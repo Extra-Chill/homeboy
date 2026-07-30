@@ -230,6 +230,8 @@ impl From<&DeployConfig> for PreparationConfig {
 pub(crate) struct PreparedComponentPayload {
     pub artifact: PreparedDeployArtifact,
     pub source_commit: String,
+    /// Whether preparing this payload ran a fresh build in this lifecycle.
+    pub build_ran: bool,
     _release_artifact: Option<ReleaseArtifactLease>,
     _exact_ref_checkout: Option<ExactRefCheckout>,
     payload_artifact: PreparedArtifactCleanup,
@@ -415,6 +417,7 @@ fn prepare_payload(
         return Ok(PreparedComponentPayload {
             source_commit: artifact.source_commit.clone(),
             artifact,
+            build_ran: false,
             _release_artifact: None,
             _exact_ref_checkout: None,
             payload_artifact: PreparedArtifactCleanup(None),
@@ -574,6 +577,7 @@ fn prepare_payload(
     Ok(PreparedComponentPayload {
         artifact,
         source_commit,
+        build_ran: release_artifact.is_none() && !request.config.skip_build,
         _release_artifact: release_artifact,
         _exact_ref_checkout: checkout,
         payload_artifact,

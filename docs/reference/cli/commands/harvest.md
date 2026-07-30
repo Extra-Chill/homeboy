@@ -32,4 +32,3 @@ Recover remote component content into local Git history
 | `--apply` | flag | Materialize the reviewed remote delta and commit it |
 | `--exclude` | `<EXCLUDE>` | Relative glob to exclude. Repeat for multiple patterns |
 | `--author` | `<AUTHOR>` | Git author for the recovery commit, for example 'Remote agent <agent@example.invalid>' |
-

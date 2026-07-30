@@ -923,6 +923,67 @@ mod tests {
         }
     }
 
+    #[test]
+    fn default_status_matches_git_status_for_registered_worktree_without_attach_path() {
+        let _guard = CWD_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        crate::test_support::with_isolated_home(|home| {
+            let primary = home.path().join("fixture");
+            fs::create_dir_all(&primary).expect("primary directory");
+            run_git(&primary, &["init"]);
+            fs::write(primary.join("file.txt"), "seed\n").expect("seed file");
+            run_git(&primary, &["add", "."]);
+            run_git(&primary, &["commit", "-m", "seed"]);
+
+            let registration_dir = home.path().join(".config/homeboy/components");
+            fs::create_dir_all(&registration_dir).expect("registration directory");
+            let registration = registration_dir.join("fixture.json");
+            fs::write(
+                &registration,
+                serde_json::json!({ "local_path": primary }).to_string(),
+            )
+            .expect("component registration");
+            let registration_before = fs::read_to_string(&registration).expect("registration");
+
+            let worktree = home.path().join("fixture@task");
+            run_git(
+                &primary,
+                &["worktree", "add", "-b", "task", worktree.to_str().unwrap()],
+            );
+
+            let git_status = homeboy::core::git::status_at(None, worktree.to_str())
+                .expect("git status resolves worktree");
+            assert_eq!(git_status.component_id, "fixture");
+            assert_eq!(
+                PathBuf::from(&git_status.path)
+                    .canonicalize()
+                    .expect("git status path"),
+                worktree.canonicalize().expect("worktree path")
+            );
+
+            let original_cwd = env::current_dir().expect("current directory");
+            env::set_current_dir(&worktree).expect("set worktree cwd");
+            let result = run(default_status_args());
+            env::set_current_dir(original_cwd).expect("restore cwd");
+
+            let (result, code) = result.expect("top-level status resolves worktree");
+            assert_eq!(code, 0);
+            match result {
+                StatusResult::Summary(output) => assert_eq!(output.total, 1),
+                StatusResult::UnregisteredContext(output) => panic!(
+                    "top-level status must match git status for {}: {}",
+                    git_status.path, output.suggestion
+                ),
+                StatusResult::Full(_) => panic!("expected summary status"),
+                StatusResult::Dashboard(_) => panic!("expected summary status"),
+            }
+            assert_eq!(
+                fs::read_to_string(&registration).expect("registration after status"),
+                registration_before,
+                "status must not attach the ephemeral worktree path"
+            );
+        });
+    }
+
     fn run_git(repo: &std::path::Path, args: &[&str]) {
         let status = Command::new("git")
             .args(args)

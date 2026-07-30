@@ -343,6 +343,7 @@ mod tests {
                     local_path: old_repo.to_string_lossy().to_string(),
                     remote_path: Some("wp-content/plugins/studio-web".to_string()),
                     deployment_provider: None,
+                    deployment_provider_input: None,
                 }],
                 ..Default::default()
             };

@@ -51,12 +51,56 @@ pub fn preflight_exact_ref(
 pub fn preflight_exact_refs(
     refs: &[(&component::Component, &str)],
 ) -> Result<std::collections::BTreeMap<String, String>> {
-    refs.iter()
-        .map(|(component, requested_ref)| {
-            orchestration_ref_checkout::resolve_exact_ref(component, requested_ref)
-                .map(|identity| (component.id.clone(), identity.resolved_sha))
-        })
-        .collect()
+    let mut refs = refs.to_vec();
+    refs.sort_by(|(left_component, left_ref), (right_component, right_ref)| {
+        left_component
+            .id
+            .cmp(&right_component.id)
+            .then_with(|| left_ref.cmp(right_ref))
+    });
+
+    let mut resolved = std::collections::BTreeMap::new();
+    let mut failures = Vec::new();
+    let mut component_counts = std::collections::BTreeMap::new();
+    for (component, _) in &refs {
+        *component_counts
+            .entry(component.id.as_str())
+            .or_insert(0usize) += 1;
+    }
+    for (component_id, count) in component_counts {
+        if count > 1 {
+            failures.push(format!(
+                "component '{component_id}' appears {count} times in the ref preflight"
+            ));
+        }
+    }
+    for (component, requested_ref) in refs {
+        match orchestration_ref_checkout::resolve_exact_ref(component, requested_ref) {
+            Ok(identity) => {
+                resolved
+                    .entry(component.id.clone())
+                    .or_insert(identity.resolved_sha);
+            }
+            Err(error) => failures.push(format!(
+                "component '{}' ref '{}': {}",
+                component.id, requested_ref, error.message
+            )),
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(resolved)
+    } else {
+        Err(Error::validation_invalid_argument(
+            "ref",
+            format!(
+                "Release-set ref preflight failed for every unresolved component: {}",
+                failures.join("; ")
+            ),
+            None,
+            None,
+        ))
+    }
 }
 
 use homeboy_core::component;
@@ -82,7 +126,24 @@ fn run_with_release_artifacts(
     release_artifacts: &mut homeboy_core::git::release_download::ReleaseArtifactStore,
 ) -> Result<DeployOrchestrationResult> {
     let project = project::load(project_id)?;
-    if let Some(result) = provider::run_if_configured(project_id, &project, config)? {
+    let source =
+        lifecycle_identity(&[project_id.to_string()], &config.component_ids, config).source;
+    let mut observation = (config.head || config.has_requested_refs())
+        .then(|| lifecycle::DeployObservation::start(project_id, &source))
+        .transpose()?;
+    if let Some(mut result) = provider::run_if_configured(project_id, &project, config)? {
+        if let Some(observation) = observation.as_mut() {
+            observation.finish(
+                if result.summary.failed == 0 {
+                    homeboy_core::observation::RunStatus::Pass
+                } else {
+                    homeboy_core::observation::RunStatus::Fail
+                },
+                (result.summary.failed > 0)
+                    .then_some("deployment provider reported failure".to_string()),
+            );
+            result.deploy_run_id = Some(observation.run_id().to_string());
+        }
         return Ok(result);
     }
     // A version-pinned release asset is resolved remotely before orchestration;
@@ -93,7 +154,27 @@ fn run_with_release_artifacts(
     }
     preflight_prepared_payload_binding(&project, project_id, config)?;
     let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
-    orchestration::deploy_components(config, &project, &ctx, &base_path, release_artifacts)
+    let mut result = orchestration::deploy_components(
+        config,
+        &project,
+        &ctx,
+        &base_path,
+        release_artifacts,
+        observation.as_mut(),
+    )?;
+    if let Some(observation) = observation.as_mut() {
+        observation.finish(
+            if result.summary.failed == 0 {
+                homeboy_core::observation::RunStatus::Pass
+            } else {
+                homeboy_core::observation::RunStatus::Fail
+            },
+            (result.summary.failed > 0)
+                .then_some("deployment reported one or more failures".to_string()),
+        );
+        result.deploy_run_id = Some(observation.run_id().to_string());
+    }
+    Ok(result)
 }
 
 /// Bind caller-supplied payloads before SSH context or lifecycle work begins.
@@ -580,6 +661,53 @@ mod tests {
     }
 
     #[test]
+    fn multi_ref_preflight_reports_all_failures_in_component_order_before_materialization() {
+        let alpha = Component {
+            id: "alpha".to_string(),
+            local_path: "/definitely/missing/alpha".to_string(),
+            ..Component::default()
+        };
+        let zebra = Component {
+            id: "zebra".to_string(),
+            local_path: "/definitely/missing/zebra".to_string(),
+            ..Component::default()
+        };
+
+        let error = preflight_exact_refs(&[(&zebra, "zebra-ref"), (&alpha, "alpha-ref")])
+            .expect_err("every required ref must be checked before preflight returns red");
+        let alpha = error
+            .message
+            .find("component 'alpha' ref 'alpha-ref'")
+            .expect("alpha failure");
+        let zebra = error
+            .message
+            .find("component 'zebra' ref 'zebra-ref'")
+            .expect("zebra failure");
+
+        assert!(
+            alpha < zebra,
+            "multi-ref errors must be deterministic regardless of caller ordering: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn multi_ref_preflight_rejects_duplicate_component_ids_before_any_checkout() {
+        let component = Component {
+            id: "duplicate".to_string(),
+            local_path: "/definitely/missing/duplicate".to_string(),
+            ..Component::default()
+        };
+
+        let error = preflight_exact_refs(&[(&component, "first"), (&component, "second")])
+            .expect_err("ambiguous component refs must fail before materialization");
+
+        assert!(error
+            .message
+            .contains("component 'duplicate' appears 2 times"));
+    }
+
+    #[test]
     fn deploy_planning_fails_closed_when_project_component_local_path_is_missing() {
         with_isolated_home(|_| {
             project::save(&Project {
@@ -591,6 +719,7 @@ mod tests {
                     local_path: "/tmp/homeboy-missing-component-path".to_string(),
                     remote_path: Some("wp-content/plugins/plugin".to_string()),
                     deployment_provider: None,
+                    deployment_provider_input: None,
                 }],
                 ..Project::default()
             })
@@ -696,6 +825,7 @@ mod tests {
                     local_path: "/stale/plugin".to_string(),
                     remote_path: Some("../wp-content/plugins/plugin".to_string()),
                     deployment_provider: None,
+                    deployment_provider_input: None,
                 }],
                 ..Project::default()
             };

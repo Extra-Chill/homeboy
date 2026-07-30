@@ -7,6 +7,7 @@ use homeboy_core::project::Project;
 use super::super::binding::bind_project_payloads;
 use super::super::execution::{prepare_component_deploy, PreparedComponentDeploy};
 use super::super::preparation::{ComponentPayloadPreparationRequest, PreparedPayloadCollection};
+use super::super::provenance::record_payload_preparation_build;
 use super::super::types::{ComponentDeployResult, DeployConfig};
 use homeboy_core::git::release_download::{ReleaseArtifactLease, ReleaseArtifactStore};
 
@@ -77,11 +78,12 @@ pub(super) fn prepare_component_deployments(
                 match payloads.prepare(request, &mut release_artifact_store) {
                     Ok(payload) => {
                         binding_payloads.insert(component.id.clone(), payload.artifact.clone());
+                        let payload_build_ran = payload.build_ran;
                         let mut prepared = effective_config;
                         prepared.prepared_artifact = Some(payload.artifact.clone());
                         prepared.skip_build = true;
                         prepared.requested_ref = None;
-                        prepared
+                        (prepared, payload_build_ran)
                     }
                     Err(error) => {
                         let mut failure = ComponentDeployResult::failed(
@@ -99,19 +101,24 @@ pub(super) fn prepare_component_deployments(
                     }
                 }
             } else {
-                effective_config
+                (effective_config, false)
             };
 
         match prepare_component_deploy(
             &component,
-            &effective_config,
+            &effective_config.0,
             base_path,
             project,
             local_versions.get(&component.id).cloned(),
             remote_versions.get(&component.id).cloned(),
             release_artifacts.get(&component.id).cloned(),
         ) {
-            Ok(prepared) => prepared_deployments.push(prepared),
+            Ok(mut prepared) => {
+                if effective_config.1 {
+                    record_payload_preparation_build(&mut prepared.build_provenance);
+                }
+                prepared_deployments.push(prepared);
+            }
             Err(result) => failures.push(result),
         }
     }

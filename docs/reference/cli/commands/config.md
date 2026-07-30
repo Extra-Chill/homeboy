@@ -84,4 +84,3 @@ homeboy config path
 ```
 
 Show the path to homeboy.json
-

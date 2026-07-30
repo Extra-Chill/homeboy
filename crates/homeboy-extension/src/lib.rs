@@ -105,12 +105,13 @@ pub use lifecycle::{
 };
 pub use maintenance::{exec_tool, update_all};
 pub use manifest::{
-    deployment_providers, structured_sidecar_schema_version, structured_sidecars, ActionConfig,
-    ActionType, AgentRuntimeManifestConfig, AuditCapability, AutofixVerifyConfig,
-    BehaviorScenarioNames, BenchConfig, BuildConfig, CiCapability, CiJobFidelity, CiJobMapping,
-    CiJobSpec, CiLocalContext, CiProfileSpec, CliAutoFlag, CliAutoFlagCondition, CliConfig,
-    CliHelpConfig, ComponentEnvConfig, DatabaseCliConfig, DatabaseConfig, DeployCapability,
-    DeployOverride, DeployOwnerHint, DeployVerification, DeploymentProviderManifest, DepsConfig,
+    deployment_provider_layered_input, deployment_providers, structured_sidecar_schema_version,
+    structured_sidecars, ActionConfig, ActionType, AgentRuntimeManifestConfig, AuditCapability,
+    AutofixVerifyConfig, BehaviorScenarioNames, BenchConfig, BuildConfig, CiCapability,
+    CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext, CiProfileSpec, CliAutoFlag,
+    CliAutoFlagCondition, CliConfig, CliHelpConfig, ComponentEnvConfig, DatabaseCliConfig,
+    DatabaseConfig, DeployCapability, DeployOverride, DeployOwnerHint, DeployVerification,
+    DeploymentProviderLayeredInputManifest, DeploymentProviderManifest, DepsConfig,
     DiscoveryConfig, DiscoveryMarkerConfig, DocTarget, ExecutableCapability,
     ExtensionContractProducer, ExtensionContractProducerInvocation,
     ExtensionContractProducerOutput, ExtensionContractProducerOutputKind,
@@ -128,7 +129,7 @@ pub use manifest::{
     TestPassthroughFilterStrategy, TestSecretEnvProjection, TestSettingStringPredicate,
     TestVacuityPolicy, TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
     TraceBrowserMetricAliasConfig, TraceBrowserSummaryAliasConfig, TraceConfig,
-    VersionPatternConfig, EXTENSION_CONTRACT_PRODUCER_SCHEMA,
+    VersionPatternConfig, DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA, EXTENSION_CONTRACT_PRODUCER_SCHEMA,
     EXTENSION_MATERIALIZATION_SOURCE_SCHEMA, NOTIFICATION_TRANSPORT_SCHEMA,
 };
 pub use refactor_protocol::{

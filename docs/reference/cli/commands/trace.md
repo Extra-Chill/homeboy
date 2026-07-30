@@ -72,4 +72,3 @@ Capture black-box behavioral traces for a component
 | `--allow-local-toolchain` | flag | Allow intentionally local/development evidence. The output is marked non-canonical |
 | `--stale` | flag | Clean only stale trace overlay locks |
 | `--force` | flag | Remove stale trace overlay locks even when touched files are dirty |
-

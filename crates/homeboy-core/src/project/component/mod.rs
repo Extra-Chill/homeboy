@@ -5,7 +5,8 @@ pub mod resolution;
 
 pub use attachments::{
     attach_component_path, attach_discovered_component_path, clear_component_attachments,
-    has_component, project_component_ids, remove_components, set_component_attachments,
+    has_component, project_component_ids, rebase_monorepo_component_paths, remove_components,
+    set_component_attachments, MonorepoComponentPathChange, MonorepoComponentPathStatus,
 };
 pub use overrides::apply_component_overrides;
 pub use report::{

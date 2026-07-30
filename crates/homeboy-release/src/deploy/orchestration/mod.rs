@@ -10,6 +10,7 @@ use super::execution::{
     execute_preflighted_component_deploy, release_artifact_plan, resolve_planned_release_artifact,
     ReleaseArtifactPlan,
 };
+use super::lifecycle::DeployObservation;
 use super::orchestration_ref_checkout::{ExactRefCheckout, ExactRefIdentity};
 use super::orchestration_tag_checkout::{
     checkout_resolved_deploy_tags, partition_shared_root_conflicts, resolve_deploy_tags,
@@ -43,7 +44,11 @@ pub(super) fn deploy_components(
     ctx: &RemoteProjectContext,
     base_path: &str,
     release_artifacts: &mut ReleaseArtifactStore,
+    mut observation: Option<&mut DeployObservation>,
 ) -> Result<DeployOrchestrationResult> {
+    if let Some(observation) = observation.as_deref_mut() {
+        observation.phase("source_resolution", false)?;
+    }
     let mut effective_config = config.clone();
     let loaded = load_project_components_with_projection(
         project,
@@ -69,6 +74,7 @@ pub(super) fn deploy_components(
                 failed: 0,
                 skipped,
             },
+            deploy_run_id: None,
         });
     }
 
@@ -121,6 +127,7 @@ pub(super) fn deploy_components(
                 failed: 0,
                 skipped: 0,
             },
+            deploy_run_id: None,
         });
     }
 
@@ -213,6 +220,12 @@ pub(super) fn deploy_components(
         HashMap::new()
     };
 
+    // Dry-run is an approval artifact, so it must reject a non-default --head
+    // source unless the same explicit --force approval required by apply exists.
+    if config.head && !config.skip_build {
+        warn_non_default_branch(&local_build_components, config)?;
+    }
+
     // Check and dry-run modes return early without building or deploying
     if config.check {
         return Ok(run_check_mode(
@@ -254,9 +267,8 @@ pub(super) fn deploy_components(
 
     guard_local_build_source_freshness(&local_build_components, config)?;
 
-    // Warn when --head deploys from a non-default branch (safety guardrail)
+    // Confirm the invocation checkout still matches the registered source.
     if config.head && !config.skip_build {
-        warn_non_default_branch(&local_build_components, config)?;
         // Fail closed when the invocation checkout has advanced past the
         // registered checkout --head would actually build from (#7599).
         guard_head_matches_invocation_checkout(&local_build_components, config)?;
@@ -367,6 +379,9 @@ pub(super) fn deploy_components(
     )?;
 
     // Build and validate every local artifact before the first remote write.
+    if let Some(observation) = observation.as_deref_mut() {
+        observation.phase("artifact_preparation", false)?;
+    }
     let prepared_deployments = match prepare_component_deployments(
         &components,
         config,
@@ -390,12 +405,16 @@ pub(super) fn deploy_components(
                     failed,
                     skipped: 0,
                 },
+                deploy_run_id: None,
             });
         }
     };
 
     // Re-probe immediately before the first destructive write. A same-version
     // mismatch is remote-only content drift, not an ordinary local update.
+    if let Some(observation) = observation.as_deref_mut() {
+        observation.phase("transfer", true)?;
+    }
     for prepared in prepared_deployments.iter() {
         let exclusions = resolve_component_scope(&prepared.component, ScopeCommand::Deploy).exclude;
         let manifest = match (
@@ -579,6 +598,9 @@ pub(super) fn deploy_components(
     // to fresh visitors should fail the deploy here so it gets rolled back
     // instead of sitting live. Catches runtime errors that a syntax-only
     // preflight structurally cannot. See homeboy#5471.
+    if let Some(observation) = observation.as_deref_mut() {
+        observation.phase("verification", true)?;
+    }
     if succeeded > 0 {
         if let Some(smoke) = run_post_deploy_smoke(&project, &mut results) {
             if smoke {
@@ -608,6 +630,7 @@ pub(super) fn deploy_components(
             failed,
             skipped: 0,
         },
+        deploy_run_id: None,
     })
 }
 
@@ -1092,6 +1115,7 @@ mod tests {
                     local_path: path.to_string_lossy().to_string(),
                     remote_path: None,
                     deployment_provider: None,
+                    deployment_provider_input: None,
                 })
                 .collect(),
             ..Default::default()

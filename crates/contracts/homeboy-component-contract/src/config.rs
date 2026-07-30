@@ -432,12 +432,17 @@ pub struct ComponentDeployConfig<'a> {
     pub cleanup_artifacts: &'a [CleanupArtifactDeclaration],
 }
 
-/// A repository-owned contract executed by an extension-declared deployment provider.
+/// Repository-owned deployment policy executed by an extension-declared provider.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeploymentProviderAttachment {
     pub extension: String,
     pub provider: String,
-    pub contract: String,
+    /// Legacy repository-relative contract file for unlayered providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<String>,
+    /// Opaque inline repository policy for layered providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<serde_json::Value>,
 }
 
 impl ComponentDeployConfig<'_> {

@@ -10,7 +10,9 @@ on:
     branches: [main]
     paths:
       - 'crates/contracts/homeboy-command-contract/**'
-      - 'crates/homeboy-cli/src/commands/cleanup.rs'
+      - 'crates/homeboy-cli/src/cli_surface/reference_docs.rs'
+      - 'crates/homeboy-cli/src/cli_surface/reference_docs_tests.rs'
+      - 'docs/reference/cli/**'
       - 'crates/homeboy-cli/Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/command-contract-boundary.yml'
@@ -32,4 +34,4 @@ jobs:
             echo 'homeboy-command-contract must remain outside execution stacks' >&2
             exit 1
           fi
-          cargo test --locked -p homeboy-command-contract cleanup::tests
+          cargo test --locked -p homeboy-command-contract

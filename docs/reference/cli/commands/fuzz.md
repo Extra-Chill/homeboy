@@ -462,4 +462,3 @@ Print a compact fuzz failure diagnosis or the complete runner result
 | --- | --- | --- |
 | `--raw` | flag | Print the complete result body as raw bytes/text |
 | `--full` | flag | Print the complete parsed result body instead of the bounded diagnosis |
-

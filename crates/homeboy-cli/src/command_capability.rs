@@ -37,6 +37,15 @@ pub fn classify(args: &[String]) -> CommandCapability {
         {
             CommandCapability::ReadOnly
         }
+        [command, rest @ ..]
+            if matches!(command.as_str(), "activity" | "project" | "rig" | "server")
+                && matches!(rest.first().map(String::as_str), None | Some("list")) =>
+        {
+            CommandCapability::ReadOnly
+        }
+        [command, subcommand, ..] if command == "runner" && subcommand == "status" => {
+            CommandCapability::ReadOnly
+        }
         _ => CommandCapability::Mutation,
     }
 }
@@ -68,6 +77,24 @@ mod tests {
             ]),
         ] {
             assert_eq!(classify(&command), CommandCapability::ReadOnly);
+        }
+    }
+
+    #[test]
+    fn classifies_inventory_readers_as_read_only_during_active_controller_work() {
+        for command in [
+            args(&["homeboy", "activity"]),
+            args(&["homeboy", "activity", "list"]),
+            args(&["homeboy", "project", "list"]),
+            args(&["homeboy", "rig", "list"]),
+            args(&["homeboy", "server", "list"]),
+            args(&["homeboy", "runner", "status"]),
+        ] {
+            assert_eq!(
+                classify(&command),
+                CommandCapability::ReadOnly,
+                "{command:?}"
+            );
         }
     }
 

@@ -27,7 +27,9 @@ matter when the workflow needs environment context.
     {
       "id": "string",
       "local_path": "string",
-      "remote_path": "string"
+      "remote_path": "string",
+      "deployment_provider": { "extension": "string", "provider": "string", "contract": "string" },
+      "deployment_provider_input": {}
     }
   ],
   "component_overrides": {},
@@ -85,7 +87,7 @@ matter when the workflow needs environment context.
 - **`table_prefix`** (string): Database table prefix (e.g., `"wp_"`)
 - **`shared_tables`** (array): List of shared table names across multi-site installations
 - **`sub_targets`** (array): Sub-target paths for multi-component sites
-- **`components`** (array): Project-attached component checkouts. Each entry requires `id` and `local_path`; optional `remote_path` overrides the repo-owned component `remote_path` for this project so the same component can deploy to projects with different filesystem layouts.
+- **`components`** (array): Project-attached component checkouts. Each entry requires `id` and `local_path`; optional `remote_path` overrides the repo-owned component `remote_path` for this project so the same component can deploy to projects with different filesystem layouts. `deployment_provider_input` is opaque project-only target input for a provider that declares layered input support. `deployment_provider` remains a legacy project policy override and cannot be combined with `deployment_provider_input`.
 - **`component_overrides`** (object): Per-component project overrides keyed by component ID. These remain the most-specific deploy overrides and take precedence over `components[].remote_path`.
 - **`services`** (array): Service names checked by project/fleet health status
 - **`changelog_next_section_label`** (string): Project-level changelog next-section label override

@@ -68,4 +68,3 @@ Poll any activity item until it reaches a terminal state
 | `--timeout` | `<TIMEOUT>` | Maximum time to wait before giving up (e.g. `30m`, `2h`, `7d`) |
 | `--interval` | `<INTERVAL>` | Delay between status polls (e.g. `2s`, `1m`) |
 | `--notify` | flag | Emit a local completion notification when the item reaches a terminal state |
-
