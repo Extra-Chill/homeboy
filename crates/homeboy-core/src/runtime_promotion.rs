@@ -58,6 +58,11 @@ pub struct RuntimePromotionLeaseRecord {
     pub operation: String,
     pub target: String,
     pub generation: String,
+    /// Non-secret result fingerprint used for exact compatible-owner waits.
+    /// Error diagnostics expose it, so callers must use immutable revision IDs
+    /// or hashes rather than credentials or request payloads.
+    #[serde(default)]
+    pub compatibility_key: String,
     pub started_at: String,
     /// Linux start ticks fence PID reuse. Platforms that cannot supply this
     /// evidence retain a live PID as a fail-closed owner.
@@ -112,6 +117,7 @@ pub struct RuntimePromotionLease {
     primary: bool,
     generation: String,
     target: String,
+    compatibility_key: String,
     owner_pid: u32,
     capability: String,
     // Held from reservation through promotion completion. Pin creation takes a
@@ -152,6 +158,7 @@ impl Drop for RuntimePromotionLease {
                 record.pid == self.owner_pid
                     && record.target == self.target
                     && record.generation == self.generation
+                    && record.compatibility_key == self.compatibility_key
                     && record.capability == self.capability
             }) {
                 let _ = fs::remove_dir_all(&self.path);
@@ -170,7 +177,12 @@ impl Drop for RuntimeGenerationPinGuard {
 /// and generation. A child process must present the capability explicitly
 /// attached by [`RuntimePromotionLease::authorize_subprocess`].
 pub fn acquire(operation: &str, target: impl Into<String>) -> Result<RuntimePromotionLease> {
-    acquire_with_pin_policy(operation, target.into(), ForeignPinPolicy::Block)
+    acquire_with_pin_policy(
+        operation,
+        target.into(),
+        String::new(),
+        ForeignPinPolicy::Block,
+    )
 }
 
 /// Wait for a compatible owner to finish, then acquire the writer lease.
@@ -185,18 +197,35 @@ pub fn acquire_waiting_for_compatible(
     timeout: Duration,
     mut progress: impl FnMut(RuntimePromotionWaitEvent),
 ) -> Result<RuntimePromotionLease> {
+    acquire_waiting_for_compatible_key(operation, target, "", timeout, progress)
+}
+
+/// Wait only for an owner with an exactly matching opaque result key.
+pub fn acquire_waiting_for_compatible_key(
+    operation: &str,
+    target: impl Into<String>,
+    compatibility_key: impl Into<String>,
+    timeout: Duration,
+    mut progress: impl FnMut(RuntimePromotionWaitEvent),
+) -> Result<RuntimePromotionLease> {
     let target = target.into();
+    let compatibility_key = compatibility_key.into();
     let generation = current_generation();
     let deadline = Instant::now() + timeout;
     let mut last_owner = None;
     let mut last_progress = None;
 
     loop {
-        match acquire(operation, target.clone()) {
+        match acquire_with_pin_policy(
+            operation,
+            target.clone(),
+            compatibility_key.clone(),
+            ForeignPinPolicy::Block,
+        ) {
             Ok(lease) => return Ok(lease),
             Err(error) if is_contention_error(&error) => {
                 let owner = contention_owner(&error)?;
-                if !is_compatible_owner(&owner, &target, &generation) {
+                if !is_compatible_owner(&owner, &target, &generation, &compatibility_key) {
                     return Err(error);
                 }
                 let owner_identity = format!("{}:{}:{}", owner.pid, owner.operation, owner.target);
@@ -241,7 +270,12 @@ pub fn acquire_for_generation_rotation(
     operation: &str,
     target: impl Into<String>,
 ) -> Result<RuntimePromotionLease> {
-    acquire_with_pin_policy(operation, target.into(), ForeignPinPolicy::Allow)
+    acquire_with_pin_policy(
+        operation,
+        target.into(),
+        String::new(),
+        ForeignPinPolicy::Allow,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,6 +287,7 @@ enum ForeignPinPolicy {
 fn acquire_with_pin_policy(
     operation: &str,
     target: String,
+    compatibility_key: String,
     foreign_pin_policy: ForeignPinPolicy,
 ) -> Result<RuntimePromotionLease> {
     let root = paths::runtime_promotion_dir()?;
@@ -273,6 +308,7 @@ fn acquire_with_pin_policy(
                 operation: operation.to_string(),
                 target: target.clone(),
                 generation: generation.clone(),
+                compatibility_key: compatibility_key.clone(),
                 started_at: now(),
                 linux_starttime_ticks: crate::process::linux_process_starttime_ticks(pid)
                     .ok()
@@ -287,7 +323,12 @@ fn acquire_with_pin_policy(
                 // after mkdir and before publication. Retry from acquisition;
                 // never return an unpublished guard.
                 if !path.exists() {
-                    return acquire_with_pin_policy(operation, target, foreign_pin_policy);
+                    return acquire_with_pin_policy(
+                        operation,
+                        target,
+                        compatibility_key,
+                        foreign_pin_policy,
+                    );
                 }
                 return Err(error);
             }
@@ -297,6 +338,7 @@ fn acquire_with_pin_policy(
                 primary: true,
                 generation,
                 target,
+                compatibility_key,
                 owner_pid: pid,
                 capability,
                 admission_lock: None,
@@ -309,6 +351,7 @@ fn acquire_with_pin_policy(
                     primary: false,
                     generation,
                     target,
+                    compatibility_key: held.compatibility_key.clone(),
                     owner_pid: held.pid,
                     capability: held.capability,
                     admission_lock: None,
@@ -322,6 +365,7 @@ fn acquire_with_pin_policy(
                     primary: false,
                     generation,
                     target,
+                    compatibility_key: held.compatibility_key.clone(),
                     owner_pid: held.pid,
                     capability: held.capability,
                     admission_lock: None,
@@ -331,9 +375,21 @@ fn acquire_with_pin_policy(
                 // Rename is the ownership CAS: one recovery moves the stale
                 // directory while former owners cannot remove its replacement.
                 match archive_stale_lease(&root, &path, &held) {
-                    Ok(_) => return acquire_with_pin_policy(operation, target, foreign_pin_policy),
+                    Ok(_) => {
+                        return acquire_with_pin_policy(
+                            operation,
+                            target,
+                            compatibility_key,
+                            foreign_pin_policy,
+                        )
+                    }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        return acquire_with_pin_policy(operation, target, foreign_pin_policy)
+                        return acquire_with_pin_policy(
+                            operation,
+                            target,
+                            compatibility_key,
+                            foreign_pin_policy,
+                        )
                     }
                     Err(error) => return Err(io("archive stale runtime promotion lease")(error)),
                 }
@@ -448,6 +504,7 @@ impl RuntimePromotionLease {
         if record.pid != self.owner_pid
             || record.target != self.target
             || record.generation != self.generation
+            || record.compatibility_key != self.compatibility_key
             || record.capability != self.capability
         {
             return Err(Error::internal_unexpected(
@@ -716,6 +773,7 @@ fn blocked_error(held: &RuntimePromotionLeaseRecord, reclaimable: bool) -> Error
             "holder_pid": held.pid,
             "holder_operation": held.operation,
             "holder_generation": held.generation,
+            "holder_compatibility_key": held.compatibility_key,
             "reclaimable": reclaimable,
             "tried": [action, "Follow: `homeboy self doctor`"],
         }),
@@ -738,6 +796,10 @@ fn contention_owner(error: &Error) -> Result<RuntimePromotionLeaseRecord> {
         operation: string("holder_operation")?,
         target: string("target")?,
         generation: string("holder_generation")?,
+        compatibility_key: details["holder_compatibility_key"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
         started_at: String::new(),
         linux_starttime_ticks: None,
         process_start_identity: None,
@@ -751,8 +813,13 @@ fn is_compatible_owner(
     owner: &RuntimePromotionLeaseRecord,
     target: &str,
     generation: &str,
+    compatibility_key: &str,
 ) -> bool {
-    owner.target == target && owner.generation == generation
+    owner.target == target
+        && owner.generation == generation
+        && (compatibility_key.is_empty()
+            || (!owner.compatibility_key.is_empty()
+                && owner.compatibility_key == compatibility_key))
 }
 
 fn wait_timeout_error(owner: &RuntimePromotionLeaseRecord, timeout: Duration) -> Error {
@@ -775,6 +842,7 @@ fn wait_timeout_error(owner: &RuntimePromotionLeaseRecord, timeout: Duration) ->
             "holder_pid": owner.pid,
             "holder_operation": owner.operation,
             "holder_generation": owner.generation,
+            "holder_compatibility_key": owner.compatibility_key,
             "tried": ["The compatible promotion owner did not finish before the admission deadline.", "Retry the same command after the owner completes or inspect its runtime-promotion lease."],
         }),
     )
@@ -895,6 +963,7 @@ mod tests {
             operation: "upgrade".to_string(),
             target: "main".to_string(),
             generation: "old".to_string(),
+            compatibility_key: String::new(),
             started_at: now(),
             linux_starttime_ticks: None,
             process_start_identity: None,
@@ -949,6 +1018,7 @@ mod tests {
             operation: "runner refresh".to_string(),
             target: "lab".to_string(),
             generation: "old".to_string(),
+            compatibility_key: String::new(),
             started_at: now(),
             linux_starttime_ticks: None,
             process_start_identity: None,
@@ -965,19 +1035,31 @@ mod tests {
     }
 
     #[test]
-    fn compatible_contenders_wait_for_the_owner_then_each_acquire() {
+    fn compatible_same_target_and_generation_contenders_converge_after_owner_release() {
         crate::test_support::with_isolated_home(|_| {
-            let mut owner = compatible_wait_owner();
+            let owner = acquire_waiting_for_compatible_key(
+                "owner",
+                "lab",
+                "candidate-a",
+                Duration::from_secs(1),
+                |_| unreachable!("uncontended owner does not queue"),
+            )
+            .expect("owner acquires lease");
             let (queued, queued_result) = std::sync::mpsc::channel();
             let contenders = (0..3)
                 .map(|_| {
                     let queued = queued.clone();
                     std::thread::spawn(move || {
-                        acquire_waiting_for_compatible(
+                        acquire_waiting_for_compatible_key(
                             "contender",
                             "lab",
+                            "candidate-a",
                             Duration::from_secs(1),
-                            |event| queued.send(event.owner_pid).expect("report queued owner"),
+                            |event| {
+                                queued
+                                    .send((event.owner_pid, event.target, event.owner_generation))
+                                    .expect("report queued owner")
+                            },
                         )
                         .map(drop)
                     })
@@ -990,16 +1072,16 @@ mod tests {
                     queued_result
                         .recv_timeout(Duration::from_secs(1))
                         .expect("contender reports the current owner"),
-                    owner.id()
+                    (std::process::id(), "lab".to_string(), current_generation(),)
                 );
             }
-            owner.wait().expect("owner exits");
+            drop(owner);
 
             for contender in contenders {
                 contender
                     .join()
                     .expect("contender exits")
-                    .expect("compatible contender acquires after handoff");
+                    .expect("compatible contender acquires after deterministic handoff");
             }
         });
     }
@@ -1051,7 +1133,7 @@ mod tests {
     #[test]
     fn incompatible_contender_remains_fail_closed() {
         crate::test_support::with_isolated_home(|_| {
-            let _owner = acquire("owner", "lab").expect("owner acquires lease");
+            let _owner = acquire("owner operation", "lab").expect("owner acquires lease");
             let error = acquire_waiting_for_compatible(
                 "other target",
                 "other-lab",
@@ -1060,15 +1142,49 @@ mod tests {
             )
             .expect_err("different promotion target remains serialized");
             assert_eq!(error.code, ErrorCode::RuntimePromotionContended);
+            assert_eq!(error.details["holder_pid"], std::process::id());
+            assert_eq!(error.details["holder_operation"], "owner operation");
+            assert_eq!(error.details["target"], "lab");
+            assert_eq!(error.details["holder_generation"], current_generation());
         });
     }
 
     #[test]
-    fn compatibility_requires_the_same_target_and_generation() {
+    fn compatibility_is_asymmetric_for_unkeyed_and_keyed_owners() {
         let owner = lease_record();
-        assert!(is_compatible_owner(&owner, "lab", "generation-a"));
-        assert!(!is_compatible_owner(&owner, "other-lab", "generation-a"));
-        assert!(!is_compatible_owner(&owner, "lab", "generation-b"));
+        assert!(is_compatible_owner(
+            &owner,
+            "lab",
+            "generation-a",
+            "candidate-a"
+        ));
+        assert!(!is_compatible_owner(
+            &owner,
+            "other-lab",
+            "generation-a",
+            "candidate-a"
+        ));
+        assert!(!is_compatible_owner(
+            &owner,
+            "lab",
+            "generation-b",
+            "candidate-a"
+        ));
+        assert!(!is_compatible_owner(
+            &owner,
+            "lab",
+            "generation-a",
+            "candidate-b"
+        ));
+        let mut legacy_owner = owner.clone();
+        legacy_owner.compatibility_key.clear();
+        assert!(is_compatible_owner(&owner, "lab", "generation-a", ""));
+        assert!(!is_compatible_owner(
+            &legacy_owner,
+            "lab",
+            "generation-a",
+            "candidate-a"
+        ));
     }
 
     fn compatible_wait_owner() -> std::process::Child {
@@ -1107,6 +1223,7 @@ mod tests {
             operation: "runner refresh".to_string(),
             target: "lab".to_string(),
             generation: "generation-a".to_string(),
+            compatibility_key: "candidate-a".to_string(),
             started_at: now(),
             linux_starttime_ticks: Some(42),
             process_start_identity: Some(crate::process::ProcessStartIdentity::Linux {
@@ -1595,6 +1712,43 @@ mod tests {
     }
 
     #[test]
+    fn keyed_owner_allows_legacy_reentrancy_without_releasing_its_transaction() {
+        crate::test_support::with_isolated_home(|_| {
+            let outer = acquire_waiting_for_compatible_key(
+                "keyed owner",
+                "lab",
+                "candidate-a",
+                Duration::from_secs(1),
+                |_| unreachable!("uncontended owner does not queue"),
+            )
+            .expect("keyed owner acquires lease");
+            let inner = acquire("legacy nested operation", "lab")
+                .expect("the owner's exact local capability permits legacy reentrancy");
+
+            assert!(!inner.primary, "nested lease must not own cleanup");
+            assert_eq!(inner.compatibility_key, "candidate-a");
+            drop(inner);
+
+            let path = paths::runtime_promotion_dir()
+                .expect("runtime promotion directory")
+                .join(LEASE_DIR);
+            let record = read_record(&path).expect("primary lease remains published");
+            assert_eq!(record.compatibility_key, "candidate-a");
+            assert_eq!(record.capability, outer.capability);
+
+            let contention = std::thread::spawn(|| acquire("independent operation", "lab"))
+                .join()
+                .expect("independent contender exits")
+                .expect_err("another thread cannot use the owner's local capability");
+            assert_eq!(contention.code, ErrorCode::RuntimePromotionContended);
+
+            drop(outer);
+            acquire("later operation", "lab")
+                .expect("dropping the primary releases the transaction after nested cleanup");
+        });
+    }
+
+    #[test]
     fn primary_cleanup_keeps_a_replaced_lease() {
         let temporary = tempfile::tempdir().expect("temporary lease directory");
         let path = temporary.path().join(LEASE_DIR);
@@ -1606,6 +1760,7 @@ mod tests {
             primary: true,
             generation: record.generation.clone(),
             target: record.target.clone(),
+            compatibility_key: record.compatibility_key.clone(),
             owner_pid: record.pid,
             capability: record.capability.clone(),
             admission_lock: None,
