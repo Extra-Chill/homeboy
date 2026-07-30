@@ -22,6 +22,8 @@ async function main() {
   const childEnvironment = { ...process.env };
   for (const secret of [...contract.secrets, ...contract.secret_inputs]) if (secret.env) delete childEnvironment[secret.env];
   const root = await repositoryRoot(contract, contractPath, redact, childEnvironment);
+  const temporaryConfigDirectory = await materializeWranglerConfig(contract, root);
+  if (temporaryConfigDirectory) secretValues.push(contract.wrangler.config, ...privateResourceValues(contract.resource_overrides));
   if (contract.repository.revision === 'HEAD') {
     contract.repository.revision = await repositoryHead(root, redact, childEnvironment, contract.timeout_ms);
   }
@@ -52,9 +54,13 @@ async function main() {
     result.failure = { stage: error.stage || 'unknown', code: error.code || 'deployment_failed', message: redact(error.message) };
     result.remediation.push(...remediation(error.code));
   }
-  if (!dryRun) await writeResult(root, contract, result);
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-  process.exitCode = ['succeeded', 'validated'].includes(result.status) ? 0 : 1;
+  try {
+    if (!dryRun) await writeResult(root, contract, result);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    process.exitCode = ['succeeded', 'validated'].includes(result.status) ? 0 : 1;
+  } finally {
+    if (temporaryConfigDirectory) await rm(temporaryConfigDirectory, { recursive: true, force: true });
+  }
 }
 
 function normalizeContract(input) {
@@ -71,7 +77,7 @@ function normalizeContract(input) {
   assertKeys(reference, ['component', 'path', 'digest'], 'policy reference');
   assertKeys(source, ['component', 'revision'], 'source');
   assertKeys(policy, ['wrangler', 'expected_bindings', 'predeploy_commands', 'timeout_ms'], 'policy');
-  assertKeys(target, ['target', 'secrets', 'secret_inputs', 'gates', 'durability'], 'target');
+  assertKeys(target, ['target', 'resources', 'secrets', 'secret_inputs', 'gates', 'durability'], 'target');
   if (!isObject(policy.wrangler)) throw new Error('Layered deployment policy requires a Wrangler object.');
   assertKeys(policy.wrangler, ['binary', 'config', 'config_ref'], 'policy Wrangler');
   if (policy.timeout_ms !== undefined && (!Number.isSafeInteger(policy.timeout_ms) || policy.timeout_ms < 1)) throw new Error('Layered deployment policy timeout_ms must be a positive safe integer.');
@@ -80,6 +86,7 @@ function normalizeContract(input) {
   if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(source.revision || '')) throw new Error('Layered deployment source requires a full Git revision.');
   if (reference.component !== source.component || reference.path !== 'homeboy.json#/deployment_provider/policy' || !/^[0-9a-f]{64}$/.test(reference.digest || '')) throw new Error('Layered deployment policy reference is invalid.');
   if (createHash('sha256').update(canonicalJson(policy)).digest('hex') !== reference.digest) throw new Error('Layered deployment policy digest does not match the declared policy.');
+  validateResourceOverrides(target.resources);
   return {
     schema: LEGACY_SCHEMA,
     repository: { worktree: process.env.HOMEBOY_COMPONENT_PATH, revision: source.revision, ref: source.component },
@@ -89,6 +96,7 @@ function normalizeContract(input) {
     predeploy_commands: policy.predeploy_commands,
     timeout_ms: policy.timeout_ms,
     target: target.target,
+    resource_overrides: target.resources,
     secrets: target.secrets,
     secret_inputs: target.secret_inputs,
     gates: target.gates,
@@ -99,6 +107,83 @@ function normalizeContract(input) {
 function isObject(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 function assertKeys(value, allowed, namespace) { for (const key of Object.keys(value)) if (!allowed.includes(key)) throw new Error(`Unsupported layered ${namespace} field ${key}.`); }
 function canonicalJson(value) { if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`; if (isObject(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`; return JSON.stringify(value); }
+
+function validateResourceOverrides(resources) {
+  if (resources === undefined) return;
+  if (!isObject(resources)) throw new Error('Layered deployment target resources must be an object.');
+  assertKeys(resources, ['d1_databases', 'r2_buckets', 'queues'], 'target resources');
+  validateBindingResources(resources.d1_databases, ['binding', 'database_name', 'database_id'], 'D1 database');
+  validateBindingResources(resources.r2_buckets, ['binding', 'bucket_name'], 'R2 bucket');
+  if (resources.queues !== undefined) {
+    if (!isObject(resources.queues)) throw new Error('Layered deployment target queues must be an object.');
+    assertKeys(resources.queues, ['producers', 'consumers'], 'target queues');
+    validateBindingResources(resources.queues.producers, ['binding', 'queue'], 'queue producer');
+    validateResources(resources.queues.consumers, ['queue', 'dead_letter_queue'], ['queue'], 'queue consumer');
+  }
+}
+
+function validateBindingResources(resources, allowed, namespace) {
+  validateResources(resources, allowed, allowed, namespace);
+  if (resources && new Set(resources.map(({ binding }) => binding)).size !== resources.length) throw new Error(`Layered deployment target ${namespace} bindings must be unique.`);
+}
+
+function validateResources(resources, allowed, required, namespace) {
+  if (resources === undefined) return;
+  if (!Array.isArray(resources) || resources.length > 32) throw new Error(`Layered deployment target ${namespace} resources must be an array of at most 32 entries.`);
+  for (const resource of resources) {
+    if (!isObject(resource)) throw new Error(`Layered deployment target ${namespace} entries must be objects.`);
+    assertKeys(resource, allowed, `target ${namespace}`);
+    if (required.some((key) => typeof resource[key] !== 'string' || !resource[key])) throw new Error(`Layered deployment target ${namespace} entries require ${required.join(', ')}.`);
+  }
+}
+
+async function materializeWranglerConfig(contract, root) {
+  if (!contract.resource_overrides) return null;
+  const sourcePath = resolvePath(root, contract.wrangler.config);
+  if (!sourcePath.endsWith('.json') && !sourcePath.endsWith('.jsonc')) throw fail('invalid_contract', 'Private resource overlays require a JSON or JSONC Wrangler config.');
+  const config = JSON.parse(stripJsonComments(await readFile(sourcePath, 'utf8')).replace(/,\s*([}\]])/g, '$1'));
+  applyBindingOverrides(config, 'd1_databases', contract.resource_overrides.d1_databases, ['database_name', 'database_id']);
+  applyBindingOverrides(config, 'r2_buckets', contract.resource_overrides.r2_buckets, ['bucket_name']);
+  applyBindingOverrides(config.queues, 'producers', contract.resource_overrides.queues?.producers, ['queue']);
+  applyConsumerOverrides(config.queues, contract.resource_overrides.queues?.consumers);
+  config.account_id = contract.target.account_id;
+  const directory = await mkdtemp(join(os.tmpdir(), 'homeboy-cloudflare-config-'));
+  await chmod(directory, 0o700);
+  contract.wrangler.config = join(directory, 'wrangler.json');
+  await writeFile(contract.wrangler.config, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  await chmod(contract.wrangler.config, 0o600);
+  return directory;
+}
+
+function applyBindingOverrides(config, key, overrides, identityKeys) {
+  if (overrides === undefined) return;
+  if (!isObject(config) || !Array.isArray(config[key])) throw fail('invalid_contract', `Wrangler config does not declare ${key}.`);
+  for (const override of overrides) {
+    const matches = config[key].filter(({ binding }) => binding === override.binding);
+    if (matches.length !== 1) throw fail('invalid_contract', `Wrangler config must declare target binding ${override.binding} exactly once.`);
+    for (const identityKey of identityKeys) matches[0][identityKey] = override[identityKey];
+  }
+}
+
+function applyConsumerOverrides(queues, overrides) {
+  if (overrides === undefined) return;
+  if (!isObject(queues) || !Array.isArray(queues.consumers) || queues.consumers.length !== overrides.length) throw fail('invalid_contract', 'Wrangler queue consumers must match the ordered private target identities.');
+  for (let index = 0; index < overrides.length; index += 1) {
+    queues.consumers[index].queue = overrides[index].queue;
+    if (overrides[index].dead_letter_queue !== undefined) queues.consumers[index].dead_letter_queue = overrides[index].dead_letter_queue;
+    else delete queues.consumers[index].dead_letter_queue;
+  }
+}
+
+function privateResourceValues(resources) {
+  if (!resources) return [];
+  return [
+    ...(resources.d1_databases || []).flatMap(({ database_name, database_id }) => [database_name, database_id]),
+    ...(resources.r2_buckets || []).map(({ bucket_name }) => bucket_name),
+    ...(resources.queues?.producers || []).map(({ queue }) => queue),
+    ...(resources.queues?.consumers || []).flatMap(({ queue, dead_letter_queue }) => [queue, dead_letter_queue]),
+  ].filter(Boolean);
+}
 
 async function repositoryRoot(contract, contractPath, redact, env) {
   try {
