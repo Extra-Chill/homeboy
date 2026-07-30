@@ -1091,6 +1091,15 @@
       "file_extensions": ["php"],
       "inline_tests": false
     },
+    "secret_env_projections": [
+      {
+        "when": {
+          "path": ["wp_codebox_database_service", "provider"],
+          "equals": "external"
+        },
+        "names_path": ["wp_codebox_database_service", "secret_env"]
+      }
+    ],
     "extension_script": "scripts/test/test-runner.sh"
   },
   "bench": {

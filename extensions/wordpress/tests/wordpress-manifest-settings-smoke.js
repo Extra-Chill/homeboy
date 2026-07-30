@@ -23,6 +23,16 @@ for (const legacySettingId of ['wp_codebox_blueprint', 'wp_codebox_workloads', '
 	assert.equal(settingIds.has(legacySettingId), false, `wordpress manifest no longer accepts ${legacySettingId}`);
 }
 
+assert.deepEqual(manifest.test.secret_env_projections, [
+	{
+		when: {
+			path: ['wp_codebox_database_service', 'provider'],
+			equals: 'external',
+		},
+		names_path: ['wp_codebox_database_service', 'secret_env'],
+	},
+], 'external WP Codebox database identity names are projected through Homeboy test secret resolution');
+
 const fuzzEnv = new Set(manifest.fuzz.env);
 for (const envKey of ['HOMEBOY_SETTINGS_JSON', 'HOMEBOY_SETTINGS_WP_CODEBOX_BIN', 'HOMEBOY_WP_CODEBOX_BIN', 'WP_CODEBOX_BIN']) {
 	assert.ok(
