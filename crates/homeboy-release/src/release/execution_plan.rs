@@ -345,9 +345,21 @@ mod tests {
         }
     }
 
-    /// Ordering now comes from `semver`'s `Ord`, which implements the full
-    /// precedence rules: a prerelease sorts below its release, and build
-    /// metadata is ignored for precedence (semver §10-11).
+    /// Ordering comes from `semver`'s `Ord`: a prerelease sorts below its
+    /// release, and numeric identifiers compare numerically rather than
+    /// lexically.
+    ///
+    /// Build metadata is the one place `semver::Version` deliberately diverges
+    /// from spec §10 precedence. `Ord` must agree with `Eq`, and `Eq` includes
+    /// build metadata, so `1.2.3+build.5` and `1.2.3` are ordered rather than
+    /// equal. This test previously asserted `Ordering::Equal` and had been
+    /// failing since `706627296` adopted the crate — nothing ran it, because
+    /// member-crate lib tests were never executed in CI (#10477).
+    ///
+    /// The divergence is harmless for tag selection and is asserted as such
+    /// below: build metadata breaks a tie deterministically and can never
+    /// promote a version above a genuinely higher one, which is all `max_by`
+    /// over release tags depends on.
     #[test]
     fn release_tag_versions_sort_by_semver_precedence() {
         let v = |tag: &str| release_tag_version(tag, None).expect(tag);
@@ -357,10 +369,20 @@ mod tests {
         assert!(v("v1.2.3-beta.2") < v("v1.2.3-beta.10"));
         assert!(v("v1.2.3") < v("v1.10.0"));
         assert!(v("v1.9.0") < v("v1.10.0"));
+
+        // Same core precedence: build metadata changes none of the fields spec
+        // §10 actually compares.
+        let build = v("v1.2.3+build.5");
+        let plain = v("v1.2.3");
         assert_eq!(
-            v("v1.2.3+build.5").cmp(&v("v1.2.3")),
-            std::cmp::Ordering::Equal
+            (build.major, build.minor, build.patch, &build.pre),
+            (plain.major, plain.minor, plain.patch, &plain.pre)
         );
+        // Deterministically ordered rather than equal, and never able to
+        // outrank a higher version.
+        assert_ne!(build.cmp(&plain), std::cmp::Ordering::Equal);
+        assert!(build < v("v1.2.4"));
+        assert!(build > v("v1.2.3-beta.1"));
 
         // The regression the hand-rolled compare produced: `v1.x.3` used to
         // parse as `(1, 0, 3)` and could win a `max_by` against a real tag.
