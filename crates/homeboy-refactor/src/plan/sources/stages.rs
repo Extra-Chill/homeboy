@@ -531,7 +531,7 @@ fn reject_unapplied_fixable_findings(
         None,
         Some(vec![
             "Inspect the extension fixer output and local worktree permissions".to_string(),
-            "Run homeboy lint without --fix to inspect the remaining findings".to_string(),
+            "Run homeboy review lint <component> to inspect the remaining findings".to_string(),
         ]),
     ))
 }
@@ -1072,6 +1072,10 @@ mod tests {
             ),
             "error must report the discrepancy: {error}"
         );
+        assert!(error
+            .details
+            .to_string()
+            .contains("homeboy review lint <component>"));
     }
 
     #[test]

@@ -521,7 +521,7 @@ mod tests {
             passed: true,
             exit_code: 0,
             finding_count: 0,
-            hint: "Deep dive: homeboy audit my-comp".to_string(),
+            hint: "Deep dive: homeboy review audit my-comp".to_string(),
             skipped_reason: None,
             output: Some(audit_full_with_findings(Vec::new())),
         }
@@ -534,7 +534,7 @@ mod tests {
             passed: true,
             exit_code: 0,
             finding_count: 0,
-            hint: "Deep dive: homeboy lint my-comp".to_string(),
+            hint: "Deep dive: homeboy review lint my-comp".to_string(),
             skipped_reason: None,
             output: Some(lint_with_findings(Vec::new())),
         }
@@ -547,7 +547,7 @@ mod tests {
             passed: true,
             exit_code: 0,
             finding_count: 0,
-            hint: "Deep dive: homeboy test my-comp".to_string(),
+            hint: "Deep dive: homeboy review test my-comp".to_string(),
             skipped_reason: None,
             output: Some(test_with_counts(passed, 0, 0)),
         }
@@ -1188,9 +1188,9 @@ mod tests {
     fn renders_deep_dive_hints_for_ran_stages() {
         let env = passing_envelope();
         let md = render_pr_comment(&env);
-        assert!(md.contains("> Deep dive: homeboy audit my-comp"));
-        assert!(md.contains("> Deep dive: homeboy lint my-comp"));
-        assert!(md.contains("> Deep dive: homeboy test my-comp"));
+        assert!(md.contains("> Deep dive: homeboy review audit my-comp"));
+        assert!(md.contains("> Deep dive: homeboy review lint my-comp"));
+        assert!(md.contains("> Deep dive: homeboy review test my-comp"));
     }
 
     #[test]

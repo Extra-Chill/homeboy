@@ -314,7 +314,7 @@ mod tests {
     fn new_run() -> NewRunRecord {
         NewRunRecord::builder("lint")
             .component_id("homeboy")
-            .command("homeboy lint")
+            .command("homeboy review lint")
             .cwd_path(std::path::Path::new("/tmp/homeboy"))
             .homeboy_version("test")
             .build()

@@ -63,7 +63,7 @@ pub fn run_dir_env() -> String {
 
 /// A run directory for a single pipeline execution.
 ///
-/// Created once per `homeboy lint`, `homeboy test`, `homeboy refactor`, etc.
+/// Created once per `homeboy review lint`, `homeboy review test`, `homeboy refactor`, etc.
 /// Provides well-known paths for step outputs and generates backward-compatible
 /// env var mappings for extension scripts.
 #[derive(Debug, Clone)]

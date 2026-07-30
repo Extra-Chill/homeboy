@@ -1105,6 +1105,23 @@ mod tests {
     }
 
     #[test]
+    fn generated_quality_remediation_commands_parse() {
+        for argv in [
+            ["homeboy", "review", "audit", "fixture"].as_slice(),
+            ["homeboy", "review", "lint", "fixture"].as_slice(),
+            ["homeboy", "review", "test", "fixture"].as_slice(),
+            [
+                "homeboy", "refactor", "fixture", "--from", "lint", "--write",
+            ]
+            .as_slice(),
+        ] {
+            Cli::try_parse_from(argv).unwrap_or_else(|error| {
+                panic!("generated quality remediation failed to parse: {argv:?}\n{error}")
+            });
+        }
+    }
+
+    #[test]
     fn core_command_docs_do_not_drift_from_registry() {
         let root = workspace_root();
         let registered_docs = crate::command_contract::COMMAND_SPECS

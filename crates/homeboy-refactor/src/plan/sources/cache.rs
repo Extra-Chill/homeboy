@@ -45,7 +45,7 @@ pub(super) fn try_load_cached_audit() -> Option<CodeAuditResult> {
     Some(result)
 }
 
-/// Try to load cached lint findings from a previous `homeboy lint` run.
+/// Try to load cached lint findings from a previous `homeboy review lint` run.
 ///
 /// Checks `HOMEBOY_OUTPUT_DIR/lint.json` for a `CliResponse<LintCommandOutput>`
 /// envelope. If found and the run passed (zero findings), returns `Clean`

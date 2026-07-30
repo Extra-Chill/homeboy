@@ -9,11 +9,10 @@ fn autofix_hint_preserves_changed_since_scope() {
 
     let hint = build_autofix_hint(&args);
 
-    assert!(hint
-        .contains("homeboy lint demo --path '/tmp/pr checkout' --changed-since origin/main --fix"));
-    assert!(hint.contains(
-        "homeboy refactor demo --path '/tmp/pr checkout' --changed-since origin/main --from lint --write"
-    ));
+    assert_eq!(
+        hint,
+        "Auto-fix: homeboy refactor demo --path '/tmp/pr checkout' --changed-since origin/main --from lint --write"
+    );
 }
 
 #[test]
@@ -24,6 +23,5 @@ fn autofix_hint_preserves_changed_only_and_file_scope() {
 
     let hint = build_autofix_hint(&args);
 
-    assert!(hint.contains("homeboy lint demo --file src/lib.rs --changed-only --fix"));
-    assert!(!hint.contains("homeboy refactor"));
+    assert_eq!(hint, "Auto-fix: homeboy refactor demo --from lint --write");
 }
