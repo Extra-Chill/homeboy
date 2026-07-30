@@ -82,7 +82,24 @@ fn run_with_release_artifacts(
     release_artifacts: &mut homeboy_core::git::release_download::ReleaseArtifactStore,
 ) -> Result<DeployOrchestrationResult> {
     let project = project::load(project_id)?;
-    if let Some(result) = provider::run_if_configured(project_id, &project, config)? {
+    let source =
+        lifecycle_identity(&[project_id.to_string()], &config.component_ids, config).source;
+    let mut observation = (config.head || config.has_requested_refs())
+        .then(|| lifecycle::DeployObservation::start(project_id, &source))
+        .transpose()?;
+    if let Some(mut result) = provider::run_if_configured(project_id, &project, config)? {
+        if let Some(observation) = observation.as_mut() {
+            observation.finish(
+                if result.summary.failed == 0 {
+                    homeboy_core::observation::RunStatus::Pass
+                } else {
+                    homeboy_core::observation::RunStatus::Fail
+                },
+                (result.summary.failed > 0)
+                    .then_some("deployment provider reported failure".to_string()),
+            );
+            result.deploy_run_id = Some(observation.run_id().to_string());
+        }
         return Ok(result);
     }
     // A version-pinned release asset is resolved remotely before orchestration;
@@ -93,7 +110,27 @@ fn run_with_release_artifacts(
     }
     preflight_prepared_payload_binding(&project, project_id, config)?;
     let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
-    orchestration::deploy_components(config, &project, &ctx, &base_path, release_artifacts)
+    let mut result = orchestration::deploy_components(
+        config,
+        &project,
+        &ctx,
+        &base_path,
+        release_artifacts,
+        observation.as_mut(),
+    )?;
+    if let Some(observation) = observation.as_mut() {
+        observation.finish(
+            if result.summary.failed == 0 {
+                homeboy_core::observation::RunStatus::Pass
+            } else {
+                homeboy_core::observation::RunStatus::Fail
+            },
+            (result.summary.failed > 0)
+                .then_some("deployment reported one or more failures".to_string()),
+        );
+        result.deploy_run_id = Some(observation.run_id().to_string());
+    }
+    Ok(result)
 }
 
 /// Bind caller-supplied payloads before SSH context or lifecycle work begins.

@@ -138,6 +138,7 @@ pub(super) fn run_check_mode(
             failed: 0,
             skipped,
         },
+        deploy_run_id: None,
     }
 }
 
@@ -243,6 +244,7 @@ pub(super) fn run_dry_run_mode(
             failed: 0,
             skipped: 0,
         },
+        deploy_run_id: None,
     })
 }
 
