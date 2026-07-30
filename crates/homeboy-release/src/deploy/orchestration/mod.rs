@@ -213,6 +213,12 @@ pub(super) fn deploy_components(
         HashMap::new()
     };
 
+    // Dry-run is an approval artifact, so it must reject a non-default --head
+    // source unless the same explicit --force approval required by apply exists.
+    if config.head && !config.skip_build {
+        warn_non_default_branch(&local_build_components, config)?;
+    }
+
     // Check and dry-run modes return early without building or deploying
     if config.check {
         return Ok(run_check_mode(
@@ -254,9 +260,8 @@ pub(super) fn deploy_components(
 
     guard_local_build_source_freshness(&local_build_components, config)?;
 
-    // Warn when --head deploys from a non-default branch (safety guardrail)
+    // Confirm the invocation checkout still matches the registered source.
     if config.head && !config.skip_build {
-        warn_non_default_branch(&local_build_components, config)?;
         // Fail closed when the invocation checkout has advanced past the
         // registered checkout --head would actually build from (#7599).
         guard_head_matches_invocation_checkout(&local_build_components, config)?;
