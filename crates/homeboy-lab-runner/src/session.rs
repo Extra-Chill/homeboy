@@ -1114,6 +1114,7 @@ impl RunnerStaleDaemonWarning {
 
     pub fn with_controller_compatibility(
         mut self,
+        runner_id: &str,
         controller_version: String,
         controller_build_identity: String,
         controller_version_matches: bool,
@@ -1144,6 +1145,21 @@ impl RunnerStaleDaemonWarning {
                     .as_deref()
                     .unwrap_or(&self.job_command_binary_version),
             );
+            if controller_version_matches {
+                if let Some(controller_commit) =
+                    homeboy_upgrade::upgrade::parse_build_identity_display(
+                        &controller_build_identity,
+                    )
+                    .filter(|identity| identity.git_dirty != Some(true))
+                    .and_then(|identity| identity.git_commit)
+                {
+                    self.recovery_commands = vec![format!(
+                        "homeboy runner refresh-homeboy {} --ref {controller_commit} --reconnect --allow-downgrade",
+                        shell::quote_arg(runner_id),
+                    )];
+                    self.refresh_command = self.recovery_commands.join(" && ");
+                }
+            }
         }
         self
     }
