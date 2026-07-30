@@ -106,6 +106,9 @@ pub(super) fn run_check_mode(
             } else if manifest.status == "different" && !matches!(status, ComponentStatus::UpToDate)
             {
                 status = ComponentStatus::MixedDrift;
+            } else if manifest.status == "unavailable" && matches!(status, ComponentStatus::UpToDate)
+            {
+                status = ComponentStatus::VersionUpToDateContentUnverified;
             }
             let mut result = ComponentDeployResult::new_for_project(c, project, base_path)
                 .with_status("checked")
@@ -822,6 +825,10 @@ mod tests {
             .expect("unavailable canonical package evidence");
         assert_eq!(manifest.status, "unavailable");
         assert_eq!(manifest.scope, "canonical-package-unavailable");
+        assert_eq!(
+            mutated.results[0].component_status,
+            Some(ComponentStatus::VersionUpToDateContentUnverified)
+        );
         assert_eq!(
             manifest
                 .provenance

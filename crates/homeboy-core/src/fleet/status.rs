@@ -29,6 +29,8 @@ pub struct FleetComponentStatus {
 pub enum FleetComponentDrift {
     /// Local and remote versions match
     Current,
+    /// Versions match but content-manifest verification lacks digest proof.
+    VersionUpToDateContentUnverified,
     /// Local version is ahead of remote (needs deploy)
     NeedsUpdate,
     /// Remote version is ahead of local
@@ -302,6 +304,7 @@ fn collect_project_component_statuses(
                     // deployment required from the configured source.
                     FleetComponentDrift::BehindRemote
                     | FleetComponentDrift::BehindUpstream
+                    | FleetComponentDrift::VersionUpToDateContentUnverified
                     | FleetComponentDrift::RemoteModified
                     | FleetComponentDrift::Missing
                     | FleetComponentDrift::MixedDrift => {}
@@ -378,6 +381,9 @@ fn resolve_component_drift(
     // Fall back to deploy status for drift detection
     let drift = match deploy_status {
         Some(ComponentStatus::UpToDate) => FleetComponentDrift::Current,
+        Some(ComponentStatus::VersionUpToDateContentUnverified) => {
+            FleetComponentDrift::VersionUpToDateContentUnverified
+        }
         Some(ComponentStatus::NeedsUpdate) => FleetComponentDrift::NeedsUpdate,
         Some(ComponentStatus::BehindRemote) => FleetComponentDrift::BehindRemote,
         Some(ComponentStatus::BehindUpstream) => FleetComponentDrift::BehindUpstream,

@@ -688,22 +688,29 @@ fn parse_remote_manifest(output: &str, exclusions: &[String]) -> Result<Manifest
     let mut manifest = Manifest::default();
     for line in output.lines() {
         let mut fields = line.splitn(4, '\t');
-        let (Some(kind), Some(path), Some(mode), Some(value)) =
-            (fields.next(), fields.next(), fields.next(), fields.next())
-        else {
-            return Err("malformed remote manifest evidence".to_string());
-        };
-        let path = normalize_path(path)?;
+        let kind = fields
+            .next()
+            .ok_or_else(|| malformed_remote_field("kind", line))?;
+        let path = fields
+            .next()
+            .ok_or_else(|| malformed_remote_field("path", line))?;
+        let mode = fields
+            .next()
+            .ok_or_else(|| malformed_remote_field("mode", line))?;
+        let value = fields
+            .next()
+            .ok_or_else(|| malformed_remote_field("value", line))?;
+        let path = normalize_path(path).map_err(|_| malformed_remote_field("path", path))?;
         if ignored(&path, exclusions) {
             continue;
         }
         let kind = match kind {
             "f" => TreeEntryKind::File,
             "l" => TreeEntryKind::Symlink,
-            _ => return Err("unsupported remote manifest entry".to_string()),
+            _ => return Err(malformed_remote_field("kind", kind)),
         };
-        let mode = u32::from_str_radix(mode, 8)
-            .map_err(|_| "malformed remote manifest mode".to_string())?;
+        let mode =
+            u32::from_str_radix(mode, 8).map_err(|_| malformed_remote_field("mode", mode))?;
         let mode = if kind == TreeEntryKind::Symlink {
             "0".to_string()
         } else {
@@ -712,10 +719,11 @@ fn parse_remote_manifest(output: &str, exclusions: &[String]) -> Result<Manifest
         if kind == TreeEntryKind::File
             && (value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()))
         {
-            return Err("malformed remote SHA-256 evidence".to_string());
+            return Err(malformed_remote_field("sha256", value));
         }
         if kind == TreeEntryKind::Symlink {
-            let value = validate_link_target(&path, value)?;
+            let value = validate_link_target(&path, value)
+                .map_err(|_| malformed_remote_field("symlink_target", value))?;
             manifest.entries.insert(
                 path,
                 TreeEntry {
@@ -739,6 +747,21 @@ fn parse_remote_manifest(output: &str, exclusions: &[String]) -> Result<Manifest
         );
     }
     Ok(manifest)
+}
+
+fn malformed_remote_field(field: &str, value: &str) -> String {
+    const MAX_DIAGNOSTIC_VALUE_BYTES: usize = 160;
+
+    let mut diagnostic = String::new();
+    for character in value.chars() {
+        let escaped = character.escape_default().to_string();
+        if diagnostic.len() + escaped.len() > MAX_DIAGNOSTIC_VALUE_BYTES {
+            diagnostic.push_str("...");
+            break;
+        }
+        diagnostic.push_str(&escaped);
+    }
+    format!("malformed remote manifest field '{field}': '{diagnostic}'")
 }
 
 /// Paths excluded from every deploy manifest, whatever produced it.
@@ -884,13 +907,39 @@ mod tests {
     }
     #[test]
     fn remote_manifest_requires_well_formed_hash_evidence() {
-        assert!(parse_remote_manifest("f\tpath\t644\n", &[]).is_err());
-        assert!(parse_remote_manifest("f\tpath\t644\tnot-a-hash\n", &[]).is_err());
+        let missing = parse_remote_manifest("f\tpath\t644\n", &[]).expect_err("missing hash");
+        assert_eq!(
+            missing,
+            "malformed remote manifest field 'value': 'f\\tpath\\t644'"
+        );
+        let malformed =
+            parse_remote_manifest("f\tpath\t644\tnot-a-hash\n", &[]).expect_err("malformed hash");
+        assert_eq!(
+            malformed,
+            "malformed remote manifest field 'sha256': 'not-a-hash'"
+        );
+        let oversized = parse_remote_manifest(&format!("f\tpath\t644\t{}\n", "x".repeat(200)), &[])
+            .expect_err("oversized malformed hash");
+        assert!(oversized.ends_with("...'"), "{oversized}");
+        assert!(oversized.len() < 210, "{oversized}");
         assert!(parse_remote_manifest(
             "f\t../path\t644\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
             &[]
         )
         .is_err());
+    }
+
+    #[test]
+    fn remote_manifest_valid_digest_matches_local_tree() {
+        let temp = tempfile::tempdir().expect("temp");
+        let local = temp.path().join("local");
+        fs::create_dir_all(&local).expect("local");
+        fs::write(local.join("plugin.php"), "release").expect("plugin");
+        let digest = sha256(&local.join("plugin.php")).expect("digest");
+
+        let remote = parse_remote_manifest(&format!("f\tplugin.php\t644\t{digest}\n"), &[])
+            .expect("valid remote evidence");
+        assert!(differences(&local_manifest(&local).expect("local manifest"), &remote).is_empty());
     }
 
     /// #10290: deploy and recovery now share one walker, and this pins the two

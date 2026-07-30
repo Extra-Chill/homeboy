@@ -52,6 +52,9 @@ pub fn collect_check(
                 for comp_result in &results {
                     let status_str = match &comp_result.component_status {
                         Some(ComponentStatus::UpToDate) => "up_to_date",
+                        Some(ComponentStatus::VersionUpToDateContentUnverified) => {
+                            "version_up_to_date_content_unverified"
+                        }
                         Some(ComponentStatus::NeedsUpdate) => "needs_update",
                         Some(ComponentStatus::BehindRemote) => "behind_remote",
                         Some(ComponentStatus::BehindUpstream) => "behind_upstream",
@@ -67,7 +70,9 @@ pub fn collect_check(
                         Some(status) if status.requires_deploy() => {
                             summary.components_needs_update += 1
                         }
-                        Some(ComponentStatus::Unknown) | None => summary.components_unknown += 1,
+                        Some(ComponentStatus::VersionUpToDateContentUnverified)
+                        | Some(ComponentStatus::Unknown)
+                        | None => summary.components_unknown += 1,
                         Some(_) => {}
                     }
 
