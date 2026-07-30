@@ -491,6 +491,10 @@ jobs:
       - gate-build
     if: needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true'
     runs-on: ubuntu-latest
+    # Match the repository-scoped Test budget in ci.yml. The inner Homeboy
+    # timeout must remain below the action's outer process-group backstop.
+    env:
+      HOMEBOY_TEST_TIMEOUT_SECONDS: '2700'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -528,6 +532,7 @@ jobs:
           expected-commands: review audit,review lint,review test
           args: ${{ github.event.before && format('--skip-lint --changed-since {0}', github.event.before) || '--skip-lint' }}
           autofix: 'false'
+          execution-timeout-seconds: '3000'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   # ── Step 3b: Release-blocking quality policy ──
