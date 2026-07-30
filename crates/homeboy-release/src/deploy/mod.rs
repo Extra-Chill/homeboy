@@ -31,7 +31,7 @@ pub use types::{
     compare_deployed_versions, parse_bulk_component_ids, ComponentDeployResult, ComponentStatus,
     DeployConfig, DeployOrchestrationResult, DeployReason, DeploySummary, MultiDeployResult,
     MultiDeploySummary, PreparedDeployArtifact, PreparedDeployProjection, ProjectDeployResult,
-    ReleaseState, ReleaseStateBuckets, ReleaseStateStatus,
+    ReleaseState, ReleaseStateBuckets, ReleaseStateStatus, VersionSource, VersionSources,
 };
 pub use version_overrides::fetch_remote_versions;
 pub use version_overrides::{RemoteVersionProbeFailure, RemoteVersionProbeResult};
