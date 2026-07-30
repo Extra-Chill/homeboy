@@ -348,6 +348,9 @@ fn to_value<T: Serialize>(result: CmdResult<T>) -> CmdResult<Value> {
 
 fn review_lint_args(mut args: lint::LintArgs) -> lint::LintArgs {
     args.force_main_workflow = true;
+    // `--summary` is the review-level compact output selector. Lint uses
+    // `json_summary` to omit its full findings array from the response.
+    args.json_summary |= args.summary;
     args
 }
 
@@ -1313,6 +1316,23 @@ mod tests {
         assert!(
             !args.should_use_self_check_dispatch(),
             "direct review lint must run the main lint workflow for every target form"
+        );
+    }
+
+    #[test]
+    fn direct_review_lint_summary_uses_compact_output() {
+        let cli = TestCli::try_parse_from(["test", "lint", "homeboy", "--summary"])
+            .expect("review lint summary should parse");
+        let ReviewCommand::Lint(args) = cli.review.command.expect("lint subcommand") else {
+            panic!("expected lint subcommand");
+        };
+
+        let args = review_lint_args(args);
+
+        assert!(args.summary);
+        assert!(
+            args.json_summary,
+            "review lint --summary must suppress the full findings payload"
         );
     }
 
