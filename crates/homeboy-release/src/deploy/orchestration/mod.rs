@@ -1097,6 +1097,7 @@ mod tests {
                     local_path: path.to_string_lossy().to_string(),
                     remote_path: None,
                     deployment_provider: None,
+                    deployment_provider_input: None,
                 })
                 .collect(),
             ..Default::default()

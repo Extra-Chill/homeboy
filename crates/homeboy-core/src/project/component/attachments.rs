@@ -146,6 +146,7 @@ fn attach_component_path_unlocked(
             local_path: local_path.to_string(),
             remote_path: None,
             deployment_provider: None,
+            deployment_provider_input: None,
         });
     }
 
@@ -291,6 +292,7 @@ mod tests {
                 local_path: format!("/workspace/{}", id),
                 remote_path: None,
                 deployment_provider: None,
+                deployment_provider_input: None,
             });
         }
         project
