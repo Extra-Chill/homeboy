@@ -237,6 +237,7 @@ mod tests {
                 local_path,
                 remote_path: Some("wp-content/plugins/plugin".to_string()),
                 deployment_provider: None,
+                deployment_provider_input: None,
             }],
             ..Project::default()
         }
@@ -270,6 +271,7 @@ mod tests {
                     local_path,
                     remote_path: Some(format!("wp-content/plugins/{id}")),
                     deployment_provider: None,
+                    deployment_provider_input: None,
                 })
                 .collect(),
             ..Project::default()

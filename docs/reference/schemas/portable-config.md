@@ -21,6 +21,11 @@ A `homeboy.json` file in a repo root defines portable component configuration th
   "changelog_target": "string",
   "extensions": {
     "extension_id": {}
+  },
+  "deployment_provider": {
+    "extension": "string",
+    "provider": "string",
+    "policy": {}
   }
 }
 ```
@@ -42,6 +47,13 @@ The component `id` field is required and must be a non-empty string. All other f
   "changelog_target": "docs/CHANGELOG.md",
   "extensions": {
     "wordpress": {}
+  },
+  "deployment_provider": {
+    "extension": "hosting-provider",
+    "provider": "hosting.deploy",
+    "policy": {
+      "deployment_mode": "release"
+    }
   }
 }
 ```
@@ -81,10 +93,13 @@ homeboy component create --local-path /path/to/repo --changelog-target "CHANGELO
 | `scripts` | Optional component-owned `lint`, `test`, `build`, `bench`, and `trace` shell commands |
 | `extensions` | Extension configuration (e.g., `{"wordpress": {}}`) |
 | `capability_extensions` | Optional explicit extension ownership by capability label (e.g., `{"deps": "nodejs"}`) when more than one linked extension supports the same capability |
+| `deployment_provider` | Repository-owned provider policy: extension, provider ID, and opaque inline `policy` |
 
 Build, lint, test, bench, trace, and deps behavior resolves from `scripts.<capability>` first, then linked extensions. When multiple linked extensions support the same capability, set `capability_extensions.<capability>` to the owning extension. Use `scripts.build` for component-owned shell builds; component-level `build_command` is not supported.
 
 Use `deploy_together` for coupled components that are versioned or built separately but must stay in sync at runtime. When a deploy selection includes one member of a declared group without the rest, Homeboy fails the plan before building or uploading.
+
+Layered deployment providers keep all repository-owned Homeboy policy inline in root `homeboy.json` under `deployment_provider.policy`. Product, application, and runtime code has no Homeboy dependency and does not need a separate deployment contract file. `deployment_provider.contract` remains available only for legacy unlayered providers. Provider target input is intentionally project-only and never belongs in portable `homeboy.json`.
 
 ## Precedence
 

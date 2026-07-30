@@ -443,6 +443,7 @@ mod tests {
                 local_path: "/repo/plugin".to_string(),
                 remote_path: None,
                 deployment_provider: None,
+                deployment_provider_input: None,
             }],
             ..Default::default()
         };
@@ -474,12 +475,14 @@ mod tests {
                         local_path: "/tmp/homeboy-remove-me-missing".to_string(),
                         remote_path: None,
                         deployment_provider: None,
+                        deployment_provider_input: None,
                     },
                     ProjectComponentAttachment {
                         id: "stale-remaining".to_string(),
                         local_path: "/tmp/homeboy-stale-remaining-missing".to_string(),
                         remote_path: None,
                         deployment_provider: None,
+                        deployment_provider_input: None,
                     },
                 ],
                 ..Default::default()
