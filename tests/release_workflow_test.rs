@@ -631,7 +631,12 @@ fn release_fails_loudly_when_prepared_release_does_not_publish() {
     assert!(verify.contains("needs.prepare.outputs.prepared == 'true'"));
     assert!(verify.contains("needs.prepare.outputs['release-tag'] != ''"));
     assert!(verify.contains("- plan"));
-    assert!(verify.contains("contents: read"));
+    // Previously asserted `contents: read`. The guard now has to be able to
+    // return an incomplete published release to draft (#8687), which needs
+    // write. The least-privilege intent is preserved by scope, not by level:
+    // this job's only mutation is the draft flag, asserted in
+    // `verify_published_returns_an_incomplete_published_release_to_draft`.
+    assert!(verify.contains("contents: write"));
     assert!(verify.contains("GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}"));
     assert!(plan.contains("expected-assets: ${{ steps.plan.outputs.expected-assets }}"));
     assert!(plan.contains(".releases[].artifacts[]? | split(\"/\") | last"));
@@ -1186,6 +1191,69 @@ fn release_recovery_finalizer_executes_the_main_built_binary() {
     assert!(
         finalize.contains("recovery-release == 'true'"),
         "binary-path must be bound to the recovery path so normal releases are unaffected"
+    );
+}
+
+/// Detecting a broken published release is not the same as containing one.
+///
+/// `v0.323.1` published with 2 of 14 assets — both Linux archives missing, so
+/// `releases/download/v0.323.1/homeboy-x86_64-unknown-linux-gnu.tar.xz`
+/// returned 404. The verify job correctly went red and the release stayed
+/// published and reachable, which is the invariant #8687 exists to enforce
+/// ("partially uploaded releases remain draft/failed").
+#[test]
+fn verify_published_returns_an_incomplete_published_release_to_draft() {
+    let workflow = release_workflow();
+    let verify = job_section(workflow, "verify-published");
+
+    assert!(
+        verify.contains("contents: write"),
+        "the job cannot un-publish a broken release without write permission"
+    );
+
+    let step = release_step_block(verify, "name: Verify planned release assets");
+
+    assert!(
+        step.contains("--draft=true"),
+        "an incomplete published release must be returned to draft, not merely reported"
+    );
+    assert!(
+        step.contains("jq -e '.draft == false' release.json"),
+        "only a release that is actually published may be re-drafted"
+    );
+    assert!(
+        step.contains("could not be returned to draft"),
+        "a failed un-publish must escalate with the manual command, never pass silently"
+    );
+
+    // Containment must not weaken the gate: the run still fails either way.
+    // `--draft=true` appears twice (the command, and the manual remediation
+    // hint), so measure from the last one.
+    let after_redraft = step
+        .rsplit("--draft=true")
+        .next()
+        .expect("re-draft branch should exist");
+    assert!(
+        after_redraft.contains("exit 1"),
+        "re-drafting is containment, not absolution -- the run must still fail"
+    );
+}
+
+/// `releases/tags/{tag}` resolves published releases only, so a draft 404s
+/// there. Reporting that as a malformed API response hides the actual state.
+#[test]
+fn verify_published_distinguishes_an_unpublished_release_from_a_broken_one() {
+    let workflow = release_workflow();
+    let verify = job_section(workflow, "verify-published");
+    let step = release_step_block(verify, "name: Verify planned release assets");
+
+    assert!(
+        step.contains("is not published"),
+        "a draft or absent release must be named as such"
+    );
+    assert!(
+        step.contains("still a draft or absent"),
+        "the operator needs to know the tag exists without a consumable release"
     );
 }
 
