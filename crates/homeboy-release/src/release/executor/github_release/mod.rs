@@ -18,6 +18,7 @@ mod run;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use notes::release_notes_path;
 pub(crate) use run::run_github_release;
 
 #[cfg(test)]

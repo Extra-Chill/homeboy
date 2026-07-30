@@ -345,7 +345,16 @@ fn run_working_tree_preflight(
     step: &PlanStep,
     context: &ReleaseExecutionContext,
 ) -> ReleaseStepResult {
-    match super::planning_worktree::validate_working_tree_fail_fast(context.component) {
+    let release_notes_tag = context
+        .options
+        .pipeline
+        .head
+        .then_some(context.state.tag.as_deref())
+        .flatten();
+    match super::planning_worktree::validate_working_tree_fail_fast(
+        context.component,
+        release_notes_tag,
+    ) {
         Ok(()) => ReleaseStepResult {
             id: step.id.clone(),
             step_type: step.kind.clone(),
@@ -933,7 +942,7 @@ mod tests {
         release_step_unexpected_dirty_files, ReleaseExecutionContext,
     };
     use crate::release::types::{
-        ReleaseOptions, ReleaseState, ReleaseStepResult, ReleaseStepStatus,
+        ReleaseOptions, ReleasePipelineOptions, ReleaseState, ReleaseStepResult, ReleaseStepStatus,
     };
     use homeboy_core::component::{Component, ComponentScriptsConfig, VersionTarget};
     use homeboy_core::deps::{DependencyCommandResult, DependencyInstallResult};
@@ -1594,6 +1603,52 @@ mod tests {
 
         assert_eq!(result.status, ReleaseStepStatus::Success);
         assert!(!release_step_is_show_stopper(&result));
+    }
+
+    #[test]
+    fn head_preflight_recovers_with_the_persisted_release_notes_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        run_in(temp.path(), &["git", "init", "-q"]);
+        configure_git_user(temp.path());
+        std::fs::write(temp.path().join("README.md"), "fixture\n").expect("write fixture");
+        run_in(temp.path(), &["git", "add", "."]);
+        run_in(
+            temp.path(),
+            &["git", "commit", "-q", "-m", "Initial commit"],
+        );
+        std::fs::create_dir(temp.path().join("build")).expect("create build directory");
+        std::fs::write(temp.path().join("build/v1.2.3-release-notes.md"), "notes\n")
+            .expect("write persisted notes");
+
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let options = ReleaseOptions {
+            pipeline: ReleasePipelineOptions {
+                head: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut context = ReleaseExecutionContext {
+            component: &component,
+            extensions: &[],
+            component_id: "fixture",
+            options: &options,
+            state: ReleaseState {
+                tag: Some("v1.2.3".to_string()),
+                ..Default::default()
+            },
+            publish_failed: false,
+        };
+
+        let result = execute_release_plan_step(&plan_step("preflight.working_tree"), &mut context)
+            .expect("dispatch")
+            .expect("result");
+
+        assert_eq!(result.status, ReleaseStepStatus::Success);
     }
 
     #[test]
