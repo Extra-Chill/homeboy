@@ -407,10 +407,12 @@ impl CliRuntime {
             return std::process::ExitCode::from(exit_code_to_u8(exit_code));
         }
 
-        let (mut cli, command_spec) = match Cli::from_registered_arg_matches(&matches) {
+        let (compiled, command_spec) = match Cli::compile_registered_arg_matches(&matches) {
             Ok(parsed) => parsed,
             Err(err) => err.exit(),
         };
+        let mut cli = compiled.value;
+        let command_provenance = compiled.provenance;
         let notification_route = match crate::core::notification_route::from_cli_or_env(
             cli.notification_transport.as_deref(),
             cli.notification_route.as_deref(),
@@ -459,7 +461,12 @@ impl CliRuntime {
 
         if let Commands::AgentTask(agent_task) = &cli.command {
             if let crate::commands::agent_task::AgentTaskCommand::Cook(cook) = &agent_task.command {
-                if let Err(err) = crate::commands::agent_task::run::validate_cook_request(cook) {
+                if let Err(err) =
+                    crate::commands::agent_task::run::validate_cook_request_with_provenance(
+                        cook,
+                        Some(&command_provenance),
+                    )
+                {
                     output_runtime::emit_json_result_for_identity(
                         Err(err),
                         output_file.as_deref(),
@@ -540,8 +547,12 @@ impl CliRuntime {
         // placement routing can consume controller transport markers.
         crate::commands::utils::execution_provenance::capture(&cli, &normalized);
 
-        let route_result =
-            crate::commands::route::route_after_parse(&cli, &normalized, output_file.as_deref());
+        let route_result = crate::commands::route::route_after_parse_with_provenance(
+            &cli,
+            &normalized,
+            output_file.as_deref(),
+            Some(&command_provenance),
+        );
         if managed_runner_placement {
             resource_policy::clear_managed_runner_placement_context();
         }
@@ -575,6 +586,7 @@ impl CliRuntime {
                 command_spec,
                 output_file.as_deref(),
                 &command_identity,
+                command_provenance,
             )
         });
         std::process::ExitCode::from(exit_code_to_u8(exit_code))

@@ -7,7 +7,7 @@ use homeboy::agents::agent_task_service::{
 };
 use homeboy::core::{Error, Result};
 
-use crate::cli_surface::{Cli, Commands};
+use crate::cli_surface::{ArgumentSource, Cli, Commands};
 
 use super::super::AgentTaskCommand;
 
@@ -75,6 +75,55 @@ fn cook_rejects_queue_only_before_creating_a_durable_recipe() {
             .contains("cannot queue its controller-owned lifecycle"));
         assert!(!homeboy::agents::agent_task_service::recipe_exists("cook-queue-only").unwrap());
     });
+}
+
+#[test]
+fn cook_rejects_non_cli_no_finalize_authorization_before_provisioning() {
+    let matches = Cli::command_with_scoped_lab_args()
+        .try_get_matches_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the fix",
+            "--to-worktree",
+            "missing@worktree",
+            "--no-finalize",
+        ])
+        .expect("parse Cook");
+    let (compiled, _) = Cli::compile_registered_arg_matches(&matches).expect("compile Cook");
+    let Commands::AgentTask(agent_task) = compiled.value.command else {
+        panic!("agent-task Cook command");
+    };
+    let AgentTaskCommand::Cook(cook) = agent_task.command else {
+        panic!("Cook command");
+    };
+    let mut provenance = compiled.provenance;
+    provenance.set("no_finalize", ArgumentSource::Configuration);
+
+    let error = super::super::run::validate_cook_request_with_provenance(&cook, Some(&provenance))
+        .expect_err("configuration cannot authorize finalization suppression");
+
+    assert!(error.message.contains("explicitly authorized"));
+}
+
+#[test]
+fn cook_plan_records_compiled_argument_provenance() {
+    let mut plan = AgentTaskPlan::new("cook-provenance", Vec::new());
+    let mut provenance = crate::cli_surface::CommandArgumentProvenance::default();
+    provenance.set("base", ArgumentSource::Configuration);
+    provenance.set("run_id", ArgumentSource::Generated);
+
+    super::super::run::record_cook_argument_provenance(&mut plan, &provenance);
+
+    assert_eq!(
+        plan.metadata["command_argument_provenance"]["base"],
+        "configuration"
+    );
+    assert_eq!(
+        plan.metadata["command_argument_provenance"]["run_id"],
+        "generated"
+    );
 }
 
 #[test]

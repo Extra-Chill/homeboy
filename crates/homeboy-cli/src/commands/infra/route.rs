@@ -29,6 +29,17 @@ pub fn route_after_parse(
     normalized_args: &[String],
     output_file: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
+    route_after_parse_with_provenance(cli, normalized_args, output_file, None)
+}
+
+/// Routes typed commands while retaining their parser-source contract through
+/// controller-side plan materialization and Lab handoff.
+pub fn route_after_parse_with_provenance(
+    cli: &Cli,
+    normalized_args: &[String],
+    output_file: Option<&str>,
+    provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
+) -> homeboy::core::Result<Option<i32>> {
     // Contradictory argument combinations are rejected before any transport
     // context is consulted. The bail-outs below skip routing, not validation:
     // an invalid combination stays invalid wherever the process runs, and
@@ -195,6 +206,7 @@ pub fn route_after_parse(
         &normalized_args,
         output_file,
         inferred_runner_id.as_deref(),
+        provenance,
     )? {
         return Ok(Some(exit_code));
     }
@@ -255,7 +267,7 @@ pub fn route_after_parse(
         lab_command
     };
     let cook_plan = if lab_command.is_some() && inferred_runner_id.is_some() {
-        materialize_agent_task_cook_plan(cli)?
+        materialize_agent_task_cook_plan(cli, provenance)?
     } else {
         None
     };
@@ -654,6 +666,7 @@ fn run_split_placement_cook(
     _normalized_args: &[String],
     output_file: Option<&str>,
     runner_id: Option<&str>,
+    provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> homeboy::core::Result<Option<i32>> {
     let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
         command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),
@@ -675,7 +688,7 @@ fn run_split_placement_cook(
         return Ok(None);
     };
 
-    let plan = materialize_agent_task_cook_plan(cli)?.expect("cook plan");
+    let plan = materialize_agent_task_cook_plan(cli, provenance)?.expect("cook plan");
     let serialized_plan = serde_json::to_string(&plan).map_err(|error| {
         Error::internal_json(
             error.to_string(),
@@ -716,6 +729,7 @@ fn run_split_placement_cook(
             homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
             Some(dispatcher),
             Some(&progress),
+            provenance,
         )?;
     let stdout = serde_json::to_string_pretty(&value).map_err(|error| {
         Error::internal_json(
@@ -1175,6 +1189,7 @@ fn inject_agent_task_cook_attempt_plan(
 /// user task a later retry must execute.
 fn materialize_agent_task_cook_plan(
     cli: &Cli,
+    provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> homeboy::core::Result<Option<homeboy::agents::agent_tasks::scheduler::AgentTaskPlan>> {
     let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
         command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),
@@ -1182,9 +1197,13 @@ fn materialize_agent_task_cook_plan(
     else {
         return Ok(None);
     };
-    crate::commands::agent_task::run::validate_cook_request(cook)?;
+    crate::commands::agent_task::run::validate_cook_request_with_provenance(cook, provenance)?;
     let provision = crate::commands::agent_task::run::provision_cook_destination(cook)?;
-    crate::commands::agent_task::run::compile_cook_plan(cook, provision).map(Some)
+    let mut plan = crate::commands::agent_task::run::compile_cook_plan(cook, provision)?;
+    if let Some(provenance) = provenance {
+        crate::commands::agent_task::run::record_cook_argument_provenance(&mut plan, provenance);
+    }
+    Ok(Some(plan))
 }
 
 fn inline_test_settings_profiles(cli: &Cli, args: &[String]) -> homeboy::core::Result<Vec<String>> {

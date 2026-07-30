@@ -73,7 +73,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 tempfile = "3.14"
 
 # CLI dependencies
-clap = { version = "4.5", features = ["derive", "string"] }
+clap = { version = "4.5", features = ["derive", "env", "string"] }
 
 [dev-dependencies]
 # Enable homeboy-core's shared hermetic test fixtures for this crate's test build

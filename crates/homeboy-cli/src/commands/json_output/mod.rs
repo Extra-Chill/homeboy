@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::cli_surface::Commands;
+use crate::cli_surface::{CommandArgumentProvenance, Commands};
 use crate::command_contract::{CommandJsonFamily, CommandSpec};
 
 use super::agent_task_summary::{agent_task_summary_kind, render_agent_task_summary};
@@ -24,6 +24,7 @@ pub fn run_command_output(
     command: Commands,
     spec: &CommandSpec,
     output_file: Option<&str>,
+    provenance: &CommandArgumentProvenance,
 ) -> CommandRun {
     crate::commands::utils::tty::status("homeboy is working...");
     let run = match command {
@@ -49,7 +50,11 @@ pub fn run_command_output(
                         lease.progress(phase, cook_id, run_id)
                     };
                     let (result, exit_code) = map(
-                        crate::commands::agent_task::run_with_cook_progress(args, Some(&progress)),
+                        crate::commands::agent_task::run_with_cook_progress_and_provenance(
+                            args,
+                            Some(&progress),
+                            Some(provenance),
+                        ),
                     );
                     if let Err(error) = lease.finish(
                         &result,

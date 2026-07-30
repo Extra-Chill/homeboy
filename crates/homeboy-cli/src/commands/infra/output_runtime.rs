@@ -4,7 +4,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use crate::cli_surface::Commands;
+use crate::cli_surface::{CommandArgumentProvenance, Commands};
 use crate::command_contract::CommandOutputFileMode;
 
 use crate::commands::utils::response::{self as output, CommandIdentity};
@@ -458,6 +458,7 @@ pub fn run_command(
     spec: &'static crate::command_contract::CommandSpec,
     requested_output_file: Option<&str>,
     identity: &CommandIdentity,
+    provenance: CommandArgumentProvenance,
 ) -> i32 {
     let output_file = command_runtime_output_file(&command, requested_output_file);
     let plan = command.response_plan(spec, output_file.is_some());
@@ -467,7 +468,8 @@ pub fn run_command(
         crate::commands::raw_output::CommandRunPreparation::Handled(exit_code) => return exit_code,
         crate::commands::raw_output::CommandRunPreparation::Json(command) => {
             return output_service.emit_run(
-                run_json(*command, spec, plan.output_file, output_file).with_identity(identity),
+                run_json(*command, spec, plan.output_file, output_file, &provenance)
+                    .with_identity(identity),
                 plan.output_file,
             );
         }
@@ -534,6 +536,7 @@ pub fn run_json(
     spec: &crate::command_contract::CommandSpec,
     mode: CommandOutputFileMode,
     output_file: Option<&str>,
+    provenance: &CommandArgumentProvenance,
 ) -> CommandRun {
     match (mode, command) {
         (CommandOutputFileMode::TraceJsonSummaryArtifact, Commands::Trace(args)) => {
@@ -552,7 +555,7 @@ pub fn run_json(
             }
         }
         (_, command) => {
-            crate::commands::json_output::run_command_output(command, spec, output_file)
+            crate::commands::json_output::run_command_output(command, spec, output_file, provenance)
         }
     }
 }

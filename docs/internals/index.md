@@ -21,6 +21,7 @@ Internals docs are for people maintaining Homeboy itself: architecture, implemen
 ## Development Contracts
 
 - [Compiler warning extension](development/contracts/compiler-warning-extension.md)
+- [Command argument provenance](development/contracts/command-argument-provenance.md)
 - [Verification phases](development/contracts/verification-phases.md)
 
 ## Docs Maintenance
