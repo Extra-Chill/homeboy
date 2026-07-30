@@ -288,6 +288,7 @@ fn rebase_monorepo_component_paths_unlocked(
                         local_path: path.clone(),
                         remote_path: None,
                         deployment_provider: None,
+                        deployment_provider_input: None,
                     });
                 }
             }
@@ -565,18 +566,21 @@ mod tests {
                         local_path: old.join("root").display().to_string(),
                         remote_path: None,
                         deployment_provider: None,
+                        deployment_provider_input: None,
                     },
                     ProjectComponentAttachment {
                         id: "nested".to_string(),
                         local_path: old.join("nested").display().to_string(),
                         remote_path: None,
                         deployment_provider: None,
+                        deployment_provider_input: None,
                     },
                     ProjectComponentAttachment {
                         id: "other-repo".to_string(),
                         local_path: "/other-repo".to_string(),
                         remote_path: None,
                         deployment_provider: None,
+                        deployment_provider_input: None,
                     },
                 ],
                 ..Default::default()
@@ -629,6 +633,7 @@ mod tests {
                     local_path: "/old-root".to_string(),
                     remote_path: None,
                     deployment_provider: None,
+                    deployment_provider_input: None,
                 }],
                 ..Default::default()
             })
