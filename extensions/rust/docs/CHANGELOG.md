@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.31.1] - 2026-07-30
+
+### Fixed
+- reuse gh auth for Homebrew publishing
+
 ## [1.31.0] - 2026-07-29
 
 ### Added
