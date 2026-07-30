@@ -29,6 +29,13 @@ pub fn route_after_parse(
     normalized_args: &[String],
     output_file: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
+    // Contradictory argument combinations are rejected before any transport
+    // context is consulted. The bail-outs below skip routing, not validation:
+    // an invalid combination stays invalid wherever the process runs, and
+    // letting one through means cook executes a request it already knows it
+    // cannot honor (#10917).
+    reject_contradictory_cook_arguments(cli)?;
+
     // A managed runner executes the controller-selected command once. Its argv
     // retains the controller's explicit placement for provenance, but must not
     // recursively route back through a runner-side controller daemon.
@@ -588,6 +595,56 @@ fn run_split_placement_fanout(
     Ok(Some(exit_code))
 }
 
+/// Reject `agent-task cook` requests whose flags contradict each other.
+///
+/// These are properties of the argument combination alone, not of the execution
+/// context, so they are evaluated before `route_after_parse` consults any
+/// transport state. The bail-outs at the top of routing exist to stop a
+/// runner-side process recursing back through controller routing; they were
+/// never meant to waive validation. While they did, a single inherited
+/// controller-transport variable let a contradictory cook through to real
+/// worktree and provider work instead of a fast rejection (#10917).
+///
+/// This is the only place these two rejections live. `run_split_placement_cook`
+/// deliberately does not repeat them: duplicated validation drifts, and which
+/// message an operator sees should never depend on the path taken to reach it.
+fn reject_contradictory_cook_arguments(cli: &Cli) -> homeboy::core::Result<()> {
+    let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+        command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),
+    }) = &cli.command
+    else {
+        return Ok(());
+    };
+
+    if cook.dispatch.core.queue_only {
+        return Err(Error::validation_invalid_argument(
+            "queue-only",
+            "agent-task cook cannot queue its controller-owned lifecycle; it must retain provider completion to ingest artifacts, promote candidates, run gates, and finalize",
+            None,
+            Some(vec![
+                "Use `homeboy agent-task run-plan --plan <materialized-plan> --record-run-id <run-id> --queue-only` only when a controller owns the corresponding continuation.".to_string(),
+            ]),
+        ));
+    }
+
+    // `--runner` implies Lab placement and is mutually exclusive with an
+    // explicit `--placement` at argument parsing, so `--placement local` here
+    // always means a fully local cook with no pinned runner, and no runner
+    // daemon can own the attempt to detach from.
+    if cli.placement == homeboy::cli_surface::Placement::Local && cli.detach_after_handoff {
+        return Err(Error::validation_invalid_argument(
+            "detach-after-handoff",
+            "agent-task cook cannot detach after handoff with --placement local because no runner daemon owns the provider attempt",
+            None,
+            Some(vec![
+                "Use --placement lab or --runner <runner-id> to detach after a runner daemon accepts the provider attempt.".to_string(),
+            ]),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Cook owns controller-local target resolution, promotion, gates, retries, and
 /// finalization. Its provider attempt is the only portable unit: a materialized
 /// typed run-plan that mirrors its aggregate and artifacts back into the same
@@ -604,30 +661,14 @@ fn run_split_placement_cook(
     else {
         return Ok(None);
     };
-    if cook.dispatch.core.queue_only {
-        return Err(Error::validation_invalid_argument(
-            "queue-only",
-            "agent-task cook cannot queue its controller-owned lifecycle; it must retain provider completion to ingest artifacts, promote candidates, run gates, and finalize",
-            None,
-            Some(vec![
-                "Use `homeboy agent-task run-plan --plan <materialized-plan> --record-run-id <run-id> --queue-only` only when a controller owns the corresponding continuation.".to_string(),
-            ]),
-        ));
-    }
+    // Contradictory combinations are already rejected by
+    // `reject_contradictory_cook_arguments` before any routing decision, so
+    // reaching here means the request is internally consistent.
+    //
     // `--runner` implies Lab placement and is mutually exclusive with an
     // explicit `--placement` at argument parsing, so `--placement local` here
     // always means a fully local cook with no pinned runner.
     if cli.placement == homeboy::cli_surface::Placement::Local {
-        if cli.detach_after_handoff {
-            return Err(Error::validation_invalid_argument(
-                "detach-after-handoff",
-                "agent-task cook cannot detach after handoff with --placement local because no runner daemon owns the provider attempt",
-                None,
-                Some(vec![
-                    "Use --placement lab or --runner <runner-id> to detach after a runner daemon accepts the provider attempt.".to_string(),
-                ]),
-            ));
-        }
         return Ok(None);
     }
     let Some(runner_id) = runner_id else {
