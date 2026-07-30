@@ -257,10 +257,7 @@ fn lab_runner_preparation_falls_back_for_stale_default_runtime_paths() {
     assert_eq!(
         prepared,
         LabRunnerPreparation::FallBackLocal {
-            reason: format!(
-                "connected runner `lab` daemon runtime is stale after runner-side rebuilds or path changes; restart the active daemon with `homeboy runner refresh-homeboy lab --ref {} --reconnect`",
-                homeboy_product_identity::build_identity().git_commit.unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
-            )
+            reason: "connected runner `lab` daemon runtime is stale after runner-side rebuilds or path changes; restart the active daemon with `homeboy runner refresh-homeboy lab --ref bbbbbbbbbbbb --reconnect`".to_string()
         }
     );
 }
@@ -325,6 +322,7 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
     assert_eq!(action["args"][1], "refresh-homeboy");
     assert_eq!(action["args"][2], "lab");
     assert_eq!(action["args"][3], "--ref");
+    assert_eq!(action["args"][4], "bbbbbbbbbbbb");
     assert_eq!(action["args"][5], "--reconnect");
     assert_eq!(
         action["evidence"]["recovery_plan"][0],
@@ -854,8 +852,8 @@ fn stale_daemon_warning(runner_id: &str) -> RunnerStaleDaemonWarning {
         runner_id,
         "homeboy 0.218.0".to_string(),
         "homeboy 0.219.0".to_string(),
-        Some("homeboy 0.218.0+old".to_string()),
-        Some("homeboy 0.219.0+new".to_string()),
+        Some("homeboy 0.218.0+aaaaaaaaaaaa".to_string()),
+        Some("homeboy 0.219.0+bbbbbbbbbbbb".to_string()),
     )
 }
 
@@ -884,8 +882,8 @@ fn stale_runtime_path_warning(runner_id: &str) -> RunnerStaleDaemonWarning {
         runner_id,
         "homeboy 0.219.0".to_string(),
         "homeboy 0.219.0".to_string(),
-        Some("homeboy 0.219.0+same".to_string()),
-        Some("homeboy 0.219.0+same".to_string()),
+        Some("homeboy 0.219.0+aaaaaaaaaaaa".to_string()),
+        Some("homeboy 0.219.0+bbbbbbbbbbbb".to_string()),
     )
     .with_runtime_paths(
         runner_id,

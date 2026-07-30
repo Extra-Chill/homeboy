@@ -1148,6 +1148,13 @@ impl RunnerStaleDaemonWarning {
         self
     }
 
+    pub(crate) fn recovery_ref(&self) -> Option<String> {
+        recovery_ref(
+            self.current_homeboy_build_identity.as_deref(),
+            &homeboy_product_identity::build_identity(),
+        )
+    }
+
     pub fn with_identity_unverifiable(
         mut self,
         runner_id: &str,
@@ -1207,7 +1214,22 @@ fn recovery_command(
     configured_identity: Option<&str>,
     initiating_identity: &homeboy_product_identity::BuildIdentity,
 ) -> Vec<String> {
-    let recovery_ref = match configured_identity {
+    recovery_ref(configured_identity, initiating_identity)
+        .map(|recovery_ref| {
+            format!(
+                "homeboy runner refresh-homeboy {} --ref {recovery_ref} --reconnect",
+                shell::quote_arg(runner_id),
+            )
+        })
+        .into_iter()
+        .collect()
+}
+
+fn recovery_ref(
+    configured_identity: Option<&str>,
+    initiating_identity: &homeboy_product_identity::BuildIdentity,
+) -> Option<String> {
+    match configured_identity {
         // The runner's configured executable is the desired post-recovery job
         // binary. A present but dirty or unverifiable identity must not be
         // replaced with the initiating controller's unrelated commit.
@@ -1218,16 +1240,7 @@ fn recovery_command(
             initiating_identity.git_commit.clone()
         }
         None => None,
-    };
-    recovery_ref
-        .map(|recovery_ref| {
-            format!(
-                "homeboy runner refresh-homeboy {} --ref {recovery_ref} --reconnect",
-                shell::quote_arg(runner_id),
-            )
-        })
-        .into_iter()
-        .collect()
+    }
 }
 
 fn same_homeboy_version(left: &str, right: &str) -> bool {
