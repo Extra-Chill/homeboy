@@ -32,9 +32,16 @@ homebrew_formula_artifacts() {
 
 configure_git_push_auth() {
   local token="${HOMEBREW_TAP_TOKEN:-${GH_TOKEN:-}}"
-  if [[ -z "${token}" ]]; then
-    return 0
+  if [[ -z "${token}" ]] && command -v gh &>/dev/null; then
+    token="$(gh auth token 2>/dev/null || true)"
   fi
+
+  if [[ -z "${token}" ]]; then
+    echo "Homebrew tap publishing requires HOMEBREW_TAP_TOKEN, GH_TOKEN, or an authenticated gh CLI." >&2
+    return 1
+  fi
+
+  export HOMEBREW_TAP_AUTH_TOKEN="${token}"
 
   local askpass
   askpass="$(mktemp)"
@@ -43,7 +50,7 @@ configure_git_push_auth() {
 #!/usr/bin/env bash
 case "$1" in
   *Username*) printf '%s\n' 'x-access-token' ;;
-  *Password*) printf '%s\n' "${HOMEBREW_TAP_TOKEN:-${GH_TOKEN:-}}" ;;
+  *Password*) printf '%s\n' "${HOMEBREW_TAP_AUTH_TOKEN}" ;;
   *) printf '\n' ;;
 esac
 SH
@@ -77,11 +84,6 @@ publish_homebrew_formulae() {
   if [[ -n "${HOMEBOY_HOMEBREW_TAP_DIR:-}" ]]; then
     tap_dir="${HOMEBOY_HOMEBREW_TAP_DIR}"
   else
-    if [[ -z "${HOMEBREW_TAP_TOKEN:-${GH_TOKEN:-}}" ]]; then
-      echo "Homebrew tap publishing requires HOMEBREW_TAP_TOKEN or GH_TOKEN." >&2
-      exit 1
-    fi
-
     configure_git_push_auth
     tap_dir="$(mktemp -d)"
     cleanup_tap="true"
