@@ -159,7 +159,13 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     }
 
     if let Some(ref info) = version_info {
-        if let Some(details) = validate_release_worktree(&component, options, info)? {
+        let release_notes_tag = options
+            .pipeline
+            .head
+            .then(|| release_scope.tag_name(&info.version));
+        if let Some(details) =
+            validate_release_worktree(&component, options, info, release_notes_tag.as_deref())?
+        {
             v.push(
                 "working_tree",
                 "Uncommitted changes detected",
@@ -331,9 +337,10 @@ fn is_explicit_patch_bump(requested_bump: &str, current_version: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::guard_stale_primary_at_head;
-    use super::{apply_oversized_patch_release_policy, oversized_patch_release_bump};
+    use super::{apply_oversized_patch_release_policy, oversized_patch_release_bump, plan};
     use crate::release::types::{
-        ReleaseChangelogPlan, ReleaseSemverCommit, ReleaseSemverRecommendation,
+        ReleaseChangelogPlan, ReleaseOptions, ReleasePipelineOptions, ReleaseSemverCommit,
+        ReleaseSemverRecommendation,
     };
     use std::collections::HashMap;
 
@@ -386,6 +393,80 @@ mod tests {
             joined.contains("Cargo.lock"),
             "dirty file list must reach the JSON envelope, got: {joined}"
         );
+    }
+
+    #[test]
+    fn head_plan_allows_only_the_matching_scoped_release_notes_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path();
+        std::fs::create_dir_all(dir.join("packages/fixture")).expect("component directory");
+        std::fs::write(
+            dir.join("homeboy.json"),
+            r#"{
+                "id": "fixture",
+                "type": "fixture",
+                "changelog_target": "CHANGELOG.md",
+                "version_targets": [{
+                    "file": "packages/fixture/manifest.toml",
+                    "pattern": "version = \\\"([0-9.]+)\\\""
+                }],
+                "scopes": {
+                    "release": {"include": ["packages/fixture/**"]}
+                }
+            }"#,
+        )
+        .expect("portable config");
+        std::fs::write(dir.join("CHANGELOG.md"), "# Changelog\n").expect("changelog");
+        std::fs::write(
+            dir.join("packages/fixture/manifest.toml"),
+            "version = \"1.2.3\"\n",
+        )
+        .expect("version target");
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "test@example.com"]);
+        git(dir, &["config", "user.name", "Test"]);
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "release: fixture-v1.2.3"]);
+        git(dir, &["tag", "fixture-v1.2.3"]);
+        std::fs::create_dir(dir.join("build")).expect("build directory");
+        std::fs::write(
+            dir.join("build/fixture-v1.2.3-release-notes.md"),
+            "release notes\n",
+        )
+        .expect("persisted notes");
+
+        let plan_result = plan(
+            "fixture",
+            &ReleaseOptions {
+                path_override: Some(dir.to_string_lossy().to_string()),
+                pipeline: ReleasePipelineOptions {
+                    head: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            plan_result.is_ok(),
+            "matching scoped release notes must not block --head planning: {plan_result:?}"
+        );
+
+        std::fs::write(dir.join("build/operator-file"), "operator drift\n")
+            .expect("unrelated dirty file");
+        let error = plan(
+            "fixture",
+            &ReleaseOptions {
+                path_override: Some(dir.to_string_lossy().to_string()),
+                pipeline: ReleasePipelineOptions {
+                    head: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect_err("unrelated build files must still block --head planning");
+        assert!(error.details.to_string().contains("build/"));
     }
 
     #[test]

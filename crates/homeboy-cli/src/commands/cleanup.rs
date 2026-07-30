@@ -32,7 +32,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::runs::{runs_resources, RunsOutput, RunsResourcesArgs, RunsResourcesOutput};
-use super::utils::response::{CommandActionableMetadata, CommandNextAction};
+use super::utils::response::{CommandActionableMetadata, CommandNextAction, CommandNextActionKind};
 use super::CmdResult;
 
 const AUTOMATIC_RETENTION_LOCK_FILE: &str = "automatic-retention-controller.lock";
@@ -126,7 +126,7 @@ pub fn run(args: CleanupArgs) -> CmdResult<Value> {
             })
             .map(|output| (output, 0)),
         Some(CleanupCommand::AutomaticRetention) => automatic_retention(),
-        None => cleanup_inventory(args).map(|output| (output, 0)),
+        None => cleanup_inventory(args).map(|result| (result.output, result.exit_code)),
     }
 }
 
@@ -908,8 +908,12 @@ fn age_bucket(age_seconds: u64) -> String {
 #[derive(Debug, Serialize)]
 pub struct CleanupInventoryOutput {
     pub command: &'static str,
+    /// `partial_failure` means independent categories completed, but at least
+    /// one category failed and can be retried through its specialist command.
+    pub status: &'static str,
     pub mode: &'static str,
     pub category_count: usize,
+    pub failed_category_count: usize,
     /// Resources selected for removal, summed across categories.
     ///
     /// `candidate_count`, `applied_count` and `skipped_count` all count
@@ -945,12 +949,27 @@ pub struct CleanupInventoryCategory {
     pub skipped: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skip_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<CleanupInventoryCategoryFailure>,
     pub candidate_count: usize,
     pub applied_count: usize,
     pub skipped_count: usize,
     pub estimated_bytes: u64,
     pub reclaimed_bytes: u64,
     pub output: Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CleanupInventoryCategoryFailure {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+}
+
+struct CleanupInventoryResult {
+    output: Value,
+    exit_code: i32,
 }
 
 const REPO_ARTIFACTS_METADATA: CleanupInventoryCategoryMetadata =
@@ -1145,7 +1164,12 @@ fn automatic_retention() -> CmdResult<Value> {
         command: None,
     })?;
     let cargo_targets = cleanup::run_automatic_cargo_retention()?;
-    let status = cargo_targets.status;
+    let cleanup_exit_code = cleanup.exit_code;
+    let status = if cleanup_exit_code == 0 {
+        cargo_targets.status
+    } else {
+        "partial_failure"
+    };
     let output = AutomaticRetentionControllerOutput {
         command: "cleanup.automatic_retention",
         status,
@@ -1154,7 +1178,7 @@ fn automatic_retention() -> CmdResult<Value> {
         reconciliation,
         repo_artifacts,
         cleanup: serde_json::json!({
-            "categories": cleanup,
+            "categories": cleanup.output,
             "cargo_targets": cargo_targets,
         }),
     };
@@ -1179,10 +1203,10 @@ fn automatic_retention() -> CmdResult<Value> {
             Some("write automatic retention state".to_string()),
         )
     })?;
-    Ok((value, 0))
+    Ok((value, cleanup_exit_code))
 }
 
-fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
+fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<CleanupInventoryResult> {
     let selected = CleanupCategorySelection::new(args.include, args.exclude);
     let apply = args.apply;
     let config = defaults::load_config();
@@ -1202,261 +1226,391 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     let mut categories = Vec::new();
 
     if selected.includes(CleanupCategoryArg::RepoArtifacts) {
-        categories.push(repo_artifacts_category(apply)?);
+        isolate_cleanup_category(
+            &mut categories,
+            REPO_ARTIFACTS_METADATA,
+            apply,
+            None,
+            None,
+            || repo_artifacts_category(apply).map(|category| vec![category]),
+        );
     }
 
     if selected.includes(CleanupCategoryArg::TaskWorktrees) {
-        let output = worktree::cleanup(WorktreeCleanupOptions {
-            force: false,
-            dry_run: !apply,
-            cleanup_branches: apply,
-            allow_unmerged_branches: false,
-        })?;
-        categories.push(task_worktrees_category(output, apply)?);
+        isolate_cleanup_category(
+            &mut categories,
+            TASK_WORKTREES_METADATA,
+            apply,
+            None,
+            None,
+            || {
+                let output = worktree::cleanup(WorktreeCleanupOptions {
+                    force: false,
+                    dry_run: !apply,
+                    cleanup_branches: apply,
+                    allow_unmerged_branches: false,
+                })?;
+                task_worktrees_category(output, apply).map(|category| vec![category])
+            },
+        );
     }
 
     if selected.includes(CleanupCategoryArg::WorktreeProviders) {
-        let output = cleanup::cleanup_resources_from_config(
-            ResourceCleanupOptions {
-                intent: cleanup_intent(apply),
-                artifacts: None,
-                worktree_providers: Some(WorktreeProviderCleanupOptions {
-                    provider: Vec::new(),
-                    all_providers: true,
-                    apply,
-                }),
-            },
-            config.clone(),
-        )?;
-        categories.push(category_from_output(
+        isolate_cleanup_category(
+            &mut categories,
             WORKTREE_PROVIDERS_METADATA,
             apply,
-            0,
-            0,
-            output.failure_count,
-            0,
-            0,
-            output,
-        )?);
+            None,
+            None,
+            || {
+                let output = cleanup::cleanup_resources_from_config(
+                    ResourceCleanupOptions {
+                        intent: cleanup_intent(apply),
+                        artifacts: None,
+                        worktree_providers: Some(WorktreeProviderCleanupOptions {
+                            provider: Vec::new(),
+                            all_providers: true,
+                            apply,
+                        }),
+                    },
+                    config.clone(),
+                )?;
+                category_from_output(
+                    WORKTREE_PROVIDERS_METADATA,
+                    apply,
+                    0,
+                    0,
+                    output.failure_count,
+                    0,
+                    0,
+                    output,
+                )
+                .map(|category| vec![category])
+            },
+        );
     }
 
     if selected.includes(CleanupCategoryArg::TerminalRuns) {
-        let output =
-            runs_service::retain_terminal_runs(runs_service::TerminalRunRetentionOptions {
-                apply,
-                older_than_days: terminal_run_days,
-                limit,
-            })?;
-        let lifecycle_bytes = output
-            .lifecycle_directories
-            .iter()
-            .map(|directory| directory.size_bytes)
-            .sum();
-        categories.push(category_from_output(
+        isolate_cleanup_category(
+            &mut categories,
             TERMINAL_RUNS_METADATA,
             apply,
-            output.candidate_run_ids.len(),
-            output.removed_run_count,
-            output.skipped_run_ids.len(),
-            lifecycle_bytes,
-            if apply { lifecycle_bytes } else { 0 },
-            output,
-        )?);
+            None,
+            None,
+            || {
+                let output = runs_service::retain_terminal_runs(
+                    runs_service::TerminalRunRetentionOptions {
+                        apply,
+                        older_than_days: terminal_run_days,
+                        limit,
+                    },
+                )?;
+                let lifecycle_bytes = output
+                    .lifecycle_directories
+                    .iter()
+                    .map(|directory| directory.size_bytes)
+                    .sum();
+                category_from_output(
+                    TERMINAL_RUNS_METADATA,
+                    apply,
+                    output.candidate_run_ids.len(),
+                    output.removed_run_count,
+                    output.skipped_run_ids.len(),
+                    lifecycle_bytes,
+                    if apply { lifecycle_bytes } else { 0 },
+                    output,
+                )
+                .map(|category| vec![category])
+            },
+        );
     }
 
     if selected.includes(CleanupCategoryArg::PersistedRunArtifacts) {
-        let persisted =
-            runs_service::cleanup_persisted_artifacts(PersistedArtifactCleanupOptions {
-                apply,
-                older_than_days: terminal_run_days,
-                run_id: None,
-                kind: None,
-                artifact_type: None,
-                run_kind: None,
-                component_id: None,
-                limit,
-                terminal_only: true,
-            })?;
-        let resources = runs_resources(RunsResourcesArgs {
-            cleanup_plan: true,
-            apply: false,
-            cleanup_root: None,
-            limit: 1000,
-            ..RunsResourcesArgs::default()
-        })?
-        .0;
-        let RunsOutput::Resources(resources) = resources else {
-            return Err(homeboy::core::Error::internal_unexpected(
-                "runs resources returned unexpected output",
-            ));
-        };
-        categories.push(persisted_artifacts_category(persisted, resources, apply)?);
+        isolate_cleanup_category(
+            &mut categories,
+            PERSISTED_RUN_ARTIFACTS_METADATA,
+            apply,
+            None,
+            None,
+            || {
+                let persisted =
+                    runs_service::cleanup_persisted_artifacts(PersistedArtifactCleanupOptions {
+                        apply,
+                        older_than_days: terminal_run_days,
+                        run_id: None,
+                        kind: None,
+                        artifact_type: None,
+                        run_kind: None,
+                        component_id: None,
+                        limit,
+                        terminal_only: true,
+                    })?;
+                let resources = runs_resources(RunsResourcesArgs {
+                    cleanup_plan: true,
+                    apply: false,
+                    cleanup_root: None,
+                    limit: 1000,
+                    ..RunsResourcesArgs::default()
+                })?
+                .0;
+                let RunsOutput::Resources(resources) = resources else {
+                    return Err(homeboy::core::Error::internal_unexpected(
+                        "runs resources returned unexpected output",
+                    ));
+                };
+                persisted_artifacts_category(persisted, resources, apply)
+                    .map(|category| vec![category])
+            },
+        );
     }
 
     if selected.includes(CleanupCategoryArg::OrphanedArtifactBytes) {
-        let output =
-            runs_service::cleanup_orphaned_artifact_bytes(OrphanedArtifactBytesCleanupOptions {
-                apply,
-                limit: policy.scan_limit(),
-            })?;
-        categories.push(category_from_output(
+        isolate_cleanup_category(
+            &mut categories,
             ORPHANED_ARTIFACT_BYTES_METADATA,
             apply,
-            output.planned_count,
-            output.removed_count,
-            output.skipped_count,
-            output.planned_size_bytes,
-            output.removed_size_bytes,
-            output,
-        )?);
+            None,
+            None,
+            || {
+                let output = runs_service::cleanup_orphaned_artifact_bytes(
+                    OrphanedArtifactBytesCleanupOptions {
+                        apply,
+                        limit: policy.scan_limit(),
+                    },
+                )?;
+                category_from_output(
+                    ORPHANED_ARTIFACT_BYTES_METADATA,
+                    apply,
+                    output.planned_count,
+                    output.removed_count,
+                    output.skipped_count,
+                    output.planned_size_bytes,
+                    output.removed_size_bytes,
+                    output,
+                )
+                .map(|category| vec![category])
+            },
+        );
     }
 
     if selected.includes(CleanupCategoryArg::RunnerDownloads) {
-        let output = runs_service::cleanup_runner_downloads(RunnerDownloadCleanupOptions {
-            apply,
-            runner: None,
-            run_id: None,
-            limit: policy.scan_limit(),
-        })?;
-        categories.push(category_from_output(
+        isolate_cleanup_category(
+            &mut categories,
             RUNNER_DOWNLOADS_METADATA,
             apply,
-            // `planned_count`, not `inspected_count`: a candidate is a resource
-            // selected for removal, not every entry the sweep walked past. Using
-            // the inspected total reported `candidate_count: 588, applied_count: 1`
-            // for a sweep that removed everything it selected, which reads as a
-            // 587-resource failure (#9483). The full inspected total remains
-            // visible in this category's nested `output`.
-            output.planned_count,
-            output.removed_count,
-            output.skipped_count,
-            output.planned_size_bytes,
-            output.removed_size_bytes,
-            output,
-        )?);
+            None,
+            None,
+            || {
+                let output =
+                    runs_service::cleanup_runner_downloads(RunnerDownloadCleanupOptions {
+                        apply,
+                        runner: None,
+                        run_id: None,
+                        limit: policy.scan_limit(),
+                    })?;
+                // `planned_count`, not `inspected_count`: a candidate is a resource
+                // selected for removal, not every entry the sweep walked past. Using
+                // the inspected total reported `candidate_count: 588, applied_count: 1`
+                // for a sweep that removed everything it selected, which reads as a
+                // 587-resource failure (#9483). The full inspected total remains
+                // visible in this category's nested `output`.
+                category_from_output(
+                    RUNNER_DOWNLOADS_METADATA,
+                    apply,
+                    output.planned_count,
+                    output.removed_count,
+                    output.skipped_count,
+                    output.planned_size_bytes,
+                    output.removed_size_bytes,
+                    output,
+                )
+                .map(|category| vec![category])
+            },
+        );
     }
 
     if selected.includes(CleanupCategoryArg::RemoteLabWorkspaces) {
-        categories.extend(remote_lab_workspace_categories(policy, apply)?);
+        isolate_cleanup_category(
+            &mut categories,
+            REMOTE_LAB_WORKSPACES_METADATA,
+            apply,
+            None,
+            None,
+            || remote_lab_workspace_categories(policy, apply),
+        );
     }
 
     if selected.includes(CleanupCategoryArg::RunnerBinaryCaches) {
-        categories.extend(runner_binary_cache_categories(policy, apply)?);
+        isolate_cleanup_category(
+            &mut categories,
+            RUNNER_BINARY_CACHES_METADATA,
+            apply,
+            None,
+            None,
+            || runner_binary_cache_categories(policy, apply),
+        );
     }
 
     if selected.includes(CleanupCategoryArg::RuntimeTmp) {
-        let output =
-            engine::temp::cleanup_runtime_tmp_bounded(engine::temp::RuntimeTempCleanupOptions {
-                apply,
-                older_than_days: policy.runtime_tmp_days,
-                managed_older_than_days: Some(policy.runtime_tmp_managed_days),
-                prefix: None,
-                limit: policy.scan_limit(),
-                run_max_bytes: policy.runtime_run_max_bytes,
-                run_max_count: policy.runtime_run_max_count,
-                cursor: args.cursor.as_deref(),
-            })?;
-        let mut category = category_from_output(
+        let commands = args
+            .runtime_tmp_managed_older_than_days
+            .map(|days| runtime_tmp_commands(apply, days));
+        let canonical_cleanup_command = commands.as_ref().map(|(canonical, _)| canonical.clone());
+        let specialist_command = commands.as_ref().map(|(_, specialist)| specialist.clone());
+        isolate_cleanup_category(
+            &mut categories,
             RUNTIME_TMP_METADATA,
             apply,
-            output.planned_count,
-            output.removed_count,
-            output.skipped_count,
-            output.totals.planned_size_bytes,
-            output.totals.removed_size_bytes,
-            output,
-        )?;
-        if let Some(days) = args.runtime_tmp_managed_older_than_days {
-            (
-                category.canonical_cleanup_command,
-                category.specialist_command,
-            ) = runtime_tmp_commands(apply, days);
-        }
-        categories.push(category);
+            canonical_cleanup_command.as_deref(),
+            specialist_command.as_deref(),
+            || {
+                let output = engine::temp::cleanup_runtime_tmp_bounded(
+                    engine::temp::RuntimeTempCleanupOptions {
+                        apply,
+                        older_than_days: policy.runtime_tmp_days,
+                        managed_older_than_days: Some(policy.runtime_tmp_managed_days),
+                        prefix: None,
+                        limit: policy.scan_limit(),
+                        run_max_bytes: policy.runtime_run_max_bytes,
+                        run_max_count: policy.runtime_run_max_count,
+                        cursor: args.cursor.as_deref(),
+                    },
+                )?;
+                let mut category = category_from_output(
+                    RUNTIME_TMP_METADATA,
+                    apply,
+                    output.planned_count,
+                    output.removed_count,
+                    output.skipped_count,
+                    output.totals.planned_size_bytes,
+                    output.totals.removed_size_bytes,
+                    output,
+                )?;
+                if let Some((canonical, specialist)) = commands {
+                    (
+                        category.canonical_cleanup_command,
+                        category.specialist_command,
+                    ) = (canonical, specialist);
+                }
+                Ok(vec![category])
+            },
+        );
     }
 
     if selected.includes(CleanupCategoryArg::ControllerScratch) {
-        let output = homeboy::agents::controller_scratch::cleanup(
-            homeboy::agents::controller_scratch::ControllerScratchCleanupOptions {
-                apply,
-                limit: policy.scan_limit(),
-                full: args.full,
-                // Thread the operator's explicit `--older-than-days` override
-                // into the retention eligibility decision so released, clean,
-                // terminal scratch can converge under disk pressure. When the
-                // operator does not pass the flag (`None`), preserve the default
-                // per-resource retention window (P7D) rather than substituting
-                // the configured terminal-run default used by other categories.
-                retention_override_seconds: args
-                    .older_than_days
-                    .map(|days| days.saturating_mul(86_400)),
-            },
-        )?;
-        categories.push(category_from_output(
+        isolate_cleanup_category(
+            &mut categories,
             CONTROLLER_SCRATCH_METADATA,
             apply,
-            output.candidate_count,
-            output.applied_count,
-            output.skipped_count,
-            output.estimated_bytes,
-            output.reclaimed_bytes,
-            output,
-        )?);
+            None,
+            None,
+            || {
+                let output = homeboy::agents::controller_scratch::cleanup(
+                    homeboy::agents::controller_scratch::ControllerScratchCleanupOptions {
+                        apply,
+                        limit: policy.scan_limit(),
+                        full: args.full,
+                        // Thread the operator's explicit `--older-than-days` override
+                        // into the retention eligibility decision so released, clean,
+                        // terminal scratch can converge under disk pressure. When the
+                        // operator does not pass the flag (`None`), preserve the default
+                        // per-resource retention window (P7D) rather than substituting
+                        // the configured terminal-run default used by other categories.
+                        retention_override_seconds: args
+                            .older_than_days
+                            .map(|days| days.saturating_mul(86_400)),
+                    },
+                )?;
+                category_from_output(
+                    CONTROLLER_SCRATCH_METADATA,
+                    apply,
+                    output.candidate_count,
+                    output.applied_count,
+                    output.skipped_count,
+                    output.estimated_bytes,
+                    output.reclaimed_bytes,
+                    output,
+                )
+                .map(|category| vec![category])
+            },
+        );
     }
     if selected.includes(CleanupCategoryArg::ControllerRuntimes) {
-        // Policy is resolved by core so this path and `homeboy runtime
-        // controller-prune` cannot drift apart again (#10288).
-        let output = controller_runtime::cleanup(controller_runtime::resolve_cleanup_options(
-            apply,
-            ControllerRuntimeRetentionOverrides {
-                limit: Some(limit),
-                ignore_retention: false,
-            },
-        ))?;
-        let estimated_bytes = output
-            .snapshots
-            .iter()
-            .filter(|snapshot| snapshot.eligible)
-            .map(|snapshot| snapshot.size_bytes)
-            .sum();
-        categories.push(category_from_output(
+        isolate_cleanup_category(
+            &mut categories,
             CONTROLLER_RUNTIMES_METADATA,
             apply,
-            output
-                .snapshots
-                .iter()
-                .filter(|snapshot| snapshot.eligible)
-                .count(),
-            output.removed_identities.len(),
-            output.retained.len(),
-            estimated_bytes,
-            output.reclaimed_bytes,
-            output,
-        )?);
+            None,
+            None,
+            || {
+                // Policy is resolved by core so this path and `homeboy runtime
+                // controller-prune` cannot drift apart again (#10288).
+                let output =
+                    controller_runtime::cleanup(controller_runtime::resolve_cleanup_options(
+                        apply,
+                        ControllerRuntimeRetentionOverrides {
+                            limit: Some(limit),
+                            ignore_retention: false,
+                        },
+                    ))?;
+                let estimated_bytes = output
+                    .snapshots
+                    .iter()
+                    .filter(|snapshot| snapshot.eligible)
+                    .map(|snapshot| snapshot.size_bytes)
+                    .sum();
+                category_from_output(
+                    CONTROLLER_RUNTIMES_METADATA,
+                    apply,
+                    output
+                        .snapshots
+                        .iter()
+                        .filter(|snapshot| snapshot.eligible)
+                        .count(),
+                    output.removed_identities.len(),
+                    output.retained.len(),
+                    estimated_bytes,
+                    output.reclaimed_bytes,
+                    output,
+                )
+                .map(|category| vec![category])
+            },
+        );
     }
 
     if selected.includes(CleanupCategoryArg::SharedCargoTargets) {
-        let output = cleanup::cleanup_shared_cargo_targets(cleanup::CargoTargetCleanupOptions {
-            root: None,
-            apply,
-            older_than: policy.shared_store_min_age(),
-            max_bytes: policy.shared_store_max_bytes,
-            limit: policy.scan_limit(),
-            cursor: args.cursor.clone(),
-            now: std::time::SystemTime::now(),
-            lease_ttl: policy.shared_store_lease_ttl(),
-            deadline: None,
-        })?;
-        categories.push(category_from_output(
+        isolate_cleanup_category(
+            &mut categories,
             SHARED_CARGO_TARGETS_METADATA,
             apply,
-            output.candidate_count,
-            output.applied_count,
-            output.skipped_count,
-            output.candidates.iter().map(|store| store.size_bytes).sum(),
-            output.reclaimed_bytes,
-            output,
-        )?);
+            None,
+            None,
+            || {
+                let output =
+                    cleanup::cleanup_shared_cargo_targets(cleanup::CargoTargetCleanupOptions {
+                        root: None,
+                        apply,
+                        older_than: policy.shared_store_min_age(),
+                        max_bytes: policy.shared_store_max_bytes,
+                        limit: policy.scan_limit(),
+                        cursor: args.cursor.clone(),
+                        now: std::time::SystemTime::now(),
+                        lease_ttl: policy.shared_store_lease_ttl(),
+                        deadline: None,
+                    })?;
+                category_from_output(
+                    SHARED_CARGO_TARGETS_METADATA,
+                    apply,
+                    output.candidate_count,
+                    output.applied_count,
+                    output.skipped_count,
+                    output.candidates.iter().map(|store| store.size_bytes).sum(),
+                    output.reclaimed_bytes,
+                    output,
+                )
+                .map(|category| vec![category])
+            },
+        );
     }
 
     let candidate_count = categories
@@ -1480,11 +1634,21 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
         .map(|category| category.reclaimed_bytes)
         .sum();
     let applied_category_count = applied_category_count(&categories);
+    let failed_category_count = categories
+        .iter()
+        .filter(|category| category.failure.is_some())
+        .count();
     let actionable = cleanup_actionable(&categories, apply);
-    serde_json::to_value(CleanupInventoryOutput {
+    let output = serde_json::to_value(CleanupInventoryOutput {
         command: "cleanup.inventory",
+        status: if failed_category_count == 0 {
+            "succeeded"
+        } else {
+            "partial_failure"
+        },
         mode: if apply { "apply" } else { "dry_run" },
         category_count: categories.len(),
+        failed_category_count,
         candidate_count,
         applied_count,
         skipped_count,
@@ -1497,7 +1661,71 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     })
     .map_err(|err| {
         homeboy::core::Error::internal_json(err.to_string(), Some("cleanup inventory".to_string()))
+    })?;
+    Ok(CleanupInventoryResult {
+        output,
+        exit_code: if failed_category_count == 0 { 0 } else { 1 },
     })
+}
+
+fn isolate_cleanup_category(
+    categories: &mut Vec<CleanupInventoryCategory>,
+    metadata: CleanupInventoryCategoryMetadata,
+    apply: bool,
+    canonical_cleanup_command: Option<&str>,
+    specialist_command: Option<&str>,
+    action: impl FnOnce() -> homeboy::core::Result<Vec<CleanupInventoryCategory>>,
+) {
+    match action() {
+        Ok(mut completed) => categories.append(&mut completed),
+        Err(error) => categories.push(cleanup_category_failure(
+            metadata,
+            apply,
+            canonical_cleanup_command,
+            specialist_command,
+            error,
+        )),
+    }
+}
+
+fn cleanup_category_failure(
+    metadata: CleanupInventoryCategoryMetadata,
+    apply: bool,
+    canonical_cleanup_command: Option<&str>,
+    specialist_command: Option<&str>,
+    error: homeboy::core::Error,
+) -> CleanupInventoryCategory {
+    let canonical_cleanup_command = canonical_cleanup_command
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| metadata.canonical_cleanup_command(apply));
+    let specialist_command =
+        specialist_command.unwrap_or_else(|| metadata.specialist_command(apply));
+    // Metadata represents a family of runner-specific commands. Without an
+    // observed runner ID, retry the executable aggregate command instead.
+    let specialist_command = if specialist_command.contains("<runner>") {
+        canonical_cleanup_command.clone()
+    } else {
+        specialist_command.to_string()
+    };
+    CleanupInventoryCategory {
+        category: metadata.category,
+        canonical_cleanup_command,
+        specialist_command,
+        included: true,
+        skipped: true,
+        skip_reason: Some(error.message.clone()),
+        failure: Some(CleanupInventoryCategoryFailure {
+            code: error.code.as_str().to_string(),
+            message: error.message,
+            retryable: error.retryable,
+        }),
+        candidate_count: 0,
+        applied_count: 0,
+        skipped_count: 1,
+        estimated_bytes: 0,
+        reclaimed_bytes: 0,
+        output: error.details,
+    }
 }
 
 struct CleanupCategorySelection {
@@ -1594,6 +1822,7 @@ fn repo_artifacts_category(apply: bool) -> homeboy::core::Result<CleanupInventor
                 .all(|diagnostic| !diagnostic.success),
         skip_reason: (failure_count > 0)
             .then(|| format!("{failure_count} owned cleanup root(s) could not be inspected")),
+        failure: None,
         candidate_count: output.candidate_count,
         applied_count: output.applied_count,
         skipped_count: output.skipped_count + failure_count,
@@ -1774,6 +2003,7 @@ fn category_from_command<T: Serialize>(
         included: true,
         skipped: false,
         skip_reason: None,
+        failure: None,
         candidate_count,
         applied_count,
         skipped_count,
@@ -1825,6 +2055,7 @@ fn persisted_artifacts_category(
         included: true,
         skipped: false,
         skip_reason: None,
+        failure: None,
         candidate_count: persisted.planned_record_count + resource_cleanup_candidates,
         applied_count: persisted.removed_record_count,
         skipped_count: persisted.skipped_count,
@@ -1852,6 +2083,7 @@ fn remote_lab_workspace_categories(
                 included: true,
                 skipped: true,
                 skip_reason: Some("runner is not connected".to_string()),
+                failure: None,
                 candidate_count: 0,
                 applied_count: 0,
                 skipped_count: 1,
@@ -1877,24 +2109,16 @@ fn remote_lab_workspace_categories(
         ) {
             Ok((output, _)) => output,
             Err(error) => {
-                categories.push(CleanupInventoryCategory {
-                    category: "remote_lab_workspaces",
-                    canonical_cleanup_command: REMOTE_LAB_WORKSPACES_METADATA
-                        .canonical_cleanup_command(apply),
-                    specialist_command: format!(
-                        "homeboy runner workspace prune {}",
-                        quote_arg(&status.runner_id)
-                    ),
-                    included: true,
-                    skipped: true,
-                    skip_reason: Some(error.message),
-                    candidate_count: 0,
-                    applied_count: 0,
-                    skipped_count: 1,
-                    estimated_bytes: 0,
-                    reclaimed_bytes: 0,
-                    output: serde_json::json!({ "runner_id": status.runner_id }),
-                });
+                categories.push(cleanup_category_failure(
+                    REMOTE_LAB_WORKSPACES_METADATA,
+                    apply,
+                    None,
+                    Some(&runner_workspace_specialist_command(
+                        &status.runner_id,
+                        apply,
+                    )),
+                    error,
+                ));
                 continue;
             }
         };
@@ -1911,17 +2135,7 @@ fn remote_workspace_category(
     output: RunnerWorkspacePruneOutput,
     apply: bool,
 ) -> homeboy::core::Result<CleanupInventoryCategory> {
-    let command = if apply {
-        format!(
-            "homeboy runner workspace prune {} --apply --passes 10",
-            quote_arg(&output.runner_id)
-        )
-    } else {
-        format!(
-            "homeboy runner workspace prune {}",
-            quote_arg(&output.runner_id)
-        )
-    };
+    let command = runner_workspace_specialist_command(&output.runner_id, apply);
     category_from_command(
         "remote_lab_workspaces",
         REMOTE_LAB_WORKSPACES_METADATA.canonical_cleanup_command(apply),
@@ -1933,6 +2147,17 @@ fn remote_workspace_category(
         output.total_removed_bytes,
         output,
     )
+}
+
+fn runner_workspace_specialist_command(runner_id: &str, apply: bool) -> String {
+    if apply {
+        format!(
+            "homeboy runner workspace prune {} --apply --passes 10",
+            quote_arg(runner_id)
+        )
+    } else {
+        format!("homeboy runner workspace prune {}", quote_arg(runner_id))
+    }
 }
 
 fn runner_binary_cache_categories(
@@ -1964,21 +2189,13 @@ fn runner_binary_cache_category(
     ) {
         Ok((output, _)) => output,
         Err(error) => {
-            return Ok(CleanupInventoryCategory {
-                category: RUNNER_BINARY_CACHES_METADATA.category,
-                canonical_cleanup_command: RUNNER_BINARY_CACHES_METADATA
-                    .canonical_cleanup_command(apply),
-                specialist_command,
-                included: true,
-                skipped: true,
-                skip_reason: Some(error.message),
-                candidate_count: 0,
-                applied_count: 0,
-                skipped_count: 1,
-                estimated_bytes: 0,
-                reclaimed_bytes: 0,
-                output: serde_json::json!({ "runner_id": runner_id }),
-            });
+            return Ok(cleanup_category_failure(
+                RUNNER_BINARY_CACHES_METADATA,
+                apply,
+                None,
+                Some(&specialist_command),
+                error,
+            ));
         }
     };
     runner_binary_cache_output_category(output, apply, specialist_command)
@@ -2008,6 +2225,16 @@ fn cleanup_actionable(
 ) -> CommandActionableMetadata {
     let mut actionable = CommandActionableMetadata::default();
     for category in categories {
+        if category.failure.is_some() {
+            actionable.next_actions.push(
+                CommandNextAction::new(
+                    format!("retry {} cleanup", category.category.replace('_', " ")),
+                    category.specialist_command.clone(),
+                )
+                .with_kind(CommandNextActionKind::Repair),
+            );
+            continue;
+        }
         if category.skipped || category.candidate_count == 0 {
             continue;
         }
@@ -2062,6 +2289,10 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
         .get("applied_count")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let remaining_count = payload
+        .get("remaining_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let skipped_count = payload
         .get("skipped_count")
         .and_then(Value::as_u64)
@@ -2074,8 +2305,6 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
         .get("reclaimed_bytes")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let remaining_candidates = candidate_count.saturating_sub(applied_count);
-
     let mut lines = vec![
         "Artifact cleanup summary".to_string(),
         format!(
@@ -2085,7 +2314,7 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
         format!("Root: {root}"),
         format!("Candidates: {candidate_count}"),
         format!("Applied: {applied_count}"),
-        format!("Remaining candidates: {remaining_candidates}"),
+        format!("Remaining candidates: {remaining_count}"),
         format!("Estimated reclaimable: {}", format_bytes(estimated_bytes)),
         format!(
             "Estimated reclaimable (allocated): {}",
@@ -2832,6 +3061,199 @@ mod tests {
     }
 
     #[test]
+    fn runtime_tmp_failure_does_not_prevent_later_independent_categories() {
+        let mut categories = Vec::new();
+        let mut executed = Vec::new();
+
+        isolate_cleanup_category(
+            &mut categories,
+            RUNTIME_TMP_METADATA,
+            true,
+            Some(
+                "homeboy cleanup --include runtime-tmp --runtime-tmp-managed-older-than-days 3 --apply",
+            ),
+            Some(
+                "homeboy self cleanup-runtime-tmp --runtime-tmp-managed-older-than-days 3 --apply",
+            ),
+            || {
+            executed.push("runtime_tmp");
+            Err(homeboy::core::Error::internal_io(
+                "Permission denied (os error 13)",
+                Some("read runtime temp directory".to_string()),
+            ))
+            },
+        );
+        isolate_cleanup_category(
+            &mut categories,
+            CONTROLLER_SCRATCH_METADATA,
+            true,
+            None,
+            None,
+            || {
+                executed.push("controller_scratch");
+                category_from_output(
+                    CONTROLLER_SCRATCH_METADATA,
+                    true,
+                    1,
+                    1,
+                    0,
+                    128,
+                    128,
+                    serde_json::json!({ "reclaimed": "scratch" }),
+                )
+                .map(|category| vec![category])
+            },
+        );
+        isolate_cleanup_category(
+            &mut categories,
+            CONTROLLER_RUNTIMES_METADATA,
+            true,
+            None,
+            None,
+            || {
+                executed.push("controller_runtimes");
+                category_from_output(
+                    CONTROLLER_RUNTIMES_METADATA,
+                    true,
+                    1,
+                    1,
+                    0,
+                    256,
+                    256,
+                    serde_json::json!({ "reclaimed": "runtimes" }),
+                )
+                .map(|category| vec![category])
+            },
+        );
+
+        assert_eq!(
+            executed,
+            ["runtime_tmp", "controller_scratch", "controller_runtimes"]
+        );
+        assert_eq!(categories.len(), 3);
+        assert_eq!(categories[0].category, "runtime_tmp");
+        assert_eq!(
+            categories[0]
+                .failure
+                .as_ref()
+                .map(|failure| failure.code.as_str()),
+            Some("internal.io_error")
+        );
+        assert_eq!(categories[1].reclaimed_bytes, 128);
+        assert_eq!(categories[2].reclaimed_bytes, 256);
+        assert_eq!(
+            categories[0].canonical_cleanup_command,
+            "homeboy cleanup --include runtime-tmp --runtime-tmp-managed-older-than-days 3 --apply"
+        );
+
+        let actionable = cleanup_actionable(&categories, true);
+        assert_eq!(
+            actionable
+                .next_actions
+                .iter()
+                .find(|action| action.kind.is_some())
+                .map(|action| action.command.as_str()),
+            Some(
+                "homeboy self cleanup-runtime-tmp --runtime-tmp-managed-older-than-days 3 --apply"
+            )
+        );
+    }
+
+    #[test]
+    fn aggregate_runtime_tmp_failure_returns_partial_json_and_continues() {
+        homeboy::test_support::with_isolated_home(|root| {
+            let blocked_root = root.path().join("runtime-tmp-file");
+            std::fs::write(&blocked_root, "not a directory").expect("runtime temp fixture");
+            let previous = std::env::var_os("HOMEBOY_RUNTIME_TMPDIR");
+            std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", &blocked_root);
+
+            let result = run(CleanupArgs {
+                apply: true,
+                include: vec![
+                    CleanupCategoryArg::RuntimeTmp,
+                    CleanupCategoryArg::ControllerScratch,
+                    CleanupCategoryArg::ControllerRuntimes,
+                ],
+                exclude: Vec::new(),
+                older_than_days: None,
+                runtime_tmp_managed_older_than_days: Some(3),
+                limit: Some(10),
+                full: false,
+                cursor: None,
+                command: None,
+            });
+
+            match previous {
+                Some(value) => std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", value),
+                None => std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR"),
+            }
+
+            let (output, exit_code) = result.expect("aggregate result");
+            assert_eq!(exit_code, 1);
+            assert_eq!(output["status"], "partial_failure");
+            assert_eq!(output["failed_category_count"], 1);
+            let categories = output["categories"].as_array().expect("categories");
+            assert_eq!(categories.len(), 3);
+            assert_eq!(categories[0]["category"], "runtime_tmp");
+            assert_eq!(categories[0]["failure"]["code"], "internal.io_error");
+            assert_eq!(
+                categories[0]["canonical_cleanup_command"],
+                "homeboy cleanup --include runtime-tmp --runtime-tmp-managed-older-than-days 3 --apply"
+            );
+            assert_eq!(categories[1]["category"], "controller_scratch");
+            assert!(categories[1]["failure"].is_null());
+            assert_eq!(categories[2]["category"], "controller_runtimes");
+            assert!(categories[2]["failure"].is_null());
+        });
+    }
+
+    #[test]
+    fn automatic_retention_propagates_aggregate_partial_failure() {
+        homeboy::test_support::with_isolated_home(|root| {
+            let blocked_root = root.path().join("runtime-tmp-file");
+            std::fs::write(&blocked_root, "not a directory").expect("runtime temp fixture");
+            let previous = std::env::var_os("HOMEBOY_RUNTIME_TMPDIR");
+            std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", &blocked_root);
+
+            let result = automatic_retention();
+
+            match previous {
+                Some(value) => std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", value),
+                None => std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR"),
+            }
+
+            let (output, exit_code) = result.expect("automatic retention result");
+            assert_eq!(exit_code, 1);
+            assert_eq!(output["status"], "partial_failure");
+            assert_eq!(output["cleanup"]["categories"]["status"], "partial_failure");
+        });
+    }
+
+    #[test]
+    fn runner_category_failures_are_typed_and_never_retry_a_placeholder() {
+        let category = cleanup_category_failure(
+            REMOTE_LAB_WORKSPACES_METADATA,
+            true,
+            None,
+            None,
+            homeboy::core::Error::internal_io("runner unavailable", None),
+        );
+
+        assert_eq!(
+            category
+                .failure
+                .as_ref()
+                .map(|failure| failure.code.as_str()),
+            Some("internal.io_error")
+        );
+        assert_eq!(
+            category.specialist_command,
+            "homeboy cleanup --include remote-lab-workspaces --apply"
+        );
+        assert!(!category.specialist_command.contains("<runner>"));
+    }
+
+    #[test]
     fn only_runner_downloads_is_withheld_from_the_bare_sweep() {
         // A bare `homeboy cleanup --apply` must keep sweeping everything that
         // reclaims Homeboy's own byproducts. Only the operator-owned download
@@ -3121,6 +3543,7 @@ mod tests {
                 included: true,
                 skipped: false,
                 skip_reason: None,
+                failure: None,
                 candidate_count: 1,
                 applied_count: 0,
                 skipped_count: 0,
@@ -3181,6 +3604,7 @@ mod tests {
             "candidate_count": 3,
             "skipped_count": 2,
             "applied_count": 0,
+            "remaining_count": 3,
             "estimated_bytes": 1572864,
             "reclaimed_bytes": 0,
             "next_command": "homeboy cleanup artifacts --path '/tmp/homeboy repo' --temp-root /tmp/review --sort size --limit 7 --merged-only --apply",
@@ -3209,7 +3633,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_artifacts_apply_summary_reports_remaining_after_applied() {
+    fn cleanup_artifacts_apply_summary_uses_post_apply_remaining_count() {
         let payload = json!({
             "command": "cleanup.artifacts",
             "mode": "apply",
@@ -3217,6 +3641,7 @@ mod tests {
             "candidate_count": 4,
             "skipped_count": 1,
             "applied_count": 3,
+            "remaining_count": 0,
             "estimated_bytes": 4096,
             "reclaimed_bytes": 3072,
             "skipped": [
@@ -3227,7 +3652,7 @@ mod tests {
         let summary = render_artifact_cleanup_summary(&payload).expect("summary");
 
         assert!(summary.contains("Mode: apply\n"));
-        assert!(summary.contains("Remaining candidates: 1\n"));
+        assert!(summary.contains("Remaining candidates: 0\n"));
         assert!(summary.contains("Reclaimed: 3.0 KiB\n"));
         assert!(
             summary.contains("Next safe command: homeboy cleanup artifacts --path /tmp/homeboy\n")
@@ -3243,6 +3668,7 @@ mod tests {
             "candidate_count": 2,
             "skipped_count": 0,
             "applied_count": 0,
+            "remaining_count": 2,
             "estimated_bytes": 3072,
             "reclaimed_bytes": 0,
             "candidates": [
@@ -3277,6 +3703,7 @@ mod tests {
             "candidate_count": 12,
             "skipped_count": 0,
             "applied_count": 0,
+            "remaining_count": 12,
             "estimated_bytes": 12288,
             "reclaimed_bytes": 0,
             "candidates": candidates,

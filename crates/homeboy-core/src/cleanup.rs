@@ -740,7 +740,7 @@ fn cleanup_artifacts_in_worktrees(
     let cleanup_run_ref = cleanup_run
         .as_ref()
         .map(|(_, run_id)| format!("homeboy://run/{run_id}"));
-    let (applied, failed) = if options.apply {
+    let (applied, failed, apply_skipped) = if options.apply {
         let run_ref = cleanup_run
             .as_ref()
             .expect("apply cleanup has a provenance run")
@@ -748,43 +748,26 @@ fn cleanup_artifacts_in_worktrees(
             .clone();
         apply_artifact_candidates(&candidates, |candidate| {
             if deadline.is_some_and(|deadline| SystemTime::now() >= deadline) {
-                return None;
+                return ArtifactCleanupCandidateApplyOutcome::Skipped(
+                    "automatic cleanup runtime limit reached before removal".to_string(),
+                );
             }
-            // The enclosing registry read lease blocks Homeboy admission from
-            // changing liveness between this final check and deletion.
-            if candidate.kind == "rust_target"
-                && active.liveness(Path::new(&candidate.worktree)) != LIVENESS_IDLE
-            {
-                return None;
-            }
-            let path = Path::new(&candidate.path);
-            path.exists().then(|| {
-                remove_artifact_path(path).map(|()| {
-                    applied_row(
-                        candidate,
-                        ArtifactCleanupDeletionProvenance {
-                            run_ref: format!("homeboy://run/{run_ref}"),
-                            deleted_at: chrono::Utc::now().to_rfc3339(),
-                            policy: "reconstructable artifact passed Git, age, and worktree activity gates".to_string(),
-                            protection_decision: "no registered active task worktree".to_string(),
-                        },
-                    )
-                })
-            })
+            apply_artifact_candidate(candidate, &active, &run_ref)
         })
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new())
     };
+    skipped.extend(apply_skipped);
 
     let estimated_bytes = candidates.iter().map(|row| row.size_bytes).sum();
     let reclaimed_bytes = applied.iter().map(|row| row.size_bytes).sum();
     let estimated_allocated_bytes = candidates.iter().map(|row| row.allocated_bytes).sum();
     let reclaimed_allocated_bytes = applied.iter().map(|row| row.allocated_bytes).sum();
     let worktree_rows = worktree_summaries(&candidates, &skipped, &applied, &active);
-    let (success_count, remaining_count) =
-        artifact_cleanup_result_counts(candidates.len(), applied.len(), failed.len());
+    let success_count = applied.len();
     let failure_count = failed.len();
-    let (_, remaining_candidate_bytes) = remaining_candidate_totals(&candidates, options.apply);
+    let (remaining_count, remaining_candidate_bytes) =
+        remaining_candidate_totals(&candidates, options.apply);
     let summary = cleanup_summary(
         &root,
         options.apply,
@@ -1076,38 +1059,73 @@ fn remaining_candidate_totals(
     (count, bytes)
 }
 
-/// Produces the artifact-cleanup result counters from per-candidate outcomes.
-/// Skipped paths are filtered before candidacy, so each candidate is either
-/// successfully applied or remains after the invocation; failed removals are
-/// therefore a subset of remaining candidates.
-fn artifact_cleanup_result_counts(
-    candidate_count: usize,
-    applied_count: usize,
-    failure_count: usize,
-) -> (usize, usize) {
-    debug_assert!(applied_count <= candidate_count);
-    let remaining_count = candidate_count - applied_count;
-    debug_assert!(failure_count <= remaining_count);
-    (applied_count, remaining_count)
+enum ArtifactCleanupCandidateApplyOutcome {
+    Applied(ArtifactCleanupApplied),
+    Failed(Error),
+    Skipped(String),
+}
+
+fn apply_artifact_candidate(
+    candidate: &ArtifactCleanupCandidate,
+    active: &ActiveWorktrees,
+    run_ref: &str,
+) -> ArtifactCleanupCandidateApplyOutcome {
+    // The enclosing registry read lease blocks Homeboy admission from changing
+    // liveness between this final check and deletion.
+    if candidate.kind == "rust_target"
+        && active.liveness(Path::new(&candidate.worktree)) != LIVENESS_IDLE
+    {
+        return ArtifactCleanupCandidateApplyOutcome::Skipped(
+            "checkout became a registered active task worktree before removal".to_string(),
+        );
+    }
+    let path = Path::new(&candidate.path);
+    if !path.exists() {
+        return ArtifactCleanupCandidateApplyOutcome::Skipped(
+            "artifact no longer exists after discovery".to_string(),
+        );
+    }
+    match remove_artifact_path(path) {
+        Ok(()) => ArtifactCleanupCandidateApplyOutcome::Applied(applied_row(
+            candidate,
+            ArtifactCleanupDeletionProvenance {
+                run_ref: format!("homeboy://run/{run_ref}"),
+                deleted_at: chrono::Utc::now().to_rfc3339(),
+                policy: "reconstructable artifact passed Git, age, and worktree activity gates"
+                    .to_string(),
+                protection_decision: "no registered active task worktree".to_string(),
+            },
+        )),
+        Err(error) => ArtifactCleanupCandidateApplyOutcome::Failed(error),
+    }
 }
 
 fn apply_artifact_candidates<Remove>(
     candidates: &[ArtifactCleanupCandidate],
     mut remove: Remove,
-) -> (Vec<ArtifactCleanupApplied>, Vec<ArtifactCleanupFailed>)
+) -> (
+    Vec<ArtifactCleanupApplied>,
+    Vec<ArtifactCleanupFailed>,
+    Vec<ArtifactCleanupSkipped>,
+)
 where
-    Remove: FnMut(&ArtifactCleanupCandidate) -> Option<Result<ArtifactCleanupApplied>>,
+    Remove: FnMut(&ArtifactCleanupCandidate) -> ArtifactCleanupCandidateApplyOutcome,
 {
     let mut applied = Vec::new();
     let mut failed = Vec::new();
+    let mut skipped = Vec::new();
     for candidate in candidates {
         match remove(candidate) {
-            Some(Ok(row)) => applied.push(row),
-            Some(Err(error)) => failed.push(failed_row(candidate, error.message)),
-            None => {}
+            ArtifactCleanupCandidateApplyOutcome::Applied(row) => applied.push(row),
+            ArtifactCleanupCandidateApplyOutcome::Failed(error) => {
+                failed.push(failed_row(candidate, error.message));
+            }
+            ArtifactCleanupCandidateApplyOutcome::Skipped(reason) => {
+                skipped.push(candidate_skip_row(candidate, reason));
+            }
         }
     }
-    (applied, failed)
+    (applied, failed, skipped)
 }
 
 fn resolve_root(options: &ArtifactCleanupOptions) -> Result<PathBuf> {
@@ -1424,6 +1442,21 @@ fn skip_row(
         declared_by: declaration.declared_by.clone(),
         category: declaration.category.clone(),
         reason: reason.to_string(),
+    }
+}
+
+fn candidate_skip_row(
+    candidate: &ArtifactCleanupCandidate,
+    reason: String,
+) -> ArtifactCleanupSkipped {
+    ArtifactCleanupSkipped {
+        worktree: candidate.worktree.clone(),
+        path: candidate.path.clone(),
+        relative_path: candidate.relative_path.clone(),
+        kind: candidate.kind.clone(),
+        declared_by: candidate.declared_by.clone(),
+        category: candidate.category.clone(),
+        reason,
     }
 }
 
@@ -2625,31 +2658,6 @@ mod tests {
     }
 
     #[test]
-    fn artifact_cleanup_result_counts_satisfy_outcome_invariants() {
-        let cases = [
-            // all-success
-            (3, 3, 0, 3, 0),
-            // partial failure: failures remain and are not reported as successes
-            (3, 1, 2, 1, 2),
-            // dry-run: candidates remain untouched
-            (3, 0, 0, 0, 3),
-            // no candidates
-            (0, 0, 0, 0, 0),
-        ];
-
-        for (candidates, applied, failures, expected_successes, expected_remaining) in cases {
-            let (successes, remaining) =
-                artifact_cleanup_result_counts(candidates, applied, failures);
-
-            assert_eq!(successes, expected_successes);
-            assert_eq!(remaining, expected_remaining);
-            assert_eq!(applied, successes);
-            assert_eq!(candidates, successes + remaining);
-            assert!(failures <= remaining);
-        }
-    }
-
-    #[test]
     fn artifact_cleanup_run_status_fails_when_any_removal_fails() {
         assert_eq!(
             artifact_cleanup_run_status(0),
@@ -2708,30 +2716,64 @@ mod tests {
             artifact_candidate("dist"),
             artifact_candidate("node_modules"),
         ];
-        let (applied, failed) = apply_artifact_candidates(&candidates, |candidate| match candidate
-            .relative_path
-            .as_str()
-        {
-            "target" => Some(Ok(applied_row(
-                candidate,
-                ArtifactCleanupDeletionProvenance {
-                    run_ref: "homeboy://run/test".to_string(),
-                    deleted_at: "2026-01-01T00:00:00Z".to_string(),
-                    policy: "test".to_string(),
-                    protection_decision: "test".to_string(),
-                },
-            ))),
-            "dist" => Some(Err(Error::internal_unexpected("remove failed"))),
-            _ => None,
+        let (applied, failed, skipped) = apply_artifact_candidates(&candidates, |candidate| {
+            match candidate.relative_path.as_str() {
+                "target" => ArtifactCleanupCandidateApplyOutcome::Applied(applied_row(
+                    candidate,
+                    ArtifactCleanupDeletionProvenance {
+                        run_ref: "homeboy://run/test".to_string(),
+                        deleted_at: "2026-01-01T00:00:00Z".to_string(),
+                        policy: "test".to_string(),
+                        protection_decision: "test".to_string(),
+                    },
+                )),
+                "dist" => ArtifactCleanupCandidateApplyOutcome::Failed(Error::internal_unexpected(
+                    "remove failed",
+                )),
+                _ => ArtifactCleanupCandidateApplyOutcome::Skipped(
+                    "artifact no longer exists after discovery".to_string(),
+                ),
+            }
         });
-        let (success_count, remaining_count) =
-            artifact_cleanup_result_counts(candidates.len(), applied.len(), failed.len());
 
         assert_eq!(applied.len(), 1);
         assert_eq!(failed.len(), 1);
+        assert_eq!(skipped.len(), 1);
         assert_eq!(failed[0].relative_path, "dist");
-        assert_eq!(success_count, 1);
-        assert_eq!(remaining_count, 2);
+        assert_eq!(skipped[0].relative_path, "node_modules");
+        assert_eq!(
+            applied.len() + failed.len() + skipped.len(),
+            candidates.len(),
+            "every discovered candidate has an explicit final outcome"
+        );
+    }
+
+    #[test]
+    fn disappearing_candidate_is_skipped_and_not_counted_as_remaining() {
+        let temp = TempDir::new().expect("tempdir");
+        let artifact_path = temp.path().join("target");
+        write_file(&artifact_path.join("debug/app"), "artifact");
+        let mut candidate = artifact_candidate("target");
+        candidate.path = artifact_path.to_string_lossy().to_string();
+
+        let (applied, failed, skipped) =
+            apply_artifact_candidates(std::slice::from_ref(&candidate), |candidate| {
+                fs::remove_dir_all(&candidate.path).expect("external removal after discovery");
+                apply_artifact_candidate(candidate, &ActiveWorktrees::default(), "test")
+            });
+        let (remaining_count, remaining_bytes) =
+            remaining_candidate_totals(std::slice::from_ref(&candidate), true);
+
+        assert!(applied.is_empty());
+        assert!(failed.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].path, candidate.path);
+        assert_eq!(
+            skipped[0].reason,
+            "artifact no longer exists after discovery"
+        );
+        assert_eq!(remaining_count, 0);
+        assert_eq!(remaining_bytes, 0);
     }
 
     #[test]
