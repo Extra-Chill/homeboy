@@ -723,6 +723,7 @@ fn compact_status_prioritizes_dirty_controller_before_runner_convergence() {
                 Some("homeboy 0.321.1+configured".to_string()),
             )
             .with_controller_compatibility(
+                "homeboy-lab",
                 "0.321.1".to_string(),
                 "homeboy 0.321.1+configured-dirty".to_string(),
                 false,

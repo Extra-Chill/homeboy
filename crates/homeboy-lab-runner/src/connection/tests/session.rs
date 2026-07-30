@@ -551,6 +551,7 @@ fn same_version_different_controller_build_is_incompatible_and_truthful() {
         Some("homeboy 0.321.1+configured".to_string()),
     )
     .with_controller_compatibility(
+        "homeboy-lab",
         "0.321.1".to_string(),
         "homeboy 0.321.1+controller".to_string(),
         true,
@@ -578,6 +579,11 @@ fn same_version_different_controller_build_is_incompatible_and_truthful() {
     );
     assert!(warning.message.contains("configured job command binary"));
     assert!(warning.message.contains("controller"));
+    assert_eq!(
+        warning.recovery_commands,
+        ["homeboy runner refresh-homeboy homeboy-lab --ref controller --reconnect --allow-downgrade"]
+    );
+    assert!(!warning.refresh_command.contains("--ref configured"));
 }
 
 #[test]

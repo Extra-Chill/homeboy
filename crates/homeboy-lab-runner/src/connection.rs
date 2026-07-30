@@ -2566,6 +2566,7 @@ fn stale_daemon_warning(
             identity_comparison == IdentityComparison::Unverifiable,
         )
         .with_controller_compatibility(
+            &runner.id,
             controller_identity.version,
             controller_identity.display,
             controller_version_matches,
