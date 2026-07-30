@@ -52,6 +52,23 @@ pub(crate) fn execute_local_command_with_piped_stdin(command: &str) -> CommandOu
     execute_local_command_in_dir_impl(command, None, None, None, Some(StdinSource::Piped(stdin)))
 }
 
+pub(crate) fn execute_local_command_with_piped_stdin_and_timeout(
+    command: &str,
+    timeout: Duration,
+) -> CommandOutput {
+    let stdin = match piped_stdin_file() {
+        Ok(stdin) => stdin,
+        Err(error) => return stdin_source_error(error),
+    };
+    execute_local_command_in_dir_impl(
+        command,
+        None,
+        None,
+        Some(timeout),
+        Some(StdinSource::Piped(stdin)),
+    )
+}
+
 pub(crate) fn execute_local_command_with_stdin_and_timeout(
     command: &str,
     stdin: &[u8],
