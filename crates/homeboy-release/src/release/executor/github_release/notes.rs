@@ -201,7 +201,7 @@ pub(super) fn persist_release_body(component: &Component, tag: &str, body: &str)
         );
         return None;
     }
-    let file = build_dir.join(format!("{}-release-notes.md", safe_filename(tag)));
+    let file = std::path::Path::new(&component.local_path).join(release_notes_path(tag));
     match std::fs::write(&file, body) {
         Ok(()) => Some(file.to_string_lossy().replace('\\', "/")),
         Err(err) => {
@@ -209,6 +209,11 @@ pub(super) fn persist_release_body(component: &Component, tag: &str, body: &str)
             None
         }
     }
+}
+
+/// Relative path reserved for the exact GitHub Release body persisted by Homeboy.
+pub(crate) fn release_notes_path(tag: &str) -> String {
+    format!("build/{}-release-notes.md", safe_filename(tag))
 }
 
 fn github_generated_notes(

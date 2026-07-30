@@ -71,7 +71,10 @@ pub(super) fn validate_release_worktree(
 
 /// Stage 0 fail-fast: refuse to run release work when the working tree has
 /// unexplained dirty files before lint/test/build can drown out the real error.
-pub(super) fn validate_working_tree_fail_fast(component: &Component) -> Result<()> {
+pub(super) fn validate_working_tree_fail_fast(
+    component: &Component,
+    release_notes_tag: Option<&str>,
+) -> Result<()> {
     let uncommitted = homeboy_core::git::get_uncommitted_changes(&component.local_path)?;
     if !uncommitted.has_changes {
         return Ok(());
@@ -97,6 +100,19 @@ pub(super) fn validate_working_tree_fail_fast(component: &Component) -> Result<(
             .iter()
             .any(|allowed| paths_match(file, allowed))
     });
+    if let Some(tag) = release_notes_tag {
+        let release_notes_path = super::executor::github_release_notes_path(tag);
+        unexpected.retain(|file| {
+            !uncommitted.untracked.iter().any(|untracked| {
+                paths_are_equal(untracked, file)
+                    && untracked_entry_is_only_release_notes(
+                        Path::new(&component.local_path),
+                        untracked,
+                        &release_notes_path,
+                    )
+            })
+        });
+    }
     if unexpected.is_empty() {
         return Ok(());
     }
@@ -290,6 +306,86 @@ fn paths_match(file: &str, allowed: &str) -> bool {
     file == allowed || file.ends_with(allowed) || allowed.ends_with(file)
 }
 
+fn paths_are_equal(left: &str, right: &str) -> bool {
+    normalize_relative_path(left) == normalize_relative_path(right)
+}
+
+fn untracked_entry_is_only_release_notes(
+    repo_root: &Path,
+    entry: &str,
+    release_notes_path: &str,
+) -> bool {
+    let entry = normalize_relative_path(entry);
+    let release_notes_path = normalize_relative_path(release_notes_path);
+    if entry == release_notes_path {
+        return std::fs::symlink_metadata(repo_root.join(&entry))
+            .is_ok_and(|metadata| metadata.file_type().is_file());
+    }
+    if !release_notes_path.starts_with(&format!("{entry}/")) {
+        return false;
+    }
+
+    let entry_path = repo_root.join(&entry);
+    let Ok(mut entries) = std::fs::read_dir(entry_path) else {
+        return false;
+    };
+    let mut files = Vec::new();
+    while let Some(entry) = entries.next() {
+        let Ok(dir_entry) = entry else {
+            return false;
+        };
+        let path = dir_entry.path();
+        let Ok(file_type) = dir_entry.file_type() else {
+            return false;
+        };
+        if file_type.is_symlink() {
+            return false;
+        }
+        if file_type.is_dir() {
+            let relative = match path.strip_prefix(repo_root) {
+                Ok(relative) => relative,
+                Err(_) => return false,
+            };
+            if !untracked_entry_is_only_release_notes(
+                repo_root,
+                &relative.to_string_lossy(),
+                &release_notes_path,
+            ) {
+                return false;
+            }
+        } else if file_type.is_file() {
+            let relative = match path.strip_prefix(repo_root) {
+                Ok(relative) => normalize_relative_path(&relative.to_string_lossy()),
+                Err(_) => return false,
+            };
+            files.push(relative);
+        } else {
+            return false;
+        }
+    }
+
+    files.len() == 1 && files[0] == release_notes_path
+}
+
+fn normalize_relative_path(path: &str) -> String {
+    path.replace('\\', "/")
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .fold(Vec::new(), |mut parts, part| {
+            if part == ".." {
+                if parts.last().is_some_and(|previous| *previous != "..") {
+                    parts.pop();
+                } else {
+                    parts.push(part);
+                }
+            } else {
+                parts.push(part);
+            }
+            parts
+        })
+        .join("/")
+}
+
 fn declared_build_artifact_paths(component: &Component) -> Vec<String> {
     let status_root = Path::new(&component.local_path);
     let scan_root = homeboy_core::component::resolution::detect_git_root(status_root)
@@ -367,8 +463,8 @@ fn should_skip_artifact_scan_dir(path: &Path) -> bool {
 mod tests {
     use super::{
         declared_build_artifact_paths, filter_homeboy_managed, get_release_allowed_files,
-        get_unexpected_uncommitted_files, is_homeboy_managed_path, validate_release_worktree,
-        validate_working_tree_fail_fast,
+        get_unexpected_uncommitted_files, is_homeboy_managed_path, normalize_relative_path,
+        validate_release_worktree, validate_working_tree_fail_fast,
     };
     use crate::release::types::ReleaseOptions;
     use crate::release::version::{ComponentVersionInfo, VersionTargetInfo};
@@ -526,7 +622,7 @@ mod tests {
         run_git(dir, &["commit", "-q", "-m", "chore: initial"]);
         std::fs::write(dir.join("src.rs"), "unexpected\n").unwrap();
 
-        let err = validate_working_tree_fail_fast(&git_component(dir))
+        let err = validate_working_tree_fail_fast(&git_component(dir), None)
             .expect_err("unexpected user file should fail fast");
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
@@ -552,7 +648,7 @@ mod tests {
         let mut component = git_component(dir);
         component.changelog_target = Some("docs/CHANGELOG.md".to_string());
 
-        validate_working_tree_fail_fast(&component)
+        validate_working_tree_fail_fast(&component, None)
             .expect("a bootstrapped changelog must not abort the release that created it");
     }
 
@@ -574,9 +670,81 @@ mod tests {
         let mut component = git_component(dir);
         component.changelog_target = Some("docs/CHANGELOG.md".to_string());
 
-        let err = validate_working_tree_fail_fast(&component)
+        let err = validate_working_tree_fail_fast(&component, None)
             .expect_err("unrelated dirty files must still fail fast");
         assert!(err.details.to_string().contains("src.rs"));
+    }
+
+    #[test]
+    fn head_recovery_allows_only_its_untracked_persisted_release_notes() {
+        let temp = git_repo();
+        let dir = temp.path();
+        std::fs::write(dir.join("README.md"), "initial\n").unwrap();
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-q", "-m", "chore: initial"]);
+        std::fs::create_dir(dir.join("build")).unwrap();
+        std::fs::write(dir.join("build/v1.2.3-release-notes.md"), "notes\n").unwrap();
+
+        validate_working_tree_fail_fast(&git_component(dir), Some("v1.2.3"))
+            .expect("head recovery should allow the exact persisted release notes file");
+
+        std::fs::write(dir.join("build/other-release-notes.md"), "other\n").unwrap();
+        let err = validate_working_tree_fail_fast(&git_component(dir), Some("v1.2.3"))
+            .expect_err("other build files must remain blocked");
+        assert!(err.details.to_string().contains("build/"));
+    }
+
+    #[test]
+    fn head_recovery_blocks_tracked_persisted_release_notes_modifications() {
+        let temp = git_repo();
+        let dir = temp.path();
+        std::fs::create_dir(dir.join("build")).unwrap();
+        std::fs::write(dir.join("build/v1.2.3-release-notes.md"), "initial\n").unwrap();
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-q", "-m", "chore: initial"]);
+        std::fs::write(dir.join("build/v1.2.3-release-notes.md"), "modified\n").unwrap();
+
+        let err = validate_working_tree_fail_fast(&git_component(dir), Some("v1.2.3"))
+            .expect_err("tracked release notes modifications must remain blocked");
+        assert!(err
+            .details
+            .to_string()
+            .contains("build/v1.2.3-release-notes.md"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn head_recovery_blocks_an_untracked_release_notes_symlink() {
+        let temp = git_repo();
+        let dir = temp.path();
+        std::fs::write(dir.join("README.md"), "initial\n").unwrap();
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-q", "-m", "chore: initial"]);
+        std::fs::create_dir(dir.join("build")).unwrap();
+        std::os::unix::fs::symlink(
+            dir.join("README.md"),
+            dir.join("build/v1.2.3-release-notes.md"),
+        )
+        .unwrap();
+
+        validate_working_tree_fail_fast(&git_component(dir), Some("v1.2.3"))
+            .expect_err("a symlink must not be accepted as Homeboy-generated release notes");
+    }
+
+    #[test]
+    fn release_notes_path_matching_normalizes_git_path_spellings() {
+        assert_eq!(
+            normalize_relative_path("./build\\v1.2.3-release-notes.md"),
+            "build/v1.2.3-release-notes.md"
+        );
+        assert_eq!(
+            normalize_relative_path("build//nested/../v1.2.3-release-notes.md"),
+            "build/v1.2.3-release-notes.md"
+        );
+        assert_eq!(
+            normalize_relative_path("../build/v1.2.3-release-notes.md"),
+            "../build/v1.2.3-release-notes.md"
+        );
     }
 
     #[test]
