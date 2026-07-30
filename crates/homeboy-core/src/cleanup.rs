@@ -41,6 +41,7 @@ const ARTIFACT_DIR_REMOVE_ATTEMPTS: usize = 3;
 const ARTIFACT_DIR_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
 const BUILTIN_ARTIFACT_PATHS: &[(&str, &str)] = &[("target", "rust_target")];
 const SECONDS_PER_DAY: u64 = 86_400;
+const AUTOMATIC_ARTIFACT_AGE_POLICY: u64 = u64::MAX;
 
 /// Default artifact class for declarations that predate categorized cleanup.
 /// Both the built-in path and repository-declared paths describe output that a
@@ -83,6 +84,85 @@ pub struct ArtifactCleanupOptions {
     /// because removing an install tree makes a live checkout unusable until it
     /// is rehydrated.
     pub include_active_worktrees: bool,
+}
+
+/// Run the existing reconstructable-artifact owner as bounded automatic
+/// retention across several repository roots. All roots share one candidate
+/// ordering and limit, so a small root cannot consume the budget before a
+/// larger eligible artifact is considered.
+pub fn run_automatic_artifact_retention(roots: Vec<PathBuf>) -> Result<ArtifactCleanupOutput> {
+    let retention = crate::defaults::load_config().retention;
+    run_automatic_artifact_retention_in(&roots, &retention, SystemTime::now())
+}
+
+fn run_automatic_artifact_retention_in(
+    roots: &[PathBuf],
+    retention: &crate::defaults::RetentionConfig,
+    now: SystemTime,
+) -> Result<ArtifactCleanupOutput> {
+    // Resolve the shared cleanup policy before acquiring a cleanup run or
+    // inspecting paths. Invalid persisted policy must never reach deletion.
+    let policy = cleanup_policy_from_retention(retention, CleanupPolicyOverrides::default())?;
+    let deadline = now.checked_add(Duration::from_secs(
+        retention.automatic_retention_max_run_seconds,
+    ));
+    let options = ArtifactCleanupOptions {
+        apply: true,
+        sort: ArtifactCleanupSort::Size,
+        limit: Some(policy.scan_limit()),
+        // The collector evaluates this sentinel per candidate filesystem.
+        min_age_days: Some(AUTOMATIC_ARTIFACT_AGE_POLICY),
+        ..Default::default()
+    };
+    let registry_quarantines = crate::worktree::reconcile_malformed_task_worktree_records(true)?;
+    crate::worktree::with_task_worktree_registry_read_lock(|| {
+        let mut worktrees = Vec::new();
+        let mut root = None;
+        for candidate_root in roots {
+            let Ok(root_path) = git_root(candidate_root) else {
+                continue;
+            };
+            root.get_or_insert_with(|| root_path.clone());
+            if deadline.is_some_and(|deadline| SystemTime::now() >= deadline) {
+                break;
+            }
+            worktrees.extend(discover_worktrees(&root_path)?);
+        }
+        let mut seen_worktrees = HashSet::new();
+        worktrees.retain(|worktree| seen_worktrees.insert(canonical_or_owned(&worktree.path)));
+        let root = root.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "roots",
+                "automatic artifact retention requires at least one repository root",
+                None,
+                None,
+            )
+        })?;
+        cleanup_artifacts_in_worktrees(
+            root,
+            worktrees,
+            &options,
+            false,
+            registry_quarantines,
+            deadline,
+        )
+    })
+}
+
+#[cfg(unix)]
+fn filesystem_available_bytes(path: &Path) -> Option<u64> {
+    use std::ffi::CString;
+    let path = CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    (unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } == 0).then(|| unsafe {
+        let stat = stat.assume_init();
+        (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64)
+    })
+}
+
+#[cfg(not(unix))]
+fn filesystem_available_bytes(_path: &Path) -> Option<u64> {
+    None
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -201,6 +281,7 @@ pub struct ArtifactCleanupCandidate {
     pub rehydrate_command: Option<String>,
     pub source_dirty: bool,
     pub unpushed_commits: bool,
+    pub pressure_eligible: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -349,7 +430,7 @@ pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactClea
     crate::worktree::with_task_worktree_registry_read_lock(|| {
         let root = resolve_root(&options)?;
         let worktrees = discover_worktrees(&root)?;
-        cleanup_artifacts_in_worktrees(root, worktrees, &options, true, registry_quarantines)
+        cleanup_artifacts_in_worktrees(root, worktrees, &options, true, registry_quarantines, None)
     })
 }
 
@@ -391,6 +472,7 @@ pub fn cleanup_worktree_artifacts(worktree: &Path) -> Result<ArtifactCleanupOutp
             },
             false,
             registry_quarantines,
+            None,
         )
     })
 }
@@ -506,8 +588,30 @@ fn collect_worktree_candidates(
 
         let usage = path_usage(&artifact_path)?;
         let age_seconds = usage.age_seconds();
+        let mut pressure_eligible = false;
         if let Some(min_age_days) = effective_min_age_days(options, &declaration) {
-            if !meets_age_gate(age_seconds, min_age_days) {
+            let automatic = min_age_days == AUTOMATIC_ARTIFACT_AGE_POLICY;
+            if automatic {
+                let retention = crate::defaults::load_config().retention;
+                pressure_eligible = retention.reconstructable_artifact_reserve_bytes > 0
+                    && filesystem_available_bytes(&artifact_path).is_some_and(|available| {
+                        available < retention.reconstructable_artifact_reserve_bytes
+                    });
+                if !pressure_eligible
+                    && !meets_age_gate(age_seconds, retention.reconstructable_artifact_days)
+                {
+                    skipped.push(skip_row(
+                        worktree,
+                        &declaration,
+                        display_path,
+                        &format!(
+                            "artifact was modified within the {}-day age gate",
+                            retention.reconstructable_artifact_days
+                        ),
+                    ));
+                    continue;
+                }
+            } else if !meets_age_gate(age_seconds, min_age_days) {
                 skipped.push(skip_row(
                     worktree,
                     &declaration,
@@ -533,6 +637,7 @@ fn collect_worktree_candidates(
             rehydrate_command: declaration.rehydrate_command.clone(),
             source_dirty: safety.source_dirty,
             unpushed_commits: safety.unpushed_commits,
+            pressure_eligible,
         });
     }
 
@@ -581,6 +686,7 @@ fn cleanup_artifacts_in_worktrees(
     options: &ArtifactCleanupOptions,
     include_self_temp_artifacts: bool,
     registry_quarantines: Vec<crate::worktree::TaskWorktreeRegistryQuarantine>,
+    deadline: Option<SystemTime>,
 ) -> Result<ArtifactCleanupOutput> {
     let mut candidates = Vec::new();
     let mut skipped = Vec::new();
@@ -590,6 +696,9 @@ fn cleanup_artifacts_in_worktrees(
     }
 
     for worktree in &worktrees {
+        if deadline.is_some_and(|deadline| SystemTime::now() >= deadline) {
+            break;
+        }
         // A single stale/non-Git/vanished worktree candidate must not abort the
         // whole batch: classify it, record a bounded diagnostic, and continue so
         // independent valid worktrees are still cleaned (#9925).
@@ -616,6 +725,12 @@ fn cleanup_artifacts_in_worktrees(
         }
     }
 
+    // Several workspace roots can resolve to the same linked worktree. Count
+    // each canonical artifact once before the global largest-first cap.
+    let mut seen_artifacts = HashSet::new();
+    candidates
+        .retain(|candidate| seen_artifacts.insert(canonical_or_owned(Path::new(&candidate.path))));
+
     order_and_limit_candidates(&mut candidates, options.sort, options.limit);
 
     let cleanup_run = options
@@ -632,6 +747,11 @@ fn cleanup_artifacts_in_worktrees(
             .1
             .clone();
         apply_artifact_candidates(&candidates, |candidate| {
+            if deadline.is_some_and(|deadline| SystemTime::now() >= deadline) {
+                return ArtifactCleanupCandidateApplyOutcome::Skipped(
+                    "automatic cleanup runtime limit reached before removal".to_string(),
+                );
+            }
             apply_artifact_candidate(candidate, &active, &run_ref)
         })
     } else {
@@ -826,9 +946,14 @@ fn order_and_limit_candidates(
     if sort == ArtifactCleanupSort::Size {
         candidates.sort_by(|left, right| {
             right
-                .size_bytes
-                .cmp(&left.size_bytes)
-                .then_with(|| left.path.cmp(&right.path))
+                .pressure_eligible
+                .cmp(&left.pressure_eligible)
+                .then_with(|| {
+                    right
+                        .size_bytes
+                        .cmp(&left.size_bytes)
+                        .then_with(|| left.path.cmp(&right.path))
+                })
         });
     }
 
@@ -1734,6 +1859,85 @@ mod tests {
             fs::read_to_string(repo.path().join("src/lib.rs")).expect("source remains"),
             "changed source"
         );
+    }
+
+    #[test]
+    fn automatic_artifact_retention_applies_one_largest_first_limit_across_roots() {
+        crate::test_support::with_isolated_home(|_| {
+            let small = git_repo();
+            let large = git_repo();
+            write_file(&small.path().join("target/debug/app"), "small");
+            write_file(&large.path().join("target/debug/app"), &"L".repeat(128));
+            let retention = crate::defaults::RetentionConfig {
+                limit: 1,
+                reconstructable_artifact_days: 0,
+                ..Default::default()
+            };
+            crate::defaults::save_config(&crate::defaults::HomeboyConfig {
+                retention: retention.clone(),
+                ..Default::default()
+            })
+            .expect("save retention");
+
+            let output = run_automatic_artifact_retention_in(
+                &[small.path().to_path_buf(), large.path().to_path_buf()],
+                &retention,
+                SystemTime::now(),
+            )
+            .expect("automatic retention");
+
+            assert_eq!(output.applied_count, 1);
+            assert!(!large.path().join("target").exists());
+            assert!(small.path().join("target").exists());
+        });
+    }
+
+    #[test]
+    fn automatic_artifact_retention_rejects_invalid_policy_without_mutation() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = git_repo();
+            write_file(&repo.path().join("target/debug/app"), "artifact");
+            let retention = crate::defaults::RetentionConfig {
+                limit: 0,
+                reconstructable_artifact_days: 0,
+                ..Default::default()
+            };
+
+            assert!(run_automatic_artifact_retention_in(
+                &[repo.path().to_path_buf()],
+                &retention,
+                SystemTime::now(),
+            )
+            .is_err());
+            assert!(repo.path().join("target").exists());
+        });
+    }
+
+    #[test]
+    fn automatic_artifact_retention_keeps_active_cargo_targets() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = repo_with_ignored_artifacts();
+            write_file(&repo.path().join("target/debug/app"), "artifact");
+            register_active_task_worktree(repo.path());
+            let retention = crate::defaults::RetentionConfig {
+                reconstructable_artifact_days: 0,
+                ..Default::default()
+            };
+
+            let output = run_automatic_artifact_retention_in(
+                &[repo.path().to_path_buf()],
+                &retention,
+                SystemTime::now(),
+            )
+            .expect("automatic retention");
+
+            assert_eq!(output.applied_count, 0);
+            assert!(repo.path().join("target").exists());
+            assert!(output
+                .skipped
+                .iter()
+                .any(|row| row.reason.contains("active task worktree")));
+        });
     }
 
     #[test]
@@ -2968,6 +3172,7 @@ mod tests {
             rehydrate_command: None,
             source_dirty: false,
             unpushed_commits: false,
+            pressure_eligible: false,
         }
     }
 
@@ -3026,6 +3231,7 @@ mod tests {
             &ArtifactCleanupOptions::default(),
             false,
             Vec::new(),
+            None,
         )
         .expect("batch must not abort on one bad worktree");
 

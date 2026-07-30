@@ -80,6 +80,8 @@ own arguments.
 - `shared_store_lease_seconds` — Lease TTL that keeps an in-use shared Cargo target store alive.
 - `shared_store_reserve_bytes` — Free bytes required on the shared Cargo target filesystem before a build starts (default: 5 GiB).
 - `shared_store_reserve_inodes` — Free inodes required on the shared Cargo target filesystem before a build starts (default: 100000).
+- `reconstructable_artifact_days` — Idle age required before automatic retention reclaims reconstructable per-worktree build artifacts (default: 7). Active task worktrees remain protected.
+- `reconstructable_artifact_reserve_bytes` — Free-space reserve that enables early reconstructable-artifact retention under pressure; `0` disables pressure cleanup (default).
 - `automatic_retention_max_run_seconds` — Cooperative wall-clock budget for one automatic pass (default: 60). The executor yields between stores; a category never interrupts an in-progress safe mutation.
 
 Runner-side age floors are deliberately *not* configuration keys. Both the

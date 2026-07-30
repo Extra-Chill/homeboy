@@ -221,6 +221,14 @@ pub struct RetentionConfig {
     pub shared_store_reserve_bytes: u64,
     #[serde(default = "default_shared_store_reserve_inodes")]
     pub shared_store_reserve_inodes: u64,
+    /// Minimum idle age before automatic retention removes reconstructable
+    /// per-worktree build artifacts. This bounds rebuild churn after a build.
+    #[serde(default = "default_reconstructable_artifact_retention_days")]
+    pub reconstructable_artifact_days: u64,
+    /// Disabled when zero. When free space drops below this reserve, automatic
+    /// reconstructable-artifact retention may bypass its age floor.
+    #[serde(default)]
+    pub reconstructable_artifact_reserve_bytes: u64,
     /// Cooperative wall-clock budget for one automatic pass. Category owners
     /// finish an in-progress safe mutation before the executor yields.
     #[serde(default = "default_automatic_retention_max_run_seconds")]
@@ -242,6 +250,8 @@ impl Default for RetentionConfig {
             shared_store_lease_seconds: default_shared_store_lease_seconds(),
             shared_store_reserve_bytes: default_shared_store_reserve_bytes(),
             shared_store_reserve_inodes: default_shared_store_reserve_inodes(),
+            reconstructable_artifact_days: default_reconstructable_artifact_retention_days(),
+            reconstructable_artifact_reserve_bytes: 0,
             automatic_retention_max_run_seconds: default_automatic_retention_max_run_seconds(),
         }
     }
@@ -293,6 +303,10 @@ fn default_shared_store_reserve_bytes() -> u64 {
 
 fn default_shared_store_reserve_inodes() -> u64 {
     100_000
+}
+
+fn default_reconstructable_artifact_retention_days() -> u64 {
+    7
 }
 
 fn default_automatic_retention_max_run_seconds() -> u64 {

@@ -49,6 +49,7 @@ struct AutomaticRetentionControllerOutput {
     state_path: String,
     resume_command: &'static str,
     reconciliation: homeboy::agents::agent_task_service::AgentTaskReconcileReport,
+    repo_artifacts: Value,
     cleanup: Value,
 }
 
@@ -1129,6 +1130,28 @@ fn automatic_retention() -> CmdResult<Value> {
         )
     })?;
     let reconciliation = homeboy::agents::agent_task_service::reconcile_stale_active_runs(false)?;
+    let roots = homeboy::core::component::registered()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|component| PathBuf::from(component.local_path))
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    let repo_artifacts = if roots.is_empty() {
+        serde_json::json!({
+            "status": "retained",
+            "reason": "no controller-accessible registered workspace roots",
+        })
+    } else {
+        match cleanup::run_automatic_artifact_retention(roots) {
+            Ok(output) => serde_json::to_value(output).map_err(|error| {
+                homeboy::core::Error::internal_json(
+                    error.to_string(),
+                    Some("serialize automatic artifact retention".to_string()),
+                )
+            })?,
+            Err(error) => serde_json::json!({ "status": "retained", "reason": error.message }),
+        }
+    };
     let cleanup = cleanup_inventory(CleanupArgs {
         apply: true,
         include: AUTOMATIC_RETENTION_CATEGORIES.to_vec(),
@@ -1153,6 +1176,7 @@ fn automatic_retention() -> CmdResult<Value> {
         state_path: state_path.display().to_string(),
         resume_command: "homeboy cleanup automatic-retention",
         reconciliation,
+        repo_artifacts,
         cleanup: serde_json::json!({
             "categories": cleanup.output,
             "cargo_targets": cargo_targets,

@@ -19,6 +19,7 @@ use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use tempfile::TempDir;
 
 struct TerminalSnapshotProvider {
     snapshot: Mutex<Option<homeboy_core::api_jobs::RunnerJobLogSnapshot>>,
@@ -1802,6 +1803,21 @@ fn aggregate_only_remote_dispatch_failure_preserves_lab_outcome_details() {
 fn completed_generic_executor_outcome_preserves_runtime_evidence_without_provider_run_id() {
     with_isolated_home(|_| {
         let mut plan = test_plan();
+        let workspace = TempDir::new().expect("workspace");
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(workspace.path())
+            .output()
+            .expect("initialize workspace");
+        std::fs::write(
+            workspace.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(workspace.path().join(".gitignore"), "target/\n").expect("ignore target");
+        std::fs::create_dir_all(workspace.path().join("target/debug")).expect("target");
+        std::fs::write(workspace.path().join("target/debug/app"), "artifact").expect("artifact");
+        plan.tasks[0].workspace.root = Some(workspace.path().display().to_string());
         plan.tasks[0].executor.backend = "opencode".to_string();
         plan.tasks[0].executor.model = None;
         let mut aggregate = succeeded_aggregate(&plan);
@@ -1831,6 +1847,10 @@ fn completed_generic_executor_outcome_preserves_runtime_evidence_without_provide
         assert_eq!(
             runtime.metadata["executor"]["model"],
             "openai/gpt-5.6-terra"
+        );
+        assert_eq!(
+            record.metadata["automatic_artifact_retention"]["command"],
+            "cleanup.artifacts"
         );
     });
 }

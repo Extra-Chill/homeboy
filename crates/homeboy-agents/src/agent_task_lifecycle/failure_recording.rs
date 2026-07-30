@@ -649,6 +649,38 @@ pub(crate) fn record_aggregate(
         aggregate,
         aggregate_path.display().to_string(),
     );
+    let mut retained_roots = Vec::new();
+    let roots: Vec<PathBuf> = plan
+        .tasks
+        .iter()
+        .filter_map(|task| task.workspace.root.as_ref())
+        .filter_map(|root| {
+            let path = PathBuf::from(root);
+            if path.is_dir() {
+                Some(path)
+            } else {
+                retained_roots.push(serde_json::json!({
+                    "path": root,
+                    "reason": "workspace root is inaccessible from this controller",
+                }));
+                None
+            }
+        })
+        .collect();
+    record.ensure_metadata_object();
+    if !roots.is_empty() {
+        record.metadata["automatic_artifact_retention"] =
+            match homeboy_core::cleanup::run_automatic_artifact_retention(roots) {
+                Ok(output) => serde_json::to_value(output).unwrap_or_else(|error| {
+                    serde_json::json!({ "status": "retained", "reason": error.to_string() })
+                }),
+                Err(error) => serde_json::json!({ "status": "retained", "reason": error.message }),
+            };
+    }
+    if !retained_roots.is_empty() {
+        record.metadata["automatic_artifact_retention_inaccessible_roots"] =
+            serde_json::Value::Array(retained_roots);
+    }
     crate::controller_scratch::register_outcome_resources(&record.run_id, &aggregate.outcomes)?;
     crate::controller_scratch::finalize_run(&record.run_id)?;
     store::write_aggregate_and_record(record, aggregate)?;
