@@ -242,8 +242,7 @@ mod tests {
                 id: "fixture".to_string(),
                 local_path,
                 remote_path: remote_path.map(str::to_string),
-                deployment_provider: None,
-                deployment_provider_input: None,
+                ..Default::default()
             }],
             ..Default::default()
         }

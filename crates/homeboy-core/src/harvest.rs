@@ -513,8 +513,7 @@ mod tests {
                     id: "component".to_string(),
                     local_path: local.display().to_string(),
                     remote_path: Some("managed/component".to_string()),
-                    deployment_provider: None,
-                    deployment_provider_input: None,
+                    ..Default::default()
                 }],
                 extensions: Some(HashMap::from([(
                     "managed-host".to_string(),

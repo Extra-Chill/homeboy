@@ -985,9 +985,7 @@ mod tests {
                 components: vec![homeboy_core::project::ProjectComponentAttachment {
                     id: "fixture".to_string(),
                     local_path: attachment.path().to_string_lossy().to_string(),
-                    remote_path: None,
-                    deployment_provider: None,
-                    deployment_provider_input: None,
+                    ..Default::default()
                 }],
                 ..Default::default()
             })

@@ -133,9 +133,7 @@ mod tests {
                 components: vec![homeboy_core::project::ProjectComponentAttachment {
                     id: "consumer".to_string(),
                     local_path: component_dir.path().to_string_lossy().to_string(),
-                    remote_path: None,
-                    deployment_provider: None,
-                    deployment_provider_input: None,
+                    ..Default::default()
                 }],
                 ..Default::default()
             };

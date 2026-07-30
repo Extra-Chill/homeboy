@@ -145,9 +145,7 @@ fn attach_component_path_unlocked(
         project.components.push(ProjectComponentAttachment {
             id: component_id.to_string(),
             local_path: local_path.to_string(),
-            remote_path: None,
-            deployment_provider: None,
-            deployment_provider_input: None,
+            ..Default::default()
         });
     }
 
@@ -286,9 +284,7 @@ fn rebase_monorepo_component_paths_unlocked(
                     project.components.push(ProjectComponentAttachment {
                         id: id.clone(),
                         local_path: path.clone(),
-                        remote_path: None,
-                        deployment_provider: None,
-                        deployment_provider_input: None,
+                        ..Default::default()
                     });
                 }
             }
@@ -457,9 +453,7 @@ mod tests {
             project.components.push(ProjectComponentAttachment {
                 id: id.to_string(),
                 local_path: format!("/workspace/{}", id),
-                remote_path: None,
-                deployment_provider: None,
-                deployment_provider_input: None,
+                ..Default::default()
             });
         }
         project
@@ -617,23 +611,17 @@ mod tests {
                     ProjectComponentAttachment {
                         id: "root".to_string(),
                         local_path: old.join("root").display().to_string(),
-                        remote_path: None,
-                        deployment_provider: None,
-                        deployment_provider_input: None,
+                        ..Default::default()
                     },
                     ProjectComponentAttachment {
                         id: "nested".to_string(),
                         local_path: old.join("nested").display().to_string(),
-                        remote_path: None,
-                        deployment_provider: None,
-                        deployment_provider_input: None,
+                        ..Default::default()
                     },
                     ProjectComponentAttachment {
                         id: "other-repo".to_string(),
                         local_path: "/other-repo".to_string(),
-                        remote_path: None,
-                        deployment_provider: None,
-                        deployment_provider_input: None,
+                        ..Default::default()
                     },
                 ],
                 ..Default::default()
@@ -684,9 +672,7 @@ mod tests {
                 components: vec![ProjectComponentAttachment {
                     id: "root".to_string(),
                     local_path: "/old-root".to_string(),
-                    remote_path: None,
-                    deployment_provider: None,
-                    deployment_provider_input: None,
+                    ..Default::default()
                 }],
                 ..Default::default()
             })

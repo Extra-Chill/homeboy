@@ -360,8 +360,7 @@ mod tests {
                     id: "plugin".to_string(),
                     local_path: "/tmp/homeboy-missing-component-path".to_string(),
                     remote_path: Some("wp-content/plugins/plugin".to_string()),
-                    deployment_provider: None,
-                    deployment_provider_input: None,
+                    ..Default::default()
                 }],
                 ..Project::default()
             })
