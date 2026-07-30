@@ -688,7 +688,7 @@ fn journal_ensure_running_replay(
     .map_err(|error| error.to_string())
 }
 
-fn negotiate_ensure_running_operation_id(
+pub(super) fn negotiate_ensure_running_operation_id(
     client: &SshClient,
     homeboy: &str,
     replacement_operation_id: Option<&str>,
