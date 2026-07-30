@@ -1023,7 +1023,11 @@ fn incomplete_recovery_delivers_identity_bound_artifacts_to_the_finalizer() {
     assert!(recovery.contains("--arg schema homeboy.package-recovery"));
     assert!(recovery.contains("--arg tag \"${RELEASE_TAG}\""));
     assert!(recovery.contains("--arg commit \"${COMMIT}\""));
-    assert!(recovery.contains("artifacts: [$expected_assets[] | {path: (\"artifacts/\" + .)}]"));
+    assert!(recovery.contains("artifacts: [$expected_assets[] | {path: .}]"));
+    assert!(
+        !recovery.contains("path: (\"artifacts/\" + .)"),
+        "manifest paths are relative to --from-artifacts artifacts"
+    );
     assert!(adoption.contains(
         "if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true'"
     ));
