@@ -83,7 +83,7 @@ If no component IDs are provided and none of `--all`, `--outdated`, `--behind-up
       "id": "<component_id>",
       "status": "deployed|failed|skipped|planned|checked",
       "deploy_reason": "explicitly_selected|all_selected|version_mismatch|unknown_local_version|unknown_remote_version",
-      "component_status": "up_to_date|needs_update|behind_remote|behind_upstream|source_stale|unknown",
+      "component_status": "up_to_date|version_up_to_date_content_unverified|needs_update|behind_remote|behind_upstream|source_stale|remote_modified|missing|mixed_drift|unknown",
       "local_version": "<v>|null",
       "remote_version": "<v>|null",
       "error": "<string>|null",
@@ -125,6 +125,7 @@ Note: `build_exit_code`/`deploy_exit_code` are numbers when present (not strings
 When using `--check`, each component result includes a `component_status` field:
 
 - `up_to_date`: local and remote versions match
+- `version_up_to_date_content_unverified`: versions match, but content-manifest verification did not produce digest proof
 - `needs_update`: local version ahead of remote (needs deployment)
 - `behind_remote`: remote version ahead of local (local is behind)
 - `behind_upstream`: local checkout is behind its upstream branch

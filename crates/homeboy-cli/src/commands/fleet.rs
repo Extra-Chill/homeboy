@@ -476,6 +476,7 @@ fn log_fleet_dashboard(result: &FleetStatusResult) {
             let remote = comp.remote_version.as_deref().unwrap_or("-");
             let drift_icon = match &comp.drift {
                 FleetComponentDrift::Current => "✅ current",
+                FleetComponentDrift::VersionUpToDateContentUnverified => "⚠️  content unverified",
                 FleetComponentDrift::NeedsUpdate => "⚠️  outdated",
                 FleetComponentDrift::BehindRemote => "🔙 behind",
                 FleetComponentDrift::BehindUpstream => "⬇️  behind upstream",

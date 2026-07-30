@@ -33,6 +33,8 @@ pub enum DeployReason {
 pub enum ComponentStatus {
     /// Local and remote versions match
     UpToDate,
+    /// Versions match, but content-manifest verification did not produce digest proof.
+    VersionUpToDateContentUnverified,
     /// Local version ahead of remote (needs deploy)
     NeedsUpdate,
     /// Remote version ahead of local (local behind)
