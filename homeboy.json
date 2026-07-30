@@ -2799,6 +2799,9 @@
     }
   ],
   "docs_dir": "docs",
+  "env": {
+    "CARGO_TARGET_DIR": "target"
+  },
   "extensions": {
     "rust": {}
   },
