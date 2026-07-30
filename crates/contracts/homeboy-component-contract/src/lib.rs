@@ -19,7 +19,8 @@ pub use config::{
     ArtifactInput, CleanupArtifactDeclaration, CommandScopeConfig, ComponentDeployConfig,
     ComponentGithubReleaseConfig, ComponentOverrideConfig, ComponentReleaseConfig,
     ComponentScriptsConfig, DependencyStackEdge, DeploymentProviderAttachment, GitDeployConfig,
-    GithubConfig, GithubHostConfig, GithubReleaseOwner, PackageCoverageArtifactMatch,
-    PackageCoverageConfig, ScopeConfig, ScopedExtensionConfig, VersionTarget,
+    GithubConfig, GithubHostConfig, GithubReleaseOwner, PackageArtifact,
+    PackageCoverageArtifactMatch, PackageCoverageConfig, ScopeConfig, ScopedExtensionConfig,
+    VersionTarget,
 };
 pub use model::{render_remote_path_template, Component, ComponentLifecycle};

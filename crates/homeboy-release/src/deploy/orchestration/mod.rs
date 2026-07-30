@@ -183,6 +183,7 @@ pub(super) fn deploy_components(
     for checkout in &exact_ref_checkouts {
         checkout.verify()?;
         checkout.hydrate_dependencies(config.skip_deps_hydration)?;
+        checkout.reconstruct_package_artifacts()?;
     }
     if let Some(artifact) = config.prepared_artifact.as_ref() {
         for checkout in &exact_ref_checkouts {

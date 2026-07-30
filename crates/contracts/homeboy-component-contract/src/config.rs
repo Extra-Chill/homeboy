@@ -215,6 +215,16 @@ pub struct ArtifactInput {
     pub sha256: Option<String>,
 }
 
+/// A generated artifact that must exist before a component can be packaged.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct PackageArtifact {
+    /// File or glob relative to the component source root.
+    pub path: String,
+    /// Command that reconstructs the artifact from the selected source tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconstruct_command: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct GithubConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
