@@ -1,13 +1,52 @@
-use std::process::{Command, Output};
+use std::process::Output;
 
+use homeboy_core::test_support::{HermeticTestContext, TestBinary};
+
+/// Run the fixture binary through the shared hermetic harness.
+///
+/// Every case in this file asserts that a contradictory invocation is rejected
+/// during argument validation, *before* any worktree or provider resolution.
+/// `route_after_parse` returns early when it detects a Lab-offload or
+/// runner-hosted execution context, and that bail-out sits above the validation
+/// under test. A single inherited controller-transport variable therefore skips
+/// the rejection silently and lets cook proceed into real worktree work, which
+/// can block forever. Because `cargo test` runs integration binaries serially,
+/// one blocked binary strands every binary ordered after it (#10917).
+///
+/// `HermeticTestContext::command` owns the complete isolation contract — HOME,
+/// XDG config and data roots, artifact root, runtime and temp dirs — and strips
+/// the Lab transport variables. Overriding only HOME on a hand-rolled `Command`
+/// leaves that leak open (#10717, #10718).
 fn homeboy(args: &[&str]) -> Output {
-    let home = tempfile::tempdir().expect("isolated home");
-    Command::new(env!("CARGO_BIN_EXE_homeboy"))
+    let context = HermeticTestContext::new();
+    context
+        .command(TestBinary::HomeboyFixture)
         .args(args)
-        .env("HOME", home.path())
-        .env("HOMEBOY_NO_UPDATE_CHECK", "1")
         .output()
         .expect("run homeboy")
+}
+
+#[test]
+fn cook_handoff_subprocesses_do_not_inherit_controller_transport() {
+    // Pins the isolation the rejections below depend on. If these fixtures ever
+    // stop stripping the controller transport variables, the routing bail-out
+    // above `run_split_placement_cook` swallows every rejection this file
+    // asserts, and the suite hangs instead of failing (#10917).
+    let context = HermeticTestContext::new();
+    let command = context.command(TestBinary::HomeboyFixture);
+    let removed_env = command
+        .get_envs()
+        .filter_map(|(key, value)| value.is_none().then(|| key.to_string_lossy().into_owned()))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert!(
+        removed_env.contains(homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV),
+        "cook handoff fixtures must not inherit Lab offload transport"
+    );
+    assert!(
+        removed_env.contains(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV),
+        "cook handoff fixtures must not inherit the controller source snapshot"
+    );
 }
 
 #[test]
