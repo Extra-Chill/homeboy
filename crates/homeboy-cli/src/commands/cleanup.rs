@@ -2038,6 +2038,10 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
         .get("applied_count")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let remaining_count = payload
+        .get("remaining_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let skipped_count = payload
         .get("skipped_count")
         .and_then(Value::as_u64)
@@ -2050,8 +2054,6 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
         .get("reclaimed_bytes")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let remaining_candidates = candidate_count.saturating_sub(applied_count);
-
     let mut lines = vec![
         "Artifact cleanup summary".to_string(),
         format!(
@@ -2061,7 +2063,7 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
         format!("Root: {root}"),
         format!("Candidates: {candidate_count}"),
         format!("Applied: {applied_count}"),
-        format!("Remaining candidates: {remaining_candidates}"),
+        format!("Remaining candidates: {remaining_count}"),
         format!("Estimated reclaimable: {}", format_bytes(estimated_bytes)),
         format!(
             "Estimated reclaimable (allocated): {}",
@@ -3157,6 +3159,7 @@ mod tests {
             "candidate_count": 3,
             "skipped_count": 2,
             "applied_count": 0,
+            "remaining_count": 3,
             "estimated_bytes": 1572864,
             "reclaimed_bytes": 0,
             "next_command": "homeboy cleanup artifacts --path '/tmp/homeboy repo' --temp-root /tmp/review --sort size --limit 7 --merged-only --apply",
@@ -3185,7 +3188,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_artifacts_apply_summary_reports_remaining_after_applied() {
+    fn cleanup_artifacts_apply_summary_uses_post_apply_remaining_count() {
         let payload = json!({
             "command": "cleanup.artifacts",
             "mode": "apply",
@@ -3193,6 +3196,7 @@ mod tests {
             "candidate_count": 4,
             "skipped_count": 1,
             "applied_count": 3,
+            "remaining_count": 0,
             "estimated_bytes": 4096,
             "reclaimed_bytes": 3072,
             "skipped": [
@@ -3203,7 +3207,7 @@ mod tests {
         let summary = render_artifact_cleanup_summary(&payload).expect("summary");
 
         assert!(summary.contains("Mode: apply\n"));
-        assert!(summary.contains("Remaining candidates: 1\n"));
+        assert!(summary.contains("Remaining candidates: 0\n"));
         assert!(summary.contains("Reclaimed: 3.0 KiB\n"));
         assert!(
             summary.contains("Next safe command: homeboy cleanup artifacts --path /tmp/homeboy\n")
@@ -3219,6 +3223,7 @@ mod tests {
             "candidate_count": 2,
             "skipped_count": 0,
             "applied_count": 0,
+            "remaining_count": 2,
             "estimated_bytes": 3072,
             "reclaimed_bytes": 0,
             "candidates": [
@@ -3253,6 +3258,7 @@ mod tests {
             "candidate_count": 12,
             "skipped_count": 0,
             "applied_count": 0,
+            "remaining_count": 12,
             "estimated_bytes": 12288,
             "reclaimed_bytes": 0,
             "candidates": candidates,
