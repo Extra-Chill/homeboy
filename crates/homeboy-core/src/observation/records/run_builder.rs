@@ -105,10 +105,13 @@ mod tests {
     #[test]
     fn test_command() {
         let record = NewRunRecord::builder("lint")
-            .command("homeboy lint homeboy")
+            .command("homeboy review lint homeboy")
             .build();
 
-        assert_eq!(record.command.as_deref(), Some("homeboy lint homeboy"));
+        assert_eq!(
+            record.command.as_deref(),
+            Some("homeboy review lint homeboy")
+        );
     }
 
     #[test]
@@ -178,24 +181,27 @@ mod tests {
     #[test]
     fn test_metadata() {
         let record = NewRunRecord::builder("lint")
-            .metadata(serde_json::json!({ "source": "homeboy lint" }))
+            .metadata(serde_json::json!({ "source": "homeboy review lint" }))
             .build();
 
-        assert_eq!(record.metadata_json["source"], "homeboy lint");
+        assert_eq!(record.metadata_json["source"], "homeboy review lint");
     }
 
     #[test]
     fn test_build() {
         let record = NewRunRecord::builder("lint")
             .component_id("homeboy")
-            .command("homeboy lint homeboy")
+            .command("homeboy review lint homeboy")
             .cwd_path(Path::new("/tmp/homeboy"))
             .current_homeboy_version()
             .build();
 
         assert_eq!(record.kind, "lint");
         assert_eq!(record.component_id.as_deref(), Some("homeboy"));
-        assert_eq!(record.command.as_deref(), Some("homeboy lint homeboy"));
+        assert_eq!(
+            record.command.as_deref(),
+            Some("homeboy review lint homeboy")
+        );
         assert_eq!(record.cwd.as_deref(), Some("/tmp/homeboy"));
         assert_eq!(
             record.homeboy_version.as_deref(),

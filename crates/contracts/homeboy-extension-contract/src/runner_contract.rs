@@ -19,7 +19,7 @@ pub const GENERIC_INFRASTRUCTURE_FAILURE_MARKERS: &[&str] = &[
 
 /// Shared verification phase vocabulary for isolated commands and composed runners.
 ///
-/// `homeboy lint`, `homeboy audit`, and `homeboy test` stay independent. A
+/// `homeboy review lint`, `homeboy review audit`, and `homeboy review test` stay independent. A
 /// future composed command can run these phases in canonical order while reusing
 /// the same phase reports and exit-code semantics.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

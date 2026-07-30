@@ -2897,16 +2897,16 @@ mod tests {
             .expect("controller repair surface");
         write_executable(
             &tools.join("homeboy"),
-            "#!/bin/sh\n[ \"$1\" = lint ] && [ \"$2\" = fixture ] && [ \"$3\" = --path ] && [ -f \"$4/lint-target\" ] && [ \"$5\" = --fix ]\n",
+            "#!/bin/sh\n[ \"$1\" = refactor ] && [ \"$2\" = fixture ] && [ \"$3\" = --path ] && [ -f \"$4/lint-target\" ] && [ \"$5\" = --from ] && [ \"$6\" = lint ] && [ \"$7\" = --write ]\n",
         );
 
         let remote = runner_source.display().to_string();
         let local = controller_source.display().to_string();
         let output = serde_json::json!({
             "success": false,
-            "hints": [format!("Auto-fix: homeboy lint fixture --path {remote} --fix")],
+            "hints": [format!("Auto-fix: homeboy refactor fixture --path {remote} --from lint --write")],
             "next_actions": [{
-                "command": format!("homeboy lint fixture --path {remote} --fix")
+                "command": format!("homeboy refactor fixture --path {remote} --from lint --write")
             }],
             "data": {
                 "source_sidecar_path": format!("{remote}/lint-findings.json"),
@@ -2929,7 +2929,10 @@ mod tests {
         let action = result["next_actions"][0]["command"]
             .as_str()
             .expect("repair action");
-        assert_eq!(action, format!("homeboy lint fixture --path {local} --fix"));
+        assert_eq!(
+            action,
+            format!("homeboy refactor fixture --path {local} --from lint --write")
+        );
         assert!(
             std::path::Path::new(&local).join("lint-target").is_file(),
             "the translated action still targets the controller repair surface after cleanup"

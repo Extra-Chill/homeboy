@@ -537,7 +537,7 @@ fn unapplied_fixable_warning(
     Some(format!(
         "Lint advertised {advertised_fixable} auto-fixable finding(s) but the fixer pass applied 0 edits. \
 The linter's fixer (e.g. phpcbf + custom fixers) could not automatically rewrite these findings — \
-they may require manual remediation despite being flagged fixable. Re-run `homeboy lint <component>` \
+they may require manual remediation despite being flagged fixable. Re-run `homeboy review lint <component>` \
 to see the remaining findings."
     ))
 }
@@ -1076,6 +1076,7 @@ mod tests {
             warning.contains("2 auto-fixable finding(s) but the fixer pass applied 0 edits"),
             "warning must report the discrepancy: {warning}"
         );
+        assert!(warning.contains("homeboy review lint <component>"));
     }
 
     #[test]

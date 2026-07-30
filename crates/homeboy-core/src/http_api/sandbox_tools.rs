@@ -16,7 +16,7 @@ pub struct SandboxToolDescriptor {
 const SANDBOX_TOOLS: &[SandboxToolDescriptor] = &[
     SandboxToolDescriptor {
         id: "homeboy.audit",
-        command: "homeboy audit",
+        command: "homeboy review audit",
         required_capability: "run:audit",
         risk: "bounded_local_run",
         runs_as_job: true,
@@ -33,7 +33,7 @@ const SANDBOX_TOOLS: &[SandboxToolDescriptor] = &[
     },
     SandboxToolDescriptor {
         id: "homeboy.lint",
-        command: "homeboy lint",
+        command: "homeboy review lint",
         required_capability: "run:lint",
         risk: "bounded_local_run",
         runs_as_job: true,
@@ -54,7 +54,7 @@ const SANDBOX_TOOLS: &[SandboxToolDescriptor] = &[
     },
     SandboxToolDescriptor {
         id: "homeboy.test",
-        command: "homeboy test",
+        command: "homeboy review test",
         required_capability: "run:test",
         risk: "bounded_local_run",
         runs_as_job: true,
@@ -190,7 +190,24 @@ pub fn kind(id: &str) -> Result<JobReadyRunKind> {
 
 #[cfg(test)]
 mod tests {
-    use super::{get, kind};
+    use super::{all, get, kind};
+
+    #[test]
+    fn quality_tool_descriptors_use_nested_review_commands() {
+        for (id, command) in [
+            ("homeboy.audit", "homeboy review audit"),
+            ("homeboy.lint", "homeboy review lint"),
+            ("homeboy.test", "homeboy review test"),
+        ] {
+            assert_eq!(
+                all()
+                    .iter()
+                    .find(|tool| tool.id == id)
+                    .map(|tool| tool.command),
+                Some(command)
+            );
+        }
+    }
 
     #[test]
     fn fuzz_descriptor_exposes_safe_non_job_subcommands() {

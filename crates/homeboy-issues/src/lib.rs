@@ -1,7 +1,7 @@
 //! Issue reconciliation: finding-stream → tracker.
 //!
 //! This module turns a structured stream of categorized findings (from
-//! `homeboy audit`, `homeboy lint`, `homeboy test`) into a deterministic
+//! `homeboy review audit`, `homeboy review lint`, `homeboy review test`) into a deterministic
 //! plan against an issue tracker. The plan can then be printed (dry-run)
 //! or executed via a [`Tracker`] implementation.
 //!
