@@ -664,6 +664,9 @@ fn project_output_declarations_for_provider(request: &mut AgentTaskRequest) -> R
     }
     let output_declarations = request.output_declarations.clone();
 
+    if request.inputs.is_null() {
+        request.inputs = json!({});
+    }
     let inputs = request.inputs.as_object_mut().ok_or_else(|| {
         "output declarations require object task inputs for provider projection".to_string()
     })?;
