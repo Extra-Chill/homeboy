@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.20] - 2026-07-30
+
+### Fixed
+- raise dependency signature pin depth to clear real plugin layouts
+- pin validation dependency signatures against test-stub shadowing
+
 ## [3.34.19] - 2026-07-29
 
 ### Fixed
