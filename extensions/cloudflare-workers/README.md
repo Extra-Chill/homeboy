@@ -29,6 +29,14 @@ The Homeboy project attachment supplies environment-owned target input:
 {
   "deployment_provider_input": {
     "target": { "worker": "production-worker", "account_id": "account-id" },
+    "resources": {
+      "d1_databases": [{ "binding": "DATABASE", "database_name": "production-database", "database_id": "database-id" }],
+      "r2_buckets": [{ "binding": "ASSETS", "bucket_name": "production-assets" }],
+      "queues": {
+        "producers": [{ "binding": "JOBS", "queue": "production-jobs" }],
+        "consumers": [{ "queue": "production-jobs", "dead_letter_queue": "production-jobs-dlq" }]
+      }
+    },
     "secrets": [{ "name": "API_TOKEN", "env": "PRODUCTION_API_TOKEN" }],
     "secret_inputs": [],
     "gates": [{ "id": "health", "url": "https://worker.example/health", "expected_status": 200 }],
@@ -37,7 +45,9 @@ The Homeboy project attachment supplies environment-owned target input:
 }
 ```
 
-Homeboy materializes `homeboy/deployment-provider-payload/v1` in a private temporary file. The extension accepts Wrangler/config policy, expected binding names, predeploy declarations, and timeout only from `policy.value`; it accepts Worker/account identity, secret descriptors, gates, and durability only from `target`. Source component and full revision come from Homeboy, while the checkout path comes from `HOMEBOY_COMPONENT_PATH`. Fields crossing those ownership boundaries are rejected. The extension verifies `policy.reference.digest` as SHA-256 over Homeboy canonical JSON before using the policy.
+Homeboy materializes `homeboy/deployment-provider-payload/v1` in a private temporary file. The extension accepts Wrangler/config policy, expected binding names, predeploy declarations, and timeout only from `policy.value`; it accepts Worker/account identity, resource identities, secret descriptors, gates, and durability only from `target`. Source component and full revision come from Homeboy, while the checkout path comes from `HOMEBOY_COMPONENT_PATH`. Fields crossing those ownership boundaries are rejected. The extension verifies `policy.reference.digest` as SHA-256 over Homeboy canonical JSON before using the policy.
+
+Layered resource overlays require a repository-owned JSON or JSONC Wrangler template. D1 and R2 entries and queue producers match exactly one declared binding; queue consumers match the template's declared order. The private target may replace only database name/ID, bucket name, producer queue name, consumer queue name, dead-letter queue name, and account ID. The provider preserves source entry points, compatibility policy, schedules, binding names, queue tuning, and every other repository-owned field. It writes the merged config outside the checkout with mode `0600`, removes it after execution, and omits its path and private resource values from evidence. Legacy contracts continue to use their declared Wrangler config unchanged.
 
 ### Legacy Contract
 
