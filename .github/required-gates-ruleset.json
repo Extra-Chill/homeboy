@@ -21,7 +21,6 @@
           { "context": "homeboy / Workspace Tests Compile", "integration_id": 15368 },
           { "context": "homeboy / Windows Compile", "integration_id": 15368 },
           { "context": "homeboy / Rustfmt", "integration_id": 15368 },
-          { "context": "homeboy / CLI Reference Docs", "integration_id": 15368 },
           { "context": "homeboy / Audit", "integration_id": 15368 },
           { "context": "homeboy / Lint", "integration_id": 15368 },
           { "context": "homeboy / Test", "integration_id": 15368 }

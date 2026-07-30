@@ -1,15 +1,19 @@
-//! Currency and coverage guards for the generated CLI reference.
+//! Coverage guards for the generated CLI reference, plus its regenerator.
 //!
 //! Lives beside `cli_surface/mod.rs` rather than inside its `mod tests` block
 //! for the same reason as `global_flag_surface_tests`: that file sits a handful
 //! of lines under the audit's 1500-line `god_file` threshold.
 //!
-//! Every `#[derive(Subcommand)]` and `#[derive(Args)]` in the workspace lives in
-//! `crates/homeboy-cli`, so any change that can move the command surface must
-//! touch this crate. That makes the differential `review test` gate a real
-//! guard for these tests, and `.github/workflows/cli-reference-docs.yml` runs
-//! the same generation non-differentially (and uploads the regenerated tree) on
-//! every PR that touches the CLI crate.
+//! The generated tree under `docs/reference/cli/` is **not** gated in CI. Byte
+//! currency between the checked-in pages, the serialized contract, and the live
+//! clap tree used to be enforced by `homeboy / CLI Reference Docs` and
+//! `homeboy / CLI Reference Runtime Parity`; both were removed deliberately
+//! because a docs regeneration step is not worth blocking merges over. Refresh
+//! the tree on demand with:
+//!
+//! ```text
+//! HOMEBOY_WRITE_CLI_REFERENCE=1 cargo test -p homeboy-cli --lib cli_surface::reference_docs
+//! ```
 
 use super::reference_docs::{
     commands_without_description, documented_subcommands, generated_reference_docs,
@@ -18,7 +22,7 @@ use super::reference_docs::{
 use super::Cli;
 use clap::CommandFactory;
 use homeboy_command_contract::cli_reference::CliReference;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 /// Repo-root-relative paths resolve from the workspace root, not this crate's
@@ -29,95 +33,37 @@ fn workspace_root() -> PathBuf {
         .join("..")
 }
 
-fn checked_in_reference_docs() -> BTreeMap<String, String> {
-    let directory = workspace_root().join(GENERATED_DIR);
-    let mut docs = BTreeMap::new();
-
-    let Ok(entries) = std::fs::read_dir(&directory) else {
-        return docs;
-    };
-
-    for entry in entries {
-        let path = entry
-            .expect("failed to read a generated CLI reference entry")
-            .path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("generated CLI reference filenames should be valid UTF-8")
-            .to_string();
-        let body = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("failed to read {GENERATED_DIR}/{name}: {error}"));
-        docs.insert(name, body);
-    }
-
-    docs
-}
-
-/// The generated reference must byte-match the live clap command tree.
+/// Regenerates the checked-in CLI reference tree from the live clap command
+/// tree. This is a generator entry point, not a gate: without
+/// `HOMEBOY_WRITE_CLI_REFERENCE` set it does nothing and asserts nothing.
 ///
-/// With `HOMEBOY_WRITE_CLI_REFERENCE` set, this rewrites the tree instead of
-/// asserting, which is how the tree is regenerated and how CI produces the
-/// downloadable artifact for a stale PR.
+/// It stays shaped as a `#[test]` because that is the only way to reach the
+/// clap tree with the workspace already built, and it keeps the documented
+/// regeneration command working.
 #[test]
-fn cli_reference_docs_are_current() {
-    let directory = workspace_root().join(GENERATED_DIR);
-
-    if std::env::var_os(WRITE_ENV).is_some() {
-        let expected = live_generated_reference_docs();
-        if directory.exists() {
-            std::fs::remove_dir_all(&directory)
-                .expect("failed to clear the generated CLI reference");
-        }
-        std::fs::create_dir_all(&directory)
-            .expect("failed to create the generated CLI reference directory");
-        for (name, body) in &expected {
-            std::fs::write(directory.join(name), body)
-                .unwrap_or_else(|error| panic!("failed to write {GENERATED_DIR}/{name}: {error}"));
-        }
-        let contract = serde_json::to_string_pretty(&CliReference::new(expected))
-            .expect("serialize CLI reference contract");
-        std::fs::write(
-            workspace_root().join("docs/reference/cli/command-surface.json"),
-            format!("{contract}\n"),
-        )
-        .expect("write CLI reference contract");
+fn cli_reference_docs_regenerate_on_demand() {
+    if std::env::var_os(WRITE_ENV).is_none() {
         return;
     }
 
-    let expected = generated_reference_docs();
-
-    let actual = checked_in_reference_docs();
-    let regenerate = format!(
-        "regenerate with `{WRITE_ENV}=1 cargo test -p homeboy-cli --lib cli_surface::reference_docs`"
-    );
-
-    assert_eq!(
-        actual.keys().collect::<Vec<_>>(),
-        expected.keys().collect::<Vec<_>>(),
-        "{GENERATED_DIR} does not contain exactly one page per visible top-level command; {regenerate}"
-    );
-
-    for (name, body) in &expected {
-        let current = actual
-            .get(name)
-            .map(String::as_str)
-            .expect("file set already asserted equal");
-        assert!(
-            current == body,
-            "{GENERATED_DIR}/{name} is stale ({} checked-in lines vs {} generated lines); {regenerate}",
-            current.lines().count(),
-            body.lines().count(),
-        );
+    let directory = workspace_root().join(GENERATED_DIR);
+    let expected = live_generated_reference_docs();
+    if directory.exists() {
+        std::fs::remove_dir_all(&directory).expect("failed to clear the generated CLI reference");
     }
-}
-
-#[test]
-fn live_clap_reference_matches_serialized_contract() {
-    assert_eq!(live_generated_reference_docs(), generated_reference_docs());
+    std::fs::create_dir_all(&directory)
+        .expect("failed to create the generated CLI reference directory");
+    for (name, body) in &expected {
+        std::fs::write(directory.join(name), body)
+            .unwrap_or_else(|error| panic!("failed to write {GENERATED_DIR}/{name}: {error}"));
+    }
+    let contract = serde_json::to_string_pretty(&CliReference::new(expected))
+        .expect("serialize CLI reference contract");
+    std::fs::write(
+        workspace_root().join("docs/reference/cli/command-surface.json"),
+        format!("{contract}\n"),
+    )
+    .expect("write CLI reference contract");
 }
 
 /// One generated page per visible top-level command, plus the index.

@@ -21,7 +21,7 @@ gh api repos/Extra-Chill/homeboy/rulesets/13680120
 ```
 
 The final command is review evidence. Its `required_status_checks` rule must
-contain exactly the eight contexts in the payload and set
+contain exactly the seven contexts in the payload and set
 `strict_required_status_checks_policy` to `true`. Test the installation with a
 PR that leaves `homeboy / Test`, `homeboy / Lint`, or `homeboy / Audit` pending;
 GitHub must report the PR as blocked until the check succeeds.
