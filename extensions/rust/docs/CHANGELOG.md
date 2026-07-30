@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.31.2] - 2026-07-30
+
+### Fixed
+- run workspace member tests on every scope kind
+
 ## [1.31.1] - 2026-07-30
 
 ### Fixed
