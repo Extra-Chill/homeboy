@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use crate::config::{
     is_default_github_config, ArtifactInput, CleanupArtifactDeclaration, ComponentDeployConfig,
     ComponentReleaseConfig, ComponentScriptsConfig, DependencyStackEdge,
-    DeploymentProviderAttachment, GitDeployConfig, GithubConfig, ScopeConfig,
+    DeploymentProviderAttachment, GitDeployConfig, GithubConfig, PackageArtifact, ScopeConfig,
     ScopedExtensionConfig, VersionTarget,
 };
 use homeboy_audit_contract::AuditConfig;
@@ -145,6 +145,9 @@ pub struct Component {
     pub deploy_together: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_inputs: Vec<ArtifactInput>,
+    /// Generated package inputs that exact-ref deploys must reconstruct before build.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_artifacts: Vec<PackageArtifact>,
     /// Override the CLI path used by extension deploy install steps.
     /// For example, local wrappers may need "lando wp" instead of the default "wp".
     pub cli_path: Option<String>,
@@ -256,6 +259,8 @@ struct RawComponent {
     deploy_together: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     artifact_inputs: Vec<ArtifactInput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    package_artifacts: Vec<PackageArtifact>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cli_path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -309,6 +314,7 @@ impl From<RawComponent> for Component {
             dependency_stack: raw.dependency_stack,
             deploy_together: raw.deploy_together,
             artifact_inputs: raw.artifact_inputs,
+            package_artifacts: raw.package_artifacts,
             cli_path: raw.cli_path,
             extra_drift_files: raw.extra_drift_files,
             cleanup_artifacts: raw.cleanup_artifacts,
@@ -358,6 +364,7 @@ impl From<Component> for RawComponent {
             dependency_stack: c.dependency_stack,
             deploy_together: c.deploy_together,
             artifact_inputs: c.artifact_inputs,
+            package_artifacts: c.package_artifacts,
             cli_path: c.cli_path,
             extra_drift_files: c.extra_drift_files,
             cleanup_artifacts: c.cleanup_artifacts,
@@ -438,6 +445,7 @@ impl Component {
             dependency_stack: Vec::new(),
             deploy_together: Vec::new(),
             artifact_inputs: Vec::new(),
+            package_artifacts: Vec::new(),
             cli_path: None,
             extra_drift_files: Vec::new(),
             cleanup_artifacts: Vec::new(),

@@ -251,6 +251,66 @@ impl ExactRefCheckout {
         }
     }
 
+    /// Ensure the selected source carries every explicitly declared package input
+    /// before the ordinary component build consumes time or produces output.
+    pub(crate) fn reconstruct_package_artifacts(&self) -> Result<()> {
+        for artifact in &self.component.package_artifacts {
+            let path = Path::new(&self.component.local_path).join(&artifact.path);
+            if glob::glob(&path.to_string_lossy())
+                .ok()
+                .is_some_and(|mut matches| matches.any(|entry| entry.is_ok()))
+            {
+                continue;
+            }
+            let command = artifact.reconstruct_command.as_deref().filter(|value| !value.trim().is_empty()).ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "package_artifacts.reconstruct_command",
+                    format!("Required package artifact '{}' is missing from exact-ref source for component '{}'. Declare package_artifacts[].reconstruct_command to generate it before deploying this ref.", artifact.path, self.component.id),
+                    Some(artifact.path.clone()),
+                    Some(vec![format!("Declare package_artifacts[].reconstruct_command to generate '{}' before deploying this ref.", artifact.path)]),
+                )
+            })?;
+            let output = std::process::Command::new("sh")
+                .args(["-c", command])
+                .current_dir(&self.component.local_path)
+                .output()
+                .map_err(|error| {
+                    Error::internal_io(
+                        format!("Failed to run package artifact reconstruction: {error}"),
+                        None,
+                    )
+                })?;
+            if !output.status.success() {
+                return Err(Error::validation_invalid_argument(
+                    "package_artifacts.reconstruct_command",
+                    format!(
+                        "Package artifact reconstruction failed for '{}' (exit {:?}): {}",
+                        artifact.path,
+                        output.status.code(),
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                    Some(artifact.path.clone()),
+                    None,
+                ));
+            }
+            if !glob::glob(&path.to_string_lossy())
+                .ok()
+                .is_some_and(|mut matches| matches.any(|entry| entry.is_ok()))
+            {
+                return Err(Error::validation_invalid_argument(
+                    "package_artifacts.path",
+                    format!(
+                        "Package artifact reconstruction completed but '{}' is still missing",
+                        artifact.path
+                    ),
+                    Some(artifact.path.clone()),
+                    None,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn cleanup(&mut self) {
         let _ = std::fs::remove_dir_all(&self.worktree_path);
     }
@@ -946,6 +1006,52 @@ mod tests {
             .hydrate_dependencies(true)
             .expect("explicit opt-out must skip hydration")
             .is_none());
+    }
+
+    #[test]
+    fn exact_ref_reconstructs_declared_package_artifact_before_build() {
+        let repo = fixture_repo();
+        let mut component = fixture_component(repo.path());
+        component.package_artifacts = vec![homeboy_core::component::PackageArtifact {
+            path: "generated/package.zip".to_string(),
+            reconstruct_command: Some(
+                "mkdir -p generated && printf package > generated/package.zip".to_string(),
+            ),
+        }];
+        let checkout =
+            ExactRefCheckout::materialize(&component, "HEAD", None).expect("materialize");
+
+        checkout
+            .reconstruct_package_artifacts()
+            .expect("reconstruct package artifact");
+
+        assert_eq!(
+            std::fs::read_to_string(
+                Path::new(&checkout.component.local_path).join("generated/package.zip")
+            )
+            .expect("artifact"),
+            "package"
+        );
+        assert!(!repo.path().join("generated/package.zip").exists());
+    }
+
+    #[test]
+    fn exact_ref_missing_package_artifact_requires_reconstruction_command_before_build() {
+        let repo = fixture_repo();
+        let mut component = fixture_component(repo.path());
+        component.package_artifacts = vec![homeboy_core::component::PackageArtifact {
+            path: "generated/package.zip".to_string(),
+            reconstruct_command: None,
+        }];
+        let checkout =
+            ExactRefCheckout::materialize(&component, "HEAD", None).expect("materialize");
+
+        let error = checkout
+            .reconstruct_package_artifacts()
+            .expect_err("missing declaration fails");
+
+        assert!(error.message.contains("Required package artifact"));
+        assert!(error.message.contains("reconstruct_command"));
     }
 
     #[test]
