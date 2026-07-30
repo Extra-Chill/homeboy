@@ -1124,6 +1124,71 @@ fn release_recovery_records_control_binary_lineage_against_the_release_target() 
     );
 }
 
+/// #10519's actual fix, pinned.
+///
+/// Recovery exists to repair a release whose publisher was broken. That only
+/// works if the binary performing the repair is NEWER than the tag it repairs.
+/// The mechanism is one line: `gate-build` checks out `github.sha` while every
+/// other release job checks out `inputs.release_tag || github.sha`.
+///
+/// That makes `gate-build` look like an inconsistency someone would tidy up,
+/// and tidying it silently restores the trap: recovery rebuilds the defective
+/// binary from the stranded tag and re-runs the bug that stranded it. v0.321.0
+/// burned two 40-minute cycles that way before the roles were separated by
+/// hand.
+#[test]
+fn release_recovery_builds_its_control_binary_from_main_not_the_recovered_tag() {
+    let workflow = release_workflow();
+    let gate_build = job_section(workflow, "gate-build");
+    let checkout = release_step_block(gate_build, "uses: actions/checkout@v4");
+
+    assert!(
+        checkout.contains("ref: ${{ github.sha }}"),
+        "gate-build must check out the event commit so the finalizer carries the \
+         current recovery contract; got:\n{checkout}"
+    );
+    assert!(
+        !checkout.contains("inputs.release_tag"),
+        "gate-build must NOT follow the recovered tag. Building the control binary \
+         from the tag being recovered reruns the publisher bug that stranded it \
+         (#10519); got:\n{checkout}"
+    );
+
+    // The binary that job produces is the one recovery must execute.
+    assert!(
+        gate_build.contains("name: homeboy-binary"),
+        "gate-build must publish its binary as the shared `homeboy-binary` artifact"
+    );
+}
+
+/// The control binary is only load-bearing if the finalizer actually runs it.
+/// `source: '.'` alone would rebuild from the recovered tag's tree, which is
+/// the same trap by a different route (#10519).
+#[test]
+fn release_recovery_finalizer_executes_the_main_built_binary() {
+    let workflow = release_workflow();
+    let host = job_section(workflow, "host");
+
+    let download = release_step_block(host, "name: Download current Homeboy finalizer");
+    assert!(
+        download.contains("name: homeboy-binary") && download.contains("path: .homeboy-bin"),
+        "recovery must fetch the main-built binary produced by gate-build; got:\n{download}"
+    );
+    // The download itself is unconditional -- fetching the binary is cheap and
+    // always-available evidence. The recovery binding lives on `binary-path`
+    // below, which is what decides whether it is actually executed.
+
+    let finalize = release_step_block(host, "name: Finish Homeboy release pipeline at tag");
+    assert!(
+        finalize.contains(".homeboy-bin/homeboy"),
+        "recovery must publish with the downloaded control binary, not a tree rebuild; got:\n{finalize}"
+    );
+    assert!(
+        finalize.contains("recovery-release == 'true'"),
+        "binary-path must be bound to the recovery path so normal releases are unaffected"
+    );
+}
+
 /// Extract the shell body of a `run: |` step so its BEHAVIOUR can be exercised
 /// rather than string-matched. Asserting the effect is the whole point: the
 /// audit gate in #10685 passed for weeks because its test asserted the command
