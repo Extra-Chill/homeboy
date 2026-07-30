@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.9.3] - 2026-07-30
+
+### Fixed
+- preserve CLI and CI result provenance
+
 ## [2.9.2] - 2026-07-29
 
 ### Fixed
