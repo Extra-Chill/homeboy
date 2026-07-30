@@ -24,7 +24,11 @@ TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 DEPENDENCY_DIR="${TMP_ROOT}/fixture-dependency"
-mkdir -p "${DEPENDENCY_DIR}/includes/core" "${DEPENDENCY_DIR}/vendor/acme" "${DEPENDENCY_DIR}/tests"
+mkdir -p \
+    "${DEPENDENCY_DIR}/includes/core" \
+    "${DEPENDENCY_DIR}/inc/Core/Database/Agents" \
+    "${DEPENDENCY_DIR}/vendor/acme" \
+    "${DEPENDENCY_DIR}/tests"
 
 cat > "${DEPENDENCY_DIR}/fixture-dependency.php" <<'PHP'
 <?php
@@ -37,6 +41,20 @@ cat > "${DEPENDENCY_DIR}/includes/core/template-functions.php" <<'PHP'
 <?php
 function fixture_dep_template_part( $slug, $name = null ) {
     return $slug . (string) $name;
+}
+PHP
+
+# Deeply nested PSR-4 source. Real dependency trees reach this depth, and a
+# shallow bound would silently omit it — reintroducing shadowing as
+# unresolved-method findings.
+cat > "${DEPENDENCY_DIR}/inc/Core/Database/Agents/Agents.php" <<'PHP'
+<?php
+namespace Fixture\Core\Database\Agents;
+
+class Agents {
+    public function get_agent( int $agent_id ): ?array {
+        return null;
+    }
 }
 PHP
 
@@ -70,6 +88,13 @@ fi
 
 if ! grep -F "${DEPENDENCY_DIR}/fixture-dependency.php" <<< "$signature_files" >/dev/null; then
     echo "FAIL: dependency root plugin file must be pinned" >&2
+    printf '%s\n' "$signature_files" >&2
+    exit 1
+fi
+
+# Depth bound must clear real PSR-4 layouts, not just top-level API surface.
+if ! grep -F "${DEPENDENCY_DIR}/inc/Core/Database/Agents/Agents.php" <<< "$signature_files" >/dev/null; then
+    echo "FAIL: deeply nested dependency sources must be pinned; the depth bound is too shallow" >&2
     printf '%s\n' "$signature_files" >&2
     exit 1
 fi

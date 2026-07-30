@@ -398,11 +398,19 @@ homeboy_resolve_phpstan_context_files() {
 # dependency's real signature governs analysis. Both mechanisms are emitted:
 # `scanDirectories:` keeps whole-tree discovery for autoloaded classes, and
 # `scanFiles:` pins the function signatures that shadowing would otherwise
-# corrupt. Depth is bounded so large dependency trees stay affordable — the
-# shadowed symbols in practice are top-level plugin API surface.
+# corrupt.
+#
+# Depth is bounded so pathological trees stay affordable, but the bound must
+# clear real plugin layouts. PSR-4 sources routinely nest further than the
+# top-level API surface: `inc/Core/Database/Agents/Agents.php` is depth 5, and
+# measured dependency trees reach depth 8. A shallower bound silently omits
+# those files, which reintroduces the shadowing this function exists to
+# prevent — as unresolved-method findings rather than arity ones. Vendored
+# code, node_modules, build output, and the dependency's own tests are excluded
+# above, so the remaining tree is first-party source.
 homeboy_resolve_phpstan_dependency_signature_files() {
     local dependency_path="$1"
-    local depth="${HOMEBOY_PHPSTAN_DEPENDENCY_SIGNATURE_DEPTH:-4}"
+    local depth="${HOMEBOY_PHPSTAN_DEPENDENCY_SIGNATURE_DEPTH:-10}"
 
     [ -d "$dependency_path" ] || return 0
 
