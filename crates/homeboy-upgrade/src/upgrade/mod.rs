@@ -9,6 +9,7 @@ pub mod update_check;
 mod validation;
 
 pub(crate) use constants::VERSION;
+pub use execution::parse_build_identity_display;
 pub use helpers::{
     current_build_version, current_version, detect_install_method, fetch_latest_version,
     run_upgrade_with_method, version_is_newer,

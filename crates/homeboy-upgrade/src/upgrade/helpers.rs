@@ -347,7 +347,7 @@ pub fn run_upgrade_with_method(
                 runner_method_override,
                 source_upgrade_path.as_deref(),
                 source_path.is_some(),
-                None,
+                new_build_identity.as_deref(),
                 runner_targets,
                 &extensions_updated,
             )
