@@ -216,7 +216,7 @@ fn layered_payload(
     policy: &serde_json::Value,
     target: Option<&serde_json::Value>,
 ) -> Result<tempfile::NamedTempFile> {
-    let policy_bytes = serde_json::to_vec(policy)
+    let policy_bytes = homeboy_engine_primitives::canonical_json::canonical_json_bytes(policy)
         .map_err(|_| Error::internal_io("Could not serialize deployment provider policy", None))?;
     let revision = clean_head_revision(component)?;
     let payload = serde_json::json!({
@@ -499,9 +499,17 @@ mod tests {
             String::new(),
             None,
         );
+        let policy = serde_json::json!({
+            "limits": {
+                "timeout_ms": 120000,
+                "attempts": 3
+            },
+            "steps": ["prepare", "apply"],
+            "mode": "strict"
+        });
         let payload = layered_payload(
             &component,
-            &serde_json::json!({ "policy": "repository" }),
+            &policy,
             Some(&serde_json::json!({ "target": "one" })),
         )
         .expect("payload");
@@ -510,10 +518,7 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_reader(payload.reopen().expect("reopen")).expect("payload json");
         assert_eq!(value["schema"], "homeboy/deployment-provider-payload/v1");
-        assert_eq!(
-            value["policy"]["value"],
-            serde_json::json!({ "policy": "repository" })
-        );
+        assert_eq!(value["policy"]["value"], policy);
         assert_eq!(value["policy"]["reference"]["component"], "fixture");
         assert_eq!(
             value["policy"]["reference"]["path"],
@@ -521,16 +526,13 @@ mod tests {
         );
         assert_eq!(
             value["policy"]["reference"]["digest"],
-            homeboy_engine_primitives::content_hash::sha256_hex(
-                &serde_json::to_vec(&serde_json::json!({ "policy": "repository" }))
-                    .expect("policy bytes")
-            )
+            "949ad67abac10d72ad874d207bff61620811c313540a65be3a9d697d280f5412"
         );
         assert_eq!(value["target"], serde_json::json!({ "target": "one" }));
         assert_eq!(value["source"]["revision"].as_str().map(str::len), Some(40));
         let second = layered_payload(
             &component,
-            &serde_json::json!({ "policy": "repository" }),
+            &policy,
             Some(&serde_json::json!({ "target": "two" })),
         )
         .expect("second payload");

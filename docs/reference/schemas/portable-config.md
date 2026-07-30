@@ -99,7 +99,7 @@ Build, lint, test, bench, trace, and deps behavior resolves from `scripts.<capab
 
 Use `deploy_together` for coupled components that are versioned or built separately but must stay in sync at runtime. When a deploy selection includes one member of a declared group without the rest, Homeboy fails the plan before building or uploading.
 
-Layered deployment providers keep all repository-owned Homeboy policy inline in root `homeboy.json` under `deployment_provider.policy`. Product, application, and runtime code has no Homeboy dependency and does not need a separate deployment contract file. `deployment_provider.contract` remains available only for legacy unlayered providers. Provider target input is intentionally project-only and never belongs in portable `homeboy.json`.
+Layered deployment providers keep all repository-owned Homeboy policy inline in root `homeboy.json` under `deployment_provider.policy`. Product, application, and runtime code has no Homeboy dependency and does not need a separate deployment contract file. `deployment_provider.contract` remains available only for legacy unlayered providers. Provider target input is intentionally project-only and never belongs in portable `homeboy.json`. The `homeboy/deployment-provider-payload/v1` policy reference digest is SHA-256 over Homeboy canonical JSON bytes: object keys are recursively sorted, arrays preserve order, and scalar values are unchanged.
 
 ## Precedence
 
