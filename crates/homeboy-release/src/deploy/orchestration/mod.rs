@@ -18,7 +18,10 @@ use super::orchestration_tag_checkout::{
 };
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
 use super::planning::{load_project_components_with_projection, plan_components};
-use super::types::{ComponentDeployResult, DeployConfig, DeployOrchestrationResult, DeploySummary};
+use super::types::{
+    ComponentDeployResult, DeployConfig, DeployOrchestrationResult, DeploySummary, VersionSource,
+    VersionSources,
+};
 use super::version_overrides::fetch_remote_versions_for_project;
 use homeboy_core::git::release_download::{ReleaseArtifactLease, ReleaseArtifactStore};
 
@@ -203,6 +206,8 @@ pub(super) fn deploy_components(
             .collect()
     };
 
+    version::validate_component_versions(&components)?;
+
     // Gather versions
     let mut local_versions: HashMap<String, String> = components
         .iter()
@@ -229,7 +234,7 @@ pub(super) fn deploy_components(
 
     // Check and dry-run modes return early without building or deploying
     if config.check {
-        return Ok(run_check_mode(
+        let mut result = run_check_mode(
             &components,
             &local_versions,
             &remote_versions,
@@ -240,17 +245,21 @@ pub(super) fn deploy_components(
             &ctx.client,
             &resolved_release_artifacts,
             &unavailable_canonical_packages,
-        ));
+        );
+        attach_version_sources(&mut result, &components);
+        return Ok(result);
     }
     if config.dry_run {
-        return Ok(run_dry_run_mode(
+        let mut result = run_dry_run_mode(
             &components,
             &local_versions,
             &remote_versions,
             &project,
             base_path,
             config,
-        )?);
+        )?;
+        attach_version_sources(&mut result, &components);
+        return Ok(result);
     }
 
     // Only local builds require mutable checkout safety checks. Release assets are
@@ -357,6 +366,8 @@ pub(super) fn deploy_components(
     }
     let components = components;
 
+    version::validate_component_versions(&components)?;
+
     // Verify expected version if --version was specified
     if let Some(ref expected) = config.expected_version {
         if let Err(err) = verify_expected_version(&local_build_components, expected) {
@@ -398,7 +409,7 @@ pub(super) fn deploy_components(
             if !tag_checkouts.is_empty() {
                 restore_branches(&tag_checkouts);
             }
-            return Ok(DeployOrchestrationResult {
+            let mut result = DeployOrchestrationResult {
                 results: failures,
                 summary: DeploySummary {
                     total: failed,
@@ -407,7 +418,9 @@ pub(super) fn deploy_components(
                     skipped: 0,
                 },
                 deploy_run_id: None,
-            });
+            };
+            attach_version_sources(&mut result, &components);
+            return Ok(result);
         }
     };
 
@@ -623,7 +636,7 @@ pub(super) fn deploy_components(
     // payload has been built, transferred, and smoke-checked.
     drop(tag_ref_checkouts);
 
-    Ok(DeployOrchestrationResult {
+    let mut result = DeployOrchestrationResult {
         results,
         summary: DeploySummary {
             total: succeeded + failed,
@@ -632,7 +645,43 @@ pub(super) fn deploy_components(
             skipped: 0,
         },
         deploy_run_id: None,
-    })
+    };
+    attach_version_sources(&mut result, &components);
+    Ok(result)
+}
+
+fn attach_version_sources(result: &mut DeployOrchestrationResult, components: &[Component]) {
+    for row in &mut result.results {
+        let Some(component) = components.iter().find(|component| component.id == row.id) else {
+            continue;
+        };
+        let local = row
+            .local_version
+            .as_ref()
+            .and_then(|_| version::local_version_source(component));
+        let artifact = row
+            .artifact_path
+            .as_ref()
+            .and_then(|_| row.local_version.as_ref())
+            .and_then(|_| version::artifact_version_source(component));
+        let remote = row.remote_version.as_ref().and_then(|_| {
+            version::local_version_source(component).map(|source| VersionSource {
+                path: row
+                    .remote_path
+                    .as_ref()
+                    .map(|path| format!("{}/{}", path.trim_end_matches('/'), source.file))
+                    .unwrap_or(source.path),
+                file: source.file,
+            })
+        });
+        if local.is_some() || artifact.is_some() || remote.is_some() {
+            row.version_sources = Some(VersionSources {
+                local,
+                artifact,
+                remote,
+            });
+        }
+    }
 }
 
 /// Resolve and verify reusable GitHub release assets for a deploy.

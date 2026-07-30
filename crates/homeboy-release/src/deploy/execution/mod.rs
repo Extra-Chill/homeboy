@@ -748,6 +748,39 @@ mod tests {
     }
 
     #[test]
+    fn predeploy_artifact_version_inspection_checks_root_and_nested_plugin_targets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact = temp.path().join("fixture.zip");
+        write_zip(
+            &artifact,
+            &[
+                ("fixture/package.json", r#"{"version":"1.2.3"}"#),
+                ("fixture/plugin/plugin.php", "<?php\n/* Version: 1.2.3 */\n"),
+            ],
+        );
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            version_targets: Some(vec![
+                VersionTarget {
+                    file: "package.json".to_string(),
+                    pattern: Some(r#""version"\s*:\s*"([0-9.]+)""#.to_string()),
+                    artifact_path: None,
+                },
+                VersionTarget {
+                    file: "plugin/plugin.php".to_string(),
+                    pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
+                    artifact_path: None,
+                },
+            ]),
+            ..Component::default()
+        };
+
+        validate_predeploy_artifact_version(&component, &artifact, "1.2.3")
+            .expect("every declared artifact target matches the resolved version");
+    }
+
+    #[test]
     fn predeploy_artifact_version_inspection_uses_artifact_path_override() {
         // Mirrors @wordpress/scripts plugins: bump source `blocks/<block>/block.json`
         // but ship the compiled `build/<block>/block.json` (source `blocks/` excluded

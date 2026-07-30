@@ -25,11 +25,13 @@ pub use types::{
 
 use crate::release::changelog;
 use homeboy_core::component::{self, Component, VersionTarget};
+use homeboy_core::error::{Error, Result};
+
+use crate::deploy::VersionSource;
 use homeboy_core::config::{from_str, set_json_pointer, to_string_pretty};
 use homeboy_core::engine::hooks::{self, HookFailureMode};
 use homeboy_core::engine::local_files;
 use homeboy_core::engine::text;
-use homeboy_core::error::{Error, Result};
 use homeboy_extension::ExtensionManifest;
 use serde_json::Value;
 use std::path::Path;
@@ -91,12 +93,93 @@ pub fn increment_version(version: &str, bump_type: &str) -> Option<String> {
     Some(next.to_string())
 }
 
-/// Get version string from a component's first version target.
-/// Returns None if no version targets configured or version can't be read.
-/// Use this for simple version checks (e.g., deploy outdated detection).
+/// Get the component version from a stable canonical target.
+///
+/// Deploy validates that all declared targets agree before it acts. This helper
+/// remains optional for status callers that cannot return a diagnostic.
 pub fn get_component_version(component: &Component) -> Option<String> {
-    let target = component.version_targets.as_ref()?.first()?;
+    let target = canonical_version_target(component)?;
     read_local_version(&component.local_path, target)
+}
+
+pub(crate) fn validate_component_versions(components: &[Component]) -> Result<()> {
+    for component in components {
+        let Some(targets) = component.version_targets.as_ref() else {
+            continue;
+        };
+        if targets.is_empty() {
+            return Err(Error::config_invalid_value(
+                "versionTargets",
+                None,
+                format!("Component '{}' has empty versionTargets", component.id),
+            ));
+        }
+
+        let mut observed = Vec::new();
+        for target in targets {
+            // Retain the existing unversioned-component behavior when a target
+            // is unavailable in this deploy mode. Once targets are readable,
+            // their values must agree before deploy can compare or package.
+            if let Some(version) = read_local_version(&component.local_path, target) {
+                observed.push((target.file.clone(), version));
+            }
+        }
+        if observed.len() != targets.len() {
+            continue;
+        }
+        let expected = &observed[0].1;
+        if observed.iter().any(|(_, version)| version != expected) {
+            let values = observed
+                .iter()
+                .map(|(file, version)| format!("{file}={version}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(Error::validation_invalid_argument(
+                "versionTargets",
+                format!(
+                    "Component '{}' has conflicting declared version targets: {values}. Deploy requires all declared targets to resolve to one version.",
+                    component.id
+                ),
+                None,
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn local_version_source(component: &Component) -> Option<VersionSource> {
+    let target = canonical_version_target(component)?;
+    Some(VersionSource {
+        file: target.file.clone(),
+        path: resolve_version_file_path(&component.local_path, &target.file),
+    })
+}
+
+pub(crate) fn artifact_version_source(component: &Component) -> Option<VersionSource> {
+    let target = canonical_version_target(component)?;
+    let file = target
+        .artifact_path
+        .clone()
+        .unwrap_or_else(|| target.file.clone());
+    Some(VersionSource {
+        path: file.clone(),
+        file,
+    })
+}
+
+fn canonical_version_target(component: &Component) -> Option<&VersionTarget> {
+    component
+        .version_targets
+        .as_ref()?
+        .iter()
+        .min_by_key(|target| {
+            (
+                target.file.as_str(),
+                target.pattern.as_deref().unwrap_or_default(),
+                target.artifact_path.as_deref().unwrap_or_default(),
+            )
+        })
 }
 
 pub(crate) fn replace_versions(
@@ -594,6 +677,82 @@ mod tests {
             changelog_target: Some("CHANGELOG.md".to_string()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn deploy_version_policy_accepts_root_and_nested_artifact_targets_in_any_order() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp_dir.path().join("plugins/example")).unwrap();
+        fs::write(
+            temp_dir.path().join("package.json"),
+            r#"{"version":"1.2.3"}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("plugins/example/example.php"),
+            "<?php\n/* Version: 1.2.3 */\n",
+        )
+        .unwrap();
+        let mut component = make_test_component(&temp_dir);
+        component.version_targets = Some(vec![
+            VersionTarget {
+                file: "plugins/example/example.php".to_string(),
+                pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
+                artifact_path: Some("example/example.php".to_string()),
+            },
+            VersionTarget {
+                file: "package.json".to_string(),
+                pattern: Some(r#""version"\s*:\s*"([0-9.]+)""#.to_string()),
+                artifact_path: Some("package.json".to_string()),
+            },
+        ]);
+
+        validate_component_versions(&[component.clone()]).expect("matching targets");
+        assert_eq!(get_component_version(&component).as_deref(), Some("1.2.3"));
+        assert_eq!(
+            local_version_source(&component).expect("local source").file,
+            "package.json"
+        );
+        assert_eq!(
+            artifact_version_source(&component)
+                .expect("artifact source")
+                .path,
+            "package.json"
+        );
+    }
+
+    #[test]
+    fn deploy_version_policy_rejects_conflicting_root_and_nested_targets() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp_dir.path().join("plugins/example")).unwrap();
+        fs::write(
+            temp_dir.path().join("package.json"),
+            r#"{"version":"1.2.3"}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("plugins/example/example.php"),
+            "<?php\n/* Version: 1.2.4 */\n",
+        )
+        .unwrap();
+        let mut component = make_test_component(&temp_dir);
+        component.version_targets = Some(vec![
+            VersionTarget {
+                file: "package.json".to_string(),
+                pattern: Some(r#""version"\s*:\s*"([0-9.]+)""#.to_string()),
+                artifact_path: None,
+            },
+            VersionTarget {
+                file: "plugins/example/example.php".to_string(),
+                pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
+                artifact_path: None,
+            },
+        ]);
+
+        let error = validate_component_versions(&[component]).expect_err("conflicting targets");
+        assert!(error
+            .message
+            .contains("conflicting declared version targets"));
     }
 
     #[test]

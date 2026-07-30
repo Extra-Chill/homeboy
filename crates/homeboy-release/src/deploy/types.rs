@@ -468,6 +468,25 @@ pub struct ContentManifestProvenance {
     pub artifact_commit: Option<String>,
 }
 
+/// A declared version target and the path from which that version was observed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionSource {
+    pub file: String,
+    pub path: String,
+}
+
+/// Version-target provenance for deploy output. Every populated source follows
+/// the component-wide all-targets-must-match policy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VersionSources {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local: Option<VersionSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<VersionSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<VersionSource>,
+}
+
 /// Result for a single component deployment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
@@ -482,6 +501,8 @@ pub struct ComponentDeployResult {
     pub content_manifest: Option<ContentManifestComparison>,
     pub local_version: Option<String>,
     pub remote_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_sources: Option<VersionSources>,
     pub local_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
@@ -549,6 +570,7 @@ impl ComponentDeployResult {
             content_manifest: None,
             local_version: None,
             remote_version: None,
+            version_sources: None,
             local_path: Some(component.local_path.clone()),
             git_branch: None,
             git_head: None,
