@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
@@ -209,6 +210,169 @@ pub fn attach_discovered_component_path(project_id: &str, local_path: &Path) -> 
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonorepoComponentPathChange {
+    pub id: String,
+    pub path: String,
+    pub status: MonorepoComponentPathStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonorepoComponentPathStatus {
+    Attached,
+    Unchanged,
+    Missing,
+    Unrelated,
+}
+
+/// Discovers portable components below one checkout and commits all matching
+/// project-path rebases with a single config-lock acquisition and save.
+pub fn rebase_monorepo_component_paths(
+    project_id: &str,
+    root: &Path,
+    dry_run: bool,
+) -> Result<Vec<MonorepoComponentPathChange>> {
+    crate::config::with_config_lock(|| {
+        rebase_monorepo_component_paths_unlocked(project_id, root, dry_run)
+    })
+}
+
+fn rebase_monorepo_component_paths_unlocked(
+    project_id: &str,
+    root: &Path,
+    dry_run: bool,
+) -> Result<Vec<MonorepoComponentPathChange>> {
+    let discovered = discover_portable_component_paths(root)?;
+    let mut project = load(project_id)?;
+    let root_id = infer_portable_component_id(root)?;
+    let mut changes = Vec::new();
+    let mut selected = HashSet::new();
+
+    for (id, paths) in &discovered {
+        if paths.len() > 1 {
+            return Err(Error::validation_invalid_argument(
+                "local_path",
+                format!("Ambiguous component ID '{id}' appears at multiple paths"),
+                Some(project_id.to_string()),
+                Some(
+                    paths
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect(),
+                ),
+            ));
+        }
+        if id == &root_id || has_component(&project, id) {
+            selected.insert(id.clone());
+            let path = paths[0].to_string_lossy().to_string();
+            let status = project
+                .components
+                .iter()
+                .find(|component| component.id == *id)
+                .map(|component| component.local_path == path)
+                .unwrap_or(false)
+                .then_some(MonorepoComponentPathStatus::Unchanged)
+                .unwrap_or(MonorepoComponentPathStatus::Attached);
+            if status == MonorepoComponentPathStatus::Attached {
+                preserve_remote_path_on_reattach(&mut project, id, &path);
+                if let Some(component) = project
+                    .components
+                    .iter_mut()
+                    .find(|component| component.id == *id)
+                {
+                    component.local_path = path.clone();
+                } else {
+                    project.components.push(ProjectComponentAttachment {
+                        id: id.clone(),
+                        local_path: path.clone(),
+                        remote_path: None,
+                        deployment_provider: None,
+                    });
+                }
+            }
+            changes.push(MonorepoComponentPathChange {
+                id: id.clone(),
+                path,
+                status,
+            });
+        } else {
+            changes.push(MonorepoComponentPathChange {
+                id: id.clone(),
+                path: paths[0].to_string_lossy().to_string(),
+                status: MonorepoComponentPathStatus::Missing,
+            });
+        }
+    }
+
+    for component in &project.components {
+        if !selected.contains(&component.id) {
+            changes.push(MonorepoComponentPathChange {
+                id: component.id.clone(),
+                path: component.local_path.clone(),
+                status: if Path::new(&component.local_path).starts_with(root) {
+                    MonorepoComponentPathStatus::Missing
+                } else {
+                    MonorepoComponentPathStatus::Unrelated
+                },
+            });
+        }
+    }
+    changes.sort_by(|left, right| left.id.cmp(&right.id).then(left.path.cmp(&right.path)));
+
+    if !dry_run
+        && changes
+            .iter()
+            .any(|change| change.status == MonorepoComponentPathStatus::Attached)
+    {
+        save(&project)?;
+    }
+    Ok(changes)
+}
+
+fn discover_portable_component_paths(root: &Path) -> Result<BTreeMap<String, Vec<PathBuf>>> {
+    if !root.is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "local_path",
+            "Monorepo root must be an existing directory",
+            Some(root.display().to_string()),
+            None,
+        ));
+    }
+    let mut pending = vec![root.to_path_buf()];
+    let mut discovered = BTreeMap::new();
+    while let Some(directory) = pending.pop() {
+        if directory.join("homeboy.json").is_file() {
+            let id = infer_portable_component_id(&directory)?;
+            discovered
+                .entry(id)
+                .or_insert_with(Vec::new)
+                .push(directory.clone());
+        }
+        let mut children: Vec<_> = std::fs::read_dir(&directory)
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "local_path",
+                    format!("Unable to read monorepo directory: {error}"),
+                    Some(directory.display().to_string()),
+                    None,
+                )
+            })?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name() != ".git")
+            .filter_map(|entry| {
+                entry
+                    .file_type()
+                    .ok()
+                    .filter(|kind| kind.is_dir())
+                    .map(|_| entry.path())
+            })
+            .collect();
+        children.sort();
+        pending.extend(children.into_iter().rev());
+    }
+    Ok(discovered)
+}
+
 fn attach_discovered_component_path_unlocked(
     project_id: &str,
     local_path: &Path,
@@ -384,6 +548,97 @@ mod tests {
             let mut ids = project_component_ids(&load("site").expect("load project"));
             ids.sort();
             assert_eq!(ids, vec!["component-a", "component-b"]);
+        });
+    }
+
+    #[test]
+    fn monorepo_rebase_previews_then_commits_all_matching_components_together() {
+        with_isolated_home(|home| {
+            let old = home.path().join("deleted-checkout");
+            save(&Project {
+                id: "site".to_string(),
+                components: vec![
+                    ProjectComponentAttachment {
+                        id: "root".to_string(),
+                        local_path: old.join("root").display().to_string(),
+                        remote_path: None,
+                        deployment_provider: None,
+                    },
+                    ProjectComponentAttachment {
+                        id: "nested".to_string(),
+                        local_path: old.join("nested").display().to_string(),
+                        remote_path: None,
+                        deployment_provider: None,
+                    },
+                    ProjectComponentAttachment {
+                        id: "other-repo".to_string(),
+                        local_path: "/other-repo".to_string(),
+                        remote_path: None,
+                        deployment_provider: None,
+                    },
+                ],
+                ..Default::default()
+            })
+            .expect("save project");
+            let root = home.path().join("checkout");
+            fs::create_dir_all(root.join("nested")).expect("nested directory");
+            fs::write(root.join("homeboy.json"), r#"{"id":"root"}"#).expect("root config");
+            fs::write(root.join("nested/homeboy.json"), r#"{"id":"nested"}"#)
+                .expect("nested config");
+
+            let preview = rebase_monorepo_component_paths("site", &root, true).expect("preview");
+            assert_eq!(
+                preview
+                    .iter()
+                    .filter(|change| change.status == MonorepoComponentPathStatus::Attached)
+                    .count(),
+                2
+            );
+            assert_eq!(
+                load("site").expect("unchanged project").components[0].local_path,
+                old.join("root").display().to_string()
+            );
+
+            let applied = rebase_monorepo_component_paths("site", &root, false).expect("apply");
+            assert_eq!(applied, preview);
+            let project = load("site").expect("rebased project");
+            assert_eq!(project.components[0].local_path, root.display().to_string());
+            assert_eq!(
+                project.components[1].local_path,
+                root.join("nested").display().to_string()
+            );
+            assert_eq!(project.components[2].local_path, "/other-repo");
+        });
+    }
+
+    #[test]
+    fn monorepo_rebase_rejects_duplicate_ids_without_mutating_config() {
+        with_isolated_home(|home| {
+            let root = home.path().join("checkout");
+            fs::create_dir_all(root.join("one")).expect("one directory");
+            fs::create_dir_all(root.join("two")).expect("two directory");
+            fs::write(root.join("homeboy.json"), r#"{"id":"root"}"#).expect("root config");
+            fs::write(root.join("one/homeboy.json"), r#"{"id":"duplicate"}"#).expect("one config");
+            fs::write(root.join("two/homeboy.json"), r#"{"id":"duplicate"}"#).expect("two config");
+            save(&Project {
+                id: "site".to_string(),
+                components: vec![ProjectComponentAttachment {
+                    id: "root".to_string(),
+                    local_path: "/old-root".to_string(),
+                    remote_path: None,
+                    deployment_provider: None,
+                }],
+                ..Default::default()
+            })
+            .expect("save project");
+
+            let error =
+                rebase_monorepo_component_paths("site", &root, false).expect_err("duplicates fail");
+            assert!(error.message.contains("Ambiguous component ID 'duplicate'"));
+            assert_eq!(
+                load("site").expect("unchanged project").components[0].local_path,
+                "/old-root"
+            );
         });
     }
 }
