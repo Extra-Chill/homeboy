@@ -16,7 +16,7 @@ use homeboy_core::engine::command::CommandCaptureMetadata;
 use homeboy_core::env_materialization_plan::EnvMaterializationPlan;
 use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::lab_contract::{LabRunnerWorkload, LabRunnerWorkloadArtifactRef};
-use homeboy_core::observation::{NewRunRecord, ObservationStore, RunStatus};
+use homeboy_core::observation::{NewRunRecord, ObservationStore, RunListFilter, RunStatus};
 use homeboy_core::runner_execution_envelope::{
     BinaryProvenance, ExtensionProvenance, OrchestrationTargetProvenance, PathMaterializationEntry,
     PathMaterializationPlan, RunnerExecutionNextAction, RunnerExecutionRecord,

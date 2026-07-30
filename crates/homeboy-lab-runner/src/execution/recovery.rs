@@ -2,6 +2,8 @@
 
 use super::*;
 
+const STARTUP_RUNNER_EXEC_RECOVERY_LIMIT: i64 = 100;
+
 /// Scan durable generic runner-exec runs, query their exact accepted runner-job
 /// binding, then retain declared evidence before terminal projection. This runs
 /// before command dispatch so a new daemon operation cannot evict a completed
@@ -9,7 +11,12 @@ use super::*;
 pub fn reconcile_terminal_runner_exec_runs() -> Result<usize> {
     let store = ObservationStore::open_initialized()?;
     let mut reconciled = 0;
-    for run in store.list_active_runs()? {
+    for run in store.list_runs(RunListFilter {
+        kind: Some("runner_execution".to_string()),
+        status: Some(RunStatus::Running.as_str().to_string()),
+        limit: Some(STARTUP_RUNNER_EXEC_RECOVERY_LIMIT),
+        ..RunListFilter::default()
+    })? {
         if run.metadata_json.get("kind").and_then(Value::as_str) != Some("runner_exec") {
             continue;
         }
@@ -225,6 +232,71 @@ mod tests {
     use super::*;
     use homeboy_core::test_support::with_isolated_home;
     use homeboy_core::{Error, ErrorCode};
+
+    #[test]
+    fn startup_recovery_does_not_materialize_unrelated_active_payloads() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let unrelated = store
+                .start_run(NewRunRecord::builder("unrelated").build())
+                .expect("unrelated run");
+            drop(store);
+
+            let path = homeboy_core::observation::store::database_path().expect("database path");
+            let connection = rusqlite::Connection::open(path).expect("open database");
+            connection
+                .execute("DROP INDEX idx_runs_metadata_retry_of", [])
+                .expect("drop metadata expression index");
+            connection
+                .execute(
+                    "UPDATE runs SET metadata_json = 'invalid-json' WHERE id = ?1",
+                    [&unrelated.id],
+                )
+                .expect("corrupt unrelated payload");
+            drop(connection);
+
+            assert_eq!(
+                reconcile_terminal_runner_exec_runs().expect("bounded recovery"),
+                0
+            );
+        });
+    }
+
+    #[test]
+    fn startup_recovery_bounds_runner_exec_candidates() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            drop(store);
+            let path = homeboy_core::observation::store::database_path().expect("database path");
+            let connection = rusqlite::Connection::open(path).expect("open database");
+            connection
+                .execute("DROP INDEX idx_runs_metadata_retry_of", [])
+                .expect("drop metadata expression index");
+            for index in 0..STARTUP_RUNNER_EXEC_RECOVERY_LIMIT {
+                connection
+                    .execute(
+                        "INSERT INTO runs(id, kind, started_at, status, metadata_json) VALUES (?1, 'runner_execution', ?2, 'running', '{\"kind\":\"runner_exec\"}')",
+                        rusqlite::params![
+                            format!("candidate-{index}"),
+                            format!("2026-07-30T{:02}:{:02}:00Z", 18 + index / 60, index % 60)
+                        ],
+                    )
+                    .expect("insert candidate");
+            }
+            connection
+                .execute(
+                    "INSERT INTO runs(id, kind, started_at, status, metadata_json) VALUES ('outside-budget', 'runner_execution', '2026-01-01T00:00:00Z', 'running', 'invalid-json')",
+                    [],
+                )
+                .expect("insert outside-budget candidate");
+            drop(connection);
+
+            assert_eq!(
+                reconcile_terminal_runner_exec_runs().expect("bounded recovery"),
+                0
+            );
+        });
+    }
 
     #[test]
     fn daemon_eviction_preserves_literal_declaration_paths_in_loss_detection() {
