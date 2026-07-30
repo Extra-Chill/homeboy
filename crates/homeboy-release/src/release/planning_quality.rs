@@ -478,6 +478,16 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
+    use std::sync::{Mutex, OnceLock};
+
+    static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn test_env_guard() -> std::sync::MutexGuard<'static, ()> {
+        TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("release test env lock")
+    }
 
     impl LintQualityOutcome {
         fn expect_passed_with_value(self, expected_ran: bool) -> bool {
@@ -620,6 +630,41 @@ mod tests {
             )])),
             ..Default::default()
         }
+    }
+
+    fn conditional_extension_test_component(home: &Path, source: &Path, script: &str) -> Component {
+        let mut component = extension_test_component(home, source, script);
+        fs::write(
+            home.join(".config/homeboy/extensions/release-test-fixture/release-test-fixture.json"),
+            r#"{
+                "name":"Release test fixture",
+                "version":"1.0.0",
+                "settings":[{"id":"service","label":"Service","type":"object","default":{"mode":"local"}}],
+                "test":{
+                    "extension_script":"test.sh",
+                    "secret_env":{"DECLARED_RELEASE_SECRET":"DECLARED_RELEASE_SECRET"},
+                    "secret_env_projections":[{
+                        "when":{"path":["service","mode"],"equals":"remote"},
+                        "names_path":["service","secret_env"]
+                    }]
+                }
+            }"#,
+        )
+        .expect("conditional release manifest");
+        component
+            .extensions
+            .as_mut()
+            .and_then(|extensions| extensions.get_mut("release-test-fixture"))
+            .expect("release extension")
+            .settings
+            .insert(
+                "service".to_string(),
+                serde_json::json!({
+                    "mode":"remote",
+                    "secret_env":{"token":"PROJECTED_RELEASE_SECRET"}
+                }),
+            );
+        component
     }
 
     fn enable_split_lint_routes(home: &Path) {
@@ -785,6 +830,7 @@ mod tests {
     #[test]
     fn validate_test_quality_fails_before_child_when_declared_secret_is_missing() {
         homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = test_env_guard();
             let source = tempfile::tempdir().expect("source dir");
             let marker = source.path().join("child-ran");
             let component = extension_test_component(
@@ -809,6 +855,7 @@ mod tests {
     #[test]
     fn validate_test_quality_redacts_injected_secret_from_release_evidence() {
         homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = test_env_guard();
             let source = tempfile::tempdir().expect("source dir");
             let marker = source.path().join("child-ran");
             let component = extension_test_component(
@@ -833,6 +880,84 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("release-fixture-secret"));
+        });
+    }
+
+    #[test]
+    fn validate_test_quality_composes_and_redacts_conditional_secrets() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = test_env_guard();
+            let source = tempfile::tempdir().expect("source dir");
+            let component = conditional_extension_test_component(
+                home.path(),
+                source.path(),
+                "#!/bin/sh\nprintf 'static=%s projected=%s settings=%s\\n' \"$DECLARED_RELEASE_SECRET\" \"$PROJECTED_RELEASE_SECRET\" \"$HOMEBOY_SETTINGS_JSON\" >&2\nexit 1\n",
+            );
+            std::env::set_var("DECLARED_RELEASE_SECRET", "static-release-secret");
+            std::env::set_var("PROJECTED_RELEASE_SECRET", "projected-release-secret");
+
+            homeboy_extension::test::resolve_test_command(&component)
+                .expect("conditional release test extension resolves");
+
+            let error = validate_test_quality(&component)
+                .expect_err("fixture child intentionally fails after injection");
+            std::env::remove_var("DECLARED_RELEASE_SECRET");
+            std::env::remove_var("PROJECTED_RELEASE_SECRET");
+
+            let rendered = format!("{}\n{}", error, error.details);
+            assert!(rendered.contains("[REDACTED]"));
+            assert!(!rendered.contains("static-release-secret"));
+            assert!(!rendered.contains("projected-release-secret"));
+        });
+    }
+
+    #[test]
+    fn validate_test_quality_missing_conditional_secret_fails_before_spawn() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = test_env_guard();
+            let source = tempfile::tempdir().expect("source dir");
+            let marker = source.path().join("conditional-child-ran");
+            let component = conditional_extension_test_component(
+                home.path(),
+                source.path(),
+                &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+            );
+            std::env::set_var("DECLARED_RELEASE_SECRET", "available-static-secret");
+            std::env::remove_var("PROJECTED_RELEASE_SECRET");
+
+            let error = validate_test_quality(&component)
+                .expect_err("missing conditional secret blocks release child");
+            std::env::remove_var("DECLARED_RELEASE_SECRET");
+
+            assert!(error.message.contains("PROJECTED_RELEASE_SECRET"));
+            assert!(!error.to_string().contains("available-static-secret"));
+            assert!(!marker.exists());
+        });
+    }
+
+    #[test]
+    fn validate_test_quality_non_matching_projection_needs_no_conditional_secret() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = test_env_guard();
+            let source = tempfile::tempdir().expect("source dir");
+            let mut component = conditional_extension_test_component(
+                home.path(),
+                source.path(),
+                "#!/bin/sh\ntest -z \"${PROJECTED_RELEASE_SECRET-}\"\n",
+            );
+            component
+                .extensions
+                .as_mut()
+                .and_then(|extensions| extensions.get_mut("release-test-fixture"))
+                .expect("release extension")
+                .settings
+                .insert("service".to_string(), serde_json::json!({"mode":"local"}));
+            std::env::set_var("DECLARED_RELEASE_SECRET", "available-static-secret");
+            std::env::remove_var("PROJECTED_RELEASE_SECRET");
+
+            assert!(validate_test_quality(&component)
+                .expect("non-matching release test runs without conditional secret"));
+            std::env::remove_var("DECLARED_RELEASE_SECRET");
         });
     }
 

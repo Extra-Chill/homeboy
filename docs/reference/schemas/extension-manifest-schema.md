@@ -485,6 +485,43 @@ Configuration for documentation-reference analysis, feature detection, and struc
 
 Changed-test and drift workflows use the canonical `test.drift` contract. `audit.test_mapping` is only for structural test coverage checks and does not declare drift behavior.
 
+### Conditional Test Secrets
+
+Extensions may combine static `test.secret_env` identities with identities selected
+from component settings. Conditional projections run after manifest defaults,
+component settings, and command-line setting overrides have been merged, but before
+the test child starts:
+
+```json
+{
+  "test": {
+    "secret_env": {
+      "ALWAYS_REQUIRED_SECRET": "ALWAYS_REQUIRED_SECRET"
+    },
+    "secret_env_projections": [{
+      "when": {
+        "path": ["service", "mode"],
+        "equals": "remote"
+      },
+      "names_path": ["service", "secret_env"],
+      "optional": false
+    }]
+  }
+}
+```
+
+`when.path` and `names_path` are bounded object paths relative to the effective
+settings object. A matching projection requires `names_path` to resolve to an
+object whose values are uppercase environment identity names. `optional: true`
+allows that object to be absent. Non-matching predicates request no projected
+identities. Duplicate identities, malformed paths, non-string predicate or name
+leaves, and invalid environment names fail before child execution.
+
+The settings object carries identity names only. Homeboy resolves the resulting
+static and projected identity set through the same local secret resolver used by
+`test.secret_env`; resolved values are injected only into the child environment
+and are exact-value redacted from output and evidence.
+
 ```json
 {
   "test": {

@@ -1329,6 +1329,16 @@ mod tests {
     use crate::test::TestFailure;
     use homeboy_core::component::{ComponentScriptsConfig, ScopedExtensionConfig};
     use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static CONDITIONAL_SECRET_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn conditional_secret_env_guard() -> std::sync::MutexGuard<'static, ()> {
+        CONDITIONAL_SECRET_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("conditional secret env lock")
+    }
 
     fn assert_artifact_tree_excludes(root: &Path, needle: &str) {
         for entry in std::fs::read_dir(root).expect("read artifact directory") {
@@ -1343,6 +1353,168 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn conditional_test_component(home: &Path, source: &Path, mode: &str) -> Component {
+        let extension_dir = home.join(".config/homeboy/extensions/conditional-secret-fixture");
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        std::fs::write(
+            extension_dir.join("conditional-secret-fixture.json"),
+            r#"{
+                "name":"Conditional secret fixture",
+                "version":"1.0.0",
+                "settings":[
+                    {"id":"service","label":"Service","type":"object","default":{"mode":"local"}}
+                ],
+                "test":{
+                    "extension_script":"test.sh",
+                    "secret_env_projections":[{
+                        "when":{"path":["service","mode"],"equals":"remote"},
+                        "names_path":["service","secret_env"]
+                    }]
+                }
+            }"#,
+        )
+        .expect("extension manifest");
+        std::fs::write(
+            extension_dir.join("test.sh"),
+            "#!/bin/sh\nprintf 'first=%s second=%s settings=%s\\n' \"${FIRST_PROJECTED_SECRET-unset}\" \"${SECOND_PROJECTED_SECRET-unset}\" \"$HOMEBOY_SETTINGS_JSON\"\nexit 1\n",
+        )
+        .expect("extension script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = extension_dir.join("test.sh");
+            let mut permissions = std::fs::metadata(&script)
+                .expect("script metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(script, permissions).expect("executable script");
+        }
+
+        Component {
+            id: "conditional-secret-consumer".to_string(),
+            local_path: source.to_string_lossy().to_string(),
+            extensions: Some(HashMap::from([(
+                "conditional-secret-fixture".to_string(),
+                ScopedExtensionConfig {
+                    settings: HashMap::from([(
+                        "service".to_string(),
+                        serde_json::json!({
+                            "mode": mode,
+                            "secret_env": {
+                                "first": "FIRST_PROJECTED_SECRET",
+                                "second": "SECOND_PROJECTED_SECRET"
+                            }
+                        }),
+                    )]),
+                    ..Default::default()
+                },
+            )])),
+            ..Default::default()
+        }
+    }
+
+    fn fixture_workflow_args(component: &Component) -> TestRunWorkflowArgs {
+        TestRunWorkflowArgs {
+            component_label: component.id.clone(),
+            component_id: component.id.clone(),
+            path_override: None,
+            settings: Vec::new(),
+            settings_json: Vec::new(),
+            skip_lint: true,
+            coverage: false,
+            coverage_min: None,
+            analyze: false,
+            baseline_flags: Default::default(),
+            changed_since: None,
+            precomputed_changed_files: None,
+            json_summary: true,
+            restore_checkout: false,
+            ci_env: Vec::new(),
+            passthrough_args: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn review_test_projects_matching_secrets_and_skips_non_matching_mode() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = conditional_secret_env_guard();
+            let source = tempfile::tempdir().expect("source dir");
+            std::env::set_var("FIRST_PROJECTED_SECRET", "first-review-secret");
+            std::env::set_var("SECOND_PROJECTED_SECRET", "second-review-secret");
+
+            let matching = conditional_test_component(home.path(), source.path(), "remote");
+            let matching_run = RunDir::create().expect("matching run dir");
+            let matching_result = run_main_test_workflow(
+                &matching,
+                source.path(),
+                fixture_workflow_args(&matching),
+                &matching_run,
+            )
+            .expect("matching child runs");
+            let rendered = serde_json::to_string(&matching_result).expect("review result");
+            assert!(rendered.contains("[REDACTED]"));
+            for value in ["first-review-secret", "second-review-secret"] {
+                assert!(!rendered.contains(value));
+                assert_artifact_tree_excludes(matching_run.path(), value);
+            }
+            let supervision = std::fs::read_to_string(
+                matching_run
+                    .path()
+                    .join(homeboy_core::engine::run_dir::files::CHILD_SUPERVISION),
+            )
+            .expect("child supervision evidence");
+            assert!(supervision.contains("[REDACTED]"));
+
+            std::env::remove_var("FIRST_PROJECTED_SECRET");
+            std::env::remove_var("SECOND_PROJECTED_SECRET");
+            let local = conditional_test_component(home.path(), source.path(), "local");
+            let local_run = RunDir::create().expect("local run dir");
+            let local_result = run_main_test_workflow(
+                &local,
+                source.path(),
+                fixture_workflow_args(&local),
+                &local_run,
+            )
+            .expect("non-matching child needs no secrets");
+            assert_eq!(local_result.exit_code, 1, "non-matching child executed");
+            let local_stdout = std::fs::read_to_string(
+                local_run
+                    .path()
+                    .join("validation-progress/command-1-stdout.log"),
+            )
+            .expect("non-matching stdout artifact");
+            assert!(local_stdout.contains("first=unset second=unset"));
+        });
+    }
+
+    #[test]
+    fn review_test_missing_projected_secret_fails_before_spawn() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = conditional_secret_env_guard();
+            let source = tempfile::tempdir().expect("source dir");
+            let marker = source.path().join("child-ran");
+            let component = conditional_test_component(home.path(), source.path(), "remote");
+            std::fs::write(
+                home.path()
+                    .join(".config/homeboy/extensions/conditional-secret-fixture/test.sh"),
+                format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+            )
+            .expect("marker script");
+            std::env::remove_var("FIRST_PROJECTED_SECRET");
+            std::env::remove_var("SECOND_PROJECTED_SECRET");
+
+            let error = run_main_test_workflow(
+                &component,
+                source.path(),
+                fixture_workflow_args(&component),
+                &RunDir::create().expect("run dir"),
+            )
+            .expect_err("missing projected identity must fail before spawn");
+            assert!(error.message.contains("FIRST_PROJECTED_SECRET"));
+            assert!(!marker.exists());
+        });
     }
 
     #[test]
