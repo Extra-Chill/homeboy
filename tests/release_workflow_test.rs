@@ -758,6 +758,14 @@ fn release_test_gate_exposes_release_blocking_policy_to_rust_tests() {
 }
 
 #[test]
+fn release_test_gate_preserves_the_repository_test_budget_ordering() {
+    let gate_test = job_section(release_workflow(), "gate-test");
+
+    assert!(gate_test.contains("HOMEBOY_TEST_TIMEOUT_SECONDS: '2700'"));
+    assert!(gate_test.contains("execution-timeout-seconds: '3000'"));
+}
+
+#[test]
 fn release_finish_head_pipeline_uses_homeboy_action_head_inputs() {
     let host = job_section(release_workflow(), "host");
 
