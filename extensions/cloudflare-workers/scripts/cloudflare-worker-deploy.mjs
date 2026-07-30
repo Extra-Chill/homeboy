@@ -1,18 +1,21 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmod, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 const SCHEMA = 'homeboy/cloudflare-worker-deploy-result/v1';
+const LAYERED_SCHEMA = 'homeboy/deployment-provider-payload/v1';
+const LEGACY_SCHEMA = 'homeboy/cloudflare-worker-deploy-contract/v1';
 const MAX_GATE_BODY_BYTES = 65536;
 const MAX_SECRET_INPUT_BYTES = 65536;
 
 async function main() {
   const dryRun = process.argv.includes('--dry-run');
   const contractPath = await realpath(resolve(requiredArgument('--contract')));
-  const contract = JSON.parse(await readFile(contractPath, 'utf8'));
+  const contract = normalizeContract(JSON.parse(await readFile(contractPath, 'utf8')));
   validate(contract);
   const secretValues = [];
   const redact = (value) => secretValues.reduce((text, secret) => String(text).split(String(secret)).join('[REDACTED]'), String(value));
@@ -53,6 +56,49 @@ async function main() {
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   process.exitCode = ['succeeded', 'validated'].includes(result.status) ? 0 : 1;
 }
+
+function normalizeContract(input) {
+  if (input?.schema === LEGACY_SCHEMA) return input;
+  if (input?.schema !== LAYERED_SCHEMA) throw new Error('Unsupported deployment contract schema.');
+  assertKeys(input, ['schema', 'policy', 'target', 'source'], 'payload');
+  if (!isObject(input.policy)) throw new Error('Layered deployment payload requires a policy object.');
+  assertKeys(input.policy, ['value', 'reference'], 'policy envelope');
+  const policy = input.policy?.value;
+  const reference = input.policy?.reference;
+  const target = input.target;
+  const source = input.source;
+  if (!isObject(policy) || !isObject(reference) || !isObject(target) || !isObject(source)) throw new Error('Layered deployment payload requires policy, target, and source objects.');
+  assertKeys(reference, ['component', 'path', 'digest'], 'policy reference');
+  assertKeys(source, ['component', 'revision'], 'source');
+  assertKeys(policy, ['wrangler', 'expected_bindings', 'predeploy_commands', 'timeout_ms'], 'policy');
+  assertKeys(target, ['target', 'secrets', 'secret_inputs', 'gates', 'durability'], 'target');
+  if (!isObject(policy.wrangler)) throw new Error('Layered deployment policy requires a Wrangler object.');
+  assertKeys(policy.wrangler, ['binary', 'config', 'config_ref'], 'policy Wrangler');
+  if (policy.timeout_ms !== undefined && (!Number.isSafeInteger(policy.timeout_ms) || policy.timeout_ms < 1)) throw new Error('Layered deployment policy timeout_ms must be a positive safe integer.');
+  if (!process.env.HOMEBOY_COMPONENT_PATH) throw new Error('Layered deployment payload requires HOMEBOY_COMPONENT_PATH.');
+  if (!source.component || source.component !== process.env.HOMEBOY_COMPONENT_ID) throw new Error('Layered deployment source component does not match the execution context.');
+  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(source.revision || '')) throw new Error('Layered deployment source requires a full Git revision.');
+  if (reference.component !== source.component || reference.path !== 'homeboy.json#/deployment_provider/policy' || !/^[0-9a-f]{64}$/.test(reference.digest || '')) throw new Error('Layered deployment policy reference is invalid.');
+  if (createHash('sha256').update(canonicalJson(policy)).digest('hex') !== reference.digest) throw new Error('Layered deployment policy digest does not match the declared policy.');
+  return {
+    schema: LEGACY_SCHEMA,
+    repository: { worktree: process.env.HOMEBOY_COMPONENT_PATH, revision: source.revision, ref: source.component },
+    policy_reference: reference,
+    wrangler: policy.wrangler,
+    expected_bindings: policy.expected_bindings,
+    predeploy_commands: policy.predeploy_commands,
+    timeout_ms: policy.timeout_ms,
+    target: target.target,
+    secrets: target.secrets,
+    secret_inputs: target.secret_inputs,
+    gates: target.gates,
+    durability: target.durability,
+  };
+}
+
+function isObject(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+function assertKeys(value, allowed, namespace) { for (const key of Object.keys(value)) if (!allowed.includes(key)) throw new Error(`Unsupported layered ${namespace} field ${key}.`); }
+function canonicalJson(value) { if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`; if (isObject(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`; return JSON.stringify(value); }
 
 async function repositoryRoot(contract, contractPath, redact, env) {
   try {
@@ -109,7 +155,7 @@ async function runPredeployCommands(contract, root, result, redact, env, secretI
 }
 
 function resultFor(contract, dryRun) {
-  return { schema: SCHEMA, status: 'running', mode: dryRun ? 'dry_run' : 'apply', source_revision: contract.repository.revision, source_ref: contract.repository.ref || 'declared-worktree', config_ref: contract.wrangler.config_ref, target: { worker: contract.target.worker, account_id: contract.target.account_id }, stages: [], deployments: [], failure: null, remediation: [], artifact_policy: { secret_values: 'omitted', raw_provider_output: 'omitted', local_paths: 'omitted' } };
+  return { schema: SCHEMA, status: 'running', mode: dryRun ? 'dry_run' : 'apply', source_revision: contract.repository.revision, source_ref: contract.repository.ref || 'declared-worktree', ...(contract.policy_reference ? { policy_reference: contract.policy_reference } : {}), config_ref: contract.wrangler.config_ref, target: { worker: contract.target.worker, account_id: contract.target.account_id }, stages: [], deployments: [], failure: null, remediation: [], artifact_policy: { secret_values: 'omitted', raw_provider_output: 'omitted', local_paths: 'omitted' } };
 }
 
 async function preflight(contract, root, result, redact, env, dryRun = false) {

@@ -1,10 +1,45 @@
 # Cloudflare Workers Extension
 
-`cloudflare-workers` is Homeboy Extensions' provider-owned deployment command for a generic Cloudflare Worker. It takes one immutable contract file, verifies the clean checkout and Wrangler target, applies declared secrets through stdin, deploys, runs HTTP gates, and rolls back to the deployment recorded before the attempt when secret provisioning, deployment, or a gate fails.
+`cloudflare-workers` is Homeboy Extensions' provider-owned deployment command for a generic Cloudflare Worker. It accepts Homeboy's layered deployment payload or the legacy immutable contract file, verifies the clean checkout and Wrangler target, applies declared secrets through stdin, deploys, runs HTTP gates, and rolls back to the deployment recorded before the attempt when secret provisioning, deployment, or a gate fails.
 
 `homeboy deploy --dry-run` uses the manifest's separate non-mutating provider command. It validates the immutable revision and clean worktree, Wrangler config/account/bindings, authentication, Wrangler's own dry-run, declared secret descriptor availability, and gate declarations. It emits the normal structured result with `mode: "dry_run"` and `status: "validated"`; it does not run predeploy commands or HTTP gates, read secret values, write a result file, provision secrets, deploy, or roll back.
 
 ## Contract
+
+The recommended Homeboy contract keeps reusable provider policy in repository-root `homeboy.json`:
+
+```json
+{
+  "deployment_provider": {
+    "extension": "cloudflare-workers",
+    "provider": "cloudflare-workers.deploy",
+    "policy": {
+      "wrangler": { "binary": "wrangler", "config": "wrangler.jsonc", "config_ref": "wrangler.jsonc" },
+      "expected_bindings": ["DATABASE", "ASSETS"],
+      "predeploy_commands": [],
+      "timeout_ms": 120000
+    }
+  }
+}
+```
+
+The Homeboy project attachment supplies environment-owned target input:
+
+```json
+{
+  "deployment_provider_input": {
+    "target": { "worker": "production-worker", "account_id": "account-id" },
+    "secrets": [{ "name": "API_TOKEN", "env": "PRODUCTION_API_TOKEN" }],
+    "secret_inputs": [],
+    "gates": [{ "id": "health", "url": "https://worker.example/health", "expected_status": 200 }],
+    "durability": { "redeploy_same_revision": true }
+  }
+}
+```
+
+Homeboy materializes `homeboy/deployment-provider-payload/v1` in a private temporary file. The extension accepts Wrangler/config policy, expected binding names, predeploy declarations, and timeout only from `policy.value`; it accepts Worker/account identity, secret descriptors, gates, and durability only from `target`. Source component and full revision come from Homeboy, while the checkout path comes from `HOMEBOY_COMPONENT_PATH`. Fields crossing those ownership boundaries are rejected. The extension verifies `policy.reference.digest` as SHA-256 over Homeboy canonical JSON before using the policy.
+
+### Legacy Contract
 
 Start from [`examples/deploy-contract.json`](examples/deploy-contract.json):
 
