@@ -172,6 +172,7 @@ pub(super) fn self_temp_artifact_candidates(
                 rehydrate_command: None,
                 source_dirty: false,
                 unpushed_commits: false,
+                pressure_eligible: false,
             });
         }
     }
@@ -218,6 +219,7 @@ fn temp_homeboy_checkout_target_candidate(
         rehydrate_command: None,
         source_dirty: safety.source_dirty,
         unpushed_commits: safety.unpushed_commits,
+        pressure_eligible: false,
     }))
 }
 
@@ -268,6 +270,7 @@ fn partial_homeboy_temp_target_candidate(
         rehydrate_command: None,
         source_dirty: false,
         unpushed_commits: false,
+        pressure_eligible: false,
     }))
 }
 
