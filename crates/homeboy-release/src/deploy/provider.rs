@@ -136,6 +136,7 @@ fn run_component(
             &attachment.provider,
             project_id,
             &component.id,
+            &component.local_path,
             payload.path(),
             dry_run,
         )
@@ -152,6 +153,7 @@ fn run_component(
             &attachment.provider,
             project_id,
             &component.id,
+            &component.local_path,
             &contract,
             dry_run,
         )
