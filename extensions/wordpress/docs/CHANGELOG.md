@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.21] - 2026-07-30
+
+### Fixed
+- register dependency classes lacking a Composer autoloader
+
 ## [3.34.20] - 2026-07-30
 
 ### Fixed
