@@ -329,24 +329,46 @@ TEST_ARGS=(
     --manifest-path "${PROJECT_PATH}/Cargo.toml"
 )
 
-# For a full/workspace run, test every workspace member -- not just the root
-# package. At a hybrid root (a Cargo.toml that is both [package] and [workspace]),
-# `cargo test` without `--workspace` only runs the root package's tests, silently
-# skipping every member crate. Only add it for full-scope runs and only when the
-# scope args don't already select specific packages (e.g. a changed-files scope
-# that passes `-p <crate>`).
-if [ "$SCOPE_KIND" = "workspace" ] || [ "$SCOPE_KIND" = "full" ]; then
-    case " $(printf '%s' "$SCOPE_JSON" | jq -r '.args[]?' | tr '\n' ' ') " in
-        *" -p "* | *" --package "* | *" --workspace "* | *" --exclude "*) ;;
-        *) TEST_ARGS+=(--workspace) ;;
-    esac
-fi
+# Test every workspace member -- not just the root package.
+#
+# At a hybrid root (a Cargo.toml that is both [package] and [workspace]),
+# `cargo test` without `--workspace` runs ONLY the root package's targets and
+# silently skips every member crate. Member crates are still compiled as test
+# targets, so nothing looks wrong: the binaries are built and never executed.
+#
+# This used to be added only for `workspace`/`full` scope kinds, which meant
+# every other kind (`args`, `rust_filter`, `rust_integration`) inherited the
+# root-package-only default. On this repository that hid ten genuinely failing
+# member-crate tests from CI indefinitely, including a real release-timeout
+# defect (#10477).
+#
+# `--workspace` is now the default and is withheld only when the scope args
+# already choose packages themselves, so an intentionally narrow scope such as
+# `-p <crate> --lib` stays narrow.
+SCOPE_ARGS_FLAT=" $(printf '%s' "$SCOPE_JSON" | jq -r '.args[]?' | tr '\n' ' ') "
+case "$SCOPE_ARGS_FLAT" in
+    *" -p "* | *" --package "* | *" --workspace "* | *" --exclude "*)
+        WORKSPACE_SELECTION="scope args select packages explicitly"
+        ;;
+    *)
+        TEST_ARGS+=(--workspace)
+        WORKSPACE_SELECTION="--workspace (all members)"
+        ;;
+esac
 
 if [ -n "${HOMEBOY_TEST_SCOPE_MESSAGE:-}" ]; then
     echo "$HOMEBOY_TEST_SCOPE_MESSAGE"
 fi
 
 rust_append_scope_args "$SCOPE_JSON"
+
+# Always state the resolved scope and the exact cargo invocation. "Which targets
+# ran" was previously only recoverable by reverse-engineering `Running
+# deps/<crate>-<hash>` lines out of the log, which is how a root-package-only
+# run went unnoticed across three separate scope fixes (#10477).
+echo "Rust test scope kind: ${SCOPE_KIND}"
+echo "Rust test package selection: ${WORKSPACE_SELECTION}"
+echo "Rust test invocation: cargo ${TEST_ARGS[*]}"
 
 # Builds COMMAND_LABEL/COMMAND_BINARY from the current TEST_ARGS. Shared so a
 # widened re-run reuses the exact runner selection the first attempt used.
@@ -421,6 +443,8 @@ if [ "$TEST_EXIT" -eq 0 ] \
         --workspace
     )
     SCOPE_KIND="full"
+    WORKSPACE_SELECTION="--workspace (all members)"
+    echo "Rust test invocation: cargo ${TEST_ARGS[*]}"
     SCOPE_JSON="$(printf '%s' "$SCOPE_JSON" | jq -c '.kind = "full" | .args = [] | .reason = "Derived scope executed no tests; widened to the full test command."')"
     rust_build_test_command
     rust_execute_test_run "$@"
