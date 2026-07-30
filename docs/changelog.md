@@ -4,6 +4,49 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.324.0] - 2026-07-30
+
+### Added
+- layer provider target inputs
+- retain idle worktree artifacts
+- project conditional secret identities
+
+### Changed
+- repair four assertions stale since member tests stopped running
+- isolate CLI reference contract
+- isolate cook handoff fixtures from controller transport
+- pin the control-binary lineage that makes recovery work
+
+### Fixed
+- compact direct lint summaries
+- report unverified manifest evidence
+- preserve provider component path
+- keep inspection commands out of startup recovery
+- fail local lint writes without changes
+- validate cook arguments before routing bail-outs
+- bound startup evidence recovery
+- restore compilation after the deployment provider input field
+- attribute attach-path lock timeouts
+- bound piped command deadlines
+- resolve component versions deterministically
+- preflight reconstructable exact-ref artifacts
+- refuse to publish a partially uploaded draft
+- rebase monorepo component paths atomically
+- resolve linked worktrees before fast fallback
+- persist exact-ref lifecycle progress
+- retain preparation build provenance
+- complete multi-ref preflight diagnostics
+- validate head branch in dry runs
+- return an incomplete published release to draft
+- skip recovery for inventory readers
+- bound aggregate output
+- converge controller skew recovery
+- isolate category failures
+- continue after temp removal failures
+- reconcile artifact outcome counts
+- converge compatible refresh promotions
+- allow persisted notes during planning
+
 ## [0.323.2] - 2026-07-30
 
 ### Fixed
