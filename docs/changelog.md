@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.323.2] - 2026-07-30
+
+### Fixed
+- allow persisted notes during head recovery
+- keep recovery artifact paths relative
+- rebind authoritative idle lease
+- target configured runner identity
+
 ## [0.323.1] - 2026-07-30
 
 ### Changed
