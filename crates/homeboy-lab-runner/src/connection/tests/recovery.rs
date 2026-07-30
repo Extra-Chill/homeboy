@@ -1109,8 +1109,11 @@ esac
 #[test]
 fn normal_start_response_loss_replays_b_without_creating_c() {
     test_support::with_isolated_home(|home| {
-        let daemon = home.path().join("remote-homeboy");
+        let old_daemon = home.path().join("old-homeboy");
+        let selected_daemon = home.path().join("selected-homeboy");
         let generation_count = home.path().join("daemon-generations");
+        let old_replay = home.path().join("old-replay");
+        let selected_argv = home.path().join("selected-argv");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
         let health_requests = Arc::new(AtomicUsize::new(0));
@@ -1143,7 +1146,7 @@ fn normal_start_response_loss_replays_b_without_creating_c() {
             }
         });
         std::fs::write(
-            &daemon,
+            &old_daemon,
             format!(
                 r#"#!/bin/sh
 case "$1 $2" in
@@ -1157,7 +1160,8 @@ case "$1 $2" in
     if [ "$3" = "--help" ]; then
       printf '%s\n' 'OPTIONS:' '    --replacement-operation-id <ID>'
     elif [ -f "{generation_count}" ]; then
-      printf '%s\n' '{{"success":true,"data":{{"pid":4242,"address":"{address}","state_path":"/tmp/state-b.json","lease_id":"lease-b"}}}}'
+      printf '%s' 'executed' > "{old_replay}"
+      exit 98
     else
       printf '%s' '1' > "{generation_count}"
       # The daemon has durably recorded B's operation key, but its SSH response
@@ -1167,14 +1171,45 @@ case "$1 $2" in
     ;;
 esac
 "#,
-                address = address,
                 generation_count = generation_count.display(),
+                old_replay = old_replay.display(),
             ),
         )
         .expect("write remote Homeboy shim");
-        let mut permissions = std::fs::metadata(&daemon).expect("metadata").permissions();
+        let mut permissions = std::fs::metadata(&old_daemon)
+            .expect("metadata")
+            .permissions();
         permissions.set_mode(0o755);
-        std::fs::set_permissions(&daemon, permissions).expect("make shim executable");
+        std::fs::set_permissions(&old_daemon, permissions).expect("make shim executable");
+        std::fs::write(
+            &selected_daemon,
+            format!(
+                r#"#!/bin/sh
+case "$1 $2" in
+  "self identity")
+    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test"}}}}'
+    ;;
+  "daemon ensure-running")
+    if [ "$3" = "--help" ]; then
+      printf '%s\n' 'OPTIONS:' '    --replacement-operation-id <ID>'
+    else
+      printf '%s\n' "$@" > "{selected_argv}"
+      printf '%s\n' '{{"success":true,"data":{{"pid":4242,"address":"{address}","state_path":"/tmp/state-b.json","lease_id":"lease-b"}}}}'
+    fi
+    ;;
+esac
+"#,
+                address = address,
+                selected_argv = selected_argv.display(),
+            ),
+        )
+        .expect("write selected Homeboy shim");
+        let mut permissions = std::fs::metadata(&selected_daemon)
+            .expect("metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&selected_daemon, permissions)
+            .expect("make selected shim executable");
         server::create(
             &serde_json::json!({ "id": "local-runner", "host": "localhost", "user": "test" })
                 .to_string(),
@@ -1185,7 +1220,7 @@ esac
             &serde_json::json!({
                 "id": "local-runner",
                 "kind": "ssh",
-                "homeboy_path": daemon,
+                "homeboy_path": old_daemon,
             })
             .to_string(),
             false,
@@ -1214,6 +1249,16 @@ esac
         assert!(operation["replay_command"]
             .as_str()
             .is_some_and(|command| command.contains("--replacement-operation-id")));
+        let operation_id = operation["operation_id"]
+            .as_str()
+            .expect("ensure-running operation ID")
+            .to_string();
+        crate::merge(
+            Some("local-runner"),
+            &serde_json::json!({ "homeboy_path": selected_daemon }).to_string(),
+            &[],
+        )
+        .expect("select refreshed remote Homeboy");
 
         let (second, second_exit) =
             connect_with_orphan_adoption("local-runner", None, &[], false, None, None, None)
@@ -1231,6 +1276,13 @@ esac
             "replay must return B rather than starting C"
         );
         assert_eq!(health_requests.load(Ordering::SeqCst), 1);
+        assert!(
+            !old_replay.exists(),
+            "the obsolete absolute Homeboy path must not execute the replay"
+        );
+        let selected_argv =
+            std::fs::read_to_string(&selected_argv).expect("selected ensure-running arguments");
+        assert!(selected_argv.contains(&operation_id));
         assert!(!journal_dir.join("pending-replacement.json").exists());
         assert!(!journal_dir.join("replacement-operation.json").exists());
         endpoint.join().expect("endpoint");

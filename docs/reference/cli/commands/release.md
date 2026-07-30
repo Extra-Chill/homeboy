@@ -54,6 +54,7 @@ Plan release workflows
 | `homeboy release changes` | Show changes since the last version tag |
 | `homeboy release changelog` | Show generated changelog content |
 | `homeboy release version` | Version inspection helpers |
+| `homeboy release artifact-source-authority` | Write a source-authority manifest for assembled release artifacts |
 
 ## `homeboy release changes`
 
@@ -127,4 +128,22 @@ Show current version (default: discovered component, fallback: homeboy binary)
 | Option | Value | Description |
 | --- | --- | --- |
 | `--path` | `<PATH>` | Override local_path for version file lookup |
+
+## `homeboy release artifact-source-authority`
+
+```sh
+homeboy release artifact-source-authority [OPTIONS] <COMPONENT_ID>
+```
+
+Write a source-authority manifest for assembled release artifacts
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<COMPONENT_ID>` | yes | Component prepared for finalization |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--dir` | `<DIR>` | Directory containing the assembled publication files |
+| `--tag` | `<TAG>` | Prepared release tag |
+| `--commit` | `<COMMIT>` | Exact commit the prepared tag resolves to |
 
