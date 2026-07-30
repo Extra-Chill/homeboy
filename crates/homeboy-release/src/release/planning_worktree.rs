@@ -13,6 +13,7 @@ pub(super) fn validate_release_worktree(
     component: &Component,
     options: &ReleaseOptions,
     version_info: &ComponentVersionInfo,
+    release_notes_tag: Option<&str>,
 ) -> Result<Option<serde_json::Value>> {
     if options.pipeline.head && options.pipeline.from_artifacts.is_some() {
         return Ok(None);
@@ -36,7 +37,8 @@ pub(super) fn validate_release_worktree(
         Path::new(&component.local_path),
     );
     let build_artifacts = declared_build_artifact_paths(component);
-    let unexpected = get_unexpected_uncommitted_files(&uncommitted, &allowed, &build_artifacts);
+    let mut unexpected = get_unexpected_uncommitted_files(&uncommitted, &allowed, &build_artifacts);
+    filter_release_owned_notes(&mut unexpected, &uncommitted, component, release_notes_tag);
 
     if !unexpected.is_empty() {
         return Ok(Some(serde_json::json!({
@@ -100,19 +102,7 @@ pub(super) fn validate_working_tree_fail_fast(
             .iter()
             .any(|allowed| paths_match(file, allowed))
     });
-    if let Some(tag) = release_notes_tag {
-        let release_notes_path = super::executor::github_release_notes_path(tag);
-        unexpected.retain(|file| {
-            !uncommitted.untracked.iter().any(|untracked| {
-                paths_are_equal(untracked, file)
-                    && untracked_entry_is_only_release_notes(
-                        Path::new(&component.local_path),
-                        untracked,
-                        &release_notes_path,
-                    )
-            })
-        });
-    }
+    filter_release_owned_notes(&mut unexpected, &uncommitted, component, release_notes_tag);
     if unexpected.is_empty() {
         return Ok(());
     }
@@ -136,6 +126,28 @@ pub(super) fn validate_working_tree_fail_fast(
             ),
         ]),
     ))
+}
+
+fn filter_release_owned_notes(
+    unexpected: &mut Vec<String>,
+    uncommitted: &UncommittedChanges,
+    component: &Component,
+    release_notes_tag: Option<&str>,
+) {
+    let Some(tag) = release_notes_tag else {
+        return;
+    };
+    let release_notes_path = super::executor::github_release_notes_path(tag);
+    unexpected.retain(|file| {
+        !uncommitted.untracked.iter().any(|untracked| {
+            paths_are_equal(untracked, file)
+                && untracked_entry_is_only_release_notes(
+                    Path::new(&component.local_path),
+                    untracked,
+                    &release_notes_path,
+                )
+        })
+    });
 }
 
 /// Paths a first-release changelog bootstrap can legitimately make dirty.
@@ -574,6 +586,7 @@ mod tests {
             &git_component(dir),
             &ReleaseOptions::default(),
             &version_info(dir),
+            None,
         )
         .expect("worktree policy should inspect changes")
         .expect("unexpected user file should be reported");
@@ -607,6 +620,7 @@ mod tests {
                 ..Default::default()
             },
             &version_info(dir),
+            None,
         )
         .expect("head artifact releases should allow artifact directories");
 

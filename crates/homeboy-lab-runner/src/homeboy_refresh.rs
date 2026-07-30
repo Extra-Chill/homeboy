@@ -33,6 +33,10 @@ pub(super) use super::{extension_materialization, Runner};
 const DEFAULT_HOMEBOY_REMOTE: &str = "https://github.com/Extra-Chill/homeboy.git";
 const DEFAULT_HOMEBOY_REF: &str = "main";
 const DISCONNECTED_SSH_REFRESH_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+// A reconnect owner is bounded by the runner connection contract. Admission
+// shares that bound so an equivalent refresh can converge while a stuck owner
+// yields the runtime-promotion timeout evidence instead of an open-ended wait.
+const RUNNER_BINARY_PROMOTION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 const RECONNECT_VERIFICATION_WINDOW: Duration = Duration::from_secs(3);
 const RECONNECT_VERIFICATION_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 /// A freshly reconnected daemon reports the right identity a beat before its
@@ -411,10 +415,12 @@ pub fn refresh_homeboy_binary(
     // A Cook pin reserves its exact runtime from provider preflight through
     // durable runner-job binding. A refresh must drain that reservation rather
     // than rotating the configured binary underneath an admitted handoff.
-    let promotion_lease = homeboy_core::runtime_promotion::acquire(
-        "runner binary promotion",
-        options.runner_id.clone(),
-    )?;
+    let promotion_candidate = parse_identity(&exec_output.stdout)
+        .ok()
+        .and_then(|identity| identity_commit(&identity))
+        .unwrap_or_else(|| format!("unverified-{}", uuid::Uuid::new_v4()));
+    let promotion_lease =
+        acquire_runner_binary_promotion(&options.runner_id, &promotion_candidate)?;
     // Materialization may have waited behind a newer refresh. Re-read every
     // authority while holding the promotion lease so an old candidate cannot
     // overwrite a newer controller selection or reconnect over its daemon.
@@ -824,6 +830,31 @@ pub fn refresh_homeboy_binary(
         },
         0,
     ))
+}
+
+fn acquire_runner_binary_promotion(
+    runner_id: &str,
+    candidate_commit: &str,
+) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
+    acquire_runner_binary_promotion_with(
+        runner_id,
+        candidate_commit,
+        super::lab_selection::emit_runtime_promotion_wait,
+    )
+}
+
+fn acquire_runner_binary_promotion_with(
+    runner_id: &str,
+    candidate_commit: &str,
+    progress: impl FnMut(homeboy_core::runtime_promotion::RuntimePromotionWaitEvent),
+) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
+    homeboy_core::runtime_promotion::acquire_waiting_for_compatible_key(
+        "runner binary promotion",
+        runner_id.to_string(),
+        candidate_commit,
+        RUNNER_BINARY_PROMOTION_ADMISSION_TIMEOUT,
+        progress,
+    )
 }
 
 fn should_rotate_daemon_generation(

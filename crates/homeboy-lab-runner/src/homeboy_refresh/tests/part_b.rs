@@ -497,6 +497,124 @@ fn controller_binary_selection_is_idempotent() {
 }
 
 #[test]
+fn equivalent_refresh_waiter_reloads_the_owner_selection_after_promotion_handoff() {
+    test_support::with_isolated_home(|_| {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let selected = fixture.path().join("homeboy");
+        std::fs::write(
+            &selected,
+            "#!/bin/sh\nprintf '%s\\n' 'homeboy 0.1.0+0123456789ab'\n",
+        )
+        .expect("write selected binary");
+        assert!(Command::new("chmod")
+            .args(["0755", selected.to_str().expect("binary path")])
+            .status()
+            .expect("make binary executable")
+            .success());
+        crate::create(
+            r#"{"id":"lab","kind":"local","homeboy_path":"/before"}"#,
+            false,
+        )
+        .expect("create runner");
+
+        let owner = acquire_runner_binary_promotion("lab", "0123456789ab").expect("owner lease");
+        let (queued_tx, queued_rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let _lease = acquire_runner_binary_promotion_with("lab", "0123456789ab", |event| {
+                queued_tx.send(event).expect("report queued owner")
+            })?;
+            refresh_promotion_authorities("lab")?;
+            crate::load("lab")
+        });
+        let event = queued_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("waiter queues behind the owner");
+        assert_eq!(event.target, "lab");
+        assert_eq!(event.owner_operation, "runner binary promotion");
+        assert_eq!(event.owner_pid, std::process::id());
+        promote_verified_runner_binary("lab", selected.to_str().expect("selected path"))
+            .expect("owner selects candidate");
+        drop(owner);
+
+        let reloaded = waiter
+            .join()
+            .expect("waiter exits")
+            .expect("waiter reloads promotion authorities");
+        assert_eq!(reloaded.settings.homeboy_path.as_deref(), selected.to_str());
+    });
+}
+
+#[test]
+fn divergent_refresh_candidate_is_rejected_while_owner_keeps_selection() {
+    test_support::with_isolated_home(|_| {
+        crate::create(
+            r#"{"id":"lab","kind":"local","homeboy_path":"/stable"}"#,
+            false,
+        )
+        .expect("create runner");
+        let owner = acquire_runner_binary_promotion("lab", "newer").expect("owner lease");
+
+        let error = std::thread::spawn(|| {
+            acquire_runner_binary_promotion_with("lab", "diverged", |_| {
+                panic!("divergent candidate must not queue")
+            })
+        })
+        .join()
+        .expect("divergent contender exits")
+        .expect_err("divergent candidate remains fail-closed");
+        assert_eq!(
+            error.code,
+            homeboy_core::ErrorCode::RuntimePromotionContended
+        );
+        assert_eq!(error.details["holder_compatibility_key"], "newer");
+        assert_eq!(
+            crate::load("lab")
+                .expect("reload runner")
+                .settings
+                .homeboy_path
+                .as_deref(),
+            Some("/stable")
+        );
+        drop(owner);
+    });
+}
+
+#[test]
+fn strict_ancestor_refresh_candidate_is_rejected_while_owner_keeps_selection() {
+    test_support::with_isolated_home(|_| {
+        crate::create(
+            r#"{"id":"lab","kind":"local","homeboy_path":"/stable"}"#,
+            false,
+        )
+        .expect("create runner");
+        let owner = acquire_runner_binary_promotion("lab", "descendant").expect("owner lease");
+
+        let error = std::thread::spawn(|| {
+            acquire_runner_binary_promotion_with("lab", "ancestor", |_| {
+                panic!("strict ancestor candidate must not queue")
+            })
+        })
+        .join()
+        .expect("strict ancestor contender exits")
+        .expect_err("strict ancestor candidate remains fail-closed");
+        assert_eq!(
+            error.code,
+            homeboy_core::ErrorCode::RuntimePromotionContended
+        );
+        assert_eq!(error.details["holder_compatibility_key"], "descendant");
+        assert_eq!(
+            crate::load("lab")
+                .expect("reload runner")
+                .settings
+                .homeboy_path
+                .as_deref(),
+            Some("/stable")
+        );
+        drop(owner);
+    });
+}
+
+#[test]
 fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
     test_support::with_isolated_home(|_| {
         let fixture = tempfile::tempdir().expect("fixture");

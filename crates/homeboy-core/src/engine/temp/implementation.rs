@@ -3,6 +3,7 @@
 use crate::error::{Error, Result};
 use crate::output::{OutputBudget, OutputPresentation, OutputTruncation};
 use crate::paths;
+use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::env;
@@ -658,7 +659,7 @@ pub struct RuntimeTempCleanupOutput {
     pub row_detail: Option<OutputTruncation>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeTempCleanupRow {
     pub path: String,
     pub name: String,
@@ -667,19 +668,12 @@ pub struct RuntimeTempCleanupRow {
     pub size_bytes: u64,
     pub allocated_bytes: u64,
     pub verified_reclaimed_bytes: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_pid: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_state: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub producer: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub age_seconds: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub protection_reason: Option<String>,
 }
 
@@ -758,6 +752,81 @@ pub fn present_runtime_temp_cleanup(
     Ok(())
 }
 
+/// Filesystem evidence captured when a cleanup candidate could not be removed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct RuntimeTempCleanupFailure {
+    pub candidate_path: String,
+    pub os_error: String,
+}
+
+const RUNTIME_TEMP_REMOVAL_FAILURE_REASON_PREFIX: &str = "failed to remove runtime tmp entry: ";
+
+impl Serialize for RuntimeTempCleanupRow {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let failure = runtime_temp_failure_presentation(self);
+        let field_count = 7
+            + self.owner_id.is_some() as usize
+            + self.owner_pid.is_some() as usize
+            + self.owner_state.is_some() as usize
+            + self.producer.is_some() as usize
+            + self.run_id.is_some() as usize
+            + self.age_seconds.is_some() as usize
+            + self.protection_reason.is_some() as usize
+            + failure.is_some() as usize;
+        let mut row = serializer.serialize_struct("RuntimeTempCleanupRow", field_count)?;
+        row.serialize_field("path", &self.path)?;
+        row.serialize_field("name", &self.name)?;
+        row.serialize_field("action", &self.action)?;
+        row.serialize_field("reason", &self.reason)?;
+        row.serialize_field("size_bytes", &self.size_bytes)?;
+        row.serialize_field("allocated_bytes", &self.allocated_bytes)?;
+        row.serialize_field("verified_reclaimed_bytes", &self.verified_reclaimed_bytes)?;
+        if let Some(owner_id) = &self.owner_id {
+            row.serialize_field("owner_id", owner_id)?;
+        }
+        if let Some(owner_pid) = self.owner_pid {
+            row.serialize_field("owner_pid", &owner_pid)?;
+        }
+        if let Some(owner_state) = &self.owner_state {
+            row.serialize_field("owner_state", owner_state)?;
+        }
+        if let Some(producer) = &self.producer {
+            row.serialize_field("producer", producer)?;
+        }
+        if let Some(run_id) = &self.run_id {
+            row.serialize_field("run_id", run_id)?;
+        }
+        if let Some(age_seconds) = self.age_seconds {
+            row.serialize_field("age_seconds", &age_seconds)?;
+        }
+        if let Some(protection_reason) = &self.protection_reason {
+            row.serialize_field("protection_reason", protection_reason)?;
+        }
+        if let Some(failure) = failure {
+            row.serialize_field("failure", &failure)?;
+        }
+        row.end()
+    }
+}
+
+fn runtime_temp_failure_presentation(
+    row: &RuntimeTempCleanupRow,
+) -> Option<RuntimeTempCleanupFailure> {
+    (row.action == "failed").then(|| RuntimeTempCleanupFailure {
+        candidate_path: row.path.clone(),
+        os_error: row
+            .reason
+            .strip_prefix(RUNTIME_TEMP_REMOVAL_FAILURE_REASON_PREFIX)
+            .unwrap_or(&row.reason)
+            .to_string(),
+    })
+}
+
+type RuntimeTempEntryRemover = fn(&Path, &fs::Metadata) -> std::io::Result<()>;
+
 pub fn cleanup_runtime_tmp(
     apply: bool,
     older_than_days: u64,
@@ -778,6 +847,13 @@ pub fn cleanup_runtime_tmp(
 
 pub fn cleanup_runtime_tmp_bounded(
     options: RuntimeTempCleanupOptions<'_>,
+) -> Result<RuntimeTempCleanupOutput> {
+    cleanup_runtime_tmp_bounded_with_remover(options, remove_runtime_tmp_entry)
+}
+
+fn cleanup_runtime_tmp_bounded_with_remover(
+    options: RuntimeTempCleanupOptions<'_>,
+    remover: RuntimeTempEntryRemover,
 ) -> Result<RuntimeTempCleanupOutput> {
     let root = runtime_root()?;
     let lock = acquire_cleanup_lock(&root)?;
@@ -1086,15 +1162,19 @@ pub fn cleanup_runtime_tmp_bounded(
             output.planned_allocated_bytes += inspection.allocated_bytes;
             if options.apply {
                 let available_before = filesystem_available_bytes(&inspection.path);
-                remove_runtime_tmp_entry(
-                    &inspection.path,
-                    &fs::symlink_metadata(&inspection.path).map_err(|error| {
-                        Error::internal_io(
-                            error.to_string(),
-                            Some(format!("restat {}", inspection.path.display())),
-                        )
-                    })?,
-                )?;
+                let metadata = match fs::symlink_metadata(&inspection.path) {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        record_removal_failure(&mut row, &inspection.path, &error);
+                        output.rows.push(row);
+                        continue;
+                    }
+                };
+                if let Err(error) = remover(&inspection.path, &metadata) {
+                    record_removal_failure(&mut row, &inspection.path, &error);
+                    output.rows.push(row);
+                    continue;
+                }
                 if !inspection.path.exists() {
                     let verified = verified_reclaimed_bytes(
                         available_before,
@@ -1205,6 +1285,7 @@ pub fn cleanup_runtime_tmp_bounded(
                         options.apply,
                         &mut row,
                         &mut output,
+                        remover,
                     )?;
                 }
             }
@@ -1219,6 +1300,7 @@ pub fn cleanup_runtime_tmp_bounded(
                 options.apply,
                 &mut row,
                 &mut output,
+                remover,
             )?;
         }
 
@@ -1424,6 +1506,7 @@ mod cleanup_support {
         apply: bool,
         row: &mut RuntimeTempCleanupRow,
         output: &mut RuntimeTempCleanupOutput,
+        remover: RuntimeTempEntryRemover,
     ) -> Result<()> {
         if metadata.modified().is_ok_and(|modified| modified > cutoff) {
             row.reason = "entry is newer than retention cutoff".to_string();
@@ -1476,7 +1559,10 @@ mod cleanup_support {
                 }
             }
             let available_before = filesystem_available_bytes(path);
-            remove_runtime_tmp_entry(path, metadata)?;
+            if let Err(error) = remover(path, metadata) {
+                record_removal_failure(row, path, &error);
+                return Ok(());
+            }
             if !path.exists() {
                 row.verified_reclaimed_bytes = verified_reclaimed_bytes(
                     available_before,
@@ -1504,13 +1590,24 @@ mod cleanup_support {
         candidate.starts_with(root)
     }
 
-    pub(super) fn remove_runtime_tmp_entry(path: &Path, metadata: &fs::Metadata) -> Result<()> {
+    pub(super) fn remove_runtime_tmp_entry(
+        path: &Path,
+        metadata: &fs::Metadata,
+    ) -> std::io::Result<()> {
         if metadata.is_dir() {
             fs::remove_dir_all(path)
         } else {
             fs::remove_file(path)
         }
-        .map_err(|e| Error::internal_io(e.to_string(), Some(format!("remove {}", path.display()))))
+    }
+
+    pub(super) fn record_removal_failure(
+        row: &mut RuntimeTempCleanupRow,
+        _: &Path,
+        error: &std::io::Error,
+    ) {
+        row.action = "failed".to_string();
+        row.reason = format!("{RUNTIME_TEMP_REMOVAL_FAILURE_REASON_PREFIX}{error}");
     }
 }
 use cleanup_support::*;
@@ -1731,6 +1828,60 @@ mod tests {
         assert_eq!(applied.removed_count, 1);
         assert!(!stale.exists());
 
+        env::remove_var(runtime_tmpdir_env());
+    }
+
+    #[test]
+    fn cleanup_runtime_tmp_reports_removal_failure_and_continues() {
+        let _guard = home_env_guard();
+        let root = tempfile::tempdir().expect("runtime temp root");
+        env::set_var(runtime_tmpdir_env(), root.path());
+        let blocked = runtime_temp_dir("homeboy-removal-failure-a").expect("blocked entry");
+        fs::write(blocked.join("evidence"), b"retain me").expect("blocked evidence");
+        let removable = runtime_temp_dir("homeboy-removal-failure-b").expect("removable entry");
+        fs::write(removable.join("evidence"), b"remove me").expect("removable evidence");
+
+        let mut options = bounded_options(true, Some("homeboy-removal-failure"));
+        options.older_than_days = 0;
+        let output = cleanup_runtime_tmp_bounded_with_remover(options, |path, metadata| {
+            if path.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .starts_with("homeboy-removal-failure-a")
+            }) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected deterministic removal failure",
+                ));
+            }
+            remove_runtime_tmp_entry(path, metadata)
+        })
+        .expect("partial cleanup succeeds");
+
+        assert_eq!(output.planned_count, 2);
+        assert_eq!(output.removed_count, 1);
+        assert!(blocked.exists());
+        assert!(!removable.exists());
+        let failed = output
+            .rows
+            .iter()
+            .find(|row| row.path == blocked.display().to_string())
+            .expect("failed row");
+        assert_eq!(failed.action, "failed");
+        assert!(failed
+            .reason
+            .contains("injected deterministic removal failure"));
+        assert_eq!(failed.protection_reason, None);
+        fs::remove_dir_all(&blocked).expect("remove retained fixture before serialization");
+        let serialized = serde_json::to_value(failed).expect("serialize failed row");
+        assert_eq!(
+            serialized["failure"]["candidate_path"],
+            blocked.display().to_string()
+        );
+        assert!(serialized["failure"]["os_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("injected deterministic removal failure")));
+        assert_eq!(serialized["reason"], failed.reason);
+        assert!(serialized["failure"].get("details").is_none());
         env::remove_var(runtime_tmpdir_env());
     }
 
