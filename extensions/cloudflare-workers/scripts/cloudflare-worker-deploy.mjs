@@ -367,7 +367,7 @@ async function runGate(gate, stage) {
       if (gate.expected_text && !body.includes(gate.expected_text)) throw fail('http_gate_text_failed', `Gate ${gate.id} did not contain expected text.`, stage);
       return { id: gate.id, attempts };
     } catch (error) {
-      if (error.code?.startsWith('http_gate_')) throw error;
+      if (typeof error.code === 'string' && error.code.startsWith('http_gate_')) throw error;
       const timeout = error.name === 'TimeoutError' || error.name === 'AbortError';
       attempts.push({ attempt, status: timeout ? 'timeout' : 'network_error', elapsed_ms: Math.round(performance.now() - startedAt) });
       if (retry && attempt < maximumAttempts) { await delay(retry.retry_delay_ms); continue; }
