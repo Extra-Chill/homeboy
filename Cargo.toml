@@ -19,7 +19,7 @@ members = ["crates/homeboy-*", "crates/contracts/homeboy-*"]
 
 [package]
 name = "homeboy"
-version = "0.324.0"
+version = "0.325.0"
 edition = "2021"
 default-run = "homeboy"
 license = "MIT"

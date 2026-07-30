@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.325.0] - 2026-07-30
+
+### Added
+- preserve argument source provenance
+
+### Changed
+- drop the CLI reference docs gates
+- construct component attachments with ..Default::default()
+
+### Fixed
+- preserve test budget ordering
+- resync the CLI reference contract with the checked-in pages
+- report inode pressure alongside byte capacity
+- resolve a draft by id instead of scanning every release
+- canonicalize provider policy digest
+- emit valid lint remediation commands
+
 ## [0.324.0] - 2026-07-30
 
 ### Added
