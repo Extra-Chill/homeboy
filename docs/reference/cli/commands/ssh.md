@@ -30,6 +30,7 @@ SSH into a project server or configured server
 | `--as-server` | flag | Force interpretation as server ID |
 | `--user` | `<USER>` | Override the SSH user (instead of the server's configured user) |
 | `--raw` | flag | Write only the remote command's stdout to local stdout (and its stderr to local stderr), exiting with the remote exit code. Ideal for piping a remote export straight into a file. Combine with `--output <path>` to also persist the structured envelope. Requires a non-interactive command |
+| `--timeout` | `<TIMEOUT>` | Bound the complete non-interactive SSH command, in seconds. Progress remains on stderr so `--raw` preserves remote stdout |
 
 | Subcommand | Summary |
 | --- | --- |
