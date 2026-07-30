@@ -358,7 +358,6 @@ process.stdin.on('end', () => {
             },
         }),
     }];
-    request.inputs = json!({});
     request.executor.config = json!({ "mode": "valid" });
 
     let valid = run_provider_command_once(&request, &provider);
@@ -411,6 +410,16 @@ process.stdin.on('end', () => {
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.class == "agent_task.output_oversized"));
+
+    request.inputs = json!("caller-owned scalar input");
+    let invalid_inputs = run_provider_command_once(&request, &provider);
+    assert_eq!(invalid_inputs.status, AgentTaskOutcomeStatus::Failed);
+    assert!(invalid_inputs.diagnostics.iter().any(|diagnostic| {
+        diagnostic.class == "agent_task.output_declaration_invalid"
+            && diagnostic
+                .message
+                .contains("output declarations require object task inputs")
+    }));
 }
 
 #[cfg(unix)]
