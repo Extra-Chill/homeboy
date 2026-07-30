@@ -209,10 +209,11 @@ fn converged_idle_generations_rebind_the_normal_disconnect_owner() {
     let daemon = status.daemon.expect("authoritative daemon");
 
     let rebound = super::super::stop_transport_recovery::rebind_idle_generation_owner(
-        &session,
+        &[session.clone(), second.clone(), third.clone()],
         &daemon,
         daemon.lease_id.clone().expect("lease"),
-    );
+    )
+    .expect("retained generation provides an endpoint template");
 
     assert_eq!(
         rebound.remote_daemon_lease_id.as_deref(),

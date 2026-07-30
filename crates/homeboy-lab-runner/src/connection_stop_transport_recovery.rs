@@ -296,27 +296,19 @@ fn reconcile_authoritative_idle_stale_generations(
         return Ok(None);
     };
     let daemon = status.daemon.expect("authoritative lease requires daemon");
-    let authoritative_endpoint = generations
-        .iter()
-        .find(|generation| generation.remote_daemon_lease_id.as_deref() == Some(&lease_id))
-        .expect("authoritative lease was selected from retained generations");
-    Ok(Some(rebind_idle_generation_owner(
-        authoritative_endpoint,
-        &daemon,
-        lease_id,
-    )))
+    Ok(rebind_idle_generation_owner(generations, &daemon, lease_id))
 }
 
 pub(in crate::connection) fn rebind_idle_generation_owner(
-    session: &RunnerSession,
+    generations: &[RunnerSession],
     daemon: &remote_daemon::RemoteDaemon,
     lease_id: String,
-) -> RunnerSession {
-    let mut authoritative_session = session.clone();
+) -> Option<RunnerSession> {
+    let mut authoritative_session = generations.first()?.clone();
     authoritative_session.remote_daemon_lease_id = Some(lease_id);
     authoritative_session.remote_daemon_pid = daemon.pid;
     authoritative_session.remote_daemon_address = Some(daemon.address.clone());
-    authoritative_session
+    Some(authoritative_session)
 }
 
 /// Clearing the ledger is safe only when every generation is represented by a
