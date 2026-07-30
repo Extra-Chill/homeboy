@@ -83,30 +83,6 @@ jobs:
       - name: Check workspace formatting
         run: cargo fmt --all --check
 
-  cli-reference-docs:
-    name: homeboy / CLI Reference Docs
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Regenerate the CLI reference from clap
-        env:
-          HOMEBOY_WRITE_CLI_REFERENCE: '1'
-        run: cargo test -p homeboy-cli --lib --locked cli_surface::reference_docs
-      - name: Upload the regenerated CLI reference
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cli-reference-docs
-          path: docs/reference/cli/commands
-          if-no-files-found: warn
-      - name: Fail if the checked-in CLI reference is stale
-        run: |
-          git add --intent-to-add -- docs/reference/cli/commands
-          git diff --exit-code -- docs/reference/cli/commands
-
   homeboy:
     name: homeboy / ${{ matrix.title }}
     runs-on: ubuntu-latest

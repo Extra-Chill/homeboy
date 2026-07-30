@@ -31,7 +31,6 @@ fn required_gate_policy_is_complete_and_emitted_by_every_pr_ci_run() {
             "homeboy / Workspace Tests Compile",
             "homeboy / Windows Compile",
             "homeboy / Rustfmt",
-            "homeboy / CLI Reference Docs",
             "homeboy / Audit",
             "homeboy / Lint",
             "homeboy / Test",

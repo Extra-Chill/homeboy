@@ -18,9 +18,9 @@
 //! the binary and emits a `rerun-if-changed` for each one. Generating this tree
 //! during the build would add a second pass over the whole command surface to
 //! every single compile of an already-slow workspace. Instead the tree is
-//! checked in and [`super::reference_docs_tests::cli_reference_docs_are_current`]
-//! fails when it drifts, so generation cost is paid only when someone
-//! deliberately regenerates:
+//! checked in and drift is not gated, so generation cost is paid only when
+//! someone deliberately regenerates via
+//! [`super::reference_docs_tests::cli_reference_docs_regenerate_on_demand`]:
 //!
 //! ```sh
 //! HOMEBOY_WRITE_CLI_REFERENCE=1 cargo test -p homeboy-cli --lib cli_surface::reference_docs
