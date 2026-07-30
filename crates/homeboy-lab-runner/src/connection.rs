@@ -430,6 +430,32 @@ fn connect_with_orphan_adoption_and_live_lease(
         if let Some((kind, command)) =
             super::generation_store::replacement_operation_replay(runner_id)?
         {
+            let command = if kind == "ensure-running" {
+                if let Err(error) = negotiate_ensure_running_operation_id(
+                    &client,
+                    homeboy,
+                    Some(&replacement_operation_id),
+                ) {
+                    return Ok(failed_connect(
+                        runner_id,
+                        session_path,
+                        RunnerFailureKind::DaemonStartupFailure,
+                        error,
+                    ));
+                }
+                let command =
+                    remote_daemon_ensure_running_command(homeboy, Some(&replacement_operation_id));
+                // Rebind the durable command to the verified selected binary
+                // before crossing the replay mutation boundary.
+                super::generation_store::record_replacement_operation_replay(
+                    runner_id,
+                    "ensure-running",
+                    &command,
+                )?;
+                command
+            } else {
+                command
+            };
             let output = client.execute_with_timeout(&command, REMOTE_LEASELESS_RECOVERY_TIMEOUT);
             if !output.success {
                 return Ok(failed_connect(
