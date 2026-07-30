@@ -49,4 +49,3 @@ Deploy components to remote server
 | `--ref` | `<GIT_REF_OR_SHA>` | Deploy an exact Git ref resolved from the declared component repository |
 | `--tagged` | flag | Force local tag-based build/deploy, ignoring reusable release assets |
 | `--resume` | `<RUN_ID>` | Resume a prior multi-project deploy run after exact identity validation |
-

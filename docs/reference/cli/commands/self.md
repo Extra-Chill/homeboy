@@ -104,4 +104,3 @@ Generate a machine-optimized codebase map for AI documentation
 | `--include-private` | flag | Include private methods and internals (default: public API surface only) |
 | `--write` | flag | Write markdown documentation files to disk (default: JSON to stdout) |
 | `--output-dir` | `<OUTPUT_DIR>` | Output directory for markdown files (default: docs) |
-

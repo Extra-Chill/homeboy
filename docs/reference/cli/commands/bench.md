@@ -133,4 +133,3 @@ List declared benchmark scenarios without executing them
 | `--settings-json-file` | `<FILE>` | Load typed setting overrides from a JSON object file. Repeatable |
 | `--setting` | `<KEY=VALUE>` | String setting override. Repeatable |
 | `--setting-json` | `<SETTING_JSON>` | Typed-JSON setting override. Repeatable |
-

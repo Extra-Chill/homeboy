@@ -139,4 +139,3 @@ Compare structured matrix/report artifacts
 | `--old` | `<RUN_OR_ARTIFACT>` | Baseline artifact input: local JSON path, run id, or run:artifact / run/artifact ref |
 | `--new` | `<RUN_OR_ARTIFACT>` | Candidate artifact input: local JSON path, run id, or run:artifact / run/artifact ref |
 | `--format` | `<FORMAT>` | Output format Values: `markdown`, `json`. |
-

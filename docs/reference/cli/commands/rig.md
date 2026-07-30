@@ -425,4 +425,3 @@ Register an existing local file or directory with the current rig run
 | --- | --- | --- |
 | `--kind` | `<KIND>` | Stable artifact kind used by run artifact readers |
 | `--path` | `<PATH>` | Existing local file or directory to retain |
-

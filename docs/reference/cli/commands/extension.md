@@ -279,4 +279,3 @@ Update extension manifest fields
 | --- | --- | --- |
 | `--json` | `<JSON>` | JSON object to merge into manifest (supports @file and - for stdin) |
 | `--replace` | `<FIELD>` | Replace these fields instead of merging arrays |
-

@@ -33,4 +33,3 @@ Passively observe a running system and persist timeline evidence
 | `--watch-process` | `<REGEX>` | _no help text_ |
 | `--watch-process-interval` | `<WATCH_PROCESS_INTERVAL>` | _no help text_ |
 | `--probe` | `<JSON>` | _no help text_ |
-

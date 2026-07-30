@@ -148,4 +148,3 @@ Open SSH tunnel to database
 | Option | Value | Description |
 | --- | --- | --- |
 | `--local-port` | `<LOCAL_PORT>` | Local port to bind |
-

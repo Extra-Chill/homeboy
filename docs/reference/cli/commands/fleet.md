@@ -209,4 +209,3 @@ Run a command across all projects in a fleet via SSH
 | `--check` | flag | Show what would execute without running anything |
 | `--apply` | flag | Confirm the command should execute over SSH on every project in the fleet |
 | `--user` | `<USER>` | Override the SSH user for this execution (instead of each server's configured user) |
-

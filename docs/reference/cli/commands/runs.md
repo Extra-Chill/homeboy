@@ -722,4 +722,3 @@ Sync continuous-loop archive directories into observation artifacts
 | `--retention-days` | `<RETENTION_DAYS>` | Retention budget used for reporting old archive candidates |
 | `--patch-limit` | `<PATCH_LIMIT>` | Maximum ranked patch candidates to include in triage output |
 | `--dry-run` | flag | Inspect and triage without writing observation runs or artifacts |
-

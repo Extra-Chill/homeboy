@@ -207,4 +207,3 @@ Fetch artifact bytes through the local daemon byte endpoint
 | --- | --- | --- |
 | `-o`, `--output` | `<OUTPUT>` | Destination file path. Defaults to the artifact id basename |
 | `--daemon-url` | `<DAEMON_URL>` | Daemon base URL. Defaults to the address from `homeboy daemon status` |
-

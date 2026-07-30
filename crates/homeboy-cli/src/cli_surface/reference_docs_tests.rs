@@ -12,11 +12,12 @@
 //! every PR that touches the CLI crate.
 
 use super::reference_docs::{
-    commands_without_description, documented_subcommands, generated_reference_docs, GENERATED_DIR,
-    WRITE_ENV,
+    commands_without_description, documented_subcommands, generated_reference_docs,
+    live_generated_reference_docs, GENERATED_DIR, WRITE_ENV,
 };
 use super::Cli;
 use clap::CommandFactory;
+use homeboy_command_contract::cli_reference::CliReference;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -63,10 +64,10 @@ fn checked_in_reference_docs() -> BTreeMap<String, String> {
 /// downloadable artifact for a stale PR.
 #[test]
 fn cli_reference_docs_are_current() {
-    let expected = generated_reference_docs();
     let directory = workspace_root().join(GENERATED_DIR);
 
     if std::env::var_os(WRITE_ENV).is_some() {
+        let expected = live_generated_reference_docs();
         if directory.exists() {
             std::fs::remove_dir_all(&directory)
                 .expect("failed to clear the generated CLI reference");
@@ -77,8 +78,17 @@ fn cli_reference_docs_are_current() {
             std::fs::write(directory.join(name), body)
                 .unwrap_or_else(|error| panic!("failed to write {GENERATED_DIR}/{name}: {error}"));
         }
+        let contract = serde_json::to_string_pretty(&CliReference::new(expected))
+            .expect("serialize CLI reference contract");
+        std::fs::write(
+            workspace_root().join("docs/reference/cli/command-surface.json"),
+            format!("{contract}\n"),
+        )
+        .expect("write CLI reference contract");
         return;
     }
+
+    let expected = generated_reference_docs();
 
     let actual = checked_in_reference_docs();
     let regenerate = format!(
@@ -103,6 +113,11 @@ fn cli_reference_docs_are_current() {
             body.lines().count(),
         );
     }
+}
+
+#[test]
+fn live_clap_reference_matches_serialized_contract() {
+    assert_eq!(live_generated_reference_docs(), generated_reference_docs());
 }
 
 /// One generated page per visible top-level command, plus the index.

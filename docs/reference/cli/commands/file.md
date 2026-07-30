@@ -263,4 +263,3 @@ Edit file with line-based or pattern-based operations
 | `--delete-pattern` | `<PATTERN>` | _no help text_ |
 | `--append` | `<CONTENT>` | _no help text_ |
 | `--prepend` | `<CONTENT>` | _no help text_ |
-

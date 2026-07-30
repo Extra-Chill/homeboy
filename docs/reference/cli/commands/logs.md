@@ -95,4 +95,3 @@ Search log file for pattern
 | `-n`, `--lines` | `<LINES>` | Limit to last N lines before searching |
 | `-C`, `--context` | `<CONTEXT>` | Lines of context around matches |
 | `--local` | flag | Execute locally instead of via SSH |
-
