@@ -14,9 +14,10 @@ use super::local_exec::{
     windows_pipe_error_is_eof, StdinSource,
 };
 use super::ssh_client::{
-    build_secret_env_stdin_block, execute_command_with_stdin_timeout,
-    execute_command_with_writer_factory, run_command_with_stdin_source,
-    wrap_command_with_secret_env_read_loop, SECRET_ENV_STDIN_SENTINEL,
+    build_secret_env_stdin_block, execute_command_with_stdin_source_timeout,
+    execute_command_with_stdin_timeout, execute_command_with_writer_factory,
+    run_command_with_stdin_source, wrap_command_with_secret_env_read_loop,
+    SECRET_ENV_STDIN_SENTINEL,
 };
 use super::{CommandOutput, SshClient};
 
@@ -143,6 +144,29 @@ fn small_secret_stdin_payload_completes_successfully() {
 
     assert!(output.success, "{}", output.stderr);
     assert_eq!(output.stdout, "done");
+}
+
+#[test]
+fn piped_stdin_deadline_terminates_the_command_without_ssh() {
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", "sleep 5"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::server::process_cleanup::configure_process_group_cleanup(&mut command);
+    let started = Instant::now();
+
+    let output = execute_command_with_stdin_source_timeout(
+        command,
+        StdinSource::Reader(Box::new(Cursor::new(b"fixture input".to_vec()))),
+        Duration::from_millis(50),
+    );
+
+    assert!(output.timed_out);
+    assert_eq!(output.exit_code, 124);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(output.stderr.contains("terminated child process group"));
 }
 
 #[test]

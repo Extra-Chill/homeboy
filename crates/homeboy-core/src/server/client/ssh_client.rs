@@ -19,8 +19,8 @@ use super::host::{is_local_host, is_transient_ssh_error};
 use super::local_exec::{
     execute_local_command, execute_local_command_in_dir_with_timeout,
     execute_local_command_interactive, execute_local_command_with_piped_stdin,
-    execute_local_command_with_stdin, execute_local_command_with_stdin_and_timeout,
-    piped_stdin_file, spawn_stdin_pump, StdinSource,
+    execute_local_command_with_piped_stdin_and_timeout, execute_local_command_with_stdin,
+    execute_local_command_with_stdin_and_timeout, piped_stdin_file, spawn_stdin_pump, StdinSource,
 };
 use super::{CommandOutput, SshClient};
 
@@ -403,6 +403,30 @@ impl SshClient {
         run_command_with_stdin_source(cmd, StdinSource::Piped(stdin))
     }
 
+    /// Execute a stdin-streaming command with a hard wall-clock deadline.
+    pub fn execute_with_piped_stdin_and_timeout(
+        &self,
+        command: &str,
+        timeout: Duration,
+    ) -> CommandOutput {
+        let effective = self.prepend_env(command);
+        if self.is_local {
+            return execute_local_command_with_piped_stdin_and_timeout(&effective, timeout);
+        }
+        let stdin = match piped_stdin_file() {
+            Ok(stdin) => stdin,
+            Err(error) => return ssh_process_error(error),
+        };
+        let args = self.build_ssh_args(Some(&effective), false);
+        let mut cmd = Command::new("ssh");
+        cmd.args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        crate::server::process_cleanup::configure_process_group_cleanup(&mut cmd);
+        execute_command_with_stdin_source_timeout(cmd, StdinSource::Piped(stdin), timeout)
+    }
+
     /// Execute a short, read-only probe with a hard wall-clock deadline.
     ///
     /// Status/version checks must return partial diagnostics instead of allowing
@@ -671,6 +695,63 @@ pub(super) fn execute_command_with_stdin_timeout(
         });
         (writer_rx, writer)
     })
+}
+
+pub(super) fn execute_command_with_stdin_source_timeout(
+    mut cmd: Command,
+    source: StdinSource,
+    timeout: Duration,
+) -> CommandOutput {
+    let started = Instant::now();
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => return ssh_process_error(error),
+    };
+    let pid = child.id();
+    let writer = child
+        .stdin
+        .take()
+        .map(|pipe| spawn_stdin_pump(pipe, source));
+    let stdout = child.stdout.take().map(read_stream);
+    let stderr = child.stderr.take().map(read_stream);
+    let mut timed_out = false;
+    let mut interrupted_signal = None;
+    let status = loop {
+        if let Some(signal) = crate::server::process_cleanup::active_cleanup_signal() {
+            interrupted_signal = Some(signal);
+            break terminate_process_group_with_deadline(&mut child, pid);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started.elapsed() < timeout => thread::sleep(Duration::from_millis(25)),
+            Ok(None) => {
+                timed_out = true;
+                break terminate_process_group_with_deadline(&mut child, pid);
+            }
+            Err(_) => break None,
+        }
+    };
+    let stdin_failed = writer
+        .and_then(|writer| writer.finish_after_child())
+        .is_some_and(|result| result.is_err());
+    let stdout = stdout
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    bounded_probe_output(
+        stdout,
+        stderr,
+        BoundedProbeOutcome {
+            exit_code: status.and_then(|status| status.code()),
+            succeeded: status.is_some_and(|status| status.success()),
+            timed_out,
+            stdin_failed,
+            interrupted_signal,
+        },
+        timeout,
+    )
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@ use homeboy::core::server::{self, Server};
 use homeboy::core::server::{resolve_context, SshClient, SshResolveArgs};
 use serde::Serialize;
 use std::io::IsTerminal;
+use std::time::Duration;
 
 use super::CmdResult;
 
@@ -37,6 +38,11 @@ pub struct SshArgs {
     /// persist the structured envelope. Requires a non-interactive command.
     #[arg(long)]
     pub raw: bool,
+
+    /// Bound the complete non-interactive SSH command, in seconds.
+    /// Progress remains on stderr so `--raw` preserves remote stdout.
+    #[arg(long)]
+    pub timeout: Option<u64>,
 
     #[command(subcommand)]
     pub subcommand: Option<SshSubcommand>,
@@ -74,6 +80,8 @@ pub struct SshConnectOutput {
     pub success: bool,
     pub exit_code: i32,
     pub result_classification: String,
+    pub phases: Vec<String>,
+    pub timed_out: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
 }
@@ -91,6 +99,7 @@ pub fn run(args: SshArgs) -> CmdResult<SshOutput> {
             Ok((SshOutput::List(SshListOutput { servers }), 0))
         }
         None => {
+            ssh_phase("target-resolution-start");
             // Build resolve args based on simplified CLI args
             let resolve_args = if args.as_server {
                 SshResolveArgs {
@@ -106,6 +115,7 @@ pub fn run(args: SshArgs) -> CmdResult<SshOutput> {
                 }
             };
             let result = resolve_context(&resolve_args)?;
+            ssh_phase("target-resolved");
 
             let command_string: Option<String> = if args.command.is_empty() {
                 None
@@ -142,11 +152,11 @@ pub fn run(args: SshArgs) -> CmdResult<SshOutput> {
                         "No command resolved for non-interactive SSH execution".to_string(),
                     )
                 })?;
-                let output = if std::io::stdin().is_terminal() {
-                    client.execute(cmd)
-                } else {
-                    client.execute_with_piped_stdin(cmd)
-                };
+                let timeout = command_timeout(args.timeout)?;
+                ssh_phase("command-start");
+                let output = execute_non_interactive(&client, cmd, timeout);
+                ssh_phase("command-finished");
+                ssh_phase("cleanup-finished");
 
                 Ok((
                     SshOutput::Connect(connect_output_from_execution(
@@ -155,6 +165,7 @@ pub fn run(args: SshArgs) -> CmdResult<SshOutput> {
                         &result.server_id,
                         command_string.clone(),
                         &output,
+                        timeout,
                     )),
                     output.exit_code,
                 ))
@@ -174,6 +185,8 @@ pub fn run(args: SshArgs) -> CmdResult<SshOutput> {
                         exit_code,
                         result_classification: ssh_result_classification(exit_code == 0, exit_code),
                         failure_reason: ssh_failure_reason(exit_code == 0, exit_code),
+                        phases: vec!["target-resolved".to_string()],
+                        timed_out: false,
                     }),
                     exit_code,
                 ))
@@ -190,6 +203,7 @@ fn connect_output_from_execution(
     // invocations remain unambiguous (e.g. args containing spaces).
     command: Option<String>,
     output: &homeboy::core::server::CommandOutput,
+    timeout: Option<Duration>,
 ) -> SshConnectOutput {
     SshConnectOutput {
         resolved_type: resolved_type.to_string(),
@@ -201,7 +215,21 @@ fn connect_output_from_execution(
         success: output.success,
         exit_code: output.exit_code,
         result_classification: ssh_result_classification(output.success, output.exit_code),
-        failure_reason: ssh_failure_reason(output.success, output.exit_code),
+        failure_reason: if output.timed_out {
+            Some(format!(
+                "SSH command deadline expired after {}ms; transport child process group was terminated",
+                timeout.map_or(0, |timeout| timeout.as_millis())
+            ))
+        } else {
+            ssh_failure_reason(output.success, output.exit_code)
+        },
+        phases: vec![
+            "target-resolved".to_string(),
+            "command-started".to_string(),
+            "command-finished".to_string(),
+            "cleanup-finished".to_string(),
+        ],
+        timed_out: output.timed_out,
     }
 }
 
@@ -209,6 +237,7 @@ fn connect_output_from_execution(
 /// exit code, for `--raw` mode. Resolution mirrors [`run`], but the caller emits
 /// the remote streams directly instead of a JSON envelope.
 pub(super) fn execute_raw_command(args: &SshArgs) -> homeboy::core::Result<(String, String, i32)> {
+    ssh_phase("target-resolution-start");
     let resolve_args = if args.as_server {
         SshResolveArgs {
             id: None,
@@ -223,6 +252,7 @@ pub(super) fn execute_raw_command(args: &SshArgs) -> homeboy::core::Result<(Stri
         }
     };
     let result = resolve_context(&resolve_args)?;
+    ssh_phase("target-resolved");
 
     let command_string: Option<String> = if args.command.len() == 1 {
         Some(args.command[0].clone())
@@ -243,12 +273,42 @@ pub(super) fn execute_raw_command(args: &SshArgs) -> homeboy::core::Result<(Stri
             "No command resolved for non-interactive SSH execution".to_string(),
         )
     })?;
-    let output = if std::io::stdin().is_terminal() {
-        client.execute(cmd)
-    } else {
-        client.execute_with_piped_stdin(cmd)
-    };
+    let timeout = command_timeout(args.timeout)?;
+    ssh_phase("command-start");
+    let output = execute_non_interactive(&client, cmd, timeout);
+    ssh_phase("command-finished");
+    ssh_phase("cleanup-finished");
     Ok((output.stdout, output.stderr, output.exit_code))
+}
+
+fn execute_non_interactive(
+    client: &SshClient,
+    command: &str,
+    timeout: Option<Duration>,
+) -> homeboy::core::server::CommandOutput {
+    match (timeout, std::io::stdin().is_terminal()) {
+        (Some(timeout), true) => client.execute_with_timeout(command, timeout),
+        (Some(timeout), false) => client.execute_with_piped_stdin_and_timeout(command, timeout),
+        (None, false) => client.execute_with_piped_stdin(command),
+        (None, true) => client.execute(command),
+    }
+}
+
+fn command_timeout(seconds: Option<u64>) -> homeboy::core::Result<Option<Duration>> {
+    match seconds {
+        Some(0) => Err(homeboy::core::Error::validation_invalid_argument(
+            "timeout",
+            "SSH command timeout must be at least one second",
+            None,
+            None,
+        )),
+        Some(seconds) => Ok(Some(Duration::from_secs(seconds))),
+        None => Ok(None),
+    }
+}
+
+fn ssh_phase(phase: &str) {
+    eprintln!("[ssh] phase={phase}");
 }
 
 fn ssh_result_classification(success: bool, exit_code: i32) -> String {
@@ -322,6 +382,7 @@ mod tests {
             as_server: false,
             user: None,
             raw,
+            timeout: None,
             subcommand: None,
         }
     }
@@ -334,5 +395,14 @@ mod tests {
         assert!(!is_raw_command(&raw_args(vec!["printf", "hi"], false)));
         // --raw with no command (interactive) is not a raw stdout invocation.
         assert!(!is_raw_command(&raw_args(vec![], true)));
+    }
+
+    #[test]
+    fn command_timeout_requires_a_positive_deadline() {
+        assert_eq!(
+            command_timeout(Some(2)).unwrap(),
+            Some(Duration::from_secs(2))
+        );
+        assert!(command_timeout(Some(0)).is_err());
     }
 }
