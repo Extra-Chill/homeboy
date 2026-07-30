@@ -2,7 +2,14 @@
 //!
 //! The runtime adapter projects its live Clap tree into this contract when the
 //! command surface changes. Regular reference validation only needs this leaf
-//! crate, while a separate runtime parity test proves the projection stays exact.
+//! crate.
+//!
+//! Parity against the live Clap tree is deliberately not gated — regenerate
+//! with `HOMEBOY_WRITE_CLI_REFERENCE=1 cargo test -p homeboy-cli --lib
+//! cli_surface::reference_docs` when the command surface moves. The test below
+//! is a different guard: it keeps the two *checked-in* artifacts (this contract
+//! and `docs/reference/cli/commands/`) agreeing with each other, so a hand-edit
+//! to one cannot silently diverge from what the contract serves at runtime.
 
 use std::collections::BTreeMap;
 
