@@ -16,6 +16,7 @@ use homeboy::core::observation::runs_service::{
     self, OrphanedArtifactBytesCleanupOptions, PersistedArtifactCleanupOptions,
     RunnerDownloadCleanupOptions,
 };
+use homeboy::core::output::OutputBudget;
 use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
 use homeboy::core::worktree::{self, WorktreeCleanupOptions, WorktreeCleanupOutput};
 use homeboy::core::worktree_providers::WorktreeProviderCleanupOptions;
@@ -173,6 +174,10 @@ struct RetainedStorageReport {
     by_age: Vec<RetainedStorageAggregate>,
     largest_examples: Vec<RetainedStorageRecord>,
     continuation: Option<String>,
+    /// `false` when a source inventory reached its bounded page before every
+    /// record could be accounted for. Aggregates then describe only this page.
+    totals_complete: bool,
+    source_continuations: Vec<String>,
     safe_next_commands: Vec<String>,
     sqlite: RetainedStorageSqlite,
     /// Added in #9824. Existing lifecycle aggregates above retain their
@@ -323,13 +328,20 @@ fn retained_storage_report(
             older_than_days: policy.runtime_tmp_days,
             managed_older_than_days: None,
             prefix: None,
-            // A read-only accounting pass: the report must total every retained
-            // entry, so it is not bounded by the delete-path record budget.
-            limit: usize::MAX,
+            // Retained-storage is an operator report, not an unbounded disk
+            // walk. It shares the cleanup record budget and names a cursor for
+            // the next runtime-temp page below.
+            limit: policy.scan_limit(),
             run_max_bytes: policy.runtime_run_max_bytes,
             run_max_count: policy.runtime_run_max_count,
             cursor: None,
         })?;
+    let runtime_tmp_continuation = runtime_tmp.next_cursor.as_ref().map(|cursor| {
+        format!(
+            "homeboy cleanup --include runtime-tmp --cursor {}",
+            quote_arg(cursor)
+        )
+    });
     records.extend(
         runtime_tmp
             .rows
@@ -366,13 +378,18 @@ fn retained_storage_report(
     }
 
     let filesystem = retained_storage_filesystem_inventory()?;
-    Ok(build_retained_storage_report(
+    let mut report = build_retained_storage_report(
         records,
         args.limit,
         args.cursor.as_deref(),
         sqlite,
         filesystem,
-    ))
+    );
+    if let Some(command) = runtime_tmp_continuation {
+        report.totals_complete = false;
+        report.source_continuations.push(command);
+    }
+    Ok(report)
 }
 
 fn runtime_tmp_retained_record(row: engine::temp::RuntimeTempCleanupRow) -> RetainedStorageRecord {
@@ -857,6 +874,8 @@ fn build_retained_storage_report(
         by_age: aggregate_retained(&records, |record| record.age.clone()),
         largest_examples: examples,
         continuation,
+        totals_complete: true,
+        source_continuations: Vec::new(),
         // One entry per category this report can account for. Omitting the
         // artifact-root categories used to leave an operator staring at bytes
         // the report itself could not name a reclaim command for.
@@ -1159,7 +1178,7 @@ fn automatic_retention() -> CmdResult<Value> {
 }
 
 fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
-    let selected = CleanupCategorySelection::new(args.include, args.exclude);
+    let selected = CleanupCategorySelection::new(args.include.clone(), args.exclude.clone());
     let apply = args.apply;
     let config = defaults::load_config();
     // One resolver for every category and every specialist command. The
@@ -1270,11 +1289,19 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     }
 
     if selected.includes(CleanupCategoryArg::OrphanedArtifactBytes) {
-        let output =
+        let mut output =
             runs_service::cleanup_orphaned_artifact_bytes(OrphanedArtifactBytesCleanupOptions {
                 apply,
+                // Orphaned artifacts have no cursor. Restricting their source
+                // scan would leave later entries unreachable, so execution
+                // always receives the configured retention limit.
                 limit: policy.scan_limit(),
             })?;
+        runs_service::present_orphaned_artifact_bytes_cleanup(
+            &mut output,
+            args.full,
+            cleanup_replay_command(&args, true, true),
+        )?;
         categories.push(category_from_output(
             ORPHANED_ARTIFACT_BYTES_METADATA,
             apply,
@@ -1321,17 +1348,27 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     }
 
     if selected.includes(CleanupCategoryArg::RuntimeTmp) {
-        let output =
+        let mut output =
             engine::temp::cleanup_runtime_tmp_bounded(engine::temp::RuntimeTempCleanupOptions {
                 apply,
                 older_than_days: policy.runtime_tmp_days,
                 managed_older_than_days: Some(policy.runtime_tmp_managed_days),
                 prefix: None,
-                limit: policy.scan_limit(),
+                limit: if apply || args.full {
+                    policy.scan_limit()
+                } else {
+                    policy.scan_limit().min(OutputBudget::COLLECTION.max_items)
+                },
                 run_max_bytes: policy.runtime_run_max_bytes,
                 run_max_count: policy.runtime_run_max_count,
                 cursor: args.cursor.as_deref(),
             })?;
+        engine::temp::present_runtime_temp_cleanup(
+            &mut output,
+            args.full,
+            cleanup_replay_command(&args, false, false),
+            cleanup_replay_command(&args, true, true),
+        )?;
         let mut category = category_from_output(
             RUNTIME_TMP_METADATA,
             apply,
@@ -1474,6 +1511,69 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     .map_err(|err| {
         homeboy::core::Error::internal_json(err.to_string(), Some("cleanup inventory".to_string()))
     })
+}
+
+fn cleanup_replay_command(args: &CleanupArgs, full: bool, include_cursor: bool) -> String {
+    let mut command = "homeboy cleanup".to_string();
+    if !args.include.is_empty() {
+        command.push_str(&format!(
+            " --include {}",
+            args.include
+                .iter()
+                .map(cleanup_category_arg_name)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    if !args.exclude.is_empty() {
+        command.push_str(&format!(
+            " --exclude {}",
+            args.exclude
+                .iter()
+                .map(cleanup_category_arg_name)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    if args.apply {
+        command.push_str(" --apply");
+    }
+    if let Some(days) = args.older_than_days {
+        command.push_str(&format!(" --older-than-days {days}"));
+    }
+    if let Some(days) = args.runtime_tmp_managed_older_than_days {
+        command.push_str(&format!(" --runtime-tmp-managed-older-than-days {days}"));
+    }
+    if let Some(limit) = args.limit {
+        command.push_str(&format!(" --limit {limit}"));
+    }
+    if include_cursor {
+        if let Some(cursor) = &args.cursor {
+            command.push_str(&format!(" --cursor {}", quote_arg(cursor)));
+        }
+    }
+    if full {
+        command.push_str(" --full");
+    }
+    command
+}
+
+fn cleanup_category_arg_name(category: &CleanupCategoryArg) -> &'static str {
+    match category {
+        CleanupCategoryArg::RepoArtifacts => "repo-artifacts",
+        CleanupCategoryArg::TaskWorktrees => "task-worktrees",
+        CleanupCategoryArg::WorktreeProviders => "worktree-providers",
+        CleanupCategoryArg::TerminalRuns => "terminal-runs",
+        CleanupCategoryArg::PersistedRunArtifacts => "persisted-run-artifacts",
+        CleanupCategoryArg::OrphanedArtifactBytes => "orphaned-artifact-bytes",
+        CleanupCategoryArg::RunnerDownloads => "runner-downloads",
+        CleanupCategoryArg::RunnerBinaryCaches => "runner-binary-caches",
+        CleanupCategoryArg::RemoteLabWorkspaces => "remote-lab-workspaces",
+        CleanupCategoryArg::RuntimeTmp => "runtime-tmp",
+        CleanupCategoryArg::ControllerScratch => "controller-scratch",
+        CleanupCategoryArg::SharedCargoTargets => "shared-cargo-targets",
+        CleanupCategoryArg::ControllerRuntimes => "controller-runtimes",
+    }
 }
 
 struct CleanupCategorySelection {

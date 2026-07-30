@@ -5,9 +5,9 @@ pub(crate) use implementation::{
     mark_run_dir_succeeded, pin_runtime_temp_dir, retain_failed_run_dir, RuntimeTempPin,
 };
 pub use implementation::{
-    cleanup_runtime_tmp, cleanup_runtime_tmp_bounded, runtime_temp_dir, unique_name,
-    CleanupSizeTotals, RuntimeTempCleanupOptions, RuntimeTempCleanupOutput, RuntimeTempCleanupRow,
-    RuntimeTempOwner,
+    cleanup_runtime_tmp, cleanup_runtime_tmp_bounded, present_runtime_temp_cleanup,
+    runtime_temp_dir, unique_name, CleanupSizeTotals, RuntimeTempCleanupOptions,
+    RuntimeTempCleanupOutput, RuntimeTempCleanupRow, RuntimeTempOwner,
 };
 
 // Keep implementation references scoped to the engine-owned sibling modules.

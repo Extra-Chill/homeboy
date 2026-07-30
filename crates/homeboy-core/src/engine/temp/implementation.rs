@@ -1,6 +1,7 @@
 //! Runtime-temp implementation behind the stable `engine::temp` facade.
 
 use crate::error::{Error, Result};
+use crate::output::{OutputBudget, OutputPresentation, OutputTruncation};
 use crate::paths;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -651,6 +652,10 @@ pub struct RuntimeTempCleanupOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     pub rows: Vec<RuntimeTempCleanupRow>,
+    /// Bounded presentation metadata. Omitted for specialist callers that
+    /// retain their historical lossless row contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_detail: Option<OutputTruncation>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -676,6 +681,81 @@ pub struct RuntimeTempCleanupRow {
     pub age_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protection_reason: Option<String>,
+}
+
+/// Present an already-planned runtime-temp cleanup without changing its totals
+/// or mutation set. Aggregate cleanup uses this agent-facing view; specialist
+/// commands retain their established lossless output unless they opt in.
+#[allow(dead_code)]
+pub fn present_runtime_temp_cleanup(
+    output: &mut RuntimeTempCleanupOutput,
+    full: bool,
+    continue_command: String,
+    export_command: String,
+) -> Result<()> {
+    let total_items = output.rows.len();
+    if full {
+        let total_bytes = output.rows.iter().try_fold(0usize, |total, row| {
+            serde_json::to_vec(row)
+                .map(|value| total.saturating_add(value.len()))
+                .map_err(|error| {
+                    Error::internal_json(
+                        error.to_string(),
+                        Some("serialize runtime temp row".to_string()),
+                    )
+                })
+        })?;
+        output.row_detail = Some(OutputTruncation {
+            presentation: OutputPresentation::LosslessExport,
+            total_items,
+            returned_items: total_items,
+            omitted_items: 0,
+            total_bytes,
+            returned_bytes: total_bytes,
+            omitted_bytes: 0,
+            total_bytes_known: true,
+            truncated: false,
+            continue_command,
+            export_command,
+        });
+        return Ok(());
+    }
+
+    let mut rows = Vec::new();
+    let mut returned_bytes = 0usize;
+    for row in output.rows.drain(..) {
+        let bytes = serde_json::to_vec(&row)
+            .map(|value| value.len())
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("serialize runtime temp row".to_string()),
+                )
+            })?;
+        if rows.len() >= OutputBudget::COLLECTION.max_items
+            || returned_bytes.saturating_add(bytes) > OutputBudget::COLLECTION.max_bytes
+        {
+            break;
+        }
+        returned_bytes = returned_bytes.saturating_add(bytes);
+        rows.push(row);
+    }
+    let returned_items = rows.len();
+    output.rows = rows;
+    output.row_detail = Some(OutputTruncation {
+        presentation: OutputPresentation::BoundedCollection,
+        total_items,
+        returned_items,
+        omitted_items: total_items.saturating_sub(returned_items),
+        total_bytes: returned_bytes,
+        returned_bytes,
+        omitted_bytes: 0,
+        total_bytes_known: returned_items == total_items,
+        truncated: returned_items < total_items,
+        continue_command,
+        export_command,
+    });
+    Ok(())
 }
 
 pub fn cleanup_runtime_tmp(
@@ -726,6 +806,7 @@ pub fn cleanup_runtime_tmp_bounded(
         has_more: false,
         next_cursor: None,
         rows: Vec::new(),
+        row_detail: None,
     };
 
     if !root.exists() {
@@ -1490,6 +1571,67 @@ mod tests {
             run_max_count: 100,
             cursor: None,
         }
+    }
+
+    #[test]
+    fn runtime_temp_presentation_bounds_high_cardinality_rows_and_preserves_export() {
+        let row = |index| RuntimeTempCleanupRow {
+            path: format!("/tmp/runtime-{index}"),
+            name: format!("runtime-{index}"),
+            action: "skip".to_string(),
+            reason: "owner is active".to_string(),
+            size_bytes: 0,
+            allocated_bytes: 0,
+            verified_reclaimed_bytes: 0,
+            owner_id: None,
+            owner_pid: None,
+            owner_state: None,
+            producer: None,
+            run_id: None,
+            age_seconds: None,
+            protection_reason: None,
+        };
+        let mut output = RuntimeTempCleanupOutput {
+            command: "self.cleanup-runtime-tmp",
+            dry_run: true,
+            runtime_tmp_root: "/tmp".to_string(),
+            older_than_days: 7,
+            managed_older_than_days: 7,
+            run_max_bytes: 0,
+            run_max_count: 0,
+            prefix: None,
+            totals: CleanupSizeTotals {
+                inspected_count: 1_000,
+                planned_size_bytes: 0,
+                removed_size_bytes: 0,
+            },
+            planned_count: 0,
+            removed_count: 0,
+            skipped_count: 1_000,
+            planned_allocated_bytes: 0,
+            removed_allocated_bytes: 0,
+            verified_reclaimed_bytes: 0,
+            has_more: true,
+            next_cursor: Some("runtime-1000".to_string()),
+            rows: (0..1_000).map(row).collect(),
+            row_detail: None,
+        };
+
+        present_runtime_temp_cleanup(
+            &mut output,
+            false,
+            "homeboy cleanup --include runtime-tmp --cursor runtime-1000".to_string(),
+            "homeboy cleanup --include runtime-tmp --full".to_string(),
+        )
+        .expect("present bounded rows");
+
+        assert!(output.rows.len() <= OutputBudget::COLLECTION.max_items);
+        let detail = output.row_detail.expect("output budget metadata");
+        assert_eq!(detail.total_items, 1_000);
+        assert_eq!(detail.omitted_items, 1_000 - output.rows.len());
+        assert!(detail.truncated);
+        assert!(detail.continue_command.contains("runtime-1000"));
+        assert!(detail.export_command.ends_with("--full"));
     }
 
     #[test]
