@@ -3243,6 +3243,47 @@ fi
         }
     }
 
+    fn with_materialized_cook_batch_worktrees(test: impl FnOnce()) {
+        with_isolated_home(|_| {
+            let mut config = homeboy::core::defaults::load_config();
+            config.agent_task.default_backend = Some("sandbox".to_string());
+            homeboy::core::defaults::save_config(&config)
+                .expect("configure fixture default backend");
+            let worktrees = tempfile::tempdir().expect("managed worktree fixtures");
+            for (handle, name) in [
+                ("homeboy@fix-issue-6453-homeboy", "issue-6453"),
+                ("homeboy@fix-issue-6454-homeboy", "issue-6454"),
+            ] {
+                let path = worktrees.path().join(name);
+                std::fs::create_dir(&path).expect("create managed worktree fixture");
+                for args in [
+                    ["init", "-b", "main"].as_slice(),
+                    ["config", "user.email", "test@example.com"].as_slice(),
+                    ["config", "user.name", "Homeboy Test"].as_slice(),
+                    ["commit", "--allow-empty", "-m", "initial"].as_slice(),
+                ] {
+                    assert!(
+                        Command::new("git")
+                            .args(args)
+                            .current_dir(&path)
+                            .status()
+                            .expect("initialize managed worktree fixture")
+                            .success(),
+                        "git {args:?} failed"
+                    );
+                }
+                worktree::adopt(worktree::WorktreeAdoptOptions {
+                    handle: handle.to_string(),
+                    path: path.display().to_string(),
+                    kind: Some("test-fixture".to_string()),
+                    provenance: None,
+                })
+                .expect("register managed worktree fixture");
+            }
+            test();
+        });
+    }
+
     #[test]
     fn cook_batch_builds_batch_cook_plan_from_issue_urls() {
         with_isolated_home(|_| {
@@ -3636,27 +3677,29 @@ fi
 
     #[test]
     fn cook_batch_dry_run_returns_status_and_resume_commands() {
-        let (value, exit_code) = cook_batch(cook_batch_args()).expect("cook batch dry run");
+        with_materialized_cook_batch_worktrees(|| {
+            let (value, exit_code) = cook_batch(cook_batch_args()).expect("cook batch dry run");
 
-        assert_eq!(exit_code, 0);
-        assert_eq!(value["schema"], "homeboy/agent-task-cook-batch/v1");
-        assert_eq!(value["status"], "planned");
-        assert_eq!(value["summary"]["issues"], 2);
-        assert_eq!(
-            value["preflight"]["provider_selection"]["executor"]["backend"],
-            "sandbox"
-        );
-        assert_eq!(value["preflight"]["provider_selection"]["model"], "gpt-5.5");
-        assert_eq!(
-            value["preflight"]["provider_selection"]["provider_config"],
-            "provided"
-        );
-        assert_eq!(value["worktrees"]["dry_run"], true);
-        assert_eq!(value["worktrees"]["rows"][0]["status"], "queued");
-        assert!(value["commands"]["resume_from_plan"]
-            .as_str()
-            .expect("resume command")
-            .contains("fanout run-plan"));
+            assert_eq!(exit_code, 0);
+            assert_eq!(value["schema"], "homeboy/agent-task-cook-batch/v1");
+            assert_eq!(value["status"], "planned");
+            assert_eq!(value["summary"]["issues"], 2);
+            assert_eq!(
+                value["preflight"]["provider_selection"]["executor"]["backend"],
+                "sandbox"
+            );
+            assert_eq!(value["preflight"]["provider_selection"]["model"], "gpt-5.5");
+            assert_eq!(
+                value["preflight"]["provider_selection"]["provider_config"],
+                "provided"
+            );
+            assert_eq!(value["worktrees"]["dry_run"], true);
+            assert_eq!(value["worktrees"]["rows"][0]["status"], "queued");
+            assert!(value["commands"]["resume_from_plan"]
+                .as_str()
+                .expect("resume command")
+                .contains("fanout run-plan"));
+        });
     }
 
     #[test]
@@ -3821,37 +3864,41 @@ fi
 
     #[test]
     fn cook_batch_unknown_provider_profile_warns_without_core_defaults() {
-        let mut args = cook_batch_args();
-        args.backend = None;
-        args.model = None;
-        args.provider_profile = Some("example-profile".to_string());
+        with_materialized_cook_batch_worktrees(|| {
+            let mut args = cook_batch_args();
+            args.backend = None;
+            args.model = None;
+            args.provider_profile = Some("example-profile".to_string());
 
-        let (value, exit_code) = cook_batch(args).expect("cook batch dry run");
+            let (value, exit_code) = cook_batch(args).expect("cook batch dry run");
 
-        assert_eq!(exit_code, 0);
-        assert_eq!(
-            value["preflight"]["provider_selection"]["profile"],
-            "example-profile"
-        );
-        assert!(value["preflight"]["provider_selection"]["warnings"][0]
-            .as_str()
-            .expect("warning")
-            .contains("not declared"));
+            assert_eq!(exit_code, 0);
+            assert_eq!(
+                value["preflight"]["provider_selection"]["profile"],
+                "example-profile"
+            );
+            assert!(value["preflight"]["provider_selection"]["warnings"][0]
+                .as_str()
+                .expect("warning")
+                .contains("not declared"));
+        });
     }
 
     #[test]
     fn cook_batch_does_not_warn_for_specific_backend_names_in_core() {
-        let mut args = cook_batch_args();
-        args.backend = Some("example".to_string());
-        args.provider_config = None;
+        with_materialized_cook_batch_worktrees(|| {
+            let mut args = cook_batch_args();
+            args.backend = Some("example".to_string());
+            args.provider_config = None;
 
-        let (value, exit_code) = cook_batch(args).expect("cook batch dry run");
+            let (value, exit_code) = cook_batch(args).expect("cook batch dry run");
 
-        assert_eq!(exit_code, 0);
-        assert!(value["preflight"]["provider_selection"]["warnings"]
-            .as_array()
-            .expect("warnings")
-            .is_empty());
+            assert_eq!(exit_code, 0);
+            assert!(value["preflight"]["provider_selection"]["warnings"]
+                .as_array()
+                .expect("warnings")
+                .is_empty());
+        });
     }
 
     #[test]
