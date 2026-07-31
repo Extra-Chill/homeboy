@@ -15,9 +15,10 @@ use crate::commands::cli;
 use crate::commands::output_runtime;
 use crate::commands::utils::{args, entity_suggest, resource_policy, response as output};
 use homeboy::extension::{
-    list_summaries, load_all_extensions, CliConfig,
-    ExtensionManifest as InstalledExtensionManifest, ExtensionSummary,
+    list_summaries_with, load_all_extensions, CliConfig,
+    ExtensionManifest as InstalledExtensionManifest, ExtensionReadinessMode, ExtensionSummary,
 };
+use homeboy_core::extension_readiness::READY_CHECK_SKIPPED_REASON;
 use homeboy_upgrade::upgrade;
 
 const COOK_PINNED_RUNTIME_ENV: &str = "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME";
@@ -72,9 +73,10 @@ fn startup_fast_path_output(args: &[String]) -> Option<StartupFastPathOutput> {
     Some(match startup_fast_path(args)? {
         // Root help renders the augmented command because extension-provided
         // subcommands are part of the user-visible surface; the static derive
-        // command hides every one of them. Extension discovery is only paid on
-        // a root-help invocation — every other argv still leaves the fast path
-        // before any discovery or provider registration happens.
+        // command hides every one of them. Discovery here is metadata-only: it
+        // reads installed manifests and broken symlinks, and spawns nothing.
+        // Rendered help never displays readiness, so probing it was pure cost
+        // on the hottest command in the CLI (#10616).
         StartupFastPath::Help => {
             StartupFastPathOutput::Help(Box::new(CliRuntime::new().build_augmented_command()))
         }
@@ -606,9 +608,18 @@ impl CliRuntime {
         try_parse_extension_cli_command(matches, &self.extension_discovery().info)
     }
 
+    /// Runtime discovery never probes readiness.
+    ///
+    /// Every consumer on this path — [`Self::build_augmented_command`], the
+    /// clap-error augmenter, and extension command dispatch — reads only the
+    /// command surface and link health. A `ready_check` is an arbitrary
+    /// operator-authored shell command, and spawning one per installed
+    /// extension to render `--help` or to route `homeboy rust ...` is pure
+    /// latency. The safety manifest still probes via
+    /// [`collect_extension_cli_info`]. (#10616)
     fn extension_discovery(&self) -> &ExtensionCliDiscovery {
         self.extension_discovery
-            .get_or_init(collect_extension_cli_info)
+            .get_or_init(collect_extension_cli_info_metadata_only)
     }
 }
 
@@ -967,8 +978,24 @@ impl Default for CliRuntime {
     }
 }
 
+/// Discovery with readiness probed. Only the safety manifest needs this: it is
+/// the sole consumer of [`ExtensionCommandManifest::health`].
 fn collect_extension_cli_info() -> ExtensionCliDiscovery {
-    let summaries = list_summaries(None);
+    collect_extension_cli_info_with(ExtensionReadinessMode::Probe)
+}
+
+/// Discovery in metadata-only mode: no `ready_check` is spawned.
+///
+/// The extension-provided command surface comes from each installed manifest's
+/// `cli` block, and broken-link health comes from `broken_extension_links()`.
+/// Neither reads readiness, so the rendered `--help` surface and the augmented
+/// parser are byte-identical either way (#10616).
+fn collect_extension_cli_info_metadata_only() -> ExtensionCliDiscovery {
+    collect_extension_cli_info_with(ExtensionReadinessMode::Skip)
+}
+
+fn collect_extension_cli_info_with(readiness: ExtensionReadinessMode) -> ExtensionCliDiscovery {
+    let summaries = list_summaries_with(None, readiness);
     let mut broken_link_ids: Vec<String> = summaries
         .iter()
         .filter(|summary| summary.error.as_deref() == Some("target_missing"))
@@ -1074,19 +1101,29 @@ fn extension_command_manifest(
 }
 
 fn extension_command_health_from_summary(summary: &ExtensionSummary) -> ExtensionCommandHealth {
+    // An extension whose `ready_check` was never run is `unknown`, not `ready`.
+    // `ExtensionReadinessMode::Skip` reports `ready: true` so that inventory
+    // output is not mistaken for a *failed* probe, but a command-health
+    // contract that copied that through would be asserting a readiness nobody
+    // measured — the fail-open defect class in #10685. Report the absence of a
+    // measurement as an absence. (#10616)
+    let readiness_skipped = summary.ready_reason.as_deref() == Some(READY_CHECK_SKIPPED_REASON);
+
     let status = if summary.error.is_some() {
         "error"
-    } else if summary.ready && summary.compatible {
-        "ready"
     } else if !summary.compatible {
         "incompatible"
+    } else if readiness_skipped {
+        "unknown"
+    } else if summary.ready {
+        "ready"
     } else {
         "not_ready"
     };
 
     ExtensionCommandHealth {
         status: status.to_string(),
-        ready: summary.ready,
+        ready: summary.ready && !readiness_skipped,
         compatible: summary.compatible,
         linked: summary.linked,
         reason: summary
@@ -1818,6 +1855,41 @@ mod tests {
         .expect("extension manifest");
     }
 
+    /// A CLI extension whose `ready_check` leaves a durable trace when it runs.
+    ///
+    /// "no probe happened" is only provable if the probe would have been
+    /// observable, so the sentinel file is the control: a test that asserts the
+    /// sentinel is absent is worthless unless another assertion shows the same
+    /// fixture creates it under [`ExtensionReadinessMode::Probe`].
+    fn write_cli_extension_with_ready_check(
+        home: &std::path::Path,
+        id: &str,
+        tool: &str,
+        sentinel: &std::path::Path,
+    ) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(id);
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        std::fs::write(
+            extension_dir.join(format!("{id}.json")),
+            serde_json::json!({
+                "name": "Probe Trace Extension",
+                "version": "0.0.0",
+                "cli": {
+                    "tool": tool,
+                    "display_name": "Probe CLI",
+                    "command_template": "{{cliPath}} {{args}}"
+                },
+                "executable": {
+                    "runtime": {
+                        "ready_check": format!("touch '{}'", sentinel.display())
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("extension manifest");
+    }
+
     fn write_extension_command_docs(home: &std::path::Path, id: &str, tool: &str) {
         let docs_dir = home
             .join(".config/homeboy/extensions")
@@ -2096,6 +2168,106 @@ mod tests {
             assert_eq!(discovery.info.len(), 1);
             assert_eq!(discovery.info[0].tool, "sample-cli");
             assert_eq!(discovery.health.broken_link_ids, vec!["stale-runtime"]);
+        });
+    }
+
+    /// `--help` is the hottest command in the CLI and needs zero readiness
+    /// information to render. Discovery on that path must spawn nothing. (#10616)
+    #[test]
+    fn runtime_discovery_never_spawns_a_ready_check() {
+        crate::test_support::with_isolated_home(|home| {
+            let sentinel = home.path().join("ready-check-ran");
+            write_cli_extension_with_ready_check(
+                home.path(),
+                "probe-runtime",
+                "probe-cli",
+                &sentinel,
+            );
+
+            let discovery = collect_extension_cli_info_metadata_only();
+
+            assert!(
+                !sentinel.exists(),
+                "metadata-only discovery must not spawn an extension ready_check"
+            );
+            // The extension command surface is still fully discovered.
+            assert_eq!(discovery.info.len(), 1);
+            assert_eq!(discovery.info[0].tool, "probe-cli");
+
+            // Control: the same fixture under Probe *does* run the check, so
+            // the assertion above measures a real suppression rather than a
+            // ready_check that never worked.
+            let _probed = collect_extension_cli_info();
+            assert!(
+                sentinel.exists(),
+                "control: probe mode must actually run the ready_check"
+            );
+        });
+    }
+
+    /// The rendered `--help` surface is a wire protocol: leaseless-recovery
+    /// negotiation parses it and a docs gate pins it. Skipping the probe must
+    /// therefore change no rendered byte. (#10616)
+    #[test]
+    fn metadata_only_discovery_renders_identical_help_to_probed_discovery() {
+        crate::test_support::with_isolated_home(|home| {
+            let sentinel = home.path().join("ready-check-ran");
+            write_cli_extension_with_ready_check(
+                home.path(),
+                "probe-runtime",
+                "probe-cli",
+                &sentinel,
+            );
+
+            let skipped = collect_extension_cli_info_metadata_only();
+            let probed = collect_extension_cli_info();
+
+            let skipped_help = build_augmented_command(&skipped.info, &skipped.health)
+                .render_long_help()
+                .to_string();
+            let probed_help = build_augmented_command(&probed.info, &probed.health)
+                .render_long_help()
+                .to_string();
+
+            assert_eq!(
+                skipped_help, probed_help,
+                "readiness must not affect the rendered help surface"
+            );
+            assert!(
+                skipped_help.contains("probe-cli"),
+                "control: the extension command must appear in help at all"
+            );
+        });
+    }
+
+    /// An extension whose `ready_check` was never run is `unknown`, not `ready`.
+    /// Reporting an unmeasured probe as success is the fail-open defect class
+    /// tracked in #10685.
+    #[test]
+    fn unprobed_extension_command_health_is_unknown_rather_than_ready() {
+        crate::test_support::with_isolated_home(|home| {
+            let sentinel = home.path().join("ready-check-ran");
+            write_cli_extension_with_ready_check(
+                home.path(),
+                "probe-runtime",
+                "probe-cli",
+                &sentinel,
+            );
+
+            let discovery = collect_extension_cli_info_metadata_only();
+            let health = &discovery.info[0]
+                .descriptor
+                .extension
+                .as_ref()
+                .expect("extension manifest")
+                .health;
+
+            assert_eq!(health.status, "unknown");
+            assert!(
+                !health.ready,
+                "an unprobed ready_check must not be reported as ready"
+            );
+            assert_eq!(health.reason.as_deref(), Some(READY_CHECK_SKIPPED_REASON));
         });
     }
 
