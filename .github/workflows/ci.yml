@@ -1,7 +1,7 @@
 # PR quality pipeline.
 #
-# Keep fast checks direct. Test uses Homeboy Action's restartable differential
-# DAG so candidate and baseline evidence survive independent runner retries.
+# Keep fast checks direct. Test uses Homeboy Action's changed-scope routing;
+# the workspace compile gate below covers every test target's wiring.
 
 name: CI
 
@@ -32,7 +32,7 @@ jobs:
         run: bash .github/validate-required-gates.sh --local
 
   # Non-differential safety net for crate-topology changes. The `review test`
-  # gate below is differentially scoped, so a crate extraction that orphans a
+  # gate below is changed-file scoped, so a crate extraction that orphans a
   # DONOR crate's test wiring (e.g. a test file left referencing a `super::foo`
   # module after `foo` moved to its own crate) can pass unnoticed — the donor
   # isn't in the changed scope. This job compiles EVERY crate's test target
@@ -139,8 +139,8 @@ jobs:
           comment-section-title: ${{ matrix.section_title }}
 
   # The caller job name plus the called reconciliation job name preserves the
-  # required `homeboy / Test` context. Candidate and baseline run independently;
-  # a cancelled phase can be rerun while the completed sibling artifact is reused.
+  # required `homeboy / Test` context. PRs execute the affected test closure;
+  # ambiguous source changes fail closed or use Homeboy's full-scope fallback.
   homeboy:
     name: homeboy
     uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2
@@ -149,10 +149,11 @@ jobs:
       expected-commands: review audit,review lint,review test
       component: homeboy
       source: .
-      differential-gating: 'true'
-      baseline-commands: review test
-      execution-timeout-seconds: '3000'
-      test-timeout-seconds: '2700'
+      scope: auto
+      differential-gating: 'false'
+      baseline-commands: none
+      execution-timeout-seconds: '1800'
+      test-timeout-seconds: '1500'
       comment-section-key: test
       comment-section-title: Test
     secrets: inherit
