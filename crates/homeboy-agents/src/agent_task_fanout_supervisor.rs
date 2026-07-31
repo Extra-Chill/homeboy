@@ -13,10 +13,12 @@ use std::fs;
 pub const AGENT_TASK_FANOUT_PORTFOLIO_SCHEMA: &str = "homeboy/agent-task-fanout-portfolio/v1";
 pub const AGENT_TASK_FANOUT_PORTFOLIO_STATUS_SCHEMA: &str =
     "homeboy/agent-task-fanout-portfolio-status/v1";
-/// Keep durable dedupe evidence useful without allowing an unbounded stream of
-/// distinct review findings to grow the controller state forever.
-pub const PORTFOLIO_FINDING_FINGERPRINT_LIMIT: usize = 128;
-pub const CHILD_FINDING_FINGERPRINT_LIMIT: usize = 32;
+/// Maximum inactive historical findings retained per portfolio. Every finding
+/// in the current observation is retained regardless of this limit.
+pub const PORTFOLIO_INACTIVE_FINDING_FINGERPRINT_LIMIT: usize = 128;
+/// Maximum inactive historical findings retained per child. Every finding in
+/// the current child observation is retained regardless of this limit.
+pub const CHILD_INACTIVE_FINDING_FINGERPRINT_LIMIT: usize = 32;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskFanoutPortfolio {
@@ -271,15 +273,15 @@ impl AgentTaskFanoutPortfolio {
                 .iter()
                 .map(|finding| finding.fingerprint.clone())
                 .collect::<BTreeSet<_>>();
-            // Active findings take retention priority. Historical findings are
-            // kept by most-recent observation, with fingerprint ordering
-            // breaking ties so replay and restart produce the same snapshot.
+            // Current evidence is complete. Bound only inactive history by
+            // most-recent observation, with fingerprint ordering breaking ties
+            // so replay and restart produce the same durable snapshot.
             retain_finding_fingerprints(
                 &mut child.finding_fingerprints,
                 &mut child.finding_fingerprint_recency,
                 &findings,
                 generation,
-                CHILD_FINDING_FINGERPRINT_LIMIT,
+                CHILD_INACTIVE_FINDING_FINGERPRINT_LIMIT,
             );
             portfolio_findings.extend(findings);
             let (blocker, action) = reconcile_child(
@@ -296,7 +298,7 @@ impl AgentTaskFanoutPortfolio {
             &mut self.finding_fingerprint_recency,
             &portfolio_findings,
             generation,
-            PORTFOLIO_FINDING_FINGERPRINT_LIMIT,
+            PORTFOLIO_INACTIVE_FINDING_FINGERPRINT_LIMIT,
         );
         self.revision = generation;
         self.updated_at = Some(Utc::now().to_rfc3339());
@@ -370,23 +372,26 @@ fn retain_finding_fingerprints(
     recency: &mut BTreeMap<String, u64>,
     active: &BTreeSet<String>,
     generation: u64,
-    limit: usize,
+    inactive_limit: usize,
 ) {
     fingerprints.extend(active.iter().cloned());
     for fingerprint in active {
         recency.insert(fingerprint.clone(), generation);
     }
     recency.retain(|fingerprint, _| fingerprints.contains(fingerprint));
-    let mut retained = fingerprints.iter().cloned().collect::<Vec<_>>();
-    retained.sort_by(|left, right| {
-        active
-            .contains(right)
-            .cmp(&active.contains(left))
-            .then_with(|| recency.get(right).cmp(&recency.get(left)))
+    let mut inactive = fingerprints
+        .iter()
+        .filter(|fingerprint| !active.contains(*fingerprint))
+        .cloned()
+        .collect::<Vec<_>>();
+    inactive.sort_by(|left, right| {
+        recency
+            .get(right)
+            .cmp(&recency.get(left))
             .then_with(|| left.cmp(right))
     });
-    retained.truncate(limit);
-    *fingerprints = retained.into_iter().collect();
+    inactive.truncate(inactive_limit);
+    *fingerprints = active.iter().cloned().chain(inactive).collect();
     recency.retain(|fingerprint, _| fingerprints.contains(fingerprint));
 }
 
@@ -809,46 +814,58 @@ mod tests {
     }
 
     #[test]
-    fn finding_fingerprints_are_bounded_and_retain_active_and_recent_evidence() {
+    fn finding_fingerprints_retain_all_active_evidence_and_bound_recent_history() {
         let mut portfolio = AgentTaskFanoutPortfolio::new("bounded-findings", [child("child")]);
-        for index in 0..(PORTFOLIO_FINDING_FINGERPRINT_LIMIT + 20) {
+        for index in 0..150 {
             let mut state = observation("child");
             state.findings = vec![AgentTaskFanoutReviewFinding {
-                fingerprint: format!("finding-{index:03}"),
+                fingerprint: format!("history-{index:03}"),
                 summary: "review evidence".into(),
             }];
             portfolio.reconcile([state], &IndependentFanoutDependencies);
         }
 
+        let mut active = observation("child");
+        active.findings = (0..150)
+            .map(|index| AgentTaskFanoutReviewFinding {
+                fingerprint: format!("active-{index:03}"),
+                summary: "active review evidence".into(),
+            })
+            .collect();
+        portfolio.reconcile([active.clone()], &IndependentFanoutDependencies);
+
         assert_eq!(
             portfolio.finding_fingerprints.len(),
-            PORTFOLIO_FINDING_FINGERPRINT_LIMIT
+            150 + PORTFOLIO_INACTIVE_FINDING_FINGERPRINT_LIMIT
         );
         assert_eq!(
             portfolio.children["child"].finding_fingerprints.len(),
-            CHILD_FINDING_FINGERPRINT_LIMIT
+            150 + CHILD_INACTIVE_FINDING_FINGERPRINT_LIMIT
         );
-        assert!(portfolio.finding_fingerprints.contains("finding-147"));
+        assert!(portfolio.finding_fingerprints.contains("active-000"));
+        assert!(portfolio.finding_fingerprints.contains("active-149"));
         assert!(portfolio.children["child"]
             .finding_fingerprints
-            .contains("finding-147"));
+            .contains("active-000"));
         assert!(portfolio.children["child"]
             .finding_fingerprints
-            .contains("finding-116"));
+            .contains("active-149"));
+        assert!(!portfolio.finding_fingerprints.contains("history-021"));
+        assert!(portfolio.finding_fingerprints.contains("history-022"));
         assert!(!portfolio.children["child"]
             .finding_fingerprints
-            .contains("finding-115"));
+            .contains("history-117"));
+        assert!(portfolio.children["child"]
+            .finding_fingerprints
+            .contains("history-118"));
 
-        let mut active = observation("child");
-        active.findings = vec![AgentTaskFanoutReviewFinding {
-            fingerprint: "finding-000".into(),
-            summary: "active again".into(),
-        }];
+        let expected_portfolio = portfolio.finding_fingerprints.clone();
+        let expected_child = portfolio.children["child"].finding_fingerprints.clone();
         portfolio.reconcile([active], &IndependentFanoutDependencies);
-        assert!(portfolio.finding_fingerprints.contains("finding-000"));
-        assert!(
-            portfolio.children["child"].finding_fingerprints.len()
-                <= CHILD_FINDING_FINGERPRINT_LIMIT
+        assert_eq!(portfolio.finding_fingerprints, expected_portfolio);
+        assert_eq!(
+            portfolio.children["child"].finding_fingerprints,
+            expected_child
         );
     }
 
