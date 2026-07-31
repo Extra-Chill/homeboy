@@ -2101,6 +2101,64 @@ pub fn record_cook_recovery_checkpoint(
     }
 }
 
+/// Re-arm a finalized candidate after a dependency rebase. The original
+/// provider output remains authoritative; Cook resumes at the promotion/gate
+/// boundary and finalizes a fresh review only after those gates pass again.
+pub fn invalidate_cook_finalization_for_dependency(
+    run_id: &str,
+    dependency_revision: &str,
+    next_command: &str,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        let metadata = record.ensure_metadata_object();
+        // Retrying the same invalidation after an interrupted coordinator must
+        // preserve the original review evidence and leave its timestamp stable.
+        if metadata.get("cook_finalization").is_none()
+            && metadata
+                .get("cook_recovery_source_checkpoint")
+                .is_some_and(|checkpoint| {
+                    checkpoint["phase"] == "verification_pending"
+                        && checkpoint["dependency_revision"] == dependency_revision
+                })
+        {
+            return false;
+        }
+        let prior = metadata.remove("cook_finalization");
+        let original_prior = metadata
+            .get("cook_recovery_source_checkpoint")
+            .and_then(|checkpoint| checkpoint.get("prior_finalization"))
+            .cloned()
+            .unwrap_or_else(|| prior.clone().unwrap_or(Value::Null));
+        let Some(mut promotion) = metadata.get("latest_promotion").cloned() else {
+            // A terminal child can have no promotion only when it was never a
+            // review-ready Cook; retain an inspectable invalidation marker.
+            metadata.insert("dependency_rebase".to_string(), json!({ "revision": dependency_revision, "next_command": next_command, "prior_finalization": original_prior }));
+            record.updated_at = Some(now_timestamp());
+            return true;
+        };
+        promotion["status"] = json!("verification_pending");
+        promotion["dependency_revision"] = json!(dependency_revision);
+        metadata.insert("latest_promotion".to_string(), promotion);
+        metadata.insert(
+            "cook_recovery_source_checkpoint".to_string(),
+            json!({
+                "schema": "homeboy/agent-task-cook-recovery-checkpoint/v1",
+                "phase": "verification_pending",
+                "next_command": next_command,
+                "dependency_revision": dependency_revision,
+                "prior_finalization": original_prior,
+            }),
+        );
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    match record {
+        Some(record) => Ok(record),
+        None => store::read_record(&run_id),
+    }
+}
+
 pub fn cook_index(cook_id: &str) -> Result<AgentTaskCookIndex> {
     store::read_cook_index(&sanitize_run_id(cook_id))
 }
