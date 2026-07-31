@@ -1022,7 +1022,6 @@ fn git_candidate_state(
     (worktree, head, base)
 }
 
-#[cfg(test)]
 fn batch_resume_result(
     report: agent_task_service::AgentTaskCookBatchReport,
     exit_code: i32,

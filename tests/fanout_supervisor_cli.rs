@@ -2,10 +2,15 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use homeboy::agents::agent_tasks::batch::{persist_fanout_run_batch, FanoutRunBatchChild};
+use homeboy::agents::agent_tasks::lifecycle::submit_plan;
+use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
 
 #[test]
 fn fanout_status_exposes_the_durable_supervisor_projection() {
     homeboy_core::test_support::with_isolated_home(|_| {
+        let plan = AgentTaskPlan::new("fanout-supervisor-cli", Vec::new());
+        submit_plan(&plan, Some("cook-child-a")).expect("persist child a");
+        submit_plan(&plan, Some("cook-child-b")).expect("persist child b");
         persist_fanout_run_batch(
             "production-interface",
             "production-interface",
@@ -30,7 +35,8 @@ fn fanout_status_exposes_the_durable_supervisor_projection() {
                         "ready": ["child-a"],
                         "blocked_paths": {
                             "child-b": ["child-b", "child-a"]
-                        }
+                        },
+                        "next_action": "dispatch ready child 'child-a'"
                     }
                 }
             }),
@@ -44,7 +50,8 @@ fn fanout_status_exposes_the_durable_supervisor_projection() {
             .expect("run Homeboy fanout status");
         assert!(
             output.status.success(),
-            "{}",
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         let output: serde_json::Value =
