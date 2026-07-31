@@ -50,6 +50,9 @@ const LEGACY_ARTIFACT_CATEGORY: &str = "build_output";
 
 /// Liveness of the checkout an artifact belongs to.
 const LIVENESS_ACTIVE: &str = "active_task_worktree";
+/// A build currently owns the target directory, whether or not Homeboy manages
+/// the checkout. Registry state cannot see this (#9481).
+const LIVENESS_ACTIVE_BUILD: &str = "active_build";
 const LIVENESS_IDLE: &str = "idle";
 const LIVENESS_UNKNOWN: &str = "unknown";
 
@@ -401,6 +404,15 @@ impl ActiveWorktrees {
     }
 
     fn liveness(&self, worktree: &Path) -> &'static str {
+        // A build holding the target lock wins over registry state. The registry
+        // only knows about checkouts Homeboy manages, so an unmanaged clone --
+        // or a managed one whose record is not `Active` -- read as idle and was
+        // deleted mid-compile. One unscoped pass removed 12 targets totalling
+        // 114 GiB, including a worktree that rebuilt to 5.7 GiB minutes later
+        // (#9481).
+        if cargo_build_lock_is_held(worktree) {
+            return LIVENESS_ACTIVE_BUILD;
+        }
         if !self.available {
             LIVENESS_UNKNOWN
         } else if self.paths.contains(&canonical_or_owned(worktree)) {
@@ -409,6 +421,57 @@ impl ActiveWorktrees {
             LIVENESS_IDLE
         }
     }
+}
+
+/// Whether a Cargo build currently owns `worktree`'s target directory.
+///
+/// Cargo holds an exclusive advisory lock on `target/<profile>/.cargo-lock` for
+/// the duration of a build and releases it on completion, so probing that lock
+/// answers "is something building here right now" for ANY checkout — managed,
+/// unmanaged, or mid-rebase. Registry state cannot: it only describes checkouts
+/// Homeboy created (#9481).
+///
+/// Deliberately fail-open. An unreadable or absent lock means "no evidence of a
+/// build", never "definitely safe to delete" — the registry and age gates still
+/// apply on top of this.
+fn cargo_build_lock_is_held(worktree: &Path) -> bool {
+    let target = worktree.join("target");
+    let Ok(entries) = fs::read_dir(&target) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path().join(".cargo-lock"))
+        .any(|lock| path_lock_is_held(&lock))
+}
+
+/// Probe one advisory lock without blocking.
+///
+/// Acquiring it proves no build holds it; the lock is released immediately so
+/// this never delays a build that starts during the probe.
+#[cfg(unix)]
+fn path_lock_is_held(lock: &Path) -> bool {
+    use std::os::unix::io::AsRawFd;
+
+    let Ok(file) = fs::File::open(lock) else {
+        return false;
+    };
+    let fd = file.as_raw_fd();
+    let acquired = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if acquired == 0 {
+        unsafe {
+            libc::flock(fd, libc::LOCK_UN);
+        }
+        return false;
+    }
+    // EWOULDBLOCK is the only answer that means "someone else holds it".
+    // Any other errno is an unusable probe, which must not read as active.
+    io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock
+}
+
+#[cfg(not(unix))]
+fn path_lock_is_held(_lock: &Path) -> bool {
+    false
 }
 
 impl Default for ActiveWorktrees {
@@ -1072,12 +1135,25 @@ fn apply_artifact_candidate(
 ) -> ArtifactCleanupCandidateApplyOutcome {
     // The enclosing registry read lease blocks Homeboy admission from changing
     // liveness between this final check and deletion.
-    if candidate.kind == "rust_target"
-        && active.liveness(Path::new(&candidate.worktree)) != LIVENESS_IDLE
-    {
-        return ArtifactCleanupCandidateApplyOutcome::Skipped(
-            "checkout became a registered active task worktree before removal".to_string(),
-        );
+    if candidate.kind == "rust_target" {
+        match active.liveness(Path::new(&candidate.worktree)) {
+            LIVENESS_IDLE => {}
+            // Name the build explicitly. "became a registered active task
+            // worktree" is wrong for an unmanaged checkout and sends the
+            // operator to the worktree registry to look for something that was
+            // never there (#9481).
+            LIVENESS_ACTIVE_BUILD => {
+                return ArtifactCleanupCandidateApplyOutcome::Skipped(format!(
+                    "active_build: a Cargo build holds the target lock in {} — deleting it now would be regenerated immediately",
+                    candidate.worktree
+                ));
+            }
+            _ => {
+                return ArtifactCleanupCandidateApplyOutcome::Skipped(
+                    "checkout became a registered active task worktree before removal".to_string(),
+                );
+            }
+        }
     }
     let path = Path::new(&candidate.path);
     if !path.exists() {
@@ -1695,6 +1771,119 @@ fn git_root(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// #9481: a build holding the Cargo target lock must protect the target,
+    /// whether or not Homeboy manages the checkout.
+    ///
+    /// The registry only knows checkouts Homeboy created, so an unmanaged clone
+    /// read as `idle` and was deleted mid-compile. One unscoped pass removed 12
+    /// targets totalling 114 GiB; one of them rebuilt to 5.7 GiB minutes later.
+    #[cfg(unix)]
+    mod active_build_lock_tests {
+        use super::super::*;
+        use std::os::unix::io::AsRawFd;
+
+        fn target_with_lock(root: &std::path::Path, profile: &str) -> std::path::PathBuf {
+            let dir = root.join("target").join(profile);
+            std::fs::create_dir_all(&dir).expect("target profile dir");
+            let lock = dir.join(".cargo-lock");
+            std::fs::write(&lock, b"").expect("cargo lock");
+            lock
+        }
+
+        /// Hold the lock the way Cargo does, for the life of the returned file.
+        fn hold(lock: &std::path::Path) -> std::fs::File {
+            let file = std::fs::File::open(lock).expect("open lock");
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            assert_eq!(rc, 0, "test must be able to take the lock");
+            file
+        }
+
+        #[test]
+        fn an_unheld_cargo_lock_is_not_an_active_build() {
+            let dir = tempfile::tempdir().expect("worktree");
+            target_with_lock(dir.path(), "debug");
+
+            assert!(!cargo_build_lock_is_held(dir.path()));
+        }
+
+        #[test]
+        fn a_held_cargo_lock_is_an_active_build() {
+            let dir = tempfile::tempdir().expect("worktree");
+            let lock = target_with_lock(dir.path(), "debug");
+            let _held = hold(&lock);
+
+            assert!(cargo_build_lock_is_held(dir.path()));
+        }
+
+        /// Releasing must clear the signal, or a finished build would pin the
+        /// target as undeletable forever.
+        #[test]
+        fn releasing_the_lock_clears_the_active_build_signal() {
+            let dir = tempfile::tempdir().expect("worktree");
+            let lock = target_with_lock(dir.path(), "debug");
+
+            let held = hold(&lock);
+            assert!(cargo_build_lock_is_held(dir.path()));
+            drop(held);
+
+            assert!(
+                !cargo_build_lock_is_held(dir.path()),
+                "a completed build must not keep the target protected"
+            );
+        }
+
+        /// `--release` builds lock a different profile directory.
+        #[test]
+        fn a_lock_under_any_profile_counts() {
+            let dir = tempfile::tempdir().expect("worktree");
+            let lock = target_with_lock(dir.path(), "release");
+            let _held = hold(&lock);
+
+            assert!(cargo_build_lock_is_held(dir.path()));
+        }
+
+        /// Fail open: no target, no lock file, and unreadable paths are all
+        /// "no evidence of a build", never a probe failure that blocks cleanup.
+        #[test]
+        fn a_checkout_without_a_target_is_not_reported_as_building() {
+            let dir = tempfile::tempdir().expect("worktree");
+            assert!(!cargo_build_lock_is_held(dir.path()));
+
+            std::fs::create_dir_all(dir.path().join("target/debug")).expect("empty profile");
+            assert!(
+                !cargo_build_lock_is_held(dir.path()),
+                "a target directory with no lock file is not an active build"
+            );
+        }
+
+        /// The protection must not depend on the worktree registry, which is
+        /// the entire gap this closes.
+        #[test]
+        fn an_unmanaged_checkout_is_protected_while_building() {
+            let dir = tempfile::tempdir().expect("worktree");
+            let lock = target_with_lock(dir.path(), "debug");
+            let _held = hold(&lock);
+
+            // An empty registry: nothing here is a managed task worktree.
+            let active = ActiveWorktrees::default();
+
+            assert_eq!(
+                active.liveness(dir.path()),
+                LIVENESS_ACTIVE_BUILD,
+                "an unmanaged checkout with a live build must not read as idle"
+            );
+        }
+
+        #[test]
+        fn an_idle_unmanaged_checkout_still_reads_as_idle() {
+            let dir = tempfile::tempdir().expect("worktree");
+            target_with_lock(dir.path(), "debug");
+            let active = ActiveWorktrees::default();
+
+            assert_eq!(active.liveness(dir.path()), LIVENESS_IDLE);
+        }
+    }
+
     use super::*;
     use std::collections::HashMap;
     use std::process::Command;
