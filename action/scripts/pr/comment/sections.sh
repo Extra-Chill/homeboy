@@ -71,7 +71,7 @@ status_icon() {
     # able to tell "this change broke tests" from "the suite never finished"
     # without opening the run.
     timeout) printf '%s\n' ':hourglass_flowing_sand:' ;;
-    baseline_red|inconclusive) printf '%s\n' ':warning:' ;;
+    baseline_red|inconclusive|no_measurement) printf '%s\n' ':warning:' ;;
     skipped) printf '%s\n' ':fast_forward:' ;;
     *) printf '%s\n' ':warning:' ;;
   esac
@@ -84,6 +84,7 @@ status_label() {
     timeout) printf '%s\n' 'timed out' ;;
     baseline_red) printf '%s\n' 'baseline red' ;;
     inconclusive) printf '%s\n' 'inconclusive' ;;
+    no_measurement) printf '%s\n' 'no measurement' ;;
     skipped) printf '%s\n' 'skipped' ;;
     *) printf '%s\n' 'unknown' ;;
   esac

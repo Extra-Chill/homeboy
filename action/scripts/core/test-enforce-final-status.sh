@@ -51,4 +51,18 @@ assert_exit 0 "baseline red quality results do not fail PR" \
 assert_exit 0 "inconclusive quality results do not fail PR" \
   env RESULTS='{"review lint":"inconclusive"}' COMMANDS='review lint' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 
+# `no_measurement` is non-blocking by design: a candidate is not answerable for
+# an infrastructure condition it did not cause. This pins that, so the split
+# introduced for Extra-Chill/homeboy#10999 cannot quietly start failing PRs.
+assert_exit 0 "no_measurement quality results do not fail PR" \
+  env RESULTS='{"review test":"no_measurement"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+
+# ...and it must still say so out loud. A silent non-blocking verdict is how an
+# unmeasured command reads as a clean run.
+output="$(env RESULTS='{"review test":"no_measurement"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}" 2>&1)"
+case "${output}" in
+  *"::warning::"*"no measurement"*) printf 'PASS: no_measurement emits a warning annotation\n' ;;
+  *) printf 'FAIL: no_measurement did not annotate; got: %s\n' "${output}"; exit 1 ;;
+esac
+
 printf 'All final status enforcement checks passed.\n'

@@ -641,6 +641,7 @@ runs:
           || contains(steps.select-results.outputs.results, '"timeout"')
           || contains(steps.select-results.outputs.results, '"baseline_red"')
           || contains(steps.select-results.outputs.results, '"inconclusive"')
+          || contains(steps.select-results.outputs.results, '"no_measurement"')
         )
       shell: bash
       env:

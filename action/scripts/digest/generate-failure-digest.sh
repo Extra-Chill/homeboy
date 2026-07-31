@@ -64,7 +64,7 @@ append_differential_evidence() {
 
   rows="$(jq -r '
     to_entries[]
-    | select(.value == "baseline_red" or .value == "inconclusive")
+    | select(.value == "baseline_red" or .value == "inconclusive" or .value == "no_measurement")
     | [.key, .value] | @tsv
   ' <<< "${RESULTS_JSON}" 2>/dev/null || true)"
 

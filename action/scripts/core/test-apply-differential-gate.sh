@@ -63,14 +63,30 @@ assert_equals '{"review lint":"baseline_red"}' "${result}" "lint baseline count 
 
 timed_out_payload='{"success":false,"data":{"exit_code":124,"failure":{"category":"infrastructure","phase":"test"},"raw_output":{"stderr_tail":"Homeboy command timed out after 1500000ms; terminated child process group before returning failure evidence."},"test_counts":{"failed":0,"errors":0}}}'
 
-# A timeout that also happens on the baseline is pre-existing, exactly like a
-# baseline-red test failure. Before this change `timeout` skipped the gate
-# entirely and stayed a hard red no matter what the baseline did.
+# A timeout that also happens on the baseline must not fail the candidate.
+# Before this was admitted to the gate, `timeout` skipped it entirely and stayed
+# a hard red no matter what the baseline did.
+#
+# It is reported as `no_measurement` rather than `baseline_red`. Both are
+# non-blocking, so the decision above is unchanged -- but `baseline_red` claims
+# the failure is *pre-existing*, and that claim needs an observation on the
+# candidate side to rest on. Here neither side wrote counts, so nothing is known
+# and there is nothing to call pre-existing. See Extra-Chill/homeboy#10999.
 printf '%s\n' "${timed_out_payload}" > "${current_dir}/review-test.json"
 rm -f "${base_dir}/review-test.json"
 printf '{"review test":{"status":"timeout","exit_code":124,"command":"homeboy review test sample --path .","structured_output":false}}\n' > "${base_dir}/baseline-status.json"
 result="$(python3 "${APPLY_GATE}" '{"review test":"timeout"}' "${current_dir}" "${base_dir}")"
-assert_equals '{"review test":"baseline_red"}' "${result}" "a timeout that also times out on the baseline is pre-existing, not a candidate failure"
+assert_equals '{"review test":"no_measurement"}' "${result}" "a double timeout reports no_measurement, not a pre-existing-failure diagnosis"
+
+# The discriminator. Same unmeasurable baseline, but here the candidate DID
+# measure -- so "this failure reproduces on main" is a claim the evidence can
+# support, and the verdict must stay `baseline_red`. If the new branch were
+# keyed on the baseline alone it would swallow this case too.
+printf '{"success":false,"data":{"test_counts":{"failed":1,"errors":0}}}\n' > "${current_dir}/review-test.json"
+rm -f "${base_dir}/review-test.json"
+printf '{"review test":{"status":"fail","exit_code":1,"command":"homeboy review test sample --path .","structured_output":false}}\n' > "${base_dir}/baseline-status.json"
+result="$(python3 "${APPLY_GATE}" '{"review test":"fail"}' "${current_dir}" "${base_dir}")"
+assert_equals '{"review test":"baseline_red"}' "${result}" "a measured candidate against an unmeasurable baseline is still baseline_red"
 
 # The important negative. A killed run reports FEWER failures than a healthy
 # baseline (0 here, versus 1), so a naive count comparison reads the timeout as

@@ -212,6 +212,33 @@ def main() -> int:
         base_structured = base_metadata.get("structured_output") is True
 
         if base_failed and (base is None or not base_structured):
+            # `baseline_red` asserts something specific: this failure is
+            # pre-existing. That claim needs an observation on the candidate
+            # side to rest on -- "the same thing is wrong on main" presumes we
+            # know what is wrong here.
+            #
+            # When the candidate also produced no measurement, there is no such
+            # observation. A double timeout is the concrete case: both sides ran
+            # out of clock, neither wrote counts, and nothing at all is known
+            # about the command. Reporting that as `baseline_red` overstates it,
+            # and it is indistinguishable in the results JSON from a genuine
+            # measured-and-unchanged failure.
+            #
+            # `no_measurement` is deliberately non-blocking, exactly like
+            # `baseline_red`: a candidate is still not answerable for an
+            # infrastructure condition it did not cause, which is the decision
+            # the "timeout that also times out on the baseline" case encodes.
+            # This only stops the two states from being reported as one, so the
+            # absence of evidence is visible and countable rather than dressed
+            # up as a diagnosis. See Extra-Chill/homeboy#10999.
+            if timed_out or current is None:
+                adjusted[command] = "no_measurement"
+                print(
+                    f"::warning::Differential gate marked {command} no_measurement: neither the candidate nor the baseline produced comparable counts (baseline command `{command_label(command, base_metadata)}` exited {base_metadata.get('exit_code', 'unknown')}). Nothing is known about this command -- this is not evidence that the failure is pre-existing.",
+                    file=sys.stderr,
+                )
+                continue
+
             adjusted[command] = "baseline_red"
             print(
                 f"::warning::Differential gate marked {command} baseline_red: baseline command `{command_label(command, base_metadata)}` exited {base_metadata.get('exit_code', 'unknown')} before comparable counts were available",
