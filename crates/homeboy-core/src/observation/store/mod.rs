@@ -23,7 +23,7 @@ use super::records::{
 };
 use crate::{paths, Error, Result};
 pub use artifacts::directory_tree_sha256;
-pub use artifacts::ArtifactPublication;
+pub use artifacts::{ArtifactPublication, ArtifactPublicationType};
 
 pub(crate) use helpers::*;
 

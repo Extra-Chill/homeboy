@@ -1539,6 +1539,151 @@ fn terminal_mirroring_persists_declared_run_and_artifact_for_controller_review()
 }
 
 #[test]
+fn terminal_mirroring_keeps_every_declared_visual_artifact_after_runner_cleanup() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = ObservationStore::open_initialized().expect("controller store");
+        let run_id = "bench-visual-review".to_string();
+        let workspace = tempfile::tempdir().expect("runner workspace");
+        let artifacts = (0..21)
+            .map(|index| {
+                let id = format!("visual-{index:02}");
+                let bytes = format!("png-{index}").into_bytes();
+                let path = workspace.path().join(format!("{id}.png"));
+                fs::write(&path, &bytes).expect("runner artifact");
+                json!({
+                    "id": id,
+                    "kind": "visual_compare",
+                    "type": "file",
+                    "size_bytes": bytes.len(),
+                    "sha256": format!("{:x}", Sha256::digest(&bytes)),
+                    "mime": "image/png"
+                })
+            })
+            .collect::<Vec<_>>();
+        let job = terminal_runner_job();
+
+        mirror_remote_observation_runs_by_id_with_downloader(
+            &store,
+            &ssh_runner(),
+            &job,
+            std::slice::from_ref(&run_id),
+            None,
+            |_| {
+                Ok(Some(json!({
+                    "id": run_id,
+                    "kind": "bench",
+                    "started_at": "2023-11-14T22:13:20Z",
+                    "finished_at": "2023-11-14T22:13:21Z",
+                    "status": "pass",
+                    "artifacts": artifacts,
+                })))
+            },
+            |artifact_path| {
+                let id = artifact_path.rsplit('/').next().expect("artifact id");
+                Ok(workspace.path().join(format!("{id}.png")))
+            },
+        )
+        .expect("all declared visual artifacts are durably mirrored");
+
+        workspace.close().expect("runner workspace cleanup");
+        let persisted = store.list_artifacts(&run_id).expect("persisted artifacts");
+        assert_eq!(persisted.len(), 21);
+        for artifact in persisted {
+            assert_eq!(artifact.artifact_type, "file");
+            assert!(artifact.sha256.is_some());
+            assert!(!fs::read(&artifact.path)
+                .expect("controller artifact")
+                .is_empty());
+        }
+    });
+}
+
+#[test]
+fn terminal_mirroring_copies_declared_directory_with_tree_hash() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = ObservationStore::open_initialized().expect("controller store");
+        let run_id = "bench-directory-review".to_string();
+        let workspace = tempfile::tempdir().expect("runner workspace");
+        let directory = workspace.path().join("visuals");
+        fs::create_dir_all(directory.join("nested")).expect("directory");
+        fs::write(directory.join("baseline.png"), b"baseline").expect("baseline");
+        fs::write(directory.join("nested/diff.png"), b"diff").expect("diff");
+        let tree_sha256 =
+            homeboy_core::observation::directory_tree_sha256(&directory).expect("tree hash");
+
+        mirror_remote_observation_runs_by_id_with_downloader(
+            &store,
+            &ssh_runner(),
+            &terminal_runner_job(),
+            std::slice::from_ref(&run_id),
+            None,
+            |_| {
+                Ok(Some(json!({
+                    "id": run_id,
+                    "kind": "bench",
+                    "started_at": "2023-11-14T22:13:20Z",
+                    "finished_at": "2023-11-14T22:13:21Z",
+                    "status": "pass",
+                    "artifacts": [{
+                        "id": "visual-directory",
+                        "kind": "visual_compare",
+                        "type": "directory",
+                        "path": "runner-artifact://lab/bench-directory-review/visual-directory",
+                        "sha256": tree_sha256.clone()
+                    }]
+                })))
+            },
+            |_| Ok(directory.clone()),
+        )
+        .expect("directory is durably mirrored");
+
+        workspace.close().expect("runner workspace cleanup");
+        let artifact = store
+            .get_artifact("visual-directory")
+            .expect("artifact lookup")
+            .expect("artifact");
+        assert_eq!(artifact.artifact_type, "directory");
+        assert_eq!(artifact.sha256.as_deref(), Some(tree_sha256.as_str()));
+        assert!(std::path::Path::new(&artifact.path).is_dir());
+    });
+}
+
+#[test]
+fn terminal_mirroring_rejects_url_only_declared_artifacts() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = ObservationStore::open_initialized().expect("controller store");
+        let run_id = "bench-expired-tunnel".to_string();
+        let error = mirror_remote_observation_runs_by_id_with_downloader(
+            &store,
+            &ssh_runner(),
+            &terminal_runner_job(),
+            std::slice::from_ref(&run_id),
+            None,
+            |_| {
+                Ok(Some(json!({
+                    "id": run_id,
+                    "kind": "bench",
+                    "started_at": "2023-11-14T22:13:20Z",
+                    "finished_at": "2023-11-14T22:13:21Z",
+                    "status": "pass",
+                    "artifacts": [{
+                        "id": "expired-tunnel",
+                        "kind": "visual_compare",
+                        "type": "url",
+                        "url": "https://expired.example/visual.png"
+                    }]
+                })))
+            },
+            |_| unreachable!("URL artifacts must not be downloaded as terminal evidence"),
+        )
+        .expect_err("URL-only artifact must fail terminal projection");
+
+        assert!(error.message.contains("durably project all artifacts"));
+        assert!(store.get_run(&run_id).expect("run lookup").is_none());
+    });
+}
+
+#[test]
 fn reverse_broker_lookup_projects_only_embedded_typed_run_details() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let job = terminal_runner_job();

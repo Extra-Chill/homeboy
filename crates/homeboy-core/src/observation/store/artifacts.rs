@@ -12,8 +12,14 @@ use super::*;
 const PUBLICATION_LEASE_MS: i64 = 5 * 60 * 1000;
 const PUBLICATION_ARTIFACT_FILENAME_LIMIT: usize = 240;
 
-/// A file staged by a caller for atomic publication with its run record.
+/// A filesystem artifact staged by a caller for atomic publication with its run record.
 /// The store computes controller-owned integrity metadata from `source_path`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactPublicationType {
+    File,
+    Directory,
+}
+
 #[derive(Debug, Clone)]
 pub struct ArtifactPublication {
     pub id: String,
@@ -25,10 +31,11 @@ pub struct ArtifactPublication {
     /// both fields; other store callers may omit them for local files.
     pub expected_size_bytes: Option<i64>,
     pub expected_sha256: Option<String>,
+    pub artifact_type: ArtifactPublicationType,
 }
 
 impl ObservationStore {
-    /// Publish a run and all of its file artifacts as one reader-visible unit.
+    /// Publish a run and all of its filesystem artifacts as one reader-visible unit.
     ///
     /// Files are copied and verified before the SQLite transaction begins. The
     /// rows become visible together at commit; files created for a failed
@@ -66,10 +73,14 @@ impl ObservationStore {
                         Some(format!("inspect staged artifact {}", source.display())),
                     )
                 })?;
-                if !metadata.is_file() {
+                let is_expected_type = match publication.artifact_type {
+                    ArtifactPublicationType::File => metadata.is_file(),
+                    ArtifactPublicationType::Directory => metadata.is_dir(),
+                };
+                if !is_expected_type {
                     return Err(Error::validation_invalid_argument(
                         "artifact.path",
-                        "atomic artifact publication requires a regular file",
+                        "atomic artifact publication source has the wrong filesystem type",
                         Some(source.display().to_string()),
                         None,
                     ));
@@ -79,9 +90,15 @@ impl ObservationStore {
                 // bytes must therefore be owned by this publication token.
                 let stored_path =
                     publication_artifact_path(&run.id, &publication.id, source, &publication_id)?;
-                let size_bytes = i64::try_from(metadata.len()).ok();
-                let sha256 = crate::artifact_metadata::sha256_file(source)?;
-                if publication.expected_size_bytes.is_some()
+                let size_bytes = (publication.artifact_type == ArtifactPublicationType::File)
+                    .then(|| i64::try_from(metadata.len()).ok())
+                    .flatten();
+                let sha256 = match publication.artifact_type {
+                    ArtifactPublicationType::File => crate::artifact_metadata::sha256_file(source)?,
+                    ArtifactPublicationType::Directory => directory_tree_sha256(source)?,
+                };
+                if publication.artifact_type == ArtifactPublicationType::File
+                    && publication.expected_size_bytes.is_some()
                     && publication.expected_size_bytes != size_bytes
                 {
                     return Err(Error::validation_invalid_argument(
@@ -104,10 +121,19 @@ impl ObservationStore {
                 if let Some(existing) = self.get_artifact(&publication.id)? {
                     let matches = existing.run_id == run.id
                         && existing.kind == publication.kind
-                        && existing.artifact_type == "file"
+                        && existing.artifact_type
+                            == match publication.artifact_type {
+                                ArtifactPublicationType::File => "file",
+                                ArtifactPublicationType::Directory => "directory",
+                            }
                         && existing.size_bytes == size_bytes
                         && existing.sha256.as_deref() == Some(sha256.as_str())
-                        && Path::new(&existing.path).is_file();
+                        && match publication.artifact_type {
+                            ArtifactPublicationType::File => Path::new(&existing.path).is_file(),
+                            ArtifactPublicationType::Directory => {
+                                Path::new(&existing.path).is_dir()
+                            }
+                        };
                     if !matches {
                         return Err(Error::validation_invalid_argument(
                             "artifact.id",
@@ -121,8 +147,19 @@ impl ObservationStore {
                 }
                 let staged_path = staged_artifact_path(&stored_path, Uuid::new_v4());
                 staged_paths.push(staged_path.clone());
-                copy_artifact_file(source, &staged_path)?;
-                if crate::artifact_metadata::sha256_file(&staged_path)? != sha256 {
+                match publication.artifact_type {
+                    ArtifactPublicationType::File => copy_artifact_file(source, &staged_path)?,
+                    ArtifactPublicationType::Directory => {
+                        copy_artifact_directory(source, &staged_path)?
+                    }
+                }
+                let staged_sha256 = match publication.artifact_type {
+                    ArtifactPublicationType::File => {
+                        crate::artifact_metadata::sha256_file(&staged_path)?
+                    }
+                    ArtifactPublicationType::Directory => directory_tree_sha256(&staged_path)?,
+                };
+                if staged_sha256 != sha256 {
                     return Err(Error::internal_unexpected(
                         "staged artifact checksum changed before publication",
                     ));
@@ -131,7 +168,10 @@ impl ObservationStore {
                     id: publication.id.clone(),
                     run_id: run.id.clone(),
                     kind: publication.kind.clone(),
-                    artifact_type: "file".to_string(),
+                    artifact_type: match publication.artifact_type {
+                        ArtifactPublicationType::File => "file".to_string(),
+                        ArtifactPublicationType::Directory => "directory".to_string(),
+                    },
                     path: stored_path.display().to_string(),
                     url: None,
                     public_url: None,
@@ -139,14 +179,19 @@ impl ObservationStore {
                     viewer_links: Vec::new(),
                     sha256: Some(sha256),
                     size_bytes,
-                    mime: publication
-                        .mime
-                        .clone()
-                        .or_else(|| crate::artifact_metadata::content_type_from_path(source)),
+                    mime: (publication.artifact_type == ArtifactPublicationType::File)
+                        .then(|| {
+                            publication.mime.clone().or_else(|| {
+                                crate::artifact_metadata::content_type_from_path(source)
+                            })
+                        })
+                        .flatten(),
                     metadata_json: publication.metadata_json.clone(),
                     created_at: chrono::Utc::now().to_rfc3339(),
                 };
-                crate::artifact_links::annotate_public_artifact_url_validation(&mut artifact);
+                if publication.artifact_type == ArtifactPublicationType::File {
+                    crate::artifact_links::annotate_public_artifact_url_validation(&mut artifact);
+                }
                 prepared.push((artifact, Some(staged_path), Some(stored_path)));
             }
             // Copying can be slow. Journal only after all staging completes so
@@ -223,7 +268,7 @@ impl ObservationStore {
         })();
         if let Err(error) = result {
             for path in staged_paths {
-                fs::remove_file(path).ok();
+                remove_publication_path(&path);
             }
             self.reconcile_artifact_publication(&publication_id, &owner_token)
                 .ok();
@@ -278,8 +323,8 @@ impl ObservationStore {
                 params![publication_id, artifact_id, owner_token, lease_expires_at, now],
             ).map_err(sqlite_error("claim expired artifact publication"))?;
             if claimed == 1 {
-                fs::remove_file(staging_path).ok();
-                fs::remove_file(final_path).ok();
+                remove_publication_path(Path::new(&staging_path));
+                remove_publication_path(Path::new(&final_path));
             }
         }
         Ok(())
@@ -300,8 +345,8 @@ impl ObservationStore {
             .map_err(sqlite_error("query owned artifact publication"))?;
         for (staging_path, final_path) in collect_rows(paths, "collect owned artifact publication")?
         {
-            fs::remove_file(staging_path).ok();
-            fs::remove_file(final_path).ok();
+            remove_publication_path(Path::new(&staging_path));
+            remove_publication_path(Path::new(&final_path));
         }
         self.connection.execute(
             "DELETE FROM artifact_publication_intents WHERE publication_id = ?1 AND owner_token = ?2",
@@ -914,11 +959,11 @@ impl ObservationStore {
                     kind,
                     "directory",
                     path_string,
-                    Some(tree_sha256.clone()),
+                    Option::<String>::None,
                     Option::<String>::None,
                     Option::<String>::None,
                     viewer_links_json,
-                    Option::<String>::None,
+                    Some(tree_sha256.clone()),
                     Option::<i64>::None,
                     Option::<String>::None,
                     metadata_json_str,
@@ -1656,6 +1701,18 @@ fn staged_artifact_path(stored_path: &Path, staging_id: Uuid) -> std::path::Path
     stored_path.with_file_name(format!(".artifact-{staging_id}.staging"))
 }
 
+fn remove_publication_path(path: &Path) {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => {
+            fs::remove_dir_all(path).ok();
+        }
+        Ok(_) => {
+            fs::remove_file(path).ok();
+        }
+        Err(_) => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1846,6 +1903,7 @@ mod tests {
                 metadata_json: serde_json::json!({}),
                 expected_size_bytes: None,
                 expected_sha256: None,
+                artifact_type: ArtifactPublicationType::File,
             };
 
             let error = store
@@ -1874,6 +1932,105 @@ mod tests {
     }
 
     #[test]
+    fn atomic_publication_keeps_mixed_artifacts_invisible_until_complete() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let seed = store
+                .start_run(NewRunRecord::builder("test").cwd_path(home.path()).build())
+                .expect("seed run");
+            let mut run = seed.clone();
+            run.id = "mixed-atomic-run".to_string();
+            let file = home.path().join("evidence.json");
+            let directory = home.path().join("visuals");
+            fs::write(&file, b"evidence").expect("file");
+            fs::create_dir_all(&directory).expect("directory");
+            fs::write(directory.join("diff.png"), b"diff").expect("directory file");
+            let file_hash = crate::artifact_metadata::sha256_file(&file).expect("file hash");
+            let tree_hash = directory_tree_sha256(&directory).expect("tree hash");
+            let publication = |id: &str, source_path: PathBuf, artifact_type| ArtifactPublication {
+                id: id.to_string(),
+                kind: "evidence".to_string(),
+                source_path,
+                mime: None,
+                metadata_json: serde_json::json!({}),
+                expected_size_bytes: None,
+                expected_sha256: None,
+                artifact_type,
+            };
+
+            store
+                .publish_run_artifacts_atomically(
+                    &run,
+                    &[
+                        publication("file", file.clone(), ArtifactPublicationType::File),
+                        publication(
+                            "missing-directory",
+                            home.path().join("missing-directory"),
+                            ArtifactPublicationType::Directory,
+                        ),
+                    ],
+                )
+                .expect_err("mixed staging failure");
+            assert!(store.get_run(&run.id).expect("run lookup").is_none());
+            assert!(store.get_artifact("file").expect("file lookup").is_none());
+
+            let directory_only = RunRecord {
+                id: "directory-only-run".to_string(),
+                ..run.clone()
+            };
+            let directory_records = store
+                .publish_run_artifacts_atomically(
+                    &directory_only,
+                    &[ArtifactPublication {
+                        expected_sha256: Some(tree_hash.clone()),
+                        ..publication(
+                            "directory",
+                            directory.clone(),
+                            ArtifactPublicationType::Directory,
+                        )
+                    }],
+                )
+                .expect("directory-only publication");
+            assert_eq!(directory_records[0].artifact_type, "directory");
+            assert_eq!(
+                directory_records[0].sha256.as_deref(),
+                Some(tree_hash.as_str())
+            );
+
+            let mixed = RunRecord {
+                id: "mixed-success-run".to_string(),
+                ..run
+            };
+            let records = store
+                .publish_run_artifacts_atomically(
+                    &mixed,
+                    &[
+                        ArtifactPublication {
+                            expected_sha256: Some(file_hash),
+                            ..publication("mixed-file", file, ArtifactPublicationType::File)
+                        },
+                        ArtifactPublication {
+                            expected_sha256: Some(tree_hash.clone()),
+                            ..publication(
+                                "mixed-directory",
+                                directory,
+                                ArtifactPublicationType::Directory,
+                            )
+                        },
+                    ],
+                )
+                .expect("mixed publication");
+            assert_eq!(records.len(), 2);
+            assert!(records
+                .iter()
+                .any(|artifact| artifact.artifact_type == "file"));
+            assert!(records
+                .iter()
+                .any(|artifact| artifact.sha256.as_deref() == Some(tree_hash.as_str())));
+        });
+    }
+
+    #[test]
     fn atomic_publication_bounds_oversized_final_filename() {
         with_isolated_home(|home| {
             let store = ObservationStore::open_initialized().expect("store");
@@ -1898,6 +2055,7 @@ mod tests {
                         metadata_json: serde_json::json!({}),
                         expected_size_bytes: None,
                         expected_sha256: None,
+                        artifact_type: ArtifactPublicationType::File,
                     }],
                 )
                 .expect("publish oversized private artifact");

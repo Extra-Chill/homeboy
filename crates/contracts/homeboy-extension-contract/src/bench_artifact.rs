@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use homeboy_lifecycle_contract::ArtifactViewerLink;
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 /// Viewer pointers shared by bench artifact records and the compact
 /// artifact index. Embedded via `#[serde(flatten)]` so the on-wire JSON
 /// keeps `viewer_url` / `viewer_links` at the parent level — identical
@@ -43,6 +47,10 @@ pub struct BenchArtifact {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation_artifact_id: Option<String>,
+    /// Makes this reviewer-facing artifact part of the terminal durability
+    /// contract. The producer must provide bytes that Homeboy can retain.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub required_durable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

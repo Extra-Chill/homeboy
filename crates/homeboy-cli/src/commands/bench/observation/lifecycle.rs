@@ -4,6 +4,7 @@ use homeboy::core::engine::run_dir::{self, RunDir};
 use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{merge_metadata, ActiveObservation, NewRunRecord, RunStatus};
 use homeboy::rig::RigStateSnapshot;
+use homeboy_extension::bench::run::BenchRunFailure;
 use homeboy_extension::bench::BenchRunWorkflowResult;
 
 use super::artifacts::{
@@ -85,7 +86,21 @@ pub(in crate::commands::bench) fn finish_success(
 ) -> Option<BenchObservationSummary> {
     let observation = observation?;
 
-    record_bench_observation_artifacts(&observation, workflow, run_dir);
+    if !record_bench_observation_artifacts(&observation, workflow, run_dir) {
+        workflow.status = "failed".to_string();
+        workflow.exit_code = 1;
+        workflow.failure = Some(BenchRunFailure {
+            component_id: workflow.component.clone(),
+            component_path: None,
+            scenario_id: None,
+            exit_code: 1,
+            stderr_tail: "declared reviewer-facing artifacts were not durably promoted".to_string(),
+            failure_classification: None,
+            responsiveness: None,
+            memory_sample: None,
+            diagnostics: workflow.diagnostics.clone(),
+        });
+    }
     let metadata =
         bench_observation_finish_metadata(observation.0.initial_metadata().clone(), workflow);
     let status = if workflow.exit_code == 0 {

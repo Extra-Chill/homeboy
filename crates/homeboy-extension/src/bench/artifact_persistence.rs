@@ -26,7 +26,7 @@ pub fn record_bench_observation_artifacts(
     observation: &ActiveObservation,
     workflow: &mut BenchRunWorkflowResult,
     run_dir: &RunDir,
-) {
+) -> bool {
     if let Some(results) = workflow.results.as_mut() {
         workflow
             .diagnostics
@@ -51,12 +51,30 @@ pub fn record_bench_observation_artifacts(
     record_memory_timeline_artifacts(observation, run_dir);
 
     let Some(results) = workflow.results.as_ref() else {
-        return;
+        return true;
     };
     observation.record_findings(&finding_records_from_budget(
         observation.run_id(),
         &results.budget_findings,
     ));
+    all_bench_artifacts_are_promoted(results)
+}
+
+fn all_bench_artifacts_are_promoted(results: &BenchResults) -> bool {
+    results.scenarios.iter().all(|scenario| {
+        scenario
+            .artifacts
+            .values()
+            .chain(
+                scenario
+                    .runs
+                    .iter()
+                    .flatten()
+                    .flat_map(|run| run.artifacts.values()),
+            )
+            .filter(|artifact| artifact.required_durable)
+            .all(|artifact| artifact.observation_artifact_id.is_some())
+    })
 }
 
 /// Record an artifact when the file at `path` exists.
@@ -136,7 +154,9 @@ fn persist_bench_artifact(
     run_dir: &RunDir,
     shared_state: Option<&str>,
 ) -> Option<BenchDiagnostic> {
-    let kind = artifact.kind.clone().unwrap_or_else(|| name.to_string());
+    // Results can be retried or hydrated from a prior run. Only this attempt's
+    // persisted record may satisfy the current durability declaration.
+    artifact.observation_artifact_id = None;
     let metadata = bench_artifact_metadata(scenario_id, run_index, name, artifact);
 
     let original_path = artifact.path.clone();
@@ -160,28 +180,40 @@ fn persist_bench_artifact(
         shared_state,
     ) else {
         if let Some(url) = artifact.url.clone() {
-            return match observation.store().record_url_artifact_with_metadata(
-                observation.run_id(),
-                &kind,
-                &url,
-                metadata,
-            ) {
-                Ok(record) => apply_recorded_bench_artifact_links(
-                    scenario_id,
-                    run_index,
-                    name,
-                    artifact,
-                    &record,
+            if !artifact.required_durable {
+                return match observation.store().record_url_artifact_with_metadata(
+                    observation.run_id(),
+                    artifact.kind.as_deref().unwrap_or(name),
+                    &url,
+                    metadata,
+                ) {
+                    Ok(record) => apply_recorded_bench_artifact_links(
+                        scenario_id,
+                        run_index,
+                        name,
+                        artifact,
+                        &record,
+                    ),
+                    Err(error) => Some(bench_artifact_diagnostic(
+                        scenario_id,
+                        run_index,
+                        name,
+                        "bench_artifact_url_record_failed",
+                        format!("failed to record bench URL artifact `{name}`: {error}"),
+                        serde_json::json!({ "url": url }),
+                    )),
+                };
+            }
+            return Some(bench_artifact_diagnostic(
+                scenario_id,
+                run_index,
+                name,
+                "bench_artifact_durable_source_missing",
+                format!(
+                    "bench artifact `{name}` has only URL source `{url}`; reviewer-facing artifacts require a local file or directory for durable promotion"
                 ),
-                Err(error) => Some(bench_artifact_diagnostic(
-                    scenario_id,
-                    run_index,
-                    name,
-                    "bench_artifact_url_record_failed",
-                    format!("failed to record bench URL artifact `{name}`: {error}"),
-                    serde_json::json!({ "url": url }),
-                )),
-            };
+                serde_json::json!({ "url": url }),
+            ));
         }
 
         let original_path = original_path?;
