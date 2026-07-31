@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.10.0] - 2026-07-31
+
+### Added
+- make differential quality phases restartable
+
 ## [2.9.3] - 2026-07-30
 
 ### Fixed
