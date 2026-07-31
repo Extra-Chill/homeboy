@@ -421,7 +421,7 @@ pub mod service {
         consume_claimed_with_dispatcher, discover_runs, enqueue_terminal_continuation,
         evidence_ref_task_id, execute_promotion, hydrate_evidence_ref, hydrate_evidence_summary,
         load_recipe, load_recipe_for_attempt, logs, normalize_plan_workspaces,
-        offloaded_status_remediation, persist_initial_recipe,
+        offloaded_status_remediation, persist_initial_recipe, persist_manual_finalization_intent,
         persist_provider_boundary_replay_evidence, persisted_status, promotion_is_resumable,
         promotion_source, read_plan, rearm_failed_terminal_continuation,
         reconcile_recipe_attempt_for_continuation, reconcile_terminal_artifact_projection,

@@ -2830,6 +2830,69 @@ pub fn record_cook_finalization(run_id: &str, finalization: Value) -> Result<Age
     }
 }
 
+/// Persist a validated manual publication intent without claiming Cook completion.
+pub(crate) fn record_manual_finalization_intent(
+    run_id: &str,
+    intent: Value,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let digest = manual_finalization_intent_digest(&intent);
+    let record = store::mutate_record(&run_id, |record| {
+        if record.metadata.get("manual_finalization_intent") == Some(&intent)
+            && record.metadata.get("manual_finalization_intent_digest") == Some(&json!(digest))
+        {
+            return false;
+        }
+        record.updated_at = Some(now_timestamp());
+        record
+            .ensure_metadata_object()
+            .insert("manual_finalization_intent".to_string(), intent.clone());
+        record.ensure_metadata_object().insert(
+            "manual_finalization_intent_digest".to_string(),
+            json!(digest),
+        );
+        true
+    })?;
+    match record {
+        Some(record) => Ok(record),
+        None => store::read_record(&run_id),
+    }
+}
+
+/// Stable digest of the exact validated manual dossier persisted for recovery.
+pub(crate) fn manual_finalization_intent_digest(intent: &Value) -> String {
+    content_hash::sha256_hex(
+        &serde_json::to_vec(intent).expect("JSON values always serialize into a manual intent"),
+    )
+}
+
+/// Persist a completed manual receipt and bind it to the validated intent digest.
+pub(crate) fn record_manual_finalization_receipt(
+    run_id: &str,
+    receipt: Value,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        let intent_digest = record.metadata["manual_finalization_intent_digest"].clone();
+        record.updated_at = Some(now_timestamp());
+        let metadata = record.ensure_metadata_object();
+        metadata.insert("cook_finalization".to_string(), receipt.clone());
+        metadata.insert(
+            "manual_finalization_receipt_digest".to_string(),
+            json!(manual_finalization_intent_digest(&receipt)),
+        );
+        metadata.insert(
+            "manual_finalization_receipt_intent_digest".to_string(),
+            intent_digest,
+        );
+        true
+    })?;
+    match record {
+        Some(record) => Ok(record),
+        None => store::read_record(&run_id),
+    }
+}
+
 /// Checkpoint controller-owned recovery after a promoted, green candidate loses
 /// its publication base. The terminal provider result remains untouched.
 pub fn record_cook_moving_base_recovery(
