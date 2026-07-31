@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.326.1] - 2026-07-31
+
+### Changed
+- Test aggregate cleanup lifecycle
+
+### Fixed
+- hydrate pathless Lab candidates
+- bound PR test execution scope
+- Fix aggregate cleanup control plane
+- default runner list to a compact actionable view
+- preserve bench workspace identity for retry
+
 ## [0.326.0] - 2026-07-31
 
 ### Added
