@@ -118,6 +118,10 @@ pub(super) fn exec(
     let (mut output, exit_code) = runner::exec(
         runner_id,
         runner::RunnerExecOptions {
+            execution_context:
+                homeboy::core::runner_job_execution_context::RunnerJobExecutionContext::local(
+                    "homeboy",
+                ),
             cwd,
             project_id,
             allow_diagnostic_ssh,

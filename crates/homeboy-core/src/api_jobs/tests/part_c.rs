@@ -502,6 +502,75 @@ fn remote_runner_context_evidence_survives_controller_restart() {
 }
 
 #[test]
+fn old_persisted_context_claim_without_context_id_rejects_direct_finish() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let job = store
+        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .expect("remote runner job queues");
+    let claim = store
+        .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+        .expect("claim succeeds")
+        .expect("job is claimed");
+    let claim_id = claim.job.claim_id.expect("claim id");
+    drop(store);
+
+    // This is the durable shape written before execution_context_id was added.
+    let mut persisted: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("read durable store"))
+            .expect("decode durable store");
+    let stored = persisted["jobs"]
+        .as_array_mut()
+        .expect("persisted jobs")
+        .iter_mut()
+        .find(|stored| stored["job"]["id"] == job.id.to_string())
+        .expect("persisted job");
+    assert!(stored["remote_runner"]
+        .get("execution_context_id")
+        .is_some());
+    stored["remote_runner"]
+        .as_object_mut()
+        .expect("remote runner state")
+        .remove("execution_context_id");
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&persisted).expect("encode old durable store"),
+    )
+    .expect("write old durable store");
+
+    let reopened = JobStore::open_without_reconciliation(&path).expect("reopen old durable store");
+    let error = reopened
+        .finish_remote_runner_job(
+            job.id,
+            "homeboy-lab",
+            &claim_id,
+            RemoteRunnerJobResult {
+                exit_code: 0,
+                stdout: None,
+                stderr: None,
+                patch: None,
+                mutation_artifacts: None,
+                data: None,
+                observation_run_ids: Vec::new(),
+                observation_run_details: Vec::new(),
+                observation_run_details_compatibility_degraded: false,
+                artifacts: Vec::new(),
+                artifact_refs: Vec::new(),
+                metrics: None,
+                capture: None,
+            },
+        )
+        .expect_err("context evidence requires a consumed receipt");
+
+    assert!(error.message.contains("receipt has not been consumed"));
+    assert_eq!(
+        reopened.get(job.id).expect("job remains in flight").status,
+        JobStatus::Running
+    );
+}
+
+#[test]
 fn remote_runner_job_result_records_terminal_state_and_artifacts() {
     let store = JobStore::default();
     let job = store

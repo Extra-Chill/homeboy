@@ -573,6 +573,29 @@ pub(super) struct RemoteRunnerExecutionReceipt {
     pub(super) consumed_at_ms: u64,
 }
 
+fn execution_context_id_from_evidence(stored: &StoredJob) -> Result<Option<String>> {
+    let mut context_ids = HashSet::new();
+    for evidence in stored.events.iter().filter_map(|event| {
+        event
+            .data
+            .as_ref()
+            .and_then(|data| data.get("runner_job_execution_context"))
+    }) {
+        let context =
+            crate::runner_job_execution_context::RunnerJobExecutionContext::from_evidence_record(
+                evidence,
+            )?;
+        context_ids.insert(context.id().to_string());
+    }
+    match context_ids.len() {
+        0 => Ok(None),
+        1 => Ok(context_ids.into_iter().next()),
+        _ => Err(crate::runner_job_execution_context::rejected(
+            "durable claim has conflicting execution-context evidence",
+        )),
+    }
+}
+
 impl JobStore {
     pub fn lookup_remote_runner_submission(
         &self,
@@ -1054,14 +1077,19 @@ impl JobStore {
 
     fn ensure_remote_runner_execution_receipt(&self, job_id: Uuid) -> Result<()> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
-        let remote_runner = inner
+        let stored = inner
             .jobs
             .get(&job_id)
-            .ok_or_else(|| job_not_found(job_id))?
+            .ok_or_else(|| job_not_found(job_id))?;
+        let remote_runner = stored
             .remote_runner
             .as_ref()
             .expect("finish only follows a validated remote runner claim");
-        let Some(context_id) = remote_runner.execution_context_id.as_deref() else {
+        let context_id = match remote_runner.execution_context_id.as_deref() {
+            Some(context_id) => Some(context_id.to_string()),
+            None => execution_context_id_from_evidence(stored)?,
+        };
+        let Some(context_id) = context_id else {
             return Ok(());
         };
         let Some(receipt) = remote_runner.execution_receipt.as_ref() else {
