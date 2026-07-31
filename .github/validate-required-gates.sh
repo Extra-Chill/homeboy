@@ -42,6 +42,12 @@ for context in "${contexts[@]}"; do
     continue
   fi
 
+  if [ "${context}" = "homeboy / Test" ] \
+    && grep -Fq 'uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2' "${ci_workflow}" \
+    && grep -Fq 'commands: review test' "${ci_workflow}"; then
+    continue
+  fi
+
   {
     echo "required check '${context}' is not emitted by ${ci_workflow}" >&2
     exit 1
