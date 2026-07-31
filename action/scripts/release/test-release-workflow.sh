@@ -59,10 +59,12 @@ assert_not_contains 'gh release create' "${WORKFLOW}" "release workflow does not
 assert_not_contains 'docs/CHANGELOG.md' "${WORKFLOW}" "release workflow does not parse changelog notes"
 
 # GitHub-hosted workflow dependencies must use published action majors (#275).
-assert_count 'actions/checkout@v4' '3' "${CI_WORKFLOW}" "reusable CI workflow uses checkout v4 for every checkout"
-assert_count 'actions/create-github-app-token@v2' '1' "${CI_WORKFLOW}" "reusable CI workflow uses app-token v2"
+assert_count 'actions/checkout@v4' '9' "${CI_WORKFLOW}" "reusable CI workflow uses checkout v4 for every checkout"
+assert_count 'actions/create-github-app-token@v2' '3' "${CI_WORKFLOW}" "reusable CI workflow uses app-token v2"
 assert_not_contains 'actions/checkout@v6' "${CI_WORKFLOW}" "reusable CI workflow does not use unavailable checkout v6"
 assert_not_contains 'actions/create-github-app-token@v3' "${CI_WORKFLOW}" "reusable CI workflow does not use unavailable app-token v3"
+assert_not_contains 'merge-multiple: true' "${CI_WORKFLOW}" "reusable CI workflow never merges competing binary artifacts"
+assert_contains 'actions: read' "${CI_WORKFLOW}" "reusable CI workflow can download current-run artifacts"
 assert_count 'actions/checkout@v4' '3' "${WORKFLOW}" "release workflow uses checkout v4 for every checkout"
 assert_count 'actions/create-github-app-token@v2' '1' "${WORKFLOW}" "release workflow uses app-token v2"
 assert_not_contains 'actions/checkout@v6' "${WORKFLOW}" "release workflow does not use unavailable checkout v6"

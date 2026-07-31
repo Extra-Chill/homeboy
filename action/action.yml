@@ -20,6 +20,10 @@ inputs:
     description: 'Path to a pre-built homeboy binary. Skips source build and release download.'
     required: false
     default: ''
+  prepare-only:
+    description: 'Install and identify Homeboy without running commands. Intended for reusable workflow binary preparation.'
+    required: false
+    default: 'false'
   rust-toolchain:
     description: 'Rust toolchain for source builds (default: stable).'
     required: false
@@ -210,6 +214,9 @@ inputs:
     default: ''
 
 outputs:
+  component:
+    description: 'Resolved component ID from portable configuration.'
+    value: ${{ steps.read-config.outputs.portable-id }}
   results:
     description: 'JSON object with pass/fail results for each command'
     value: ${{ steps.select-results.outputs.results }}
@@ -291,6 +298,7 @@ runs:
       shell: bash
       env:
         COMMANDS_INPUT: ${{ inputs.commands }}
+        HOMEBOY_PREPARE_ONLY: ${{ inputs.prepare-only }}
       run: bash ${{ github.action_path }}/scripts/core/phase-progress.sh run changed_scope_resolution -- bash ${{ github.action_path }}/scripts/core/resolve-commands.sh
 
     # ── Phase 3: Install Homeboy ──

@@ -164,14 +164,14 @@ on:
         required: false
 
 permissions:
+  actions: read
   contents: write
   pull-requests: write
   issues: write
 
 jobs:
-  build:
-    name: Build
-    if: inputs.build-command != ''
+  binary:
+    name: Prepare candidate Homeboy binary
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -196,14 +196,33 @@ jobs:
           key: ${{ runner.os }}-cargo-ci-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-ci-
 
-      - name: Build Homeboy binary
+      - name: Build candidate Homeboy binary
+        if: inputs.build-command != ''
         run: ${{ inputs.build-command }}
 
-      - name: Upload Homeboy binary
+      - name: Check out Homeboy Action
+        uses: actions/checkout@v4
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ inputs.action-ref }}
+          path: .homeboy-action
+
+      - name: Materialize candidate Homeboy binary
+        uses: ./.homeboy-action
+        with:
+          commands: __prepare__
+          prepare-only: 'true'
+          version: ${{ inputs.version }}
+          source: ${{ inputs.source }}
+          binary-path: ${{ inputs.build-command != '' && inputs.build-artifact-path || inputs.binary-path }}
+          rust-toolchain: ${{ inputs.rust-toolchain }}
+          auto-setup: 'false'
+
+      - name: Upload candidate Homeboy binary
         uses: actions/upload-artifact@v4
         with:
-          name: homeboy-binary
-          path: ${{ inputs.build-artifact-path }}
+          name: homeboy-candidate-binary-${{ github.run_attempt }}
+          path: /usr/local/bin/homeboy
           retention-days: 1
 
   plan:
@@ -217,6 +236,7 @@ jobs:
         shell: bash
         env:
           COMMANDS: ${{ inputs.commands }}
+          BASELINE_COMMANDS: ${{ inputs.baseline-commands }}
         run: |
           declare -A selected_commands=()
           unknown_commands=()
@@ -249,12 +269,30 @@ jobs:
 
           rows=()
           add_row() {
+            artifact_key="$(printf '%s' "$1" | sha256sum | cut -c1-16)"
             rows+=("$(jq -cn \
               --arg command "$1" \
               --arg title "$2" \
               --arg section_key "$3" \
               --arg section_title "$4" \
-              '{command:$command,title:$title,section_key:$section_key,section_title:$section_title}')")
+              --arg baseline "$5" \
+              --arg artifact_key "${artifact_key}" \
+              '{command:$command,title:$title,section_key:$section_key,section_title:$section_title,baseline:$baseline,artifact_key:$artifact_key}')")
+          }
+
+          baseline_for() {
+             local command="$1" requested
+             case "${BASELINE_COMMANDS}" in
+               none) printf '%s\n' false; return ;;
+               auto)
+                 case "${command}" in review\ audit|review\ lint|review\ test|audit|lint|test) printf '%s\n' true ;; *) printf '%s\n' false ;; esac
+                 return ;;
+             esac
+             IFS=',' read -ra requested <<< "${BASELINE_COMMANDS}"
+             for requested in "${requested[@]}"; do
+               [ "$(printf '%s' "${requested}" | xargs)" = "${command}" ] && { printf '%s\n' true; return; }
+             done
+             printf '%s\n' false
           }
 
           title_for() {
@@ -277,7 +315,8 @@ jobs:
           for base in audit lint test refactor bench; do
             if [ -n "${selected_commands[${base}]:-}" ]; then
               title="$(title_for "${base}")"
-              add_row "${selected_commands[${base}]}" "${title}" "${base}" "${title}"
+              command="${selected_commands[${base}]}"
+              add_row "${command}" "${title}" "${base}" "${title}" "$(baseline_for "${command}")"
             fi
           done
 
@@ -285,16 +324,16 @@ jobs:
             base="${command%% *}"
             title="$(title_for "${base:-homeboy}")"
             section_key="$(section_key_for "${command}")"
-            add_row "${command}" "${title}" "${section_key:-homeboy}" "${title}"
+            add_row "${command}" "${title}" "${section_key:-homeboy}" "${title}" false
           done
 
           matrix="$(printf '%s\n' "${rows[@]}" | jq -sc '{include:.}')"
           echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
 
-  quality:
-    name: ${{ matrix.title }}
-    needs: [build, plan]
-    if: ${{ always() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+  candidate:
+    name: Candidate ${{ matrix.title }}
+    needs: [binary, plan]
+    if: ${{ always() && needs.binary.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -305,42 +344,18 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
-      - name: Download built Homeboy binary
-        if: inputs.build-command != ''
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BUILD_ARTIFACT_FILE: ${{ inputs.build-artifact-file }}
-        run: |
-          gh run download "${GITHUB_RUN_ID}" --name homeboy-binary --dir .homeboy-bin
-          if [ ! -f ".homeboy-bin/${BUILD_ARTIFACT_FILE}" ]; then
-            echo "::error::Build artifact 'homeboy-binary/${BUILD_ARTIFACT_FILE}' was not downloaded from run ${GITHUB_RUN_ID}. The upstream Build job may have failed, been skipped, or not uploaded the artifact. This is a CI plumbing issue, not a code finding. Verify the Build job succeeded and that this workflow grants the 'actions: read' permission."
-            exit 1
-          fi
-          echo "Downloaded homeboy binary to .homeboy-bin/${BUILD_ARTIFACT_FILE}"
-
-      - name: Resolve Homeboy binary path
-        id: binary-path
-        shell: bash
-        env:
-          BUILD_COMMAND: ${{ inputs.build-command }}
-          BUILD_ARTIFACT_FILE: ${{ inputs.build-artifact-file }}
-          BINARY_PATH: ${{ inputs.binary-path }}
-        run: |
-          if [ -n "${BUILD_COMMAND}" ]; then
-            path=".homeboy-bin/${BUILD_ARTIFACT_FILE}"
-            chmod +x "${path}"
-            echo "value=${path}" >> "${GITHUB_OUTPUT}"
-          else
-            echo "value=${BINARY_PATH}" >> "${GITHUB_OUTPUT}"
-          fi
-
       - name: Check out Homeboy Action
         uses: actions/checkout@v4
         with:
           repository: Extra-Chill/homeboy-action
           ref: ${{ inputs.action-ref }}
           path: .homeboy-action
+
+      - name: Download candidate Homeboy binary
+        id: candidate-binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
 
       - name: Generate GitHub App token
         id: app-token
@@ -350,11 +365,13 @@ jobs:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      - uses: ./.homeboy-action
+      - id: phase
+        continue-on-error: true
+        uses: ./.homeboy-action
         with:
           version: ${{ inputs.version }}
           source: ${{ inputs.source }}
-          binary-path: ${{ steps.binary-path.outputs.value }}
+          binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
           rust-toolchain: ${{ inputs.rust-toolchain }}
           extension: ${{ inputs.extension }}
           extension-source: ${{ inputs.extension-source }}
@@ -371,18 +388,236 @@ jobs:
           auto-setup: ${{ inputs.auto-setup }}
           php-version: ${{ inputs.php-version }}
           node-version: ${{ inputs.node-version }}
+          # Preserve differential scope semantics (full audit/test, changed
+          # lint) while deferring the baseline to its independent job.
           differential-gating: ${{ inputs.differential-gating }}
-          baseline-commands: ${{ inputs.baseline-commands }}
+          baseline-commands: none
           observation-window: ${{ inputs.observation-window }}
           execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
           cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
           app-token: ${{ steps.app-token.outputs.token || github.token }}
-          auto-issue: ${{ inputs.auto-issue }}
           comment-key: ${{ inputs.comment-key }}
           comment-section-key: ${{ inputs.comment-section-key || matrix.section_key }}
           comment-section-title: ${{ inputs.comment-section-title || matrix.section_title }}
-          pr-comment: ${{ inputs.pr-comment }}
-          pr-policy: ${{ inputs.pr-policy }}
-          pr-open-policy: ${{ inputs.pr-open-policy }}
-          pr-policy-merge: ${{ inputs.pr-policy-merge }}
-          pr-policy-merge-method: ${{ inputs.pr-policy-merge-method }}
+          pr-comment: 'false'
+          auto-issue: 'false'
+          pr-policy: ''
+          pr-open-policy: ''
+          pr-policy-merge: 'false'
+
+      - name: Write candidate phase provenance
+        if: always()
+        shell: bash
+        env:
+          REPOSITORY: ${{ github.repository }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          COMMAND: ${{ matrix.command }}
+          COMPONENT: ${{ steps.phase.outputs.component }}
+          CLI_REVISION: ${{ steps.phase.outputs.homeboy-version }}
+          RESULTS: ${{ steps.phase.outputs.results }}
+          ACTION_REF: ${{ inputs.action-ref }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          BINARY_SHA256: ${{ steps.candidate-binary.outputs.binary-sha256 }}
+        run: |
+          mkdir -p differential-phase/candidate
+          action_revision="$(git -C .homeboy-action rev-parse HEAD)"
+          results="${RESULTS:-{}}"
+          jq -cn --arg phase candidate --arg repository "${REPOSITORY}" --arg candidate_sha "${CANDIDATE_SHA}" --arg base_sha "${BASE_SHA}" --arg checkout_sha "${CANDIDATE_SHA}" --arg command "${COMMAND}" --arg component "${COMPONENT}" --arg action_revision "${action_revision}" --arg cli_revision "${CLI_REVISION}" --arg binary_sha256 "${BINARY_SHA256}" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${results}" '{phase:$phase,repository:$repository,candidate_sha:$candidate_sha,base_sha:$base_sha,checkout_sha:$checkout_sha,command:$command,component:$component,action_revision:$action_revision,cli_revision:$cli_revision,binary_sha256:$binary_sha256,run_attempt:$run_attempt,results:$results}' > differential-phase/candidate/manifest.json
+          cp -R homeboy-ci-results differential-phase/candidate/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-ci-results
+
+      - name: Upload candidate phase evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: homeboy-differential-candidate-${{ matrix.artifact_key }}-${{ github.run_attempt }}
+          path: differential-phase
+          if-no-files-found: warn
+
+  baseline:
+    name: Baseline ${{ matrix.title }}
+    needs: [binary, plan]
+    if: ${{ always() && needs.binary.result == 'success' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ inputs.action-ref }}
+          path: .homeboy-action
+      - name: Download candidate Homeboy binary
+        id: candidate-binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
+      - id: phase
+        if: matrix.baseline == 'true'
+        continue-on-error: true
+        uses: ./.homeboy-action
+        with:
+          version: ${{ inputs.version }}
+          binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
+          rust-toolchain: ${{ inputs.rust-toolchain }}
+          extension: ${{ inputs.extension }}
+          extension-source: ${{ inputs.extension-source }}
+          commands: ${{ matrix.command }}
+          expected-commands: ${{ inputs.expected-commands || inputs.commands }}
+          component: ${{ inputs.component }}
+          args: ${{ inputs.args }}
+          scope: ${{ inputs.scope }}
+          auto-setup: ${{ inputs.auto-setup }}
+          php-version: ${{ inputs.php-version }}
+          node-version: ${{ inputs.node-version }}
+          differential-gating: 'true'
+          baseline-commands: none
+          execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
+          cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
+          pr-comment: 'false'
+          auto-issue: 'false'
+      - name: Write baseline phase provenance
+        if: always() && matrix.baseline == 'true'
+        shell: bash
+        env:
+          REPOSITORY: ${{ github.repository }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          COMMAND: ${{ matrix.command }}
+          COMPONENT: ${{ steps.phase.outputs.component }}
+          CLI_REVISION: ${{ steps.phase.outputs.homeboy-version }}
+          RESULTS: ${{ steps.phase.outputs.results }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          BINARY_SHA256: ${{ steps.candidate-binary.outputs.binary-sha256 }}
+        run: |
+          mkdir -p differential-phase/baseline
+          action_revision="$(git -C .homeboy-action rev-parse HEAD)"
+          results="${RESULTS:-{}}"
+          jq -cn --arg phase baseline --arg repository "${REPOSITORY}" --arg candidate_sha "${CANDIDATE_SHA}" --arg base_sha "${BASE_SHA}" --arg checkout_sha "${BASE_SHA}" --arg command "${COMMAND}" --arg component "${COMPONENT}" --arg action_revision "${action_revision}" --arg cli_revision "${CLI_REVISION}" --arg binary_sha256 "${BINARY_SHA256}" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${results}" '{phase:$phase,repository:$repository,candidate_sha:$candidate_sha,base_sha:$base_sha,checkout_sha:$checkout_sha,command:$command,component:$component,action_revision:$action_revision,cli_revision:$cli_revision,binary_sha256:$binary_sha256,run_attempt:$run_attempt,results:$results}' > differential-phase/baseline/manifest.json
+          cp -R homeboy-ci-results differential-phase/baseline/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/baseline/homeboy-ci-results
+      - name: Upload baseline phase evidence
+        if: always() && matrix.baseline == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: homeboy-differential-baseline-${{ matrix.artifact_key }}-${{ github.run_attempt }}
+          path: differential-phase
+          if-no-files-found: warn
+
+  reconcile:
+    # This is the sole verdict and retains the established required-check name.
+    name: ${{ matrix.title }}
+    needs: [candidate, baseline, plan]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ inputs.action-ref }}
+          path: .homeboy-action
+      - name: Download candidate Homeboy binary
+        id: candidate-binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
+      - name: Install candidate Homeboy binary
+        run: sudo cp "${{ steps.candidate-binary.outputs.binary-path }}" /usr/local/bin/homeboy
+      - id: action-revision
+        run: echo "value=$(git -C .homeboy-action rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: homeboy-differential-*-${{ matrix.artifact_key }}-*
+          path: differential-artifacts
+      - name: Reconcile provenance-bound phase evidence
+        id: reconcile
+        shell: bash
+        env:
+          PHASE_ARTIFACT_ROOT: differential-artifacts
+          REPOSITORY: ${{ github.repository }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          COMMAND: ${{ matrix.command }}
+          ACTION_REVISION: ${{ steps.action-revision.outputs.value }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          REQUIRE_BASELINE: ${{ github.event_name == 'pull_request' && inputs.differential-gating == 'true' && matrix.baseline == 'true' }}
+        run: bash .homeboy-action/scripts/core/reconcile-differential-phases.sh
+
+      - name: Generate GitHub App token
+        id: app-token
+        if: always() && inputs.pr-comment != 'false'
+        uses: actions/create-github-app-token@v2
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+
+      - name: Post reconciled PR comment
+        if: always() && github.event_name == 'pull_request' && inputs.pr-comment != 'false'
+        shell: bash
+        env:
+          GITHUB_ACTION_PATH: ${{ github.workspace }}/.homeboy-action
+          HOMEBOY_OUTPUT_DIR: ${{ steps.reconcile.outputs.output-dir }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          COMMANDS: ${{ matrix.command }}
+          COMPONENT_NAME: ${{ steps.reconcile.outputs.component }}
+          RESULTS: ${{ steps.reconcile.outputs.results }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COMMENT_KEY_INPUT: ${{ inputs.comment-key }}
+          COMMENT_SECTION_KEY_INPUT: ${{ inputs.comment-section-key || matrix.section_key }}
+          COMMENT_SECTION_TITLE_INPUT: ${{ inputs.comment-section-title || matrix.section_title }}
+          HOMEBOY_CI_RESULTS_ARTIFACT: homeboy-differential-candidate-${{ matrix.artifact_key }}-${{ github.run_attempt }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash .homeboy-action/scripts/pr/post-pr-comment.sh
+
+  policy:
+    name: PR Policy
+    needs: reconcile
+    if: ${{ github.event_name == 'pull_request' && inputs.pr-policy != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/checkout@v4
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ inputs.action-ref }}
+          path: .homeboy-action
+      - name: Download candidate Homeboy binary
+        id: candidate-binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
+      - name: Install candidate Homeboy binary
+        run: sudo cp "${{ steps.candidate-binary.outputs.binary-path }}" /usr/local/bin/homeboy
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+      - name: Evaluate PR policy after reconciled quality gates
+        shell: bash
+        env:
+          GITHUB_ACTION_PATH: ${{ github.workspace }}/.homeboy-action
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          POLICY_PATH: ${{ inputs.pr-policy }}
+          POLICY_MERGE: ${{ inputs.pr-policy-merge }}
+          POLICY_MERGE_METHOD: ${{ inputs.pr-policy-merge-method }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
+          COMPONENT_NAME: ${{ inputs.component }}
+        run: bash .homeboy-action/scripts/pr/policy-gate.sh

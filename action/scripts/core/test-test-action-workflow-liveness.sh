@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
-if ! grep -q 'name: \${{ matrix.title }}' "${ROOT_DIR}/.github/workflows/ci.yml" \
+if ! grep -q 'name: Candidate \${{ matrix.title }}' "${ROOT_DIR}/.github/workflows/ci.yml" \
   || ! grep -q 'commands: \${{ matrix.command }}' "${ROOT_DIR}/.github/workflows/ci.yml" \
   || ! grep -q '^      execution-timeout-seconds:' "${ROOT_DIR}/.github/workflows/ci.yml" \
   || ! grep -q '^          execution-timeout-seconds: \${{ inputs.execution-timeout-seconds }}' "${ROOT_DIR}/.github/workflows/ci.yml" \

@@ -26,6 +26,14 @@ Prefer the reusable workflow so Homeboy Action owns the CI DAG and result
 aggregation. The workflow runs all requested quality commands before failing,
 so an audit failure does not hide lint or test feedback.
 
+For pull requests with `differential-gating: 'true'`, the reusable workflow
+materializes one candidate Homeboy binary, then runs candidate and base phases
+in separate jobs. A final reconciliation check is the only pass/fail decision:
+it accepts only artifacts bound to the repository, candidate SHA, base SHA,
+command, component, action revision, CLI revision, and phase identity. Missing
+or mismatched evidence fails closed. This DAG behavior is specific to the
+reusable workflow; direct composite-action callers keep the combined behavior.
+
 ```yaml
 name: CI
 on: [pull_request]

@@ -83,6 +83,10 @@ cron_output="$(run_resolve "" "cron")"
 assert_equals "" "$(get_output "${cron_output}" "resolved-commands")" "cron default has no quality commands"
 assert_equals "release" "$(get_output "${cron_output}" "release-commands")" "cron default populates release bucket"
 
+prepare_output="$(HOMEBOY_PREPARE_ONLY=true run_resolve "review test")"
+assert_equals "" "$(get_output "${prepare_output}" "resolved-commands")" "prepare-only suppresses quality commands"
+assert_equals "" "$(get_output "${prepare_output}" "release-commands")" "prepare-only suppresses release commands"
+
 enforce_output="$(RESULTS='{}' COMMANDS='' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}")"
 assert_contains "No quality gate commands to enforce" "${enforce_output}" "release-only final status skips quality enforcement"
 

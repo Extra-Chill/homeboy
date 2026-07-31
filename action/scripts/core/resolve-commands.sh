@@ -29,7 +29,10 @@ set -euo pipefail
 COMMANDS_INPUT="${COMMANDS_INPUT:-}"
 SCOPE_CONTEXT="${SCOPE_CONTEXT:-manual}"
 
-if [ -n "${COMMANDS_INPUT}" ]; then
+if [ "${HOMEBOY_PREPARE_ONLY:-false}" = "true" ]; then
+  ALL_COMMANDS=""
+  echo "Preparing Homeboy without running commands"
+elif [ -n "${COMMANDS_INPUT}" ]; then
   ALL_COMMANDS="${COMMANDS_INPUT}"
   echo "Commands from input: ${ALL_COMMANDS}"
 else
