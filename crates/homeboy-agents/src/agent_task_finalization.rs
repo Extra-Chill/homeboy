@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::agent_task_promotion::AgentTaskPromotionReport;
@@ -151,6 +150,25 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             ));
         }
     };
+    let candidate_changed_files = normalize_changed_files(&changed_files);
+    if options.expected_candidate_sha.is_some() && (commit_required || push_required) {
+        return Err(Error::validation_invalid_argument(
+            "publication_intent",
+            "recovered manual finalization requires the already-pushed candidate validated by preflight",
+            None,
+            None,
+        ));
+    }
+    if options.expected_candidate_sha.is_some()
+        && normalize_changed_files(&options.changed_files) != candidate_changed_files
+    {
+        return Err(Error::validation_invalid_argument(
+            "publication_intent.changed_files",
+            "recovered manual finalization changed files no longer match the preflight-validated candidate",
+            None,
+            None,
+        ));
+    }
     if !options.manual_finalization {
         changed_files = durable_changed_files;
     } else if !options.changed_files.is_empty() {
@@ -260,6 +278,16 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             None,
         )
     })?;
+    if let Some(expected_candidate_sha) = options.expected_candidate_sha.as_deref() {
+        if expected_candidate_sha != commit_sha {
+            return Err(Error::validation_invalid_argument(
+                "publication_intent",
+                "recovered manual finalization candidate no longer matches the preflight-validated commit",
+                Some(commit_sha.to_string()),
+                None,
+            ));
+        }
+    }
     let git_tracking = if push_required {
         Some(backend.push_branch(&options.path, commit_sha, &head)?)
     } else {
@@ -733,6 +761,7 @@ fn report(
         path: options.path.clone(),
         base: options.base.clone(),
         head: head.to_string(),
+        title: options.title.clone(),
         pr_action: pr_action.to_string(),
         pr_number,
         pr_url,

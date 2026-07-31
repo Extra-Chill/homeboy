@@ -12,7 +12,7 @@ pub struct AgentTaskGateResult {
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskPrFinalizationReport {
     pub schema: String,
     pub run_id: String,
@@ -20,6 +20,8 @@ pub struct AgentTaskPrFinalizationReport {
     pub path: String,
     pub base: String,
     pub head: String,
+    #[serde(default)]
+    pub title: String,
     pub pr_action: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pr_number: Option<u64>,
@@ -250,6 +252,8 @@ pub struct AgentTaskPrFinalizationOptions {
     pub review_profile: AgentTaskReviewProfile,
     /// Manual finalization is an explicit migration mode for work not produced by a durable run.
     pub manual_finalization: bool,
+    /// A recovered manual preflight may only publish the immutable candidate it validated.
+    pub expected_candidate_sha: Option<String>,
     pub protected_branches: Vec<String>,
 }
 
