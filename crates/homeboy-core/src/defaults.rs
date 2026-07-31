@@ -526,6 +526,38 @@ pub struct AgentTaskConfig {
     /// `AgentTaskProviderRotationPolicy` when building a plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation: Option<serde_json::Value>,
+    /// Optional independent acceptance authority. The command receives a typed
+    /// request on stdin and returns a signed verdict on stdout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_verifier: Option<AgentTaskAcceptanceVerifierConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskAcceptanceVerifierConfig {
+    pub command: Vec<String>,
+    /// Opaque, non-secret policy/configuration revision included in provenance.
+    pub configuration: String,
+    /// Controller-owned verification material. The verifier command receives no
+    /// trust secret, so it cannot make its own verdict trusted.
+    pub trust: AgentTaskAcceptanceVerifierTrustConfig,
+    #[serde(default = "default_acceptance_verifier_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_acceptance_verifier_output_limit_bytes")]
+    pub output_limit_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentTaskAcceptanceVerifierTrustConfig {
+    HmacSha256 { key_id: String, key_env: String },
+}
+
+fn default_acceptance_verifier_timeout_ms() -> u64 {
+    10_000
+}
+
+fn default_acceptance_verifier_output_limit_bytes() -> usize {
+    64 * 1024
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

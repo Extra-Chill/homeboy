@@ -558,6 +558,34 @@ where
     if let Some(provenance) = provenance {
         record_cook_argument_provenance(&mut initial_plan, provenance);
     }
+    if args.require_acceptance {
+        let authority = args.acceptance_authority.clone().ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "acceptance-authority",
+                "--require-acceptance requires --acceptance-authority",
+                None,
+                None,
+            )
+        })?;
+        let policy = args.acceptance_policy.clone().ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "acceptance-policy",
+                "--require-acceptance requires --acceptance-policy",
+                None,
+                None,
+            )
+        })?;
+        if authority.trim().is_empty() || policy.trim().is_empty() {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "acceptance",
+                "--require-acceptance requires non-empty --acceptance-authority and --acceptance-policy",
+                None,
+                None,
+            ));
+        }
+        initial_plan.metadata["acceptance"] =
+            serde_json::json!({ "authority": authority, "policy": policy });
+    }
     // Capture the resolved task workspace before dispatch. The provider may
     // commit and leave a clean tree, so resolving this after it runs would
     // silently widen the promotion range.

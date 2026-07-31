@@ -1,3 +1,6 @@
+use super::acceptance_verifier::{
+    validate_acceptance_requirement, validate_attestation, with_acceptance_verifier,
+};
 use super::*;
 use homeboy_core::api_jobs::RemoteRunnerJobRequest;
 use homeboy_engine_primitives::content_hash;
@@ -390,6 +393,16 @@ where
         "lifecycle_schema": RUN_LIFECYCLE_RECORD_SCHEMA,
         "note": "submitted tasks are durable; provider run ids are recorded after an executor returns them as generic artifacts or evidence refs"
     });
+    let acceptance_requirement = plan
+        .metadata
+        .get("acceptance")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<AgentTaskAcceptanceRequirement>(value).ok());
+    if let Some(requirement) = acceptance_requirement {
+        validate_acceptance_requirement(&requirement)?;
+        metadata["acceptance_requirement"] =
+            serde_json::to_value(requirement).expect("acceptance requirement is serializable");
+    }
     if let Some(runner_id) = execution_runner_id.as_deref() {
         metadata["runner_id"] = json!(runner_id);
     }
@@ -431,6 +444,7 @@ where
         lab_handoff: None,
         candidate_adoption: None,
         adoption_run_id: None,
+        acceptance: None,
         metadata,
     };
     let mut preserved_controller_runtime = None;
@@ -1759,6 +1773,18 @@ fn retry_with_force_inner(
     enforce_lineage_reservation: bool,
 ) -> Result<AgentTaskRunRecord> {
     let source = store::read_record(&resolve_run_id(run_id)?)?;
+    if source.acceptance.as_ref().is_some_and(|acceptance| {
+        acceptance.repair_attempts > 1
+            || (acceptance.repair_attempts > 0
+                && acceptance.verdict != AgentTaskAcceptanceVerdict::Rejected)
+    }) {
+        return Err(Error::validation_invalid_argument(
+            "acceptance",
+            "acceptance rejection repair budget is exhausted for this lineage",
+            Some(source.run_id.clone()),
+            None,
+        ));
+    }
     let root_run_id = retry_root_run_id(&source)?;
     let _reservation = enforce_lineage_reservation
         .then(|| RetryLineageLock::lock(&root_run_id))
@@ -1838,7 +1864,7 @@ fn retry_with_force_inner(
         metadata.insert("retry_root".to_string(), json!(root_run_id));
     }
     metadata.insert("retry_requested_at".to_string(), json!(now_timestamp()));
-    let record = submit_plan_with_runtime_admission_on_runner_with_metadata(
+    let mut record = submit_plan_with_runtime_admission_on_runner_with_metadata(
         &plan,
         requested_run_id,
         execution_runner_id(),
@@ -1850,6 +1876,34 @@ fn retry_with_force_inner(
             )
         },
     )?;
+    if let Some(mut acceptance) = source.acceptance.clone() {
+        // A repair is a new candidate, but it retains the rejected verdict and
+        // evidence as lineage instead of erasing the reviewer decision.
+        acceptance.archive();
+        acceptance.verdict = AgentTaskAcceptanceVerdict::Pending;
+        acceptance.candidate = empty_acceptance_candidate();
+        acceptance.base_sha.clear();
+        acceptance.actor = None;
+        acceptance.recorded_at = None;
+        acceptance.provider_ref = None;
+        acceptance.verifier = None;
+        acceptance.evidence_refs.clear();
+        acceptance.repair_attempts = source
+            .acceptance
+            .as_ref()
+            .map(|acceptance| acceptance.repair_attempts)
+            .unwrap_or_default();
+        if let Some(updated) = store::mutate_record(&record.run_id, |child| {
+            child.acceptance = Some(acceptance.clone());
+            child.ensure_metadata_object().insert(
+                "acceptance_repair_lineage".to_string(),
+                json!({ "source_run_id": source.run_id, "count": acceptance.repair_attempts, "max": 1 }),
+            );
+            true
+        })? {
+            record = updated;
+        }
+    }
     if enforce_lineage_reservation {
         persist_retry_lineage(&source.run_id, &root_run_id, &record.run_id)?;
     }
@@ -2485,6 +2539,39 @@ fn resolve_run_id(run_id: &str) -> Result<String> {
     }
 }
 
+fn acceptance_candidate(
+    promotion: &Value,
+) -> Option<crate::agent_task_promotion::AgentTaskCandidateFingerprint> {
+    promotion
+        .pointer("/provenance/candidate/fingerprint")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .filter(candidate_is_complete)
+}
+
+fn candidate_is_complete(
+    candidate: &crate::agent_task_promotion::AgentTaskCandidateFingerprint,
+) -> bool {
+    !candidate.schema.trim().is_empty()
+        && !candidate.target_path.trim().is_empty()
+        && !candidate.head.trim().is_empty()
+        && !candidate.base.trim().is_empty()
+        && !candidate.sha256.trim().is_empty()
+        && !candidate.tree.trim().is_empty()
+}
+
+fn empty_acceptance_candidate() -> crate::agent_task_promotion::AgentTaskCandidateFingerprint {
+    crate::agent_task_promotion::AgentTaskCandidateFingerprint {
+        schema: String::new(),
+        target_path: String::new(),
+        head: String::new(),
+        base: String::new(),
+        changed_files: Vec::new(),
+        sha256: String::new(),
+        tree: String::new(),
+    }
+}
+
 pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let record = store::mutate_record(&run_id, |record| {
@@ -2512,6 +2599,55 @@ pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRe
             .expect("promotions array")
             .push(promotion.clone());
         metadata.insert("latest_promotion".to_string(), promotion.clone());
+        if let Some(acceptance) = record.acceptance.as_mut() {
+            let candidate = acceptance_candidate(&promotion);
+            let base_sha = promotion
+                .pointer("/verified_base/sha")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if candidate
+                .as_ref()
+                .is_none_or(|candidate| !acceptance.matches_candidate(candidate, &base_sha))
+            {
+                acceptance.archive();
+                acceptance.verdict = AgentTaskAcceptanceVerdict::Pending;
+                acceptance.candidate = candidate.unwrap_or_else(empty_acceptance_candidate);
+                acceptance.base_sha = base_sha;
+                acceptance.actor = None;
+                acceptance.recorded_at = None;
+                acceptance.provider_ref = None;
+                acceptance.verifier = None;
+                acceptance.attestation = None;
+                acceptance.signature = None;
+                acceptance.key_id = None;
+                acceptance.evidence_refs.clear();
+                acceptance.repair_attempts = 0;
+            }
+        }
+        if record.acceptance.is_none()
+            && promotion.get("status").and_then(Value::as_str) == Some("applied")
+        {
+            let requirement = record
+                .metadata
+                .get("acceptance_requirement")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok());
+            let candidate = acceptance_candidate(&promotion);
+            let base_sha = promotion
+                .pointer("/verified_base/sha")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty());
+            if let (Some(requirement), Some(candidate), Some(base_sha)) =
+                (requirement, candidate, base_sha)
+            {
+                record.acceptance = Some(AgentTaskAcceptanceRecord::pending(
+                    requirement,
+                    candidate,
+                    base_sha.to_string(),
+                ));
+            }
+        }
         true
     })?;
     let record = match record {
@@ -2522,6 +2658,156 @@ pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRe
         update_cook_candidate_after_completion(&record, &aggregate, Some(promotion))?;
     }
     Ok(record)
+}
+
+pub fn record_acceptance_verdict(
+    run_id: &str,
+    verdict: AgentTaskAcceptanceVerdict,
+    evidence_refs: Vec<String>,
+    token: String,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    if token.trim().is_empty() || evidence_refs.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "acceptance",
+            "acceptance requires an authority token and at least one evidence reference",
+            None,
+            None,
+        ));
+    }
+    let existing = store::read_record(&run_id)?;
+    let acceptance = existing.acceptance.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "acceptance",
+            "acceptance is not required for this run",
+            None,
+            None,
+        )
+    })?;
+    validate_acceptance_requirement(&acceptance.requirement)?;
+    if acceptance.verdict == AgentTaskAcceptanceVerdict::Pending
+        && (!candidate_is_complete(&acceptance.candidate) || acceptance.base_sha.trim().is_empty())
+    {
+        return Err(Error::validation_invalid_argument(
+            "acceptance",
+            "acceptance is unavailable until an applied promotion records the candidate and verified base",
+            None,
+            None,
+        ));
+    }
+    if existing
+        .metadata
+        .pointer("/latest_promotion/status")
+        .and_then(Value::as_str)
+        != Some("applied")
+    {
+        return Err(Error::validation_invalid_argument(
+            "acceptance",
+            "acceptance requires an applied promotion with green deterministic gates",
+            None,
+            None,
+        ));
+    }
+    // Keep the pre-verification binding and compare it again under the durable
+    // record mutation. An authority result cannot be applied to a promotion
+    // that advanced while the authority was deciding.
+    let expected_requirement = acceptance.requirement.clone();
+    let expected_candidate = acceptance.candidate.clone();
+    let expected_base_sha = acceptance.base_sha.clone();
+    let request = AgentTaskAcceptanceVerificationRequest {
+        requirement: expected_requirement.clone(),
+        verdict,
+        candidate: expected_candidate.clone(),
+        base_sha: expected_base_sha.clone(),
+        evidence_refs: evidence_refs.clone(),
+        token,
+    };
+    let (attestation, verifier) = with_acceptance_verifier(|verifier| {
+        (verifier.verify_acceptance(&request), verifier.provenance())
+    });
+    let attestation = attestation?;
+    validate_attestation(&acceptance.requirement, &attestation)?;
+    if verifier.verifier.trim().is_empty() || verifier.configuration.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "acceptance",
+            "authority verifier has incomplete configured provenance",
+            None,
+            None,
+        ));
+    }
+    if acceptance.verdict == verdict
+        && acceptance.actor.as_deref() == Some(attestation.actor.as_str())
+        && acceptance.evidence_refs == evidence_refs
+    {
+        return Ok(existing);
+    }
+    let mut promotion_drifted = false;
+    let record = store::mutate_record(&run_id, |record| {
+        let Some(acceptance) = record.acceptance.as_mut() else {
+            promotion_drifted = true;
+            return false;
+        };
+        if acceptance.requirement != expected_requirement
+            || acceptance.candidate != expected_candidate
+            || acceptance.base_sha != expected_base_sha
+            || record
+                .metadata
+                .pointer("/latest_promotion/status")
+                .and_then(Value::as_str)
+                != Some("applied")
+        {
+            promotion_drifted = true;
+            return false;
+        }
+        if matches!(verdict, AgentTaskAcceptanceVerdict::Pending) {
+            return false;
+        }
+        if acceptance.verdict == verdict
+            && acceptance.actor.as_deref() == Some(attestation.actor.as_str())
+            && acceptance.evidence_refs == evidence_refs
+        {
+            return false;
+        }
+        acceptance.archive();
+        acceptance.verdict = verdict;
+        acceptance.actor = Some(attestation.actor.clone());
+        acceptance.recorded_at = Some(attestation.issued_at.clone());
+        acceptance.provider_ref = Some(attestation.provider_ref.clone());
+        acceptance.verifier = Some(verifier.clone());
+        acceptance.attestation = Some(attestation.clone());
+        acceptance.signature = Some(attestation.signature.clone());
+        acceptance.key_id = Some(attestation.key_id.clone());
+        acceptance.evidence_refs = evidence_refs.clone();
+        let repair = if verdict == AgentTaskAcceptanceVerdict::Rejected {
+            acceptance.repair_attempts = acceptance.repair_attempts.saturating_add(1);
+            Some(json!({
+                "status": if acceptance.repair_attempts == 1 { "repair_available" } else { "repair_exhausted" },
+                "candidate": acceptance.candidate,
+                "base_sha": acceptance.base_sha,
+                "attempts": acceptance.repair_attempts,
+                "max_attempts": 1,
+                "evidence_refs": acceptance.evidence_refs,
+            }))
+        } else {
+            None
+        };
+        if let Some(repair) = repair {
+            record
+                .ensure_metadata_object()
+                .insert("acceptance_repair".to_string(), repair);
+        }
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    if promotion_drifted {
+        return Err(Error::validation_invalid_argument(
+            "acceptance",
+            "acceptance candidate changed while the authority verdict was being recorded; rerun acceptance for the current applied promotion",
+            None,
+            None,
+        ));
+    }
+    record.ok_or_else(|| Error::validation_invalid_argument("acceptance", "acceptance is not required for this run, does not match the declared authority/policy, or the identical verdict is already durable", None, None))
 }
 
 /// Persist the controller publication result separately from promotion so a

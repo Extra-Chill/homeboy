@@ -23,6 +23,7 @@ serde_json_path = "0.7"
 chrono = "0.4"
 uuid = { version = "1.11", features = ["v4", "v5", "serde"] }
 sha2 = "0.10.9"
+hmac = "0.12"
 base64 = "0.22"
 regex = "1.11"
 libc = "0.2"

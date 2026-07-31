@@ -81,6 +81,35 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
         }
     }
     let mut value = serde_json::to_value(&record).unwrap_or(Value::Null);
+    let acceptance_is_actionable = record.state
+        == agent_task_lifecycle::AgentTaskRunState::Succeeded
+        && record
+            .metadata
+            .pointer("/latest_promotion/status")
+            .and_then(Value::as_str)
+            == Some("applied");
+    if acceptance_is_actionable {
+        if let Some(verdict) = value.pointer("/acceptance/verdict").and_then(Value::as_str) {
+            match verdict {
+                "pending" => {
+                    value["terminal_status"] = Value::String("awaiting_acceptance".to_string());
+                }
+                "rejected" => {
+                    value["terminal_status"] = Value::String("repair_required".to_string());
+                    let attempts = value
+                        .pointer("/acceptance/repair_attempts")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    value["acceptance_continuation"] = json!({
+                        "status": if attempts == 1 { "repair_available" } else { "repair_exhausted" },
+                        "max_attempts": 1,
+                        "command": (attempts == 1).then(|| format!("homeboy agent-task retry {} --run", record.run_id)),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
     enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
     attach_transport_proxy_recovery_guidance(&mut value, &args.run_id);
     if args.full {

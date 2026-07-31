@@ -103,6 +103,8 @@ pub enum AgentTaskCommand {
     #[command(hide = true)]
     PromotionProvider(PromotionProviderArgs),
     FinalizePr(FinalizePrArgs),
+    /// Record an independent, durable acceptance verdict for a candidate.
+    Accept(AcceptArgs),
     GateFeedback(GateFeedbackArgs),
     Providers(ProvidersArgs),
     Prompts(AgentTaskPromptsArgs),
@@ -112,6 +114,18 @@ pub enum AgentTaskCommand {
     Controller(AgentTaskControllerArgs),
     #[command(hide = true)]
     Tool(AgentTaskToolArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct AcceptArgs {
+    pub run_id: String,
+    #[arg(long, value_parser = ["accepted", "rejected"])]
+    pub verdict: String,
+    /// Opaque credential consumed by the configured acceptance verifier.
+    #[arg(long)]
+    pub token: String,
+    #[arg(long = "evidence-ref")]
+    pub evidence_refs: Vec<String>,
 }
 
 #[derive(Args, Debug)]

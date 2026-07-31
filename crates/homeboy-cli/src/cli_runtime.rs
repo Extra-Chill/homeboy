@@ -219,6 +219,15 @@ impl CliRuntime {
         // core only owns the generic daemon lifecycle.
         crate::runner::register_lab_staging_controller_driver();
         crate::agents::agent_task_service::register_promotion_job_driver();
+        let config = crate::core::defaults::load_config();
+        if let Err(error) =
+            crate::agents::agent_task_lifecycle::register_acceptance_verifier_from_config(
+                &config.agent_task,
+            )
+        {
+            eprintln!("error: {error}");
+            return std::process::ExitCode::from(2);
+        }
         crate::runner::enable_production_lab_staging();
         // Register the runner workspace-root provider so the daemon file API can
         // resolve a runner's configured workspace_root without core depending on
@@ -714,6 +723,7 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
                 None
             }
             crate::commands::agent_task::AgentTaskCommand::Resume(args) => Some(&args.run_id),
+            crate::commands::agent_task::AgentTaskCommand::Accept(args) => Some(&args.run_id),
             crate::commands::agent_task::AgentTaskCommand::CookContinue(args) => {
                 if matches!(cli.placement, crate::cli_surface::Placement::Local) {
                     return Ok(None);

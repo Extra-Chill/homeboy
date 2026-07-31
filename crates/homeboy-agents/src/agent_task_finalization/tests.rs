@@ -979,6 +979,47 @@ fn requires_a_real_durable_run_unless_manual_mode_is_selected() {
 }
 
 #[test]
+fn manual_finalization_cannot_bypass_acceptance_for_an_existing_run_id() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "manual-acceptance-bypass";
+        let mut plan = AgentTaskPlan::new("manual-acceptance", Vec::new());
+        plan.metadata = json!({
+            "acceptance": { "authority": "independent-review", "policy": "release-v1" }
+        });
+        crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        let mut proof = successful_gate_proof();
+        proof.run_id = run_id.to_string();
+        proof.promotion.source.run_id = Some(run_id.to_string());
+        proof.promotion.provenance = json!({
+            "candidate": { "fingerprint": { "head": "candidate" } }
+        });
+        proof.promotion.verified_base = Some(
+            crate::agent_task_promotion::AgentTaskPromotionVerifiedBase {
+                base: "main".to_string(),
+                sha: "verified-base".to_string(),
+            },
+        );
+        crate::agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(&proof.promotion).unwrap(),
+        )
+        .unwrap();
+
+        let mut options = options();
+        options.run_id = run_id.to_string();
+        options.manual_finalization = true;
+        let mut backend = MockBackend {
+            lifecycle: Some(successful_lifecycle("openai/gpt-5.6-terra")),
+            gate_proof: Some(proof),
+            ..Default::default()
+        };
+        let error = finalize_pr_with_backend(options, &mut backend).unwrap_err();
+        assert!(error.message.contains("awaiting_acceptance"));
+        assert!(!backend.committed && !backend.pushed && !backend.created);
+    });
+}
+
+#[test]
 fn durable_finalization_requires_successful_provider_run_and_hydrates_model() {
     let mut backend = MockBackend {
         changed_files: vec!["src/lib.rs".to_string()],
@@ -1496,6 +1537,7 @@ fn durable_finalization_rejects_model_less_terminal_record_without_mutation() {
 #[test]
 fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_work() {
     homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "mixed-executor-evidence";
         let plan = AgentTaskPlan::new(
             "mixed-executor-plan",
             vec![
@@ -1536,7 +1578,7 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
             queue: AgentTaskQueueStatus::default(),
         };
         let record =
-            crate::agent_task_lifecycle::record_completed_run(&plan, &aggregate, Some("cook-3678"))
+            crate::agent_task_lifecycle::record_completed_run(&plan, &aggregate, Some(run_id))
                 .expect("durable aggregate recorded");
         let runtimes = &record.lifecycle.provider_runtime;
 
@@ -1555,6 +1597,8 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
         assert_eq!(record.artifact_refs[0].kind, "patch");
 
         let mut gate_proof = successful_gate_proof();
+        gate_proof.run_id = run_id.to_string();
+        gate_proof.promotion.source.run_id = Some(run_id.to_string());
         gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
         let mut backend = MockBackend {
             changed_files: vec!["src/lib.rs".to_string()],
@@ -1563,6 +1607,7 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
             ..Default::default()
         };
         let mut finalization_options = options();
+        finalization_options.run_id = run_id.to_string();
         finalization_options.manual_finalization = false;
         finalization_options.changed_files = vec!["src/lib.rs".to_string()];
 

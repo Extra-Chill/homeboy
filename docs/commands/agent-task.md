@@ -122,6 +122,7 @@ an exhausted run records which budget stopped further execution.
 | `promote <source>` | Promote a completed generic patch artifact into a managed worktree. |
 | `adopt <run-or-cook-id> --candidate-ref <sha>` | Adopt an immutable commit candidate through the recorded cook gates and finalization policy. |
 | `finalize-pr` | Finalize a green run, or recover publication from a durable Cook record. |
+| `accept <run-id> --verdict accepted\|rejected --token <token> --evidence-ref <ref>` | Record an independently verified acceptance decision for an applied candidate. |
 | `gate-feedback` | Convert deterministic gate results into a cook retry or stop decision. |
 
 `adopt` accepts only immutable commits from the recorded cook source workspace.
@@ -144,6 +145,24 @@ structured contracts:
 
 Extensions and lab runners should delegate PR creation/update and proof assembly
 to this command instead of recreating GitHub publication logic locally.
+
+#### Independent Acceptance
+
+`cook --require-acceptance --acceptance-authority <authority> --acceptance-policy <policy>`
+adds an independent acceptance boundary. Homeboy creates its durable `pending`
+record only after an applied promotion has recorded the candidate and verified
+base, following successful deterministic gates. Provider output and review forms
+remain evidence but cannot satisfy this decision.
+
+The runtime must register an `AgentTaskAcceptanceVerifier`. Its attestation must
+match the declared authority and policy and include an actor, timestamp, provider
+reference, and opaque verifier/configuration provenance. The CLI token is passed
+only to that verifier and is never persisted. `accept` requires at least one
+evidence reference. Replaying an identical decision is idempotent. A changed
+candidate or verified base archives the old decision and creates a new pending
+record. A rejection preserves its evidence and permits one repair continuation.
+Finalization reports and persisted Cook finalization evidence project the same
+authoritative acceptance record.
 
 Recovery hydrates the run, worktree, base snapshot, candidate, changed files,
 gates, source references, model/tool disclosure, and accepted review form from

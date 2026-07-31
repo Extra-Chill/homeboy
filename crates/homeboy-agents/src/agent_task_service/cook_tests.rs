@@ -1302,7 +1302,7 @@ impl AgentTaskCookAttemptDispatcher for ProviderDiscoveryReplayDispatcher {
                 "fixture runner reported provider discovery failure",
             ));
         }
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.exit_code, 0, "{:#?}", result.value);
         Ok(())
     }
 }
@@ -4952,6 +4952,88 @@ fn adoption_by_cook_id_selects_the_latest_substantive_candidate_not_a_newer_empt
                 .expect("recipe attempts preserve substantive selection without an index"),
             second_run_id
         );
+    });
+}
+
+#[test]
+fn cook_alias_continuation_uses_the_candidate_selected_after_adoption_and_gate_feedback() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("candidate artifacts");
+        let cook_id = "cook-alias-selected-attempt";
+        // Attempt one deliberately shares the Cook ID, matching the durable
+        // identity shape that previously bypassed candidate selection.
+        let original_run_id = cook_id;
+        let adoption_run_id = "cook-alias-selected-attempt-attempt-2-adoption";
+        let gate_feedback_run_id = "cook-alias-selected-attempt-attempt-3-gate-feedback";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = original_run_id.to_string();
+        super::super::persist_initial_recipe(&options).expect("persist recipe");
+        super::super::record_recipe_attempt(cook_id, 2, adoption_run_id, &options.initial_plan)
+            .expect("persist adoption recipe attempt");
+        super::super::record_recipe_attempt(
+            cook_id,
+            3,
+            gate_feedback_run_id,
+            &options.initial_plan,
+        )
+        .expect("persist gate-feedback recipe attempt");
+        for (attempt, run_id) in [
+            (1, original_run_id),
+            (2, adoption_run_id),
+            (3, gate_feedback_run_id),
+        ] {
+            agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
+                .expect("persist lifecycle record");
+            agent_task_lifecycle::record_cook_attempt(cook_id, attempt, run_id)
+                .expect("persist Cook attempt");
+        }
+        let patch = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        for (run_id, name) in [
+            (original_run_id, "original.patch"),
+            (adoption_run_id, "adoption.patch"),
+            (gate_feedback_run_id, "gate-feedback.patch"),
+        ] {
+            seed_substantive_candidate_aggregate(
+                run_id,
+                &options.initial_plan,
+                &temp.path().join(name),
+                patch,
+            );
+        }
+
+        let selection = agent_task_lifecycle::select_cook_candidate(cook_id)
+            .expect("select advanced durable candidate");
+        assert_eq!(selection.run_id, gate_feedback_run_id);
+        assert_eq!(selection.attempt, 3);
+        assert_eq!(selection.reason, "latest_substantive_candidate_pointer");
+
+        let selected_run_id = super::super::resolve_cook_continuation_run_id(cook_id)
+            .expect("Cook alias resolves selected candidate");
+        assert_eq!(selected_run_id, gate_feedback_run_id);
+        assert_eq!(
+            super::super::resolve_cook_continuation_run_id(adoption_run_id)
+                .expect("exact distinct attempt remains addressable"),
+            adoption_run_id
+        );
+        let recipe = super::super::load_recipe(cook_id).expect("load recipe");
+        let record =
+            super::super::reconcile_recipe_attempt_for_continuation(&recipe, &selected_run_id)
+                .expect("selected candidate passes strict Cook identity fence");
+        assert_eq!(record.run_id, gate_feedback_run_id);
+        super::super::validate_recipe_attempt_record(&recipe, &selected_run_id, &record)
+            .expect("matching Cook metadata passes the identity fence");
+        let mut cross_cook_record = record;
+        cross_cook_record.ensure_metadata_object().insert(
+            "cook_id".to_string(),
+            Value::String("other-cook".to_string()),
+        );
+        let error = super::super::validate_recipe_attempt_record(
+            &recipe,
+            &selected_run_id,
+            &cross_cook_record,
+        )
+        .expect_err("cross-Cook metadata must fail the identity fence");
+        assert!(error.message.contains("observed Cook `other-cook`"));
     });
 }
 
