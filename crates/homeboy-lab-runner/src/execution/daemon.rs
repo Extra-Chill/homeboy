@@ -110,7 +110,7 @@ pub(super) fn exec_via_daemon(
         "require_paths": require_paths.clone(),
         "extension_env_providers": extension_env_providers.clone(),
         "runner_workload": lab_runner_workload.clone(),
-        "metadata": runner_exec_request_metadata(run_id.as_deref(), "daemon"),
+        "metadata": runner_exec_request_metadata(run_id.as_deref(), "daemon", &runner.id),
         "lifecycle": lifecycle,
         // Explicit, first-class idempotency key the daemon dedupes `/exec` on.
         // The controller asserts it up front instead of the daemon having to

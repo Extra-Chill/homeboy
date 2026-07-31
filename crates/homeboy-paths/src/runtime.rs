@@ -77,6 +77,19 @@ pub(crate) fn runner_lease_evidence_file(runner_id: &str, lease_id: &str) -> Res
         .join(format!("{}.json", sanitize_path_segment(lease_id))))
 }
 
+/// Runner-owned durable reverse-execution evidence. This is distinct from the
+/// controller's job event record so a restarted runner can resolve the exact
+/// broker-issued context it persisted before starting a child process.
+pub fn runner_job_execution_context_evidence_file(
+    runner_id: &str,
+    context_id: &str,
+) -> Result<PathBuf> {
+    Ok(homeboy()?
+        .join("runner-job-execution-context")
+        .join(sanitize_path_segment(runner_id))
+        .join(format!("{}.json", sanitize_path_segment(context_id))))
+}
+
 /// Managed service tunnel runtime state directory (~/.local/share/homeboy/service-tunnels/{id}/).
 pub fn service_tunnel_runtime_dir(id: &str) -> Result<PathBuf> {
     Ok(homeboy_data()?

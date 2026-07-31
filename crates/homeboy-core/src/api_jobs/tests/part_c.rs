@@ -180,8 +180,17 @@ fn remote_runner_job_claim_respects_concurrency_limit() {
         .claim_remote_runner_job("homeboy-lab", None, 30_000, Some(1))
         .expect("claim succeeds")
         .expect("first job is claimed");
+    let first_context_id = first_claim
+        .execution_context
+        .as_ref()
+        .expect("execution context")
+        .id()
+        .to_string();
     assert_eq!(first_claim.job.id, first.id);
     let first_claim_id = first_claim.job.claim_id.as_deref().expect("claim id");
+    store
+        .consume_remote_runner_execution(first.id, "homeboy-lab", first_claim_id, &first_context_id)
+        .expect("consume execution receipt");
 
     let saturated_claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, Some(1))
@@ -245,6 +254,323 @@ fn remote_runner_job_claim_can_be_filtered_by_project() {
 }
 
 #[test]
+fn remote_runner_claim_persists_and_requires_authenticated_execution_context() {
+    let store = JobStore::default();
+    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+    request.metadata = Some(json!({
+        "controller_run_id": "cook-42",
+        "controller_attempt_id": "cook-42:attempt-2",
+        "accepted_handoff_id": "reverse_broker:homeboy-lab:cook-42:attempt-2",
+    }));
+    let job = store
+        .submit_remote_runner_job(request)
+        .expect("remote runner job queues");
+    let claim = store
+        .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
+        .expect("claim succeeds")
+        .expect("job is claimed");
+    let context = claim.execution_context.as_ref().expect("execution context");
+    let serialized_context = serde_json::to_value(context).expect("serialize context");
+    assert_eq!(serialized_context["controller_run_id"], "cook-42");
+    assert_eq!(
+        serialized_context["controller_attempt_id"],
+        "cook-42:attempt-2"
+    );
+    assert_eq!(
+        serialized_context["accepted_handoff_id"],
+        "reverse_broker:homeboy-lab:cook-42:attempt-2"
+    );
+    let verified_context = context
+        .verify_claim(&claim.job, &claim.request)
+        .expect("context verifies claimed job");
+    assert!(verified_context.verify_integrity().is_ok());
+    let mut tampered_value = serde_json::to_value(context).expect("serialize context");
+    tampered_value["runner_job_id"] = serde_json::json!("different-job");
+    let tampered: crate::runner_job_execution_context::RunnerJobExecutionContext =
+        serde_json::from_value(tampered_value).expect("decode tampered context");
+    assert!(tampered.verify_claim(&claim.job, &claim.request).is_err());
+    assert!(store.events(job.id).expect("events").iter().any(|event| {
+        event
+            .data
+            .as_ref()
+            .and_then(|data| data.get("runner_job_execution_context"))
+            .and_then(|evidence| evidence.get("context"))
+            == Some(&serde_json::to_value(context).expect("serialize context"))
+    }));
+
+    let mut old_wire = serde_json::to_value(&claim).expect("serialize claim");
+    old_wire
+        .as_object_mut()
+        .expect("claim object")
+        .remove("execution_context");
+    let old_claim: RemoteRunnerJobClaim =
+        serde_json::from_value(old_wire).expect("decode old claim");
+    assert!(old_claim.execution_context.is_none());
+}
+
+#[test]
+fn remote_runner_context_rejects_expired_or_different_durable_claims() {
+    let store = JobStore::default();
+    let first = store
+        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("one")))
+        .expect("first job queues");
+    let second = store
+        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("two")))
+        .expect("second job queues");
+    let first_claim = store
+        .claim_remote_runner_job("homeboy-lab", Some("one"), 30_000, None)
+        .expect("first claim")
+        .expect("first job");
+    let second_claim = store
+        .claim_remote_runner_job("homeboy-lab", Some("two"), 30_000, None)
+        .expect("second claim")
+        .expect("second job");
+    let context = first_claim.execution_context.expect("first context");
+
+    assert_ne!(first.id, second.id);
+    assert!(context
+        .verify_claim(&second_claim.job, &second_claim.request)
+        .is_err());
+
+    let mut expired = first_claim.job.clone();
+    expired.claim_expires_at_ms = Some(crate::api_jobs::timestamp_ms().saturating_sub(1));
+    assert!(context
+        .verify_claim(&expired, &first_claim.request)
+        .is_err());
+}
+
+#[test]
+fn remote_runner_execution_receipt_is_one_time_and_revalidates_the_live_claim() {
+    let store = JobStore::default();
+    let job = store
+        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .expect("remote runner job queues");
+    let claim = store
+        .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+        .expect("claim succeeds")
+        .expect("job is claimed");
+    let context = claim.execution_context.expect("execution context");
+    let claim_id = claim.job.claim_id.as_deref().expect("claim id");
+
+    let consumed = store
+        .consume_remote_runner_execution(job.id, "homeboy-lab", claim_id, context.id())
+        .expect("live claim consumes once");
+    assert_eq!(consumed.id, job.id);
+    assert!(store
+        .consume_remote_runner_execution(job.id, "homeboy-lab", claim_id, context.id())
+        .is_err());
+    assert!(store.events(job.id).expect("events").iter().any(|event| {
+        event.message.as_deref() == Some("remote runner execution receipt consumed")
+            && event
+                .data
+                .as_ref()
+                .is_some_and(|data| data["context_id"] == context.id())
+    }));
+
+    let expired_job = store
+        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .expect("expired job queues");
+    let expired_claim = store
+        .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+        .expect("expired claim succeeds")
+        .expect("expired job is claimed");
+    let expired_context = expired_claim.execution_context.expect("expired context");
+    let expired_claim_id = expired_claim
+        .job
+        .claim_id
+        .as_deref()
+        .expect("expired claim id");
+    store
+        .inner
+        .lock()
+        .expect("job store")
+        .jobs
+        .get_mut(&expired_job.id)
+        .expect("expired job")
+        .job
+        .claim_expires_at_ms = Some(crate::api_jobs::timestamp_ms().saturating_sub(1));
+    assert!(store
+        .consume_remote_runner_execution(
+            expired_job.id,
+            "homeboy-lab",
+            expired_claim_id,
+            expired_context.id(),
+        )
+        .is_err());
+}
+
+#[test]
+fn remote_runner_claim_rejects_workers_without_the_context_protocol() {
+    let store = JobStore::default();
+    let mut request = remote_runner_request("homeboy-lab", None);
+    request.extension_env_providers = vec!["authenticated-provider".to_string()];
+    let job = store
+        .submit_remote_runner_job(request)
+        .expect("remote runner job queues");
+
+    let missing = store.claim_remote_runner_job_with_execution_protocol(
+        "homeboy-lab",
+        None,
+        30_000,
+        None,
+        None,
+    );
+    assert!(missing.is_err());
+    assert_eq!(
+        store.get(job.id).expect("job remains queued").status,
+        JobStatus::Queued
+    );
+
+    let old = crate::runner_job_execution_context::RunnerJobExecutionProtocol {
+        capability: crate::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY
+            .to_string(),
+        version: 0,
+    };
+    assert!(store
+        .claim_remote_runner_job_with_execution_protocol(
+            "homeboy-lab",
+            None,
+            30_000,
+            None,
+            Some(&old)
+        )
+        .is_err());
+    assert_eq!(
+        store.get(job.id).expect("job remains queued").status,
+        JobStatus::Queued
+    );
+}
+
+#[test]
+fn remote_runner_legacy_claims_remain_available_only_for_context_free_jobs() {
+    let store = JobStore::default();
+    let job = store
+        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .expect("legacy job queues");
+
+    let claim = store
+        .claim_remote_runner_job_with_execution_protocol("homeboy-lab", None, 30_000, None, None)
+        .expect("legacy worker can claim context-free work")
+        .expect("legacy job is claimed");
+    assert_eq!(claim.job.id, job.id);
+    assert!(claim.execution_context.is_none());
+    assert!(claim.execution_protocol.is_none());
+    assert!(store.events(job.id).expect("events").iter().all(|event| {
+        event
+            .data
+            .as_ref()
+            .and_then(|data| data.get("runner_job_execution_context"))
+            .is_none()
+    }));
+}
+
+#[test]
+fn remote_runner_context_evidence_survives_controller_restart() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let job = store
+        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+        .expect("remote runner job queues");
+    let claim = store
+        .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
+        .expect("claim succeeds")
+        .expect("job is claimed");
+    let expected = claim.execution_context.expect("execution context");
+    drop(store);
+
+    let restarted = JobStore::open_without_reconciliation(&path).expect("restart store");
+    let evidence = restarted
+        .events(job.id)
+        .expect("events")
+        .into_iter()
+        .find_map(|event| {
+            event
+                .data
+                .and_then(|data| data.get("runner_job_execution_context").cloned())
+        })
+        .expect("durable context evidence");
+    let recovered =
+        crate::runner_job_execution_context::RunnerJobExecutionContext::from_evidence_record(
+            &evidence,
+        )
+        .expect("decode context");
+    assert_eq!(recovered, expected);
+    assert!(evidence["content_sha256"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("sha256:")));
+}
+
+#[test]
+fn old_persisted_context_claim_without_context_id_rejects_direct_finish() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let job = store
+        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .expect("remote runner job queues");
+    let claim = store
+        .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+        .expect("claim succeeds")
+        .expect("job is claimed");
+    let claim_id = claim.job.claim_id.expect("claim id");
+    drop(store);
+
+    // This is the durable shape written before execution_context_id was added.
+    let mut persisted: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("read durable store"))
+            .expect("decode durable store");
+    let stored = persisted["jobs"]
+        .as_array_mut()
+        .expect("persisted jobs")
+        .iter_mut()
+        .find(|stored| stored["job"]["id"] == job.id.to_string())
+        .expect("persisted job");
+    assert!(stored["remote_runner"]
+        .get("execution_context_id")
+        .is_some());
+    stored["remote_runner"]
+        .as_object_mut()
+        .expect("remote runner state")
+        .remove("execution_context_id");
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&persisted).expect("encode old durable store"),
+    )
+    .expect("write old durable store");
+
+    let reopened = JobStore::open_without_reconciliation(&path).expect("reopen old durable store");
+    let error = reopened
+        .finish_remote_runner_job(
+            job.id,
+            "homeboy-lab",
+            &claim_id,
+            RemoteRunnerJobResult {
+                exit_code: 0,
+                stdout: None,
+                stderr: None,
+                patch: None,
+                mutation_artifacts: None,
+                data: None,
+                observation_run_ids: Vec::new(),
+                observation_run_details: Vec::new(),
+                observation_run_details_compatibility_degraded: false,
+                artifacts: Vec::new(),
+                artifact_refs: Vec::new(),
+                metrics: None,
+                capture: None,
+            },
+        )
+        .expect_err("context evidence requires a consumed receipt");
+
+    assert!(error.message.contains("receipt has not been consumed"));
+    assert_eq!(
+        reopened.get(job.id).expect("job remains in flight").status,
+        JobStatus::Running
+    );
+}
+
+#[test]
 fn remote_runner_job_result_records_terminal_state_and_artifacts() {
     let store = JobStore::default();
     let job = store
@@ -254,7 +580,16 @@ fn remote_runner_job_result_records_terminal_state_and_artifacts() {
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
         .expect("claim succeeds")
         .expect("job is claimed");
+    let context_id = claim
+        .execution_context
+        .as_ref()
+        .expect("execution context")
+        .id()
+        .to_string();
     let claim_id = claim.job.claim_id.expect("claim id");
+    store
+        .consume_remote_runner_execution(job.id, "homeboy-lab", &claim_id, &context_id)
+        .expect("consume execution receipt");
     store
         .append_remote_runner_event(
             job.id,
@@ -398,7 +733,16 @@ fn remote_runner_job_failed_result_records_error_and_terminal_state() {
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
         .expect("claim succeeds")
         .expect("job is claimed");
+    let context_id = claim
+        .execution_context
+        .as_ref()
+        .expect("execution context")
+        .id()
+        .to_string();
     let claim_id = claim.job.claim_id.expect("claim id");
+    store
+        .consume_remote_runner_execution(job.id, "homeboy-lab", &claim_id, &context_id)
+        .expect("consume execution receipt");
 
     let failed = store
         .finish_remote_runner_job(

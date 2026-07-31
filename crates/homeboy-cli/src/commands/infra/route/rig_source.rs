@@ -77,6 +77,10 @@ pub(super) fn run_rig_source_management_on_runner(
     let (output, exit_code) = runners::exec(
         runner_id,
         RunnerExecOptions {
+            execution_context:
+                homeboy::core::runner_job_execution_context::RunnerJobExecutionContext::local(
+                    "homeboy",
+                ),
             cwd: runner.workspace_root.clone(),
             project_id: None,
             allow_diagnostic_ssh: false,

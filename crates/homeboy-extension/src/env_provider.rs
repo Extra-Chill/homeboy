@@ -1,9 +1,23 @@
 use crate::manifest::ExtensionManifest;
 use homeboy_core::error::{Error, Result};
+use homeboy_core::runner_job_execution_context::RunnerJobExecutionContext;
 use homeboy_core::server::execute_local_command_in_dir;
 use homeboy_engine_primitives::shell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+pub const ENV_PROVIDER_COMMAND_PAYLOAD_ENV: &str = "HOMEBOY_ENV_PROVIDER_COMMAND_PAYLOAD";
+const ENV_PROVIDER_COMMAND_PAYLOAD_SCHEMA: &str = "homeboy/env-provider-command/v1";
+const MAX_PROVIDER_COMMAND_PAYLOAD_BYTES: usize = 8 * 1024;
+
+/// The explicit, bounded payload passed to every provider script. The typed
+/// context is duplicated here because scripts are process boundaries and
+/// cannot rely on Rust-side pre-validation.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EnvProviderCommandPayload<'a> {
+    pub schema: &'static str,
+    pub execution_context: &'a RunnerJobExecutionContext,
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EnvProviderContribution {
@@ -34,6 +48,7 @@ pub fn declared_secret_names(extension_id: &str) -> Result<Vec<String>> {
 /// that will execute the workload. The caller retains only this non-secret
 /// provenance; secret values remain in the runner's secret-env resolver.
 pub fn resolve_installed(
+    execution_context: &RunnerJobExecutionContext,
     extension_id: &str,
     component_path: &Path,
     base_env: &[(String, String)],
@@ -50,7 +65,7 @@ pub fn resolve_installed(
         ));
     };
     let secret_env_names = declared_secret_names(extension_id)?;
-    let public_env = env_vars(&extension, component_path, base_env)?;
+    let public_env = env_vars(execution_context, &extension, component_path, base_env)?;
     for (name, _) in &public_env {
         if secret_env_names.iter().any(|secret| secret == name)
             || homeboy_core::redaction::RedactionPolicy::default().is_sensitive_key(name)
@@ -75,10 +90,21 @@ pub fn resolve_installed(
 /// Resolve providers in request order and reject any ambiguous contribution
 /// before the workload can start. The returned values contain no secrets.
 pub fn resolve_installed_all(
+    execution_context: &RunnerJobExecutionContext,
     extension_ids: &[String],
     component_path: &Path,
     base_env: &[(String, String)],
 ) -> Result<Vec<EnvProviderContribution>> {
+    if execution_context.verify_integrity().is_err() {
+        return Err(Error::validation_invalid_argument(
+            "execution_context",
+            "extension environment providers require authenticated runner execution context",
+            None,
+            Some(vec![
+                "Claim a fresh runner job through the controller before retrying.".to_string(),
+            ]),
+        ));
+    }
     let mut effective_env = base_env.to_vec();
     let mut owners = HashMap::new();
     for (name, _) in base_env {
@@ -86,7 +112,12 @@ pub fn resolve_installed_all(
     }
     let mut contributions = Vec::new();
     for extension_id in extension_ids {
-        let contribution = resolve_installed(extension_id, component_path, &effective_env)?;
+        let contribution = resolve_installed(
+            execution_context,
+            extension_id,
+            component_path,
+            &effective_env,
+        )?;
         for (name, value) in &contribution.public_env {
             if let Some(owner) = owners.get(name) {
                 return Err(Error::validation_invalid_argument(
@@ -108,6 +139,7 @@ pub fn resolve_installed_all(
 }
 
 pub(crate) fn env_vars(
+    execution_context: &RunnerJobExecutionContext,
     extension: &ExtensionManifest,
     component_path: &Path,
     base_env: &[(String, String)],
@@ -117,7 +149,21 @@ pub(crate) fn env_vars(
     };
     let extension_path = extension_path(extension)?;
     let command = shell::quote_path(&extension_path.join(script_path).to_string_lossy());
-    let env_refs = base_env
+    let payload = provider_command_payload(execution_context)?;
+    if base_env
+        .iter()
+        .any(|(key, _)| key == ENV_PROVIDER_COMMAND_PAYLOAD_ENV)
+    {
+        return Err(Error::validation_invalid_argument(
+            "extension_env",
+            format!("request environment cannot override {ENV_PROVIDER_COMMAND_PAYLOAD_ENV}"),
+            None,
+            None,
+        ));
+    }
+    let mut provider_env = base_env.to_vec();
+    provider_env.push((ENV_PROVIDER_COMMAND_PAYLOAD_ENV.to_string(), payload));
+    let env_refs = provider_env
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect::<Vec<_>>();
@@ -138,6 +184,36 @@ pub(crate) fn env_vars(
     }
 
     parse_env_provider_output(&output.stdout)
+}
+
+fn provider_command_payload(execution_context: &RunnerJobExecutionContext) -> Result<String> {
+    execution_context.verify_integrity().map_err(|_| {
+        Error::validation_invalid_argument(
+            "execution_context",
+            "extension environment providers require authenticated runner execution context",
+            None,
+            None,
+        )
+    })?;
+    let payload = serde_json::to_string(&EnvProviderCommandPayload {
+        schema: ENV_PROVIDER_COMMAND_PAYLOAD_SCHEMA,
+        execution_context,
+    })
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize env provider command payload".to_string()),
+        )
+    })?;
+    if payload.len() > MAX_PROVIDER_COMMAND_PAYLOAD_BYTES {
+        return Err(Error::validation_invalid_argument(
+            "execution_context",
+            "extension environment provider command payload exceeds its bounded record",
+            None,
+            None,
+        ));
+    }
+    Ok(payload)
 }
 
 pub(crate) fn load_manifest_from_dir(extension_path: &Path) -> Result<ExtensionManifest> {
@@ -201,5 +277,36 @@ mod tests {
                 ("B".to_string(), "two".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn command_payload_carries_the_stable_verified_context_identity() {
+        let context = RunnerJobExecutionContext::local("homeboy");
+        let payload = provider_command_payload(&context).expect("payload");
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("JSON payload");
+
+        assert_eq!(value["schema"], ENV_PROVIDER_COMMAND_PAYLOAD_SCHEMA);
+        assert_eq!(
+            value["execution_context"]["schema"],
+            homeboy_core::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_SCHEMA
+        );
+        assert_eq!(value["execution_context"]["id"], context.id());
+    }
+
+    #[test]
+    fn command_payload_redacts_raw_execution_claim_material() {
+        let secret = "reservation-secret";
+        let context = RunnerJobExecutionContext::direct_daemon(
+            Some("run-1"),
+            "runner-1",
+            "job-1",
+            "homeboy",
+            secret,
+        )
+        .expect("context");
+
+        let payload = provider_command_payload(&context).expect("payload");
+        assert!(!payload.contains(secret));
+        assert!(payload.contains("claim_ref"));
     }
 }

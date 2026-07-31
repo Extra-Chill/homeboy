@@ -63,6 +63,8 @@ struct ClaimRequest {
     lease_ms: Option<u64>,
     #[serde(default)]
     concurrency_limit: Option<usize>,
+    #[serde(default)]
+    execution_protocol: Option<crate::runner_job_execution_context::RunnerJobExecutionProtocol>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -89,6 +91,13 @@ struct HeartbeatRequest {
     claim_id: String,
     #[serde(default)]
     lease_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ConsumeRequest {
+    runner_id: String,
+    claim_id: String,
+    context_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -146,7 +155,7 @@ pub(in crate::daemon) fn route(
                 "unknown remote runner broker path",
                 Some(path.to_string()),
                 Some(vec![
-                    "Use /runner/jobs, /runner/jobs/reconcile, /runner/jobs/claim, /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, /runner/jobs/<job-id>/cancel, or GET /runner/jobs/<job-id>/artifacts/<artifact-id>."
+                    "Use /runner/jobs, /runner/jobs/reconcile, /runner/jobs/claim, /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, /runner/jobs/<job-id>/consume, /runner/jobs/<job-id>/cancel, or GET /runner/jobs/<job-id>/artifacts/<artifact-id>."
                         .to_string(),
                     "Use /runner/sessions to register reverse runner sessions.".to_string(),
                 ]),
@@ -535,11 +544,12 @@ fn claim(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) ->
     let concurrency_limit = request
         .concurrency_limit
         .or_else(|| super::runner_workspace_root::runner_concurrency_limit(&request.runner_id));
-    let claim = job_store.claim_remote_runner_job(
+    let claim = job_store.claim_remote_runner_job_with_execution_protocol(
         &request.runner_id,
         request.project_id.as_deref(),
         request.lease_ms.unwrap_or(30_000),
         concurrency_limit,
+        request.execution_protocol.as_ref(),
     )?;
     Ok(json!({
         "command": "api.runner.jobs.claim",
@@ -561,7 +571,7 @@ fn update(
                 "unknown remote runner job path",
                 Some(path.to_string()),
                 Some(vec![
-                    "Use /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, or /runner/jobs/<job-id>/cancel.".to_string(),
+                    "Use /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, /runner/jobs/<job-id>/consume, or /runner/jobs/<job-id>/cancel.".to_string(),
                 ]),
             ),
         );
@@ -580,6 +590,10 @@ fn update(
             Ok(body) => daemon_endpoint_response("runner.jobs.heartbeat", body),
             Err(err) => auth_or_bad_request(err),
         },
+        "consume" => match consume(job_id, body, job_store, auth) {
+            Ok(body) => daemon_endpoint_response("runner.jobs.consume", body),
+            Err(err) => auth_or_bad_request(err),
+        },
         "cancel" => match cancel(job_id, job_store, auth) {
             Ok(body) => daemon_endpoint_response("runner.jobs.cancel", body),
             Err(err) => auth_or_bad_request(err),
@@ -591,7 +605,8 @@ fn update(
                 "unknown remote runner job operation",
                 Some(operation.to_string()),
                 Some(vec![
-                    "Supported operations are events, finish, heartbeat, and cancel.".to_string(),
+                    "Supported operations are events, finish, heartbeat, consume, and cancel."
+                        .to_string(),
                 ]),
             ),
         ),
@@ -687,6 +702,28 @@ fn heartbeat(
     Ok(json!({
         "command": "api.runner.jobs.heartbeat",
         "job": job,
+    }))
+}
+
+fn consume(
+    job_id: Uuid,
+    body: Option<Value>,
+    job_store: &JobStore,
+    auth: &BrokerAuthContext,
+) -> Result<Value> {
+    let request: ConsumeRequest = parse_body(body, "remote runner execution consume request")?;
+    auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
+    touch_reverse_session(&request.runner_id)?;
+    let job = job_store.consume_remote_runner_execution(
+        job_id,
+        &request.runner_id,
+        &request.claim_id,
+        &request.context_id,
+    )?;
+    Ok(json!({
+        "command": "api.runner.jobs.consume",
+        "job": job,
+        "context_id": request.context_id,
     }))
 }
 
@@ -1171,6 +1208,116 @@ mod auth_tests {
         );
         assert_eq!(finish.status_code, 200, "finish body: {}", finish.body);
         assert_eq!(finish.body["body"]["job"]["status"], "succeeded");
+    }
+
+    #[test]
+    fn context_claim_finish_requires_a_matching_consumed_receipt() {
+        let _home = HomeGuard::new();
+        let store = JobStore::default();
+        let submit = route(
+            "POST",
+            "/runner/jobs",
+            Some(submit_body()),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        let job_id = submit.body["body"]["job"]["id"]
+            .as_str()
+            .expect("job id")
+            .to_string();
+        let claim = route(
+            "POST",
+            "/runner/jobs/claim",
+            Some(json!({
+                "runner_id": "homeboy-lab",
+                "lease_ms": 30000,
+                "execution_protocol": crate::runner_job_execution_context::RunnerJobExecutionProtocol::current(),
+            })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(claim.status_code, 200, "claim body: {}", claim.body);
+        let claim_id = claim.body["body"]["claim"]["job"]["claim_id"]
+            .as_str()
+            .expect("claim id")
+            .to_string();
+        let context_id = claim.body["body"]["claim"]["execution_context"]["id"]
+            .as_str()
+            .expect("execution context id")
+            .to_string();
+        let finish_path = format!("/runner/jobs/{job_id}/finish");
+        let finish_body = || {
+            json!({
+                "runner_id": "homeboy-lab",
+                "claim_id": claim_id,
+                "result": { "exit_code": 0 },
+            })
+        };
+
+        let before_consumption = route(
+            "POST",
+            &finish_path,
+            Some(finish_body()),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(before_consumption.status_code, 400);
+        assert_eq!(
+            store
+                .get(Uuid::parse_str(&job_id).expect("valid job id"))
+                .expect("job remains running")
+                .status,
+            crate::api_jobs::JobStatus::Running
+        );
+
+        let consume_path = format!("/runner/jobs/{job_id}/consume");
+        let mismatch = route(
+            "POST",
+            &consume_path,
+            Some(json!({
+                "runner_id": "homeboy-lab",
+                "claim_id": claim_id,
+                "context_id": "rjec:mismatch",
+            })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(mismatch.status_code, 400);
+
+        let consumed = route(
+            "POST",
+            &consume_path,
+            Some(json!({
+                "runner_id": "homeboy-lab",
+                "claim_id": claim_id,
+                "context_id": context_id,
+            })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(consumed.status_code, 200, "consume body: {}", consumed.body);
+        let replay = route(
+            "POST",
+            &consume_path,
+            Some(json!({
+                "runner_id": "homeboy-lab",
+                "claim_id": claim_id,
+                "context_id": context_id,
+            })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(replay.status_code, 400);
+
+        let finished = route(
+            "POST",
+            &finish_path,
+            Some(finish_body()),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(finished.status_code, 200, "finish body: {}", finished.body);
+        assert_eq!(finished.body["body"]["job"]["status"], "succeeded");
     }
 
     #[test]

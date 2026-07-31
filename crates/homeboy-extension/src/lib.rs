@@ -64,7 +64,8 @@ pub use homeboy_extension_contract::ExtensionCapability;
 pub use env_provider::{
     declared_secret_names as env_provider_secret_names,
     resolve_installed as resolve_installed_env_provider,
-    resolve_installed_all as resolve_installed_env_providers, EnvProviderContribution,
+    resolve_installed_all as resolve_installed_env_providers, EnvProviderCommandPayload,
+    EnvProviderContribution, ENV_PROVIDER_COMMAND_PAYLOAD_ENV,
 };
 pub(crate) use execution::build_settings_json_from_manifest;
 pub use execution::execute_action;
