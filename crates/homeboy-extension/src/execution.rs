@@ -159,7 +159,12 @@ fn persist_setup_runtime_env(extension: &ExtensionManifest, extension_id: &str) 
         None,
     );
 
-    match super::env_provider::env_vars(extension, extension_dir, &base_env) {
+    match super::env_provider::env_vars(
+        &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
+        extension,
+        extension_dir,
+        &base_env,
+    ) {
         Ok(discovered) if !discovered.is_empty() => {
             let _ = super::setup_env::persist(extension_id, &discovered);
         }
@@ -413,6 +418,9 @@ pub(crate) fn build_capability_env_with_additional_providers(
     provider_env.extend(extra_env.iter().cloned());
     if let Ok(extension) = env_provider::load_manifest_from_dir(extension_path) {
         env.extend(env_provider::env_vars(
+            &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
+                "homeboy",
+            ),
             &extension,
             component_path,
             &provider_env,
@@ -421,6 +429,9 @@ pub(crate) fn build_capability_env_with_additional_providers(
     for (_extension_id, provider_path) in additional_env_provider_paths {
         if let Ok(extension) = env_provider::load_manifest_from_dir(provider_path) {
             env.extend(env_provider::env_vars(
+                &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
+                    "homeboy",
+                ),
                 &extension,
                 component_path,
                 &provider_env,

@@ -63,6 +63,8 @@ struct ClaimRequest {
     lease_ms: Option<u64>,
     #[serde(default)]
     concurrency_limit: Option<usize>,
+    #[serde(default)]
+    execution_protocol: Option<crate::runner_job_execution_context::RunnerJobExecutionProtocol>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -89,6 +91,13 @@ struct HeartbeatRequest {
     claim_id: String,
     #[serde(default)]
     lease_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ConsumeRequest {
+    runner_id: String,
+    claim_id: String,
+    context_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -146,7 +155,7 @@ pub(in crate::daemon) fn route(
                 "unknown remote runner broker path",
                 Some(path.to_string()),
                 Some(vec![
-                    "Use /runner/jobs, /runner/jobs/reconcile, /runner/jobs/claim, /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, /runner/jobs/<job-id>/cancel, or GET /runner/jobs/<job-id>/artifacts/<artifact-id>."
+                    "Use /runner/jobs, /runner/jobs/reconcile, /runner/jobs/claim, /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, /runner/jobs/<job-id>/consume, /runner/jobs/<job-id>/cancel, or GET /runner/jobs/<job-id>/artifacts/<artifact-id>."
                         .to_string(),
                     "Use /runner/sessions to register reverse runner sessions.".to_string(),
                 ]),
@@ -535,11 +544,12 @@ fn claim(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) ->
     let concurrency_limit = request
         .concurrency_limit
         .or_else(|| super::runner_workspace_root::runner_concurrency_limit(&request.runner_id));
-    let claim = job_store.claim_remote_runner_job(
+    let claim = job_store.claim_remote_runner_job_with_execution_protocol(
         &request.runner_id,
         request.project_id.as_deref(),
         request.lease_ms.unwrap_or(30_000),
         concurrency_limit,
+        request.execution_protocol.as_ref(),
     )?;
     Ok(json!({
         "command": "api.runner.jobs.claim",
@@ -561,7 +571,7 @@ fn update(
                 "unknown remote runner job path",
                 Some(path.to_string()),
                 Some(vec![
-                    "Use /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, or /runner/jobs/<job-id>/cancel.".to_string(),
+                    "Use /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, /runner/jobs/<job-id>/consume, or /runner/jobs/<job-id>/cancel.".to_string(),
                 ]),
             ),
         );
@@ -580,6 +590,10 @@ fn update(
             Ok(body) => daemon_endpoint_response("runner.jobs.heartbeat", body),
             Err(err) => auth_or_bad_request(err),
         },
+        "consume" => match consume(job_id, body, job_store, auth) {
+            Ok(body) => daemon_endpoint_response("runner.jobs.consume", body),
+            Err(err) => auth_or_bad_request(err),
+        },
         "cancel" => match cancel(job_id, job_store, auth) {
             Ok(body) => daemon_endpoint_response("runner.jobs.cancel", body),
             Err(err) => auth_or_bad_request(err),
@@ -591,7 +605,8 @@ fn update(
                 "unknown remote runner job operation",
                 Some(operation.to_string()),
                 Some(vec![
-                    "Supported operations are events, finish, heartbeat, and cancel.".to_string(),
+                    "Supported operations are events, finish, heartbeat, consume, and cancel."
+                        .to_string(),
                 ]),
             ),
         ),
@@ -687,6 +702,28 @@ fn heartbeat(
     Ok(json!({
         "command": "api.runner.jobs.heartbeat",
         "job": job,
+    }))
+}
+
+fn consume(
+    job_id: Uuid,
+    body: Option<Value>,
+    job_store: &JobStore,
+    auth: &BrokerAuthContext,
+) -> Result<Value> {
+    let request: ConsumeRequest = parse_body(body, "remote runner execution consume request")?;
+    auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
+    touch_reverse_session(&request.runner_id)?;
+    let job = job_store.consume_remote_runner_execution(
+        job_id,
+        &request.runner_id,
+        &request.claim_id,
+        &request.context_id,
+    )?;
+    Ok(json!({
+        "command": "api.runner.jobs.consume",
+        "job": job,
+        "context_id": request.context_id,
     }))
 }
 

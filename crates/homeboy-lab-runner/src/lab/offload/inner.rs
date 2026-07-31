@@ -441,6 +441,8 @@ fn lab_runner_exec_options(
     }
     env.extend(lab_rig_registry_env(context.rig_registry_root.as_deref()));
     RunnerExecOptions {
+        execution_context:
+            homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
         cwd: Some(context.remote_cwd.clone()),
         project_id: None,
         allow_diagnostic_ssh: false,

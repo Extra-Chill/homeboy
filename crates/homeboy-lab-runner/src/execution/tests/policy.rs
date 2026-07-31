@@ -26,6 +26,8 @@ fn test_required_extensions_for_command_reads_extension_flags() {
 fn test_runner_policy_denies_raw_ssh_exec_by_default() {
     let runner = ssh_runner();
     let options = RunnerExecOptions {
+        execution_context:
+            homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
         cwd: Some("/srv/homeboy/project".to_string()),
         project_id: Some("extrachill".to_string()),
         allow_diagnostic_ssh: true,
@@ -73,6 +75,8 @@ fn test_runner_policy_enforces_projects_commands_workspace_and_artifacts() {
     };
 
     let allowed = RunnerExecOptions {
+        execution_context:
+            homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
         cwd: Some("/srv/homeboy/extrachill/homeboy".to_string()),
         project_id: Some("extrachill".to_string()),
         allow_diagnostic_ssh: true,

@@ -106,6 +106,8 @@ pub fn runner_source_checkout_prepare_options(
     command: Vec<String>,
 ) -> RunnerExecOptions {
     RunnerExecOptions {
+        execution_context:
+            homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
         cwd: None,
         project_id: None,
         allow_diagnostic_ssh: true,

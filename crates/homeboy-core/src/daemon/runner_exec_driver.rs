@@ -21,6 +21,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::error::{Error, Result};
+use crate::runner_job_execution_context::RunnerJobExecutionContext;
 use crate::server::HeartbeatOnlyStallPolicy;
 use crate::source_snapshot::SourceSnapshot;
 
@@ -143,6 +144,7 @@ pub trait RunnerExecDriver: Send + Sync {
     fn execute(
         &self,
         prepared: &PreparedDaemonExec,
+        execution_context: &RunnerJobExecutionContext,
         is_cancelled: ExecCancellationProbe,
         progress_sink: Option<ExecProgressSink>,
         require_child_identity_acknowledgement: bool,
@@ -163,6 +165,7 @@ impl RunnerExecDriver for NoopRunnerExecDriver {
     fn execute(
         &self,
         _prepared: &PreparedDaemonExec,
+        _execution_context: &RunnerJobExecutionContext,
         _is_cancelled: ExecCancellationProbe,
         _progress_sink: Option<ExecProgressSink>,
         _require_child_identity_acknowledgement: bool,
@@ -191,6 +194,7 @@ pub(crate) fn prepare_exec(request: RunnerExecPrepareRequest) -> Result<Prepared
 /// is released before the child runs.
 pub(crate) fn execute_exec(
     prepared: &PreparedDaemonExec,
+    execution_context: &RunnerJobExecutionContext,
     is_cancelled: ExecCancellationProbe,
     progress_sink: Option<ExecProgressSink>,
     require_child_identity_acknowledgement: bool,
@@ -198,6 +202,7 @@ pub(crate) fn execute_exec(
 ) -> Result<DaemonExecOutput> {
     active_driver().execute(
         prepared,
+        execution_context,
         is_cancelled,
         progress_sink,
         require_child_identity_acknowledgement,

@@ -19,11 +19,12 @@ use super::*;
 pub(crate) fn exec_worker_local_until_cancelled_with_progress(
     runner_id: &str,
     options: RunnerExecOptions,
+    before_provider: impl FnOnce() -> Result<()>,
     is_cancelled: impl FnMut() -> bool,
     progress_sink: Option<super::super::RunnerCommandProgressSink>,
 ) -> Result<(RunnerExecOutput, i32)> {
     let mut is_cancelled = is_cancelled;
-    exec_worker_local_with_process_output(runner_id, options, |plan| {
+    exec_worker_local_with_process_output(runner_id, options, before_provider, |plan| {
         execute_runner_process_until_cancelled_with_progress(
             plan,
             &mut is_cancelled,
@@ -37,8 +38,22 @@ pub(crate) fn exec_worker_local_until_cancelled_with_progress(
 pub(super) fn exec_worker_local_with_process_output(
     runner_id: &str,
     options: RunnerExecOptions,
+    before_provider: impl FnOnce() -> Result<()>,
     execute: impl FnOnce(&PreparedRunnerProcess) -> Result<ProcessOutput>,
 ) -> Result<(RunnerExecOutput, i32)> {
+    let verified_remote = options.execution_context.verify_integrity().is_ok()
+        && options.execution_context.runner_id() == runner_id;
+    let explicit_local = options.execution_context.is_local();
+    if !verified_remote && !explicit_local {
+        return Err(homeboy_core::error::Error::validation_invalid_argument(
+            "execution_context",
+            "runner execution context is not verified for this runner",
+            Some(runner_id.to_string()),
+            Some(vec![
+                "Claim a fresh runner job through the controller before retrying.".to_string(),
+            ]),
+        ));
+    }
     let provider_secret_names = options
         .extension_env_providers
         .iter()
@@ -75,7 +90,10 @@ pub(super) fn exec_worker_local_with_process_output(
     })?;
     let run_id_hint =
         apply_explicit_runner_exec_run_id_env(&mut plan.env, options.run_id.as_deref());
-    let contributions = homeboy_extension::resolve_installed_env_providers(
+    // The final pre-provider boundary consumes a remote receipt exactly once.
+    before_provider()?;
+    let contributions = super::resolve_provider_env_with_execution_context(
+        &options.execution_context,
         &options.extension_env_providers,
         std::path::Path::new(&plan.cwd),
         &plan

@@ -24,6 +24,7 @@ pub(super) fn claim_job(
             "project_id": options.project_id,
             "lease_ms": options.lease_ms.max(1),
             "concurrency_limit": options.concurrency_limit,
+            "execution_protocol": homeboy_core::runner_job_execution_context::RunnerJobExecutionProtocol::current(),
         }),
         "claim reverse runner job",
         options.broker_token.as_deref(),
@@ -38,30 +39,6 @@ pub(super) fn claim_job(
             Some("parse reverse runner job claim".to_string()),
         )
     })
-}
-
-pub(super) fn append_progress(
-    client: &Client,
-    broker_url: &str,
-    token: Option<&str>,
-    runner_id: &str,
-    job: &Job,
-) -> Result<()> {
-    let claim_id = remote_runner_claim_id(job)?;
-    broker_http::post_json(
-        client,
-        broker_url,
-        &format!("/runner/jobs/{}/events", job.id),
-        json!({
-            "runner_id": runner_id,
-            "claim_id": claim_id,
-            "kind": "progress",
-            "message": "reverse runner worker started execution",
-        }),
-        "append reverse runner progress event",
-        token,
-    )?;
-    Ok(())
 }
 
 pub(super) fn append_progress_data(
@@ -114,6 +91,35 @@ pub(super) fn finish_job(
         Error::internal_json(
             err.to_string(),
             Some("parse finished reverse runner job".to_string()),
+        )
+    })
+}
+
+pub(super) fn consume_execution(
+    client: &Client,
+    broker_url: &str,
+    token: Option<&str>,
+    runner_id: &str,
+    job: &Job,
+    context_id: &str,
+) -> Result<Job> {
+    let claim_id = remote_runner_claim_id(job)?;
+    let data = broker_http::post_json(
+        client,
+        broker_url,
+        &format!("/runner/jobs/{}/consume", job.id),
+        json!({
+            "runner_id": runner_id,
+            "claim_id": claim_id,
+            "context_id": context_id,
+        }),
+        "consume reverse runner execution receipt",
+        token,
+    )?;
+    serde_json::from_value(data["job"].clone()).map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("parse consumed reverse runner job".to_string()),
         )
     })
 }

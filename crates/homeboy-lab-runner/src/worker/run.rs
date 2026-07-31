@@ -12,10 +12,11 @@ use serde_json::json;
 use homeboy_core::api_jobs::RemoteRunnerJobResult;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::runner_execution_envelope::RunnerExecutionEnvelope;
+use homeboy_core::runner_job_execution_context::RunnerJobExecutionContext;
 
 use super::super::execution::{exec_worker_local_until_cancelled_with_progress, RunnerExecOptions};
 use super::broker::{
-    append_progress, append_progress_data, cancelled_job_snapshot, claim_job, finish_job,
+    append_progress_data, cancelled_job_snapshot, claim_job, consume_execution, finish_job,
     start_claim_heartbeat,
 };
 use super::result::{
@@ -241,6 +242,37 @@ fn run_once_output(
         ));
     };
 
+    // The broker claim is the execution boundary. Verify the typed receipt
+    // before materializing inputs or invoking any provider/runtime adapter.
+    let execution_context = claim.execution_context.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "execution_context",
+            "reverse runner claim predates authenticated execution context support",
+            Some(claim.job.id.to_string()),
+            Some(vec![
+                "Resubmit the handoff through a compatible controller before retrying.".to_string(),
+            ]),
+        )
+    })?;
+    claim
+        .execution_protocol
+        .as_ref()
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "execution_protocol",
+                "reverse runner claim predates execution-context protocol negotiation",
+                Some(claim.job.id.to_string()),
+                None,
+            )
+        })?
+        .verify()?;
+    let execution_context = execution_context.verify_claim(&claim.job, &claim.request)?;
+
+    // Commit runner-owned evidence before materializing any broker input. The
+    // controller persists the same identity in its claim event; keeping both
+    // records lets either side recover after its own restart.
+    persist_runner_execution_context(&options.runner_id, &execution_context)?;
+
     if let Some(job) = poll_cancelled(&client, &options, &claim.job)? {
         return Ok(cancelled_output(
             options,
@@ -252,12 +284,19 @@ fn run_once_output(
         ));
     }
 
-    append_progress(
+    // This runner-authenticated record is persisted before inputs are
+    // materialized, so it and the claim event resolve the same receipt after a
+    // controller or runner restart.
+    append_progress_data(
         &client,
         &options.broker_url,
         options.broker_token.as_deref(),
         &options.runner_id,
         &claim.job,
+        serde_json::json!({
+            "phase": "runner_job_execution_context_verified",
+            "runner_job_execution_context": execution_context.evidence_record()?,
+        }),
     )?;
     let _heartbeat = start_claim_heartbeat(&client, &options, &claim.job)?;
     // Remote capability-parity preflight: validate that this runner can satisfy
@@ -305,7 +344,24 @@ fn run_once_output(
             execution_envelope.clone(),
             capability_preflight,
             claimed_run_id,
+            execution_context.clone(),
         )?,
+        || {
+            let recovered =
+                resolve_runner_execution_context(&options.runner_id, execution_context.id())?;
+            consume_execution(
+                &client,
+                &options.broker_url,
+                options.broker_token.as_deref(),
+                &options.runner_id,
+                &claim.job,
+                recovered.id(),
+            )?;
+            // Consumption atomically verifies the live claim and commits the
+            // one-time receipt. Its returned job has a newer timestamp, so it
+            // must not be used to recompute the pre-consumption receipt.
+            Ok(())
+        },
         || {
             if cancel_seen || last_cancel_poll.elapsed() < BROKER_CANCEL_POLL_INTERVAL {
                 return cancel_seen;
@@ -391,6 +447,77 @@ fn run_once_output(
         ),
         exit_code,
     ))
+}
+
+pub(super) fn persist_runner_execution_context(
+    runner_id: &str,
+    execution_context: &RunnerJobExecutionContext,
+) -> Result<()> {
+    let path = homeboy_core::paths::runner_job_execution_context_evidence_file(
+        runner_id,
+        execution_context.id(),
+    )?;
+    let parent = path.parent().expect("evidence file has parent");
+    std::fs::create_dir_all(parent).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", parent.display())),
+        )
+    })?;
+    let evidence = execution_context.evidence_record()?;
+    let bytes = serde_json::to_vec(&evidence).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("encode runner execution evidence".to_string()),
+        )
+    })?;
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, bytes).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("write {}", temporary.display())),
+        )
+    })?;
+    std::fs::rename(&temporary, &path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("commit {}", path.display())),
+        )
+    })?;
+    let recovered = resolve_runner_execution_context(runner_id, execution_context.id())?;
+    if recovered.id() != execution_context.id() || recovered.runner_id() != runner_id {
+        return Err(Error::internal_unexpected(
+            "runner execution evidence resolved a different context",
+        ));
+    }
+    Ok(())
+}
+
+/// Recovery resolves only the exact runner-local context ID. This is
+/// diagnostic identity, never renewed authority: the broker still rejects a
+/// consumed receipt and fails the interrupted running job closed on expiry.
+pub(super) fn resolve_runner_execution_context(
+    runner_id: &str,
+    context_id: &str,
+) -> Result<RunnerJobExecutionContext> {
+    let path =
+        homeboy_core::paths::runner_job_execution_context_evidence_file(runner_id, context_id)?;
+    let bytes = std::fs::read(&path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+    })?;
+    let evidence: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("decode runner execution evidence".to_string()),
+        )
+    })?;
+    let context = RunnerJobExecutionContext::from_evidence_record(&evidence)?;
+    if context.id() != context_id || context.runner_id() != runner_id {
+        return Err(Error::internal_unexpected(
+            "runner execution evidence resolved a different context",
+        ));
+    }
+    Ok(context)
 }
 
 /// Private `@file` paths carry their SHA-256 in the runner-resident filename.
@@ -950,6 +1077,7 @@ fn runner_exec_options_from_envelope(
     envelope: RunnerExecutionEnvelope,
     capability_preflight: Option<crate::RunnerCapabilityPreflight>,
     run_id: Option<String>,
+    execution_context: homeboy_core::runner_job_execution_context::RunnerJobExecutionContext,
 ) -> Result<RunnerExecOptions> {
     let dispatch = envelope.dispatch.ok_or_else(|| {
         Error::internal_unexpected("runner execution envelope is missing dispatch payload")
@@ -963,6 +1091,7 @@ fn runner_exec_options_from_envelope(
         .unwrap_or_default();
 
     Ok(RunnerExecOptions {
+        execution_context,
         cwd: dispatch.cwd,
         project_id: dispatch.project_id,
         allow_diagnostic_ssh: false,
