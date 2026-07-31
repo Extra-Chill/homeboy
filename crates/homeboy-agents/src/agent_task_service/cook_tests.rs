@@ -1302,7 +1302,7 @@ impl AgentTaskCookAttemptDispatcher for ProviderDiscoveryReplayDispatcher {
                 "fixture runner reported provider discovery failure",
             ));
         }
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.exit_code, 0, "{:#?}", result.value);
         Ok(())
     }
 }

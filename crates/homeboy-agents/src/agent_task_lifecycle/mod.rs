@@ -29,6 +29,7 @@ mod lifecycle_store;
 
 use lifecycle_store as store;
 
+mod acceptance_verifier;
 pub mod activity_provider;
 pub mod agent_task_lifecycle_event;
 mod artifact_materialization;
@@ -53,6 +54,14 @@ pub mod runner_continuation;
 mod runner_exec;
 mod workspace_authority;
 
+pub(crate) use acceptance_verifier::revalidate_durable_attestation;
+#[cfg(any(test, feature = "test-support"))]
+pub use acceptance_verifier::{clear_acceptance_verifier_for_test, AcceptanceVerifierTestGuard};
+pub use acceptance_verifier::{
+    register_acceptance_verifier, register_acceptance_verifier_from_config,
+    AgentTaskAcceptanceAttestation, AgentTaskAcceptanceVerificationRequest,
+    AgentTaskAcceptanceVerifier, AgentTaskAcceptanceVerifierProvenance,
+};
 pub use artifact_materialization::*;
 pub use cancellation::*;
 pub use failure_recording::*;

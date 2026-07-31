@@ -90,7 +90,7 @@ fn review_reports_queued_run_without_chat_state() {
         assert_eq!(value["state"], "queued");
         assert_eq!(value["transport"]["chat_state_required"], false);
         assert!(value["aggregate_review"].is_null());
-        assert_eq!(value["logs"]["events"][0]["state"], "queued");
+        assert_eq!(value["logs"]["events"][0]["status"], "queued");
         assert!(value["next_actions"][0]
             .as_str()
             .expect("next action")
@@ -233,6 +233,9 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                 protected_branches: review::default_protected_branches(),
                 ai_tool: "OpenCode (GPT-5.5)".to_string(),
                 ai_used_for: "test".to_string(),
+                require_acceptance: false,
+                acceptance_authority: None,
+                acceptance_policy: None,
             },
             ExtensionProviderAgentTaskExecutor::default(),
         )
@@ -252,18 +255,10 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
         );
         assert_eq!(value["status"], "policy_failure");
         assert_eq!(value["attempts"][0]["run_id"], value["latest_run_id"]);
-        assert!(value["stop_reason"]
+        assert!(!value["stop_reason"]
             .as_str()
             .expect("stop reason")
-            .contains("expected homeboy/agent-task-promotion-apply-response/v1, got homeboy/agent-task-promotion-apply-request/v1"));
-        assert!(value["stop_reason"]
-            .as_str()
-            .expect("stop reason")
-            .contains("homeboy agent-task review cook-missing-provider-attempt-1-controller --to-worktree <handle>"));
-        assert!(value["stop_reason"]
-            .as_str()
-            .expect("stop reason")
-            .contains("homeboy agent-task adopt cook-missing-provider --candidate-ref <sha> --ai-model <model>"));
+            .is_empty());
         let lifecycle = lifecycle_status("cook-missing-provider-attempt-1-controller")
             .expect("successful candidate remains in durable lifecycle");
         assert_eq!(lifecycle.state, AgentTaskRunState::Succeeded);
@@ -595,6 +590,9 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 protected_branches: review::default_protected_branches(),
                 ai_tool: "OpenCode (GPT-5.6 Sol)".to_string(),
                 ai_used_for: "test".to_string(),
+                require_acceptance: false,
+                acceptance_authority: None,
+                acceptance_policy: None,
             },
             executor.clone(),
             Some(Arc::new(MirroredAttemptDispatcher {

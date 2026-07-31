@@ -979,6 +979,47 @@ fn requires_a_real_durable_run_unless_manual_mode_is_selected() {
 }
 
 #[test]
+fn manual_finalization_cannot_bypass_acceptance_for_an_existing_run_id() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "manual-acceptance-bypass";
+        let mut plan = AgentTaskPlan::new("manual-acceptance", Vec::new());
+        plan.metadata = json!({
+            "acceptance": { "authority": "independent-review", "policy": "release-v1" }
+        });
+        crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        let mut proof = successful_gate_proof();
+        proof.run_id = run_id.to_string();
+        proof.promotion.source.run_id = Some(run_id.to_string());
+        proof.promotion.provenance = json!({
+            "candidate": { "fingerprint": { "head": "candidate" } }
+        });
+        proof.promotion.verified_base = Some(
+            crate::agent_task_promotion::AgentTaskPromotionVerifiedBase {
+                base: "main".to_string(),
+                sha: "verified-base".to_string(),
+            },
+        );
+        crate::agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(&proof.promotion).unwrap(),
+        )
+        .unwrap();
+
+        let mut options = options();
+        options.run_id = run_id.to_string();
+        options.manual_finalization = true;
+        let mut backend = MockBackend {
+            lifecycle: Some(successful_lifecycle("openai/gpt-5.6-terra")),
+            gate_proof: Some(proof),
+            ..Default::default()
+        };
+        let error = finalize_pr_with_backend(options, &mut backend).unwrap_err();
+        assert!(error.message.contains("awaiting_acceptance"));
+        assert!(!backend.committed && !backend.pushed && !backend.created);
+    });
+}
+
+#[test]
 fn durable_finalization_requires_successful_provider_run_and_hydrates_model() {
     let mut backend = MockBackend {
         changed_files: vec!["src/lib.rs".to_string()],

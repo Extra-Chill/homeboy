@@ -1847,7 +1847,12 @@ where
     // A persisted recipe can replace the just-validated inputs. Re-check its
     // workspace and candidate topology before it reaches transport preparation
     // or a resumed attempt.
-    validate_cook_workspace(&options)?;
+    // A detached transport may own workspace materialization on the runner.
+    // Its initial handoff has no controller-local source path to validate yet;
+    // requiring one here turns an accepted detached retry into a local failure.
+    if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
+        validate_cook_workspace(&options)?;
+    }
     validate_cook_candidate_group(&options.initial_plan)?;
     materialize_initial_cook_attempt(&options)?;
     record_active_cook_worktree_warning(&options)?;
@@ -2044,7 +2049,9 @@ where
                     max_attempts,
                 );
             }
-            validate_cook_workspace(&options)?;
+            if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
+                validate_cook_workspace(&options)?;
+            }
             // Claim the durable attempt before candidate baseline staging. That
             // staging can take longer than the foreground controller's timeout;
             // a restarted controller must find the same immutable plan rather
@@ -2152,9 +2159,13 @@ where
                         });
                     }
                 }
-                bind_dispatch_workspace_attestations(&mut dispatch_plan)?;
+                if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
+                    bind_dispatch_workspace_attestations(&mut dispatch_plan)?;
+                }
                 if let Some(dispatcher) = &options.attempt_dispatcher {
-                    validate_cook_workspace(&options)?;
+                    if options.source_worktree_path.is_some() {
+                        validate_cook_workspace(&options)?;
+                    }
                     dispatcher.dispatch_attempt(
                         dispatch_plan,
                         &run_id,
@@ -2642,6 +2653,22 @@ where
                             attempts,
                             recovery,
                             continuation_queued,
+                            Some(&run_id),
+                        ));
+                    }
+                    Err(error) if error.message.contains("awaiting_acceptance") => {
+                        return Ok(cook_report(
+                            cook_id,
+                            "awaiting_acceptance",
+                            attempts,
+                            Some(serde_json::json!({
+                                "status": "awaiting_acceptance",
+                                "reason": error.message,
+                                "run_id": run_id,
+                                "status_command": format!("homeboy agent-task status {run_id} --full"),
+                            })),
+                            Some("deterministic gates passed; an independent acceptance verdict is required before PR finalization".to_string()),
+                            1,
                             Some(&run_id),
                         ));
                     }

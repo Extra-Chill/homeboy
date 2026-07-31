@@ -390,6 +390,15 @@ pub struct AgentTaskCookArgs {
     /// and defaults empty (no canned platitude).
     #[arg(long, default_value = "", value_name = "TEXT")]
     pub ai_used_for: String,
+    /// Require a separate durable acceptance verdict before PR finalization.
+    #[arg(long)]
+    pub require_acceptance: bool,
+    /// Authority allowed to issue the acceptance verdict.
+    #[arg(long, requires = "require_acceptance")]
+    pub acceptance_authority: Option<String>,
+    /// Policy the acceptance authority applies.
+    #[arg(long, requires = "require_acceptance")]
+    pub acceptance_policy: Option<String>,
 }
 
 #[derive(Args, Clone, Debug)]

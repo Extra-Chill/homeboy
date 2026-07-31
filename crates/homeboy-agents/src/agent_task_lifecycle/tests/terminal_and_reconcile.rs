@@ -25,6 +25,119 @@ struct TerminalSnapshotProvider {
     snapshot: Mutex<Option<homeboy_core::api_jobs::RunnerJobLogSnapshot>>,
 }
 
+struct FixtureAcceptanceVerifier;
+
+struct PromotionDriftVerifier {
+    run_id: String,
+}
+
+impl AgentTaskAcceptanceVerifier for FixtureAcceptanceVerifier {
+    fn provenance(&self) -> AgentTaskAcceptanceVerifierProvenance {
+        AgentTaskAcceptanceVerifierProvenance {
+            verifier: "fixture-independent-review".to_string(),
+            configuration: "policy-revision-7".to_string(),
+        }
+    }
+
+    fn verify_acceptance(
+        &self,
+        request: &AgentTaskAcceptanceVerificationRequest,
+    ) -> Result<AgentTaskAcceptanceAttestation> {
+        if request.token != "fixture-token" {
+            return Err(Error::validation_invalid_argument(
+                "token",
+                "fixture verifier rejected token",
+                None,
+                None,
+            ));
+        }
+        Ok(AgentTaskAcceptanceAttestation {
+            actor: "fixture-reviewer".to_string(),
+            authority: request.requirement.authority.clone(),
+            policy: request.requirement.policy.clone(),
+            issued_at: "2026-07-30T00:00:00Z".to_string(),
+            provider_ref: "fixture://acceptance/7".to_string(),
+            signature: "fixture-signature".to_string(),
+            key_id: "fixture-key".to_string(),
+        })
+    }
+
+    fn revalidate_attestation(
+        &self,
+        request: &AgentTaskAcceptanceVerificationRequest,
+        attestation: &AgentTaskAcceptanceAttestation,
+    ) -> Result<()> {
+        if attestation.signature != "fixture-signature"
+            || attestation.key_id != "fixture-key"
+            || attestation.authority != request.requirement.authority
+            || attestation.policy != request.requirement.policy
+        {
+            return Err(Error::validation_invalid_argument(
+                "acceptance",
+                "fixture attestation did not match the signed request",
+                None,
+                None,
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl AgentTaskAcceptanceVerifier for PromotionDriftVerifier {
+    fn provenance(&self) -> AgentTaskAcceptanceVerifierProvenance {
+        FixtureAcceptanceVerifier.provenance()
+    }
+
+    fn verify_acceptance(
+        &self,
+        request: &AgentTaskAcceptanceVerificationRequest,
+    ) -> Result<AgentTaskAcceptanceAttestation> {
+        record_promotion(
+            &self.run_id,
+            applied_acceptance_promotion("candidate-b", &request.base_sha),
+        )?;
+        FixtureAcceptanceVerifier.verify_acceptance(request)
+    }
+
+    fn revalidate_attestation(
+        &self,
+        request: &AgentTaskAcceptanceVerificationRequest,
+        attestation: &AgentTaskAcceptanceAttestation,
+    ) -> Result<()> {
+        FixtureAcceptanceVerifier.revalidate_attestation(request, attestation)
+    }
+}
+
+fn applied_acceptance_promotion(candidate: &str, base: &str) -> Value {
+    applied_acceptance_promotion_with_fingerprint(
+        candidate,
+        base,
+        "candidate-sha",
+        "candidate-tree",
+    )
+}
+
+fn applied_acceptance_promotion_with_fingerprint(
+    candidate: &str,
+    base: &str,
+    sha256: &str,
+    tree: &str,
+) -> Value {
+    json!({
+        "status": "applied",
+        "verified_base": { "sha": base },
+        "provenance": { "candidate": { "fingerprint": {
+            "schema": "homeboy/agent-task-candidate-fingerprint/v1",
+            "target_path": "/repo",
+            "head": candidate,
+            "base": "candidate-parent",
+            "changed_files": ["src/lib.rs"],
+            "sha256": sha256,
+            "tree": tree,
+        } } },
+    })
+}
+
 impl RunnerContinuationProvider for TerminalSnapshotProvider {
     fn runner_job_log_snapshot(
         &self,
@@ -1681,6 +1794,247 @@ fn record_promotion_persists_latest_event_on_run_metadata() {
                 .len(),
             1
         );
+    });
+}
+
+#[test]
+fn acceptance_is_created_after_green_promotion_and_persists_verifier_provenance() {
+    with_isolated_home(|_| {
+        let mut plan = test_plan();
+        plan.metadata = json!({
+            "acceptance": { "authority": "independent-review", "policy": "release-v1" },
+        });
+        let submitted = submit_plan(&plan, Some("acceptance-lifecycle")).expect("submitted");
+        assert!(
+            submitted.acceptance.is_none(),
+            "submission is not acceptance-ready"
+        );
+
+        let before_gates = record_promotion(
+            "acceptance-lifecycle",
+            json!({
+                "status": "verification_pending",
+                "verified_base": { "sha": "base-a" },
+                "provenance": { "candidate": { "fingerprint": { "head": "candidate-a" } } },
+            }),
+        )
+        .expect("pending promotion recorded");
+        assert!(before_gates.acceptance.is_none());
+
+        let pending = record_promotion(
+            "acceptance-lifecycle",
+            applied_acceptance_promotion("candidate-a", "base-a"),
+        )
+        .expect("applied promotion recorded");
+        assert_eq!(
+            pending.acceptance.expect("acceptance pending").verdict,
+            AgentTaskAcceptanceVerdict::Pending
+        );
+
+        let _verifier = AcceptanceVerifierTestGuard::install(Box::new(FixtureAcceptanceVerifier));
+        let accepted = record_acceptance_verdict(
+            "acceptance-lifecycle",
+            AgentTaskAcceptanceVerdict::Accepted,
+            vec!["review://fixture/7".to_string()],
+            "fixture-token".to_string(),
+        )
+        .expect("acceptance recorded");
+        let acceptance = accepted.acceptance.expect("acceptance record");
+        assert_eq!(acceptance.verdict, AgentTaskAcceptanceVerdict::Accepted);
+        assert_eq!(
+            acceptance
+                .verifier
+                .expect("verifier provenance")
+                .configuration,
+            "policy-revision-7"
+        );
+        assert_eq!(acceptance.signature.as_deref(), Some("fixture-signature"));
+        assert_eq!(acceptance.key_id.as_deref(), Some("fixture-key"));
+        assert_eq!(
+            acceptance
+                .attestation
+                .as_ref()
+                .expect("canonical attestation")
+                .provider_ref,
+            "fixture://acceptance/7"
+        );
+        // Reloading models controller restart: the evidence remains available
+        // for later cryptographic revalidation rather than living in memory.
+        let restarted = status("acceptance-lifecycle").expect("durable restart evidence");
+        let restarted = restarted.acceptance.expect("durable acceptance");
+        assert_eq!(restarted.signature.as_deref(), Some("fixture-signature"));
+        assert_eq!(restarted.key_id.as_deref(), Some("fixture-key"));
+
+        let replay = record_acceptance_verdict(
+            "acceptance-lifecycle",
+            AgentTaskAcceptanceVerdict::Accepted,
+            vec!["review://fixture/7".to_string()],
+            "fixture-token".to_string(),
+        )
+        .expect("idempotent acceptance replay");
+        assert!(replay.acceptance.expect("acceptance").history.is_empty());
+
+        let invalidated = record_promotion(
+            "acceptance-lifecycle",
+            applied_acceptance_promotion("candidate-b", "base-a"),
+        )
+        .expect("changed candidate recorded");
+        let acceptance = invalidated.acceptance.expect("invalidated acceptance");
+        assert_eq!(acceptance.verdict, AgentTaskAcceptanceVerdict::Pending);
+        assert_eq!(acceptance.candidate.head, "candidate-b");
+        assert_eq!(acceptance.history.len(), 1);
+    });
+}
+
+#[test]
+fn acceptance_rejects_a_promotion_that_changes_during_authority_verification() {
+    with_isolated_home(|_| {
+        let mut plan = test_plan();
+        plan.metadata = json!({
+            "acceptance": { "authority": "independent-review", "policy": "release-v1" },
+        });
+        let run_id = "acceptance-promotion-drift";
+        submit_plan(&plan, Some(run_id)).expect("submitted");
+        record_promotion(
+            run_id,
+            applied_acceptance_promotion("candidate-a", "base-a"),
+        )
+        .expect("promotion recorded");
+        let _verifier = AcceptanceVerifierTestGuard::install(Box::new(PromotionDriftVerifier {
+            run_id: run_id.to_string(),
+        }));
+
+        let error = record_acceptance_verdict(
+            run_id,
+            AgentTaskAcceptanceVerdict::Accepted,
+            vec!["review://fixture/7".to_string()],
+            "fixture-token".to_string(),
+        )
+        .expect_err("stale verdict must not apply");
+        assert!(error.message.contains("candidate changed"));
+        let acceptance = status(run_id)
+            .expect("durable status")
+            .acceptance
+            .expect("acceptance record");
+        assert_eq!(acceptance.verdict, AgentTaskAcceptanceVerdict::Pending);
+        assert_eq!(acceptance.candidate.head, "candidate-b");
+    });
+}
+
+#[test]
+fn rejection_allows_one_repair_and_restart_revalidates_before_finalization() {
+    with_isolated_home(|_| {
+        let mut plan = test_plan();
+        plan.metadata = json!({
+            "acceptance": { "authority": "independent-review", "policy": "release-v1" },
+        });
+        let run_id = "acceptance-repair-and-restart";
+        submit_plan(&plan, Some(run_id)).expect("submitted");
+        record_promotion(
+            run_id,
+            applied_acceptance_promotion("candidate-a", "base-a"),
+        )
+        .expect("green promotion recorded");
+        let _verifier = AcceptanceVerifierTestGuard::install(Box::new(FixtureAcceptanceVerifier));
+
+        let rejected = record_acceptance_verdict(
+            run_id,
+            AgentTaskAcceptanceVerdict::Rejected,
+            vec!["review://fixture/rejection".to_string()],
+            "fixture-token".to_string(),
+        )
+        .expect("rejection recorded");
+        assert_eq!(
+            rejected
+                .acceptance
+                .as_ref()
+                .expect("acceptance")
+                .repair_attempts,
+            1
+        );
+
+        let repair = retry(run_id, None).expect("one rejection repair is available");
+        assert_eq!(repair.metadata["acceptance_repair_lineage"]["count"], 1);
+        let error = retry(&repair.run_id, None).expect_err("repair is bounded to one attempt");
+        assert!(error.message.contains("repair budget is exhausted"));
+
+        record_promotion(
+            run_id,
+            applied_acceptance_promotion("candidate-b", "base-a"),
+        )
+        .expect("replacement promotion invalidates rejection");
+        let accepted = record_acceptance_verdict(
+            run_id,
+            AgentTaskAcceptanceVerdict::Accepted,
+            vec!["review://fixture/acceptance".to_string()],
+            "fixture-token".to_string(),
+        )
+        .expect("acceptance recorded");
+        let acceptance = accepted.acceptance.expect("acceptance");
+        let attestation = acceptance
+            .attestation
+            .as_ref()
+            .expect("durable attestation")
+            .clone();
+        let request = AgentTaskAcceptanceVerificationRequest {
+            requirement: acceptance.requirement,
+            verdict: AgentTaskAcceptanceVerdict::Accepted,
+            candidate: acceptance.candidate,
+            base_sha: acceptance.base_sha,
+            evidence_refs: vec!["review://fixture/acceptance".to_string()],
+            token: String::new(),
+        };
+        // Rebuilding the request from disk models a fresh controller process;
+        // revalidation depends only on the durable signed evidence.
+        revalidate_durable_attestation(&request, &attestation)
+            .expect("restart revalidates durable acceptance");
+    });
+}
+
+#[test]
+fn acceptance_invalidates_a_dirty_candidate_replacement_at_the_same_head() {
+    with_isolated_home(|_| {
+        let mut plan = test_plan();
+        plan.metadata = json!({
+            "acceptance": { "authority": "independent-review", "policy": "release-v1" },
+        });
+        let run_id = "acceptance-dirty-same-head";
+        submit_plan(&plan, Some(run_id)).expect("submitted");
+        record_promotion(
+            run_id,
+            applied_acceptance_promotion_with_fingerprint(
+                "unchanged-head",
+                "base-a",
+                "clean-sha256",
+                "clean-tree",
+            ),
+        )
+        .expect("clean promotion recorded");
+        let _verifier = AcceptanceVerifierTestGuard::install(Box::new(FixtureAcceptanceVerifier));
+        record_acceptance_verdict(
+            run_id,
+            AgentTaskAcceptanceVerdict::Accepted,
+            vec!["review://fixture/7".to_string()],
+            "fixture-token".to_string(),
+        )
+        .expect("clean candidate accepted");
+
+        let replaced = record_promotion(
+            run_id,
+            applied_acceptance_promotion_with_fingerprint(
+                "unchanged-head",
+                "base-a",
+                "dirty-replacement-sha256",
+                "dirty-replacement-tree",
+            ),
+        )
+        .expect("dirty replacement recorded");
+        let acceptance = replaced.acceptance.expect("acceptance record");
+        assert_eq!(acceptance.verdict, AgentTaskAcceptanceVerdict::Pending);
+        assert_eq!(acceptance.candidate.head, "unchanged-head");
+        assert_eq!(acceptance.candidate.sha256, "dirty-replacement-sha256");
+        assert_eq!(acceptance.candidate.tree, "dirty-replacement-tree");
+        assert_eq!(acceptance.history.len(), 1);
     });
 }
 

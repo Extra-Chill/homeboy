@@ -116,8 +116,134 @@ pub struct AgentTaskRunRecord {
     /// Cook alias. Exact run status leaves this unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adoption_run_id: Option<String>,
+    /// Independent acceptance is deliberately separate from provider, review,
+    /// promotion, and gate state. It is the only acceptance authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance: Option<AgentTaskAcceptanceRecord>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskAcceptanceRequirement {
+    pub authority: String,
+    pub policy: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskAcceptanceVerdict {
+    Pending,
+    Accepted,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskAcceptanceRecord {
+    pub requirement: AgentTaskAcceptanceRequirement,
+    pub verdict: AgentTaskAcceptanceVerdict,
+    /// Exact promoted content accepted by the authority. A commit SHA alone is
+    /// insufficient because a dirty worktree can change without moving HEAD.
+    pub candidate: crate::agent_task_promotion::AgentTaskCandidateFingerprint,
+    pub base_sha: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier: Option<super::acceptance_verifier::AgentTaskAcceptanceVerifierProvenance>,
+    /// The complete signed authority response. This is the canonical durable
+    /// attestation used to revalidate acceptance after a controller restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<super::acceptance_verifier::AgentTaskAcceptanceAttestation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<AgentTaskAcceptanceHistory>,
+    /// A rejection permits exactly one explicit repair continuation for this
+    /// candidate. A changed candidate invalidates the verdict and resets it.
+    #[serde(default)]
+    pub repair_attempts: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskAcceptanceHistory {
+    pub verdict: AgentTaskAcceptanceVerdict,
+    pub candidate: crate::agent_task_promotion::AgentTaskCandidateFingerprint,
+    pub base_sha: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier: Option<super::acceptance_verifier::AgentTaskAcceptanceVerifierProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<super::acceptance_verifier::AgentTaskAcceptanceAttestation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_refs: Vec<String>,
+}
+
+impl AgentTaskAcceptanceRecord {
+    pub(crate) fn pending(
+        requirement: AgentTaskAcceptanceRequirement,
+        candidate: crate::agent_task_promotion::AgentTaskCandidateFingerprint,
+        base_sha: String,
+    ) -> Self {
+        Self {
+            requirement,
+            verdict: AgentTaskAcceptanceVerdict::Pending,
+            candidate,
+            base_sha,
+            actor: None,
+            recorded_at: None,
+            provider_ref: None,
+            verifier: None,
+            attestation: None,
+            signature: None,
+            key_id: None,
+            evidence_refs: Vec::new(),
+            history: Vec::new(),
+            repair_attempts: 0,
+        }
+    }
+
+    pub(crate) fn matches_candidate(
+        &self,
+        candidate: &crate::agent_task_promotion::AgentTaskCandidateFingerprint,
+        base_sha: &str,
+    ) -> bool {
+        &self.candidate == candidate && self.base_sha == base_sha
+    }
+
+    pub(crate) fn archive(&mut self) {
+        if self.verdict != AgentTaskAcceptanceVerdict::Pending {
+            self.history.push(AgentTaskAcceptanceHistory {
+                verdict: self.verdict,
+                candidate: self.candidate.clone(),
+                base_sha: self.base_sha.clone(),
+                actor: self.actor.clone(),
+                recorded_at: self.recorded_at.clone(),
+                provider_ref: self.provider_ref.clone(),
+                verifier: self.verifier.clone(),
+                attestation: self.attestation.clone(),
+                signature: self.signature.clone(),
+                key_id: self.key_id.clone(),
+                evidence_refs: self.evidence_refs.clone(),
+            });
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -823,6 +949,82 @@ mod tests {
             record.lab_handoff = Some(handoff);
             assert!(record.lab_handoff_validation_error().is_some());
             assert!(!record.has_accepted_lab_handoff());
+        }
+    }
+
+    #[test]
+    fn acceptance_record_is_candidate_and_base_bound() {
+        let requirement = AgentTaskAcceptanceRequirement {
+            authority: "independent-review".to_string(),
+            policy: "release-v1".to_string(),
+        };
+        let mut acceptance = AgentTaskAcceptanceRecord::pending(
+            requirement,
+            acceptance_candidate("candidate-a", "candidate-a-sha", "candidate-a-tree"),
+            "base-a".to_string(),
+        );
+        assert_eq!(acceptance.verdict, AgentTaskAcceptanceVerdict::Pending);
+        assert!(acceptance.matches_candidate(
+            &acceptance_candidate("candidate-a", "candidate-a-sha", "candidate-a-tree"),
+            "base-a"
+        ));
+        assert!(!acceptance.matches_candidate(
+            &acceptance_candidate("candidate-a", "replacement-sha", "replacement-tree"),
+            "base-a"
+        ));
+
+        acceptance.verdict = AgentTaskAcceptanceVerdict::Accepted;
+        let round_trip: AgentTaskAcceptanceRecord = serde_json::from_value(
+            serde_json::to_value(&acceptance).expect("serialize acceptance"),
+        )
+        .expect("deserialize acceptance");
+        assert_eq!(round_trip, acceptance);
+    }
+
+    #[test]
+    fn acceptance_history_preserves_rejected_evidence_before_invalidation() {
+        let mut acceptance = AgentTaskAcceptanceRecord::pending(
+            AgentTaskAcceptanceRequirement {
+                authority: "review-service".to_string(),
+                policy: "release".to_string(),
+            },
+            acceptance_candidate("candidate-a", "candidate-a-sha", "candidate-a-tree"),
+            "base-a".to_string(),
+        );
+        acceptance.verdict = AgentTaskAcceptanceVerdict::Rejected;
+        acceptance.actor = Some("reviewer-1".to_string());
+        acceptance.recorded_at = Some("2026-07-30T00:00:00Z".to_string());
+        acceptance.evidence_refs = vec!["review://finding/1".to_string()];
+        acceptance.archive();
+        acceptance.verdict = AgentTaskAcceptanceVerdict::Pending;
+        acceptance.candidate =
+            acceptance_candidate("candidate-b", "candidate-b-sha", "candidate-b-tree");
+
+        assert_eq!(acceptance.history.len(), 1);
+        assert_eq!(
+            acceptance.history[0].verdict,
+            AgentTaskAcceptanceVerdict::Rejected
+        );
+        assert_eq!(acceptance.history[0].candidate.head, "candidate-a");
+        assert_eq!(
+            acceptance.history[0].evidence_refs,
+            vec!["review://finding/1"]
+        );
+    }
+
+    fn acceptance_candidate(
+        head: &str,
+        sha256: &str,
+        tree: &str,
+    ) -> crate::agent_task_promotion::AgentTaskCandidateFingerprint {
+        crate::agent_task_promotion::AgentTaskCandidateFingerprint {
+            schema: "test".to_string(),
+            target_path: "/repo".to_string(),
+            head: head.to_string(),
+            base: "candidate-base".to_string(),
+            changed_files: vec!["src/lib.rs".to_string()],
+            sha256: sha256.to_string(),
+            tree: tree.to_string(),
         }
     }
 }
