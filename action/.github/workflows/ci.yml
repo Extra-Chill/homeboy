@@ -177,6 +177,8 @@ jobs:
   binary:
     name: Prepare candidate Homeboy binary
     runs-on: ubuntu-latest
+    outputs:
+      cargo-cache-key: ${{ steps.cargo-cache-key.outputs.key }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -189,15 +191,20 @@ jobs:
         with:
           toolchain: ${{ inputs.rust-toolchain }}
 
-      - name: Cache cargo
+      - name: Resolve candidate cargo cache key
+        id: cargo-cache-key
         if: hashFiles('Cargo.lock') != ''
+        run: echo "key=${RUNNER_OS}-cargo-ci-${{ hashFiles('Cargo.lock') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache cargo
+        if: steps.cargo-cache-key.outputs.key != ''
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-ci-${{ hashFiles('Cargo.lock') }}
+          key: ${{ steps.cargo-cache-key.outputs.key }}
           restore-keys: ${{ runner.os }}-cargo-ci-
 
       - name: Build candidate Homeboy binary
@@ -348,6 +355,16 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
+      - name: Restore candidate cargo cache
+        if: needs.binary.outputs.cargo-cache-key != ''
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ needs.binary.outputs.cargo-cache-key }}
+
       - name: Check out Homeboy Action
         uses: actions/checkout@v4
         with:
@@ -452,6 +469,17 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
+
+      - name: Restore candidate cargo cache
+        if: needs.binary.outputs.cargo-cache-key != ''
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ needs.binary.outputs.cargo-cache-key }}
+
       - uses: actions/checkout@v4
         with:
           repository: Extra-Chill/homeboy-action
