@@ -77,6 +77,24 @@ fn aggregate_repo_artifact_next_action_runs_outside_a_checkout() {
         .pointer("/data/job_id")
         .and_then(Value::as_str)
         .expect("cleanup job ID");
+
+    // The submission receipt is the operator's only handle on work that has not
+    // finished yet. Assert it names the job and hands back the exact commands
+    // that reach its status and evidence, so a durable handoff can never return
+    // an unfollowable job.
+    assert!(!job_id.is_empty());
+    assert_eq!(applied["data"]["status"], "running", "{applied:#}");
+    assert_eq!(
+        applied["data"]["status_command"],
+        format!("homeboy cleanup status {job_id}"),
+        "{applied:#}"
+    );
+    assert_eq!(
+        applied["data"]["evidence_command"],
+        format!("homeboy cleanup status {job_id} --full"),
+        "{applied:#}"
+    );
+
     let completed = wait_for_cleanup_job(fixture.path(), &invocation_dir, job_id, &path);
     assert_eq!(completed["data"]["status"], "succeeded", "{completed:#}");
     let artifact_removed = !repository.join("target").exists();
