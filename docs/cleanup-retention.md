@@ -12,6 +12,18 @@ Unsafe existing local artifact paths keep the run and its lifecycle directory.
 The existing cleanup inventory remains the only planner. This change does not
 add a second cleanup engine.
 
+## Durable Aggregate Apply
+
+`homeboy cleanup --apply` submits the existing aggregate inventory to the local
+controller's durable job queue and returns a compact receipt immediately. The
+daemon continues the apply if the submitting terminal disconnects. Use
+`homeboy cleanup status <job-id>` for compact progress,
+`homeboy cleanup status <job-id> --full` for the durable job evidence, and
+`homeboy cleanup resume <job-id>` to start a queued recovered job. The durable
+controller job retains the full category evidence; normal submission and status
+responses deliberately report only totals and retrieval commands. The
+`runner-downloads` category remains explicit opt-in in durable applies.
+
 Retention resolves the observation store and the artifact root once per sweep.
 Both used to be re-derived inside every per-run artifact plan, so a default
 `--limit 1000` sweep opened thousands of SQLite connections and re-ran the
