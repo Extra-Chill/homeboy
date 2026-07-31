@@ -702,10 +702,15 @@ pub(crate) fn record_terminal_artifact_projection(
                     .insert("runner_id".to_string(), json!(runner_id));
             }
             Err(error) => {
+                let status = if error.retryable == Some(true) {
+                    "pending"
+                } else {
+                    "failed"
+                };
                 record.ensure_metadata_object().insert(
                     "artifact_projection".to_string(),
                     json!({
-                        "status": "pending",
+                        "status": status,
                         "error": error.message,
                         "recovery_action": {
                             "kind": "fetch_and_reconcile",
@@ -725,10 +730,15 @@ pub(crate) fn record_terminal_artifact_projection(
             );
         }
         Err(error) => {
+            let status = if error.retryable == Some(true) {
+                "pending"
+            } else {
+                "failed"
+            };
             record.ensure_metadata_object().insert(
                 "artifact_projection".to_string(),
                 json!({
-                    "status": "pending",
+                    "status": status,
                     "error": error.message,
                     "recovery_action": {
                         "kind": "fetch_and_reconcile",
@@ -882,16 +892,11 @@ fn runner_id_from_artifact_provenance(aggregate: &AgentTaskAggregate) -> Result<
         .flat_map(|outcome| &outcome.artifacts)
         .filter(|artifact| {
             crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact)
-                && artifact.path.as_deref().is_some_and(|path| Path::new(path).is_absolute())
                 && artifact.size_bytes.is_some()
                 && artifact.sha256.is_some()
         })
         .map(|artifact| {
-            artifact
-                .metadata
-                .pointer("/source_provenance/runner_id")
-                .and_then(Value::as_str)
-                .filter(|runner_id| !runner_id.trim().is_empty())
+            artifact_runner_id(artifact)
                 .map(str::to_string)
                 .ok_or_else(|| {
                     Error::validation_invalid_argument(
@@ -914,6 +919,33 @@ fn runner_id_from_artifact_provenance(aggregate: &AgentTaskAggregate) -> Result<
     }
 }
 
+fn artifact_runner_id(artifact: &AgentTaskArtifact) -> Option<&str> {
+    artifact
+        .metadata
+        .pointer("/source_provenance/runner_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|runner_id| !runner_id.is_empty())
+}
+
+fn validate_artifact_runner_binding(
+    artifact: &AgentTaskArtifact,
+    record_runner_id: &str,
+) -> Result<()> {
+    if artifact_runner_id(artifact).is_some_and(|runner_id| runner_id != record_runner_id) {
+        return Err(Error::validation_invalid_argument(
+            "artifact.metadata.source_provenance.runner_id",
+            format!(
+                "artifact '{}' runner provenance conflicts with lifecycle runner binding '{}'",
+                artifact.id, record_runner_id
+            ),
+            Some(artifact.id.clone()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 fn aggregate_has_runner_backed_actionable_patch(aggregate: &AgentTaskAggregate) -> bool {
     aggregate
         .outcomes
@@ -921,7 +953,7 @@ fn aggregate_has_runner_backed_actionable_patch(aggregate: &AgentTaskAggregate) 
         .flat_map(|outcome| &outcome.artifacts)
         .any(|artifact| {
             crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact)
-                && artifact.path.as_deref().is_some_and(|path| {
+                && artifact.path.as_deref().is_none_or(|path| {
                     let path = Path::new(path);
                     path.is_absolute() && !path.is_file()
                 })
@@ -937,9 +969,9 @@ pub(crate) fn terminal_artifact_projection_is_verified(
     for outcome in &aggregate.outcomes {
         for artifact in &outcome.artifacts {
             if requires_durable_lab_projection(artifact) {
-                if artifact.path.is_none()
-                    || artifact.size_bytes.is_none()
+                if artifact.size_bytes.is_none()
                     || artifact.sha256.is_none()
+                    || (artifact.path.is_none() && record.runner_id().is_none())
                 {
                     return Ok(false);
                 }
@@ -1054,6 +1086,19 @@ mod tests {
     }
 
     #[test]
+    fn artifact_runner_provenance_must_match_the_lifecycle_binding() {
+        let artifact = artifact("patch", "patch", Some("runner-a"));
+
+        validate_artifact_runner_binding(&artifact, "runner-a").expect("matching runner binding");
+        let error = validate_artifact_runner_binding(&artifact, "runner-b")
+            .expect_err("conflicting runner identity must fail closed");
+
+        assert!(error
+            .message
+            .contains("conflicts with lifecycle runner binding"));
+    }
+
+    #[test]
     fn reusable_artifact_rejects_conflicting_persisted_logical_identity() {
         homeboy_core::test_support::with_isolated_home(|home| {
             let store = homeboy_core::observation::ObservationStore::open_initialized()
@@ -1155,24 +1200,29 @@ pub(crate) fn project_terminal_artifacts(
     let mut projection_error = None;
     for outcome in &aggregate.outcomes {
         for artifact in &outcome.artifacts {
-            if crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact)
-                && (artifact.path.is_none()
-                    || artifact.size_bytes.is_none()
-                    || artifact.sha256.is_none())
+            let actionable =
+                crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact);
+            let remote_runner = record.runner_id().filter(|runner_id| {
+                super::lifecycle_ops::execution_runner_id().as_deref() != Some(*runner_id)
+            });
+            if actionable
+                && (artifact.size_bytes.is_none()
+                    || artifact.sha256.is_none()
+                    || (artifact.path.is_none() && remote_runner.is_none()))
             {
                 return Err(Error::validation_invalid_argument(
                     "artifact_projection",
                     format!(
-                        "actionable patch for run '{}', task '{}', and artifact '{}' requires path, size, and SHA-256 before controller projection",
+                        "actionable patch for run '{}', task '{}', and artifact '{}' requires a local path or authenticated runner binding, plus size and SHA-256, before controller projection",
                         record.run_id, outcome.task_id, artifact.id
                     ),
                     Some(artifact.id.clone()),
                     None,
                 ));
             }
-            let Some(path) = artifact.path.as_deref() else {
+            if artifact.path.is_none() && remote_runner.is_none() {
                 continue;
-            };
+            }
             if artifact.size_bytes.is_none() || artifact.sha256.is_none() {
                 // Unreadable/remote declarations remain visible to review only.
                 continue;
@@ -1208,9 +1258,7 @@ pub(crate) fn project_terminal_artifacts(
             )? {
                 continue;
             }
-            if let Some(runner_id) = record.runner_id().filter(|runner_id| {
-                super::lifecycle_ops::execution_runner_id().as_deref() != Some(*runner_id)
-            }) {
+            if let Some(runner_id) = remote_runner {
                 if runner_id.trim().is_empty() {
                     return Err(Error::validation_invalid_argument(
                         "runner_id",
@@ -1219,6 +1267,7 @@ pub(crate) fn project_terminal_artifacts(
                         None,
                     ));
                 }
+                validate_artifact_runner_binding(artifact, runner_id)?;
                 match controller_finalized_artifact_path(artifact)? {
                     Some(path) => {
                         let mut controller_hash = sha2::Sha256::new();
@@ -1261,7 +1310,8 @@ pub(crate) fn project_terminal_artifacts(
                                             Some(mirror.path().to_path_buf()),
                                         )
                                     },
-                                )?;
+                                )
+                                .map_err(|error| error.with_retryable(true))?;
                                 let expected_size = artifact.size_bytes.expect("checked above");
                                 let expected_sha256 =
                                     artifact.sha256.as_deref().expect("checked above");
@@ -1338,6 +1388,7 @@ pub(crate) fn project_terminal_artifacts(
                     }
                 }
             } else {
+                let path = artifact.path.as_deref().expect("local path checked above");
                 store.record_verified_artifact_with_id(
                     &record.run_id,
                     &artifact.kind,

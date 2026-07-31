@@ -822,10 +822,9 @@ fn delegate_cook_continue_to_runner_pinned_runtime(
     Ok(exit_code)
 }
 
-/// A newer coordinator must repair a recipe-bound terminal attempt before an
-/// older pinned runtime can resume it. Provider execution remains pinned; this
-/// exception only covers terminal work already accepted by the current Cook
-/// scheduler, so it cannot redispatch the provider.
+/// A terminal recipe-bound continuation is controller-owned. Provider execution
+/// remains pinned, but harvest, artifact hydration, gates, and finalization must
+/// run where the immutable Cook recipe is stored rather than on Lab.
 fn current_runtime_owns_terminal_cook_continuation(run_id: &str) -> homeboy::core::Result<bool> {
     let Some(recipe) = crate::agents::agent_tasks::service::load_recipe_for_attempt(run_id)? else {
         return Ok(false);
@@ -840,26 +839,7 @@ fn current_runtime_owns_terminal_cook_continuation(run_id: &str) -> homeboy::cor
         return Ok(false);
     }
     crate::agents::agent_tasks::service::validate_recipe_attempt_record(&recipe, run_id, &record)?;
-    let scheduler_cook_id = record
-        .metadata
-        .get("cook_continuation_scheduler")
-        .and_then(|scheduler| scheduler.get("cook_id"))
-        .and_then(serde_json::Value::as_str);
-    let scheduler_build = record
-        .metadata
-        .get("cook_continuation_scheduler")
-        .and_then(|scheduler| scheduler.get("coordinator_build_identity"))
-        .and_then(serde_json::Value::as_str);
-    let originating_build = record
-        .metadata
-        .get("controller_runtime")
-        .and_then(|runtime| runtime.get("originating"))
-        .and_then(|originating| originating.get("build_identity"))
-        .and_then(serde_json::Value::as_str);
-    Ok(scheduler_cook_id == Some(recipe.cook_id.as_str())
-        && scheduler_build == Some(homeboy::core::build_identity::current().display.as_str())
-        && originating_build
-            .is_some_and(|build| build != homeboy::core::build_identity::current().display))
+    Ok(true)
 }
 
 /// Fanout coordination is controller-owned and may span children from distinct
@@ -2801,7 +2781,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn terminal_cook_without_a_current_scheduler_claim_reexecutes_the_origin_runtime() {
+    fn terminal_cook_with_a_controller_recipe_does_not_route_to_lab_or_origin_runtime() {
         crate::test_support::with_isolated_home(|home| {
             let target = home.path().join("active-task-worktree");
             std::fs::create_dir(&target).expect("create active task worktree");
@@ -2890,10 +2870,10 @@ mod tests {
             )
             .expect("current runtime delegates to verified runtime A");
 
-            assert_eq!(exit_code, Some(17));
-            assert_eq!(
-                std::fs::read_to_string(invocation).expect("runtime-A invocation"),
-                format!("agent-task\ncook-continue\n{cook_id}\n--full\n")
+            assert_eq!(exit_code, None);
+            assert!(
+                !invocation.exists(),
+                "controller continuation must not re-exec"
             );
             assert_eq!(
                 crate::agents::agent_tasks::service::resolve_cook_continuation_run_id(cook_id)
