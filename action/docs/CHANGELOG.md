@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.10.3] - 2026-07-31
+
+### Fixed
+- stop reporting an unmeasured command as a pre-existing failure
+
 ## [2.10.2] - 2026-07-31
 
 ### Fixed
