@@ -497,7 +497,11 @@ fn capability_fallback_persists_the_verified_local_outcome() {
             .expect("persist durable run");
         let mut request = LabOffloadRequest::for_test(&[]);
         request.placement_decision = decision.clone();
-        request.active_run_id = Some("fallback-run");
+        request.placement_outcome_target = Some(
+            homeboy_core::lab_routing::ExecutionPlacementOutcomeTarget::AgentTaskLifecycle {
+                run_id: "fallback-run",
+            },
+        );
 
         automatic_capability_fallback(
             &request,
@@ -523,7 +527,38 @@ fn capability_fallback_persists_the_verified_local_outcome() {
 }
 
 #[test]
-fn timed_fallback_preserves_active_run_id_for_the_verified_local_outcome() {
+fn local_outcome_without_an_agent_task_target_does_not_read_an_observation_id_as_a_lifecycle_record(
+) {
+    let mut request = LabOffloadRequest::for_test(&[]);
+    request.placement_decision = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+        "test",
+        "1",
+        homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+            repository: "test".to_string(),
+            workspace: "test".to_string(),
+            task: "trace".to_string(),
+            candidate: None,
+            base: None,
+        },
+        homeboy_lab_runner_contract::Placement::Auto,
+        homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
+        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+        None,
+        homeboy_lab_runner_contract::ExecutionPlacementFallback {
+            local_allowed: false,
+            reason: None,
+        },
+        homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+            authorized: false,
+            authority: None,
+        },
+    );
+
+    record_local_outcome(&request).expect("observation-only route skips lifecycle persistence");
+}
+
+#[test]
+fn timed_fallback_preserves_agent_task_target_for_the_verified_local_outcome() {
     homeboy_core::test_support::with_isolated_home(|_| {
         crate::register_runner_lab_offload_provider();
         let decision = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
@@ -570,7 +605,11 @@ fn timed_fallback_preserves_active_run_id_for_the_verified_local_outcome() {
                 capture_patch: false,
                 mutation_flag: None,
                 timeout: Some(std::time::Duration::from_secs(1)),
-                active_run_id: Some("timed-fallback"),
+                placement_outcome_target: Some(
+                    homeboy_core::lab_routing::ExecutionPlacementOutcomeTarget::AgentTaskLifecycle {
+                        run_id: "timed-fallback",
+                    },
+                ),
                 detach_after_handoff: false,
                 output_file_requested: false,
                 read_only_polling: false,

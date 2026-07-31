@@ -419,9 +419,10 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
 }
 
 pub(crate) fn record_local_outcome(request: &LabOffloadRequest<'_>) -> Result<()> {
-    let Some(run_id) = request.active_run_id else {
+    let Some(target) = request.placement_outcome_target else {
         return Ok(());
     };
+    let run_id = target.agent_task_run_id();
     let outcome = request
         .placement_decision
         .outcome(

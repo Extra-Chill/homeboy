@@ -2605,7 +2605,11 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             preserve_workspace_on_failure: request.recipe.preserve_workspace_on_failure,
             capture_patch: request.recipe.capture_patch,
             mutation_flag: request.recipe.mutation_flag.as_deref(),
-            active_run_id: Some(&request.recipe.run_id),
+            placement_outcome_target: Some(
+                homeboy_core::lab_routing::ExecutionPlacementOutcomeTarget::AgentTaskLifecycle {
+                    run_id: &request.recipe.run_id,
+                },
+            ),
             detach_after_handoff: request.recipe.detach_after_handoff,
             output_file_requested: request.recipe.output_file_requested,
             read_only_polling: request.recipe.read_only_polling,

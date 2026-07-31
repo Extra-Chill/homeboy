@@ -57,7 +57,7 @@ impl LabOffloadProvider for RunnerLabOffload {
             preserve_workspace_on_failure: request.preserve_workspace_on_failure,
             capture_patch: request.capture_patch,
             mutation_flag: request.mutation_flag,
-            active_run_id: request.active_run_id,
+            placement_outcome_target: request.placement_outcome_target,
             detach_after_handoff: request.detach_after_handoff,
             output_file_requested: request.output_file_requested,
             read_only_polling: request.read_only_polling,

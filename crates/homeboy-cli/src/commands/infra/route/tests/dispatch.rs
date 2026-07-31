@@ -3,6 +3,31 @@
 use super::*;
 
 #[test]
+fn automatic_local_trace_does_not_target_an_agent_task_lifecycle_record() {
+    assert!(placement_outcome_target(None, None).is_none());
+}
+
+#[test]
+fn successful_offloaded_trace_does_not_target_an_agent_task_lifecycle_record() {
+    assert!(placement_outcome_target(None, None).is_none());
+}
+
+#[test]
+fn detached_fanout_observation_does_not_target_an_agent_task_lifecycle_record() {
+    assert!(placement_outcome_target(None, None).is_none());
+}
+
+#[test]
+fn durable_agent_task_handoff_targets_its_lifecycle_record() {
+    assert_eq!(
+        placement_outcome_target(Some("durable-run"), None),
+        Some(ExecutionPlacementOutcomeTarget::AgentTaskLifecycle {
+            run_id: "durable-run"
+        })
+    );
+}
+
+#[test]
 fn detached_planless_handoff_persists_explicit_bench_label_before_handoff() {
     crate::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source workspace");

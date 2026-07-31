@@ -22,7 +22,8 @@ pub struct LabOffloadRequest<'a> {
     /// source-tree mutation. Used to render actionable diagnostics when the
     /// remote runner finishes cleanly but returns no patch to apply.
     pub mutation_flag: Option<&'a str>,
-    pub active_run_id: Option<&'a str>,
+    pub placement_outcome_target:
+        Option<homeboy_core::lab_routing::ExecutionPlacementOutcomeTarget<'a>>,
     pub detach_after_handoff: bool,
     pub output_file_requested: bool,
     pub read_only_polling: bool,
@@ -90,7 +91,7 @@ impl<'a> LabOffloadRequest<'a> {
             preserve_workspace_on_failure: false,
             capture_patch: false,
             mutation_flag: None,
-            active_run_id: None,
+            placement_outcome_target: None,
             detach_after_handoff: false,
             output_file_requested: false,
             read_only_polling: false,
@@ -127,7 +128,7 @@ mod tests {
             preserve_workspace_on_failure,
             capture_patch,
             mutation_flag,
-            active_run_id,
+            placement_outcome_target,
             detach_after_handoff,
             output_file_requested,
             read_only_polling,
@@ -155,7 +156,7 @@ mod tests {
         assert!(!preserve_workspace_on_failure);
         assert!(!capture_patch);
         assert!(mutation_flag.is_none());
-        assert!(active_run_id.is_none());
+        assert!(placement_outcome_target.is_none());
         assert!(!detach_after_handoff);
         assert!(!output_file_requested);
         assert!(!read_only_polling);

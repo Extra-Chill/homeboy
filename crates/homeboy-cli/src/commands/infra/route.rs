@@ -5,8 +5,8 @@ use homeboy::core::command_execution_plan::CommandSourceMaterialization;
 use homeboy::core::component::{self, TargetSpec};
 use homeboy::core::git;
 use homeboy::core::lab_routing::{
-    self, LabDispatchObserver, LabRouteOutcome, LabRoutingRequest, NoopLabDispatchObserver,
-    PersistedRunRetrieval,
+    self, ExecutionPlacementOutcomeTarget, LabDispatchObserver, LabRouteOutcome, LabRoutingRequest,
+    NoopLabDispatchObserver, PersistedRunRetrieval,
 };
 use homeboy::core::observation::{
     finish_run_best_effort, NewRunRecord, ObservationStore, RunStatus,
@@ -289,10 +289,6 @@ pub fn route_after_parse_with_provenance(
         && retry_handoff.is_none()
         && cook_plan.is_none();
     let observer = lab_dispatch_observer(cli, &normalized_args, inferred_runner_id.as_deref());
-    let active_run_id = observer
-        .run_id()
-        .map(str::to_string)
-        .or_else(|| retry_handoff.as_ref().map(|handoff| handoff.run_id.clone()));
 
     let capture_mutation_patch = cli.command.lab_offload_captures_mutation_patch();
     let mutation_flag = cli.command.lab_offload_mutation_flag();
@@ -349,14 +345,16 @@ pub fn route_after_parse_with_provenance(
             materialize_generic_detached_lab_handoff(&normalized_args, placement_decision.clone())
         })
         .transpose()?;
-    // Generic detached materialization creates the durable lifecycle record.
-    // Rebind the active ID after it exists so any verified local fallback is
-    // persisted on that record by the Lab offload provider.
-    let active_run_id = active_run_id.or_else(|| {
+    // Only durable agent-task handoffs own placement outcomes. Dispatch
+    // observations (trace and detached fanout) persist through their observers.
+    let placement_outcome_target = placement_outcome_target(
+        retry_handoff
+            .as_ref()
+            .map(|handoff| handoff.run_id.as_str()),
         generic_detached_handoff
             .as_ref()
-            .map(|handoff| handoff.run_id.clone())
-    });
+            .map(|handoff| handoff.run_id.as_str()),
+    );
     // Lab routing carries the durable plan opaquely as JSON (core does not
     // depend on the agent-task subsystem); serialize the selected typed plan.
     let durable_agent_task_plan = run_handoff
@@ -400,7 +398,7 @@ pub fn route_after_parse_with_provenance(
             capture_patch: capture_mutation_patch,
             mutation_flag,
             timeout: lab_route_dispatch_timeout(&cli.command),
-            active_run_id: active_run_id.as_deref(),
+            placement_outcome_target,
             detach_after_handoff: cli.detach_after_handoff,
             output_file_requested: output_file.is_some(),
             read_only_polling: cli
@@ -1225,7 +1223,9 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                     capture_patch: false,
                     mutation_flag: None,
                     timeout: None,
-                    active_run_id: Some(run_id),
+                    placement_outcome_target: Some(
+                        ExecutionPlacementOutcomeTarget::AgentTaskLifecycle { run_id },
+                    ),
                     detach_after_handoff: self.detach_after_handoff,
                     output_file_requested: false,
                     read_only_polling: false,
@@ -2672,6 +2672,15 @@ fn lab_dispatch_observer(
         }
         _ => Box::new(NoopLabDispatchObserver),
     }
+}
+
+fn placement_outcome_target<'a>(
+    retry_run_id: Option<&'a str>,
+    detached_run_id: Option<&'a str>,
+) -> Option<ExecutionPlacementOutcomeTarget<'a>> {
+    retry_run_id
+        .or(detached_run_id)
+        .map(|run_id| ExecutionPlacementOutcomeTarget::AgentTaskLifecycle { run_id })
 }
 
 struct AgentTaskFanoutLabDispatchObservation {

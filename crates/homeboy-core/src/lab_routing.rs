@@ -108,7 +108,9 @@ pub struct LabRoutingRequest<'a> {
     pub capture_patch: bool,
     pub mutation_flag: Option<&'a str>,
     pub timeout: Option<Duration>,
-    pub active_run_id: Option<&'a str>,
+    /// The durable agent-task record that owns a verified placement outcome.
+    /// Observation IDs remain exclusively within their observation projections.
+    pub placement_outcome_target: Option<ExecutionPlacementOutcomeTarget<'a>>,
     pub detach_after_handoff: bool,
     pub output_file_requested: bool,
     pub read_only_polling: bool,
@@ -134,6 +136,20 @@ pub struct LabRoutingRequest<'a> {
     /// Reuse an exact clean snapshot already materialized on the selected runner.
     pub reuse_compatible_snapshot: bool,
     pub job_overrides: crate::lab_offload::LabJobOverrides,
+}
+
+/// Explicit persistence domain for a verified execution placement outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionPlacementOutcomeTarget<'a> {
+    AgentTaskLifecycle { run_id: &'a str },
+}
+
+impl<'a> ExecutionPlacementOutcomeTarget<'a> {
+    pub fn agent_task_run_id(self) -> &'a str {
+        match self {
+            Self::AgentTaskLifecycle { run_id } => run_id,
+        }
+    }
 }
 
 pub(crate) fn route_lab_offload(
@@ -722,7 +738,9 @@ fn execute_lab_offload_with_timeout(
     let skip_deps_hydration = request.skip_deps_hydration;
     let preserve_workspace_on_failure = request.preserve_workspace_on_failure;
     let capture_patch = request.capture_patch;
-    let active_run_id = request.active_run_id.map(str::to_string);
+    let placement_outcome_target = request.placement_outcome_target.map(|target| match target {
+        ExecutionPlacementOutcomeTarget::AgentTaskLifecycle { run_id } => run_id.to_string(),
+    });
     let mutation_flag = request.mutation_flag.map(str::to_string);
     let detach_after_handoff = request.detach_after_handoff;
     let output_file_requested = request.output_file_requested;
@@ -735,7 +753,7 @@ fn execute_lab_offload_with_timeout(
     let require_controller_git_bundle = request.require_controller_git_bundle;
     let reuse_compatible_snapshot = request.reuse_compatible_snapshot;
     let job_overrides = request.job_overrides;
-    let worker_active_run_id = active_run_id.clone();
+    let worker_placement_outcome_target = placement_outcome_target.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = crate::lab_offload::execute_lab_offload(LabRoutingRequest {
@@ -751,7 +769,9 @@ fn execute_lab_offload_with_timeout(
             capture_patch,
             mutation_flag: mutation_flag.as_deref(),
             timeout: None,
-            active_run_id: worker_active_run_id.as_deref(),
+            placement_outcome_target: worker_placement_outcome_target
+                .as_deref()
+                .map(|run_id| ExecutionPlacementOutcomeTarget::AgentTaskLifecycle { run_id }),
             detach_after_handoff,
             output_file_requested,
             read_only_polling,
@@ -777,8 +797,8 @@ fn execute_lab_offload_with_timeout(
         .with_hint("Wait/reconnect by following the runner daemon job when known: `homeboy runner job logs <runner-id> <job-id> --follow`.".to_string())
         .with_hint("Cancel a known daemon job with `homeboy runner job cancel <runner-id> <job-id>`; then confirm the rig lease clears before retrying.".to_string())
         .with_hint("Run `homeboy runner doctor <runner-id>` if the runner daemon no longer responds.".to_string());
-        if let Some(run_id) = active_run_id {
-            error.details["active_run_id"] = serde_json::Value::String(run_id.clone());
+        if let Some(run_id) = placement_outcome_target {
+            error.details["agent_task_run_id"] = serde_json::Value::String(run_id.clone());
             error = error.with_hint(format!(
                 "Controller dispatch run `{run_id}` remains discoverable; inspect it with `homeboy runs show {run_id}`."
             ));
@@ -950,7 +970,7 @@ mod tests {
             capture_patch: false,
             mutation_flag: None,
             timeout: None,
-            active_run_id: None,
+            placement_outcome_target: None,
             detach_after_handoff: false,
             output_file_requested: false,
             read_only_polling: false,
@@ -1319,7 +1339,7 @@ mod tests {
                 capture_patch: false,
                 mutation_flag: None,
                 timeout: None,
-                active_run_id: None,
+                placement_outcome_target: None,
                 detach_after_handoff: false,
                 output_file_requested: false,
                 read_only_polling: false,
