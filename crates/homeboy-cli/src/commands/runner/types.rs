@@ -45,6 +45,10 @@ pub struct RunnerExtra {
     pub operator_commands: Vec<RunnerOperatorCommand>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operator_summary: Option<RunnerOperatorSummary>,
+    /// One compact row per configured runner: what exists, whether it is
+    /// reachable, and whether it can take work (#9487).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub runner_summaries: Vec<RunnerOperatorSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub operator_summaries: Vec<RunnerOperatorSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -72,6 +76,7 @@ impl Default for RunnerExtra {
             operator_hints: Vec::new(),
             operator_commands: Vec::new(),
             operator_summary: None,
+            runner_summaries: Vec::new(),
             operator_summaries: Vec::new(),
             truncation: None,
             probe_degradations: Vec::new(),

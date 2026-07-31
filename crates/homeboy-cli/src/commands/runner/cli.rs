@@ -96,7 +96,17 @@ pub(super) enum RunnerCommand {
         artifact_policy: Option<String>,
     },
     /// List all configured runners
-    List,
+    List {
+        /// Include full runner configuration, sessions, and environment.
+        ///
+        /// The default is a compact row per runner. A long-lived controller's
+        /// full listing carries every configured environment, serialized
+        /// settings, dev-sync extension metadata, and every historical draining
+        /// generation — which truncates in agent and terminal output and buries
+        /// the answer (#9487).
+        #[arg(long)]
+        full: bool,
+    },
     /// Display runner configuration
     Show {
         /// Runner ID
