@@ -1537,6 +1537,7 @@ fn durable_finalization_rejects_model_less_terminal_record_without_mutation() {
 #[test]
 fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_work() {
     homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "mixed-executor-evidence";
         let plan = AgentTaskPlan::new(
             "mixed-executor-plan",
             vec![
@@ -1577,7 +1578,7 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
             queue: AgentTaskQueueStatus::default(),
         };
         let record =
-            crate::agent_task_lifecycle::record_completed_run(&plan, &aggregate, Some("cook-3678"))
+            crate::agent_task_lifecycle::record_completed_run(&plan, &aggregate, Some(run_id))
                 .expect("durable aggregate recorded");
         let runtimes = &record.lifecycle.provider_runtime;
 
@@ -1596,6 +1597,8 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
         assert_eq!(record.artifact_refs[0].kind, "patch");
 
         let mut gate_proof = successful_gate_proof();
+        gate_proof.run_id = run_id.to_string();
+        gate_proof.promotion.source.run_id = Some(run_id.to_string());
         gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
         let mut backend = MockBackend {
             changed_files: vec!["src/lib.rs".to_string()],
@@ -1604,6 +1607,7 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
             ..Default::default()
         };
         let mut finalization_options = options();
+        finalization_options.run_id = run_id.to_string();
         finalization_options.manual_finalization = false;
         finalization_options.changed_files = vec!["src/lib.rs".to_string()];
 
