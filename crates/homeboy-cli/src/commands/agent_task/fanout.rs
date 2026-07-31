@@ -3,10 +3,18 @@
 use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::process::Command;
 
 use homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration;
 use homeboy::agents::agent_tasks::batch;
+use homeboy::agents::agent_tasks::dependency_actions::{
+    execute_resolved_dependency_actions, DependencyAction, DependencyActionExecutor,
+    DependencyResolution,
+};
+use homeboy::agents::agent_tasks::dependency_graph::{
+    dependency_graph_readiness, AgentTaskDependencyNode,
+};
 use homeboy::agents::agent_tasks::dispatch_service::{
     AgentTaskDispatchCommand, DispatchCoreInputs,
 };
@@ -117,7 +125,19 @@ fn submit_fanout_batch(args: AgentTaskFanoutSubmitBatchArgs) -> CmdResult<Value>
 }
 
 fn batch_status(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
-    let report = batch::status(&args.batch_id)?;
+    let observations = reconcile_fanout_pr_states(&args.batch_id, false)?;
+    let mut report = batch::status(&args.batch_id)?;
+    if !observations.is_empty() {
+        report.dependency_graph = batch::fanout_dependency_graph_with_finalization_statuses(
+            &args.batch_id,
+            &observations,
+        )?;
+        if let Some(graph) = &report.dependency_graph {
+            let state = batch::fanout_aggregate_state(&report.totals, graph);
+            report.batch.state = state;
+            report.status = state.outcome_status().to_string();
+        }
+    }
     let exit_code = report.batch.state.exit_code();
     Ok((command_json_value(report)?, exit_code))
 }
@@ -128,6 +148,7 @@ fn batch_status(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
 /// contract, reconciling per-child state back into the durable batch record so
 /// repeated resume calls converge without duplicate PRs (#9525).
 fn batch_resume(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
+    reconcile_fanout_pr_states(&args.batch_id, true)?;
     let result = agent_task_service::resume_cook_batch(
         &args.batch_id,
         provider::ExtensionProviderAgentTaskExecutor::discover(),
@@ -135,6 +156,309 @@ fn batch_resume(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
     )?;
     let exit_code = result.exit_code;
     Ok(batch_resume_result(result.value, exit_code, &args.batch_id))
+}
+
+/// GitHub is the authority for whether a review-ready candidate was accepted.
+/// Persist that observation before asking the durable graph for its executable
+/// frontier, so a merge releases only its newly-ready descendants.
+fn reconcile_fanout_pr_states(batch_id: &str, mutate: bool) -> Result<BTreeMap<String, String>> {
+    let batch = batch::read_batch_record(batch_id)?;
+    let mut resolutions = Vec::new();
+    let mut statuses = BTreeMap::new();
+    for child in batch.child_runs {
+        let Ok(record) = agent_task_lifecycle::status(&child.run_id) else {
+            continue;
+        };
+        let Some(mut finalization) = record.metadata.get("cook_finalization").cloned() else {
+            continue;
+        };
+        let pr_ref = finalization
+            .get("pr_url")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                finalization
+                    .get("pr_number")
+                    .and_then(Value::as_u64)
+                    .map(|number| number.to_string())
+            })
+            // Older durable finalization records used a nested PR reference.
+            .or_else(|| {
+                finalization
+                    .get("pr")
+                    .and_then(|pr| pr.get("url"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .or_else(|| {
+                finalization
+                    .get("pr")
+                    .and_then(|pr| pr.get("number"))
+                    .and_then(Value::as_u64)
+                    .map(|number| number.to_string())
+            });
+        let Some(pr_ref) = pr_ref else { continue };
+        let observation = observe_pr_state(&pr_ref)?;
+        let status = observation.verdict();
+        let mut pr_observation = observation.as_value();
+        if let Some(candidate_revision) = finalization
+            .pointer("/publication_proof/binding/candidate_sha")
+            .and_then(Value::as_str)
+        {
+            // The PR head is the precise candidate that was reviewed. Retain
+            // the comparison with the merge observation so a changed upstream
+            // revision always re-runs dependent invalidation/review instead of
+            // trusting the prior candidate's gates.
+            pr_observation["candidate_revision"] = Value::String(candidate_revision.to_string());
+            pr_observation["candidate_revision_matches"] = Value::Bool(
+                observation
+                    .head_ref_oid
+                    .as_deref()
+                    .is_none_or(|head| head == candidate_revision),
+            );
+        }
+        statuses.insert(child.task_id.clone(), status.to_string());
+        let transition = match status {
+            // An approved candidate makes the next stack level reviewable now.
+            // Bind it to the exact head observed so a later force-push/new commit
+            // is a distinct durable rebase, gate, and review invalidation.
+            "review_ready" => observation
+                .head_ref_oid
+                .clone()
+                .zip(observation.head_ref_name.clone()),
+            // Once merged, move the dependent from the candidate branch back to
+            // the PR's resolved target branch using the merge commit.
+            "merged" => observation
+                .merge_commit
+                .as_ref()
+                .map(|commit| commit.oid.clone())
+                .zip(observation.base_ref_name.clone()),
+            _ => None,
+        };
+        if let Some((upstream_revision, target_base)) = transition {
+            resolutions.push(DependencyResolution {
+                child_id: child.task_id.clone(),
+                upstream_revision,
+                target_base,
+            });
+        }
+        if !mutate
+            || (finalization.get("status").and_then(Value::as_str) == Some(status)
+                && finalization.get("pr_observation") == Some(&pr_observation))
+        {
+            continue;
+        }
+        finalization["status"] = Value::String(status.to_string());
+        finalization["pr_observation"] = pr_observation;
+        agent_task_lifecycle::record_cook_finalization(&child.run_id, finalization)?;
+    }
+    if mutate && !resolutions.is_empty() {
+        execute_resolved_dependency_actions(
+            batch_id,
+            &resolutions,
+            &mut LocalDependencyActionExecutor,
+        )?;
+    }
+    Ok(statuses)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FanoutPrObservation {
+    state: String,
+    #[serde(default)]
+    merged_at: Option<String>,
+    #[serde(default)]
+    review_decision: Option<String>,
+    #[serde(default)]
+    merge_state_status: Option<String>,
+    #[serde(default)]
+    merge_commit: Option<FanoutMergeCommit>,
+    #[serde(default)]
+    base_ref_name: Option<String>,
+    #[serde(default)]
+    head_ref_oid: Option<String>,
+    #[serde(default)]
+    head_ref_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FanoutMergeCommit {
+    oid: String,
+}
+
+impl FanoutPrObservation {
+    fn verdict(&self) -> &'static str {
+        match self.state.as_str() {
+            "MERGED" | "CLOSED" if self.merged_at.is_some() => "merged",
+            "CLOSED" => "rejected",
+            "OPEN" if self.review_decision.as_deref() == Some("CHANGES_REQUESTED") => {
+                "revision_requested"
+            }
+            _ => "review_ready",
+        }
+    }
+
+    fn as_value(&self) -> Value {
+        serde_json::json!({
+            "state": self.state,
+            "merged_at": self.merged_at,
+            "review_decision": self.review_decision,
+            "merge_state_status": self.merge_state_status,
+            "merge_commit_oid": self.merge_commit.as_ref().map(|commit| &commit.oid),
+            "base_ref_name": self.base_ref_name,
+            "head_ref_oid": self.head_ref_oid,
+            "head_ref_name": self.head_ref_name,
+        })
+    }
+}
+
+fn observe_pr_state(pr: &str) -> Result<FanoutPrObservation> {
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            pr,
+            "--json",
+            "state,mergedAt,reviewDecision,mergeStateStatus,mergeCommit,baseRefName,headRefOid,headRefName",
+        ])
+        .output()
+        .map_err(|error| Error::git_command_failed(format!("gh pr view {pr}: {error}")))?;
+    if !output.status.success() {
+        return Err(Error::git_command_failed(format!(
+            "gh pr view {pr}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| Error::internal_json(format!("parse gh pr view {pr}: {error}"), None))
+}
+
+struct LocalDependencyActionExecutor;
+
+impl DependencyActionExecutor for LocalDependencyActionExecutor {
+    fn side_effect_applied(&mut self, action: &DependencyAction, step: &str) -> Result<bool> {
+        match step {
+            "fetch" => run_dependency_command(
+                &action.worktree,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    &format!("{}^{{commit}}", action.upstream_revision),
+                ],
+            )
+            .map(|()| true)
+            .or_else(|_| Ok(false)),
+            "rebase" => Command::new("git")
+                .args([
+                    "merge-base",
+                    "--is-ancestor",
+                    &action.upstream_revision,
+                    "HEAD",
+                ])
+                .current_dir(&action.worktree)
+                .status()
+                .map(|status| status.success())
+                .map_err(|error| Error::git_command_failed(format!("git merge-base: {error}"))),
+            "push" => {
+                let local = dependency_command_output(&action.worktree, &["rev-parse", "HEAD"])?;
+                let remote = dependency_command_output(
+                    &action.worktree,
+                    &[
+                        "ls-remote",
+                        "--heads",
+                        "origin",
+                        &format!("refs/heads/{}", action.head),
+                    ],
+                )?;
+                Ok(remote
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|revision| revision == local))
+            }
+            "pull_request_base_update" => {
+                let Some(pr) = action.pull_request.as_deref() else {
+                    return Ok(true);
+                };
+                let observation = observe_pr_state(pr)?;
+                Ok(observation.base_ref_name.as_deref() == Some(&action.target_base))
+            }
+            // These are durable-local transitions, not GitHub/Git side effects.
+            _ => Ok(false),
+        }
+    }
+
+    fn fetch(&mut self, action: &DependencyAction) -> Result<()> {
+        run_dependency_command(
+            &action.worktree,
+            &["fetch", "--no-tags", "origin", &action.upstream_revision],
+        )
+    }
+
+    fn rebase(&mut self, action: &DependencyAction) -> Result<()> {
+        run_dependency_command(&action.worktree, &["rebase", &action.upstream_revision])
+    }
+
+    fn push(&mut self, action: &DependencyAction) -> Result<()> {
+        run_dependency_command(
+            &action.worktree,
+            &[
+                "push",
+                "--force-with-lease",
+                "origin",
+                &format!("HEAD:{}", action.head),
+            ],
+        )
+    }
+
+    fn update_pull_request_base(&mut self, action: &DependencyAction) -> Result<()> {
+        let Some(pr) = action.pull_request.as_deref() else {
+            return Ok(());
+        };
+        let output = Command::new("gh")
+            .args(["pr", "edit", pr, "--base", &action.target_base])
+            .current_dir(&action.worktree)
+            .output()
+            .map_err(|error| Error::git_command_failed(format!("gh pr edit {pr}: {error}")))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(Error::git_command_failed(format!(
+                "gh pr edit {pr}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
+        }
+    }
+
+    fn invalidate_review(&mut self, action: &DependencyAction) -> Result<()> {
+        // The Cook lifecycle has already been re-armed by the preceding durable
+        // gate-invalidation step. Keep review invalidation as its own receipt.
+        let _ = action;
+        Ok(())
+    }
+}
+
+fn run_dependency_command(path: &str, arguments: &[&str]) -> Result<()> {
+    dependency_command_output(path, arguments).map(|_| ())
+}
+
+fn dependency_command_output(path: &str, arguments: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(path)
+        .output()
+        .map_err(|error| {
+            Error::git_command_failed(format!("git {}: {error}", arguments.join(" ")))
+        })?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(Error::git_command_failed(format!(
+            "git {}: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
 }
 
 fn batch_resume_result(
@@ -213,6 +537,7 @@ fn persist_fanout_run_batch_record(plan: &BatchCookFanoutPlan) -> Result<()> {
         serde_json::json!({
             "source": "fanout-run-plan",
             "durable_child_runs": true,
+            "dependency_graph": plan.dependency_graph_metadata()?,
         }),
     )?;
     Ok(())
@@ -223,10 +548,12 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher(
     attempt_dispatcher: &CookAttemptDispatcherFactory,
 ) -> CmdResult<Value> {
     persist_fanout_run_batch_record(&plan)?;
+    persist_batch_cook_recipes(&plan)?;
+    let ready_plan = plan.ready_plan()?;
     let result = agent_task_service::run_cook_batch(
         agent_task_service::AgentTaskCookBatchOptions {
             batch_id: plan.fanout_id.clone(),
-            cooks: compile_batch_cooks(&plan, |options| {
+            cooks: compile_batch_cooks(&ready_plan, |options| {
                 options.attempt_dispatcher = Some(attempt_dispatcher(options));
             })?,
             max_concurrency: batch_worker_limit(&plan),
@@ -252,16 +579,28 @@ where
     E: homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter + Clone + Send,
 {
     persist_fanout_run_batch_record(&plan)?;
+    persist_batch_cook_recipes(&plan)?;
+    let ready_plan = plan.ready_plan()?;
     let result = agent_task_service::run_cook_batch(
         agent_task_service::AgentTaskCookBatchOptions {
             batch_id: plan.fanout_id.clone(),
-            cooks: compile_batch_cooks(&plan, |_| {})?,
+            cooks: compile_batch_cooks(&ready_plan, |_| {})?,
             max_concurrency: batch_worker_limit(&plan),
         },
         executor,
     )?;
     record_terminal_batch_admission_failures(&plan, &result.value)?;
     Ok(batch_cook_result(&plan, result))
+}
+
+/// Recipes are the durable restart boundary. Persist blocked dependents before
+/// dispatching any sibling so a later merge can release them through `resume`
+/// without reconstructing mutable operator input or re-planning a branch.
+fn persist_batch_cook_recipes(plan: &BatchCookFanoutPlan) -> Result<()> {
+    for options in compile_batch_cooks(plan, |_| {})? {
+        agent_task_service::persist_initial_recipe(&options)?;
+    }
+    Ok(())
 }
 
 /// A failure before Cook creates its durable child record is nevertheless a
@@ -694,25 +1033,108 @@ impl BatchCookFanoutPlan {
         for cook in &mut plan.cooks {
             cook.apply_defaults(args)?;
         }
+        plan.resolve_dependencies()?;
         Ok(plan)
     }
 
     fn rekey(&mut self, fanout_id: String) {
         let previous_prefix = format!("{}-", self.fanout_id);
+        let mut ids = BTreeMap::new();
         for cook in &mut self.cooks {
             let cell_id = cook
                 .cook_id
                 .strip_prefix(&previous_prefix)
                 .unwrap_or(&cook.cook_id);
+            let previous = cook.cook_id.clone();
             cook.cook_id = format!("{fanout_id}-{cell_id}");
+            ids.insert(previous, cook.cook_id.clone());
+        }
+        for cook in &mut self.cooks {
+            for dependency in &mut cook.depends_on {
+                if let Some(rekeyed) = ids.get(dependency) {
+                    *dependency = rekeyed.clone();
+                }
+            }
         }
         self.fanout_id = fanout_id;
+    }
+
+    fn dependency_nodes(&self) -> Vec<AgentTaskDependencyNode> {
+        self.cooks
+            .iter()
+            .map(|cook| AgentTaskDependencyNode {
+                id: cook.cook_id.clone(),
+                tracker_url: cook.task_url.clone(),
+                repository: cook.repo.clone(),
+                worktree: cook.workspace.clone().or_else(|| cook.cwd.clone()),
+                head: cook.head.clone(),
+                depends_on: cook.depends_on.clone(),
+            })
+            .collect()
+    }
+
+    fn resolve_dependencies(&mut self) -> Result<()> {
+        let (edges, _) = dependency_graph_readiness(&self.dependency_nodes(), &BTreeMap::new())?;
+        for edge in edges {
+            let parent = self
+                .cooks
+                .iter()
+                .find(|cook| cook.cook_id == edge.upstream_id)
+                .expect("validated graph parent");
+            let branch = parent.head.clone().ok_or_else(|| {
+                invalid_fanout(&format!(
+                    "upstream child '{}' must declare head for dependent '{}'",
+                    parent.cook_id, edge.downstream_id
+                ))
+            })?;
+            let child = self
+                .cooks
+                .iter_mut()
+                .find(|cook| cook.cook_id == edge.downstream_id)
+                .expect("validated graph child");
+            if child.depends_on.len() > 1 {
+                return Err(invalid_fanout(&format!(
+                    "child '{}' has multiple upstream candidates; declare one stack base per child",
+                    child.cook_id
+                )));
+            }
+            child.base = branch;
+        }
+        Ok(())
+    }
+
+    fn ready_plan(&self) -> Result<Self> {
+        let (_, readiness) =
+            dependency_graph_readiness(&self.dependency_nodes(), &BTreeMap::new())?;
+        let ready = readiness.ready.into_iter().collect::<HashSet<_>>();
+        Ok(Self {
+            cooks: self
+                .cooks
+                .iter()
+                .filter(|cook| ready.contains(&cook.cook_id))
+                .cloned()
+                .collect(),
+            ..self.clone()
+        })
+    }
+
+    fn dependency_graph_metadata(&self) -> Result<Value> {
+        let nodes = self.dependency_nodes();
+        let (edges, readiness) = dependency_graph_readiness(&nodes, &BTreeMap::new())?;
+        Ok(serde_json::json!({
+            "schema": "homeboy/agent-task-fanout-dependency-graph/v1",
+            "nodes": nodes,
+            "edges": edges,
+            "readiness": readiness,
+        }))
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct BatchCookSpec {
     cook_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    depends_on: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     prompt: Option<String>,
     #[serde(default)]
@@ -1037,6 +1459,7 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
         );
         cooks.push(BatchCookSpec {
             cook_id: format!("issue-{}", issue.number),
+            depends_on: Vec::new(),
             prompt: Some(prompt),
             tasks: Vec::new(),
             cwd: None,
@@ -1504,6 +1927,8 @@ mod tests {
     use crate::test_support::{env_lock, with_isolated_home};
     use clap::Parser;
     use serde_json::json;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     fn test_batch_plan() -> BatchCookFanoutPlan {
         BatchCookFanoutPlan::from_value(
@@ -1550,6 +1975,423 @@ mod tests {
         }
     }
 
+    fn command(path: &Path, program: &str, args: &[&str]) -> String {
+        let output = Command::new(program)
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap_or_else(|error| panic!("run {program} {args:?}: {error}"));
+        assert!(
+            output.status.success(),
+            "{program} {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn write_fake_gh(root: &Path) -> (PathBuf, PathBuf) {
+        let bin = root.join("bin");
+        std::fs::create_dir(&bin).expect("fake gh bin");
+        let log = root.join("gh.log");
+        let script = bin.join("gh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$HOMEBOY_FAKE_GH_LOG"
+if [ "$1 $2" = "pr view" ]; then
+  case "$3" in
+    upstream) printf '%s\n' "$HOMEBOY_FAKE_UPSTREAM_PR" ;;
+    dependent) printf '%s\n' "$HOMEBOY_FAKE_DEPENDENT_PR" ;;
+    *) exit 2 ;;
+  esac
+elif [ "$1 $2" = "pr edit" ] && [ "${HOMEBOY_FAKE_GH_FAIL_EDIT:-}" = "1" ]; then
+  exit 1
+fi
+"#,
+        )
+        .expect("fake gh script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("make fake gh executable");
+        }
+        (bin, log)
+    }
+
+    fn dependency_repo(root: &Path, conflict: bool) -> (PathBuf, String, String) {
+        let remote = root.join("remote.git");
+        let checkout = root.join("checkout");
+        command(
+            root,
+            "git",
+            &["init", "--bare", remote.to_str().expect("remote path")],
+        );
+        command(
+            root,
+            "git",
+            &[
+                "clone",
+                remote.to_str().expect("remote path"),
+                checkout.to_str().expect("checkout path"),
+            ],
+        );
+        command(
+            &checkout,
+            "git",
+            &["config", "user.email", "test@example.test"],
+        );
+        command(&checkout, "git", &["config", "user.name", "Fanout Test"]);
+        std::fs::write(checkout.join("shared.txt"), "base\n").expect("base file");
+        command(&checkout, "git", &["add", "."]);
+        command(&checkout, "git", &["commit", "-m", "base"]);
+        command(&checkout, "git", &["branch", "-M", "main"]);
+        command(&checkout, "git", &["push", "origin", "main"]);
+
+        command(&checkout, "git", &["checkout", "-b", "foundation"]);
+        if conflict {
+            std::fs::write(checkout.join("shared.txt"), "foundation\n").expect("foundation file");
+        } else {
+            std::fs::write(checkout.join("foundation.txt"), "foundation\n")
+                .expect("foundation file");
+        }
+        command(&checkout, "git", &["add", "."]);
+        command(&checkout, "git", &["commit", "-m", "foundation"]);
+        command(&checkout, "git", &["push", "origin", "foundation"]);
+
+        command(&checkout, "git", &["checkout", "-b", "dependent"]);
+        if conflict {
+            std::fs::write(checkout.join("shared.txt"), "dependent\n").expect("dependent file");
+        } else {
+            std::fs::write(checkout.join("dependent.txt"), "dependent\n").expect("dependent file");
+        }
+        command(&checkout, "git", &["add", "."]);
+        command(&checkout, "git", &["commit", "-m", "dependent"]);
+        command(&checkout, "git", &["push", "origin", "dependent"]);
+
+        command(&checkout, "git", &["checkout", "main"]);
+        command(
+            &checkout,
+            "git",
+            &["merge", "--no-ff", "foundation", "-m", "merge foundation"],
+        );
+        if conflict {
+            std::fs::write(checkout.join("shared.txt"), "main\n").expect("main conflict file");
+            command(&checkout, "git", &["add", "."]);
+            command(&checkout, "git", &["commit", "-m", "main conflict"]);
+        }
+        let merged = command(&checkout, "git", &["rev-parse", "HEAD"]);
+        command(&checkout, "git", &["push", "origin", "main"]);
+        command(&checkout, "git", &["checkout", "dependent"]);
+        let remote_dependent = command(&checkout, "git", &["rev-parse", "origin/dependent"]);
+        (checkout, merged, remote_dependent)
+    }
+
+    fn seed_dependency_batch(batch_id: &str, checkout: &Path) {
+        let run =
+            homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new("fanout-e2e", Vec::new());
+        for (run_id, pr) in [
+            ("upstream-run", Some("upstream")),
+            ("dependent-run", Some("dependent")),
+            ("sibling-run", None),
+        ] {
+            agent_task_lifecycle::submit_plan(&run, Some(run_id)).expect("durable child run");
+            if let Some(pr) = pr {
+                agent_task_lifecycle::record_cook_finalization(
+                    run_id,
+                    json!({ "status": "review_ready", "pr_url": pr }),
+                )
+                .expect("child PR finalization");
+                if run_id == "dependent-run" {
+                    agent_task_lifecycle::record_promotion(
+                        run_id,
+                        json!({ "status": "succeeded" }),
+                    )
+                    .expect("dependent promotion");
+                }
+            }
+        }
+        batch::persist_fanout_run_batch(
+            batch_id,
+            batch_id,
+            &[
+                batch::FanoutRunBatchChild { task_id: "upstream".into(), run_id: "upstream-run".into() },
+                batch::FanoutRunBatchChild { task_id: "sibling".into(), run_id: "sibling-run".into() },
+                batch::FanoutRunBatchChild { task_id: "dependent".into(), run_id: "dependent-run".into() },
+            ],
+            json!({ "dependency_graph": { "nodes": [
+                {"id":"upstream","repository":"repo","worktree":checkout,"head":"foundation","depends_on":[]},
+                {"id":"sibling","repository":"repo","worktree":checkout,"head":"sibling","depends_on":[]},
+                {"id":"dependent","repository":"repo","worktree":checkout,"head":"dependent","depends_on":["upstream"]}
+            ]}}),
+        )
+        .expect("durable fanout batch");
+    }
+
+    fn dependency_receipt(batch_id: &str, key: &str) -> Option<serde_json::Value> {
+        let batch = batch::read_batch_record(batch_id).expect("batch record");
+        batch.metadata["dependency_action_receipts"][key]
+            .as_object()
+            .map(|_| batch.metadata["dependency_action_receipts"][key].clone())
+    }
+
+    #[test]
+    fn fanout_resume_rebases_pushes_updates_pr_and_rearms_downstream_after_interruption() {
+        with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("fanout tempdir");
+            let (checkout, merged, _) = dependency_repo(temp.path(), false);
+            let (bin, gh_log) = write_fake_gh(temp.path());
+            let path = format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH"));
+            let _env = EnvRestore::set(&[
+                ("PATH", Some(&path)),
+                (
+                    "HOMEBOY_FAKE_GH_LOG",
+                    Some(gh_log.to_str().expect("gh log path")),
+                ),
+                ("HOMEBOY_FAKE_GH_FAIL_EDIT", Some("1")),
+                (
+                    "HOMEBOY_FAKE_UPSTREAM_PR",
+                    Some(&format!(
+                        r#"{{"state":"MERGED","mergedAt":"2026-01-01T00:00:00Z","mergeCommit":{{"oid":"{merged}"}},"baseRefName":"main"}}"#
+                    )),
+                ),
+                (
+                    "HOMEBOY_FAKE_DEPENDENT_PR",
+                    Some(
+                        r#"{"state":"OPEN","mergedAt":null,"reviewDecision":"APPROVED","mergeCommit":null,"baseRefName":"foundation"}"#,
+                    ),
+                ),
+            ]);
+            seed_dependency_batch("fanout-e2e", &checkout);
+
+            // The first resume reaches the real force-with-lease push, then the
+            // fake PR adapter interrupts the process at the next durable step.
+            reconcile_fanout_pr_states("fanout-e2e", true)
+                .expect("push is journaled before PR edit");
+            let receipt =
+                dependency_receipt("fanout-e2e", &format!("upstream:dependent:{merged}:main"))
+                    .expect("receipt exists");
+            assert_eq!(receipt["steps"]["push"]["status"], "completed");
+            assert_eq!(receipt["blocked_step"], "pull_request_base_update");
+            let pushed = command(&checkout, "git", &["rev-parse", "origin/dependent"]);
+            assert_eq!(
+                command(
+                    &checkout,
+                    "git",
+                    &["merge-base", "--is-ancestor", &merged, &pushed]
+                ),
+                ""
+            );
+
+            std::env::remove_var("HOMEBOY_FAKE_GH_FAIL_EDIT");
+            reconcile_fanout_pr_states("fanout-e2e", true).expect("idempotent resume");
+            let receipt =
+                dependency_receipt("fanout-e2e", &format!("upstream:dependent:{merged}:main"))
+                    .expect("receipt exists");
+            assert_eq!(receipt["status"], "completed");
+            assert_eq!(receipt["steps"]["gates_invalidate"]["status"], "completed");
+            assert_eq!(receipt["steps"]["review_invalidate"]["status"], "completed");
+            let dependent =
+                agent_task_lifecycle::status("dependent-run").expect("dependent record");
+            assert!(dependent.metadata.get("cook_finalization").is_none());
+            assert_eq!(
+                dependent.metadata["cook_recovery_source_checkpoint"]["phase"],
+                "verification_pending"
+            );
+            let gh_calls = std::fs::read_to_string(gh_log).expect("gh calls");
+            assert_eq!(gh_calls.matches("pr edit dependent --base main").count(), 2);
+        });
+    }
+
+    #[test]
+    fn fanout_resume_rejection_and_rebase_conflict_block_without_later_mutations() {
+        with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("fanout tempdir");
+            let (checkout, merged, before) = dependency_repo(temp.path(), true);
+            let (bin, gh_log) = write_fake_gh(temp.path());
+            let path = format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH"));
+            let _env = EnvRestore::set(&[
+                ("PATH", Some(&path)),
+                (
+                    "HOMEBOY_FAKE_GH_LOG",
+                    Some(gh_log.to_str().expect("gh log path")),
+                ),
+                (
+                    "HOMEBOY_FAKE_UPSTREAM_PR",
+                    Some(
+                        r#"{"state":"CLOSED","mergedAt":null,"mergeCommit":null,"baseRefName":"main"}"#,
+                    ),
+                ),
+                (
+                    "HOMEBOY_FAKE_DEPENDENT_PR",
+                    Some(
+                        r#"{"state":"OPEN","mergedAt":null,"mergeCommit":null,"baseRefName":"foundation"}"#,
+                    ),
+                ),
+            ]);
+            seed_dependency_batch("fanout-blocked", &checkout);
+
+            reconcile_fanout_pr_states("fanout-blocked", true).expect("rejection observation");
+            assert!(dependency_receipt("fanout-blocked", "upstream:dependent:missing").is_none());
+            assert_eq!(
+                command(&checkout, "git", &["rev-parse", "origin/dependent"]),
+                before
+            );
+
+            std::env::set_var(
+                "HOMEBOY_FAKE_UPSTREAM_PR",
+                format!(
+                    r#"{{"state":"MERGED","mergedAt":"2026-01-01T00:00:00Z","mergeCommit":{{"oid":"{merged}"}},"baseRefName":"main"}}"#
+                ),
+            );
+            reconcile_fanout_pr_states("fanout-blocked", true)
+                .expect("conflict becomes durable block");
+            let receipt = dependency_receipt(
+                "fanout-blocked",
+                &format!("upstream:dependent:{merged}:main"),
+            )
+            .expect("conflict receipt");
+            assert_eq!(receipt["blocked_step"], "rebase");
+            assert_eq!(receipt["steps"]["push"], serde_json::Value::Null);
+            assert_eq!(
+                command(&checkout, "git", &["rev-parse", "origin/dependent"]),
+                before
+            );
+            assert!(!std::fs::read_to_string(gh_log)
+                .expect("gh calls")
+                .contains("pr edit dependent"));
+        });
+    }
+
+    #[test]
+    fn fanout_stack_rebases_review_ready_heads_then_moves_to_target_after_merge() {
+        with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("fanout tempdir");
+            let (checkout, _, _) = dependency_repo(temp.path(), false);
+            let (bin, gh_log) = write_fake_gh(temp.path());
+            let path = format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH"));
+            let _env = EnvRestore::set(&[
+                ("PATH", Some(&path)),
+                (
+                    "HOMEBOY_FAKE_GH_LOG",
+                    Some(gh_log.to_str().expect("gh log path")),
+                ),
+                (
+                    "HOMEBOY_FAKE_DEPENDENT_PR",
+                    Some(
+                        r#"{"state":"OPEN","mergedAt":null,"reviewDecision":"APPROVED","mergeCommit":null,"baseRefName":"foundation"}"#,
+                    ),
+                ),
+            ]);
+            seed_dependency_batch("fanout-stack", &checkout);
+
+            // The first accepted candidate releases the dependent against its
+            // branch, and the receipt binds the exact upstream head used.
+            let first = command(&checkout, "git", &["rev-parse", "origin/foundation"]);
+            std::env::set_var(
+                "HOMEBOY_FAKE_UPSTREAM_PR",
+                format!(
+                    r#"{{"state":"OPEN","mergedAt":null,"reviewDecision":"APPROVED","mergeCommit":null,"baseRefName":"main","headRefName":"foundation","headRefOid":"{first}"}}"#
+                ),
+            );
+            reconcile_fanout_pr_states("fanout-stack", true).expect("first stack transition");
+            let first_receipt = dependency_receipt(
+                "fanout-stack",
+                &format!("upstream:dependent:{first}:foundation"),
+            )
+            .expect("first candidate receipt");
+            assert_eq!(first_receipt["action"]["upstream_revision"], first);
+            assert_eq!(first_receipt["action"]["target_base"], "foundation");
+
+            // A new upstream head invalidates the dependent's prior review and
+            // produces a second rebase/reverification receipt rather than
+            // trusting the review of the old candidate.
+            command(&checkout, "git", &["checkout", "foundation"]);
+            std::fs::write(checkout.join("foundation-update.txt"), "updated\n").expect("update");
+            command(&checkout, "git", &["add", "."]);
+            command(&checkout, "git", &["commit", "-m", "update foundation"]);
+            command(&checkout, "git", &["push", "origin", "foundation"]);
+            let second = command(&checkout, "git", &["rev-parse", "HEAD"]);
+            std::env::set_var(
+                "HOMEBOY_FAKE_UPSTREAM_PR",
+                format!(
+                    r#"{{"state":"OPEN","mergedAt":null,"reviewDecision":"APPROVED","mergeCommit":null,"baseRefName":"main","headRefName":"foundation","headRefOid":"{second}"}}"#
+                ),
+            );
+            reconcile_fanout_pr_states("fanout-stack", true).expect("updated stack transition");
+            let second_receipt = dependency_receipt(
+                "fanout-stack",
+                &format!("upstream:dependent:{second}:foundation"),
+            )
+            .expect("updated candidate receipt");
+            assert_eq!(second_receipt["status"], "completed");
+            assert_eq!(
+                second_receipt["steps"]["gates_invalidate"]["status"],
+                "completed"
+            );
+            assert_eq!(
+                second_receipt["steps"]["review_invalidate"]["status"],
+                "completed"
+            );
+
+            command(&checkout, "git", &["checkout", "main"]);
+            command(
+                &checkout,
+                "git",
+                &[
+                    "merge",
+                    "--no-ff",
+                    "foundation",
+                    "-m",
+                    "merge updated foundation",
+                ],
+            );
+            let merged = command(&checkout, "git", &["rev-parse", "HEAD"]);
+            command(&checkout, "git", &["push", "origin", "main"]);
+            std::env::set_var(
+                "HOMEBOY_FAKE_UPSTREAM_PR",
+                format!(
+                    r#"{{"state":"MERGED","mergedAt":"2026-01-01T00:00:00Z","mergeCommit":{{"oid":"{merged}"}},"baseRefName":"main","headRefName":"foundation","headRefOid":"{second}"}}"#
+                ),
+            );
+            reconcile_fanout_pr_states("fanout-stack", true).expect("merge transition");
+            let merge_receipt =
+                dependency_receipt("fanout-stack", &format!("upstream:dependent:{merged}:main"))
+                    .expect("merge receipt");
+            assert_eq!(merge_receipt["action"]["target_base"], "main");
+            assert_eq!(merge_receipt["steps"]["rebase"]["status"], "completed");
+            assert!(std::fs::read_to_string(gh_log)
+                .expect("gh calls")
+                .contains("pr edit dependent --base main"));
+        });
+    }
+
+    #[test]
+    fn invalid_dependency_graph_does_not_mutate_a_real_repository() {
+        with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("fanout tempdir");
+            let (checkout, _, before) = dependency_repo(temp.path(), false);
+            let error = BatchCookFanoutPlan::from_value(
+                json!({
+                    "schema": AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA,
+                    "fanout_id": "invalid",
+                    "cooks": [
+                        {"cook_id":"upstream","repo":"repo","prompt":"upstream","workspace":checkout,"to_worktree":"upstream","head":"upstream","verify":["true"]},
+                        {"cook_id":"dependent","repo":"repo","depends_on":["missing"],"prompt":"dependent","workspace":checkout,"to_worktree":"dependent","head":"dependent","verify":["true"]}
+                    ]
+                }),
+                &args(),
+            )
+            .expect_err("missing edge must fail validation");
+            assert!(error.message.contains("missing"));
+            assert_eq!(
+                command(&checkout, "git", &["rev-parse", "origin/dependent"]),
+                before
+            );
+            assert_eq!(command(&checkout, "git", &["status", "--porcelain"]), "");
+        });
+    }
+
     #[test]
     fn resolve_ai_tool_disclosure_preserves_an_explicit_operator_value() {
         // An operator-supplied disclosure is preserved verbatim regardless of
@@ -1561,6 +2403,32 @@ mod tests {
             Some("openai/gpt-5.6-terra"),
         );
         assert_eq!(resolved, "Custom Tool (v2)");
+    }
+
+    #[test]
+    fn pr_observation_distinguishes_merge_rejection_and_revision() {
+        let observation = |state: &str, merged_at: Option<&str>, review_decision: Option<&str>| {
+            FanoutPrObservation {
+                state: state.to_string(),
+                merged_at: merged_at.map(str::to_string),
+                review_decision: review_decision.map(str::to_string),
+                merge_state_status: None,
+                merge_commit: None,
+                base_ref_name: None,
+                head_ref_oid: None,
+                head_ref_name: None,
+            }
+        };
+
+        assert_eq!(
+            observation("CLOSED", Some("2026-07-30T00:00:00Z"), None).verdict(),
+            "merged"
+        );
+        assert_eq!(observation("CLOSED", None, None).verdict(), "rejected");
+        assert_eq!(
+            observation("OPEN", None, Some("CHANGES_REQUESTED")).verdict(),
+            "revision_requested"
+        );
     }
 
     #[test]
@@ -1689,6 +2557,54 @@ mod tests {
                 .expect("client context")
                 .contains("/Users/user/Developer/homeboy@5929-docs"));
         });
+    }
+
+    #[test]
+    fn batch_plan_persists_a_two_level_stack_and_schedules_ready_siblings() {
+        let plan = BatchCookFanoutPlan::from_value(
+            json!({
+                "schema": AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA,
+                "fanout_id": "stack",
+                "cooks": [
+                    {"cook_id": "foundation", "task_url": "https://github.com/Extra-Chill/homeboy/issues/1", "repo": "homeboy", "prompt": "foundation", "to_worktree": "homeboy@foundation", "head": "fix/foundation", "verify": ["true"]},
+                    {"cook_id": "sibling", "task_url": "https://github.com/Extra-Chill/homeboy/issues/2", "repo": "homeboy", "prompt": "sibling", "to_worktree": "homeboy@sibling", "head": "fix/sibling", "verify": ["true"]},
+                    {"cook_id": "dependent", "task_url": "https://github.com/Extra-Chill/homeboy/issues/3", "repo": "homeboy", "depends_on": ["https://github.com/Extra-Chill/homeboy/issues/1"], "prompt": "dependent", "to_worktree": "homeboy@dependent", "head": "fix/dependent", "verify": ["true"]}
+                ]
+            }),
+            &args(),
+        )
+        .expect("stack plan");
+        assert_eq!(plan.cooks[2].base, "fix/foundation");
+        assert_eq!(
+            plan.ready_plan()
+                .expect("ready frontier")
+                .cooks
+                .iter()
+                .map(|cook| cook.cook_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fanout/refactor-foundation", "fanout/refactor-sibling"]
+        );
+        let graph = plan.dependency_graph_metadata().expect("durable graph");
+        assert_eq!(
+            graph["readiness"]["states"]["fanout/refactor-dependent"],
+            "blocked_by_dependency"
+        );
+    }
+
+    #[test]
+    fn batch_plan_rejects_missing_and_cross_repository_dependencies_before_mutation() {
+        let missing = BatchCookFanoutPlan::from_value(
+            json!({"schema": AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA, "fanout_id": "missing", "cooks": [{"cook_id": "child", "depends_on": ["absent"], "prompt": "x", "to_worktree": "homeboy@child", "verify": ["true"]}]}),
+            &args(),
+        )
+        .expect_err("missing dependency");
+        assert!(missing.message.contains("missing"));
+        let cross_repo = BatchCookFanoutPlan::from_value(
+            json!({"schema": AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA, "fanout_id": "cross", "cooks": [{"cook_id": "a", "repo": "one", "prompt": "x", "to_worktree": "one@a", "head": "fix/a", "verify": ["true"]}, {"cook_id": "b", "repo": "two", "depends_on": ["a"], "prompt": "x", "to_worktree": "two@b", "verify": ["true"]}]}),
+            &args(),
+        )
+        .expect_err("cross repository dependency");
+        assert!(cross_repo.message.contains("cross-repository"));
     }
 
     #[test]
@@ -2053,7 +2969,7 @@ mod tests {
     }
 
     #[test]
-    fn recipe_preflight_accepts_exact_replay_and_rejects_changed_inputs() {
+    fn recipe_preflight_accepts_safe_pre_execution_recipe_corrections() {
         with_isolated_home(|_| {
             let plan = test_batch_plan();
             let compiled = compile_batch_cooks(&plan, |_| {}).expect("compile batch cooks");
@@ -2071,9 +2987,8 @@ mod tests {
 
             let mut changed = plan;
             changed.cooks[0].title = Some("changed title".to_string());
-            let error = preflight_batch_cook_recipes(&changed, None)
-                .expect_err("changed execution inputs conflict");
-            assert!(error.message.contains("different execution inputs"));
+            preflight_batch_cook_recipes(&changed, None)
+                .expect("pre-execution finalization metadata can be corrected safely");
         });
     }
 
