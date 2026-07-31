@@ -35,12 +35,68 @@ pub const DEFAULT_LAB_PROVIDER_DISCOVERY_DISPATCH_TIMEOUT_SECS: u64 = 90;
 pub const LAB_PROVIDER_DISCOVERY_DISPATCH_TIMEOUT_ENV: &str =
     "HOMEBOY_LAB_PROVIDER_DISCOVERY_DISPATCH_TIMEOUT_SECS";
 
+/// Compatibility constructor for callers restoring plans written before the
+/// canonical decision existed. New controller routing must provide its actual
+/// repository/workspace/task identity instead.
+pub fn compatibility_placement_decision(
+    placement: homeboy_lab_runner_contract::Placement,
+    runner_id: Option<&str>,
+    allow_local_fallback: bool,
+) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
+    use homeboy_lab_runner_contract::{
+        EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
+        ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
+        ExecutionPlacementRunnerSelection, RunnerSelectionSource,
+    };
+    let required =
+        if placement == homeboy_lab_runner_contract::Placement::Lab || runner_id.is_some() {
+            ExecutionPlacementRequirement::Lab
+        } else {
+            ExecutionPlacementRequirement::Either
+        };
+    let selected = if required == ExecutionPlacementRequirement::Lab {
+        EffectiveExecutionPlacement::Lab
+    } else {
+        EffectiveExecutionPlacement::Local
+    };
+    homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+        "legacy-lab-routing",
+        "v1",
+        ExecutionPlacementIdentity {
+            repository: "unknown".to_string(),
+            workspace: "unknown".to_string(),
+            task: "unknown".to_string(),
+            candidate: None,
+            base: None,
+        },
+        placement,
+        required,
+        selected,
+        runner_id.map(|runner_id| ExecutionPlacementRunnerSelection {
+            runner_id: runner_id.to_string(),
+            source: RunnerSelectionSource::Explicit,
+        }),
+        ExecutionPlacementFallback {
+            local_allowed: allow_local_fallback,
+            reason: None,
+        },
+        ExecutionPlacementOverrideAuthorization {
+            authorized: false,
+            authority: None,
+        },
+    )
+}
+
 /// Phase tag used for Lab trace dispatch observation metadata payloads. Kept in
 /// core so the routing service owns the observation envelope shape rather than
 /// the CLI adapter.
 const LAB_DISPATCH_PHASE: &str = "route_lab_dispatch";
 
 pub struct LabRoutingRequest<'a> {
+    /// Immutable output of the controller's placement-policy resolution. The
+    /// runner provider consumes this record; legacy scalar fields below remain
+    /// only while persisted callers migrate to the canonical contract.
+    pub placement_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision,
     pub command: Option<crate::lab_offload::LabOffloadCommand>,
     pub normalized_args: &'a [String],
     pub explicit_runner: Option<&'a str>,
@@ -657,6 +713,7 @@ fn execute_lab_offload_with_timeout(
     timeout: Duration,
 ) -> Result<crate::lab_offload::LabOffloadOutcome> {
     let command = request.command;
+    let placement_decision = request.placement_decision;
     let normalized_args = request.normalized_args.to_vec();
     let explicit_runner = request.explicit_runner.map(str::to_string);
     let placement = request.placement;
@@ -678,9 +735,11 @@ fn execute_lab_offload_with_timeout(
     let require_controller_git_bundle = request.require_controller_git_bundle;
     let reuse_compatible_snapshot = request.reuse_compatible_snapshot;
     let job_overrides = request.job_overrides;
+    let worker_active_run_id = active_run_id.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = crate::lab_offload::execute_lab_offload(LabRoutingRequest {
+            placement_decision,
             command,
             normalized_args: &normalized_args,
             explicit_runner: explicit_runner.as_deref(),
@@ -692,7 +751,7 @@ fn execute_lab_offload_with_timeout(
             capture_patch,
             mutation_flag: mutation_flag.as_deref(),
             timeout: None,
-            active_run_id: None,
+            active_run_id: worker_active_run_id.as_deref(),
             detach_after_handoff,
             output_file_requested,
             read_only_polling,
@@ -875,6 +934,11 @@ mod tests {
     #[test]
     fn route_lab_offload_runs_non_lab_contract_locally() {
         let outcome = route_lab_offload(LabRoutingRequest {
+            placement_decision: compatibility_placement_decision(
+                homeboy_lab_runner_contract::Placement::Auto,
+                None,
+                false,
+            ),
             command: None,
             normalized_args: &["homeboy".to_string(), "status".to_string()],
             explicit_runner: None,
@@ -1239,6 +1303,11 @@ mod tests {
 
         let outcome = dispatch_lab_offload(
             LabRoutingRequest {
+                placement_decision: compatibility_placement_decision(
+                    homeboy_lab_runner_contract::Placement::Auto,
+                    None,
+                    false,
+                ),
                 command: None,
                 normalized_args: &["homeboy".to_string(), "status".to_string()],
                 explicit_runner: None,

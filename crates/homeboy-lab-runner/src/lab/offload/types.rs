@@ -1,6 +1,9 @@
 //! Public request/command/outcome types for Lab offload.
 
 pub struct LabOffloadRequest<'a> {
+    /// Canonical controller-owned placement decision. This is deliberately
+    /// separate from #10943's authenticated runner-job execution context.
+    pub placement_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision,
     pub command: Option<LabOffloadCommand>,
     pub normalized_args: &'a [String],
     pub explicit_runner: Option<&'a str>,
@@ -19,6 +22,7 @@ pub struct LabOffloadRequest<'a> {
     /// source-tree mutation. Used to render actionable diagnostics when the
     /// remote runner finishes cleanly but returns no patch to apply.
     pub mutation_flag: Option<&'a str>,
+    pub active_run_id: Option<&'a str>,
     pub detach_after_handoff: bool,
     pub output_file_requested: bool,
     pub read_only_polling: bool,
@@ -53,6 +57,29 @@ impl<'a> LabOffloadRequest<'a> {
     /// This remains test-only so production callers must set every policy field.
     pub(crate) fn for_test(normalized_args: &'a [String]) -> Self {
         Self {
+            placement_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+                "test",
+                "1",
+                homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+                    repository: "test".to_string(),
+                    workspace: "test".to_string(),
+                    task: "test".to_string(),
+                    candidate: None,
+                    base: None,
+                },
+                homeboy_lab_runner_contract::Placement::Auto,
+                homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
+                homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+                None,
+                homeboy_lab_runner_contract::ExecutionPlacementFallback {
+                    local_allowed: false,
+                    reason: None,
+                },
+                homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+                    authorized: false,
+                    authority: None,
+                },
+            ),
             command: None,
             normalized_args,
             explicit_runner: None,
@@ -63,6 +90,7 @@ impl<'a> LabOffloadRequest<'a> {
             preserve_workspace_on_failure: false,
             capture_patch: false,
             mutation_flag: None,
+            active_run_id: None,
             detach_after_handoff: false,
             output_file_requested: false,
             read_only_polling: false,
@@ -88,6 +116,7 @@ mod tests {
         let request = LabOffloadRequest::for_test(&args);
 
         let LabOffloadRequest {
+            placement_decision,
             command,
             normalized_args,
             explicit_runner,
@@ -98,6 +127,7 @@ mod tests {
             preserve_workspace_on_failure,
             capture_patch,
             mutation_flag,
+            active_run_id,
             detach_after_handoff,
             output_file_requested,
             read_only_polling,
@@ -111,6 +141,10 @@ mod tests {
             job_overrides,
         } = request;
 
+        assert_eq!(
+            placement_decision.selected,
+            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local
+        );
         assert!(command.is_none());
         assert_eq!(normalized_args, args);
         assert!(explicit_runner.is_none());
@@ -121,6 +155,7 @@ mod tests {
         assert!(!preserve_workspace_on_failure);
         assert!(!capture_patch);
         assert!(mutation_flag.is_none());
+        assert!(active_run_id.is_none());
         assert!(!detach_after_handoff);
         assert!(!output_file_requested);
         assert!(!read_only_polling);

@@ -19,7 +19,7 @@ impl LabOffloadProvider for RunnerLabOffload {
         // Core carries the durable agent-task plan opaquely as JSON so it does
         // not depend on the agent-task subsystem. The runner layer owns the
         // typed plan, so deserialize it here and borrow it for the offload.
-        let durable_agent_task_plan = request
+        let mut durable_agent_task_plan = request
             .durable_agent_task_plan
             .map(|plan| {
                 serde_json::from_value::<homeboy_agents::agent_task_scheduler::AgentTaskPlan>(
@@ -33,7 +33,20 @@ impl LabOffloadProvider for RunnerLabOffload {
                     Some("deserialize durable agent-task plan".to_string()),
                 )
             })?;
+        if let Some(plan) = durable_agent_task_plan.as_mut() {
+            if !plan.metadata.is_object() {
+                plan.metadata = serde_json::json!({ "legacy_metadata": plan.metadata });
+            }
+            plan.metadata["execution_placement_decision"] =
+                serde_json::to_value(&request.placement_decision).map_err(|error| {
+                    homeboy_core::error::Error::internal_json(
+                        error.to_string(),
+                        Some("serialize execution placement decision".to_string()),
+                    )
+                })?;
+        }
         crate::execute_lab_offload(LabOffloadRequest {
+            placement_decision: request.placement_decision,
             command: request.command,
             normalized_args: request.normalized_args,
             explicit_runner: request.explicit_runner,
@@ -44,6 +57,7 @@ impl LabOffloadProvider for RunnerLabOffload {
             preserve_workspace_on_failure: request.preserve_workspace_on_failure,
             capture_patch: request.capture_patch,
             mutation_flag: request.mutation_flag,
+            active_run_id: request.active_run_id,
             detach_after_handoff: request.detach_after_handoff,
             output_file_requested: request.output_file_requested,
             read_only_polling: request.read_only_polling,
