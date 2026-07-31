@@ -881,7 +881,10 @@ pub(crate) fn exec_with_status_snapshot(
                 plan.env.insert(key, value);
             }
         }
-        return exec_local(plan);
+        let (mut output, exit_code) = exec_local(plan)?;
+        append_runner_exec_binary_diagnostics(&mut output, &runner, None);
+        append_runner_exec_diagnostic_hint(&mut output, run_id_hint);
+        return Ok((output, exit_code));
     }
     // Extension parity uses daemon-backed runner commands. Recover the direct
     // session before that preparation so admission cannot fail before `/exec`.

@@ -75,6 +75,30 @@ fn runner_exec_run_id_creates_generic_run_on_demand() {
 }
 
 #[test]
+fn generic_runner_exec_adopts_and_reuses_a_direct_runner_exec_run() {
+    with_isolated_home(|_| {
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+        let direct = store
+            .start_run(
+                homeboy_core::observation::NewRunRecord::builder("runner-exec")
+                    .command("homeboy runner exec lab".to_string())
+                    .build(),
+            )
+            .expect("direct runner exec run");
+        let command = vec!["true".to_string()];
+
+        let adopted = ensure_generic_runner_exec_run(&direct.id, "lab", "/workspace", &command)
+            .expect("adopt direct runner exec run");
+        let reused = ensure_generic_runner_exec_run(&direct.id, "lab", "/workspace", &command)
+            .expect("repeat direct runner exec run");
+
+        assert_eq!(adopted.id, direct.id);
+        assert_eq!(reused.id, direct.id);
+        assert_eq!(reused.metadata_json["kind"], RUNNER_EXEC_RUN_KIND);
+    });
+}
+
+#[test]
 fn diagnostic_ssh_run_id_creates_generic_run_without_a_runner_job() {
     // #9485: the diagnostic-SSH transport executes synchronously and never
     // accepts a durable runner job, but `runner exec --ssh --run-id <new-id>`
