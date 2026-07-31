@@ -5,6 +5,18 @@ use super::*;
 use homeboy_core::build_identity;
 use homeboy_core::secret_env_plan::SECRET_ENV_PLAN_ENV_DELTA_SOURCE;
 
+pub(super) fn with_agent_task_retry_hint(
+    error: Error,
+    run_id: &str,
+    plan: Option<&homeboy_agents::agent_task_scheduler::AgentTaskPlan>,
+) -> Error {
+    if plan.is_some_and(agent_task_lifecycle::plan_has_retry_materialization_identity) {
+        error.with_hint(format!("Retry: homeboy agent-task retry {run_id} --run"))
+    } else {
+        error
+    }
+}
+
 /// Homeboy-owned Lab artifact directory for a given runner checkout root.
 ///
 /// Lab structured output is a Homeboy-owned artifact, not part of the synced
@@ -1168,9 +1180,11 @@ pub(crate) fn run_lab_offload_inner(
                         );
                     }
                 }
-                return Err(
-                    error.with_hint(format!("Retry: homeboy agent-task retry {run_id} --run"))
-                );
+                return Err(with_agent_task_retry_hint(
+                    error,
+                    run_id,
+                    request.durable_agent_task_plan,
+                ));
             }
         };
         let controller_job_commands = controller_job_retrieval_commands(&controller_job_id);
@@ -1656,9 +1670,11 @@ pub(crate) fn run_lab_offload_inner(
                         );
                     }
                 }
-                return Err(
-                    error.with_hint(format!("Retry: homeboy agent-task retry {run_id} --run"))
-                );
+                return Err(with_agent_task_retry_hint(
+                    error,
+                    run_id,
+                    request.durable_agent_task_plan,
+                ));
             }
         };
         let controller_job_commands = controller_job_retrieval_commands(&controller_job_id);
@@ -1712,7 +1728,7 @@ pub(crate) fn run_lab_offload_inner(
         Ok(stage) => stage,
         Err(error) => {
             let error = if let Some(run_id) = pre_acceptance_run_id.as_deref() {
-                error.with_hint(format!("Retry: homeboy agent-task retry {run_id} --run"))
+                with_agent_task_retry_hint(error, run_id, request.durable_agent_task_plan)
             } else {
                 error
             };

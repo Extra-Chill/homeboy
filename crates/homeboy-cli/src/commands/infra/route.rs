@@ -14,7 +14,7 @@ use homeboy::core::observation::{
 use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::Error;
 use homeboy::runner::runners::{self, RunnerExecOptions};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -127,7 +127,7 @@ pub fn route_after_parse_with_provenance(
     }
 
     let lab_command = lab_offload_command(&cli.command)?;
-    let normalized_args = inline_test_settings_profiles(cli, normalized_args)?;
+    let normalized_args = inline_portable_settings_profiles(cli, normalized_args)?;
 
     // Keep the readiness verdict, not just the selected id: when no runner is
     // eligible the reasons and remediation commands are the only thing that can
@@ -270,7 +270,11 @@ pub fn route_after_parse_with_provenance(
     // A controller-owned `run` becomes a portable `run-plan`. Route according
     // to that materialized command so Lab stages its workspace and rewrites the
     // structured plan instead of taking the original runner-resident path.
-    let lab_command = if run_handoff.is_some() {
+    let lab_command = if run_handoff.is_some()
+        || retry_handoff
+            .as_ref()
+            .is_some_and(|handoff| handoff.replays_generic_command)
+    {
         lab_offload_command_for_materialized_args(&normalized_args)?
     } else {
         lab_command
@@ -342,7 +346,14 @@ pub fn route_after_parse_with_provenance(
     )?;
     let generic_detached_handoff = needs_generic_detached_handoff
         .then(|| {
-            materialize_generic_detached_lab_handoff(&normalized_args, placement_decision.clone())
+            materialize_generic_detached_lab_handoff(
+                routed_args,
+                &routing_source_path,
+                lab_command
+                    .as_ref()
+                    .expect("generic detached handoff has a Lab command"),
+                placement_decision.clone(),
+            )
         })
         .transpose()?;
     // Only durable agent-task handoffs own placement outcomes. Dispatch
@@ -382,7 +393,13 @@ pub fn route_after_parse_with_provenance(
         .transpose()?;
     let durable_run_id = generic_detached_handoff
         .as_ref()
-        .map(|handoff| handoff.run_id.as_str());
+        .map(|handoff| handoff.run_id.as_str())
+        .or_else(|| {
+            retry_handoff
+                .as_ref()
+                .filter(|handoff| handoff.replays_generic_command)
+                .map(|handoff| handoff.run_id.as_str())
+        });
 
     let outcome = lab_routing::dispatch_lab_offload(
         LabRoutingRequest {
@@ -1658,11 +1675,20 @@ fn materialize_agent_task_cook_plan(
     Ok(Some(plan))
 }
 
-fn inline_test_settings_profiles(cli: &Cli, args: &[String]) -> homeboy::core::Result<Vec<String>> {
-    let settings = match &cli.command {
+fn inline_portable_settings_profiles(
+    cli: &Cli,
+    args: &[String],
+) -> homeboy::core::Result<Vec<String>> {
+    let (settings, command_token) = match &cli.command {
         Commands::Review(review) => match review.command.as_ref() {
-            Some(crate::commands::review::ReviewCommand::Test(test)) => &test.setting_args,
+            Some(crate::commands::review::ReviewCommand::Test(test)) => {
+                (&test.setting_args, "test")
+            }
             _ => return Ok(args.to_vec()),
+        },
+        Commands::Bench(bench) => match bench.portable_settings() {
+            Some(settings) => (settings, "bench"),
+            None => return Ok(args.to_vec()),
         },
         _ => return Ok(args.to_vec()),
     };
@@ -1706,12 +1732,10 @@ fn inline_test_settings_profiles(cli: &Cli, args: &[String]) -> homeboy::core::R
 
     let insertion = rewritten
         .iter()
-        .rposition(|arg| arg == "test")
+        .rposition(|arg| arg == command_token)
         .map(|index| index + 1)
         .ok_or_else(|| {
-            Error::internal_unexpected(
-                "test settings profile normalization lost the test subcommand",
-            )
+            Error::internal_unexpected("settings profile normalization lost the portable command")
         })?;
     let mut portable_profile_args = Vec::with_capacity(profile_values.len() * 2);
     for (key, value) in profile_values {
@@ -1860,20 +1884,109 @@ struct GenericDetachedLabHandoff {
     plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
 }
 
+const GENERIC_LAB_COMMAND_REPLAY_SCHEMA: &str = "homeboy/generic-lab-command-replay/v1";
+
+#[derive(Debug, serde::Deserialize)]
+struct GenericLabCommandReplay {
+    schema: String,
+    normalized_args: Vec<String>,
+    materialization: GenericLabMaterialization,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GenericLabMaterialization {
+    canonical_root: String,
+    content_identity: String,
+}
+
+fn structured_command_inputs(args: &[String]) -> serde_json::Value {
+    let mut options = BTreeMap::<String, Vec<serde_json::Value>>::new();
+    let mut positional = Vec::new();
+    let mut passthrough = Vec::new();
+    let mut iter = args.iter().skip(1).peekable();
+    let mut after_separator = false;
+    while let Some(arg) = iter.next() {
+        if after_separator {
+            passthrough.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            after_separator = true;
+            continue;
+        }
+        if let Some(option) = arg.strip_prefix("--") {
+            if let Some((name, value)) = option.split_once('=') {
+                options
+                    .entry(name.to_string())
+                    .or_default()
+                    .push(serde_json::Value::String(value.to_string()));
+            } else if iter.peek().is_some_and(|value| !value.starts_with('-')) {
+                options
+                    .entry(option.to_string())
+                    .or_default()
+                    .push(serde_json::Value::String(
+                        iter.next().expect("peeked value").clone(),
+                    ));
+            } else {
+                options
+                    .entry(option.to_string())
+                    .or_default()
+                    .push(serde_json::Value::Bool(true));
+            }
+        } else {
+            positional.push(arg.clone());
+        }
+    }
+    serde_json::json!({
+        "positional": positional,
+        "options": options,
+        "passthrough": passthrough,
+    })
+}
+
 /// Give detached portable commands a controller-owned identity before Lab
 /// admission. Agent-task commands retain their richer command-specific plans.
 fn materialize_generic_detached_lab_handoff(
     args: &[String],
+    source_path: &Path,
+    command: &runners::LabOffloadCommand,
     placement_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision,
 ) -> homeboy::core::Result<GenericDetachedLabHandoff> {
     let run_id =
         explicit_run_id(args).unwrap_or_else(|| format!("lab-offload-{}", uuid::Uuid::new_v4()));
+    let canonical_root = source_path.canonicalize().map_err(|error| {
+        Error::validation_invalid_argument(
+            "workspace",
+            "detached Lab handoff could not canonicalize its source workspace",
+            Some(source_path.display().to_string()),
+            Some(vec![error.to_string()]),
+        )
+    })?;
+    let content_identity =
+        homeboy::runner::controller_workspace_materialization_identity(&canonical_root)?;
+    let repository_remote =
+        homeboy::core::git::release_download::detect_remote_url(&canonical_root);
+    let revision = homeboy::core::git::head_sha(&canonical_root);
+    let portable_args = portable_deferred_args(args);
+    let replay = serde_json::json!({
+        "schema": GENERIC_LAB_COMMAND_REPLAY_SCHEMA,
+        "normalized_args": portable_args,
+        "inputs": structured_command_inputs(args),
+        "lab_command": command,
+        "materialization": {
+            "canonical_root": canonical_root,
+            "content_identity": content_identity,
+            "repository_remote": repository_remote,
+            "revision": revision,
+        },
+    });
     let mut plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
         format!("lab-offload-{run_id}"),
         Vec::new(),
     );
     plan.metadata = serde_json::json!({
         "execution_placement_decision": placement_decision,
+        "generic_lab_command_replay": replay,
     });
     if agent_task_lifecycle::run_record_exists(&run_id)? {
         let persisted = agent_task_lifecycle::load_controller_plan(&run_id)?;
@@ -1893,6 +2006,8 @@ fn materialize_generic_detached_lab_handoff(
             })?;
         if persisted.plan_id != plan.plan_id
             || persisted_decision.as_ref() != Some(&placement_decision)
+            || persisted.metadata.get("generic_lab_command_replay")
+                != plan.metadata.get("generic_lab_command_replay")
         {
             return Err(Error::validation_invalid_argument(
                 "run_id",
@@ -1975,6 +2090,37 @@ struct AgentTaskRetryHandoff {
     run_id: String,
     plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
     primary_workspace: PathBuf,
+    replays_generic_command: bool,
+}
+
+fn generic_lab_command_replay(
+    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+) -> homeboy::core::Result<Option<GenericLabCommandReplay>> {
+    let Some(value) = plan.metadata.get("generic_lab_command_replay") else {
+        return Ok(None);
+    };
+    let replay: GenericLabCommandReplay =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            Error::validation_invalid_argument(
+                "generic_lab_command_replay",
+                format!("persisted Lab replay plan is malformed: {error}"),
+                Some(plan.plan_id.clone()),
+                None,
+            )
+        })?;
+    if replay.schema != GENERIC_LAB_COMMAND_REPLAY_SCHEMA
+        || replay.normalized_args.is_empty()
+        || replay.materialization.canonical_root.trim().is_empty()
+        || replay.materialization.content_identity.trim().is_empty()
+    {
+        return Err(Error::validation_invalid_argument(
+            "generic_lab_command_replay",
+            "persisted Lab replay plan lacks required rematerialization identity",
+            Some(plan.plan_id.clone()),
+            None,
+        ));
+    }
+    Ok(Some(replay))
 }
 
 #[derive(Debug)]
@@ -2148,6 +2294,33 @@ fn materialize_agent_task_retry_handoff(
     }
     let record = retry_result.record;
     let plan = agent_task_lifecycle::load_plan(&record.run_id)?;
+    if let Some(replay) = generic_lab_command_replay(&plan)? {
+        let primary_workspace = PathBuf::from(&replay.materialization.canonical_root);
+        let current_identity =
+            homeboy::runner::controller_workspace_materialization_identity(&primary_workspace)?;
+        if current_identity != replay.materialization.content_identity {
+            let error = Error::validation_invalid_argument(
+                "workspace",
+                "agent-task retry refused a source workspace whose content no longer matches the persisted Lab replay identity",
+                Some(primary_workspace.display().to_string()),
+                Some(vec!["Restore the recorded workspace content or reissue the original command as a new run.".to_string()]),
+            );
+            agent_task_lifecycle::record_pre_execution_failure(
+                &record.run_id,
+                &plan,
+                "validate_retry_workspace_identity",
+                &error,
+            )?;
+            return Err(error);
+        }
+        return Ok(Some(AgentTaskRetryHandoff {
+            args: replay.normalized_args,
+            run_id: record.run_id,
+            plan,
+            primary_workspace,
+            replays_generic_command: true,
+        }));
+    }
     let primary_workspace = match retry_plan_primary_workspace(&plan) {
         Ok(workspace) => workspace,
         Err(error) => {
@@ -2190,6 +2363,7 @@ fn materialize_agent_task_retry_handoff(
         run_id: record.run_id,
         plan,
         primary_workspace,
+        replays_generic_command: false,
     }))
 }
 

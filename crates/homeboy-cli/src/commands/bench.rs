@@ -125,6 +125,10 @@ impl BenchArgs {
             extension_overrides: run.extension_override.extensions.clone(),
         })
     }
+
+    pub(crate) fn portable_settings(&self) -> Option<&SettingArgs> {
+        self.run_args_for_lab_offload().map(|run| &run.setting_args)
+    }
 }
 
 #[derive(Subcommand)]
