@@ -9,7 +9,9 @@ use homeboy::runner::runners::{self as runner, ReverseRunnerConnectOptions, Runn
 
 use super::super::{CmdResult, DynamicSetArgs};
 use super::cli::RunnerKindArg;
-use super::types::{RunnerConnectionOutput, RunnerExtra, RunnerOutput, REDACTED_ENV_VALUE};
+use super::types::{
+    RunnerConnectionOutput, RunnerExtra, RunnerOutput, RunnerTruncation, REDACTED_ENV_VALUE,
+};
 
 pub(super) struct RunnerAddInput {
     pub(super) json: Option<String>,
@@ -80,13 +82,47 @@ pub(super) fn add(input: RunnerAddInput) -> CmdResult<RunnerOutput> {
     }
 }
 
-pub(super) fn list() -> CmdResult<RunnerOutput> {
+pub(super) fn list(full: bool) -> CmdResult<RunnerOutput> {
+    let entities = runner::list()?;
+    let sessions = runner::statuses()?;
+
+    if full {
+        return Ok((
+            RunnerOutput {
+                command: "runner.list".to_string(),
+                entities,
+                extra: RunnerExtra {
+                    sessions,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            0,
+        ));
+    }
+
+    // Answer the question the command is actually asked -- which runners exist,
+    // are they reachable, can they take work -- and keep the diagnostic mass
+    // behind `--full`. Reuses `runner status`'s compact shape rather than
+    // inventing a second one (#9478/#9522/#9487).
+    let runner_summaries = sessions
+        .iter()
+        .map(super::status::operator_summary)
+        .collect::<Vec<_>>();
+    let omitted_sessions = sessions.len();
+
     Ok((
         RunnerOutput {
             command: "runner.list".to_string(),
-            entities: runner::list()?,
+            entities,
             extra: RunnerExtra {
-                sessions: runner::statuses()?,
+                runner_summaries,
+                truncation: Some(RunnerTruncation {
+                    omitted_generations: 0,
+                    omitted_sessions,
+                    evidence_ref: "runner:list:sessions".to_string(),
+                    full_command: "homeboy runner list --full".to_string(),
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -443,6 +479,38 @@ pub(super) fn redact_runner_output_env(output: &mut RunnerOutput) {
 
 #[cfg(test)]
 mod tests {
+    /// `runner list` must default to the compact view and keep the diagnostic
+    /// mass behind `--full` (#9487).
+    mod list_output_shape {
+        use crate::cli_surface::Cli;
+        use clap::Parser;
+
+        fn parse(args: &[&str]) -> bool {
+            let cli = Cli::try_parse_from(args).expect("parse runner list");
+            let crate::cli_surface::Commands::Runner(runner) = cli.command else {
+                panic!("expected a runner command");
+            };
+            match runner.command {
+                crate::commands::runner::cli::RunnerCommand::List { full } => full,
+                _ => panic!("expected a runner list command"),
+            }
+        }
+
+        #[test]
+        fn list_defaults_to_the_compact_view() {
+            assert!(
+                !parse(&["homeboy", "runner", "list"]),
+                "the default must be compact; a long-lived controller's full \
+                 listing truncates in agent and terminal output"
+            );
+        }
+
+        #[test]
+        fn full_is_available_explicitly() {
+            assert!(parse(&["homeboy", "runner", "list", "--full"]));
+        }
+    }
+
     // Argument validation is exercised through `validate_connect_input` rather
     // than `connect` so no test can fall through to a real SSH attempt.
     use super::{validate_connect_input, RunnerConnectInput};

@@ -52,6 +52,7 @@ Run generic agent task plans
 | `homeboy agent-task promote` | _no help text_ |
 | `homeboy agent-task adopt` | Adopt an immutable commit candidate through a tracked cook's normal gates and finalization |
 | `homeboy agent-task finalize-pr` | _no help text_ |
+| `homeboy agent-task accept` | Record an independent, durable acceptance verdict for a candidate |
 | `homeboy agent-task gate-feedback` | _no help text_ |
 | `homeboy agent-task providers` | _no help text_ |
 | `homeboy agent-task prompts` | _no help text_ |
@@ -145,6 +146,9 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--protected-branch` | `<BRANCH>` | Branch names the cook refuses to push to or target directly, as a safety guard. Repeatable; defaults to the standard protected set |
 | `--ai-tool` | `<TEXT>` | AI tool disclosure recorded in the PR's assistance attribution (default `AI-assisted`) |
 | `--ai-used-for` | `<TEXT>` | Legacy AI-usage disclosure. The reviewer-facing "Used for" text is now authored by the agent's `review_form.used_for` (a self-reflective process description) and validated by the cook loop's review-form gate; this flag no longer feeds the PR body. Retained only for recipe back-compatibility and defaults empty (no canned platitude) |
+| `--require-acceptance` | flag | Require a separate durable acceptance verdict before PR finalization |
+| `--acceptance-authority` | `<ACCEPTANCE_AUTHORITY>` | Authority allowed to issue the acceptance verdict |
+| `--acceptance-policy` | `<ACCEPTANCE_POLICY>` | Policy the acceptance authority applies |
 
 ## `homeboy agent-task cook-continue`
 
@@ -888,6 +892,24 @@ _This command declares no clap help text, so no description can be generated for
 | `--review-override` | `<TARGET=VALUE@PROVENANCE>` | _no help text_ |
 | `--preflight` | flag | Validate the complete hydrated dossier and candidate without publishing |
 | `--manual-finalization` | flag | _no help text_ |
+
+## `homeboy agent-task accept`
+
+```sh
+homeboy agent-task accept [OPTIONS] <RUN_ID>
+```
+
+Record an independent, durable acceptance verdict for a candidate
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<RUN_ID>` | yes | _no help text_ |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--verdict` | `<VERDICT>` | _no help text_ Values: `accepted`, `rejected`. |
+| `--token` | `<TOKEN>` | Opaque credential consumed by the configured acceptance verifier |
+| `--evidence-ref` | `<EVIDENCE_REFS>` | _no help text_ |
 
 ## `homeboy agent-task gate-feedback`
 

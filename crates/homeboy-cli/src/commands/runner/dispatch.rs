@@ -63,7 +63,7 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
                 ..RunnerSettings::default()
             },
         )),
-        RunnerCommand::List => map_registry(list()),
+        RunnerCommand::List { full } => map_registry(list(full)),
         RunnerCommand::Show { id } => map_registry(show(&id)),
         RunnerCommand::Set { args } => map_registry(set(args)),
         RunnerCommand::Trust {

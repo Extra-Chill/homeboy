@@ -93,10 +93,14 @@ Enable runner capability on an existing SSH server
 ## `homeboy runner list`
 
 ```sh
-homeboy runner list
+homeboy runner list [OPTIONS]
 ```
 
 List all configured runners
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--full` | flag | Include full runner configuration, sessions, and environment |
 
 ## `homeboy runner show`
 
