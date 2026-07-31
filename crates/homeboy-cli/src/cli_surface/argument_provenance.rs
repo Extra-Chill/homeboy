@@ -94,6 +94,19 @@ impl CommandArgumentProvenance {
 
     fn collect(&mut self, matches: &ArgMatches) {
         for id in matches.ids() {
+            // `ids()` yields ids that `value_source` cannot resolve, and it
+            // PANICS on them rather than returning `None`:
+            //
+            //   `"placement"` is not an id of an argument or a group.
+            //
+            // The runtime parses an extension-augmented command, whose global
+            // and flattened argument layout surfaces such ids, so any command
+            // reaching this collector aborted the process. `homeboy refactor
+            // rename` did exactly that. `try_get_raw` reports the same
+            // distinction as a recoverable error, so use it as the guard.
+            if matches.try_get_raw(id.as_str()).is_err() {
+                continue;
+            }
             if let Some(source) = matches.value_source(id.as_str()) {
                 self.set(id.as_str(), ArgumentSource::from_clap(source));
             }
