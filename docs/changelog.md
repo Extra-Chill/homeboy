@@ -4,6 +4,42 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.326.0] - 2026-07-31
+
+### Added
+- reconcile portfolio lifecycle
+- require durable acceptance verdicts
+- persist canonical placement decisions
+- authenticate provider execution context
+- model candidate dependencies
+
+### Changed
+- materialize dry-run worktrees
+- model pending acceptance state
+- isolate durable finalization evidence
+
+### Fixed
+- stop argument provenance panicking on unresolvable ids
+- make Test phases restartable
+- retain active portfolio findings
+- activate bounded portfolio recovery
+- preserve recipe corrections after rebase
+- persist safe child recovery
+- preserve direct exec lifecycle evidence
+- fail closed on legacy context evidence
+- separate placement outcome domains
+- require consumed execution receipts
+- recover manual finalization intent
+- retain gate baseline artifacts
+- resolve Cook aliases to selected attempts
+- reject incomplete mixed checks
+- protect a target directory that a build currently owns
+- route project checks through providers
+- stop spawning extension ready_checks on the runtime path
+- rearm dependent verification
+- derive the store schema version from its migration list
+- own staging workspace lifecycle
+
 ## [0.325.0] - 2026-07-30
 
 ### Added
