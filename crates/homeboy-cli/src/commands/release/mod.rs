@@ -114,6 +114,10 @@ pub struct ReleaseExecuteArgs {
     #[arg(long)]
     recover: bool,
 
+    /// Provider workspace owner reference to reconcile during --recover.
+    #[arg(long, value_name = "OWNER_RUN_REF")]
+    owner_run_ref: Option<String>,
+
     /// With --recover: if the release tag exists but points at a commit behind
     /// HEAD (e.g. config-only commits landed after tagging), move the tag to
     /// HEAD instead of refusing. Guarded — the tagged commit must be an
@@ -222,6 +226,8 @@ pub struct ReleaseExecuteArgs {
 pub struct ReleaseOutput {
     pub variant: &'static str,
     pub result: ReleaseCommandResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<release::ReleaseWorkspaceOutput>,
     /// Dependency-aware cascade result, present when `--cascade` released
     /// dependents after this component.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -387,6 +393,7 @@ impl ReleaseExecuteArgs {
             apply: false,
             deploy,
             recover,
+            owner_run_ref: None,
             retag: false,
             head,
             from_artifacts,
@@ -475,7 +482,9 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
             git_identity: args.git_identity.clone(),
             execution: Some(execution.clone()),
         };
-        let (result, exit_code) = release::run_command(input.clone())?;
+        let (workspace_result, exit_code) =
+            release::run_command_with_workspace(input.clone(), args.owner_run_ref.as_deref())?;
+        let result = workspace_result.result;
 
         let cascade = run_cascade_if_requested(&args, component_id, &result, &input)?;
 
@@ -484,6 +493,7 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
                 variant: "single",
                 actionable: recovery_actionable_metadata(&result),
                 result,
+                workspace: workspace_result.workspace,
                 cascade,
             }),
             exit_code,
@@ -1050,6 +1060,7 @@ mod tests {
             apply: false,
             deploy: false,
             recover: false,
+            owner_run_ref: None,
             retag: false,
             head: false,
             from_artifacts: None,
@@ -1375,6 +1386,7 @@ jobs:
             variant: "single",
             actionable: recovery_actionable_metadata(&result),
             result,
+            workspace: None,
             cascade: None,
         };
         let data = serde_json::to_value(output).expect("serialize release result");

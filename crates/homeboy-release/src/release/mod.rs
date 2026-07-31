@@ -28,6 +28,7 @@ mod utils;
 pub mod version;
 mod workflow;
 mod workflow_recover;
+mod workspace;
 
 pub use cascade::{run_cascade, CascadeResult, CascadeStepResult, ReleasedCoordinates};
 pub use executor::artifacts::{
@@ -42,10 +43,13 @@ pub use types::{
     ReleaseExecutionPlan, ReleaseOptions, ReleasePhase, ReleasePipelineOptions, ReleasePlan,
     ReleaseProjectDeployResult, ReleaseRollbackEvidence, ReleaseRun, ReleaseRunResult,
     ReleaseRunSummary, ReleaseSemverCommit, ReleaseSemverRecommendation, ReleaseStepResult,
-    ReleaseStepStatus,
+    ReleaseStepStatus, ReleaseWorkspaceCommandResult, ReleaseWorkspaceOutput,
 };
 pub use utils::{extract_latest_notes, parse_release_artifacts};
-pub use workflow::{run_batch, run_command, SKIPPED_RELEASE_EXIT_CODE};
+pub use workflow::{
+    run_batch, run_command, run_command_with_recovery_owner, run_command_with_workspace,
+    SKIPPED_RELEASE_EXIT_CODE,
+};
 
 /// Return the release tag name this component uses for a version.
 ///

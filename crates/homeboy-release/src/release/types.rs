@@ -205,6 +205,55 @@ pub struct ReleaseRunResult {
     pub rollback: Option<ReleaseRollbackEvidence>,
 }
 
+/// The authoritative checkout used by a release and its terminal disposition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseWorkspaceOutput {
+    pub kind: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_run_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_disposition: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finalization_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconciliation_ref: Option<String>,
+}
+
+impl ReleaseWorkspaceOutput {
+    pub(crate) fn in_place(path: &str) -> Self {
+        Self {
+            kind: "in_place".to_string(),
+            path: path.to_string(),
+            provider_id: None,
+            handle: None,
+            owner_run_ref: None,
+            source_sha: None,
+            final_disposition: None,
+            continuation_ref: None,
+            finalization_error: None,
+            reconciliation_ref: None,
+        }
+    }
+}
+
+/// Additive result envelope for callers that requested provider workspace
+/// lifecycle evidence. The legacy release result remains unchanged.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReleaseWorkspaceCommandResult {
+    pub result: ReleaseCommandResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<ReleaseWorkspaceOutput>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseRollbackEvidence {
     /// `restored` means final_head was independently observed at original_head.
@@ -709,5 +758,22 @@ mod tests {
         let input = ReleaseCommandInput::default();
 
         assert!(!input.force_lower_bump);
+    }
+
+    #[test]
+    fn legacy_release_run_result_literal_and_json_shape_remain_compatible() {
+        let result = ReleaseRunResult {
+            steps: Vec::new(),
+            status: ReleaseStepStatus::Success,
+            warnings: Vec::new(),
+            summary: None,
+            phase_timings: None,
+            rollback: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(result).expect("serialize legacy release result"),
+            serde_json::json!({ "steps": [], "status": "success" })
+        );
     }
 }
