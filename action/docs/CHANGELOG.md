@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.10.2] - 2026-07-31
+
+### Fixed
+- restore cache in differential phases
+
 ## [2.10.1] - 2026-07-31
 
 ### Fixed
