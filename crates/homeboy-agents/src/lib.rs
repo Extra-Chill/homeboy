@@ -21,6 +21,7 @@ pub mod agent_task_dispatch_plan;
 pub mod agent_task_dispatch_service;
 pub mod agent_task_executor_evidence;
 pub mod agent_task_fanout;
+pub mod agent_task_fanout_supervisor;
 pub mod agent_task_finalization;
 pub mod agent_task_gate;
 pub mod agent_task_gate_executor;
