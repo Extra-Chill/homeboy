@@ -5,8 +5,8 @@ use homeboy::core::command_execution_plan::CommandSourceMaterialization;
 use homeboy::core::component::{self, TargetSpec};
 use homeboy::core::git;
 use homeboy::core::lab_routing::{
-    self, LabDispatchObserver, LabRouteOutcome, LabRoutingRequest, NoopLabDispatchObserver,
-    PersistedRunRetrieval,
+    self, ExecutionPlacementOutcomeTarget, LabDispatchObserver, LabRouteOutcome, LabRoutingRequest,
+    NoopLabDispatchObserver, PersistedRunRetrieval,
 };
 use homeboy::core::observation::{
     finish_run_best_effort, NewRunRecord, ObservationStore, RunStatus,
@@ -83,6 +83,15 @@ pub fn route_after_parse_with_provenance(
 
     if is_command_local_runner_option(&cli.command) {
         return Ok(None);
+    }
+
+    // This is a command safety boundary, not an offload fallback decision.
+    // Reject before resolving any source workspace so explicit local execution
+    // cannot be obscured by unrelated route-materialization failures.
+    if cli.placement == homeboy::cli_surface::Placement::Local
+        && destructive_fuzz_requires_lab(&cli.command)
+    {
+        return Err(destructive_fuzz_local_execution_error());
     }
 
     if let (Some(runner_id), Commands::Rig(args)) = (cli.runner.as_deref(), &cli.command) {
@@ -273,17 +282,79 @@ pub fn route_after_parse_with_provenance(
     };
     let normalized_args =
         inject_agent_task_cook_attempt_plan(&normalized_args, cook_plan.as_ref())?;
-    let generic_detached_handoff = if lab_command.is_some()
+    let needs_generic_detached_handoff = lab_command.is_some()
         && inferred_runner_id.is_some()
         && cli.detach_after_handoff
         && run_handoff.is_none()
         && retry_handoff.is_none()
-        && cook_plan.is_none()
-    {
-        Some(materialize_generic_detached_lab_handoff(&normalized_args)?)
-    } else {
-        None
-    };
+        && cook_plan.is_none();
+    let observer = lab_dispatch_observer(cli, &normalized_args, inferred_runner_id.as_deref());
+
+    let capture_mutation_patch = cli.command.lab_offload_captures_mutation_patch();
+    let mutation_flag = cli.command.lab_offload_mutation_flag();
+
+    // For component-targeted write/fix commands (`homeboy review lint --fix <component>`,
+    // `homeboy refactor --from lint --write <component>`), the component is
+    // resolved on the controller to its source checkout and the args are
+    // rewritten to `--path <source>`. Without this, the offload syncs and
+    // diff-captures the controller's working directory while the remote re-resolves
+    // the positional component to the runner's registered checkout and writes
+    // fixes there — so the source-tree mutation lands outside the captured
+    // workspace and the runner returns no patch to apply (#4315).
+    let scoped_args = inject_lab_changed_files(&cli.command, &normalized_args)?;
+    let normalized_args = scoped_args.as_deref().unwrap_or(&normalized_args);
+
+    let rewritten_args =
+        lab_route_source_path_args(&cli.command, normalized_args, capture_mutation_patch);
+    let routed_args = rewritten_args.as_deref().unwrap_or(normalized_args);
+    let generic_detached_source_path = needs_generic_detached_handoff
+        .then(|| source_path_for_generic_detached_lab_handoff(&normalized_args))
+        .transpose()?;
+    // Resolve this once on the controller. The decision records the same source
+    // worktree that will be snapshotted, never an ambient identity inferred by a
+    // later provider process.
+    let routing_source_path = run_handoff
+        .as_ref()
+        .map(|handoff| handoff.primary_workspace.clone())
+        .or_else(|| {
+            retry_handoff
+                .as_ref()
+                .map(|handoff| handoff.primary_workspace.clone())
+        })
+        .or_else(|| generic_detached_source_path.clone())
+        .map(Ok)
+        .unwrap_or_else(|| authoritative_lab_source_path(routed_args))?;
+    let job_overrides = lab_job_overrides(cli)?;
+
+    // Cook materializes its provider task before routing. Bind that stable task
+    // identity into the initial decision so the first Lab attempt is not an
+    // artificial replacement of a generic command-level decision.
+    let placement_task = cook_plan
+        .as_ref()
+        .and_then(|plan| plan.tasks.first())
+        .map(|task| task.task_id.as_str())
+        .unwrap_or("command");
+    let placement_decision = placement_decision(
+        cli,
+        inferred_runner_id.as_deref(),
+        placement_task,
+        Some(&routing_source_path),
+    )?;
+    let generic_detached_handoff = needs_generic_detached_handoff
+        .then(|| {
+            materialize_generic_detached_lab_handoff(&normalized_args, placement_decision.clone())
+        })
+        .transpose()?;
+    // Only durable agent-task handoffs own placement outcomes. Dispatch
+    // observations (trace and detached fanout) persist through their observers.
+    let placement_outcome_target = placement_outcome_target(
+        retry_handoff
+            .as_ref()
+            .map(|handoff| handoff.run_id.as_str()),
+        generic_detached_handoff
+            .as_ref()
+            .map(|handoff| handoff.run_id.as_str()),
+    );
     // Lab routing carries the durable plan opaquely as JSON (core does not
     // depend on the agent-task subsystem); serialize the selected typed plan.
     let durable_agent_task_plan = run_handoff
@@ -312,33 +383,10 @@ pub fn route_after_parse_with_provenance(
     let durable_run_id = generic_detached_handoff
         .as_ref()
         .map(|handoff| handoff.run_id.as_str());
-    let observer = lab_dispatch_observer(cli, &normalized_args, inferred_runner_id.as_deref());
-    let active_run_id = observer
-        .run_id()
-        .map(str::to_string)
-        .or_else(|| retry_handoff.as_ref().map(|handoff| handoff.run_id.clone()));
-
-    let capture_mutation_patch = cli.command.lab_offload_captures_mutation_patch();
-    let mutation_flag = cli.command.lab_offload_mutation_flag();
-
-    // For component-targeted write/fix commands (`homeboy review lint --fix <component>`,
-    // `homeboy refactor --from lint --write <component>`), the component is
-    // resolved on the controller to its source checkout and the args are
-    // rewritten to `--path <source>`. Without this, the offload syncs and
-    // diff-captures the controller's working directory while the remote re-resolves
-    // the positional component to the runner's registered checkout and writes
-    // fixes there — so the source-tree mutation lands outside the captured
-    // workspace and the runner returns no patch to apply (#4315).
-    let scoped_args = inject_lab_changed_files(&cli.command, &normalized_args)?;
-    let normalized_args = scoped_args.as_deref().unwrap_or(&normalized_args);
-
-    let rewritten_args =
-        lab_route_source_path_args(&cli.command, normalized_args, capture_mutation_patch);
-    let routed_args = rewritten_args.as_deref().unwrap_or(normalized_args);
-    let job_overrides = lab_job_overrides(cli)?;
 
     let outcome = lab_routing::dispatch_lab_offload(
         LabRoutingRequest {
+            placement_decision,
             command: lab_command,
             normalized_args: routed_args,
             explicit_runner: cli.runner.as_deref(),
@@ -350,7 +398,7 @@ pub fn route_after_parse_with_provenance(
             capture_patch: capture_mutation_patch,
             mutation_flag,
             timeout: lab_route_dispatch_timeout(&cli.command),
-            active_run_id: active_run_id.as_deref(),
+            placement_outcome_target,
             detach_after_handoff: cli.detach_after_handoff,
             output_file_requested: output_file.is_some(),
             read_only_polling: cli
@@ -363,19 +411,7 @@ pub fn route_after_parse_with_provenance(
             // A serialized run-plan has no workspace CLI argument. Carry its
             // canonical plan root through the portable source channel so Lab
             // snapshots it before remapping nested plan/config paths.
-            source_path: run_handoff
-                .as_ref()
-                .map(|handoff| handoff.primary_workspace.as_path())
-                .or_else(|| {
-                    retry_handoff
-                        .as_ref()
-                        .map(|handoff| handoff.primary_workspace.as_path())
-                })
-                .or_else(|| {
-                    generic_detached_handoff
-                        .as_ref()
-                        .map(|handoff| handoff.source_path.as_path())
-                }),
+            source_path: Some(&routing_source_path),
             verified_cook_baseline: None,
             require_controller_git_bundle: false,
             reuse_compatible_snapshot: retry_handoff.is_some(),
@@ -424,6 +460,125 @@ pub fn route_after_parse_with_provenance(
             Ok(Some(output.exit_code))
         }
     }
+}
+
+fn placement_decision(
+    cli: &Cli,
+    runner_id: Option<&str>,
+    task: &str,
+    source_path: Option<&Path>,
+) -> homeboy::core::Result<homeboy_lab_runner_contract::ExecutionPlacementDecision> {
+    use homeboy_lab_runner_contract::{
+        EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
+        ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
+        ExecutionPlacementRunnerSelection, RunnerSelectionSource,
+    };
+    // Selecting a default runner is a policy preference, not an operator
+    // requirement. Only pinned Lab placement or an explicit runner forbids a
+    // verified local fallback.
+    let required = if cli.placement == homeboy::cli_surface::Placement::Lab || cli.runner.is_some()
+    {
+        ExecutionPlacementRequirement::Lab
+    } else {
+        ExecutionPlacementRequirement::Either
+    };
+    // `auto` is a policy-selected Lab attempt. The provider may append a
+    // verified local fallback only when the decision's fallback policy allows.
+    let selected = if cli.placement == homeboy::cli_surface::Placement::Local || runner_id.is_none()
+    {
+        EffectiveExecutionPlacement::Local
+    } else {
+        EffectiveExecutionPlacement::Lab
+    };
+    if cli.placement == homeboy::cli_surface::Placement::Lab && runner_id.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "placement",
+            "required Lab placement has no selected ready runner",
+            Some("lab".to_string()),
+            None,
+        ));
+    }
+    Ok(
+        homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+            "lab-route-contract",
+            "v1",
+            ExecutionPlacementIdentity {
+                repository: source_path
+                    .and_then(|path| path.file_name())
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "runner-resident-or-unmaterialized".to_string()),
+                workspace: source_path
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "runner-resident-or-unmaterialized".to_string()),
+                task: task.to_string(),
+                candidate: source_path.and_then(homeboy::core::git::head_sha),
+                base: source_path
+                    .and_then(|path| homeboy::core::git::rev_parse(path, "origin/HEAD")),
+            },
+            cli.placement,
+            required,
+            selected,
+            runner_id.map(|runner_id| ExecutionPlacementRunnerSelection {
+                runner_id: runner_id.to_string(),
+                source: if cli.runner.is_some() {
+                    RunnerSelectionSource::Explicit
+                } else {
+                    RunnerSelectionSource::Policy
+                },
+            }),
+            ExecutionPlacementFallback {
+                // Automatic routing historically falls back to local when no ready
+                // Lab runner exists; record that authorization explicitly.
+                local_allowed: required != ExecutionPlacementRequirement::Lab
+                    && matches!(
+                        cli.placement,
+                        homeboy::cli_surface::Placement::Auto
+                            | homeboy::cli_surface::Placement::LabOrLocal
+                    ),
+                reason: None,
+            },
+            ExecutionPlacementOverrideAuthorization {
+                authorized: cli.placement == homeboy::cli_surface::Placement::Local,
+                authority: (cli.placement == homeboy::cli_surface::Placement::Local)
+                    .then(|| "operator --placement local".to_string()),
+            },
+        ),
+    )
+}
+
+fn authoritative_lab_source_path(args: &[String]) -> homeboy::core::Result<PathBuf> {
+    let mut args = args.iter().skip(1);
+    while let Some(argument) = args.next() {
+        if argument == "--" {
+            break;
+        }
+        if matches!(
+            argument.as_str(),
+            "--path" | "--cwd" | "--workspace" | "--to-worktree"
+        ) {
+            let value = args.next().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    argument.trim_start_matches("--"),
+                    format!("{argument} requires a source worktree"),
+                    None,
+                    None,
+                )
+            })?;
+            return Ok(PathBuf::from(value));
+        }
+        if let Some(value) = argument
+            .strip_prefix("--path=")
+            .or_else(|| argument.strip_prefix("--cwd="))
+        {
+            return Ok(PathBuf::from(value));
+        }
+    }
+    std::env::current_dir().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("resolve controller source worktree".to_string()),
+        )
+    })
 }
 
 /// A runner-resident plan, or a nested command targeting the runner that
@@ -557,25 +712,46 @@ fn run_split_placement_fanout(
     let Some(runner_id) = runner_id else {
         return Ok(None);
     };
-    let dispatcher = LabCookAttemptDispatcher {
-        runner_id: runner_id.to_string(),
-        allow_local_fallback: false,
-        allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
-        skip_deps_hydration: cli.skip_deps_hydration,
-        detach_after_handoff: cli.detach_after_handoff,
-        source_path: None,
-        job_overrides: lab_job_overrides(cli)?,
-    };
+    let runner_id = runner_id.to_string();
+    let job_overrides = lab_job_overrides(cli)?;
+    let placement = cli.placement;
+    let runner_is_explicit = cli.runner.is_some();
+    let allow_dirty_lab_workspace = cli.allow_dirty_lab_workspace;
+    let skip_deps_hydration = cli.skip_deps_hydration;
+    let detach_after_handoff = cli.detach_after_handoff;
     let attempt_dispatcher =
         move |options: &crate::agents::agent_task_service::AgentTaskCookServiceOptions| {
-            let mut dispatcher = dispatcher.clone();
-            dispatcher.source_path = options
+            // Fanout compiles each child worktree before this factory runs. Bind
+            // its decision here, not at coordinator startup, so the decision
+            // names the child candidate/base that will actually be dispatched.
+            let source_path = options
                 .initial_plan
                 .tasks
                 .first()
                 .and_then(|task| task.workspace.root.as_ref())
                 .map(PathBuf::from);
-            Arc::new(dispatcher)
+            let task = options
+                .initial_plan
+                .tasks
+                .first()
+                .map(|task| task.task_id.as_str())
+                .unwrap_or("fanout-provider-attempt");
+            Arc::new(LabCookAttemptDispatcher {
+                runner_id: runner_id.clone(),
+                placement_decision: fanout_child_placement_decision(
+                    placement,
+                    runner_is_explicit,
+                    &runner_id,
+                    task,
+                    source_path.as_deref(),
+                ),
+                allow_local_fallback: false,
+                allow_dirty_lab_workspace,
+                skip_deps_hydration,
+                detach_after_handoff,
+                source_path,
+                job_overrides: job_overrides.clone(),
+            })
                 as Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>
         };
     let (value, exit_code) = match &cli.command {
@@ -669,6 +845,56 @@ fn reject_contradictory_cook_arguments(cli: &Cli) -> homeboy::core::Result<()> {
     Ok(())
 }
 
+fn fanout_child_placement_decision(
+    placement: homeboy::cli_surface::Placement,
+    runner_is_explicit: bool,
+    runner_id: &str,
+    task: &str,
+    source_path: Option<&Path>,
+) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
+    use homeboy_lab_runner_contract::{
+        EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
+        ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
+        ExecutionPlacementRunnerSelection, RunnerSelectionSource,
+    };
+
+    homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+        "lab-route-contract",
+        "v1",
+        ExecutionPlacementIdentity {
+            repository: source_path
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "unmaterialized-fanout-child".to_string()),
+            workspace: source_path
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "unmaterialized-fanout-child".to_string()),
+            task: task.to_string(),
+            candidate: source_path.and_then(homeboy::core::git::head_sha),
+            base: source_path.and_then(|path| homeboy::core::git::rev_parse(path, "origin/HEAD")),
+        },
+        placement,
+        ExecutionPlacementRequirement::Lab,
+        EffectiveExecutionPlacement::Lab,
+        Some(ExecutionPlacementRunnerSelection {
+            runner_id: runner_id.to_string(),
+            source: if runner_is_explicit {
+                RunnerSelectionSource::Explicit
+            } else {
+                RunnerSelectionSource::Policy
+            },
+        }),
+        ExecutionPlacementFallback {
+            local_allowed: false,
+            reason: None,
+        },
+        ExecutionPlacementOverrideAuthorization {
+            authorized: false,
+            authority: None,
+        },
+    )
+}
+
 /// Cook owns controller-local target resolution, promotion, gates, retries, and
 /// finalization. Its provider attempt is the only portable unit: a materialized
 /// typed run-plan that mirrors its aggregate and artifacts back into the same
@@ -718,12 +944,23 @@ fn run_split_placement_cook(
         .first()
         .and_then(|task| task.workspace.root.as_ref())
         .map(PathBuf::from);
+    let placement_task = plan
+        .tasks
+        .first()
+        .map(|task| task.task_id.as_str())
+        .unwrap_or("cook-provider-attempt");
     let mut controller = cook.clone();
     controller.dispatch.run_id = Some(cook_id);
     controller.attempt_run_id = Some(attempt_run_id);
     controller.attempt_plan = Some(serialized_plan);
     let dispatcher = Arc::new(LabCookAttemptDispatcher {
         runner_id: runner_id.to_string(),
+        placement_decision: placement_decision(
+            cli,
+            Some(runner_id),
+            placement_task,
+            source_path.as_deref(),
+        )?,
         allow_local_fallback: cli.placement.allows_local_fallback(),
         allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
         skip_deps_hydration: cli.skip_deps_hydration,
@@ -761,6 +998,7 @@ fn run_split_placement_cook(
 #[derive(Debug, Clone)]
 struct LabCookAttemptDispatcher {
     runner_id: String,
+    placement_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision,
     allow_local_fallback: bool,
     allow_dirty_lab_workspace: bool,
     skip_deps_hydration: bool,
@@ -809,6 +1047,10 @@ pub(crate) fn reconstruct_cook_attempt_dispatcher(
     let overrides = value("job_overrides")?;
     let dispatcher = LabCookAttemptDispatcher {
         runner_id: decode_cook_dispatch_field("runner_id", value("runner_id")?)?,
+        placement_decision: decode_cook_dispatch_field(
+            "execution_placement_decision",
+            value("execution_placement_decision")?,
+        )?,
         allow_local_fallback: decode_cook_dispatch_field(
             "allow_local_fallback",
             value("allow_local_fallback")?,
@@ -874,6 +1116,7 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
         Ok(serde_json::json!({
             "kind": "lab",
             "runner_id": self.runner_id,
+            "execution_placement_decision": self.placement_decision,
             "allow_local_fallback": self.allow_local_fallback,
             "allow_dirty_lab_workspace": self.allow_dirty_lab_workspace,
             "skip_deps_hydration": self.skip_deps_hydration,
@@ -901,6 +1144,24 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
         run_id: &str,
         derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     ) -> homeboy::core::Result<()> {
+        // Preserve the controller's canonical decision across ordinary retry,
+        // continuation, and fanout replay. A derived baseline is the declared
+        // pre-staging transition where a changed candidate may replace it.
+        let source_path =
+            cook_attempt_source_path(derived_cook_baseline, self.source_path.as_deref());
+        let task = plan
+            .tasks
+            .first()
+            .map(|task| task.task_id.clone())
+            .unwrap_or_else(|| self.placement_decision.identity.task.clone());
+        let placement_decision = resolve_cook_attempt_placement_decision(
+            &mut plan,
+            run_id,
+            &self.placement_decision,
+            &self.runner_id,
+            &task,
+            source_path,
+        )?;
         // The capability has already bound the promoted artifact and exact
         // baseline to this retry; only its evidence crosses the Lab boundary.
         let verified_cook_baseline =
@@ -956,6 +1217,7 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
             });
             let outcome = lab_routing::dispatch_lab_offload(
                 LabRoutingRequest {
+                    placement_decision: placement_decision.clone(),
                     command: lab_offload_command(&provider_cli.command)?,
                     normalized_args: &provider_args,
                     explicit_runner: Some(&self.runner_id),
@@ -967,7 +1229,9 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                     capture_patch: false,
                     mutation_flag: None,
                     timeout: None,
-                    active_run_id: Some(run_id),
+                    placement_outcome_target: Some(
+                        ExecutionPlacementOutcomeTarget::AgentTaskLifecycle { run_id },
+                    ),
                     detach_after_handoff: self.detach_after_handoff,
                     output_file_requested: false,
                     read_only_polling: false,
@@ -979,10 +1243,7 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                     // A retry's baseline is controller-owned capability, not plan
                     // data. Stage that exact clean checkout; never substitute the
                     // controller's original workspace during nested Lab dispatch.
-                    source_path: cook_attempt_source_path(
-                        derived_cook_baseline,
-                        self.source_path.as_deref(),
-                    ),
+                    source_path,
                     verified_cook_baseline: verified_cook_baseline.as_ref(),
                     job_overrides: self.job_overrides.clone(),
                 },
@@ -1048,6 +1309,114 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
             LabRouteOutcome::InFlight(_) => Ok(()),
         }
     }
+}
+
+fn placement_decision_for_attempt(
+    prior: &homeboy_lab_runner_contract::ExecutionPlacementDecision,
+    runner_id: &str,
+    task: &str,
+    source_path: Option<&Path>,
+) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
+    use homeboy_lab_runner_contract::{
+        ExecutionPlacementIdentity, ExecutionPlacementRunnerSelection,
+    };
+
+    homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+        prior.policy_id.clone(),
+        prior.policy_revision.clone(),
+        ExecutionPlacementIdentity {
+            repository: source_path
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| prior.identity.repository.clone()),
+            workspace: source_path
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| prior.identity.workspace.clone()),
+            task: task.to_string(),
+            candidate: source_path
+                .and_then(homeboy::core::git::head_sha)
+                .or_else(|| prior.identity.candidate.clone()),
+            base: source_path
+                .and_then(|path| homeboy::core::git::rev_parse(path, "origin/HEAD"))
+                .or_else(|| prior.identity.base.clone()),
+        },
+        prior.requested,
+        prior.required,
+        prior.selected,
+        Some(ExecutionPlacementRunnerSelection {
+            runner_id: runner_id.to_string(),
+            source: prior
+                .runner
+                .as_ref()
+                .map(|runner| runner.source)
+                .unwrap_or(homeboy_lab_runner_contract::RunnerSelectionSource::Explicit),
+        }),
+        prior.fallback.clone(),
+        prior.override_authorization.clone(),
+    )
+}
+
+fn resolve_cook_attempt_placement_decision(
+    plan: &mut homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    run_id: &str,
+    initial: &homeboy_lab_runner_contract::ExecutionPlacementDecision,
+    runner_id: &str,
+    task: &str,
+    source_path: Option<&Path>,
+) -> homeboy::core::Result<homeboy_lab_runner_contract::ExecutionPlacementDecision> {
+    let replacement = placement_decision_for_attempt(initial, runner_id, task, source_path);
+    let persisted = plan
+        .metadata
+        .get("execution_placement_decision")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "execution_placement_decision",
+                format!("durable plan has malformed canonical placement decision: {error}"),
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    let placement_decision = persisted.unwrap_or_else(|| initial.clone());
+    let stale_reasons = placement_decision.stale_reasons(&replacement);
+    if !plan.metadata.is_object() {
+        plan.metadata = serde_json::json!({ "legacy_metadata": plan.metadata });
+    }
+    if !stale_reasons.is_empty() {
+        plan.metadata["execution_placement_invalidated"] = serde_json::json!({
+            "lifecycle_transition": "pre_staging_replacement",
+            "prior_decision_id": placement_decision.decision_id,
+            "replacement_decision_id": replacement.decision_id,
+            "reasons": stale_reasons,
+            "evidence": {
+                "prior_identity": placement_decision.identity,
+                "replacement_identity": replacement.identity,
+                "prior_policy": {
+                    "id": placement_decision.policy_id,
+                    "revision": placement_decision.policy_revision,
+                },
+                "replacement_policy": {
+                    "id": replacement.policy_id,
+                    "revision": replacement.policy_revision,
+                },
+            },
+        });
+    }
+    let placement_decision = if stale_reasons.is_empty() {
+        placement_decision
+    } else {
+        replacement
+    };
+    plan.metadata["execution_placement_decision"] = serde_json::to_value(&placement_decision)
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize execution placement decision".to_string()),
+            )
+        })?;
+    Ok(placement_decision)
 }
 
 /// Establish controller authority before Lab routing can reconcile a runner
@@ -1126,7 +1495,7 @@ fn lab_cook_attempt_args(serialized_plan: String, run_id: &str) -> Vec<String> {
 /// transport. The durable run record is created before handoff and receives the
 /// typed runner/job identity as soon as the daemon accepts it.
 pub(crate) fn dispatch_controller_plan_to_lab(
-    plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    mut plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
     run_id: &str,
     runner_id: &str,
 ) -> homeboy::core::Result<serde_json::Value> {
@@ -1135,8 +1504,31 @@ pub(crate) fn dispatch_controller_plan_to_lab(
         .first()
         .and_then(|task| task.workspace.root.as_ref())
         .map(PathBuf::from);
+    let placement_decision = plan
+        .metadata
+        .get("execution_placement_decision")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "execution_placement_decision",
+                format!("stored controller plan has malformed placement decision: {error}"),
+                Some(run_id.to_string()),
+                None,
+            )
+        })?
+        .unwrap_or_else(|| {
+            controller_dispatch_placement_decision(&plan, runner_id, source_path.as_deref())
+        });
+    if !plan.metadata.is_object() {
+        plan.metadata = serde_json::json!({ "legacy_metadata": plan.metadata });
+    }
+    plan.metadata["execution_placement_decision"] = serde_json::to_value(&placement_decision)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
     let dispatcher = LabCookAttemptDispatcher {
         runner_id: runner_id.to_string(),
+        placement_decision,
         allow_local_fallback: false,
         allow_dirty_lab_workspace: false,
         skip_deps_hydration: false,
@@ -1161,6 +1553,54 @@ pub(crate) fn dispatch_controller_plan_to_lab(
         "identity": record.metadata.get("runner_handoff").and_then(|handoff| handoff.get("identity")).cloned(),
         "run": record,
     }))
+}
+
+fn controller_dispatch_placement_decision(
+    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    runner_id: &str,
+    source_path: Option<&Path>,
+) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
+    use homeboy_lab_runner_contract::{
+        EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
+        ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
+        ExecutionPlacementRunnerSelection, Placement, RunnerSelectionSource,
+    };
+
+    homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+        "controller-dispatch-lab",
+        "v1",
+        ExecutionPlacementIdentity {
+            repository: source_path
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "controller-dispatch".to_string()),
+            workspace: source_path
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "controller-dispatch".to_string()),
+            task: plan
+                .tasks
+                .first()
+                .map(|task| task.task_id.clone())
+                .unwrap_or_else(|| plan.plan_id.clone()),
+            candidate: source_path.and_then(homeboy::core::git::head_sha),
+            base: source_path.and_then(|path| homeboy::core::git::rev_parse(path, "origin/HEAD")),
+        },
+        Placement::Lab,
+        ExecutionPlacementRequirement::Lab,
+        EffectiveExecutionPlacement::Lab,
+        Some(ExecutionPlacementRunnerSelection {
+            runner_id: runner_id.to_string(),
+            source: RunnerSelectionSource::Explicit,
+        }),
+        ExecutionPlacementFallback {
+            local_allowed: false,
+            reason: None,
+        },
+        ExecutionPlacementOverrideAuthorization {
+            authorized: false,
+            authority: None,
+        },
+    )
 }
 
 /// Transfer the exact controller-compiled cook plan rather than asking the
@@ -1418,22 +1858,42 @@ fn portable_deferred_args(args: &[String]) -> Vec<String> {
 struct GenericDetachedLabHandoff {
     run_id: String,
     plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
-    source_path: PathBuf,
 }
 
 /// Give detached portable commands a controller-owned identity before Lab
 /// admission. Agent-task commands retain their richer command-specific plans.
 fn materialize_generic_detached_lab_handoff(
     args: &[String],
+    placement_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision,
 ) -> homeboy::core::Result<GenericDetachedLabHandoff> {
     let run_id =
         explicit_run_id(args).unwrap_or_else(|| format!("lab-offload-{}", uuid::Uuid::new_v4()));
-    let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+    let mut plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
         format!("lab-offload-{run_id}"),
         Vec::new(),
     );
+    plan.metadata = serde_json::json!({
+        "execution_placement_decision": placement_decision,
+    });
     if agent_task_lifecycle::run_record_exists(&run_id)? {
-        if agent_task_lifecycle::load_plan(&run_id)? != plan {
+        let persisted = agent_task_lifecycle::load_controller_plan(&run_id)?;
+        let persisted_decision = persisted
+            .metadata
+            .get("execution_placement_decision")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "execution_placement_decision",
+                    format!("detached Lab run has malformed canonical placement decision: {error}"),
+                    Some(run_id.clone()),
+                    None,
+                )
+            })?;
+        if persisted.plan_id != plan.plan_id
+            || persisted_decision.as_ref() != Some(&placement_decision)
+        {
             return Err(Error::validation_invalid_argument(
                 "run_id",
                 "detached Lab run id already belongs to a different immutable handoff",
@@ -1444,12 +1904,7 @@ fn materialize_generic_detached_lab_handoff(
     } else {
         agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
     }
-    let source_path = source_path_for_generic_detached_lab_handoff(args)?;
-    Ok(GenericDetachedLabHandoff {
-        run_id,
-        plan,
-        source_path,
-    })
+    Ok(GenericDetachedLabHandoff { run_id, plan })
 }
 
 fn explicit_run_id(args: &[String]) -> Option<String> {
@@ -2223,6 +2678,15 @@ fn lab_dispatch_observer(
         }
         _ => Box::new(NoopLabDispatchObserver),
     }
+}
+
+fn placement_outcome_target<'a>(
+    retry_run_id: Option<&'a str>,
+    detached_run_id: Option<&'a str>,
+) -> Option<ExecutionPlacementOutcomeTarget<'a>> {
+    retry_run_id
+        .or(detached_run_id)
+        .map(|run_id| ExecutionPlacementOutcomeTarget::AgentTaskLifecycle { run_id })
 }
 
 struct AgentTaskFanoutLabDispatchObservation {

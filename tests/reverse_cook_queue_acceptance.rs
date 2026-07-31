@@ -166,7 +166,7 @@ fn json_field<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a serde
 
 #[cfg(unix)]
 #[test]
-fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
+fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_lifecycle() {
     use std::os::unix::fs::PermissionsExt;
 
     let mut ledger = PhaseLedger::new();
@@ -600,6 +600,26 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
         Some("succeeded"),
         "controller terminal projection: {terminal}\n{}",
         ledger.render(),
+    );
+    let durable_record = homeboy::agents::agent_task_lifecycle::status(run_id)
+        .expect("pinned runner terminal lifecycle record");
+    let decision_id = durable_record.metadata["execution_placement_decision"]["decision_id"]
+        .as_str()
+        .expect("pinned runner decision persisted on the terminal run");
+    assert_eq!(
+        durable_record.metadata["execution_placement_decision"]["runner"]["runner_id"],
+        serde_json::json!("lab"),
+        "the durable decision must retain the explicitly pinned runner: {durable_record:#?}"
+    );
+    assert_eq!(
+        durable_record.metadata["execution_placement_outcome"]["decision_id"],
+        serde_json::json!(decision_id),
+        "the completed provider outcome must bind to the persisted decision: {durable_record:#?}"
+    );
+    assert_eq!(
+        durable_record.metadata["execution_placement_outcome"]["effective"],
+        serde_json::json!("lab"),
+        "the deterministic reverse worker must report a Lab outcome: {durable_record:#?}"
     );
     daemon.kill().expect("stop test-owned controller daemon");
     daemon.wait().expect("controller daemon fixture exits");

@@ -14,6 +14,7 @@ use homeboy_core::daemon::runner_exec_driver::{
     PreparedDaemonExec, RunnerExecDriver, RunnerExecPrepareRequest,
 };
 use homeboy_core::error::Result;
+use homeboy_core::runner_job_execution_context::RunnerJobExecutionContext;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
 
 use super::execution::{
@@ -21,6 +22,11 @@ use super::execution::{
     PreparedRunnerProcess, RunnerProcessRequest,
 };
 use super::Runner;
+
+struct DaemonPreparedPlan {
+    plan: PreparedRunnerProcess,
+    extension_env_providers: Vec<String>,
+}
 
 /// The runner layer's `RunnerExecDriver`. Registered with core at startup.
 pub struct RunnerDaemonExecDriver;
@@ -65,7 +71,7 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
             &request.env,
             secret_env_plan,
         );
-        let mut plan = prepare_daemon_local_process(RunnerProcessRequest {
+        let plan = prepare_daemon_local_process(RunnerProcessRequest {
             runner_id: request.runner_id,
             runner,
             cwd: request.cwd,
@@ -80,8 +86,72 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
             require_paths: request.require_paths,
             validate_require_paths_on_host: request.validate_require_paths_on_host,
         })?;
-        let contributions = homeboy_extension::resolve_installed_env_providers(
-            &request.extension_env_providers,
+        Ok(PreparedDaemonExec::new(
+            plan.runner.id.clone(),
+            plan.cwd.clone(),
+            plan.command.clone(),
+            plan.env.clone(),
+            plan.secret_env_names.clone(),
+            plan.source_snapshot.clone(),
+            plan.require_paths.clone(),
+            plan.runner.settings.concurrency_limit,
+            plan.runner.settings.heartbeat_only_stall.clone(),
+            // This is a durable declaration, not provider output. The provider
+            // itself is resolved only after the authenticated context arrives
+            // at `execute`.
+            serde_json::json!({ "providers": request.extension_env_providers.clone() }),
+            Arc::new(DaemonPreparedPlan {
+                plan,
+                extension_env_providers: request.extension_env_providers,
+            }),
+        ))
+    }
+
+    fn execute(
+        &self,
+        prepared: &PreparedDaemonExec,
+        execution_context: &RunnerJobExecutionContext,
+        is_cancelled: ExecCancellationProbe,
+        progress_sink: Option<ExecProgressSink>,
+        require_child_identity_acknowledgement: bool,
+        child_started: Option<ExecChildStarted>,
+    ) -> Result<DaemonExecOutput> {
+        let base = prepared
+            .plan_token()
+            .downcast_ref::<DaemonPreparedPlan>()
+            .ok_or_else(|| {
+                homeboy_core::error::Error::internal_unexpected(
+                    "runner exec driver received a plan it did not prepare",
+                )
+            })?;
+
+        // The daemon may have mutated `prepared.env` (e.g. injecting the child
+        // reservation id) between prepare and execute, so run with that env.
+        if execution_context.verify_integrity().is_err()
+            || execution_context.runner_id() != prepared.runner_id
+            || execution_context.runtime_id()
+                != prepared
+                    .command
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or_default()
+        {
+            return Err(homeboy_core::error::Error::validation_invalid_argument(
+                "execution_context",
+                "daemon execution context does not match the accepted runner job",
+                Some(prepared.runner_id.clone()),
+                Some(vec![
+                    "Claim a fresh runner job through the controller before retrying.".to_string(),
+                ]),
+            ));
+        }
+        let mut plan = base.plan.clone();
+        plan.env = prepared.env.clone();
+        // Provider adapters execute only after the daemon supplied the verified
+        // typed context. No environment value participates in this decision.
+        let contributions = super::execution::resolve_provider_env_with_execution_context(
+            execution_context,
+            &base.extension_env_providers,
             std::path::Path::new(&plan.cwd),
             &plan
                 .env
@@ -100,43 +170,6 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
                 Some("serialize extension env provenance".to_string()),
             )
         })?;
-
-        Ok(PreparedDaemonExec::new(
-            plan.runner.id.clone(),
-            plan.cwd.clone(),
-            plan.command.clone(),
-            plan.env.clone(),
-            plan.secret_env_names.clone(),
-            plan.source_snapshot.clone(),
-            plan.require_paths.clone(),
-            plan.runner.settings.concurrency_limit,
-            plan.runner.settings.heartbeat_only_stall.clone(),
-            extension_env_provenance,
-            Arc::new(plan),
-        ))
-    }
-
-    fn execute(
-        &self,
-        prepared: &PreparedDaemonExec,
-        is_cancelled: ExecCancellationProbe,
-        progress_sink: Option<ExecProgressSink>,
-        require_child_identity_acknowledgement: bool,
-        child_started: Option<ExecChildStarted>,
-    ) -> Result<DaemonExecOutput> {
-        let base = prepared
-            .plan_token()
-            .downcast_ref::<PreparedRunnerProcess>()
-            .ok_or_else(|| {
-                homeboy_core::error::Error::internal_unexpected(
-                    "runner exec driver received a plan it did not prepare",
-                )
-            })?;
-
-        // The daemon may have mutated `prepared.env` (e.g. injecting the child
-        // reservation id) between prepare and execute, so run with that env.
-        let mut plan = base.clone();
-        plan.env = prepared.env.clone();
 
         let mut is_cancelled = is_cancelled;
         let output = execute_runner_process_until_cancelled_with_progress(
@@ -163,7 +196,7 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
             capture: output
                 .capture
                 .and_then(|capture| serde_json::to_value(capture).ok()),
-            extension_env_provenance: prepared.extension_env_provenance.clone(),
+            extension_env_provenance,
         })
     }
 }

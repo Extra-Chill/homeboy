@@ -13,12 +13,14 @@ use homeboy_core::test_support;
 use sha2::{Digest, Sha256};
 
 use super::super::run::{
-    run_loop, run_reverse_worker, verify_private_at_files, write_private_at_file_snapshot,
+    persist_runner_execution_context, resolve_runner_execution_context, run_loop,
+    run_reverse_worker, verify_private_at_files, write_private_at_file_snapshot,
 };
 use super::support::{
     spawn_cancelling_after_claim_broker, spawn_cancelling_on_second_snapshot_broker,
     spawn_failing_broker, spawn_mock_broker, spawn_mock_broker_until_finish,
-    spawn_mock_broker_until_finish_with_paths, write_reverse_controller_session,
+    spawn_mock_broker_until_finish_with_paths, spawn_mock_broker_with_claim_mutation,
+    write_reverse_controller_session,
 };
 use super::worker_options;
 
@@ -88,6 +90,22 @@ fn reverse_worker_executes_claimed_job_and_finishes_it() {
         assert!(serialized.get("last_claim").is_none());
         let job = output.job.clone().expect("job");
         let events = store.events(job.id).expect("events");
+        let runner_context_evidence = events
+            .iter()
+            .find_map(|event| {
+                event
+                    .data
+                    .as_ref()
+                    .filter(|data| {
+                        data["phase"] == serde_json::json!("runner_job_execution_context_verified")
+                    })
+                    .and_then(|data| data.get("runner_job_execution_context"))
+            })
+            .expect("runner persists verified context before execution");
+        assert_eq!(
+            runner_context_evidence["context"]["runner_job_id"],
+            serde_json::json!(job.id.to_string())
+        );
         let result = events
             .iter()
             .find(|event| event.kind == JobEventKind::Result)
@@ -106,6 +124,26 @@ fn reverse_worker_executes_claimed_job_and_finishes_it() {
         }));
         assert!(result["metrics"]["duration_ms"].as_u64().is_some());
         let seen_paths = seen_paths.lock().expect("seen paths");
+        let consume_index = seen_paths
+            .iter()
+            .position(|path| path.ends_with("/consume"))
+            .expect("worker consumes execution receipt");
+        let finish_index = seen_paths
+            .iter()
+            .position(|path| path.ends_with("/finish"))
+            .expect("worker finishes claimed job");
+        assert_eq!(
+            seen_paths
+                .iter()
+                .filter(|path| path.ends_with("/consume"))
+                .count(),
+            1,
+            "execution receipt is consumed once"
+        );
+        assert!(
+            consume_index < finish_index,
+            "worker consumes its receipt before publishing the terminal result"
+        );
         assert!(
             !seen_paths.iter().any(|path| path == "/runner/jobs"),
             "claimed worker job must execute locally instead of submitting another reverse broker job"
@@ -117,6 +155,152 @@ fn reverse_worker_executes_claimed_job_and_finishes_it() {
             );
             assert!(result["metrics"]["sample_count"].as_u64().is_some());
         }
+    });
+}
+
+#[test]
+fn reverse_worker_restart_cannot_replay_a_consumed_receipt_and_keeps_context_evidence() {
+    test_support::with_isolated_home(|_| {
+        create_shell_runner();
+        let store = JobStore::default();
+        let job = store
+            .submit_remote_runner_job(run_id_echo_request())
+            .expect("queue job");
+        let claim = store
+            .claim_remote_runner_job("lab", None, 30_000, None)
+            .expect("claim job")
+            .expect("queued job");
+        let context = claim.execution_context.expect("execution context");
+        let claim_id = claim.job.claim_id.as_deref().expect("claim id");
+
+        // The first worker reaches the provider boundary, then is interrupted
+        // before it can report a terminal result.
+        persist_runner_execution_context("lab", &context).expect("persist runner evidence");
+        store
+            .consume_remote_runner_execution(job.id, "lab", claim_id, context.id())
+            .expect("consume receipt before interruption");
+        assert_eq!(
+            store.get(job.id).expect("running job").status,
+            JobStatus::Running
+        );
+
+        // A restarted worker sees no queued work and therefore cannot replay
+        // the consumed receipt or invoke the provider a second time.
+        let (broker_url, handle) = spawn_mock_broker(store.clone(), 1);
+        let (output, exit_code) =
+            run_reverse_worker(worker_options(broker_url)).expect("restarted worker");
+        assert_eq!(exit_code, 0);
+        assert!(!output.claimed);
+        handle.join().expect("restart broker joins");
+        assert!(store
+            .consume_remote_runner_execution(job.id, "lab", claim_id, context.id())
+            .is_err());
+
+        // Recovery retains runner-local identity for diagnostics, while the
+        // broker owns terminalization of the interrupted running job.
+        let recovered = resolve_runner_execution_context("lab", context.id())
+            .expect("read runner-local context evidence after restart");
+        assert_eq!(recovered.id(), context.id());
+        assert_eq!(recovered.runner_job_id(), job.id.to_string());
+        let reconciled = store
+            .reconcile_expired_remote_runner_claims(
+                claim.job.claim_expires_at_ms.expect("claim expiry") + 1,
+            )
+            .expect("broker fails interrupted execution closed");
+        assert_eq!(reconciled.len(), 1);
+        assert_eq!(reconciled[0].status, JobStatus::Failed);
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn reverse_provider_dispatch_rejects_runner_mismatch_before_provider_script() {
+    assert_tampered_claim_rejects_before_provider(|claim| {
+        claim["job"]["claimed_by_runner_id"] = serde_json::json!("other-runner");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn reverse_provider_dispatch_rejects_job_mismatch_before_provider_script() {
+    assert_tampered_claim_rejects_before_provider(|claim| {
+        claim["execution_context"]["runner_job_id"] =
+            serde_json::json!("00000000-0000-0000-0000-000000000000");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn reverse_provider_dispatch_rejects_tampered_context_before_provider_script() {
+    assert_tampered_claim_rejects_before_provider(|claim| {
+        claim["execution_context"]["dispatch_receipt"] = serde_json::json!("sha256:tampered");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn reverse_provider_dispatch_retry_keeps_controller_run_and_separates_attempt_jobs() {
+    test_support::with_isolated_home(|_| {
+        create_shell_runner();
+        let directory = tempfile::tempdir().expect("provider fixture directory");
+        let provider = directory.path().join("provider.sh");
+        let marker = directory.path().join("provider-invocations");
+        std::fs::write(&provider, "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$2\"\n")
+            .expect("write provider script");
+        let store = JobStore::default();
+        let controller_run_id = "cook-controller-run";
+        let first = store
+            .submit_remote_runner_job(provider_request(
+                &provider,
+                &marker,
+                "attempt-1",
+                controller_run_id,
+            ))
+            .expect("queue first provider attempt");
+        let second = store
+            .submit_remote_runner_job(provider_request(
+                &provider,
+                &marker,
+                "attempt-2",
+                controller_run_id,
+            ))
+            .expect("queue retry provider attempt");
+
+        for expected_job in [first.id, second.id] {
+            let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
+            write_reverse_controller_session(&broker_url);
+            let (output, exit_code) =
+                run_reverse_worker(worker_options(broker_url)).expect("dispatch provider attempt");
+            assert_eq!(exit_code, 0);
+            assert_eq!(output.job.expect("completed job").id, expected_job);
+            handle.join().expect("broker joins");
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(&marker).expect("provider invocations"),
+            "attempt-1\nattempt-2\n"
+        );
+        let contexts = [first.id, second.id].map(|job_id| {
+            store
+                .events(job_id)
+                .expect("broker events")
+                .into_iter()
+                .find_map(|event| {
+                    event.data.and_then(|data| {
+                        (data["phase"]
+                            == serde_json::json!("runner_job_execution_context_verified"))
+                        .then(|| data["runner_job_execution_context"]["context"].clone())
+                    })
+                })
+                .expect("verified context evidence")
+        });
+        assert_eq!(contexts[0]["controller_run_id"], controller_run_id);
+        assert_eq!(contexts[1]["controller_run_id"], controller_run_id);
+        assert_eq!(contexts[0]["controller_attempt_id"], "attempt-1");
+        assert_eq!(contexts[1]["controller_attempt_id"], "attempt-2");
+        assert_ne!(contexts[0]["runner_job_id"], contexts[1]["runner_job_id"]);
+        assert_eq!(contexts[0]["runner_job_id"], first.id.to_string());
+        assert_eq!(contexts[1]["runner_job_id"], second.id.to_string());
     });
 }
 
@@ -549,7 +733,7 @@ fn reverse_worker_streams_redacted_child_progress_without_trusting_stdout_lifecy
         request.command[2] = "printf 'HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"import\",\"current_item\":\"%s\",\"completed\":1,\"total\":2,\"metadata\":{\"api_key\":\"%s\"}}\\n' \"$TOKEN\" \"$TOKEN\"; printf 'HOMEBOY_RUNNER_PROGRESS {not-json}\\n'; printf 'HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"done\",\"status\":\"succeeded\"}\\n'; sleep 0.1; dd if=/dev/zero bs=1024 count=4097 2>/dev/null; printf tail".to_string();
         request.secret_env_names = vec!["TOKEN".to_string()];
         store.submit_remote_runner_job(request).expect("submit job");
-        let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
+        let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 9);
 
         let (output, exit_code) =
             run_reverse_worker(worker_options(broker_url)).expect("run worker");
@@ -798,7 +982,7 @@ fn reverse_worker_reports_execution_failure_to_broker() {
                 metadata: None,
             })
             .expect("submit job");
-        let (broker_url, handle) = spawn_mock_broker(store.clone(), 5);
+        let (broker_url, handle) = spawn_mock_broker(store.clone(), 6);
 
         let (output, exit_code) =
             run_reverse_worker(worker_options(broker_url)).expect("run worker");
@@ -843,7 +1027,7 @@ fn reverse_worker_loop_reports_failed_job_status() {
                 metadata: None,
             })
             .expect("submit job");
-        let (broker_url, handle) = spawn_mock_broker(store.clone(), 6);
+        let (broker_url, handle) = spawn_mock_broker(store.clone(), 7);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_after_sleep = stop.clone();
         let mut options = worker_options(broker_url);
@@ -1130,6 +1314,84 @@ fn run_id_echo_request() -> RemoteRunnerJobRequest {
         lab_runner_workload: None,
         lifecycle: None,
         metadata: None,
+    }
+}
+
+#[cfg(unix)]
+fn assert_tampered_claim_rejects_before_provider(
+    mutate_claim: impl FnMut(&mut serde_json::Value) + Send + 'static,
+) {
+    test_support::with_isolated_home(|_| {
+        create_shell_runner();
+        let directory = tempfile::tempdir().expect("provider fixture directory");
+        let provider = directory.path().join("provider.sh");
+        let marker = directory.path().join("provider-invoked");
+        std::fs::write(&provider, "#!/bin/sh\ntouch \"$1\"\n").expect("write provider script");
+        let store = JobStore::default();
+        let job = store
+            .submit_remote_runner_job(provider_request(
+                &provider,
+                &marker,
+                "attempt-1",
+                "controller-run",
+            ))
+            .expect("queue provider job");
+        let (broker_url, handle) =
+            spawn_mock_broker_with_claim_mutation(store.clone(), mutate_claim);
+
+        let error = run_reverse_worker(worker_options(broker_url))
+            .expect_err("tampered broker claim must fail before provider dispatch");
+
+        assert!(
+            error.message.contains("runner execution context rejected"),
+            "unexpected error: {error:#?}"
+        );
+        assert!(
+            !marker.exists(),
+            "provider script ran despite rejected reverse broker claim"
+        );
+        assert_eq!(
+            store.get(job.id).expect("claimed job").status,
+            JobStatus::Running
+        );
+        handle.join().expect("broker joins");
+    });
+}
+
+#[cfg(unix)]
+fn provider_request(
+    provider: &std::path::Path,
+    marker: &std::path::Path,
+    attempt_id: &str,
+    controller_run_id: &str,
+) -> RemoteRunnerJobRequest {
+    RemoteRunnerJobRequest {
+        runner_id: "lab".to_string(),
+        project_id: None,
+        operation: "runner.exec".to_string(),
+        command: vec![
+            "sh".to_string(),
+            provider.display().to_string(),
+            attempt_id.to_string(),
+            marker.display().to_string(),
+        ],
+        cwd: Some("/tmp".to_string()),
+        env: Default::default(),
+        secret_env_names: Vec::new(),
+        secret_env_plan: Default::default(),
+        env_materialization: None,
+        capture_patch: false,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        require_paths: Vec::new(),
+        extension_env_providers: Vec::new(),
+        lab_runner_workload: None,
+        lifecycle: None,
+        metadata: Some(serde_json::json!({
+            "controller_run_id": controller_run_id,
+            "controller_attempt_id": attempt_id,
+            "accepted_handoff_id": format!("reverse:lab:{attempt_id}"),
+        })),
     }
 }
 

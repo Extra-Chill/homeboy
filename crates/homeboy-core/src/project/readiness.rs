@@ -7,8 +7,27 @@ use super::Project;
 
 pub fn calculate_deploy_readiness(project: &Project) -> (bool, Vec<String>) {
     let mut blockers = Vec::new();
+    let standalone_snapshot = super::StandaloneComponentConfigSnapshot::load();
+    let resolved_components = project
+        .components
+        .iter()
+        .filter_map(|attachment| {
+            super::resolve_project_component_with_standalone_snapshot(
+                project,
+                &attachment.id,
+                Some(&standalone_snapshot),
+            )
+            .ok()
+        })
+        .collect::<Vec<_>>();
+    let provider_owned = !resolved_components.is_empty()
+        && resolved_components.len() == project.components.len()
+        && resolved_components
+            .iter()
+            .all(|component| component.deployment_provider.is_some());
 
     match &project.server_id {
+        _ if provider_owned => {}
         None => {
             blockers.push(format!(
                 "Missing server_id - set with: homeboy project set {} --json '{{\"server_id\": \"<server-id>\"}}'",
@@ -24,11 +43,12 @@ pub fn calculate_deploy_readiness(project: &Project) -> (bool, Vec<String>) {
         _ => {}
     }
 
-    if project
-        .base_path
-        .as_ref()
-        .map(|p| p.is_empty())
-        .unwrap_or(true)
+    if !provider_owned
+        && project
+            .base_path
+            .as_ref()
+            .map(|p| p.is_empty())
+            .unwrap_or(true)
     {
         blockers.push(format!(
             "Missing base_path - set with: homeboy project set {} --json '{{\"base_path\": \"/path/to/webroot\"}}'",
@@ -45,23 +65,15 @@ pub fn calculate_deploy_readiness(project: &Project) -> (bool, Vec<String>) {
     } else {
         blockers.extend(component_local_path_blockers(project));
 
-        let standalone_snapshot = super::StandaloneComponentConfigSnapshot::load();
-        let has_deployable = project.components.iter().any(|attachment| {
-            if let Ok(comp) = super::resolve_project_component_with_standalone_snapshot(
-                project,
-                &attachment.id,
-                Some(&standalone_snapshot),
-            ) {
-                let is_git = comp.deploy_strategy.as_deref() == Some("git");
-                // An ambiguous artifact owner is an authoring error, not a
-                // readiness signal, and this closure has no error channel. Treat
-                // it as "not deployable" here; `build`/`deploy` surface the
-                // actionable ambiguity error when the component is used.
-                let has_artifact = component::resolve_artifact(&comp).ok().flatten().is_some();
-                is_git || has_artifact
-            } else {
-                false
-            }
+        let has_deployable = resolved_components.iter().any(|comp| {
+            let has_provider = comp.deployment_provider.is_some();
+            let is_git = comp.deploy_strategy.as_deref() == Some("git");
+            // An ambiguous artifact owner is an authoring error, not a
+            // readiness signal, and this closure has no error channel. Treat
+            // it as "not deployable" here; `build`/`deploy` surface the
+            // actionable ambiguity error when the component is used.
+            let has_artifact = component::resolve_artifact(&comp).ok().flatten().is_some();
+            has_provider || is_git || has_artifact
         });
 
         if !has_deployable {
@@ -402,5 +414,85 @@ mod tests {
         assert!(err.hints.iter().any(|hint| hint.message.contains(
             "Component 'stale' local_path '/tmp/homeboy-stale-unrelated-component' does not exist"
         )));
+    }
+
+    #[test]
+    fn provider_only_project_is_ready_without_server_deployment_fields() {
+        let provider = repo_with_component(
+            "provider",
+            serde_json::json!({
+                "build_artifact": null,
+                "deployment_provider": {
+                    "extension": "fixture-extension",
+                    "provider": "fixture.deploy",
+                    "policy": {}
+                }
+            }),
+        );
+        let mut project = project_with_components(vec![(
+            "provider",
+            provider.path().to_string_lossy().to_string(),
+        )]);
+        project.server_id = None;
+        project.base_path = None;
+        project.components[0].deployment_provider_input =
+            Some(serde_json::json!({ "target": "site" }));
+
+        let (ready, blockers) = calculate_deploy_readiness(&project);
+
+        assert!(ready, "unexpected blockers: {blockers:?}");
+        assert!(blockers.is_empty());
+    }
+
+    #[test]
+    fn generic_project_still_requires_server_deployment_fields() {
+        let generic = repo_with_component("generic", serde_json::json!({}));
+        let mut project = project_with_components(vec![(
+            "generic",
+            generic.path().to_string_lossy().to_string(),
+        )]);
+        project.server_id = None;
+        project.base_path = None;
+
+        let (ready, blockers) = calculate_deploy_readiness(&project);
+
+        assert!(!ready);
+        assert!(blockers
+            .iter()
+            .any(|blocker| blocker.contains("Missing server_id")));
+        assert!(blockers
+            .iter()
+            .any(|blocker| blocker.contains("Missing base_path")));
+    }
+
+    #[test]
+    fn mixed_project_keeps_generic_server_requirements() {
+        let provider = repo_with_component(
+            "provider",
+            serde_json::json!({
+                "deployment_provider": {
+                    "extension": "fixture-extension",
+                    "provider": "fixture.deploy",
+                    "policy": {}
+                }
+            }),
+        );
+        let generic = repo_with_component("generic", serde_json::json!({}));
+        let mut project = project_with_components(vec![
+            ("provider", provider.path().to_string_lossy().to_string()),
+            ("generic", generic.path().to_string_lossy().to_string()),
+        ]);
+        project.server_id = None;
+        project.base_path = None;
+
+        let (ready, blockers) = calculate_deploy_readiness(&project);
+
+        assert!(!ready);
+        assert!(blockers
+            .iter()
+            .any(|blocker| blocker.contains("Missing server_id")));
+        assert!(blockers
+            .iter()
+            .any(|blocker| blocker.contains("Missing base_path")));
     }
 }

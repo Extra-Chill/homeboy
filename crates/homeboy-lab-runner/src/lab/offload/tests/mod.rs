@@ -52,6 +52,52 @@ pub(super) fn local_only_lab_command(reason: &'static str) -> LabOffloadCommand 
     }
 }
 
+pub(super) fn test_placement_decision(
+    selected: homeboy_lab_runner_contract::EffectiveExecutionPlacement,
+    runner_id: Option<&str>,
+) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
+    use homeboy_lab_runner_contract::{
+        ExecutionPlacementFallback, ExecutionPlacementIdentity,
+        ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
+        ExecutionPlacementRunnerSelection, Placement, RunnerSelectionSource,
+    };
+
+    homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+        "test",
+        "1",
+        ExecutionPlacementIdentity {
+            repository: "test".to_string(),
+            workspace: "test".to_string(),
+            task: "test".to_string(),
+            candidate: None,
+            base: None,
+        },
+        if selected == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab {
+            Placement::Lab
+        } else {
+            Placement::Local
+        },
+        if selected == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab {
+            ExecutionPlacementRequirement::Lab
+        } else {
+            ExecutionPlacementRequirement::Either
+        },
+        selected,
+        runner_id.map(|runner_id| ExecutionPlacementRunnerSelection {
+            runner_id: runner_id.to_string(),
+            source: RunnerSelectionSource::Explicit,
+        }),
+        ExecutionPlacementFallback {
+            local_allowed: false,
+            reason: None,
+        },
+        ExecutionPlacementOverrideAuthorization {
+            authorized: false,
+            authority: None,
+        },
+    )
+}
+
 pub(super) fn release_gate_lab_command(label: &'static str) -> LabOffloadCommand {
     let mut command = portable_lab_command(label);
     command.routing_policy.release_gate = true;

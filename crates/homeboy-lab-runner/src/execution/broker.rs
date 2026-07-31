@@ -95,7 +95,8 @@ pub(super) fn exec_via_reverse_broker(
         path_materialization_plan: path_materialization_plan.clone(),
         lab_runner_workload: lab_runner_workload.clone(),
         metadata: Some({
-            let mut metadata = runner_exec_request_metadata(run_id.as_deref(), "reverse_broker");
+            let mut metadata =
+                runner_exec_request_metadata(run_id.as_deref(), "reverse_broker", &runner.id);
             if let Some(run_id) = run_id.as_deref() {
                 metadata["submission_key"] =
                     serde_json::json!(reverse_broker_submission_key(&runner.id, run_id));

@@ -760,14 +760,21 @@ fn runner_exec_promotes_artifact_dir_children_to_run_store() {
             RunnerExecMode::Local,
             &workspace.path().display().to_string(),
         );
+        homeboy_agents::agent_task_lifecycle::ensure_generic_runner_exec_run(
+            &run.id,
+            "lab-local",
+            &workspace.path().display().to_string(),
+            &["true".to_string()],
+        )
+        .expect("generic runner-exec run");
 
         let promoted =
             promote_runner_exec_artifact_dirs(&run.id, &output, &["outputs".to_string()])
                 .expect("promote artifact dir children");
 
-        assert_eq!(promoted.len(), 2);
+        assert_eq!(promoted.len(), 3);
         let artifacts = store.list_artifacts(&run.id).expect("artifacts");
-        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts.len(), 3);
         assert_eq!(artifacts[0].kind, "report");
         assert_eq!(artifacts[0].artifact_type, "directory");
         assert_eq!(artifacts[0].metadata_json["artifact_dir"], "outputs");
@@ -778,14 +785,22 @@ fn runner_exec_promotes_artifact_dir_children_to_run_store() {
         assert!(std::path::Path::new(&artifacts[0].path)
             .join("index.html")
             .is_file());
-        assert_eq!(artifacts[1].kind, "summary_json");
+        assert_eq!(artifacts[1].kind, "index_html");
         assert_eq!(artifacts[1].artifact_type, "file");
         assert_eq!(artifacts[1].metadata_json["artifact_dir"], "outputs");
         assert_eq!(
             artifacts[1].metadata_json["declared_path"],
-            "outputs/summary.json"
+            "outputs/report/index.html"
         );
         assert!(std::path::Path::new(&artifacts[1].path).is_file());
+        assert_eq!(artifacts[2].kind, "summary_json");
+        assert_eq!(artifacts[2].artifact_type, "file");
+        assert_eq!(artifacts[2].metadata_json["artifact_dir"], "outputs");
+        assert_eq!(
+            artifacts[2].metadata_json["declared_path"],
+            "outputs/summary.json"
+        );
+        assert!(std::path::Path::new(&artifacts[2].path).is_file());
     });
 }
 
@@ -946,6 +961,13 @@ fn runner_exec_promotes_artifact_dir_typed_schema_children() {
             RunnerExecMode::Local,
             &workspace.path().display().to_string(),
         );
+        homeboy_agents::agent_task_lifecycle::ensure_generic_runner_exec_run(
+            &run.id,
+            "lab-local",
+            &workspace.path().display().to_string(),
+            &["true".to_string()],
+        )
+        .expect("generic runner-exec run");
 
         let promoted =
             promote_runner_exec_artifact_dirs(&run.id, &output, &["outputs".to_string()])

@@ -90,6 +90,13 @@ pub struct RemoteRunnerJobRequest {
 }
 
 impl RemoteRunnerJobRequest {
+    /// Provider environment resolution accepts only authenticated execution
+    /// contexts. Older workers can still receive ordinary runner jobs, but
+    /// must never be handed a job that would make this boundary fail open.
+    pub fn requires_execution_context(&self) -> bool {
+        !self.extension_env_providers.is_empty()
+    }
+
     /// A caller-owned identity makes a retried POST safe across a lost response.
     /// It deliberately lives in metadata so older clients can continue submitting
     /// anonymous jobs while durable handoffs opt into replayable ownership.
@@ -410,6 +417,14 @@ fn merge_metadata_value(mut metadata: Value, key: &str, value: Value) -> Value {
 pub struct RemoteRunnerJobClaim {
     pub job: Job,
     pub request: RemoteRunnerJobRequest,
+    /// Authenticated execution authority derived from this durable claim.
+    /// Older brokers omit it on the wire; workers refuse those claims rather
+    /// than reconstructing authority from environment or lifecycle projections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_context: Option<crate::runner_job_execution_context::RunnerJobExecutionContext>,
+    /// Echoed by compatible workers and verified before they execute a claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_protocol: Option<crate::runner_job_execution_context::RunnerJobExecutionProtocol>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -541,6 +556,44 @@ pub(super) struct StoredRemoteRunnerJob {
     #[serde(default, skip)]
     pub(super) execution_request: Option<RemoteRunnerJobRequest>,
     pub(super) request: RemoteRunnerJobRequest,
+    /// Presence records that this claim carried an authenticated execution
+    /// context. Its absence is the persisted compatibility signal for legacy
+    /// context-free claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) execution_context_id: Option<String>,
+    /// One-time durable execution receipt. This is consumed only at the
+    /// provider boundary after the worker has materialized its inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) execution_receipt: Option<RemoteRunnerExecutionReceipt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct RemoteRunnerExecutionReceipt {
+    pub(super) context_id: String,
+    pub(super) consumed_at_ms: u64,
+}
+
+fn execution_context_id_from_evidence(stored: &StoredJob) -> Result<Option<String>> {
+    let mut context_ids = HashSet::new();
+    for evidence in stored.events.iter().filter_map(|event| {
+        event
+            .data
+            .as_ref()
+            .and_then(|data| data.get("runner_job_execution_context"))
+    }) {
+        let context =
+            crate::runner_job_execution_context::RunnerJobExecutionContext::from_evidence_record(
+                evidence,
+            )?;
+        context_ids.insert(context.id().to_string());
+    }
+    match context_ids.len() {
+        0 => Ok(None),
+        1 => Ok(context_ids.into_iter().next()),
+        _ => Err(crate::runner_job_execution_context::rejected(
+            "durable claim has conflicting execution-context evidence",
+        )),
+    }
 }
 
 impl JobStore {
@@ -726,6 +779,8 @@ impl JobStore {
                     // immediately before dispatch.
                     execution_request: None,
                     request: public_request,
+                    execution_context_id: None,
+                    execution_receipt: None,
                 }),
                 local_runner: None,
                 local_child: None,
@@ -781,6 +836,27 @@ impl JobStore {
         project_id: Option<&str>,
         lease_ms: u64,
         concurrency_limit: Option<usize>,
+    ) -> Result<Option<RemoteRunnerJobClaim>> {
+        self.claim_remote_runner_job_with_execution_protocol(
+            runner_id,
+            project_id,
+            lease_ms,
+            concurrency_limit,
+            Some(&crate::runner_job_execution_context::RunnerJobExecutionProtocol::current()),
+        )
+    }
+
+    /// Claim a reverse-runner job only after the worker has advertised support
+    /// for the context carried in the resulting claim.
+    pub fn claim_remote_runner_job_with_execution_protocol(
+        &self,
+        runner_id: &str,
+        project_id: Option<&str>,
+        lease_ms: u64,
+        concurrency_limit: Option<usize>,
+        execution_protocol: Option<
+            &crate::runner_job_execution_context::RunnerJobExecutionProtocol,
+        >,
     ) -> Result<Option<RemoteRunnerJobClaim>> {
         if runner_id.trim().is_empty() {
             return Err(Error::validation_invalid_argument(
@@ -858,23 +934,64 @@ impl JobStore {
                         .dispatch_request();
                     (stored.job.clone(), request)
                 };
+                let execution_context = match execution_protocol {
+                    Some(protocol) => {
+                        protocol.verify()?;
+                        Some(
+                            crate::runner_job_execution_context::RunnerJobExecutionContext::from_claim(
+                                &job, &request,
+                            )?,
+                        )
+                    }
+                    None if request.requires_execution_context() => {
+                        return Err(crate::runner_job_execution_context::rejected(
+                            "worker did not advertise the required execution-context protocol",
+                        ));
+                    }
+                    None => None,
+                };
+                if let Some(context) = execution_context.as_ref() {
+                    inner
+                        .jobs
+                        .get_mut(&job_id)
+                        .expect("candidate exists")
+                        .remote_runner
+                        .as_mut()
+                        .expect("filtered remote runner job has request")
+                        .execution_context_id = Some(context.id().to_string());
+                }
                 Self::append_event_already_locked(
                     self,
                     inner,
                     job_id,
                     JobEventKind::Status,
                     Some("remote runner job claimed".to_string()),
-                    Some(serde_json::json!({ "status": JobStatus::Running })),
+                    Some(match execution_context.as_ref() {
+                        Some(context) => serde_json::json!({
+                            "status": JobStatus::Running,
+                            "runner_job_execution_context": context.evidence_record()?,
+                        }),
+                        None => serde_json::json!({ "status": JobStatus::Running }),
+                    }),
                 )?;
-                return Ok(Some((job, request)));
+                return Ok(Some((job, request, execution_context)));
             }
             Ok(None)
         })?;
 
-        let Some((job, request)) = claimed else {
+        let Some((job, request, execution_context)) = claimed else {
             return Ok(None);
         };
-        Ok(Some(RemoteRunnerJobClaim { job, request }))
+        let execution_protocol = execution_context
+            .as_ref()
+            .map(|_| execution_protocol.cloned())
+            .flatten();
+        Ok(Some(RemoteRunnerJobClaim {
+            job,
+            request,
+            execution_context,
+            execution_protocol,
+        }))
     }
 
     pub fn append_remote_runner_event(
@@ -898,6 +1015,7 @@ impl JobStore {
         mut result: RemoteRunnerJobResult,
     ) -> Result<Job> {
         self.ensure_remote_runner_claim(job_id, runner_id, claim_id)?;
+        self.ensure_remote_runner_execution_receipt(job_id)?;
         result.validate_observation_run_details()?;
         result.observation_run_details_compatibility_degraded =
             !result.observation_run_ids.is_empty() && result.observation_run_details.is_empty();
@@ -957,6 +1075,36 @@ impl JobStore {
         )
     }
 
+    fn ensure_remote_runner_execution_receipt(&self, job_id: Uuid) -> Result<()> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = inner
+            .jobs
+            .get(&job_id)
+            .ok_or_else(|| job_not_found(job_id))?;
+        let remote_runner = stored
+            .remote_runner
+            .as_ref()
+            .expect("finish only follows a validated remote runner claim");
+        let context_id = match remote_runner.execution_context_id.as_deref() {
+            Some(context_id) => Some(context_id.to_string()),
+            None => execution_context_id_from_evidence(stored)?,
+        };
+        let Some(context_id) = context_id else {
+            return Ok(());
+        };
+        let Some(receipt) = remote_runner.execution_receipt.as_ref() else {
+            return Err(crate::runner_job_execution_context::rejected(
+                "runner execution receipt has not been consumed for this claim",
+            ));
+        };
+        if receipt.context_id != context_id {
+            return Err(crate::runner_job_execution_context::rejected(
+                "runner execution receipt does not match the claimed execution context",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn renew_remote_runner_claim(
         &self,
         job_id: Uuid,
@@ -976,6 +1124,89 @@ impl JobStore {
             Ok(())
         })?;
         self.get(job_id)
+    }
+
+    /// Atomically revalidate and consume a claim immediately before provider
+    /// invocation. A receipt can only be consumed once, preventing a restarted
+    /// worker from replaying a materialized handoff.
+    pub fn consume_remote_runner_execution(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+        claim_id: &str,
+        context_id: &str,
+    ) -> Result<Job> {
+        self.durable_transaction(|inner| {
+            let now = timestamp_ms();
+            let job = {
+                let stored = inner
+                    .jobs
+                    .get_mut(&job_id)
+                    .ok_or_else(|| job_not_found(job_id))?;
+                if stored.remote_runner.is_none() {
+                    return Err(Error::validation_invalid_argument(
+                        "job_id",
+                        "job is not a remote runner job",
+                        Some(job_id.to_string()),
+                        None,
+                    ));
+                }
+                if stored.job.claimed_by_runner_id.as_deref() != Some(runner_id)
+                    || stored.job.claim_id.as_deref() != Some(claim_id)
+                    || stored.job.status != JobStatus::Running
+                    || stored
+                        .job
+                        .claim_expires_at_ms
+                        .is_none_or(|expires_at| expires_at <= now)
+                {
+                    return Err(crate::runner_job_execution_context::rejected(
+                        "durable runner claim is no longer live",
+                    ));
+                }
+                let remote_runner = stored
+                    .remote_runner
+                    .as_mut()
+                    .expect("checked remote runner");
+                if remote_runner.execution_receipt.is_some() {
+                    return Err(crate::runner_job_execution_context::rejected(
+                        "runner execution receipt was already consumed",
+                    ));
+                }
+                let request = remote_runner
+                    .execution_request
+                    .as_ref()
+                    .unwrap_or(&remote_runner.request);
+                let expected =
+                    crate::runner_job_execution_context::RunnerJobExecutionContext::from_claim(
+                        &stored.job,
+                        request,
+                    )?;
+                if expected.id() != context_id {
+                    return Err(crate::runner_job_execution_context::rejected(
+                        "runner execution context does not match the live claim",
+                    ));
+                }
+                remote_runner.execution_receipt = Some(RemoteRunnerExecutionReceipt {
+                    context_id: context_id.to_string(),
+                    consumed_at_ms: now,
+                });
+                stored.job.updated_at_ms = now;
+                stored.job.clone()
+            };
+            Self::append_event_already_locked(
+                self,
+                inner,
+                job_id,
+                JobEventKind::Progress,
+                Some("remote runner execution receipt consumed".to_string()),
+                Some(serde_json::json!({
+                    "schema": "homeboy/remote-runner-execution-receipt/v1",
+                    "context_id": context_id,
+                    "consumed_at_ms": now,
+                })),
+            )?;
+            Ok(job)
+        })
     }
 
     pub(crate) fn cancel_remote_runner_job(
@@ -1092,7 +1323,7 @@ impl JobStore {
         })
     }
 
-    pub(crate) fn reconcile_expired_remote_runner_claims(&self, now_ms: u64) -> Result<Vec<Job>> {
+    pub fn reconcile_expired_remote_runner_claims(&self, now_ms: u64) -> Result<Vec<Job>> {
         self.reconcile_expired_remote_runner_claims_for_runner(now_ms, None)
     }
 

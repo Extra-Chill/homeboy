@@ -313,6 +313,139 @@ pub fn submit_plan(
     })
 }
 
+/// Append a provider-verified placement outcome to the durable run without
+/// re-evaluating policy. A mismatched decision id is a stale/replayed attempt
+/// and fails closed.
+pub fn record_execution_placement_outcome(
+    run_id: &str,
+    outcome: homeboy_lab_runner_contract::ExecutionPlacementOutcome,
+) -> Result<()> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let decision: homeboy_lab_runner_contract::ExecutionPlacementDecision = serde_json::from_value(
+        record.metadata["execution_placement_decision"].clone(),
+    )
+    .map_err(|error| {
+        Error::validation_invalid_argument(
+            "execution_placement_decision",
+            format!("durable run has no valid canonical placement decision: {error}"),
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    if decision.decision_id != outcome.decision_id
+        || !decision.verifies_outcome(outcome.effective)
+        || (outcome.effective == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab
+            && decision
+                .runner
+                .as_ref()
+                .map(|runner| runner.runner_id.as_str())
+                != outcome.runner_id.as_deref())
+    {
+        return Err(Error::validation_invalid_argument(
+            "execution_placement_outcome",
+            "verified placement outcome contradicts the durable routing decision",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    record.metadata["execution_placement_outcome"] =
+        serde_json::to_value(outcome).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize placement outcome".to_string()),
+            )
+        })?;
+    store::write_record(&record)
+}
+
+#[cfg(test)]
+mod execution_placement_tests {
+    use super::*;
+    use homeboy_lab_runner_contract::{
+        EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
+        ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
+        ExecutionPlacementRunnerSelection, Placement, RunnerSelectionSource,
+    };
+
+    fn decision() -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
+        homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+            "test-policy",
+            "1",
+            ExecutionPlacementIdentity {
+                repository: "repo".to_string(),
+                workspace: "workspace".to_string(),
+                task: "task".to_string(),
+                candidate: Some("candidate-a".to_string()),
+                base: Some("base-a".to_string()),
+            },
+            Placement::Lab,
+            ExecutionPlacementRequirement::Lab,
+            EffectiveExecutionPlacement::Lab,
+            Some(ExecutionPlacementRunnerSelection {
+                runner_id: "lab-a".to_string(),
+                source: RunnerSelectionSource::Explicit,
+            }),
+            ExecutionPlacementFallback {
+                local_allowed: false,
+                reason: None,
+            },
+            ExecutionPlacementOverrideAuthorization {
+                authorized: false,
+                authority: None,
+            },
+        )
+    }
+
+    #[test]
+    fn durable_plan_status_and_verified_outcome_keep_one_decision_identity() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut plan = super::super::tests::test_plan();
+            let placement = decision();
+            plan.metadata = json!({ "execution_placement_decision": placement });
+            let record = submit_plan_with_runtime_admission(&plan, Some("placement-run"), |_| {
+                Ok(json!({ "runtime": "test" }))
+            })
+            .expect("submit plan");
+            assert_eq!(
+                record.metadata["execution_placement_decision"]["decision_id"],
+                decision().decision_id
+            );
+            record_execution_placement_outcome(
+                "placement-run",
+                decision()
+                    .outcome(EffectiveExecutionPlacement::Lab, Some("lab-a".to_string()))
+                    .expect("Lab is authorized"),
+            )
+            .expect("record verified outcome");
+            let status = status("placement-run").expect("status");
+            assert_eq!(
+                status.metadata["execution_placement_outcome"]["decision_id"],
+                decision().decision_id
+            );
+        });
+    }
+
+    #[test]
+    fn stale_or_contradictory_outcomes_fail_closed() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut plan = super::super::tests::test_plan();
+            plan.metadata = json!({ "execution_placement_decision": decision() });
+            submit_plan_with_runtime_admission(&plan, Some("placement-run"), |_| Ok(json!({})))
+                .expect("submit plan");
+            let error = record_execution_placement_outcome(
+                "placement-run",
+                homeboy_lab_runner_contract::ExecutionPlacementOutcome {
+                    decision_id: "stale".to_string(),
+                    effective: EffectiveExecutionPlacement::Local,
+                    runner_id: None,
+                },
+            )
+            .expect_err("reject contradictory outcome");
+            assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        });
+    }
+}
+
 pub(crate) trait RuntimeAdmissionEvidence {
     fn runtime(&self) -> Value;
 }
@@ -405,6 +538,18 @@ where
     }
     if let Some(runner_id) = execution_runner_id.as_deref() {
         metadata["runner_id"] = json!(runner_id);
+    }
+    // The plan is the immutable cross-process carrier. Project the identical
+    // decision onto the run record so status, finalization, and PR evidence do
+    // not infer placement from ambient runner metadata.
+    if let Some(decision) = plan.metadata.get("execution_placement_decision") {
+        metadata["execution_placement_decision"] = decision.clone();
+    }
+    // A replacement decision is only reviewable after it reaches the durable
+    // run record. Keep its invalidation evidence alongside the decision rather
+    // than leaving it in the transient plan file.
+    if let Some(invalidation) = plan.metadata.get("execution_placement_invalidated") {
+        metadata["execution_placement_invalidated"] = invalidation.clone();
     }
     // Surface controller-owned worktree convergence in the run record as well
     // as the immutable plan, so status and resumed execution retain the same
@@ -2846,6 +2991,69 @@ pub fn record_cook_force_with_lease_receipt(
         record
             .ensure_metadata_object()
             .insert("cook_force_with_lease_receipt".to_string(), receipt.clone());
+        true
+    })?;
+    match record {
+        Some(record) => Ok(record),
+        None => store::read_record(&run_id),
+    }
+}
+
+/// Persist a validated manual publication intent without claiming Cook completion.
+pub(crate) fn record_manual_finalization_intent(
+    run_id: &str,
+    intent: Value,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let digest = manual_finalization_intent_digest(&intent);
+    let record = store::mutate_record(&run_id, |record| {
+        if record.metadata.get("manual_finalization_intent") == Some(&intent)
+            && record.metadata.get("manual_finalization_intent_digest") == Some(&json!(digest))
+        {
+            return false;
+        }
+        record.updated_at = Some(now_timestamp());
+        record
+            .ensure_metadata_object()
+            .insert("manual_finalization_intent".to_string(), intent.clone());
+        record.ensure_metadata_object().insert(
+            "manual_finalization_intent_digest".to_string(),
+            json!(digest),
+        );
+        true
+    })?;
+    match record {
+        Some(record) => Ok(record),
+        None => store::read_record(&run_id),
+    }
+}
+
+/// Stable digest of the exact validated manual dossier persisted for recovery.
+pub(crate) fn manual_finalization_intent_digest(intent: &Value) -> String {
+    content_hash::sha256_hex(
+        &serde_json::to_vec(intent).expect("JSON values always serialize into a manual intent"),
+    )
+}
+
+/// Persist a completed manual receipt and bind it to the validated intent digest.
+pub(crate) fn record_manual_finalization_receipt(
+    run_id: &str,
+    receipt: Value,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        let intent_digest = record.metadata["manual_finalization_intent_digest"].clone();
+        record.updated_at = Some(now_timestamp());
+        let metadata = record.ensure_metadata_object();
+        metadata.insert("cook_finalization".to_string(), receipt.clone());
+        metadata.insert(
+            "manual_finalization_receipt_digest".to_string(),
+            json!(manual_finalization_intent_digest(&receipt)),
+        );
+        metadata.insert(
+            "manual_finalization_receipt_intent_digest".to_string(),
+            intent_digest,
+        );
         true
     })?;
     match record {

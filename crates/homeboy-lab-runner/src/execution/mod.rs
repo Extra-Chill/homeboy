@@ -135,6 +135,9 @@ pub fn reconcile_runner_generation_after_evidence(runner_id: &str) -> Result<()>
 
 #[derive(Debug, Clone)]
 pub struct RunnerExecOptions {
+    /// Typed execution authority supplied by the dispatch boundary. It is never
+    /// reconstructed from environment or runner-local lifecycle state.
+    pub execution_context: homeboy_core::runner_job_execution_context::RunnerJobExecutionContext,
     pub cwd: Option<String>,
     pub project_id: Option<String>,
     pub allow_diagnostic_ssh: bool,
@@ -176,9 +179,25 @@ pub struct RunnerExecOptions {
     pub read_only_artifact_access: bool,
 }
 
+/// The only provider-env adapter boundary for authenticated runner execution.
+/// The provider receives the typed context as an explicit argument to this
+/// boundary; environment remains only its eventual process projection.
+pub(crate) fn resolve_provider_env_with_execution_context(
+    execution_context: &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext,
+    provider_ids: &[String],
+    cwd: &std::path::Path,
+    env: &[(String, String)],
+) -> Result<Vec<homeboy_extension::EnvProviderContribution>> {
+    homeboy_extension::resolve_installed_env_providers(execution_context, provider_ids, cwd, env)
+}
+
 impl Default for RunnerExecOptions {
     fn default() -> Self {
         Self {
+            execution_context:
+                homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
+                    "homeboy",
+                ),
             cwd: None,
             project_id: None,
             allow_diagnostic_ssh: false,
@@ -848,6 +867,7 @@ pub(crate) fn exec_with_status_snapshot(
             validate_require_paths_on_host: false,
         })?;
         let contributions = homeboy_extension::resolve_installed_env_providers(
+            &options.execution_context,
             &options.extension_env_providers,
             std::path::Path::new(&plan.cwd),
             &plan
@@ -861,7 +881,10 @@ pub(crate) fn exec_with_status_snapshot(
                 plan.env.insert(key, value);
             }
         }
-        return exec_local(plan);
+        let (mut output, exit_code) = exec_local(plan)?;
+        append_runner_exec_binary_diagnostics(&mut output, &runner, None);
+        append_runner_exec_diagnostic_hint(&mut output, run_id_hint);
+        return Ok((output, exit_code));
     }
     // Extension parity uses daemon-backed runner commands. Recover the direct
     // session before that preparation so admission cannot fail before `/exec`.
@@ -1230,9 +1253,19 @@ fn apply_explicit_runner_exec_run_id_env(
     })
 }
 
-fn runner_exec_request_metadata(run_id: Option<&str>, transport: &str) -> Value {
+fn runner_exec_request_metadata(run_id: Option<&str>, transport: &str, runner_id: &str) -> Value {
+    let controller_run_id = run_id
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or("runner-exec");
+    // This controller-created ID is stable in the persisted replay request and
+    // distinct for each new dispatch attempt.
+    let controller_attempt_id = format!("{controller_run_id}:{}", uuid::Uuid::new_v4());
+    let accepted_handoff_id = format!("{transport}:{runner_id}:{controller_attempt_id}");
     let mut metadata = serde_json::json!({
         "transport": transport,
+        "controller_run_id": controller_run_id,
+        "controller_attempt_id": controller_attempt_id,
+        "accepted_handoff_id": accepted_handoff_id,
     });
     if let Some(run_id) = run_id.filter(|id| !id.trim().is_empty()) {
         metadata["durable_run_id"] = serde_json::json!(run_id);

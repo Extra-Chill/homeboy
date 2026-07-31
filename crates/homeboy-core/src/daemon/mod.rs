@@ -1899,6 +1899,9 @@ fn enqueue_exec_job(
         cwd: Some(plan.cwd.clone()),
         lifecycle: lifecycle.clone(),
     };
+    let execution_controller_run_id = lifecycle
+        .as_ref()
+        .and_then(|lifecycle| lifecycle.durable_run_id.clone());
     // Every runner process shares the runner's connection and declared process
     // capacity. Diagnostic commands are ordinary runner executions too, so
     // admitting them outside this queue can wedge the shared transport.
@@ -1928,6 +1931,30 @@ fn enqueue_exec_job(
                         return Err(error);
                     }
                 };
+                let execution_context = crate::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon_with_dispatch_metadata(
+                    execution_controller_run_id.as_deref(),
+                    request
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("controller_attempt_id"))
+                        .and_then(serde_json::Value::as_str),
+                    request
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("accepted_handoff_id"))
+                        .and_then(serde_json::Value::as_str),
+                    &plan.runner_id,
+                    &job.job_id().to_string(),
+                    plan.command.first().map(String::as_str).unwrap_or_default(),
+                    &reservation_id,
+                )?;
+                let execution_context_evidence = execution_context.evidence_record()?;
+                // Durable progress makes the same receipt resolvable after a
+                // controller restart without consulting process environment.
+                job.progress(json!({
+                    "phase": "runner_job_execution_context_verified",
+                    "execution_context": execution_context_evidence,
+                }))?;
                 plan.env
                     .insert("HOMEBOY_RUNNER_CHILD_RESERVATION".to_string(), reservation_id);
                 let liveness = Arc::new(Mutex::new(ExecLiveness::new(Instant::now())));
@@ -2009,6 +2036,7 @@ fn enqueue_exec_job(
                 let driver_cancellation = Arc::clone(&cancellation_requested);
                 let process_output = runner_exec_driver::execute_exec(
                     &plan,
+                    &execution_context,
                     Box::new(move || {
                         driver_cancellation.load(Ordering::SeqCst) || cancel_job.is_cancelled()
                     }),
@@ -2040,6 +2068,7 @@ fn enqueue_exec_job(
                 let exit_code = process_output.exit_code;
                 let metrics = process_output.metrics.clone();
                 let capture = process_output.capture.clone();
+                let extension_env_provenance = process_output.extension_env_provenance.clone();
                 if cancellation_requested.load(Ordering::SeqCst) {
                     let evidence = stall_evidence
                         .lock()
@@ -2111,7 +2140,7 @@ fn enqueue_exec_job(
                     "patch": patch,
                     "metrics": metrics,
                     "capture": capture,
-                    "extension_env_providers": plan.extension_env_provenance,
+                    "extension_env_providers": extension_env_provenance,
                 });
                 if exit_code != 0 {
                     job.result(result.clone())?;
@@ -3186,6 +3215,7 @@ mod tests {
         fn execute(
             &self,
             prepared: &PreparedDaemonExec,
+            _execution_context: &crate::runner_job_execution_context::RunnerJobExecutionContext,
             _is_cancelled: runner_exec_driver::ExecCancellationProbe,
             _progress_sink: Option<runner_exec_driver::ExecProgressSink>,
             _require_child_identity_acknowledgement: bool,

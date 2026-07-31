@@ -1424,7 +1424,16 @@ fn remote_runner_submission_terminal_replay_returns_original_projection_without_
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, Some(1))
         .expect("claim")
         .expect("job claimed");
+    let context_id = claim
+        .execution_context
+        .as_ref()
+        .expect("execution context")
+        .id()
+        .to_string();
     let claim_id = claim.job.claim_id.expect("claim id");
+    store
+        .consume_remote_runner_execution(accepted.id, "homeboy-lab", &claim_id, &context_id)
+        .expect("consume execution receipt");
     let terminal = store
         .finish_remote_runner_job(
             accepted.id,

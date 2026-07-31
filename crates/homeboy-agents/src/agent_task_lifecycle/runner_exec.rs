@@ -80,7 +80,8 @@ fn ensure_runner_exec_observation_run(
     let mut run = match store.get_run(&run_id)? {
         Some(run)
             if run.metadata_json.get("kind").and_then(Value::as_str)
-                == Some(RUNNER_EXEC_RUN_KIND) =>
+                == Some(RUNNER_EXEC_RUN_KIND)
+                || run.kind == "runner-exec" =>
         {
             run
         }

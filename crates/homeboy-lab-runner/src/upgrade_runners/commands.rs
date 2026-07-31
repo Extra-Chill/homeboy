@@ -271,6 +271,8 @@ pub fn shell_arg(arg: &str) -> String {
 
 pub fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecOptions {
     RunnerExecOptions {
+        execution_context:
+            homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
         cwd: None,
         project_id: None,
         allow_diagnostic_ssh: true,

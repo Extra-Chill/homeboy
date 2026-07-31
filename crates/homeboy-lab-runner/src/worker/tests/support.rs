@@ -71,6 +71,31 @@ pub(super) fn spawn_mock_broker_with_paths(
     (format!("http://{addr}"), handle)
 }
 
+/// Return a real store-backed claim while allowing a boundary test to corrupt
+/// its wire representation before the reverse worker receives it.
+pub(super) fn spawn_mock_broker_with_claim_mutation<F>(
+    store: JobStore,
+    mut mutate_claim: F,
+) -> (String, std::thread::JoinHandle<()>)
+where
+    F: FnMut(&mut Value) + Send + 'static,
+{
+    spawn_custom_broker(store, 1, None, move |store, request| {
+        if request.path == "/runner/jobs/claim" {
+            let claim = store
+                .claim_remote_runner_job("lab", None, 30_000, None)
+                .expect("claim job");
+            let mut claim = serde_json::to_value(claim).expect("serialize claim");
+            mutate_claim(&mut claim);
+            return serde_json::json!({
+                "success": true,
+                "data": { "body": { "claim": claim } }
+            });
+        }
+        handle_request(store, request)
+    })
+}
+
 pub(super) fn spawn_cancelling_after_claim_broker(
     store: JobStore,
     expected_requests: usize,
@@ -310,6 +335,27 @@ fn handle_request(store: &JobStore, request: &MockRequest) -> Value {
         return serde_json::json!({
             "success": true,
             "data": { "body": { "event": event } }
+        });
+    }
+    if let Some(job_id) = request
+        .path
+        .strip_prefix("/runner/jobs/")
+        .and_then(|tail| tail.strip_suffix("/consume"))
+    {
+        let job_id = uuid::Uuid::parse_str(job_id).expect("consume job id");
+        let job = store
+            .consume_remote_runner_execution(
+                job_id,
+                "lab",
+                request.body["claim_id"].as_str().expect("consume claim id"),
+                request.body["context_id"]
+                    .as_str()
+                    .expect("consume context id"),
+            )
+            .expect("consume execution receipt");
+        return serde_json::json!({
+            "success": true,
+            "data": { "body": { "job": job } }
         });
     }
     if let Some(job_id) = request

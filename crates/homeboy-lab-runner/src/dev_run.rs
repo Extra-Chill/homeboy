@@ -243,6 +243,10 @@ pub(crate) fn run_extension_dev_run_with(
     let (install, _) = exec(
         &plan.runner_id,
         RunnerExecOptions {
+            execution_context:
+                homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
+                    "homeboy",
+                ),
             cwd: Some(synced.remote_path.clone()),
             project_id: None,
             allow_diagnostic_ssh: false,
@@ -309,6 +313,10 @@ pub(crate) fn run_extension_dev_run_with(
     let (command_output, command_exit_code) = exec(
         &plan.runner_id,
         RunnerExecOptions {
+            execution_context:
+                homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
+                    "homeboy",
+                ),
             cwd: Some(synced.remote_path.clone()),
             project_id: None,
             allow_diagnostic_ssh: false,
@@ -576,6 +584,10 @@ fn probe_runner_extension_state(
     match exec(
         &plan.runner_id,
         RunnerExecOptions {
+            execution_context:
+                homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
+                    "homeboy",
+                ),
             cwd: None,
             project_id: None,
             allow_diagnostic_ssh: false,

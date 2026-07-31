@@ -242,6 +242,9 @@ fn component_script_env(
             provider_env.extend(component_env.iter().cloned());
             provider_env.extend(extra_env.iter().cloned());
             env.extend(env_provider::env_vars(
+                &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
+                    "homeboy",
+                ),
                 &extension,
                 source_path,
                 &provider_env,

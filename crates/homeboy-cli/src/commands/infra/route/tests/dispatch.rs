@@ -3,14 +3,50 @@
 use super::*;
 
 #[test]
+fn automatic_local_trace_does_not_target_an_agent_task_lifecycle_record() {
+    assert!(placement_outcome_target(None, None).is_none());
+}
+
+#[test]
+fn successful_offloaded_trace_does_not_target_an_agent_task_lifecycle_record() {
+    assert!(placement_outcome_target(None, None).is_none());
+}
+
+#[test]
+fn detached_fanout_observation_does_not_target_an_agent_task_lifecycle_record() {
+    assert!(placement_outcome_target(None, None).is_none());
+}
+
+#[test]
+fn durable_agent_task_handoff_targets_its_lifecycle_record() {
+    assert_eq!(
+        placement_outcome_target(Some("durable-run"), None),
+        Some(ExecutionPlacementOutcomeTarget::AgentTaskLifecycle {
+            run_id: "durable-run"
+        })
+    );
+}
+
+#[test]
 fn detached_planless_handoff_persists_explicit_bench_label_before_handoff() {
     crate::test_support::with_isolated_home(|_| {
-        let handoff = materialize_generic_detached_lab_handoff(&[
-            "homeboy".to_string(),
-            "bench".to_string(),
-            "--run-id".to_string(),
-            "ssi-fixture-37-20260727-runtime-fixed".to_string(),
-        ])
+        let source = tempfile::tempdir().expect("source workspace");
+        let decision = placement_decision(
+            &Cli::parse_from(["homeboy", "status"]),
+            Some("homeboy-lab"),
+            "bench",
+            Some(source.path()),
+        )
+        .expect("placement decision");
+        let handoff = materialize_generic_detached_lab_handoff(
+            &[
+                "homeboy".to_string(),
+                "bench".to_string(),
+                "--run-id".to_string(),
+                "ssi-fixture-37-20260727-runtime-fixed".to_string(),
+            ],
+            decision.clone(),
+        )
         .expect("persist detached bench handoff");
 
         assert_eq!(handoff.run_id, "ssi-fixture-37-20260727-runtime-fixed");
@@ -18,6 +54,12 @@ fn detached_planless_handoff_persists_explicit_bench_label_before_handoff() {
             .expect("interrupted caller leaves a discoverable run");
         assert!(!record.state.is_terminal());
         assert_eq!(record.plan_id, handoff.plan.plan_id);
+        assert_eq!(
+            agent_task_lifecycle::load_controller_plan(&handoff.run_id)
+                .expect("durable controller plan")
+                .metadata["execution_placement_decision"]["decision_id"],
+            decision.decision_id,
+        );
     });
 }
 
@@ -29,8 +71,18 @@ fn detached_planless_handoff_reuses_the_same_explicit_bench_label() {
             "bench".to_string(),
             "--run-id=ssi-fixture-37-20260727-runtime-fixed".to_string(),
         ];
-        let first = materialize_generic_detached_lab_handoff(&args).expect("first handoff");
-        let second = materialize_generic_detached_lab_handoff(&args).expect("replayed handoff");
+        let source = tempfile::tempdir().expect("source workspace");
+        let decision = placement_decision(
+            &Cli::parse_from(["homeboy", "status"]),
+            Some("homeboy-lab"),
+            "bench",
+            Some(source.path()),
+        )
+        .expect("placement decision");
+        let first = materialize_generic_detached_lab_handoff(&args, decision.clone())
+            .expect("first handoff");
+        let second =
+            materialize_generic_detached_lab_handoff(&args, decision).expect("replayed handoff");
 
         assert_eq!(first.run_id, second.run_id);
         assert_eq!(first.plan.plan_id, second.plan.plan_id);
@@ -174,6 +226,13 @@ fn deferred_workload_command_is_portable_and_omits_controller_placement() {
 fn lab_cook_dispatcher_recipe_round_trips_exact_transport() {
     let dispatcher = LabCookAttemptDispatcher {
         runner_id: "homeboy-lab".to_string(),
+        placement_decision: placement_decision(
+            &Cli::parse_from(["homeboy", "status"]),
+            Some("homeboy-lab"),
+            "test-cook-dispatch",
+            None,
+        )
+        .expect("test placement decision"),
         allow_local_fallback: true,
         allow_dirty_lab_workspace: false,
         skip_deps_hydration: true,
@@ -208,6 +267,251 @@ fn lab_cook_dispatcher_recipe_round_trips_exact_transport() {
         legacy.durable_recipe().unwrap()["detach_after_handoff"],
         false
     );
+}
+
+#[test]
+fn unchanged_attempt_inputs_preserve_the_canonical_decision() {
+    let cli = Cli::parse_from(["homeboy", "--runner", "homeboy-lab", "status"]);
+    let first = tempdir().expect("first child workspace");
+    let initial = placement_decision(&cli, Some("homeboy-lab"), "child-a", Some(first.path()))
+        .expect("initial child decision");
+
+    let preserved =
+        placement_decision_for_attempt(&initial, "homeboy-lab", "child-a", Some(first.path()));
+
+    assert_eq!(initial.decision_id, preserved.decision_id);
+    assert_eq!(
+        preserved.identity.workspace,
+        first.path().display().to_string()
+    );
+    assert_eq!(preserved.identity.task, "child-a");
+    assert_eq!(
+        preserved
+            .runner
+            .as_ref()
+            .map(|runner| runner.runner_id.as_str()),
+        Some("homeboy-lab")
+    );
+}
+
+#[test]
+fn durable_placement_identity_survives_workspace_exception_retry_continuation_and_fanout() {
+    crate::test_support::with_isolated_home(|_| {
+        let workspace_parent = tempdir().expect("workspace parent");
+        let replacement_parent = tempdir().expect("replacement workspace parent");
+        let workspace = workspace_parent.path().join("candidate");
+        let replacement_workspace = replacement_parent.path().join("candidate");
+        std::fs::create_dir(&workspace).expect("workspace");
+        std::fs::create_dir(&replacement_workspace).expect("replacement workspace");
+        let cli = Cli::parse_from(["homeboy", "--runner", "homeboy-lab", "status"]);
+        let initial =
+            placement_decision(&cli, Some("homeboy-lab"), "provider-task", Some(&workspace))
+                .expect("initial placement decision");
+        let template = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            "placement-e2e",
+            vec![serde_json::from_value(serde_json::json!({
+                "task_id": "provider-task",
+                "executor": { "backend": "fixture" },
+                "instructions": "exercise durable placement"
+            }))
+            .expect("task")],
+        );
+
+        // These paths re-enter staging with the same declared workspace. They
+        // must retain one decision and attach outcomes to that exact identity.
+        for run_id in [
+            "workspace-exception",
+            "workspace-retry",
+            "workspace-continuation",
+            "fanout-child-a",
+            "fanout-child-b",
+        ] {
+            let mut plan = template.clone();
+            let decision = resolve_cook_attempt_placement_decision(
+                &mut plan,
+                run_id,
+                &initial,
+                "homeboy-lab",
+                "provider-task",
+                Some(&workspace),
+            )
+            .expect("preserve placement decision");
+            assert_eq!(decision.decision_id, initial.decision_id, "{run_id}");
+            assert!(plan
+                .metadata
+                .get("execution_placement_invalidated")
+                .is_none());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist attempt");
+            homeboy_agents::agent_task_lifecycle::record_execution_placement_outcome(
+                run_id,
+                decision
+                    .outcome(
+                        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+                        Some("homeboy-lab".to_string()),
+                    )
+                    .expect("authorized Lab outcome"),
+            )
+            .expect("persist verified outcome");
+            let record = agent_task_lifecycle::status(run_id).expect("durable attempt");
+            assert_eq!(
+                record.metadata["execution_placement_decision"]["decision_id"],
+                initial.decision_id
+            );
+            assert_eq!(
+                record.metadata["execution_placement_outcome"]["decision_id"],
+                initial.decision_id
+            );
+        }
+
+        // A replacement workspace is the declared transition where the old
+        // identity becomes stale. Its outcome must bind to the replacement.
+        let mut replacement_plan = template;
+        replacement_plan.metadata = serde_json::json!({
+            "execution_placement_decision": initial,
+        });
+        let replacement = resolve_cook_attempt_placement_decision(
+            &mut replacement_plan,
+            "workspace-replacement",
+            &placement_decision(&cli, Some("homeboy-lab"), "provider-task", Some(&workspace))
+                .expect("initial decision"),
+            "homeboy-lab",
+            "provider-task",
+            Some(&replacement_workspace),
+        )
+        .expect("replace stale decision");
+        assert_ne!(
+            replacement.decision_id,
+            replacement_plan.metadata["execution_placement_invalidated"]["prior_decision_id"]
+        );
+        assert_eq!(
+            replacement_plan.metadata["execution_placement_invalidated"]["reasons"],
+            serde_json::json!(["workspace_changed"])
+        );
+        agent_task_lifecycle::submit_plan(&replacement_plan, Some("workspace-replacement"))
+            .expect("persist replacement");
+        let replacement_record =
+            agent_task_lifecycle::status("workspace-replacement").expect("replacement record");
+        assert_eq!(
+            replacement_record.metadata["execution_placement_invalidated"]["prior_decision_id"],
+            replacement_plan.metadata["execution_placement_invalidated"]["prior_decision_id"]
+        );
+        assert_eq!(
+            replacement_record.metadata["execution_placement_invalidated"]["reasons"],
+            serde_json::json!(["workspace_changed"])
+        );
+        homeboy_agents::agent_task_lifecycle::record_execution_placement_outcome(
+            "workspace-replacement",
+            replacement
+                .outcome(
+                    homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+                    Some("homeboy-lab".to_string()),
+                )
+                .expect("replacement Lab outcome"),
+        )
+        .expect("persist replacement outcome");
+        let replacement_record =
+            agent_task_lifecycle::status("workspace-replacement").expect("replacement record");
+        assert_eq!(
+            replacement_record.metadata["execution_placement_outcome"]["decision_id"],
+            replacement.decision_id
+        );
+    });
+}
+
+#[test]
+fn direct_controller_dispatch_creates_an_authoritative_placement_decision() {
+    let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        "controller-dispatch-plan",
+        vec![serde_json::from_value(serde_json::json!({
+            "task_id": "controller-task",
+            "executor": { "backend": "fixture" },
+            "instructions": "dispatch directly to Lab"
+        }))
+        .expect("task")],
+    );
+
+    let decision = controller_dispatch_placement_decision(&plan, "homeboy-lab", None);
+
+    assert_eq!(decision.identity.task, "controller-task");
+    assert_eq!(
+        decision.requested,
+        homeboy_lab_runner_contract::Placement::Lab
+    );
+    assert_eq!(
+        decision.required,
+        homeboy_lab_runner_contract::ExecutionPlacementRequirement::Lab
+    );
+    assert_eq!(
+        decision.runner.expect("selected runner").runner_id,
+        "homeboy-lab"
+    );
+}
+
+#[test]
+fn command_placement_matrix_separates_preferred_lab_from_required_lab() {
+    let source = tempdir().expect("source workspace");
+    let cases = [
+        (
+            vec!["homeboy", "--placement", "local", "review", "lint"],
+            None,
+            homeboy::cli_surface::Placement::Local,
+            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
+            true,
+        ),
+        (
+            vec!["homeboy", "review", "lint"],
+            Some("policy-lab"),
+            homeboy::cli_surface::Placement::Auto,
+            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
+            true,
+        ),
+        (
+            vec!["homeboy", "--placement", "lab-or-local", "review", "lint"],
+            Some("policy-lab"),
+            homeboy::cli_surface::Placement::LabOrLocal,
+            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
+            true,
+        ),
+        (
+            vec!["homeboy", "--runner", "pinned-lab", "review", "lint"],
+            Some("pinned-lab"),
+            homeboy::cli_surface::Placement::Auto,
+            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Lab,
+            false,
+        ),
+        (
+            vec!["homeboy", "--placement", "lab", "review", "lint"],
+            Some("policy-lab"),
+            homeboy::cli_surface::Placement::Lab,
+            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Lab,
+            false,
+        ),
+    ];
+
+    for (args, runner, placement, required, local_fallback) in cases {
+        let cli = Cli::parse_from(&args);
+        let decision = placement_decision(&cli, runner, "matrix", Some(source.path()))
+            .expect("placement decision");
+
+        assert_eq!(cli.placement, placement);
+        assert_eq!(decision.required, required);
+        assert_eq!(
+            decision
+                .verifies_outcome(homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local),
+            local_fallback,
+            "{args:?} local fallback authorization"
+        );
+        assert_eq!(
+            decision.runner.as_ref().map(|runner| runner.source),
+            runner.map(|_| {
+                if cli.runner.is_some() {
+                    homeboy_lab_runner_contract::RunnerSelectionSource::Explicit
+                } else {
+                    homeboy_lab_runner_contract::RunnerSelectionSource::Policy
+                }
+            })
+        );
+    }
 }
 
 #[test]
@@ -246,6 +550,13 @@ fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
         );
         let dispatcher = LabCookAttemptDispatcher {
             runner_id: "missing-homeboy-lab".to_string(),
+            placement_decision: placement_decision(
+                &Cli::parse_from(["homeboy", "status"]),
+                Some("missing-homeboy-lab"),
+                "task",
+                None,
+            )
+            .expect("test placement decision"),
             allow_local_fallback: false,
             allow_dirty_lab_workspace: false,
             skip_deps_hydration: false,
@@ -285,6 +596,14 @@ fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
         assert_eq!(
             record.metadata["pre_execution_failure"]["provider_executions_consumed"],
             0
+        );
+        assert!(record
+            .metadata
+            .get("execution_placement_invalidated")
+            .is_none());
+        assert_eq!(
+            record.metadata["execution_placement_decision"]["identity"]["task"],
+            "task"
         );
     });
 }

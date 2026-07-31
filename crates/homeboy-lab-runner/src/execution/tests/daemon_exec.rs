@@ -82,6 +82,18 @@ fn daemon_exec_does_not_require_runner_config_on_daemon_host() {
     assert_eq!(job.status, JobStatus::Succeeded);
 
     let events = store.events(job.id).expect("events");
+    assert!(events.iter().any(|event| {
+        event
+            .data
+            .as_ref()
+            .and_then(|data| data.get("execution_context"))
+            .is_some_and(|evidence| {
+                evidence["content_sha256"]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("sha256:"))
+                    && evidence["context"]["runner_job_id"] == serde_json::json!(job.id.to_string())
+            })
+    }));
     let result = events
         .iter()
         .find(|event| event.kind == JobEventKind::Result)
@@ -164,7 +176,7 @@ fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
     .expect("manifest");
     std::fs::write(
         extension.path().join("env.sh"),
-        "#!/bin/sh\nprintf '%s\\n' '{\"FIXTURE_RUNTIME\":\"runner-local\"}'\n",
+        "#!/bin/sh\ntest -n \"$HOMEBOY_ENV_PROVIDER_COMMAND_PAYLOAD\" || exit 23\nprintf '%s\\n' '{\"FIXTURE_RUNTIME\":\"runner-local\"}'\n",
     )
     .expect("provider");
     #[cfg(unix)]
@@ -197,6 +209,11 @@ fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
     );
 
     assert_eq!(response.status_code, 200);
+    assert_eq!(
+        response.body["body"]["request"]["extension_env_providers"]["providers"],
+        serde_json::json!(["fixture"]),
+        "enqueue retains only provider declarations; resolved output is produced after authenticated execution"
+    );
     let job_id = response.body["body"]["job"]["id"]
         .as_str()
         .expect("job id")

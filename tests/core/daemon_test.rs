@@ -2872,7 +2872,7 @@ fn routes_remote_runner_job_broker_lifecycle() {
 }
 
 #[test]
-fn remote_runner_broker_redacts_secret_env_from_public_surfaces() {
+fn remote_runner_broker_refuses_inline_secret_env_without_persisting_it() {
     let store = JobStore::default();
     let sentinel = "homeboy-secret-sentinel-do-not-echo";
     let submit = route_with_job_store_and_body(
@@ -2892,44 +2892,9 @@ fn remote_runner_broker_redacts_secret_env_from_public_surfaces() {
         &store,
     );
 
-    assert_eq!(submit.status_code, 200, "submit body: {}", submit.body);
+    assert_eq!(submit.status_code, 400, "submit body: {}", submit.body);
     assert!(!serialized_contains(&submit.body, sentinel));
-    assert_eq!(
-        submit.body["body"]["request"]["env"]["RUNNER_SECRET_TOKEN"],
-        "<redacted>"
-    );
-    let job_id = submit.body["body"]["job"]["id"]
-        .as_str()
-        .expect("job id")
-        .to_string();
-
-    let list = route_with_job_store("GET", "/jobs", &store);
-    assert_eq!(list.status_code, 200, "list body: {}", list.body);
-    assert!(!serialized_contains(&list.body, sentinel));
-
-    let show = route_with_job_store("GET", &format!("/jobs/{job_id}"), &store);
-    assert_eq!(show.status_code, 200, "show body: {}", show.body);
-    assert!(!serialized_contains(&show.body, sentinel));
-
-    let events = route_with_job_store("GET", &format!("/jobs/{job_id}/events"), &store);
-    assert_eq!(events.status_code, 200, "events body: {}", events.body);
-    assert!(!serialized_contains(&events.body, sentinel));
-
-    let claim = route_with_job_store_and_body(
-        "POST",
-        "/runner/jobs/claim",
-        Some(serde_json::json!({
-            "runner_id": "homeboy-lab",
-            "project_id": "sample-project",
-            "lease_ms": 30000
-        })),
-        &store,
-    );
-    assert_eq!(claim.status_code, 200, "claim body: {}", claim.body);
-    assert_eq!(
-        claim.body["body"]["claim"]["request"]["env"]["RUNNER_SECRET_TOKEN"],
-        sentinel
-    );
+    assert_eq!(store.list().len(), 0);
 }
 
 #[test]

@@ -906,6 +906,10 @@ fn worker_local_workload_validation_uses_implicit_command_secret_names() {
         let (_output, exit_code) = super::super::worker::exec_worker_local_with_process_output(
             "lab-local",
             RunnerExecOptions {
+                execution_context:
+                    homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
+                        "homeboy",
+                    ),
                 cwd: Some(workspace.display().to_string()),
                 project_id: None,
                 allow_diagnostic_ssh: false,
@@ -932,6 +936,7 @@ fn worker_local_workload_validation_uses_implicit_command_secret_names() {
                 print_handoff: true,
                 read_only_artifact_access: false,
             },
+            || Ok(()),
             |_plan| {
                 Ok(ProcessOutput {
                     stdout: "ok".to_string(),
@@ -957,6 +962,10 @@ fn test_exec_runs_local_runner_command() {
         let (output, exit_code) = exec(
             "lab-local",
             RunnerExecOptions {
+                execution_context:
+                    homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
+                        "homeboy",
+                    ),
                 cwd: None,
                 project_id: None,
                 allow_diagnostic_ssh: false,
@@ -1036,6 +1045,10 @@ fn test_exec_does_not_leak_ambient_process_env() {
         let (output, exit_code) = exec(
             "lab-local",
             RunnerExecOptions {
+                execution_context:
+                    homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
+                        "homeboy",
+                    ),
                 cwd: None,
                 project_id: None,
                 allow_diagnostic_ssh: false,
@@ -1083,6 +1096,10 @@ fn test_exec_preserves_explicit_request_env() {
         let (output, exit_code) = exec(
             "lab-local",
             RunnerExecOptions {
+                execution_context:
+                    homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
+                        "homeboy",
+                    ),
                 cwd: None,
                 project_id: None,
                 allow_diagnostic_ssh: false,
@@ -1130,6 +1147,7 @@ fn runner_exec_explicit_run_id_overrides_conflicting_run_id_env() {
         let (output, exit_code) = exec(
             "lab-local",
             RunnerExecOptions {
+                execution_context: homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
                 cwd: None,
                 project_id: None,
                 allow_diagnostic_ssh: false,
@@ -1212,6 +1230,10 @@ fn test_exec_rejects_missing_required_local_runner_path() {
         let err = exec(
             "lab-local",
             RunnerExecOptions {
+                execution_context:
+                    homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
+                        "homeboy",
+                    ),
                 cwd: None,
                 project_id: None,
                 allow_diagnostic_ssh: false,
@@ -1270,6 +1292,10 @@ fn test_exec_reports_required_path_diagnostics() {
         let (output, exit_code) = exec(
             "lab-local",
             RunnerExecOptions {
+                execution_context:
+                    homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
+                        "homeboy",
+                    ),
                 cwd: None,
                 project_id: None,
                 allow_diagnostic_ssh: false,
@@ -1339,6 +1365,10 @@ fn test_exec_rejects_disconnected_ssh_runner_without_diagnostic_fallback() {
         let err = exec(
             "lab-server",
             RunnerExecOptions {
+                execution_context:
+                    homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
+                        "homeboy",
+                    ),
                 cwd: Some("/srv/homeboy/project".to_string()),
                 project_id: None,
                 allow_diagnostic_ssh: false,
@@ -1388,6 +1418,8 @@ fn test_diagnostic_ssh_mode_serializes_as_diagnostic_ssh() {
 #[test]
 fn explicit_diagnostic_ssh_wins_for_ssh_runners() {
     let mut options = RunnerExecOptions {
+        execution_context:
+            homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
         cwd: Some("/srv/homeboy/project".to_string()),
         project_id: None,
         allow_diagnostic_ssh: true,
