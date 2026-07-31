@@ -33,7 +33,7 @@ pub(super) fn execute_release_plan_step(
         "preflight.working_tree" => Ok(Some(run_working_tree_preflight(step, context))),
         "preflight.head_identity" => Ok(Some(run_head_identity_preflight(step, context))),
         "preflight.recovery_artifacts" => Ok(Some(run_recovery_artifacts_preflight(step, context))),
-        "preflight.remote_sync" => Ok(Some(run_remote_sync_preflight(step, context))),
+        "preflight.remote_sync" => Ok(Some(run_remote_sync_preflight(step, context, None))),
         "preflight.bump_policy" => Ok(Some(run_bump_policy_preflight(step))),
         "preflight.dependencies" => Ok(Some(run_dependencies_preflight(step, context))),
         "preflight.lint" => Ok(Some(run_lint_preflight(step, context))),
@@ -418,17 +418,25 @@ fn run_recovery_artifacts_preflight(
     }
 }
 
-fn run_remote_sync_preflight(
+pub(super) fn run_remote_sync_preflight(
     step: &PlanStep,
     context: &ReleaseExecutionContext,
+    staging_source_sha: Option<&str>,
 ) -> ReleaseStepResult {
-    let result = super::planning_git::validate_remote_sync(context.component).and_then(|()| {
-        if context.options.pipeline.head {
-            super::planning_git::validate_head_reachable_from_default_branch(context.component)
-        } else {
-            super::planning_git::validate_default_branch_ancestry(context.component)
-        }
-    });
+    let result = staging_source_sha
+        .map_or_else(
+            || super::planning_git::validate_remote_sync(context.component),
+            |source_sha| {
+                super::planning_git::validate_remote_sync_at(context.component, source_sha)
+            },
+        )
+        .and_then(|()| {
+            if context.options.pipeline.head {
+                super::planning_git::validate_head_reachable_from_default_branch(context.component)
+            } else {
+                super::planning_git::validate_default_branch_ancestry(context.component)
+            }
+        });
 
     match result {
         Ok(()) => ReleaseStepResult {

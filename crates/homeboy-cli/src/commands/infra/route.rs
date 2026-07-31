@@ -470,6 +470,12 @@ fn split_placement_coordinator_label(command: &Commands) -> Option<&'static str>
                     command: AgentTaskFanoutCommand::CookBatch(args),
                 }),
         }) if args.run_plan => Some("agent-task fanout cook-batch --run-plan"),
+        Commands::AgentTask(AgentTaskArgs {
+            command:
+                AgentTaskCommand::Fanout(AgentTaskFanoutArgs {
+                    command: AgentTaskFanoutCommand::SubmitBatch(_),
+                }),
+        }) => Some("agent-task fanout submit-batch"),
         _ => None,
     }
 }
@@ -524,7 +530,7 @@ fn split_placement_lab_runner_unavailable_error(
     Some(Error::validation_invalid_argument(
         "placement",
         format!(
-            "{label} accepts `--placement lab`, but no ready Lab runner could be selected (readiness: {state}); no provider attempt was dispatched"
+            "{label} accepts `--placement lab` but requires an eligible Lab runner; none could be selected (readiness: {state}), so no provider attempt was dispatched"
         ),
         Some("lab".to_string()),
         Some(hints),

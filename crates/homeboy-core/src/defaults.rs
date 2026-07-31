@@ -477,7 +477,9 @@ pub struct WorktreeProviderCommands {
     pub list: Option<Vec<String>>,
     /// Atomically return an existing managed worktree or create it. Homeboy
     /// expands `{handle}`, `{repo}`, `{base}`, `{head}`, `{task_url}`, and a
-    /// stable `{idempotency_key}` from an explicit Cook destination.
+    /// stable `{idempotency_key}` from an explicit workspace request. Lifecycle
+    /// requests additionally expand `{purpose}`, `{owner_run_ref}`, and
+    /// `{cleanup_policy}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ensure: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -775,6 +777,23 @@ mod tests {
                 .to_string()
                 .contains("lookup_output_limit_bytes must be between"));
         }
+    }
+
+    #[test]
+    fn legacy_worktree_provider_commands_literal_remains_compatible() {
+        let commands = WorktreeProviderCommands {
+            resolve: None,
+            resolve_path: None,
+            resolve_not_found_exit_codes: Vec::new(),
+            list: Some(vec!["provider".to_string(), "list".to_string()]),
+            ensure: Some(vec!["provider".to_string(), "ensure".to_string()]),
+            cleanup_preview: None,
+            cleanup_apply: None,
+            artifacts_preview: None,
+            artifacts_apply: None,
+        };
+
+        assert!(commands.ensure.is_some());
     }
 
     #[test]

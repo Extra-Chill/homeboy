@@ -3,43 +3,92 @@
 //! The planner builds the `ReleasePlan`; this module runs that plan and wraps
 //! the accumulated step results into the public release run shape.
 
-use homeboy_core::error::Result;
+use homeboy_core::error::{Error, Result};
 use homeboy_core::phase_timing::PhaseTimer;
 use std::collections::HashSet;
 
-use super::execution_plan::{
-    build_initial_preflight_plan, execute_plan_steps, initial_executable_preflight_ids,
-};
+use super::execution_plan::{build_initial_preflight_plan, initial_executable_preflight_ids};
 use super::pipeline_summary::{build_summary, derive_overall_status};
 use super::planner::plan;
 use super::types::{
     ReleaseOptions, ReleasePlan, ReleaseRollbackEvidence, ReleaseRun, ReleaseRunResult,
-    ReleaseStepResult, ReleaseStepStatus,
+    ReleaseStepResult, ReleaseStepStatus, ReleaseWorkspaceOutput,
 };
+use homeboy_core::worktree_providers::WorktreeProviderTerminalDisposition;
 
 /// Execute a release end-to-end.
 ///
 /// Runs the executable preflight validations, rebuilds the full release plan
 /// after those preflights, then walks the planned release steps in order.
 pub fn run(component_id: &str, options: &ReleaseOptions) -> Result<ReleaseRun> {
-    run_with_plan(component_id, options).map(|(_plan, run)| run)
+    run_with_plan(component_id, options).map(|(_plan, run, _workspace)| run)
 }
 
 /// Execute a release and return the plan that drove it alongside the run.
 pub(crate) fn run_with_plan(
     component_id: &str,
     options: &ReleaseOptions,
-) -> Result<(ReleasePlan, ReleaseRun)> {
+) -> Result<(ReleasePlan, ReleaseRun, Option<ReleaseWorkspaceOutput>)> {
     let component = super::context::load_component(component_id, options)?;
-    let checkout_guard = super::checkout_guard::ReleaseCheckoutGuard::capture(&component)?;
+    let mut workspace = super::workspace::ReleaseWorkspace::select(&component)?;
+    let mut workspace_options = options.clone();
+    workspace_options.path_override = Some(workspace.component.local_path.clone());
+    let checkout_guard =
+        super::checkout_guard::ReleaseCheckoutGuard::capture(&workspace.component)?;
 
-    match run_with_plan_inner(component_id, options, checkout_guard.as_ref()) {
-        Ok(result) => Ok(result),
-        Err(err) => {
-            if let Some(checkout_guard) = checkout_guard.as_ref() {
-                checkout_guard.restore_after_failure()?;
+    let staging_source_sha = workspace.source_sha();
+    match run_with_plan_inner(
+        component_id,
+        &workspace_options,
+        checkout_guard.as_ref(),
+        staging_source_sha.as_deref(),
+    ) {
+        Ok((plan, mut run)) => {
+            let disposition = if matches!(run.result.status, ReleaseStepStatus::Success) {
+                WorktreeProviderTerminalDisposition::Succeeded
+            } else {
+                WorktreeProviderTerminalDisposition::Failed
+            };
+            let output = workspace.finalize(disposition, release_was_pushed(&run.result.steps));
+            if let Some(error) = &output.finalization_error {
+                run.result.warnings.push(format!(
+                    "Release completed, but workspace finalization is pending: {error}. Reconcile owner reference `{}`.",
+                    output.reconciliation_ref.as_deref().unwrap_or("unavailable")
+                ));
             }
-            Err(err)
+            Ok((plan, run, (output.kind != "in_place").then_some(output)))
+        }
+        Err(err) => {
+            // A provisioned workspace must remain recoverable even when checkout
+            // rollback itself fails. Attempt both terminal operations and retain
+            // both errors rather than silently dropping the provider finalizer.
+            let finalization =
+                workspace.finalize(WorktreeProviderTerminalDisposition::Interrupted, false);
+            let finalization_error = finalization.finalization_error;
+            let restore_error = checkout_guard
+                .as_ref()
+                .map(|guard| guard.restore_after_failure())
+                .transpose()
+                .err();
+            if finalization_error.is_none() && restore_error.is_none() {
+                return Err(err);
+            }
+            Err(Error::validation_invalid_argument(
+                "release.workspace",
+                format!(
+                    "{err}; checkout restoration: {}; workspace finalization: {}",
+                    restore_error
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "completed".to_string()),
+                    finalization_error
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "completed".to_string()),
+                ),
+                None,
+                None,
+            ))
         }
     }
 }
@@ -48,18 +97,20 @@ fn run_with_plan_inner(
     component_id: &str,
     options: &ReleaseOptions,
     checkout_guard: Option<&super::checkout_guard::ReleaseCheckoutGuard>,
+    staging_source_sha: Option<&str>,
 ) -> Result<(ReleasePlan, ReleaseRun)> {
     let mut results: Vec<ReleaseStepResult> = Vec::new();
 
     let initial_plan = build_initial_preflight_plan(component_id, options);
     let mut timer = PhaseTimer::new();
     let initial_stop = timer.time("package_preflight", || {
-        execute_plan_steps(
+        super::execution_plan::execute_plan_steps_at_source(
             &initial_plan.plan.steps,
             component_id,
             options,
             &mut results,
             &HashSet::new(),
+            staging_source_sha,
         )
     })?;
 
@@ -78,12 +129,13 @@ fn run_with_plan_inner(
         initial_executable_preflight_ids().iter().copied().collect();
 
     timer.time("package", || {
-        execute_plan_steps(
+        super::execution_plan::execute_plan_steps_at_source(
             &release_plan.plan.steps,
             component_id,
             options,
             &mut results,
             &completed_preflights,
+            staging_source_sha,
         )
     })?;
 

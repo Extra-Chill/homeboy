@@ -946,9 +946,24 @@ where
         ));
     }
 
+    let ready = crate::agent_task_batch::fanout_ready_child_run_ids(batch_id)?;
     let total = batch.child_runs.len();
     let mut cells = Vec::with_capacity(total);
     for child in &batch.child_runs {
+        if ready
+            .as_ref()
+            .is_some_and(|ready| !ready.contains(&child.run_id))
+        {
+            cells.push(AgentTaskCookBatchCellReport {
+                cook_id: child.task_id.clone(),
+                initial_run_id: child.run_id.clone(),
+                status: "blocked_by_dependency".to_string(),
+                exit_code: 0,
+                result: None,
+                error: None,
+            });
+            continue;
+        }
         // The persisted batch child `run_id` is the cook id (`cook-<id>`), which
         // is exactly the durable recipe key. Reconstruct from that recipe so the
         // resumed cook re-runs its own gates and finalization contract.

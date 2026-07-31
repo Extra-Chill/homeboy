@@ -1,10 +1,13 @@
 use chrono::Utc;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+use crate::agent_task_dependency_graph::{
+    dependency_graph_readiness, AgentTaskDependencyNode, AgentTaskDependencyState,
+};
 use crate::agent_task_lifecycle::{self, AgentTaskRunState};
 use crate::agent_task_schedule::AgentTaskPlan;
 use homeboy_core::{paths, Error, Result};
@@ -292,27 +295,44 @@ pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
         }
     }
     totals.unavailable = unavailable_child_runs.len();
-    let state = aggregate_state(&totals);
+    let mut state = aggregate_state(&totals);
     if batch.state != state {
         batch.state = state;
         changed = true;
     }
+    let dependency_graph = refresh_dependency_graph(&mut batch)?;
+    if let Some(graph) = &dependency_graph {
+        state = aggregate_state_after_graph_refresh(&totals, graph, state);
+        if batch.state != state {
+            batch.state = state;
+            changed = true;
+        }
+    }
+    // A status read only persists a changed durable projection. In particular,
+    // repeated observations must retain the existing timestamp byte-for-byte.
     if changed {
         batch.updated_at = Some(now_timestamp());
         write_batch(&batch)?;
     }
-
+    let mut next_actions = batch_next_actions(
+        &unavailable_child_runs,
+        &projection_pending_child_runs,
+        &resumable_child_runs,
+        &commands(&batch.batch_id),
+    );
+    if let Some(graph) = &dependency_graph {
+        if let Some(action) = graph["readiness"]["next_action"].as_str() {
+            next_actions.insert(0, action.to_string());
+        }
+    }
+    next_actions.truncate(8);
     let resumable = !resumable_child_runs.is_empty();
     let commands = commands(&batch.batch_id);
     Ok(AgentTaskBatchStatusReport {
         schema: AGENT_TASK_BATCH_STATUS_SCHEMA,
         status: state.outcome_status().to_string(),
-        next_actions: batch_next_actions(
-            &unavailable_child_runs,
-            &projection_pending_child_runs,
-            &resumable_child_runs,
-            &commands,
-        ),
+        dependency_graph,
+        next_actions,
         commands,
         batch,
         totals,
@@ -321,6 +341,170 @@ pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
         resumable_child_runs,
         resumable,
     })
+}
+
+/// Return the same dependency projection used by resume without persisting a
+/// read-side PR observation into either the lifecycle or batch record.
+pub fn fanout_dependency_graph_with_finalization_statuses(
+    batch_id: &str,
+    statuses: &BTreeMap<String, String>,
+) -> Result<Option<Value>> {
+    let mut batch = read_batch(batch_id)?;
+    refresh_dependency_graph_with_finalization_statuses(&mut batch, Some(statuses))
+}
+
+fn aggregate_state_after_graph_refresh(
+    totals: &AgentTaskBatchTotals,
+    graph: &Value,
+    state: AgentTaskBatchState,
+) -> AgentTaskBatchState {
+    if state != AgentTaskBatchState::Succeeded {
+        return state;
+    }
+    let pending = graph["readiness"]["states"]
+        .as_object()
+        .is_some_and(|states| {
+            states.values().any(|state| {
+                !matches!(
+                    state.as_str(),
+                    Some("succeeded" | "rejected" | "failed" | "cancelled")
+                )
+            })
+        });
+    if pending {
+        // Child lifecycle success only means Cook completed. A queued dependent,
+        // gate invalidation, or pending PR acceptance keeps the fanout active.
+        if totals.queued > 0 {
+            AgentTaskBatchState::Queued
+        } else {
+            AgentTaskBatchState::Running
+        }
+    } else {
+        state
+    }
+}
+
+/// Apply a read-only fanout graph projection to an already reconciled batch
+/// aggregate. Status uses this after observing live PR state without mutation.
+pub fn fanout_aggregate_state(totals: &AgentTaskBatchTotals, graph: &Value) -> AgentTaskBatchState {
+    aggregate_state_after_graph_refresh(totals, graph, aggregate_state(totals))
+}
+
+/// Reconcile persisted fanout graph state from durable child observations. A
+/// candidate that passed gates but is still awaiting human merge remains an
+/// explicit blocker; only a recorded merge releases its dependents.
+fn refresh_dependency_graph(batch: &mut AgentTaskBatchRecord) -> Result<Option<Value>> {
+    refresh_dependency_graph_with_finalization_statuses(batch, None)
+}
+
+fn refresh_dependency_graph_with_finalization_statuses(
+    batch: &mut AgentTaskBatchRecord,
+    finalization_statuses: Option<&BTreeMap<String, String>>,
+) -> Result<Option<Value>> {
+    let Some(graph) = batch.metadata.get("dependency_graph").cloned() else {
+        return Ok(None);
+    };
+    let Some(nodes_value) = graph.get("nodes").cloned() else {
+        return Ok(None);
+    };
+    let nodes: Vec<AgentTaskDependencyNode> = serde_json::from_value(nodes_value)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    let mut states = BTreeMap::new();
+    for child in &batch.child_runs {
+        let finalization_status = finalization_statuses
+            .and_then(|statuses| statuses.get(&child.task_id).cloned())
+            .or_else(|| {
+                agent_task_lifecycle::status(&child.run_id)
+                    .ok()
+                    .and_then(|record| record.metadata.get("cook_finalization").cloned())
+                    .and_then(|value| {
+                        value
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+            });
+        let has_finalization = finalization_status.is_some();
+        let mut state = match child.state {
+            AgentTaskRunState::Failed => AgentTaskDependencyState::Failed,
+            AgentTaskRunState::Cancelled => AgentTaskDependencyState::Cancelled,
+            AgentTaskRunState::CandidateRecoverable | AgentTaskRunState::PartialRecoverable => {
+                AgentTaskDependencyState::BlockedByGate
+            }
+            AgentTaskRunState::Succeeded => match finalization_status.as_deref() {
+                // A review-ready candidate is a valid stack base. Its exact head
+                // is bound by the action receipt before the dependent is resumed.
+                Some("merged" | "review_ready") => AgentTaskDependencyState::Succeeded,
+                Some("rejected") => AgentTaskDependencyState::Rejected,
+                _ => AgentTaskDependencyState::AwaitingAcceptance,
+            },
+            _ => AgentTaskDependencyState::Queued,
+        };
+        // A merged upstream is not enough to release a terminal dependent: its
+        // rebased head must finish every durable Git/PR and invalidation step.
+        // Once invalidated, remove the old review terminal state from this
+        // projection so `resume` re-enters Cook's gate/review lifecycle.
+        for receipt in batch.metadata["dependency_action_receipts"]
+            .as_object()
+            .into_iter()
+            .flat_map(|receipts| receipts.values())
+        {
+            if receipt["action"]["downstream_id"].as_str() != Some(child.task_id.as_str()) {
+                continue;
+            }
+            match receipt["status"].as_str() {
+                // A completed invalidation only holds the child at the Cook
+                // frontier while it has no replacement finalization. Once its
+                // gates/review complete again, the new review state (including
+                // a merge) is authoritative.
+                Some("completed")
+                    if receipt["gates_invalidated"] == Value::Bool(true) && !has_finalization =>
+                {
+                    state = AgentTaskDependencyState::Queued;
+                }
+                Some("blocked" | "running" | "pending") | None => {
+                    state = AgentTaskDependencyState::BlockedByDependency;
+                }
+                _ => {}
+            }
+        }
+        states.insert(child.task_id.clone(), state);
+    }
+    let (edges, readiness) = dependency_graph_readiness(&nodes, &states)?;
+    let graph = json!({
+        "schema": "homeboy/agent-task-fanout-dependency-graph/v1",
+        "nodes": nodes,
+        "edges": edges,
+        "readiness": readiness,
+    });
+    if batch.metadata["dependency_graph"] != graph {
+        batch.metadata["dependency_graph"] = graph.clone();
+    }
+    Ok(Some(graph))
+}
+
+/// Read the graph-projected executable frontier. Resume callers use this to
+/// avoid finalizing a dependent before its upstream candidate is accepted.
+pub fn fanout_ready_child_run_ids(batch_id: &str) -> Result<Option<HashSet<String>>> {
+    let report = status(batch_id)?;
+    let Some(graph) = report.dependency_graph else {
+        return Ok(None);
+    };
+    let ready = graph["readiness"]["ready"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<HashSet<_>>();
+    Ok(Some(
+        report
+            .batch
+            .child_runs
+            .into_iter()
+            .filter(|child| ready.contains(child.task_id.as_str()))
+            .map(|child| child.run_id)
+            .collect(),
+    ))
 }
 
 /// A child is resumable when its provider attempt reached a terminal, recoverable
@@ -657,6 +841,35 @@ pub fn record_child_finalization(
         .as_object_mut()
         .expect("child_finalizations is an object")
         .insert(child_run_id.to_string(), finalization);
+    batch.updated_at = Some(now_timestamp());
+    write_batch(&batch)
+}
+
+pub fn dependency_action_receipt(batch_id: &str, key: &str) -> Result<Option<Value>> {
+    let batch = read_batch(batch_id)?;
+    Ok(batch.metadata["dependency_action_receipts"][key]
+        .as_object()
+        .map(|_| batch.metadata["dependency_action_receipts"][key].clone()))
+}
+
+pub fn record_dependency_action_receipt(batch_id: &str, key: &str, receipt: Value) -> Result<()> {
+    let mut batch = read_batch(batch_id)?;
+    if !batch.metadata.is_object() {
+        batch.metadata = json!({});
+    }
+    let receipts = batch
+        .metadata
+        .as_object_mut()
+        .expect("metadata object")
+        .entry("dependency_action_receipts")
+        .or_insert_with(|| json!({}));
+    if !receipts.is_object() {
+        *receipts = json!({});
+    }
+    receipts
+        .as_object_mut()
+        .expect("receipts object")
+        .insert(key.to_string(), receipt);
     batch.updated_at = Some(now_timestamp());
     write_batch(&batch)
 }
@@ -1066,6 +1279,82 @@ mod tests {
             .next_actions
             .iter()
             .any(|action| action.contains("withheld")));
+    }
+
+    #[test]
+    fn graph_pending_acceptance_prevents_a_succeeded_batch_aggregate() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let plan = AgentTaskPlan::new("fanout/acceptance", vec![request("a"), request("b")]);
+        submit_plan_batch(&plan, Some("batch/acceptance")).expect("batch submitted");
+        for run_id in ["batch_acceptance-a", "batch_acceptance-b"] {
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.state = AgentTaskRunState::Succeeded;
+                record.metadata["cook_finalization"] = json!({ "status": "review_ready" });
+            })
+            .expect("stage review-ready child");
+        }
+        let mut batch = read_batch("batch/acceptance").expect("batch record");
+        batch.metadata = json!({ "dependency_graph": { "nodes": [
+            { "id": "a", "depends_on": [] },
+            { "id": "b", "depends_on": ["a"] }
+        ]}});
+        write_batch(&batch).expect("persist graph");
+
+        let report = status("batch/acceptance").expect("batch status");
+
+        assert_eq!(report.totals.succeeded, 2);
+        assert_eq!(report.batch.state, AgentTaskBatchState::Running);
+        assert_eq!(report.status, "running");
+    }
+
+    #[test]
+    fn status_keeps_timestamps_stable_without_a_durable_change() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let plan = AgentTaskPlan::new("fanout/stable-status", vec![request("a")]);
+        submit_plan_batch(&plan, Some("batch/stable-status")).expect("batch submitted");
+        let before = read_batch("batch/stable-status").expect("batch record");
+
+        let report = status("batch/stable-status").expect("status observation");
+
+        assert_eq!(report.batch.updated_at, before.updated_at);
+        assert_eq!(
+            read_batch("batch/stable-status")
+                .expect("persisted batch")
+                .updated_at,
+            before.updated_at
+        );
+    }
+
+    #[test]
+    fn merged_dependent_terminalizes_after_its_invalidated_review_is_recompleted() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let plan = AgentTaskPlan::new("fanout/merged-dependent", vec![request("a")]);
+        submit_plan_batch(&plan, Some("batch/merged-dependent")).expect("batch submitted");
+        agent_task_lifecycle::rewrite_record_for_test("batch_merged-dependent-a", |record| {
+            record.state = AgentTaskRunState::Succeeded;
+            record.metadata["cook_finalization"] = json!({ "status": "merged" });
+        })
+        .expect("stage merged child");
+        let mut batch = read_batch("batch/merged-dependent").expect("batch record");
+        batch.metadata = json!({
+            "dependency_graph": { "nodes": [{ "id": "a", "depends_on": [] }] },
+            "dependency_action_receipts": {
+                "upstream:a:revision": {
+                    "status": "completed",
+                    "action": { "downstream_id": "a" },
+                    "gates_invalidated": true
+                }
+            }
+        });
+        write_batch(&batch).expect("persist graph");
+
+        let report = status("batch/merged-dependent").expect("batch status");
+
+        assert_eq!(report.batch.state, AgentTaskBatchState::Succeeded);
+        assert_eq!(
+            report.dependency_graph.unwrap()["readiness"]["states"]["a"],
+            "succeeded"
+        );
     }
 
     #[test]
