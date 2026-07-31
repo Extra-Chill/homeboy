@@ -221,6 +221,7 @@ impl CliRuntime {
         // core only owns the generic daemon lifecycle.
         crate::runner::register_lab_staging_controller_driver();
         crate::agents::agent_task_service::register_promotion_job_driver();
+        crate::commands::cleanup::register_cleanup_job_driver();
         let config = crate::core::defaults::load_config();
         if let Err(error) =
             crate::agents::agent_task_lifecycle::register_acceptance_verifier_from_config(

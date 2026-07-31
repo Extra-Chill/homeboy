@@ -6,8 +6,9 @@
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
+use serde::{Deserialize, Serialize};
 
-#[derive(Args, Debug, PartialEq, Eq)]
+#[derive(Args, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleanupArgs {
     /// Apply cleanup across the selected categories. Omit for inventory dry-run output.
     #[arg(long)]
@@ -46,10 +47,11 @@ pub struct CleanupArgs {
     pub cursor: Option<String>,
 
     #[command(subcommand)]
+    #[serde(skip)]
     pub command: Option<CleanupCommand>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, Serialize, Deserialize)]
 #[value(rename_all = "kebab-case")]
 pub enum CleanupCategoryArg {
     RepoArtifacts,
@@ -80,6 +82,19 @@ pub enum CleanupCommand {
     RetainedStorage(CleanupRetainedStorageArgs),
     /// Run one configured, bounded retention pass
     AutomaticRetention,
+    /// Read compact durable progress for an asynchronous cleanup apply
+    Status(CleanupJobArgs),
+    /// Re-submit a queued durable cleanup job after an interrupted client
+    Resume(CleanupJobArgs),
+}
+
+#[derive(Args, Debug, PartialEq, Eq, Clone)]
+pub struct CleanupJobArgs {
+    /// Durable controller job identifier printed by cleanup --apply.
+    pub job_id: String,
+    /// Include the daemon's durable job record, including completed cleanup evidence.
+    #[arg(long)]
+    pub full: bool,
 }
 
 #[derive(Args, Debug, PartialEq, Eq)]
@@ -235,6 +250,14 @@ mod tests {
         ]);
         assert_eq!(parsed.cleanup.include, vec![CleanupCategoryArg::RuntimeTmp]);
         assert_eq!(parsed.cleanup.runtime_tmp_managed_older_than_days, Some(0));
+
+        let parsed =
+            CleanupParserTest::parse_from(["cleanup", "status", "cleanup-job-id", "--full"]);
+        let Some(CleanupCommand::Status(args)) = parsed.cleanup.command else {
+            panic!("expected cleanup status command");
+        };
+        assert_eq!(args.job_id, "cleanup-job-id");
+        assert!(args.full);
 
         let parsed = CleanupParserTest::parse_from([
             "cleanup",

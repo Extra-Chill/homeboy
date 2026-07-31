@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use fs4::fs_std::FileExt;
 use homeboy::core::cleanup::{
@@ -9,6 +9,10 @@ use homeboy::core::cleanup::{
     ResourceCleanupOptions,
 };
 use homeboy::core::controller_runtime::{self, ControllerRuntimeRetentionOverrides};
+use homeboy::core::daemon::controller_job_driver::{
+    self, ControllerJobDriver, ControllerJobHandle, ControllerJobPublicError,
+};
+use homeboy::core::daemon::LocalControllerJobClient;
 use homeboy::core::defaults;
 use homeboy::core::engine;
 use homeboy::core::engine::shell::quote_arg;
@@ -127,8 +131,199 @@ pub fn run(args: CleanupArgs) -> CmdResult<Value> {
             })
             .map(|output| (output, 0)),
         Some(CleanupCommand::AutomaticRetention) => automatic_retention(),
+        Some(CleanupCommand::Status(args)) => {
+            cleanup_job_status(&args.job_id, args.full).map(|output| (output, 0))
+        }
+        Some(CleanupCommand::Resume(args)) => {
+            cleanup_job_resume(&args.job_id).map(|output| (output, 0))
+        }
+        None if args.apply => submit_cleanup(args).map(|output| (output, 0)),
         None => cleanup_inventory(args).map(|result| (result.output, result.exit_code)),
     }
+}
+
+const CLEANUP_JOB_TYPE: &str = "cleanup.inventory";
+const CLEANUP_JOB_VERSION: u32 = 1;
+
+/// Registers cleanup with the daemon's generic durable-job infrastructure. The
+/// command owns cleanup semantics; the daemon only owns process-independent
+/// admission, recovery, and durable progress.
+pub fn register_cleanup_job_driver() {
+    static REGISTERED: OnceLock<()> = OnceLock::new();
+    REGISTERED.get_or_init(|| {
+        controller_job_driver::register_controller_job_driver(Arc::new(CleanupJobDriver))
+            .expect("register cleanup controller job driver");
+    });
+}
+
+struct CleanupJobDriver;
+
+impl ControllerJobDriver for CleanupJobDriver {
+    fn job_type(&self) -> &'static str {
+        CLEANUP_JOB_TYPE
+    }
+    fn version(&self) -> u32 {
+        CLEANUP_JOB_VERSION
+    }
+
+    fn public_request(&self, request: &Value) -> homeboy::core::Result<Value> {
+        let args: CleanupArgs =
+            serde_json::from_value(request.clone()).map_err(cleanup_job_parse_error)?;
+        Ok(serde_json::json!({
+            "mode": "apply",
+            "include_count": args.include.len(),
+            "exclude_count": args.exclude.len(),
+            "full_evidence": args.full,
+        }))
+    }
+
+    fn public_progress(&self, progress: &Value) -> homeboy::core::Result<Value> {
+        Ok(serde_json::json!({ "phase": progress.get("phase").cloned().unwrap_or(Value::Null) }))
+    }
+
+    fn public_result(&self, result: &Value) -> homeboy::core::Result<Value> {
+        Ok(compact_cleanup_result(result))
+    }
+
+    fn public_error(&self, error: &homeboy::core::Error) -> ControllerJobPublicError {
+        ControllerJobPublicError {
+            message: "durable cleanup failed; inspect cleanup status for retained evidence"
+                .to_string(),
+            data: serde_json::json!({ "code": error.code.as_str() }),
+        }
+    }
+
+    fn validate_secret_references(&self, request: &Value) -> homeboy::core::Result<()> {
+        let args: CleanupArgs =
+            serde_json::from_value(request.clone()).map_err(cleanup_job_parse_error)?;
+        if !args.apply || args.command.is_some() {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "cleanup_job",
+                "durable cleanup jobs must contain an aggregate apply request",
+                None,
+                None,
+            ));
+        }
+        Ok(())
+    }
+
+    fn execute(
+        &self,
+        prepared: Value,
+        handle: ControllerJobHandle,
+    ) -> homeboy::core::Result<Value> {
+        self.run(prepared, handle)
+    }
+
+    fn resume(
+        &self,
+        checkpoint: Value,
+        handle: ControllerJobHandle,
+    ) -> homeboy::core::Result<Value> {
+        self.run(checkpoint, handle)
+    }
+
+    fn cancel(&self, _prepared: &Value) -> homeboy::core::Result<()> {
+        Ok(())
+    }
+}
+
+impl CleanupJobDriver {
+    fn run(&self, request: Value, handle: ControllerJobHandle) -> homeboy::core::Result<Value> {
+        let args: CleanupArgs = serde_json::from_value(request).map_err(cleanup_job_parse_error)?;
+        if handle.is_cancelled() {
+            return Ok(serde_json::json!({ "phase": "cancelled" }));
+        }
+        handle.checkpoint(serde_json::to_value(&args).map_err(|error| {
+            homeboy::core::Error::internal_json(
+                error.to_string(),
+                Some("serialize cleanup checkpoint".to_string()),
+            )
+        })?)?;
+        handle.progress(serde_json::json!({ "phase": "running" }))?;
+        let result = cleanup_inventory(args)?;
+        let output = serde_json::json!({
+            "phase": "completed",
+            "exit_code": result.exit_code,
+            "evidence": result.output,
+        });
+        handle.checkpoint(output.clone())?;
+        handle.progress(serde_json::json!({ "phase": "completed" }))?;
+        Ok(output)
+    }
+}
+
+fn cleanup_job_parse_error(error: serde_json::Error) -> homeboy::core::Error {
+    homeboy::core::Error::validation_invalid_argument(
+        "cleanup_job",
+        format!("invalid durable cleanup request: {error}"),
+        None,
+        None,
+    )
+}
+
+fn submit_cleanup(args: CleanupArgs) -> homeboy::core::Result<Value> {
+    let request = serde_json::to_value(&args).map_err(|error| {
+        homeboy::core::Error::internal_json(
+            error.to_string(),
+            Some("serialize cleanup job request".to_string()),
+        )
+    })?;
+    let digest = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, request.to_string().as_bytes());
+    let job = LocalControllerJobClient::connect()?.submit(serde_json::json!({
+        "type": CLEANUP_JOB_TYPE,
+        "version": CLEANUP_JOB_VERSION,
+        "idempotency_key": format!("cleanup-inventory-{digest}"),
+        "request": request,
+    }))?;
+    Ok(compact_cleanup_job(&job, "submitted"))
+}
+
+fn cleanup_job_status(job_id: &str, full: bool) -> homeboy::core::Result<Value> {
+    let job = LocalControllerJobClient::connect()?.status(job_id)?;
+    if full {
+        return serde_json::to_value(job).map_err(|error| {
+            homeboy::core::Error::internal_json(
+                error.to_string(),
+                Some("serialize cleanup job evidence".to_string()),
+            )
+        });
+    }
+    Ok(compact_cleanup_job(&job, "status"))
+}
+
+fn cleanup_job_resume(job_id: &str) -> homeboy::core::Result<Value> {
+    // Starting is idempotent: a running or terminal job returns its durable state.
+    Ok(compact_cleanup_job(
+        &LocalControllerJobClient::connect()?.start(job_id)?,
+        "resume",
+    ))
+}
+
+fn compact_cleanup_job(job: &homeboy::core::api_jobs::Job, command: &'static str) -> Value {
+    let job = serde_json::to_value(job).unwrap_or(Value::Null);
+    serde_json::json!({
+        "command": format!("cleanup.{command}"),
+        "job_id": job.get("id").cloned().unwrap_or(Value::Null),
+        "status": job.get("status").cloned().unwrap_or(Value::Null),
+        "progress": job.pointer("/metadata/progress").cloned().unwrap_or(Value::Null),
+        "status_command": format!("homeboy cleanup status {}", job.get("id").and_then(Value::as_str).unwrap_or("<job-id>")),
+        "evidence_command": format!("homeboy cleanup status {} --full", job.get("id").and_then(Value::as_str).unwrap_or("<job-id>")),
+    })
+}
+
+fn compact_cleanup_result(result: &Value) -> Value {
+    let evidence = result.get("evidence").unwrap_or(&Value::Null);
+    serde_json::json!({
+        "phase": result.get("phase").cloned().unwrap_or(Value::Null),
+        "exit_code": result.get("exit_code").cloned().unwrap_or(Value::Null),
+        "status": evidence.get("status").cloned().unwrap_or(Value::Null),
+        "category_count": evidence.get("category_count").cloned().unwrap_or(Value::Null),
+        "failed_category_count": evidence.get("failed_category_count").cloned().unwrap_or(Value::Null),
+        "candidate_count": evidence.get("candidate_count").cloned().unwrap_or(Value::Null),
+        "applied_count": evidence.get("applied_count").cloned().unwrap_or(Value::Null),
+        "reclaimed_bytes": evidence.get("reclaimed_bytes").cloned().unwrap_or(Value::Null),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

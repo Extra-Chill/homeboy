@@ -218,6 +218,147 @@ impl LocalControllerJobClient {
         }
         Ok(job)
     }
+
+    /// Admit and start a typed durable controller job. The daemon, rather than
+    /// the submitting CLI process, owns execution after this method returns.
+    pub fn submit(&self, request: serde_json::Value) -> Result<crate::api_jobs::Job> {
+        let response = self
+            .client
+            .post(format!("{}/controller/jobs", self.endpoint))
+            .json(&request)
+            .send()
+            .map_err(|error| {
+                Error::internal_unexpected(format!("submit local controller job: {error}"))
+            })?;
+        let status = response.status();
+        let value: serde_json::Value = response.json().map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse local controller-job submission".to_string()),
+            )
+        })?;
+        if !status.is_success()
+            || value.get("success").and_then(serde_json::Value::as_bool) != Some(true)
+        {
+            return Err(Error::internal_unexpected(format!(
+                "local controller job submission failed: {value}"
+            )));
+        }
+        let job: crate::api_jobs::Job =
+            serde_json::from_value(value.pointer("/data/job").cloned().ok_or_else(|| {
+                Error::internal_unexpected("local controller-job submission response has no job")
+            })?)
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("parse local controller job".to_string()),
+                )
+            })?;
+        let response = self
+            .client
+            .post(format!(
+                "{}/controller/jobs/{}/start",
+                self.endpoint, job.id
+            ))
+            .send()
+            .map_err(|error| {
+                Error::internal_unexpected(format!(
+                    "start local controller job `{}`: {error}",
+                    job.id
+                ))
+            })?;
+        let status = response.status();
+        let value: serde_json::Value = response.json().map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse local controller-job start".to_string()),
+            )
+        })?;
+        if !status.is_success()
+            || value.get("success").and_then(serde_json::Value::as_bool) != Some(true)
+        {
+            return Err(Error::internal_unexpected(format!(
+                "local controller job start failed: {value}"
+            )));
+        }
+        serde_json::from_value(value.pointer("/data/job").cloned().ok_or_else(|| {
+            Error::internal_unexpected("local controller-job start response has no job")
+        })?)
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse local controller job".to_string()),
+            )
+        })
+    }
+
+    pub fn status(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
+        let response = self
+            .client
+            .get(format!("{}/jobs/{job_id}", self.endpoint))
+            .send()
+            .map_err(|error| {
+                Error::internal_unexpected(format!("read local controller job `{job_id}`: {error}"))
+            })?;
+        let status = response.status();
+        let value: serde_json::Value = response.json().map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse local controller-job status".to_string()),
+            )
+        })?;
+        if !status.is_success()
+            || value.get("success").and_then(serde_json::Value::as_bool) != Some(true)
+        {
+            return Err(Error::internal_unexpected(format!(
+                "local controller job status failed: {value}"
+            )));
+        }
+        serde_json::from_value(value.pointer("/data/job").cloned().ok_or_else(|| {
+            Error::internal_unexpected("local controller-job status response has no job")
+        })?)
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse local controller job".to_string()),
+            )
+        })
+    }
+
+    pub fn start(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
+        let response = self
+            .client
+            .post(format!("{}/controller/jobs/{job_id}/start", self.endpoint))
+            .send()
+            .map_err(|error| {
+                Error::internal_unexpected(format!(
+                    "start local controller job `{job_id}`: {error}"
+                ))
+            })?;
+        let status = response.status();
+        let value: serde_json::Value = response.json().map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse local controller-job start".to_string()),
+            )
+        })?;
+        if !status.is_success()
+            || value.get("success").and_then(serde_json::Value::as_bool) != Some(true)
+        {
+            return Err(Error::internal_unexpected(format!(
+                "local controller job start failed: {value}"
+            )));
+        }
+        serde_json::from_value(value.pointer("/data/job").cloned().ok_or_else(|| {
+            Error::internal_unexpected("local controller-job start response has no job")
+        })?)
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse local controller job".to_string()),
+            )
+        })
+    }
 }
 
 static DAEMON_JOB_STORE: OnceLock<JobStore> = OnceLock::new();
