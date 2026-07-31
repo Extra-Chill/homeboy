@@ -68,6 +68,20 @@ fn required_gate_policy_is_complete_and_emitted_by_every_pr_ci_run() {
         !ci_workflow().contains("paths:"),
         "a required CI check cannot be path-filtered because unrelated PRs would wait forever"
     );
+
+    let test_gate = ci_workflow()
+        .split("  homeboy:\n")
+        .nth(1)
+        .expect("reusable Test gate");
+    assert!(test_gate.contains("      scope: auto"));
+    assert!(test_gate.contains("      differential-gating: 'false'"));
+    assert!(test_gate.contains("      baseline-commands: none"));
+    assert!(test_gate.contains("      execution-timeout-seconds: '1800'"));
+    assert!(test_gate.contains("      test-timeout-seconds: '1500'"));
+    assert!(
+        !test_gate.contains("baseline-commands: review test"),
+        "Test differential gating expands changed PRs to an unbounded full-workspace run"
+    );
 }
 
 #[test]
