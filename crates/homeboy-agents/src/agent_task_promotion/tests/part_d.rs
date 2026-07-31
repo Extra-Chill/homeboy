@@ -375,7 +375,7 @@ fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
 }
 
 #[test]
-fn committed_changes_bind_cleanup_safe_gate_feedback_baselines() {
+fn committed_changes_retain_a_controller_baseline_before_source_cleanup() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
@@ -390,34 +390,16 @@ fn committed_changes_bind_cleanup_safe_gate_feedback_baselines() {
         std::fs::write(repo.join("lib.rs"), "new\n").expect("candidate");
         git(&repo, &["commit", "-am", "candidate"]);
         let (source_path, source) = write_empty_patch_source(&temp);
-        let baseline_patch = VALID_PATCH;
-        let baseline_sha256 = sha256_hex(baseline_patch);
-        record_controller_projection("baseline-run", "baseline-task", "baseline", baseline_patch);
-        let mut source: Value = serde_json::from_str(&source).expect("source json");
-        source["artifacts"][0]["metadata"] = serde_json::json!({
-            "gate_feedback_baseline": {
-                "source_run_id": "baseline-run",
-                "source_task_id": "baseline-task",
-                "current_diff": baseline_patch,
-                "patch_artifact": {
-                    "id": "baseline",
-                    "kind": "patch",
-                    "path": "/lab/cleaned/baseline.patch",
-                    "sha256": baseline_sha256
-                }
-            }
-        });
-        let source = source.to_string();
-        std::fs::write(&source_path, &source).expect("write source");
+        record_controller_projection("baseline-run", "other-task", "other", VALID_PATCH);
         let mut provider = FakePromotionWorkspaceProvider {
             workspace_path: Some(repo.clone()),
             ..Default::default()
         };
 
-        promote_with_provider(
+        let report = promote_with_provider(
             AgentTaskPromotionOptions {
                 source,
-                source_run_id: Some("committed-follow-up".to_string()),
+                source_run_id: Some("baseline-run".to_string()),
                 source_path: Some(source_path),
                 source_worktree_path: Some(repo),
                 base_ref: None,
@@ -433,16 +415,65 @@ fn committed_changes_bind_cleanup_safe_gate_feedback_baselines() {
             },
             &mut provider,
         )
-        .expect("committed follow-up promotes after Lab cleanup");
-
-        let baseline = provider.apply_calls[0]
-            .gate_feedback_baseline
-            .as_ref()
-            .expect("baseline forwarded");
-        assert!(baseline["patch_artifact"].get("path").is_none());
+        .expect("committed changes promote");
+        let original_path = temp.path().join(format!(
+            "committed-changes-{}.patch",
+            report.patch_artifact.sha256.as_deref().expect("patch sha")
+        ));
+        assert_ne!(
+            report.patch_artifact.path,
+            original_path.display().to_string()
+        );
+        std::fs::remove_file(&original_path).expect("clean original promotion artifact");
+        crate::agent_task_lifecycle::verified_controller_artifact_projection(
+            "baseline-run",
+            "task-1",
+            "committed-changes",
+            "patch",
+            report.patch_artifact.sha256.as_deref().expect("patch sha"),
+            None,
+        )
+        .expect("retained projection lookup")
+        .expect("committed changes retained before cleanup");
+        let baseline = serde_json::json!({
+            "source_run_id": "baseline-run",
+            "source_task_id": "task-1",
+            "patch_artifact": report.patch_artifact,
+        });
+        let bound = super::super::promote::bind_gate_feedback_baseline(Some(baseline))
+            .expect("continuation resolves controller mirror")
+            .expect("bound baseline");
+        assert!(bound["patch_artifact"].get("path").is_none());
         assert_eq!(
-            baseline["patch_artifact"]["controller_artifact"]["run_id"],
-            "baseline-run"
+            bound["patch_artifact"]["controller_artifact"]["logical_artifact_id"],
+            "committed-changes"
+        );
+        let forged = serde_json::json!({
+            "source_run_id": "baseline-run",
+            "source_task_id": "forged-task",
+            "patch_artifact": {
+                "id": "forged",
+                "kind": "patch",
+                "path": temp.path().join("unbounded.patch"),
+                "sha256": sha256_hex(VALID_PATCH),
+            }
+        });
+        let error = super::super::promote::bind_gate_feedback_baseline(Some(forged))
+            .expect_err("unindexed baseline path cannot be imported");
+        assert!(error
+            .message
+            .contains("controller artifact mirror is missing"));
+        assert!(
+            crate::agent_task_lifecycle::verified_controller_artifact_projection(
+                "baseline-run",
+                "forged-task",
+                "forged",
+                "patch",
+                &sha256_hex(VALID_PATCH),
+                None,
+            )
+            .expect("forged lookup")
+            .is_none()
         );
     });
 }
