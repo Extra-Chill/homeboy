@@ -1148,15 +1148,15 @@ pub fn reconstruct_adoption_options(
 /// owns continuation. Both the CLI re-exec boundary and the Cook handler use
 /// this so an upgraded controller cannot select different attempts.
 pub fn resolve_cook_continuation_run_id(cook_or_attempt_id: &str) -> Result<String> {
-    let recipe = load_recipe(cook_or_attempt_id)
-        .or_else(|cook_error| load_recipe_for_attempt(cook_or_attempt_id)?.ok_or(cook_error))?;
-    if recipe
-        .attempts
-        .iter()
-        .any(|attempt| attempt.run_id == cook_or_attempt_id)
-    {
-        return Ok(cook_or_attempt_id.to_string());
-    }
+    let recipe = match load_recipe(cook_or_attempt_id) {
+        // A Cook ID can also be its original attempt's run ID. In that case the
+        // Cook alias remains authoritative and must select the current candidate.
+        Ok(recipe) => recipe,
+        Err(cook_error) => {
+            load_recipe_for_attempt(cook_or_attempt_id)?.ok_or(cook_error)?;
+            return Ok(cook_or_attempt_id.to_string());
+        }
+    };
     if !agent_task_lifecycle::cook_index_exists(&recipe.cook_id)? {
         let attempts = recipe
             .attempts

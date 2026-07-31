@@ -179,6 +179,7 @@ fn reconstruct_record(run: &RunRecord) -> Result<AgentTaskRunRecord> {
         lab_handoff: None,
         candidate_adoption: None,
         adoption_run_id: None,
+        acceptance: None,
         metadata: json!({
             "lifecycle_reconstruction": {
                 "source": "observation_status_and_durable_plan",

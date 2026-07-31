@@ -1536,12 +1536,17 @@ fn preflight_batch_cook_recipes(
     // Validate immutable recipe inputs without resolving that handle as a live
     // workspace; execution validates the materialized workspace separately.
     for cook in &plan.cooks {
-        let mut invocation = cook.to_cook_invocation(plan)?;
-        invocation.options.harvest_context = batch_harvest_context()?;
+        let invocation = cook.to_cook_invocation(plan)?;
+        // Preflight must construct the same initial plan that Cook persists.
+        // Comparing the uncompiled invocation made existing recipes appear to
+        // drift whenever their workspace-derived plan had already been stored.
+        let mut options =
+            agent_task_service::compile_cook_attempt(invocation.options, invocation.dispatch)?;
+        options.harvest_context = batch_harvest_context()?;
         if let Some(dispatcher) = attempt_dispatcher {
-            invocation.options.attempt_dispatcher = Some(dispatcher(&invocation.options));
+            options.attempt_dispatcher = Some(dispatcher(&options));
         }
-        agent_task_service::validate_initial_recipe_compatibility(&invocation.options)?;
+        agent_task_service::validate_initial_recipe_compatibility(&options)?;
     }
     Ok(())
 }

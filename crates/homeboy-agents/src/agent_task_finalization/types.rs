@@ -33,6 +33,10 @@ pub struct AgentTaskPrFinalizationReport {
     pub publication_intent: AgentTaskPublicationIntent,
     pub publication_proof: AgentTaskPublicationProof,
     pub finalization_outcome: AgentTaskPrFinalizationOutcome,
+    /// The independent decision that authorized this publication, when the run
+    /// declared an acceptance requirement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acceptance: Option<crate::agent_task_lifecycle::AgentTaskAcceptanceRecord>,
     pub review_dossier: AgentTaskReviewDossier,
     pub manual_finalization: bool,
     #[serde(flatten)]
