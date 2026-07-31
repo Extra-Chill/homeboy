@@ -32,10 +32,19 @@ pub(super) fn run_if_configured(
         .iter()
         .map(|id| homeboy_core::project::resolve_project_component(project, id))
         .collect::<Result<Vec<_>>>()?;
-    if components
+    let provider_count = components
         .iter()
-        .all(|component| component.deployment_provider.is_some())
-    {
+        .filter(|component| component.deployment_provider.is_some())
+        .count();
+    if config.check && provider_count > 0 && provider_count < components.len() {
+        return Err(Error::validation_invalid_argument(
+            "component_ids",
+            "Project-wide check spans provider-owned and server-deployed components",
+            Some(project_id.to_string()),
+            Some(vec!["Run component-scoped checks so each component uses its declared deployment lifecycle".to_string()]),
+        ));
+    }
+    if provider_count == components.len() {
         let results = components
             .iter()
             .map(|component| run_component(project_id, project, component, config))
@@ -608,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn project_wide_check_keeps_mixed_components_on_generic_path() {
+    fn project_wide_check_requires_mixed_components_to_be_checked_separately() {
         let provider = provider_repository("provider");
         let generic = tempfile::tempdir().expect("generic repository");
         std::fs::write(
@@ -633,11 +642,18 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(
-            run_if_configured("site", &project, &DeployConfig::check_all_no_pull_head(),)
-                .expect("mixed dispatch decision")
-                .is_none()
+        let error = run_if_configured("site", &project, &DeployConfig::check_all_no_pull_head())
+            .expect_err("mixed project-wide check must not omit provider components");
+
+        assert_eq!(error.details["field"], "component_ids");
+        assert_eq!(error.details["id"], "site");
+        assert_eq!(
+            error.details["tried"],
+            serde_json::json!([
+                "Run component-scoped checks so each component uses its declared deployment lifecycle"
+            ])
         );
+        assert!(!error.message.contains("server_id"));
     }
 
     #[test]
