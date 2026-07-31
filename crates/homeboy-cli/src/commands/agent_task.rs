@@ -25,7 +25,7 @@ pub mod status;
 pub mod tool;
 
 pub use args::{
-    ActiveArgs, AdoptArgs, AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand,
+    AcceptArgs, ActiveArgs, AdoptArgs, AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand,
     AgentTaskCommand, AgentTaskControllerApplyEventArgs, AgentTaskControllerArgs,
     AgentTaskControllerCommand, AgentTaskControllerDispatchArgs, AgentTaskControllerFromSpecArgs,
     AgentTaskControllerInitArgs, AgentTaskControllerMarkHumanReadyArgs,
@@ -173,6 +173,20 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             run::promotion_provider(provider_args)
         }
         AgentTaskCommand::FinalizePr(finalize_args) => review::finalize_pull_request(finalize_args),
+        AgentTaskCommand::Accept(args) => {
+            let verdict = if args.verdict == "accepted" {
+                homeboy::agents::agent_tasks::lifecycle::AgentTaskAcceptanceVerdict::Accepted
+            } else {
+                homeboy::agents::agent_tasks::lifecycle::AgentTaskAcceptanceVerdict::Rejected
+            };
+            let record = homeboy::agents::agent_tasks::lifecycle::record_acceptance_verdict(
+                &args.run_id,
+                verdict,
+                args.evidence_refs,
+                args.token,
+            )?;
+            Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
+        }
         AgentTaskCommand::GateFeedback(feedback_args) => review::gate_feedback(feedback_args),
         AgentTaskCommand::Providers(providers_args) => review::providers(providers_args),
         AgentTaskCommand::Prompts(prompts_args) => prompts::prompts(prompts_args),

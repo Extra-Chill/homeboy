@@ -61,7 +61,15 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     backend: &mut B,
     publish: bool,
 ) -> Result<AgentTaskPrFinalizationReport> {
+    // A run id that resolves to durable state is never a manual escape hatch.
+    // Preserve manual mode only for work that has no Homeboy run record.
+    if options.manual_finalization
+        && crate::agent_task_lifecycle::persisted_status(&options.run_id).is_ok()
+    {
+        options.manual_finalization = false;
+    }
     let mut durable_changed_files = Vec::new();
+    let mut durable_acceptance = None;
     if !options.manual_finalization {
         let lifecycle = backend.hydrate_run(&options.run_id)?;
         let gate_proof = backend.hydrate_gate_proof(&options.run_id)?;
@@ -83,6 +91,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             ));
         }
         validate_gate_proof_binding(&gate_proof, &options)?;
+        durable_acceptance = validate_durable_acceptance(&options.run_id, &gate_proof.promotion)?;
         let eligibility =
             validate_durable_publication_eligibility(&lifecycle, &gate_proof.promotion)?;
         durable_changed_files = normalize_changed_files(&gate_proof.promotion.changed_files);
@@ -211,6 +220,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             None,
             None,
             None,
+            durable_acceptance,
         ));
     }
 
@@ -245,6 +255,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             // publication git tracking to record.
             None,
             None,
+            durable_acceptance,
         ));
     }
     if commit_required {
@@ -331,7 +342,84 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         Some(git_identity),
         git_tracking,
         Some(binding),
+        durable_acceptance,
     ))
+}
+
+fn validate_durable_acceptance(
+    run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+) -> Result<Option<crate::agent_task_lifecycle::AgentTaskAcceptanceRecord>> {
+    let record = match crate::agent_task_lifecycle::persisted_status(run_id) {
+        Ok(record) => record,
+        // Durable proofs created before acceptance existed have no lifecycle
+        // record to carry an acceptance requirement. Preserve that established
+        // compatibility case, but propagate every readable-record failure.
+        Err(error) if error.message.contains("agent-task run record not found") => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(acceptance) = record.acceptance else {
+        if record.metadata.get("acceptance_requirement").is_some() {
+            return Err(Error::validation_invalid_argument(
+                "acceptance",
+                "awaiting_acceptance: finalization requires a durable acceptance record after applied promotion",
+                None,
+                None,
+            ));
+        }
+        return Ok(None);
+    };
+    let candidate = promotion
+        .provenance
+        .pointer("/candidate/fingerprint")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .filter(
+            |candidate: &crate::agent_task_promotion::AgentTaskCandidateFingerprint| {
+                !candidate.schema.trim().is_empty()
+                    && !candidate.target_path.trim().is_empty()
+                    && !candidate.head.trim().is_empty()
+                    && !candidate.base.trim().is_empty()
+                    && !candidate.sha256.trim().is_empty()
+                    && !candidate.tree.trim().is_empty()
+            },
+        )
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "acceptance",
+                "awaiting_acceptance: finalization requires a complete candidate fingerprint",
+                None,
+                None,
+            )
+        })?;
+    let base_sha = promotion
+        .verified_base
+        .as_ref()
+        .map(|base| base.sha.as_str())
+        .unwrap_or_default();
+    if acceptance.verdict != crate::agent_task_lifecycle::AgentTaskAcceptanceVerdict::Accepted
+        || !acceptance.matches_candidate(&candidate, base_sha)
+    {
+        return Err(Error::validation_invalid_argument("acceptance", "awaiting_acceptance: finalization requires an accepted durable verdict bound to the current candidate and verified base", None, None));
+    }
+    let attestation = acceptance.attestation.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "acceptance",
+            "accepted durable verdict has no canonical signed attestation",
+            None,
+            None,
+        )
+    })?;
+    let request = crate::agent_task_lifecycle::AgentTaskAcceptanceVerificationRequest {
+        requirement: acceptance.requirement.clone(),
+        verdict: acceptance.verdict,
+        candidate: acceptance.candidate.clone(),
+        base_sha: acceptance.base_sha.clone(),
+        evidence_refs: acceptance.evidence_refs.clone(),
+        token: String::new(),
+    };
+    crate::agent_task_lifecycle::revalidate_durable_attestation(&request, attestation)?;
+    Ok(Some(acceptance))
 }
 
 pub(crate) fn normalize_changed_files(changed_files: &[String]) -> Vec<String> {
@@ -701,6 +789,7 @@ fn report(
     git_identity: Option<homeboy_core::git::GitIdentityProof>,
     git_tracking: Option<AgentTaskPublicationGitTracking>,
     binding: Option<AgentTaskPublicationBinding>,
+    acceptance: Option<crate::agent_task_lifecycle::AgentTaskAcceptanceRecord>,
 ) -> AgentTaskPrFinalizationReport {
     let normalized_gate_results = options.normalized_gate_results.clone();
     let proof =
@@ -743,6 +832,7 @@ fn report(
         publication_intent,
         publication_proof,
         finalization_outcome,
+        acceptance,
         review_dossier: options.review_dossier.clone(),
         manual_finalization: options.manual_finalization,
         evidence: options.evidence.clone(),
