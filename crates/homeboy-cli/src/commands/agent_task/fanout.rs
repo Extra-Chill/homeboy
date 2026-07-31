@@ -3,13 +3,15 @@
 use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::process::Command;
 
 use homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration;
 use homeboy::agents::agent_tasks::batch;
 use homeboy::agents::agent_tasks::dispatch_service::{
     AgentTaskDispatchCommand, DispatchCoreInputs,
 };
+use homeboy::agents::agent_tasks::fanout_supervisor as supervisor;
 use homeboy::agents::agent_tasks::gate::{
     AgentTaskGateEnvironmentPolicy, AgentTaskGateExecutionPolicy, AgentTaskGateRevealPolicy,
     VerifyGateOptions,
@@ -119,7 +121,15 @@ fn submit_fanout_batch(args: AgentTaskFanoutSubmitBatchArgs) -> CmdResult<Value>
 fn batch_status(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
     let report = batch::status(&args.batch_id)?;
     let exit_code = report.batch.state.exit_code();
-    Ok((command_json_value(report)?, exit_code))
+    let portfolio = reconcile_portfolio(&report.batch)?;
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-fanout-status/v2",
+            "batch": report,
+            "portfolio": portfolio,
+        }),
+        exit_code,
+    ))
 }
 
 /// Resume a durable fanout batch after its synchronous coordinator exited.
@@ -128,15 +138,640 @@ fn batch_status(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
 /// contract, reconciling per-child state back into the durable batch record so
 /// repeated resume calls converge without duplicate PRs (#9525).
 fn batch_resume(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
-    let result = agent_task_service::resume_cook_batch(
-        &args.batch_id,
-        provider::ExtensionProviderAgentTaskExecutor::discover(),
-        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
-    )?;
-    let exit_code = result.exit_code;
-    Ok(batch_resume_result(result.value, exit_code, &args.batch_id))
+    let batch_record = batch::read_batch_record(&args.batch_id)?;
+    let mut portfolio = load_portfolio(&batch_record)?;
+    let mut adapter = CookFanoutPortfolioAdapter;
+    let dependencies = durable_graph_dependencies(&batch_record)?;
+    let report = portfolio.run(&mut adapter, &dependencies)?;
+    let exit_code = if report.blocked.is_empty() { 0 } else { 1 };
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-fanout-resume/v2",
+            "batch_id": args.batch_id,
+            "portfolio": report,
+        }),
+        exit_code,
+    ))
 }
 
+/// Collect current, provider-neutral observations from the durable cook record
+/// plus its real git candidate.
+fn reconcile_portfolio(
+    batch_record: &homeboy::agents::agent_tasks::AgentTaskBatchRecord,
+) -> Result<homeboy::agents::agent_tasks::fanout_supervisor::AgentTaskFanoutPortfolioStatus> {
+    let mut portfolio = load_portfolio(batch_record)?;
+    let observations = batch_record
+        .child_runs
+        .iter()
+        .map(|child| portfolio_observation(&child.task_id, &child.run_id))
+        .collect::<Result<Vec<_>>>()?;
+    let dependencies = durable_graph_dependencies(batch_record)?;
+    let status = portfolio.reconcile(observations, &dependencies);
+    supervisor::write_portfolio(&portfolio)?;
+    Ok(status)
+}
+
+fn load_portfolio(
+    batch_record: &homeboy::agents::agent_tasks::AgentTaskBatchRecord,
+) -> Result<supervisor::AgentTaskFanoutPortfolio> {
+    match supervisor::read_portfolio(&batch_record.batch_id) {
+        Ok(portfolio) => Ok(portfolio),
+        Err(_) if !supervisor::portfolio_exists(&batch_record.batch_id)? => {
+            Ok(supervisor::AgentTaskFanoutPortfolio::new(
+                batch_record.batch_id.clone(),
+                batch_record.child_runs.iter().map(|child| {
+                    supervisor::AgentTaskFanoutPortfolioChild {
+                        child_id: child.task_id.clone(),
+                        tracker_ref: format!("homeboy://agent-task/run/{}", child.run_id),
+                        run_id: child.run_id.clone(),
+                        source_sha: None,
+                        base_sha: None,
+                        head_sha: None,
+                        evidence_generation: 0,
+                        finding_fingerprints: Default::default(),
+                        blocker: None,
+                        next_action: None,
+                    }
+                }),
+            ))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Read the public durable graph projection written by the fanout graph owner.
+/// This consumes only its serialized readiness contract so the supervisor can
+/// stack on that implementation without importing its internal graph types.
+struct DurableGraphDependencies {
+    readiness: BTreeMap<String, supervisor::FanoutDependencyReadiness>,
+}
+
+impl supervisor::FanoutDependencyResolver for DurableGraphDependencies {
+    fn readiness(&self, child_id: &str) -> supervisor::FanoutDependencyReadiness {
+        self.readiness
+            .get(child_id)
+            .cloned()
+            .unwrap_or(supervisor::FanoutDependencyReadiness::Ready)
+    }
+}
+
+fn durable_graph_dependencies(
+    batch_record: &homeboy::agents::agent_tasks::AgentTaskBatchRecord,
+) -> Result<DurableGraphDependencies> {
+    let Some(graph) = batch_record.metadata.get("dependency_graph") else {
+        return Ok(DurableGraphDependencies {
+            readiness: BTreeMap::new(),
+        });
+    };
+    let invalid = |detail: String| {
+        batch_record
+            .child_runs
+            .iter()
+            .map(|child| {
+                (
+                    child.task_id.clone(),
+                    supervisor::FanoutDependencyReadiness::Blocked {
+                        detail: detail.clone(),
+                        evidence_ref: format!(
+                            "homeboy://agent-task/batch/{}/dependency-graph",
+                            batch_record.batch_id
+                        ),
+                    },
+                )
+            })
+            .collect()
+    };
+    if graph.get("schema").and_then(Value::as_str)
+        != Some("homeboy/agent-task-fanout-dependency-graph/v1")
+    {
+        return Ok(DurableGraphDependencies {
+            readiness: invalid("durable fanout dependency graph has an unsupported schema".into()),
+        });
+    }
+    let Some(readiness) = graph.get("readiness").and_then(Value::as_object) else {
+        return Ok(DurableGraphDependencies {
+            readiness: invalid(
+                "durable fanout dependency graph has no readiness projection".into(),
+            ),
+        });
+    };
+    let Some(states) = readiness.get("states").and_then(Value::as_object) else {
+        return Ok(DurableGraphDependencies {
+            readiness: invalid("durable fanout dependency graph has no child states".into()),
+        });
+    };
+    let Some(ready) = readiness.get("ready").and_then(Value::as_array) else {
+        return Ok(DurableGraphDependencies {
+            readiness: invalid("durable fanout dependency graph has no ready frontier".into()),
+        });
+    };
+    let ready = ready
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<BTreeSet<_>>>();
+    let Some(ready) = ready else {
+        return Ok(DurableGraphDependencies {
+            readiness: invalid(
+                "durable fanout dependency graph has an invalid ready frontier".into(),
+            ),
+        });
+    };
+    let blocked_paths = readiness
+        .get("blocked_paths")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut projection = BTreeMap::new();
+    for child in &batch_record.child_runs {
+        let Some(state) = states.get(&child.task_id).and_then(Value::as_str) else {
+            return Ok(DurableGraphDependencies {
+                readiness: invalid(format!(
+                    "durable fanout dependency graph omits child '{}'",
+                    child.task_id
+                )),
+            });
+        };
+        if ready.contains(child.task_id.as_str()) {
+            projection.insert(
+                child.task_id.clone(),
+                supervisor::FanoutDependencyReadiness::Ready,
+            );
+            continue;
+        }
+        let path = blocked_paths
+            .get(&child.task_id)
+            .and_then(Value::as_array)
+            .and_then(|path| path.iter().map(Value::as_str).collect::<Option<Vec<_>>>())
+            .map(|path| path.join(" <- "));
+        projection.insert(
+            child.task_id.clone(),
+            supervisor::FanoutDependencyReadiness::Blocked {
+                detail: path
+                    .unwrap_or_else(|| format!("dependency graph projects child state '{state}'")),
+                evidence_ref: format!(
+                    "homeboy://agent-task/batch/{}/dependency-graph/children/{}",
+                    batch_record.batch_id, child.task_id
+                ),
+            },
+        );
+    }
+    Ok(DurableGraphDependencies {
+        readiness: projection,
+    })
+}
+
+/// Production adapter for the durable child action executor. Cook owns the
+/// provider, promotion, gate, review, Git, and PR contracts; this adapter only
+/// chooses the child-local, idempotent continuation that must run next.
+struct CookFanoutPortfolioAdapter;
+
+impl supervisor::FanoutPortfolioAdapter for CookFanoutPortfolioAdapter {
+    fn observe(
+        &mut self,
+        child: &supervisor::AgentTaskFanoutPortfolioChild,
+    ) -> Result<supervisor::AgentTaskFanoutPortfolioObservation> {
+        portfolio_observation(&child.child_id, &child.run_id)
+    }
+
+    fn continue_provider(
+        &mut self,
+        child: &supervisor::AgentTaskFanoutPortfolioChild,
+    ) -> Result<()> {
+        resume_fanout_child(child, false)
+    }
+
+    fn rebase_candidate(
+        &mut self,
+        child: &supervisor::AgentTaskFanoutPortfolioChild,
+    ) -> Result<()> {
+        resume_fanout_child(child, true)
+    }
+
+    fn recreate_candidate(
+        &mut self,
+        child: &supervisor::AgentTaskFanoutPortfolioChild,
+    ) -> Result<()> {
+        // Recreate is intentionally a separate continuation request. The Cook
+        // recovery contract selects only its persisted recreation path.
+        resume_fanout_child(child, true)
+    }
+
+    fn rerun_gates_and_review(
+        &mut self,
+        child: &supervisor::AgentTaskFanoutPortfolioChild,
+    ) -> Result<()> {
+        resume_fanout_child(child, true)
+    }
+
+    fn finalize_or_update_pr(
+        &mut self,
+        child: &supervisor::AgentTaskFanoutPortfolioChild,
+        should_force_with_lease: bool,
+    ) -> Result<()> {
+        if should_force_with_lease {
+            force_with_lease_then_reconcile(child)
+        } else {
+            resume_fanout_child(child, false)
+        }
+    }
+}
+
+/// Publish the already-gated candidate with a remote compare-and-swap, persist
+/// its receipt, then ask Cook's recovery finalizer to refresh the existing PR.
+/// This deliberately bypasses Cook's cached-finalization return path.
+fn force_with_lease_then_reconcile(
+    child: &supervisor::AgentTaskFanoutPortfolioChild,
+) -> Result<()> {
+    let record = agent_task_lifecycle::status(&child.run_id)?;
+    let promotion = record.metadata.get("latest_promotion").ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "latest_promotion",
+            "force-with-lease requires the durable promoted candidate",
+            Some(child.run_id.clone()),
+            None,
+        )
+    })?;
+    let path = promotion
+        .pointer("/provenance/worktree_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "promotion.provenance.worktree_path",
+                "force-with-lease requires the promoted candidate worktree",
+                Some(child.run_id.clone()),
+                None,
+            )
+        })?;
+    let finalization = record.metadata.get("cook_finalization").ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "cook_finalization",
+            "force-with-lease requires a prior Cook finalization with its PR head branch",
+            Some(child.run_id.clone()),
+            None,
+        )
+    })?;
+    let head = finalization
+        .get("head")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_finalization.head",
+                "force-with-lease requires the prior finalization head branch",
+                Some(child.run_id.clone()),
+                None,
+            )
+        })?;
+    let receipt = force_with_lease_push(path, head)?;
+    agent_task_lifecycle::record_cook_force_with_lease_receipt(&child.run_id, receipt.clone())?;
+    agent_task_service::recover_cook_pr(&child.run_id, Vec::new(), false)?;
+    let mut receipt = receipt;
+    receipt["pr_refresh_completed"] = Value::Bool(true);
+    agent_task_lifecycle::record_cook_force_with_lease_receipt(&child.run_id, receipt)?;
+    Ok(())
+}
+
+/// Compare-and-swap the already-gated candidate onto its PR branch. Keeping
+/// this boundary independent of lifecycle mutation makes the expected remote
+/// SHA, command, and post-push observation directly verifiable.
+fn force_with_lease_push(path: &str, head: &str) -> Result<Value> {
+    let destination = format!("refs/heads/{head}");
+    let expected_sha = git_stdout(path, &["ls-remote", "--heads", "origin", &destination])?
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            Error::git_command_failed(format!(
+                "cannot force-with-lease a missing remote branch `{destination}`"
+            ))
+        })?;
+    let candidate_sha = git_stdout(path, &["rev-parse", "HEAD"])?;
+    let lease = format!("--force-with-lease={destination}:{expected_sha}");
+    let refspec = format!("{candidate_sha}:{destination}");
+    // A restart may observe the completed push before its receipt was durable.
+    // The matching remote ref is sufficient to record that receipt and refresh
+    // the PR; issuing a second force-push would widen the interruption window.
+    if expected_sha != candidate_sha {
+        git_stdout(path, &["push", &lease, "origin", &refspec])?;
+    }
+    let after_sha = git_stdout(path, &["ls-remote", "--heads", "origin", &destination])?
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            Error::git_command_failed(format!(
+                "force-with-lease did not leave remote branch `{destination}` readable"
+            ))
+        })?;
+    if after_sha != candidate_sha {
+        return Err(Error::git_command_failed(format!(
+            "force-with-lease left `{destination}` at `{after_sha}` instead of candidate `{candidate_sha}`"
+        )));
+    }
+    Ok(serde_json::json!({
+        "command": ["git", "push", lease, "origin", refspec],
+        "remote": "origin",
+        "ref": destination,
+        "expected_sha": expected_sha,
+        "after_sha": after_sha,
+        "reconciled_existing_push": expected_sha == candidate_sha,
+        // The receipt is intentionally incomplete until the PR host has been
+        // refreshed. A restart then resumes refresh without repeating a push.
+        "pr_refresh_completed": false,
+    }))
+}
+
+fn git_stdout(path: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if !output.status.success() {
+        return Err(Error::git_command_failed(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn resume_fanout_child(
+    child: &supervisor::AgentTaskFanoutPortfolioChild,
+    rerun_completed_gates: bool,
+) -> Result<()> {
+    agent_task_service::resume_cook(
+        &child.run_id,
+        provider::ExtensionProviderAgentTaskExecutor::discover(),
+        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
+        rerun_completed_gates,
+    )?;
+    Ok(())
+}
+
+fn portfolio_observation(
+    child_id: &str,
+    run_id: &str,
+) -> Result<homeboy::agents::agent_tasks::fanout_supervisor::AgentTaskFanoutPortfolioObservation> {
+    use homeboy::agents::agent_tasks::fanout_supervisor as supervisor;
+    let record = agent_task_lifecycle::status(run_id).ok();
+    let provider = match record.as_ref().map(|record| record.state) {
+        Some(agent_task_lifecycle::AgentTaskRunState::Running) => {
+            supervisor::AgentTaskFanoutProviderState::Running
+        }
+        Some(
+            agent_task_lifecycle::AgentTaskRunState::Succeeded
+            | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable,
+        ) => supervisor::AgentTaskFanoutProviderState::Succeeded,
+        Some(_) => supervisor::AgentTaskFanoutProviderState::Failed,
+        None => supervisor::AgentTaskFanoutProviderState::Pending,
+    };
+    let promotion = record
+        .as_ref()
+        .and_then(|record| record.metadata.get("latest_promotion"));
+    let path = promotion
+        .and_then(|value| value.pointer("/provenance/worktree_path"))
+        .and_then(Value::as_str);
+    let declared_base = promotion
+        .and_then(|value| value.pointer("/verified_base/base"))
+        .and_then(Value::as_str);
+    let (worktree, head_sha, current_base_sha) = path
+        .map(|path| git_candidate_state(path, declared_base))
+        .unwrap_or((
+            supervisor::AgentTaskFanoutWorktreeState::Missing,
+            None,
+            None,
+        ));
+    let base_sha = promotion
+        .and_then(|value| value.pointer("/verified_base/sha"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let source_sha = promotion
+        .and_then(|value| value.pointer("/provenance/source_sha"))
+        .or_else(|| promotion.and_then(|value| value.pointer("/source/sha")))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let gates = match promotion
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str)
+    {
+        Some("applied") => supervisor::AgentTaskFanoutEvidenceState::Current,
+        Some("failed") => supervisor::AgentTaskFanoutEvidenceState::Failed,
+        _ => supervisor::AgentTaskFanoutEvidenceState::Missing,
+    };
+    let finalization = record
+        .as_ref()
+        .and_then(|record| record.metadata.get("cook_finalization"));
+    let accepted_evidence = finalization
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str)
+        == Some("review_ready");
+    let receipt_current = record
+        .as_ref()
+        .and_then(|record| record.metadata.get("cook_force_with_lease_receipt"))
+        .and_then(|receipt| {
+            (receipt.get("pr_refresh_completed") == Some(&Value::Bool(true))).then_some(receipt)
+        })
+        .and_then(|receipt| receipt.get("after_sha"))
+        .and_then(Value::as_str)
+        .is_some_and(|after_sha| head_sha.as_deref() == Some(after_sha));
+    let (tracker, pr, remote_head_sha, findings) = match path {
+        Some(path) => github_observation(path, record.as_ref(), finalization)?,
+        None => (
+            supervisor::AgentTaskFanoutTrackerState::Unknown,
+            supervisor::AgentTaskFanoutPrState::Unknown,
+            None,
+            Vec::new(),
+        ),
+    };
+    Ok(supervisor::AgentTaskFanoutPortfolioObservation {
+        child_id: child_id.to_string(),
+        tracker,
+        provider,
+        worktree,
+        candidate: supervisor::AgentTaskFanoutCandidateState {
+            source_sha,
+            base_sha,
+            head_sha,
+            current_base_sha,
+            remote_head_sha,
+            publication_receipt_current: receipt_current,
+            can_rebase: path.is_some(),
+            can_recreate: false,
+        },
+        gates,
+        // A durable finalization record is the accepted local evidence. Host
+        // review decisions and findings below are independently refreshed.
+        acceptance: if accepted_evidence {
+            supervisor::AgentTaskFanoutEvidenceState::Current
+        } else {
+            supervisor::AgentTaskFanoutEvidenceState::Missing
+        },
+        pr,
+        findings,
+    })
+}
+
+/// Read tracker and PR state through Homeboy's existing GitHub API boundary.
+/// Keeping this at the CLI composition layer makes the supervisor itself
+/// injectable and product-neutral while avoiding synthetic "open" states.
+fn github_observation(
+    path: &str,
+    record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
+    finalization: Option<&Value>,
+) -> Result<(
+    supervisor::AgentTaskFanoutTrackerState,
+    supervisor::AgentTaskFanoutPrState,
+    Option<String>,
+    Vec<supervisor::AgentTaskFanoutReviewFinding>,
+)> {
+    let task_url = record
+        .and_then(|record| record.metadata.pointer("/cook_recipe/source_refs/0"))
+        .and_then(Value::as_str);
+    let tracker = task_url
+        .and_then(|url| IssueRef::parse(url).ok())
+        .map(|issue| {
+            homeboy::core::git::issue_find(
+                None,
+                homeboy::core::git::IssueFindOptions {
+                    state: homeboy::core::git::IssueState::All,
+                    limit: 100,
+                    path: Some(path.to_string()),
+                    ..Default::default()
+                },
+            )
+            .map(|result| {
+                result
+                    .items
+                    .iter()
+                    .find(|item| item.number.to_string() == issue.number)
+                    .map_or(supervisor::AgentTaskFanoutTrackerState::Unknown, |item| {
+                        if item.state.eq_ignore_ascii_case("open") {
+                            supervisor::AgentTaskFanoutTrackerState::Open
+                        } else {
+                            supervisor::AgentTaskFanoutTrackerState::Closed
+                        }
+                    })
+            })
+        })
+        .transpose()?
+        .unwrap_or(supervisor::AgentTaskFanoutTrackerState::Unknown);
+    let head = finalization
+        .and_then(|value| value.get("head"))
+        .and_then(Value::as_str);
+    let base = finalization
+        .and_then(|value| value.get("base"))
+        .and_then(Value::as_str);
+    let Some(head) = head else {
+        return Ok((
+            tracker,
+            supervisor::AgentTaskFanoutPrState::Missing,
+            None,
+            Vec::new(),
+        ));
+    };
+    let prs = homeboy::core::git::pr_find(
+        None,
+        homeboy::core::git::PrFindOptions {
+            head: Some(head.to_string()),
+            base: base.map(str::to_string),
+            state: homeboy::core::git::PrState::All,
+            limit: 10,
+            path: Some(path.to_string()),
+        },
+    )?;
+    let Some(pr) = prs.items.first() else {
+        return Ok((
+            tracker,
+            supervisor::AgentTaskFanoutPrState::Missing,
+            None,
+            Vec::new(),
+        ));
+    };
+    let view = homeboy::core::git::pr_view(None, pr.number, Some(path.to_string()))?;
+    let findings = matches!(view.review_decision.as_deref(), Some("CHANGES_REQUESTED"))
+        .then(|| supervisor::AgentTaskFanoutReviewFinding {
+            fingerprint: format!("github-pr-{}-changes-requested", view.number),
+            summary: "GitHub review decision is changes requested".to_string(),
+        })
+        .into_iter()
+        .collect();
+    let state = if view.merged_at.is_some() {
+        supervisor::AgentTaskFanoutPrState::Merged
+    } else if view.ci_state.eq_ignore_ascii_case("terminal_green") {
+        supervisor::AgentTaskFanoutPrState::OpenChecksPassing
+    } else if view.ci_state.eq_ignore_ascii_case("failure") {
+        supervisor::AgentTaskFanoutPrState::OpenChecksFailed
+    } else {
+        supervisor::AgentTaskFanoutPrState::OpenChecksPending
+    };
+    Ok((tracker, state, view.head_sha, findings))
+}
+
+fn git_candidate_state(
+    path: &str,
+    declared_base: Option<&str>,
+) -> (
+    homeboy::agents::agent_tasks::fanout_supervisor::AgentTaskFanoutWorktreeState,
+    Option<String>,
+    Option<String>,
+) {
+    use homeboy::agents::agent_tasks::fanout_supervisor::AgentTaskFanoutWorktreeState;
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(path)
+        .output();
+    let Ok(status) = status else {
+        return (AgentTaskFanoutWorktreeState::Missing, None, None);
+    };
+    if !status.status.success() {
+        return (AgentTaskFanoutWorktreeState::Missing, None, None);
+    }
+    let worktree = if status.stdout.is_empty() {
+        AgentTaskFanoutWorktreeState::Clean
+    } else if String::from_utf8_lossy(&status.stdout)
+        .lines()
+        .any(|line| line.starts_with("UU") || line.starts_with("AA") || line.starts_with("DD"))
+    {
+        AgentTaskFanoutWorktreeState::Conflicted
+    } else {
+        AgentTaskFanoutWorktreeState::Dirty
+    };
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
+    let base = declared_base.and_then(|base| {
+        let reference = format!("refs/homeboy/fanout/base/{base}");
+        let fetch = Command::new("git")
+            .args([
+                "fetch",
+                "--no-tags",
+                "origin",
+                &format!("refs/heads/{base}:{reference}"),
+            ])
+            .current_dir(path)
+            .output()
+            .ok()?;
+        if !fetch.status.success() {
+            return None;
+        }
+        Command::new("git")
+            .args(["rev-parse", "--verify", &format!("{reference}^{{commit}}")])
+            .current_dir(path)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    });
+    (worktree, head, base)
+}
+
+#[cfg(test)]
 fn batch_resume_result(
     report: agent_task_service::AgentTaskCookBatchReport,
     exit_code: i32,
@@ -621,6 +1256,9 @@ fn preflight_batch_cook_recipes(
     plan: &BatchCookFanoutPlan,
     attempt_dispatcher: Option<&CookAttemptDispatcherFactory>,
 ) -> Result<()> {
+    // Planning and dry-run callers may only have a managed worktree handle.
+    // Validate immutable recipe inputs without resolving that handle as a live
+    // workspace; execution validates the materialized workspace separately.
     for cook in &plan.cooks {
         let mut invocation = cook.to_cook_invocation(plan)?;
         invocation.options.harvest_context = batch_harvest_context()?;
@@ -2393,5 +3031,138 @@ mod tests {
             args.provider_profile,
             Some("opencode-codex-gpt55".to_string())
         );
+    }
+
+    #[test]
+    fn force_with_lease_uses_the_observed_sha_and_converges_after_push_before_receipt() {
+        let root = tempfile::tempdir().expect("temporary Git fixture");
+        let remote = root.path().join("remote.git");
+        let worktree = root.path().join("worktree");
+        git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        git(
+            root.path(),
+            &[
+                "clone",
+                remote.to_str().unwrap(),
+                worktree.to_str().unwrap(),
+            ],
+        );
+        git(&worktree, &["config", "user.name", "Homeboy test"]);
+        git(&worktree, &["config", "user.email", "homeboy@example.test"]);
+        std::fs::write(worktree.join("candidate.txt"), "base\n").expect("write base");
+        git(&worktree, &["add", "."]);
+        git(&worktree, &["commit", "-m", "base"]);
+        git(&worktree, &["branch", "-M", "main"]);
+        git(&worktree, &["push", "origin", "main"]);
+        git(&worktree, &["checkout", "-b", "fanout/child"]);
+        std::fs::write(worktree.join("candidate.txt"), "old candidate\n").expect("write old");
+        git(&worktree, &["commit", "-am", "old candidate"]);
+        git(&worktree, &["push", "origin", "fanout/child"]);
+        let expected_sha = git(&worktree, &["rev-parse", "HEAD"]);
+
+        std::fs::write(worktree.join("candidate.txt"), "new candidate\n").expect("write new");
+        git(&worktree, &["commit", "-am", "new candidate"]);
+        let candidate_sha = git(&worktree, &["rev-parse", "HEAD"]);
+
+        let receipt = force_with_lease_push(worktree.to_str().unwrap(), "fanout/child")
+            .expect("force-with-lease push");
+        assert_eq!(receipt["expected_sha"], expected_sha);
+        assert_eq!(receipt["after_sha"], candidate_sha);
+        assert_eq!(
+            receipt["command"][2],
+            format!("--force-with-lease=refs/heads/fanout/child:{expected_sha}")
+        );
+        assert_eq!(receipt["pr_refresh_completed"], false);
+
+        // This models a restart after Git accepted the push but before Homeboy
+        // persisted its receipt. The second pass observes the candidate already
+        // published and records convergence instead of issuing another push.
+        let restarted = force_with_lease_push(worktree.to_str().unwrap(), "fanout/child")
+            .expect("reconcile completed push");
+        assert_eq!(restarted["expected_sha"], candidate_sha);
+        assert_eq!(restarted["after_sha"], candidate_sha);
+        assert_eq!(restarted["reconciled_existing_push"], true);
+        assert_eq!(
+            git(
+                &worktree,
+                &["ls-remote", "--heads", "origin", "refs/heads/fanout/child"]
+            )
+            .split_whitespace()
+            .next(),
+            Some(candidate_sha.as_str())
+        );
+    }
+
+    #[test]
+    fn github_observation_refreshes_a_fake_review_ready_pr() {
+        let _env = env_lock();
+        let root = tempfile::tempdir().expect("temporary GitHub fixture");
+        let worktree = root.path().join("worktree");
+        git(root.path(), &["init", worktree.to_str().unwrap()]);
+        git(
+            &worktree,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/fanout.git",
+            ],
+        );
+        let bin = root.path().join("bin");
+        std::fs::create_dir(&bin).expect("fake gh bin");
+        let fake_gh = bin.join("gh");
+        std::fs::write(
+            &fake_gh,
+            r#"#!/bin/sh
+case "$1 $2" in
+  "--version "|"auth status") exit 0 ;;
+  "pr list") printf '%s\n' '[{"number":42,"title":"Fanout child","url":"https://github.com/acme/fanout/pull/42","state":"OPEN","baseRefName":"main","headRefName":"fanout/child"}]' ;;
+  "pr view") printf '%s\n' '{"author":{"login":"homeboy"},"baseRefName":"main","headRefName":"fanout/child","headRefOid":"candidate-sha","title":"Fanout child","url":"https://github.com/acme/fanout/pull/42","state":"OPEN","isDraft":false,"mergedAt":null,"reviewDecision":"APPROVED","mergeStateStatus":"CLEAN","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}' ;;
+  *) exit 1 ;;
+esac
+"#,
+        )
+        .expect("write fake gh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755))
+                .expect("make fake gh executable");
+        }
+        let previous_path = std::env::var_os("PATH");
+        let mut path = std::ffi::OsString::from(bin.as_os_str());
+        path.push(":");
+        path.push(previous_path.clone().unwrap_or_default());
+        std::env::set_var("PATH", path);
+
+        let observed = github_observation(
+            worktree.to_str().unwrap(),
+            None,
+            Some(&json!({ "head": "fanout/child", "base": "main" })),
+        );
+        match previous_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        let (tracker, pr, remote_head, findings) = observed.expect("fake GitHub observation");
+        assert_eq!(tracker, supervisor::AgentTaskFanoutTrackerState::Unknown);
+        assert_eq!(pr, supervisor::AgentTaskFanoutPrState::OpenChecksPassing);
+        assert_eq!(remote_head.as_deref(), Some("candidate-sha"));
+        assert!(findings.is_empty());
+    }
+
+    fn git(path: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run Git fixture command");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 }

@@ -80,6 +80,12 @@ pub use super::agent_task_fanout::{
     AGENT_TASK_FANOUT_AGGREGATE_SCHEMA, AGENT_TASK_FANOUT_PLAN_SCHEMA,
 };
 
+/// Durable portfolio reconciliation for independent fanout children. Dependency
+/// topology is supplied through `FanoutDependencyResolver` by #10946.
+pub mod fanout_supervisor {
+    pub use super::super::agent_task_fanout_supervisor::*;
+}
+
 // Plan/scheduler/execution context types are widely consumed and stay at the
 // facade root for ergonomics.
 pub use super::agent_task_schedule::{
@@ -260,16 +266,16 @@ pub mod lifecycle {
         materialize_recovered_patch_artifact, pin_current_controller_runtime,
         pinned_runtime_for_mutation, prune_controller_runtime_pins, reconcile_record_health,
         reconcile_terminal_artifact_projection, record_completed_run, record_cook_attempt,
-        record_detached_lab_run, record_health_summary, record_lab_offload_phase,
-        record_lab_offload_planned, record_pre_dispatch_failure, record_pre_execution_failure,
-        record_promotion, record_remote_dispatch_failure, record_run_aggregate,
-        record_runner_job_identity, resolve_promotion_patch_artifact_id, retry,
-        run_id_for_aggregate_path, run_record_exists, run_record_exists_resolved, run_status,
-        runner_pinned_runtime_for_mutation, runner_probe_plan, select_cook_candidate_from_attempts,
-        status, status_with_options, submit_plan, verified_controller_artifact_projection_path,
-        AgentTaskArtifactRef, AgentTaskCookIndex, AgentTaskCookIndexAttempt,
-        AgentTaskEventEnvelope, AgentTaskPreDispatchFailure, AgentTaskRecordHealthItem,
-        AgentTaskRecordHealthReason, AgentTaskRecordHealthSummary,
+        record_cook_force_with_lease_receipt, record_detached_lab_run, record_health_summary,
+        record_lab_offload_phase, record_lab_offload_planned, record_pre_dispatch_failure,
+        record_pre_execution_failure, record_promotion, record_remote_dispatch_failure,
+        record_run_aggregate, record_runner_job_identity, resolve_promotion_patch_artifact_id,
+        retry, run_id_for_aggregate_path, run_record_exists, run_record_exists_resolved,
+        run_status, runner_pinned_runtime_for_mutation, runner_probe_plan,
+        select_cook_candidate_from_attempts, status, status_with_options, submit_plan,
+        verified_controller_artifact_projection_path, AgentTaskArtifactRef, AgentTaskCookIndex,
+        AgentTaskCookIndexAttempt, AgentTaskEventEnvelope, AgentTaskPreDispatchFailure,
+        AgentTaskRecordHealthItem, AgentTaskRecordHealthReason, AgentTaskRecordHealthSummary,
         AgentTaskRecordReconciliationItem, AgentTaskRecordReconciliationReport,
         AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts, AgentTaskRunLog,
         AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunStatus,
@@ -404,7 +410,7 @@ pub mod service {
         reconcile_recipe_attempt_for_continuation, reconcile_terminal_artifact_projection,
         reconstruct_options_with_dispatcher, recover_cook_pr,
         recover_terminal_transport_proxy_evidence, register_promotion_job_driver,
-        resolve_cook_continuation_run_id, resume, resume_cook_batch, retry, run_cook,
+        resolve_cook_continuation_run_id, resume, resume_cook, resume_cook_batch, retry, run_cook,
         run_cook_batch, run_cook_with_durable_observer, run_loaded_plan, run_next,
         run_next_with_cook_dispatcher, run_status, run_submitted, run_submitted_with_timeout,
         run_terminal_cook_continuation, source_worktree_path, status, submit_plan_spec,
