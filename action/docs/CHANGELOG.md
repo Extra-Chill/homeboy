@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.10.1] - 2026-07-31
+
+### Fixed
+- propagate reusable test timeout
+
 ## [2.10.0] - 2026-07-31
 
 ### Added
