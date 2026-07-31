@@ -185,12 +185,30 @@ pub mod cook_loop {
 /// Durable batch/fanout lifecycle records built from independent child runs.
 pub mod batch {
     pub use super::super::agent_task_batch::{
-        artifacts, persist_fanout_run_batch, read_batch_record,
+        artifacts, fanout_aggregate_state, fanout_dependency_graph_with_finalization_statuses,
+        fanout_ready_child_run_ids, persist_fanout_run_batch, read_batch_record,
         record_fanout_run_batch_failed_admissions, status, submit_plan_batch,
         AgentTaskBatchArtifactsReport, AgentTaskBatchChildArtifacts, AgentTaskBatchChildRun,
         AgentTaskBatchCommands, AgentTaskBatchRecord, AgentTaskBatchState,
         AgentTaskBatchStatusReport, AgentTaskBatchTotals, FanoutRunBatchChild,
         AGENT_TASK_BATCH_ARTIFACTS_SCHEMA, AGENT_TASK_BATCH_SCHEMA, AGENT_TASK_BATCH_STATUS_SCHEMA,
+    };
+}
+
+/// Generic dependency graph validation and readiness projection for fanout and
+/// supervisor orchestration.
+pub mod dependency_graph {
+    pub use super::super::agent_task_dependency_graph::{
+        dependency_graph_readiness, AgentTaskDependencyEdge, AgentTaskDependencyNode,
+        AgentTaskDependencyReadiness, AgentTaskDependencyState,
+    };
+}
+
+/// Durable Git/PR actions released by a merged fanout dependency.
+pub mod dependency_actions {
+    pub use super::super::agent_task_dependency_actions::{
+        execute_resolved_dependency_actions, DependencyAction, DependencyActionExecutor,
+        DependencyResolution,
     };
 }
 
@@ -256,27 +274,28 @@ pub mod lifecycle {
     pub use super::super::agent_task_lifecycle::{
         aggregate_source, artifacts, cancel, cancel_run, claim_next_queued_run,
         cook_attempt_run_id, cook_index, cook_index_exists, has_accepted_runner_handoff,
-        list_records, load_controller_plan, load_plan, logs, mark_resuming, mark_running,
-        materialize_recovered_patch_artifact, pin_current_controller_runtime,
-        pinned_runtime_for_mutation, prune_controller_runtime_pins, reconcile_record_health,
-        reconcile_terminal_artifact_projection, record_completed_run, record_cook_attempt,
-        record_detached_lab_run, record_health_summary, record_lab_offload_phase,
-        record_lab_offload_planned, record_pre_dispatch_failure, record_pre_execution_failure,
-        record_promotion, record_remote_dispatch_failure, record_run_aggregate,
-        record_runner_job_identity, resolve_promotion_patch_artifact_id, retry,
-        run_id_for_aggregate_path, run_record_exists, run_record_exists_resolved, run_status,
-        runner_pinned_runtime_for_mutation, runner_probe_plan, select_cook_candidate_from_attempts,
-        status, status_with_options, submit_plan, verified_controller_artifact_projection_path,
-        AgentTaskArtifactRef, AgentTaskCookIndex, AgentTaskCookIndexAttempt,
-        AgentTaskEventEnvelope, AgentTaskPreDispatchFailure, AgentTaskRecordHealthItem,
-        AgentTaskRecordHealthReason, AgentTaskRecordHealthSummary,
-        AgentTaskRecordReconciliationItem, AgentTaskRecordReconciliationReport,
-        AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts, AgentTaskRunLog,
-        AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunStatus,
-        AgentTaskRunTask, AgentTaskRunnerProbe, AgentTaskRunnerProbePlan, AgentTaskStatusOptions,
-        AgentTaskStatusOutcome, ControllerRuntimePruneResult, DetachedLabRunRecord,
-        LabOffloadProxyPlan, RunnerPinnedRuntime, RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT,
-        RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL, RUNNER_PROBE_SKIPPED_NOT_RUNNING,
+        invalidate_cook_finalization_for_dependency, list_records, load_controller_plan, load_plan,
+        logs, mark_resuming, mark_running, materialize_recovered_patch_artifact,
+        pin_current_controller_runtime, pinned_runtime_for_mutation, prune_controller_runtime_pins,
+        reconcile_record_health, reconcile_terminal_artifact_projection, record_completed_run,
+        record_cook_attempt, record_cook_finalization, record_detached_lab_run,
+        record_health_summary, record_lab_offload_phase, record_lab_offload_planned,
+        record_pre_dispatch_failure, record_pre_execution_failure, record_promotion,
+        record_remote_dispatch_failure, record_run_aggregate, record_runner_job_identity,
+        resolve_promotion_patch_artifact_id, retry, run_id_for_aggregate_path, run_record_exists,
+        run_record_exists_resolved, run_status, runner_pinned_runtime_for_mutation,
+        runner_probe_plan, select_cook_candidate_from_attempts, status, status_with_options,
+        submit_plan, verified_controller_artifact_projection_path, AgentTaskArtifactRef,
+        AgentTaskCookIndex, AgentTaskCookIndexAttempt, AgentTaskEventEnvelope,
+        AgentTaskPreDispatchFailure, AgentTaskRecordHealthItem, AgentTaskRecordHealthReason,
+        AgentTaskRecordHealthSummary, AgentTaskRecordReconciliationItem,
+        AgentTaskRecordReconciliationReport, AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts,
+        AgentTaskRunLog, AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState,
+        AgentTaskRunStatus, AgentTaskRunTask, AgentTaskRunnerProbe, AgentTaskRunnerProbePlan,
+        AgentTaskStatusOptions, AgentTaskStatusOutcome, ControllerRuntimePruneResult,
+        DetachedLabRunRecord, LabOffloadProxyPlan, RunnerPinnedRuntime,
+        RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT, RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL,
+        RUNNER_PROBE_SKIPPED_NOT_RUNNING,
     };
     #[cfg(feature = "test-support")]
     pub use super::super::agent_task_lifecycle::{

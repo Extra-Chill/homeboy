@@ -86,6 +86,10 @@ pub struct AgentTaskBatchStatusReport {
     /// True when one or more children are resumable and the batch can be carried
     /// to PR-ready finalization by re-running the coordinator.
     pub resumable: bool,
+    /// Dependency topology and current readiness for fanout batches that
+    /// declared explicit child dependencies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_graph: Option<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<String>,
     pub commands: AgentTaskBatchCommands,
