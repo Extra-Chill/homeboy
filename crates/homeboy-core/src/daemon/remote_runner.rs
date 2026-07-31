@@ -1211,6 +1211,116 @@ mod auth_tests {
     }
 
     #[test]
+    fn context_claim_finish_requires_a_matching_consumed_receipt() {
+        let _home = HomeGuard::new();
+        let store = JobStore::default();
+        let submit = route(
+            "POST",
+            "/runner/jobs",
+            Some(submit_body()),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        let job_id = submit.body["body"]["job"]["id"]
+            .as_str()
+            .expect("job id")
+            .to_string();
+        let claim = route(
+            "POST",
+            "/runner/jobs/claim",
+            Some(json!({
+                "runner_id": "homeboy-lab",
+                "lease_ms": 30000,
+                "execution_protocol": crate::runner_job_execution_context::RunnerJobExecutionProtocol::current(),
+            })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(claim.status_code, 200, "claim body: {}", claim.body);
+        let claim_id = claim.body["body"]["claim"]["job"]["claim_id"]
+            .as_str()
+            .expect("claim id")
+            .to_string();
+        let context_id = claim.body["body"]["claim"]["execution_context"]["id"]
+            .as_str()
+            .expect("execution context id")
+            .to_string();
+        let finish_path = format!("/runner/jobs/{job_id}/finish");
+        let finish_body = || {
+            json!({
+                "runner_id": "homeboy-lab",
+                "claim_id": claim_id,
+                "result": { "exit_code": 0 },
+            })
+        };
+
+        let before_consumption = route(
+            "POST",
+            &finish_path,
+            Some(finish_body()),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(before_consumption.status_code, 400);
+        assert_eq!(
+            store
+                .get(Uuid::parse_str(&job_id).expect("valid job id"))
+                .expect("job remains running")
+                .status,
+            crate::api_jobs::JobStatus::Running
+        );
+
+        let consume_path = format!("/runner/jobs/{job_id}/consume");
+        let mismatch = route(
+            "POST",
+            &consume_path,
+            Some(json!({
+                "runner_id": "homeboy-lab",
+                "claim_id": claim_id,
+                "context_id": "rjec:mismatch",
+            })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(mismatch.status_code, 400);
+
+        let consumed = route(
+            "POST",
+            &consume_path,
+            Some(json!({
+                "runner_id": "homeboy-lab",
+                "claim_id": claim_id,
+                "context_id": context_id,
+            })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(consumed.status_code, 200, "consume body: {}", consumed.body);
+        let replay = route(
+            "POST",
+            &consume_path,
+            Some(json!({
+                "runner_id": "homeboy-lab",
+                "claim_id": claim_id,
+                "context_id": context_id,
+            })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(replay.status_code, 400);
+
+        let finished = route(
+            "POST",
+            &finish_path,
+            Some(finish_body()),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(finished.status_code, 200, "finish body: {}", finished.body);
+        assert_eq!(finished.body["body"]["job"]["status"], "succeeded");
+    }
+
+    #[test]
     fn broker_artifact_content_path_returns_worker_mirrored_bytes() {
         let _home = HomeGuard::new();
         let store = JobStore::default();

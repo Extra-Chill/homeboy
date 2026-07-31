@@ -180,8 +180,17 @@ fn remote_runner_job_claim_respects_concurrency_limit() {
         .claim_remote_runner_job("homeboy-lab", None, 30_000, Some(1))
         .expect("claim succeeds")
         .expect("first job is claimed");
+    let first_context_id = first_claim
+        .execution_context
+        .as_ref()
+        .expect("execution context")
+        .id()
+        .to_string();
     assert_eq!(first_claim.job.id, first.id);
     let first_claim_id = first_claim.job.claim_id.as_deref().expect("claim id");
+    store
+        .consume_remote_runner_execution(first.id, "homeboy-lab", first_claim_id, &first_context_id)
+        .expect("consume execution receipt");
 
     let saturated_claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, Some(1))
@@ -502,7 +511,16 @@ fn remote_runner_job_result_records_terminal_state_and_artifacts() {
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
         .expect("claim succeeds")
         .expect("job is claimed");
+    let context_id = claim
+        .execution_context
+        .as_ref()
+        .expect("execution context")
+        .id()
+        .to_string();
     let claim_id = claim.job.claim_id.expect("claim id");
+    store
+        .consume_remote_runner_execution(job.id, "homeboy-lab", &claim_id, &context_id)
+        .expect("consume execution receipt");
     store
         .append_remote_runner_event(
             job.id,
@@ -646,7 +664,16 @@ fn remote_runner_job_failed_result_records_error_and_terminal_state() {
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
         .expect("claim succeeds")
         .expect("job is claimed");
+    let context_id = claim
+        .execution_context
+        .as_ref()
+        .expect("execution context")
+        .id()
+        .to_string();
     let claim_id = claim.job.claim_id.expect("claim id");
+    store
+        .consume_remote_runner_execution(job.id, "homeboy-lab", &claim_id, &context_id)
+        .expect("consume execution receipt");
 
     let failed = store
         .finish_remote_runner_job(
