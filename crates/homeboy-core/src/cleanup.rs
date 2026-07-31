@@ -2153,6 +2153,7 @@ mod tests {
                     provider: vec!["fixture".to_string()],
                     all_providers: false,
                     apply: true,
+                    timeout: None,
                 }),
             },
             config_with_provider(WorktreeProviderConfig {
@@ -2214,6 +2215,7 @@ mod tests {
                     provider: vec!["fixture".to_string()],
                     all_providers: false,
                     apply: false,
+                    timeout: None,
                 }),
             },
             config_with_provider(WorktreeProviderConfig {

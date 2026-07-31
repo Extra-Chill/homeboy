@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 
 use fs4::fs_std::FileExt;
 use homeboy::core::cleanup::{
@@ -58,7 +59,8 @@ struct AutomaticRetentionControllerOutput {
     cleanup: Value,
 }
 
-const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 6] = [
+const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 7] = [
+    CleanupCategoryArg::WorktreeProviders,
     CleanupCategoryArg::TerminalRuns,
     CleanupCategoryArg::PersistedRunArtifacts,
     CleanupCategoryArg::OrphanedArtifactBytes,
@@ -107,6 +109,7 @@ pub fn run(args: CleanupArgs) -> CmdResult<Value> {
                     provider: args.provider,
                     all_providers: args.all_providers,
                     apply: args.apply,
+                    timeout: None,
                 }),
             },
             defaults::load_config(),
@@ -182,7 +185,9 @@ impl ControllerJobDriver for CleanupJobDriver {
     }
 
     fn public_result(&self, result: &Value) -> homeboy::core::Result<Value> {
-        Ok(compact_cleanup_result(result))
+        // `cleanup status --full` retrieves the durable terminal record. The
+        // command's normal receipt/status projections remain compact below.
+        Ok(result.clone())
     }
 
     fn public_error(&self, error: &homeboy::core::Error) -> ControllerJobPublicError {
@@ -220,7 +225,13 @@ impl ControllerJobDriver for CleanupJobDriver {
         checkpoint: Value,
         handle: ControllerJobHandle,
     ) -> homeboy::core::Result<Value> {
-        self.run(checkpoint, handle)
+        if let Some(result) = checkpoint.get("completed") {
+            return Ok(result.clone());
+        }
+        self.run(
+            checkpoint.get("request").cloned().unwrap_or(checkpoint),
+            handle,
+        )
     }
 
     fn cancel(&self, _prepared: &Value) -> homeboy::core::Result<()> {
@@ -241,13 +252,24 @@ impl CleanupJobDriver {
             )
         })?)?;
         handle.progress(serde_json::json!({ "phase": "running" }))?;
+        let checkpoint_request = serde_json::to_value(&args).map_err(|error| {
+            homeboy::core::Error::internal_json(
+                error.to_string(),
+                Some("serialize cleanup recovery request".to_string()),
+            )
+        })?;
         let result = cleanup_inventory(args)?;
         let output = serde_json::json!({
             "phase": "completed",
             "exit_code": result.exit_code,
             "evidence": result.output,
         });
-        handle.checkpoint(output.clone())?;
+        // Keep both the original request and completed result. Recovery after a
+        // terminal-write interruption must not deserialize terminal evidence as
+        // a request or repeat an already completed cleanup.
+        handle.checkpoint(
+            serde_json::json!({ "request": checkpoint_request, "completed": output }),
+        )?;
         handle.progress(serde_json::json!({ "phase": "completed" }))?;
         Ok(output)
     }
@@ -1343,6 +1365,10 @@ fn automatic_retention() -> CmdResult<Value> {
             Some("write automatic retention state".to_string()),
         )
     })?;
+    let retention = defaults::load_config().retention;
+    let deadline = SystemTime::now().checked_add(Duration::from_secs(
+        retention.automatic_retention_max_run_seconds,
+    ));
     let reconciliation = homeboy::agents::agent_task_service::reconcile_stale_active_runs(false)?;
     let roots = homeboy::core::component::registered()
         .unwrap_or_default()
@@ -1366,18 +1392,33 @@ fn automatic_retention() -> CmdResult<Value> {
             Err(error) => serde_json::json!({ "status": "retained", "reason": error.message }),
         }
     };
-    let cleanup = cleanup_inventory(CleanupArgs {
-        apply: true,
-        include: AUTOMATIC_RETENTION_CATEGORIES.to_vec(),
-        exclude: Vec::new(),
-        older_than_days: None,
-        runtime_tmp_managed_older_than_days: None,
-        limit: None,
-        full: false,
-        cursor: None,
-        command: None,
-    })?;
-    let cargo_targets = cleanup::run_automatic_cargo_retention()?;
+    let cleanup = cleanup_inventory_with_deadline(
+        CleanupArgs {
+            apply: true,
+            include: AUTOMATIC_RETENTION_CATEGORIES.to_vec(),
+            exclude: Vec::new(),
+            older_than_days: None,
+            runtime_tmp_managed_older_than_days: None,
+            limit: None,
+            full: false,
+            cursor: None,
+            command: None,
+        },
+        deadline,
+    )?;
+    let cargo_targets = if deadline.is_some_and(|deadline| SystemTime::now() >= deadline) {
+        cleanup::AutomaticRetentionOutput {
+            command: "cleanup.automatic_retention",
+            status: "partial",
+            max_run_seconds: retention.automatic_retention_max_run_seconds,
+            row_limit: retention.limit as usize,
+            state_path: state_path.display().to_string(),
+            resume_command: "homeboy cleanup automatic-retention".to_string(),
+            cargo_targets: None,
+        }
+    } else {
+        cleanup::run_automatic_cargo_retention()?
+    };
     let cleanup_exit_code = cleanup.exit_code;
     let status = if cleanup_exit_code == 0 {
         cargo_targets.status
@@ -1421,6 +1462,13 @@ fn automatic_retention() -> CmdResult<Value> {
 }
 
 fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<CleanupInventoryResult> {
+    cleanup_inventory_with_deadline(args, None)
+}
+
+fn cleanup_inventory_with_deadline(
+    args: CleanupArgs,
+    deadline: Option<SystemTime>,
+) -> homeboy::core::Result<CleanupInventoryResult> {
     let selected = CleanupCategorySelection::new(args.include.clone(), args.exclude.clone());
     let apply = args.apply;
     let config = defaults::load_config();
@@ -1485,6 +1533,11 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<CleanupInventor
                             provider: Vec::new(),
                             all_providers: true,
                             apply,
+                            timeout: deadline.map(|deadline| {
+                                deadline
+                                    .duration_since(SystemTime::now())
+                                    .unwrap_or(Duration::ZERO)
+                            }),
                         }),
                     },
                     config.clone(),
@@ -3580,6 +3633,36 @@ mod tests {
             );
         }
         assert!(!bare.includes(CleanupCategoryArg::RunnerDownloads));
+    }
+
+    #[test]
+    fn durable_cleanup_status_is_compact_while_terminal_evidence_is_retained() {
+        let result = serde_json::json!({
+            "phase": "completed",
+            "exit_code": 0,
+            "evidence": {
+                "status": "completed",
+                "category_count": 1,
+                "categories": [{ "category": "runtime_tmp", "paths": ["/private/full/evidence"] }]
+            }
+        });
+
+        let compact = compact_cleanup_result(&result);
+        assert_eq!(compact["category_count"], 1);
+        assert!(compact.get("evidence").is_none());
+        assert!(compact.get("categories").is_none());
+        assert_eq!(CleanupJobDriver.public_result(&result).unwrap(), result);
+    }
+
+    #[test]
+    fn completed_cleanup_checkpoint_preserves_the_resumable_request_and_result() {
+        let checkpoint = serde_json::json!({
+            "request": { "apply": true, "include": ["runtime-tmp"] },
+            "completed": { "phase": "completed", "evidence": { "category_count": 1 } }
+        });
+
+        assert_eq!(checkpoint["request"]["apply"], true);
+        assert_eq!(checkpoint["completed"]["phase"], "completed");
     }
 
     #[test]

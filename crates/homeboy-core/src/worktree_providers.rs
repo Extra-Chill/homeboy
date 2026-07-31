@@ -68,6 +68,8 @@ pub struct WorktreeProviderCleanupOptions {
     pub provider: Vec<String>,
     pub all_providers: bool,
     pub apply: bool,
+    /// An aggregate owner may cap this provider's normal cleanup timeout.
+    pub timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -1623,9 +1625,9 @@ pub fn cleanup_worktree_providers_from_config(
         let mut tasks = Vec::new();
         for (provider_id, provider_config) in providers {
             let mode = mode.clone();
-            tasks.push(
-                scope.spawn(move || run_provider_cleanup(&provider_id, &provider_config, mode)),
-            );
+            tasks.push(scope.spawn(move || {
+                run_provider_cleanup(&provider_id, &provider_config, mode, options.timeout)
+            }));
         }
         tasks
             .into_iter()
@@ -1702,15 +1704,19 @@ fn run_provider_cleanup(
     provider_id: &str,
     provider_config: &WorktreeProviderConfig,
     mode: WorktreeProviderCleanupMode,
+    timeout: Option<Duration>,
 ) -> WorktreeProviderCleanupResult {
     if !provider_config.enabled {
         return provider_failure(provider_id, mode, "provider is disabled");
     }
 
     match provider_config.kind {
-        WorktreeProviderKind::Command => {
-            run_command_provider_cleanup(provider_id, provider_config, mode)
-        }
+        WorktreeProviderKind::Command => run_command_provider_cleanup(
+            provider_id,
+            provider_config,
+            mode,
+            timeout.unwrap_or(PROVIDER_CLEANUP_TIMEOUT),
+        ),
     }
 }
 
@@ -1718,12 +1724,13 @@ fn run_command_provider_cleanup(
     provider_id: &str,
     provider_config: &WorktreeProviderConfig,
     mode: WorktreeProviderCleanupMode,
+    timeout: Duration,
 ) -> WorktreeProviderCleanupResult {
     run_command_provider_cleanup_with_liveness(
         provider_id,
         provider_config,
         mode,
-        PROVIDER_CLEANUP_TIMEOUT,
+        timeout,
         PROVIDER_CLEANUP_HEARTBEAT,
     )
 }
@@ -2637,6 +2644,7 @@ mod tests {
                 provider: vec!["fixture".to_string()],
                 all_providers: false,
                 apply: false,
+                timeout: None,
             },
             config_with_provider(WorktreeProviderConfig {
                 enabled: true,
@@ -2698,12 +2706,13 @@ mod tests {
                 provider: Vec::new(),
                 all_providers: true,
                 apply: false,
+                timeout: Some(Duration::from_millis(500)),
             },
             config,
         )
         .expect("bounded cleanup completes");
 
-        assert!(started.elapsed() < Duration::from_secs(7));
+        assert!(started.elapsed() < Duration::from_millis(800));
         assert_eq!(
             output.inventory_completeness,
             WorktreeProviderInventoryCompleteness::Partial
@@ -2723,7 +2732,7 @@ mod tests {
             .iter()
             .find(|row| row.provider_id == "slow")
             .expect("slow result");
-        assert_eq!(slow.outcome, WorktreeProviderCleanupOutcome::Completed);
+        assert_eq!(slow.outcome, WorktreeProviderCleanupOutcome::TimedOut);
         assert!(slow.heartbeat_count > 0);
         let failing = output
             .providers
@@ -2741,6 +2750,7 @@ mod tests {
                 provider: vec!["fixture".to_string()],
                 all_providers: false,
                 apply: true,
+                timeout: None,
             },
             config_with_provider(WorktreeProviderConfig {
                 enabled: true,
@@ -2774,6 +2784,7 @@ mod tests {
                 provider: vec!["fixture".to_string()],
                 all_providers: false,
                 apply: true,
+                timeout: None,
             },
             config_with_provider(WorktreeProviderConfig {
                 enabled: true,
@@ -3728,6 +3739,7 @@ mod tests {
                 provider: vec!["fixture".to_string()],
                 all_providers: false,
                 apply: true,
+                timeout: None,
             },
             config_with_provider(WorktreeProviderConfig {
                 enabled: true,
