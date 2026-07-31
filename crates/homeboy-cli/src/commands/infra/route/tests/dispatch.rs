@@ -45,6 +45,10 @@ fn detached_planless_handoff_persists_explicit_bench_label_before_handoff() {
                 "--run-id".to_string(),
                 "ssi-fixture-37-20260727-runtime-fixed".to_string(),
             ],
+            source.path(),
+            &lab_offload_command(&Cli::parse_from(["homeboy", "bench"]).command)
+                .expect("bench contract")
+                .expect("portable bench"),
             decision.clone(),
         )
         .expect("persist detached bench handoff");
@@ -79,14 +83,127 @@ fn detached_planless_handoff_reuses_the_same_explicit_bench_label() {
             Some(source.path()),
         )
         .expect("placement decision");
-        let first = materialize_generic_detached_lab_handoff(&args, decision.clone())
-            .expect("first handoff");
+        let command = lab_offload_command(&Cli::parse_from(["homeboy", "bench"]).command)
+            .expect("bench contract")
+            .expect("portable bench");
+        let first = materialize_generic_detached_lab_handoff(
+            &args,
+            source.path(),
+            &command,
+            decision.clone(),
+        )
+        .expect("first handoff");
         let second =
-            materialize_generic_detached_lab_handoff(&args, decision).expect("replayed handoff");
+            materialize_generic_detached_lab_handoff(&args, source.path(), &command, decision)
+                .expect("replayed handoff");
 
         assert_eq!(first.run_id, second.run_id);
         assert_eq!(first.plan.plan_id, second.plan.plan_id);
         assert!(agent_task_lifecycle::status(&first.run_id).is_ok());
+    });
+}
+
+#[test]
+fn failed_detached_bench_retry_replays_the_persisted_workspace_and_inputs() {
+    crate::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("source workspace");
+        git_init(source.path());
+        let original = [
+            "homeboy",
+            "--placement",
+            "lab",
+            "--detach-after-handoff",
+            "bench",
+            "blocks-engine",
+            "--run-id",
+            "bench-pre-provider-failure",
+            "--rig",
+            "ssi-fixtures",
+            "--extension",
+            "blocks-engine=refs/pull/748/head",
+            "--setting-json",
+            "fixture={\"id\":37}",
+        ];
+        let cli = Cli::parse_from(original);
+        let args = original
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect::<Vec<_>>();
+        let command = lab_offload_command(&cli.command)
+            .expect("bench contract")
+            .expect("portable bench");
+        let decision = placement_decision(&cli, Some("homeboy-lab"), "bench", Some(source.path()))
+            .expect("placement decision");
+        let handoff =
+            materialize_generic_detached_lab_handoff(&args, source.path(), &command, decision)
+                .expect("persist detached bench handoff");
+        let persisted = agent_task_lifecycle::load_controller_plan(&handoff.run_id)
+            .expect("durable replay plan");
+        let replay = &persisted.metadata["generic_lab_command_replay"];
+        let expected_args = portable_deferred_args(&args);
+
+        assert_eq!(replay["normalized_args"], serde_json::json!(expected_args));
+        assert_eq!(replay["lab_command"], serde_json::json!(command));
+        assert_eq!(
+            replay["inputs"]["options"]["rig"],
+            serde_json::json!(["ssi-fixtures"])
+        );
+        assert_eq!(
+            replay["inputs"]["options"]["extension"],
+            serde_json::json!(["blocks-engine=refs/pull/748/head"])
+        );
+        assert_eq!(
+            replay["inputs"]["options"]["setting-json"],
+            serde_json::json!(["fixture={\"id\":37}"])
+        );
+        assert_eq!(
+            replay["materialization"]["canonical_root"],
+            serde_json::json!(source.path().canonicalize().expect("canonical source"))
+        );
+        assert!(replay["materialization"]["content_identity"]
+            .as_str()
+            .is_some_and(|identity| !identity.is_empty()));
+
+        agent_task_lifecycle::record_pre_execution_failure(
+            &handoff.run_id,
+            &persisted,
+            "lab_daemon_admission",
+            &Error::internal_unexpected("daemon unavailable"),
+        )
+        .expect("persist pre-provider failure");
+        let retry_args = [
+            "homeboy",
+            "agent-task",
+            "retry",
+            "bench-pre-provider-failure",
+            "--run",
+            "--new-run-id",
+            "bench-pre-provider-failure-retry1",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let retry_cli = Cli::parse_from(&retry_args);
+        let first = materialize_agent_task_retry_handoff(&retry_cli, &retry_args)
+            .expect("materialize retry")
+            .expect("retry handoff");
+        let second = materialize_agent_task_retry_handoff(&retry_cli, &retry_args)
+            .expect("idempotently rematerialize retry")
+            .expect("retry handoff");
+
+        assert!(first.replays_generic_command);
+        assert_eq!(first.run_id, "bench-pre-provider-failure-retry1");
+        assert_eq!(first.args, expected_args);
+        assert_eq!(second.args, first.args);
+        assert_eq!(second.run_id, first.run_id);
+        assert_eq!(
+            first.primary_workspace,
+            source.path().canonicalize().expect("canonical workspace")
+        );
+        assert_eq!(
+            first.plan.metadata["generic_lab_command_replay"],
+            persisted.metadata["generic_lab_command_replay"]
+        );
     });
 }
 
@@ -150,7 +267,7 @@ fn review_test_inlines_external_database_service_profile_before_lab_handoff() {
         "database_service={\"host\":\"db.lab\"}".to_string(),
     ];
 
-    let routed = inline_test_settings_profiles(&cli, &args).expect("portable settings args");
+    let routed = inline_portable_settings_profiles(&cli, &args).expect("portable settings args");
 
     assert!(!routed.iter().any(|arg| arg == "--settings-json-file"));
     let profile_setting = routed
@@ -196,7 +313,8 @@ fn credential_profile_is_rejected_without_persisting_plaintext() {
         settings.to_string_lossy().to_string(),
     ];
 
-    let error = inline_test_settings_profiles(&cli, &args).expect_err("credential profile refused");
+    let error =
+        inline_portable_settings_profiles(&cli, &args).expect_err("credential profile refused");
 
     assert!(error.message.contains("database_service.password"));
     assert!(error.message.contains("cannot be inlined"));

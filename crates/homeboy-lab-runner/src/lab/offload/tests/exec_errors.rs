@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn retry_hint_requires_persisted_materialization_identity() {
+    let missing =
+        homeboy_agents::agent_task_scheduler::AgentTaskPlan::new("missing-workspace", Vec::new());
+    let missing_error = super::super::inner::with_agent_task_retry_hint(
+        Error::internal_unexpected("admission failed"),
+        "missing-workspace",
+        Some(&missing),
+    );
+    assert!(missing_error.hints.is_empty());
+
+    let task = serde_json::from_value(serde_json::json!({
+        "task_id": "retryable",
+        "executor": { "backend": "fixture" },
+        "instructions": "retry",
+        "workspace": { "root": "/controller/worktree" }
+    }))
+    .expect("task");
+    let retryable =
+        homeboy_agents::agent_task_scheduler::AgentTaskPlan::new("retryable-workspace", vec![task]);
+    let retryable_error = super::super::inner::with_agent_task_retry_hint(
+        Error::internal_unexpected("admission failed"),
+        "retryable-workspace",
+        Some(&retryable),
+    );
+    assert!(retryable_error.hints.iter().any(|hint| hint
+        .message
+        .contains("agent-task retry retryable-workspace --run")));
+}
+
+#[test]
 fn apply_patch_step_accepts_noop_mutation_return() {
     let plan = base_lab_plan(Some(&portable_lab_command("refactor")));
 

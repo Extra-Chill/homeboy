@@ -15,6 +15,8 @@ use homeboy_core::activity::{
     is_active, is_failure, ActivityCrossRefs, ActivityEvidenceRef, ActivityItem,
     ActivityNextAction, ActivityRunnerRefs, ActivityState,
 };
+
+use super::{load_controller_plan, plan_has_retry_materialization_identity};
 use homeboy_core::run_lifecycle_record::RunExecutionState;
 use homeboy_core::Result;
 
@@ -121,7 +123,14 @@ fn item_from_agent_task(record: AgentTaskRunRecord) -> ActivityItem {
             .collect(),
         source_projections: Vec::new(),
         state_conflicts: Vec::new(),
-        next_actions: actions_for_agent_task(&record.run_id, runner_id.as_deref(), state),
+        next_actions: actions_for_agent_task(
+            &record.run_id,
+            runner_id.as_deref(),
+            state,
+            load_controller_plan(&record.run_id)
+                .as_ref()
+                .is_ok_and(|plan| plan_has_retry_materialization_identity(plan)),
+        ),
     }
 }
 
@@ -129,6 +138,7 @@ fn actions_for_agent_task(
     run_id: &str,
     runner_id: Option<&str>,
     state: ActivityState,
+    retry_materializable: bool,
 ) -> Vec<ActivityNextAction> {
     let command_prefix = runner_id
         .map(|runner_id| format!("homeboy runner exec {runner_id} -- homeboy agent-task"))
@@ -140,7 +150,7 @@ fn actions_for_agent_task(
     ];
     if is_active(state) {
         actions.push(action("watch", format!("homeboy activity watch {run_id}")));
-    } else if is_failure(state) {
+    } else if is_failure(state) && retry_materializable {
         actions.push(action(
             "retry",
             format!("{command_prefix} retry --run {run_id}"),
@@ -180,12 +190,19 @@ mod tests {
 
     #[test]
     fn runner_backed_actions_execute_on_the_owning_runner() {
-        let actions = actions_for_agent_task("run-1", Some("lab-a"), ActivityState::Stale);
+        let actions = actions_for_agent_task("run-1", Some("lab-a"), ActivityState::Stale, true);
 
         assert!(actions.iter().any(|action| {
             action.command
                 == "homeboy runner exec lab-a -- homeboy agent-task reconcile run-1 --dry-run"
         }));
+    }
+
+    #[test]
+    fn failed_plan_without_materialization_identity_has_no_retry_action() {
+        let actions = actions_for_agent_task("run-1", None, ActivityState::Failed, false);
+
+        assert!(!actions.iter().any(|action| action.label == "retry"));
     }
 
     #[test]

@@ -109,6 +109,14 @@ mod workspace;
 pub(crate) use extension_materialization::materialize_lab_job_extension_overlays;
 pub(crate) use workspace::copy_snapshot_to_directory;
 pub use workspace::register_workspace_snapshot_provider;
+
+/// Compute the same controller workspace identity used by Lab snapshot
+/// materialization before a detached command is admitted.
+pub fn controller_workspace_materialization_identity(
+    path: &std::path::Path,
+) -> homeboy_core::error::Result<String> {
+    workspace::snapshot_identity(path, &[], &[])
+}
 // Only test code (extension::trace::canonicality) still calls verify_lab_workspace
 // directly; production goes through the LabWorkspaceProvenanceProvider hook.
 pub(crate) use workspace::update_workspace_resource_lifecycle;

@@ -1889,6 +1889,48 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
     retry_with_force_inner(run_id, requested_run_id, false, false)
 }
 
+/// Whether a persisted plan contains enough source identity to offer a retry
+/// that can be materialized without consulting the caller's current directory.
+pub fn plan_has_retry_materialization_identity(plan: &AgentTaskPlan) -> bool {
+    if plan.tasks.iter().any(|task| {
+        task.workspace
+            .root
+            .as_deref()
+            .or_else(|| {
+                task.executor
+                    .config
+                    .get("workspace_root")
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| {
+                task.metadata
+                    .get("workspace")
+                    .and_then(|workspace| workspace.get("root"))
+                    .and_then(Value::as_str)
+            })
+            .is_some_and(|root| !root.trim().is_empty())
+    }) {
+        return true;
+    }
+
+    let Some(replay) = plan.metadata.get("generic_lab_command_replay") else {
+        return false;
+    };
+    replay.get("schema").and_then(Value::as_str) == Some("homeboy/generic-lab-command-replay/v1")
+        && replay
+            .get("normalized_args")
+            .and_then(Value::as_array)
+            .is_some_and(|args| !args.is_empty())
+        && replay
+            .pointer("/materialization/canonical_root")
+            .and_then(Value::as_str)
+            .is_some_and(|root| !root.trim().is_empty())
+        && replay
+            .pointer("/materialization/content_identity")
+            .and_then(Value::as_str)
+            .is_some_and(|identity| !identity.trim().is_empty())
+}
+
 pub(crate) fn record_metadata_value(run_id: &str, key: &str, value: Value) -> Result<()> {
     store::mutate_record(&sanitize_run_id(run_id), |record| {
         record
