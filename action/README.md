@@ -191,6 +191,7 @@ Use these outputs to gate downstream jobs:
 | `baseline-commands` | No | `auto` | Commands to rerun at the PR base when `differential-gating` is true. `auto` reruns requested `review audit`/`review lint`/`review test` commands; use a comma-separated subset such as `review audit` or `none` to skip baseline reruns. |
 | `observation-window` | No | `24h` | Duration window passed to best-effort `homeboy runs export --since` for the separate matrix-safe observations artifact. |
 | `execution-timeout-seconds` | No | `1800` | Per-command wall-clock budget. The action writes liveness notices and returns timeout evidence when the budget expires. |
+| `test-timeout-seconds` | No | inherited / `1500` | Homeboy test-child budget. Direct action calls preserve `HOMEBOY_TEST_TIMEOUT_SECONDS` when omitted; the reusable workflow defaults to `1500`. Must leave cleanup margin below `execution-timeout-seconds`. |
 | `cleanup-timeout-seconds` | No | `15` | Process-group teardown budget after a command finishes or times out. The action retains command logs and fails with diagnostics if cleanup cannot finish. |
 | `import-observations` | No | `false` | Download and best-effort import earlier `homeboy-observations-*` artifacts from the same workflow run before command execution. |
 | `php-version` | No | | PHP version (sets up via `shivammathur/setup-php`) |

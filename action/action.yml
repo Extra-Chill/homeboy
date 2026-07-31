@@ -96,6 +96,10 @@ inputs:
     description: 'Maximum wall-clock time for a Homeboy command phase. Emits liveness notices and exits with actionable timeout evidence.'
     required: false
     default: '1800'
+  test-timeout-seconds:
+    description: 'Maximum wall-clock time for the Homeboy test child. Empty preserves HOMEBOY_TEST_TIMEOUT_SECONDS or Homeboy default. Must leave cleanup-timeout-seconds of margin below execution-timeout-seconds.'
+    required: false
+    default: ''
   cleanup-timeout-seconds:
     description: 'Maximum wall-clock time to terminate and verify a Homeboy command process group after command completion or timeout. Emits retained-log diagnostics and fails when cleanup cannot finish.'
     required: false
@@ -300,6 +304,15 @@ runs:
         COMMANDS_INPUT: ${{ inputs.commands }}
         HOMEBOY_PREPARE_ONLY: ${{ inputs.prepare-only }}
       run: bash ${{ github.action_path }}/scripts/core/phase-progress.sh run changed_scope_resolution -- bash ${{ github.action_path }}/scripts/core/resolve-commands.sh
+
+    - name: Validate timeout budgets
+      if: steps.resolve-commands.outputs.has-test == 'true'
+      shell: bash
+      env:
+        HOMEBOY_TEST_TIMEOUT_SECONDS: ${{ inputs.test-timeout-seconds || env.HOMEBOY_TEST_TIMEOUT_SECONDS || '1500' }}
+        HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
+        HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS: ${{ inputs.cleanup-timeout-seconds }}
+      run: bash ${{ github.action_path }}/scripts/core/validate-timeout-budgets.sh
 
     # ── Phase 3: Install Homeboy ──
     # Homeboy installs before PHP/Node so we can use `homeboy component env`
@@ -513,6 +526,7 @@ runs:
         RUN_GROUP_PREFIX: homeboy
         HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
         HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS: ${{ inputs.cleanup-timeout-seconds }}
+        HOMEBOY_TEST_TIMEOUT_SECONDS: ${{ inputs.test-timeout-seconds || env.HOMEBOY_TEST_TIMEOUT_SECONDS || '1500' }}
         HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF: true
         HOMEBOY_ACTION_PHASE_HEARTBEAT_SECONDS: ${{ inputs.phase-heartbeat-seconds }}
         HOMEBOY_ACTION_PHASE_BUDGET_SECONDS: ${{ inputs.phase-budget-seconds }}
@@ -600,6 +614,7 @@ runs:
         RUN_GROUP_PREFIX: homeboy baseline
         HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
         HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS: ${{ inputs.cleanup-timeout-seconds }}
+        HOMEBOY_TEST_TIMEOUT_SECONDS: ${{ inputs.test-timeout-seconds || env.HOMEBOY_TEST_TIMEOUT_SECONDS || '1500' }}
         HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF: true
         HOMEBOY_ACTION_PHASE_HEARTBEAT_SECONDS: ${{ inputs.phase-heartbeat-seconds }}
         HOMEBOY_ACTION_PHASE_BUDGET_SECONDS: ${{ inputs.phase-budget-seconds }}

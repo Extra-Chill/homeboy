@@ -113,6 +113,10 @@ on:
         description: 'Maximum wall-clock time for each Homeboy command phase.'
         type: string
         default: '1800'
+      test-timeout-seconds:
+        description: 'Maximum wall-clock time for the Homeboy test child. Must leave cleanup margin below the command phase timeout.'
+        type: string
+        default: '1500'
       cleanup-timeout-seconds:
         description: 'Maximum wall-clock time to terminate command descendants.'
         type: string
@@ -394,6 +398,7 @@ jobs:
           baseline-commands: none
           observation-window: ${{ inputs.observation-window }}
           execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
+          test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
           cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
           app-token: ${{ steps.app-token.outputs.token || github.token }}
           comment-key: ${{ inputs.comment-key }}
@@ -478,6 +483,7 @@ jobs:
           differential-gating: 'true'
           baseline-commands: none
           execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
+          test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
           cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
           pr-comment: 'false'
           auto-issue: 'false'

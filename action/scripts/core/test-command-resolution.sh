@@ -87,6 +87,13 @@ prepare_output="$(HOMEBOY_PREPARE_ONLY=true run_resolve "review test")"
 assert_equals "" "$(get_output "${prepare_output}" "resolved-commands")" "prepare-only suppresses quality commands"
 assert_equals "" "$(get_output "${prepare_output}" "release-commands")" "prepare-only suppresses release commands"
 
+review_test_output="$(run_resolve "review test")"
+assert_equals "true" "$(get_output "${review_test_output}" "has-test")" "review test enables the test budget"
+bare_test_output="$(run_resolve "test")"
+assert_equals "true" "$(get_output "${bare_test_output}" "has-test")" "bare test enables the test budget"
+contest_output="$(run_resolve "contest,review latest")"
+assert_equals "false" "$(get_output "${contest_output}" "has-test")" "unrelated commands containing test do not enable the test budget"
+
 enforce_output="$(RESULTS='{}' COMMANDS='' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}")"
 assert_contains "No quality gate commands to enforce" "${enforce_output}" "release-only final status skips quality enforcement"
 

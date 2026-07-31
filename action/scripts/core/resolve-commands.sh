@@ -23,6 +23,7 @@
 #   RESOLVED_COMMANDS     — comma-separated quality command list
 #   RELEASE_COMMANDS      — comma-separated release command list
 #   OPERATIONS_COMMANDS   — comma-separated operations command list (fleet/deploy)
+#   has-test              — true when an exact test or review test command is present
 
 set -euo pipefail
 
@@ -63,6 +64,7 @@ fi
 QUALITY_COMMANDS=()
 RELEASE_COMMANDS=()
 OPS_COMMANDS=()
+HAS_TEST=false
 
 IFS=',' read -ra _ALL_ARRAY <<< "${ALL_COMMANDS}"
 for _cmd in "${_ALL_ARRAY[@]}"; do
@@ -78,6 +80,10 @@ for _cmd in "${_ALL_ARRAY[@]}"; do
       ;;
     *)
       QUALITY_COMMANDS+=("${_cmd}")
+      _subcommand="$(printf '%s' "${_cmd}" | awk '{print $2}')"
+      if [ "${_base}" = "test" ] || { [ "${_base}" = "review" ] && [ "${_subcommand}" = "test" ]; }; then
+        HAS_TEST=true
+      fi
       ;;
   esac
 done
@@ -110,6 +116,7 @@ fi
 
 echo "RESOLVED_COMMANDS=${RESOLVED_COMMANDS}" >> "${GITHUB_ENV}"
 echo "resolved-commands=${RESOLVED_COMMANDS}" >> "${GITHUB_OUTPUT}"
+echo "has-test=${HAS_TEST}" >> "${GITHUB_OUTPUT}"
 
 echo "RELEASE_COMMANDS=${RELEASE_COMMANDS_OUTPUT}" >> "${GITHUB_ENV}"
 echo "release-commands=${RELEASE_COMMANDS_OUTPUT}" >> "${GITHUB_OUTPUT}"
