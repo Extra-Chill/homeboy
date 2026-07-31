@@ -2486,6 +2486,30 @@ pub fn record_cook_finalization(run_id: &str, finalization: Value) -> Result<Age
     }
 }
 
+/// Persist the exact compare-and-swap push receipt before PR reconciliation.
+/// A restarted fanout supervisor can therefore distinguish an observed remote
+/// update from an unrecorded mutation window.
+pub fn record_cook_force_with_lease_receipt(
+    run_id: &str,
+    receipt: Value,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        if record.metadata.get("cook_force_with_lease_receipt") == Some(&receipt) {
+            return false;
+        }
+        record.updated_at = Some(now_timestamp());
+        record
+            .ensure_metadata_object()
+            .insert("cook_force_with_lease_receipt".to_string(), receipt.clone());
+        true
+    })?;
+    match record {
+        Some(record) => Ok(record),
+        None => store::read_record(&run_id),
+    }
+}
+
 /// Checkpoint controller-owned recovery after a promoted, green candidate loses
 /// its publication base. The terminal provider result remains untouched.
 pub fn record_cook_moving_base_recovery(

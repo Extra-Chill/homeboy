@@ -183,6 +183,17 @@ pub fn validate_initial_recipe_compatibility(options: &AgentTaskCookServiceOptio
     recipe.attempts = existing.attempts.clone();
     recipe.retry_budget["execution_budget"] = existing.retry_budget["execution_budget"].clone();
     let mismatches = recipe_mismatch_fields(&existing, &recipe);
+    if !mismatches.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "cook_recipe",
+            format!(
+                "durable cook recipe has different execution inputs: {}",
+                mismatches.join(", ")
+            ),
+            Some(options.cook_id.clone()),
+            None,
+        ));
+    }
     ensure_correction_is_safe(&existing, &recipe, &mismatches)?;
     Ok(())
 }

@@ -925,6 +925,34 @@ where
     )
 }
 
+/// Resume one durable Cook through its original provider, promotion, gates, and
+/// finalization contract. Fanout supervisors use this child-local entrypoint so
+/// a blocked sibling cannot prevent a ready candidate from advancing.
+pub fn resume_cook<E, D>(
+    cook_id: &str,
+    executor: E,
+    reconstruct_dispatcher: D,
+    rerun_completed_gates: bool,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    D: Fn(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+{
+    let mut finalize = finalize_or_load_cook_pr;
+    let report = resume_batch_child_with_gate_rerun(
+        cook_id,
+        cook_id,
+        executor,
+        &reconstruct_dispatcher,
+        &mut finalize,
+        rerun_completed_gates,
+    )?;
+    Ok(AgentTaskRunResult {
+        exit_code: cook_report_exit_code(&report),
+        value: report,
+    })
+}
+
 fn resume_cook_batch_with_finalizer<E, D, F>(
     batch_id: &str,
     executor: E,
@@ -1044,6 +1072,29 @@ where
     D: Fn(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
     F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
 {
+    resume_batch_child_with_gate_rerun(
+        batch_id,
+        cook_id,
+        executor,
+        reconstruct_dispatcher,
+        finalize,
+        false,
+    )
+}
+
+fn resume_batch_child_with_gate_rerun<E, D, F>(
+    batch_id: &str,
+    cook_id: &str,
+    executor: E,
+    reconstruct_dispatcher: &D,
+    finalize: &mut F,
+    rerun_completed_gates: bool,
+) -> Result<AgentTaskCookReport>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    D: Fn(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
+{
     if !super::recipe_exists(cook_id)? {
         return Err(Error::validation_invalid_argument(
             "cook_id",
@@ -1104,6 +1155,7 @@ where
     let attempt_dispatcher =
         reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
     let mut options = super::reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher)?;
+    options.gates.rerun_completed_gates = rerun_completed_gates;
     if let Some(run_id) = checkpoint_run_id {
         let attempt = recipe
             .attempts
