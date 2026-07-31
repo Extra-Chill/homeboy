@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use homeboy::agents::agent_tasks::batch::{persist_fanout_run_batch, FanoutRunBatchChild};
+use homeboy::agents::agent_tasks::fanout_supervisor::{portfolio_exists, read_portfolio};
 use homeboy::agents::agent_tasks::lifecycle::submit_plan;
 use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
 
@@ -72,6 +73,45 @@ fn fanout_status_exposes_the_durable_supervisor_projection() {
             output["data"]["portfolio"]["children"][1]["blocker"]["code"],
             "blocked_by_dependency"
         );
+        assert!(
+            !portfolio_exists("production-interface").expect("read portfolio path"),
+            "status must remain a read-only projection"
+        );
+    });
+}
+
+#[test]
+fn fanout_resume_runs_and_persists_the_production_supervisor_across_restart() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let plan = AgentTaskPlan::new("fanout-supervisor-cli-resume", Vec::new());
+        submit_plan(&plan, Some("cook-child")).expect("persist child");
+        persist_fanout_run_batch(
+            "production-resume",
+            "production-resume",
+            &[FanoutRunBatchChild {
+                task_id: "child".to_string(),
+                run_id: "cook-child".to_string(),
+            }],
+            serde_json::json!({}),
+        )
+        .expect("persist fanout batch");
+
+        for expected_minimum_revision in [2, 4] {
+            let output = Command::new(homeboy_bin())
+                .args(["agent-task", "fanout", "resume", "production-resume"])
+                .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+                .output()
+                .expect("run Homeboy fanout resume");
+            let output: serde_json::Value =
+                serde_json::from_slice(&output.stdout).expect("fanout resume JSON output");
+            assert_eq!(
+                output["data"]["portfolio"]["status"]["fanout_id"],
+                "production-resume"
+            );
+            let portfolio = read_portfolio("production-resume").expect("durable supervisor state");
+            assert!(portfolio.revision >= expected_minimum_revision);
+            assert_eq!(portfolio.children["child"].child_id, "child");
+        }
     });
 }
 

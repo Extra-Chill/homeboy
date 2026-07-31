@@ -140,6 +140,8 @@ fn batch_status(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
         }
     }
     let exit_code = report.batch.state.exit_code();
+    // `status` is a read-only projection. Durable reconciliation and any child
+    // continuation are intentionally limited to the explicit `resume` command.
     let portfolio = reconcile_portfolio(&report.batch)?;
     Ok((
         serde_json::json!({
@@ -164,7 +166,14 @@ fn batch_resume(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
     )?;
     let exit_code = result.exit_code;
-    Ok(batch_resume_result(result.value, exit_code, &args.batch_id))
+    let batch = batch::read_batch_record(&args.batch_id)?;
+    let portfolio = run_portfolio(&batch)?;
+    Ok(batch_resume_result(
+        result.value,
+        exit_code,
+        &args.batch_id,
+        Some(portfolio),
+    ))
 }
 
 /// GitHub is the authority for whether a review-ready candidate was accepted.
@@ -483,8 +492,18 @@ fn reconcile_portfolio(
         .collect::<Result<Vec<_>>>()?;
     let dependencies = durable_graph_dependencies(batch_record)?;
     let status = portfolio.reconcile(observations, &dependencies);
-    supervisor::write_portfolio(&portfolio)?;
     Ok(status)
+}
+
+/// Mutating supervisor entrypoint. Constructing the production adapter here
+/// keeps Cook's durable continuation, force-with-lease receipt, and PR recovery
+/// on the public `fanout resume` path rather than a status projection.
+fn run_portfolio(
+    batch_record: &homeboy::agents::agent_tasks::AgentTaskBatchRecord,
+) -> Result<supervisor::AgentTaskFanoutPortfolioRunReport> {
+    let mut portfolio = load_portfolio(batch_record)?;
+    let dependencies = durable_graph_dependencies(batch_record)?;
+    portfolio.run(&mut CookFanoutPortfolioAdapter, &dependencies)
 }
 
 fn load_portfolio(
@@ -505,6 +524,7 @@ fn load_portfolio(
                         head_sha: None,
                         evidence_generation: 0,
                         finding_fingerprints: Default::default(),
+                        finding_fingerprint_recency: Default::default(),
                         blocker: None,
                         next_action: None,
                     }
@@ -996,21 +1016,10 @@ fn git_candidate_state(
         .ok()
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
+    // Observation must be safe for `fanout status`: use the existing
+    // remote-tracking ref rather than fetching and mutating the worktree.
     let base = declared_base.and_then(|base| {
-        let reference = format!("refs/homeboy/fanout/base/{base}");
-        let fetch = Command::new("git")
-            .args([
-                "fetch",
-                "--no-tags",
-                "origin",
-                &format!("refs/heads/{base}:{reference}"),
-            ])
-            .current_dir(path)
-            .output()
-            .ok()?;
-        if !fetch.status.success() {
-            return None;
-        }
+        let reference = format!("refs/remotes/origin/{base}");
         Command::new("git")
             .args(["rev-parse", "--verify", &format!("{reference}^{{commit}}")])
             .current_dir(path)
@@ -1026,6 +1035,7 @@ fn batch_resume_result(
     report: agent_task_service::AgentTaskCookBatchReport,
     exit_code: i32,
     batch_id: &str,
+    portfolio: Option<supervisor::AgentTaskFanoutPortfolioRunReport>,
 ) -> (Value, i32) {
     (
         serde_json::json!({
@@ -1042,6 +1052,7 @@ fn batch_resume_result(
                 "timed_out": report.timed_out,
             },
             "cooks": report.cooks,
+            "portfolio": portfolio,
             "commands": {
                 "status": format!("homeboy agent-task fanout status {batch_id}"),
                 "artifacts": format!("homeboy agent-task fanout artifacts {batch_id}"),
@@ -3735,7 +3746,7 @@ fi
             },
         );
         let (resumed, resume_exit_code) =
-            batch_resume_result(active_failed_report, 0, "test-batch");
+            batch_resume_result(active_failed_report, 0, "test-batch", None);
         for (name, value, code) in [
             ("immediate", immediate, exit_code),
             ("resume", resumed, resume_exit_code),
