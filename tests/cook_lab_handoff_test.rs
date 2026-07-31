@@ -211,6 +211,22 @@ fn cook_rejects_queue_only_before_worktree_resolution() {
 }
 
 #[test]
+fn required_lab_route_without_a_selected_runner_fails_deterministically() {
+    let output = homeboy(&["--placement", "lab", "review", "lint"]);
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("required Lab placement has no selected ready runner")
+            || stderr.contains("required Lab placement has no selected ready runner"),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(!stdout.contains("worktree provider"));
+    assert!(!stderr.contains("worktree provider"));
+}
+
+#[test]
 fn cook_help_does_not_advertise_queue_only() {
     let output = homeboy(&["agent-task", "cook", "--help"]);
 

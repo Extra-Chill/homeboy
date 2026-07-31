@@ -106,6 +106,9 @@ pub struct LabStagingRecipe {
     pub schema: String,
     pub run_id: String,
     pub runner_id: String,
+    /// The exact controller routing decision. Recipes without this field are
+    /// pre-#10941 and must be recreated rather than silently re-routed.
+    pub placement_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision,
     /// Immutable Homeboy build selected by the controller for this handoff.
     /// Optional only for recipes persisted by older controllers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -189,14 +192,15 @@ impl LabStagingRecipe {
             schema: LAB_STAGING_RECIPE_SCHEMA.to_string(),
             run_id: run_id.into(),
             runner_id: runner_id.into(),
+            placement_decision: request.placement_decision.clone(),
             required_homeboy_build_identity: Some(
                 homeboy_product_identity::build_identity().display,
             ),
             tunnel_mode,
             command: command.into(),
             normalized_args: request.normalized_args.to_vec(),
-            placement: request.placement,
-            allow_local_fallback: request.allow_local_fallback,
+            placement: request.placement_decision.requested,
+            allow_local_fallback: request.placement_decision.fallback.local_allowed,
             allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
             skip_deps_hydration: request.skip_deps_hydration,
             preserve_workspace_on_failure: request.preserve_workspace_on_failure,
@@ -239,6 +243,20 @@ impl LabStagingRecipe {
                 "local_output_run_id_emitted",
                 "Lab staging requires the initiating CLI to emit the durable run id before controller-job creation when local output was requested",
                 None,
+                None,
+            ));
+        }
+        if self
+            .placement_decision
+            .runner
+            .as_ref()
+            .map(|runner| runner.runner_id.as_str())
+            != Some(self.runner_id.as_str())
+        {
+            return Err(Error::validation_invalid_argument(
+                "execution_placement_decision",
+                "Lab staging recipe runner does not match its canonical placement decision",
+                Some(self.run_id.clone()),
                 None,
             ));
         }
@@ -2576,6 +2594,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             ));
         }
         let offload_request = LabOffloadRequest {
+            placement_decision: request.recipe.placement_decision.clone(),
             command: None,
             normalized_args: &request.recipe.normalized_args,
             explicit_runner: Some(&request.recipe.runner_id),
@@ -2586,6 +2605,11 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             preserve_workspace_on_failure: request.recipe.preserve_workspace_on_failure,
             capture_patch: request.recipe.capture_patch,
             mutation_flag: request.recipe.mutation_flag.as_deref(),
+            placement_outcome_target: Some(
+                homeboy_core::lab_routing::ExecutionPlacementOutcomeTarget::AgentTaskLifecycle {
+                    run_id: &request.recipe.run_id,
+                },
+            ),
             detach_after_handoff: request.recipe.detach_after_handoff,
             output_file_requested: request.recipe.output_file_requested,
             read_only_polling: request.recipe.read_only_polling,
@@ -3865,6 +3889,14 @@ mod tests {
         env: HashMap<String, String>,
     ) -> LabOffloadRequest<'a> {
         LabOffloadRequest {
+            // Staging tests exercise durable state independently of controller
+            // routing. Use the explicit compatibility decision for that fixture
+            // boundary; production callers must provide their routed decision.
+            placement_decision: homeboy_core::lab_routing::compatibility_placement_decision(
+                homeboy_lab_runner_contract::Placement::Lab,
+                Some("lab-1"),
+                false,
+            ),
             command,
             normalized_args: args,
             placement: homeboy_lab_runner_contract::Placement::Lab,
@@ -4469,7 +4501,7 @@ mod tests {
         let args = vec!["agent-task".to_string(), "run-plan".to_string()];
         let recipe = LabStagingRecipe::from_request(
             "attempt-identity",
-            "lab-identity",
+            "lab-1",
             &recipe_request(Some(recipe_command()), &args, HashMap::new()),
         )
         .expect("recipe");
@@ -5850,7 +5882,7 @@ mod tests {
 
         let mut recipe = LabStagingRecipe::from_request(
             "run",
-            "lab",
+            "lab-1",
             &recipe_request(Some(recipe_command()), &args, HashMap::new()),
         )
         .expect("recipe");
@@ -5859,6 +5891,14 @@ mod tests {
         recipe.schema = LAB_STAGING_RECIPE_SCHEMA.to_string();
         recipe.secret_env_names = vec!["AGENT_TOKEN".to_string(), "AGENT_TOKEN".to_string()];
         assert!(recipe.validate().is_err());
+
+        let mut mismatched = recipe_request(Some(recipe_command()), &args, HashMap::new());
+        mismatched.placement_decision = homeboy_core::lab_routing::compatibility_placement_decision(
+            homeboy_lab_runner_contract::Placement::Lab,
+            Some("other-lab"),
+            false,
+        );
+        assert!(LabStagingRecipe::from_request("run", "lab", &mismatched).is_err());
     }
 
     #[test]

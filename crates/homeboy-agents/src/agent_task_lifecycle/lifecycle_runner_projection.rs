@@ -287,6 +287,7 @@ fn project_terminal_runner_lifecycle_event(
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| "aggregate.json".to_string());
     apply_aggregate_to_record(record, &projection_plan, &aggregate, aggregate_path);
+    record_verified_lab_placement_outcome(record)?;
     // The aggregate is the task result. A successful enclosing daemon job only
     // proves transport completion, not task success.
     record_runner_job_terminal_metadata(record, snapshot.job.status, &snapshot.events);
@@ -346,6 +347,7 @@ pub(crate) fn project_persisted_terminal_runner_events(
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| "aggregate.json".to_string());
     apply_aggregate_to_record(record, &projection_plan, &aggregate, aggregate_path);
+    record_verified_lab_placement_outcome(record)?;
     record.ensure_metadata_object().insert(
         "terminal_transport_recovery".to_string(),
         json!("persisted_runner_job_events"),
@@ -353,6 +355,55 @@ pub(crate) fn project_persisted_terminal_runner_events(
     store::write_aggregate_and_record(record, &aggregate)?;
     crate::agent_task_lifecycle::record_terminal_artifact_projection(record, &aggregate)?;
     Ok(true)
+}
+
+/// A detached runner reports its terminal result through reconciliation rather
+/// than the synchronous offload return path. Preserve the same canonical
+/// placement outcome before writing the controller record.
+fn record_verified_lab_placement_outcome(record: &mut AgentTaskRunRecord) -> Result<()> {
+    let Some(decision) = record.metadata.get("execution_placement_decision").cloned() else {
+        return Ok(());
+    };
+    let decision: homeboy_lab_runner_contract::ExecutionPlacementDecision =
+        serde_json::from_value(decision).map_err(|error| {
+            Error::validation_invalid_argument(
+                "execution_placement_decision",
+                format!("durable run has malformed canonical placement decision: {error}"),
+                Some(record.run_id.clone()),
+                None,
+            )
+        })?;
+    let runner_id = record.runner_id().map(str::to_string).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "execution_placement_outcome",
+            "terminal Lab runner result has no runner identity",
+            Some(record.run_id.clone()),
+            None,
+        )
+    })?;
+    let outcome = decision
+        .outcome(
+            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+            Some(runner_id),
+        )
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "execution_placement_outcome",
+                "terminal Lab runner result contradicts the canonical placement decision",
+                Some(record.run_id.clone()),
+                None,
+            )
+        })?;
+    record.ensure_metadata_object().insert(
+        "execution_placement_outcome".to_string(),
+        serde_json::to_value(outcome).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize execution placement outcome".to_string()),
+            )
+        })?,
+    );
+    Ok(())
 }
 
 fn projected_runner_aggregate(
