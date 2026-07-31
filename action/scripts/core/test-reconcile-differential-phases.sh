@@ -78,6 +78,22 @@ if grep -A3 '^  baseline:' "${WORKFLOW}" | grep -q 'candidate'; then
 fi
 printf 'PASS: workflow keeps candidate and baseline retries independent\n'
 
+if grep -F 'results="${RESULTS:-{}}"' "${WORKFLOW}" >/dev/null \
+  || [ "$(grep -Fc 'results="${RESULTS:-}"' "${WORKFLOW}")" -ne 2 ] \
+  || [ "$(grep -Fc "[ -n \"\${results}\" ] || results='{}'" "${WORKFLOW}")" -ne 2 ]; then
+  printf 'FAIL: candidate and baseline provenance do not preserve populated result JSON\n'
+  exit 1
+fi
+RESULTS='{"review test":"pass"}'
+results="${RESULTS:-}"
+[ -n "${results}" ] || results='{}'
+jq -e '."review test" == "pass"' <<< "${results}" >/dev/null
+RESULTS=''
+results="${RESULTS:-}"
+[ -n "${results}" ] || results='{}'
+jq -e 'type == "object" and length == 0' <<< "${results}" >/dev/null
+printf 'PASS: populated and missing phase results remain valid provenance JSON\n'
+
 rm -rf "${tmp}/artifacts"
 write_phase candidate candidate component cli '{"review test":"pass"}' "${payload_pass}"
 write_phase baseline base component cli '{"review test":"pass"}' "${payload_pass}"

@@ -444,7 +444,8 @@ jobs:
         run: |
           mkdir -p differential-phase/candidate
           action_revision="$(git -C .homeboy-action rev-parse HEAD)"
-          results="${RESULTS:-{}}"
+          results="${RESULTS:-}"
+          [ -n "${results}" ] || results='{}'
           jq -cn --arg phase candidate --arg repository "${REPOSITORY}" --arg candidate_sha "${CANDIDATE_SHA}" --arg base_sha "${BASE_SHA}" --arg checkout_sha "${CANDIDATE_SHA}" --arg command "${COMMAND}" --arg component "${COMPONENT}" --arg action_revision "${action_revision}" --arg cli_revision "${CLI_REVISION}" --arg binary_sha256 "${BINARY_SHA256}" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${results}" '{phase:$phase,repository:$repository,candidate_sha:$candidate_sha,base_sha:$base_sha,checkout_sha:$checkout_sha,command:$command,component:$component,action_revision:$action_revision,cli_revision:$cli_revision,binary_sha256:$binary_sha256,run_attempt:$run_attempt,results:$results}' > differential-phase/candidate/manifest.json
           cp -R homeboy-ci-results differential-phase/candidate/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-ci-results
 
@@ -531,7 +532,8 @@ jobs:
         run: |
           mkdir -p differential-phase/baseline
           action_revision="$(git -C .homeboy-action rev-parse HEAD)"
-          results="${RESULTS:-{}}"
+          results="${RESULTS:-}"
+          [ -n "${results}" ] || results='{}'
           jq -cn --arg phase baseline --arg repository "${REPOSITORY}" --arg candidate_sha "${CANDIDATE_SHA}" --arg base_sha "${BASE_SHA}" --arg checkout_sha "${BASE_SHA}" --arg command "${COMMAND}" --arg component "${COMPONENT}" --arg action_revision "${action_revision}" --arg cli_revision "${CLI_REVISION}" --arg binary_sha256 "${BINARY_SHA256}" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${results}" '{phase:$phase,repository:$repository,candidate_sha:$candidate_sha,base_sha:$base_sha,checkout_sha:$checkout_sha,command:$command,component:$component,action_revision:$action_revision,cli_revision:$cli_revision,binary_sha256:$binary_sha256,run_attempt:$run_attempt,results:$results}' > differential-phase/baseline/manifest.json
           cp -R homeboy-ci-results differential-phase/baseline/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/baseline/homeboy-ci-results
       - name: Upload baseline phase evidence
