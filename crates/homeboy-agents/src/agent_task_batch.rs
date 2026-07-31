@@ -1284,14 +1284,34 @@ mod tests {
     #[test]
     fn graph_pending_acceptance_prevents_a_succeeded_batch_aggregate() {
         let _home = homeboy_core::test_support::HomeGuard::new();
-        let plan = AgentTaskPlan::new("fanout/acceptance", vec![request("a"), request("b")]);
+        let mut plan = AgentTaskPlan::new("fanout/acceptance", vec![request("a"), request("b")]);
+        plan.metadata = json!({
+            "acceptance": { "authority": "independent-review", "policy": "release-v1" },
+        });
         submit_plan_batch(&plan, Some("batch/acceptance")).expect("batch submitted");
         for run_id in ["batch_acceptance-a", "batch_acceptance-b"] {
             agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
                 record.state = AgentTaskRunState::Succeeded;
-                record.metadata["cook_finalization"] = json!({ "status": "review_ready" });
+                record.metadata["cook_finalization"] = json!({ "status": "awaiting_acceptance" });
             })
-            .expect("stage review-ready child");
+            .expect("stage awaiting-acceptance child");
+            agent_task_lifecycle::record_promotion(
+                run_id,
+                json!({
+                    "status": "applied",
+                    "verified_base": { "sha": "base-a" },
+                    "provenance": { "candidate": { "fingerprint": {
+                        "schema": "homeboy/agent-task-candidate-fingerprint/v1",
+                        "target_path": "/repo",
+                        "head": "candidate-a",
+                        "base": "candidate-parent",
+                        "changed_files": ["src/lib.rs"],
+                        "sha256": "candidate-sha",
+                        "tree": "candidate-tree",
+                    } } },
+                }),
+            )
+            .expect("persist pending acceptance");
         }
         let mut batch = read_batch("batch/acceptance").expect("batch record");
         batch.metadata = json!({ "dependency_graph": { "nodes": [
