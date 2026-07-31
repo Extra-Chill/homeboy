@@ -505,6 +505,7 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         review_dossier,
         review_profile,
         manual_finalization: args.manual_finalization,
+        expected_candidate_sha: None,
         protected_branches: args.protected_branches,
     };
     let report = if args.preflight {
@@ -519,6 +520,9 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
     };
 
     let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
+    if args.manual_finalization && args.preflight && report.status == "validated" {
+        agent_task_service::persist_manual_finalization_intent(&handoff_run_id, &report)?;
+    }
     value["handoff"] = finalization_handoff(
         &report.status,
         report.pr_url.as_deref(),

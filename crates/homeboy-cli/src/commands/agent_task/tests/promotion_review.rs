@@ -259,6 +259,14 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
             .as_str()
             .expect("stop reason")
             .is_empty());
+        assert_eq!(
+            value["failure_context"]["diagnostic"]["details"]["problem"],
+            "expected homeboy/agent-task-promotion-apply-response/v1, got homeboy/agent-task-promotion-apply-request/v1"
+        );
+        assert_eq!(
+            value["failure_context"]["next_actions"][0]["command"],
+            "homeboy agent-task status cook-missing-provider-attempt-1-controller --full"
+        );
         let lifecycle = lifecycle_status("cook-missing-provider-attempt-1-controller")
             .expect("successful candidate remains in durable lifecycle");
         assert_eq!(lifecycle.state, AgentTaskRunState::Succeeded);

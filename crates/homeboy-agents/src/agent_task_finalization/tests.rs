@@ -2138,6 +2138,7 @@ fn options() -> AgentTaskPrFinalizationOptions {
         },
         review_profile: crate::agent_task_review_dossier::default_profile(),
         manual_finalization: true,
+        expected_candidate_sha: None,
         protected_branches: vec![
             "main".to_string(),
             "master".to_string(),

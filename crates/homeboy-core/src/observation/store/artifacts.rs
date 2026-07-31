@@ -473,6 +473,70 @@ impl ObservationStore {
         self.record_artifact_with_metadata(run_id, kind, snapshot.path(), metadata_json)
     }
 
+    /// Persist an opened file under a stable lifecycle identity after verifying
+    /// the exact descriptor-copied bytes against the supplied digest.
+    pub fn record_verified_artifact_from_open_file_with_id(
+        &self,
+        run_id: &str,
+        kind: &str,
+        source: &mut fs::File,
+        artifact_id: &str,
+        expected_size_bytes: i64,
+        expected_sha256: &str,
+        metadata_json: serde_json::Value,
+    ) -> Result<ArtifactRecord> {
+        let metadata = source.metadata().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("inspect opened verified artifact file".to_string()),
+            )
+        })?;
+        if !metadata.is_file() {
+            return Err(Error::validation_invalid_argument(
+                "artifact",
+                "opened verified artifact source is not a regular file",
+                None,
+                None,
+            ));
+        }
+        let mut snapshot = tempfile::NamedTempFile::new().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("create verified artifact snapshot".to_string()),
+            )
+        })?;
+        std::io::copy(source, snapshot.as_file_mut()).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("copy opened verified artifact snapshot".to_string()),
+            )
+        })?;
+        snapshot.as_file_mut().flush().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("flush verified artifact snapshot".to_string()),
+            )
+        })?;
+        let actual_size_bytes = i64::try_from(
+            snapshot
+                .as_file()
+                .metadata()
+                .map_err(|error| Error::internal_io(error.to_string(), None))?
+                .len(),
+        )
+        .ok();
+        let actual_sha256 = crate::artifact_metadata::sha256_file(snapshot.path())?;
+        if actual_size_bytes != Some(expected_size_bytes) || actual_sha256 != expected_sha256 {
+            return Err(Error::validation_invalid_argument(
+                "artifact.sha256",
+                "opened artifact bytes do not match the published durable metadata",
+                Some(actual_sha256),
+                None,
+            ));
+        }
+        self.record_artifact_with_id(run_id, kind, snapshot.path(), artifact_id, metadata_json)
+    }
+
     /// Record verified file bytes under a caller-provided stable logical id.
     /// This is used when an owning lifecycle already defines artifact identity.
     pub fn record_artifact_with_id(
@@ -1695,6 +1759,71 @@ mod tests {
                 fs::read(&artifact.path).expect("persisted bytes"),
                 b"original bytes"
             );
+        });
+    }
+
+    #[test]
+    fn verified_opened_artifact_rejects_digest_mismatch_without_publishing() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("test").cwd_path(home.path()).build())
+                .expect("run");
+            let source = home.path().join("source.patch");
+            fs::write(&source, b"trusted bytes").expect("write source");
+            let mut opened = fs::File::open(&source).expect("open source");
+
+            let error = store
+                .record_verified_artifact_from_open_file_with_id(
+                    &run.id,
+                    "patch",
+                    &mut opened,
+                    "verified-patch",
+                    13,
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                    serde_json::json!({}),
+                )
+                .expect_err("wrong digest rejects the descriptor bytes");
+            assert!(error.message.contains("do not match"));
+            assert!(store
+                .get_artifact("verified-patch")
+                .expect("lookup")
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn verified_opened_artifact_uses_pre_replacement_descriptor_bytes() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("test").cwd_path(home.path()).build())
+                .expect("run");
+            let source = home.path().join("source.patch");
+            let replacement = home.path().join("replacement.patch");
+            let trusted = b"trusted bytes";
+            fs::write(&source, trusted).expect("write trusted source");
+            let expected_sha256 = crate::artifact_metadata::sha256_file(&source).expect("hash");
+            let mut opened = fs::File::open(&source).expect("open trusted source");
+            fs::write(&replacement, b"poison bytes").expect("write replacement");
+            fs::rename(&replacement, &source).expect("replace source pathname");
+
+            let artifact = store
+                .record_verified_artifact_from_open_file_with_id(
+                    &run.id,
+                    "patch",
+                    &mut opened,
+                    "verified-patch",
+                    i64::try_from(trusted.len()).expect("trusted size"),
+                    &expected_sha256,
+                    serde_json::json!({}),
+                )
+                .expect("publish trusted descriptor bytes");
+            assert_eq!(
+                fs::read(&source).expect("replacement bytes"),
+                b"poison bytes"
+            );
+            assert_eq!(fs::read(artifact.path).expect("stored bytes"), trusted);
         });
     }
 

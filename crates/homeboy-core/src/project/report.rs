@@ -110,10 +110,7 @@ pub fn show_report(project_id: &str) -> Result<ProjectShowReport> {
     let project = load(project_id)?;
 
     let hint = if project.server_id.is_none() {
-        Some(
-            "Local project: Commands execute on this machine. Only deploy requires a server."
-                .to_string(),
-        )
+        Some("Local project: Server-deployed components require a server.".to_string())
     } else if project.components.is_empty() {
         Some(format!(
             "No components linked. Use: homeboy project components add {} <component-id> or homeboy project components attach-path {} <component-id> <path>",
@@ -374,6 +371,46 @@ mod tests {
                     "Component 'plugin' local_path '/tmp/homeboy-missing-component-path' does not exist",
                 )
             }));
+        });
+    }
+
+    #[test]
+    fn show_report_marks_repository_provider_project_ready_without_server_fields() {
+        with_isolated_home(|_| {
+            let repository = tempfile::tempdir().expect("component repository");
+            std::fs::write(
+                repository.path().join("homeboy.json"),
+                serde_json::json!({
+                    "id": "provider",
+                    "deployment_provider": {
+                        "extension": "fixture-extension",
+                        "provider": "fixture.deploy",
+                        "policy": {}
+                    }
+                })
+                .to_string(),
+            )
+            .expect("portable component");
+            crate::project::save(&Project {
+                id: "site".to_string(),
+                components: vec![ProjectComponentAttachment {
+                    id: "provider".to_string(),
+                    local_path: repository.path().to_string_lossy().to_string(),
+                    deployment_provider_input: Some(serde_json::json!({ "target": "site" })),
+                    ..Default::default()
+                }],
+                ..Project::default()
+            })
+            .expect("save project");
+
+            let report = show_report("site").expect("show report");
+
+            assert!(
+                report.deploy_ready,
+                "unexpected blockers: {:?}",
+                report.deploy_blockers
+            );
+            assert!(report.deploy_blockers.is_empty());
         });
     }
 }

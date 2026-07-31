@@ -17,9 +17,15 @@
 //!   managed source checkout homeboy keeps synced on the runner, read by core's
 //!   agent-runtime manifest and by `homeboy-agents`.
 
+mod execution_placement;
 mod placement;
 mod provider_source_types;
 
+pub use execution_placement::{
+    EffectiveExecutionPlacement, ExecutionPlacementDecision, ExecutionPlacementFallback,
+    ExecutionPlacementIdentity, ExecutionPlacementOutcome, ExecutionPlacementOverrideAuthorization,
+    ExecutionPlacementRequirement, ExecutionPlacementRunnerSelection, RunnerSelectionSource,
+};
 pub use placement::Placement;
 pub use provider_source_types::AgentTaskProviderRunnerSource;
 

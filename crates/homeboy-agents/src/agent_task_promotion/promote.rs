@@ -1,5 +1,6 @@
 use homeboy_engine_primitives::content_hash;
 use std::cell::RefCell;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -971,7 +972,7 @@ fn gate_feedback_baseline_for_artifact(
 /// Replace a runner-local baseline path with the controller artifact-store
 /// identity before a follow-up can reuse a dirty destination. Older baselines
 /// without source identity retain their existing strict path/hash contract.
-fn bind_gate_feedback_baseline(baseline: Option<Value>) -> Result<Option<Value>> {
+pub(crate) fn bind_gate_feedback_baseline(baseline: Option<Value>) -> Result<Option<Value>> {
     let Some(mut baseline) = baseline else {
         return Ok(None);
     };
@@ -1264,6 +1265,9 @@ fn promote_committed_changes(
             None,
         ));
     }
+    let retained_patch_path =
+        retain_committed_changes_artifact(options, outcome, &patch, &committed_patch.sha256)?
+            .unwrap_or_else(|| committed_patch.patch_path.clone());
     let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
     // Keep committed-change promotion on the same atomic base-validation
     // boundary as artifact promotion: no apply or checkpoint may precede a
@@ -1321,7 +1325,7 @@ fn promote_committed_changes(
             AgentTaskPromotionArtifactRef {
                 id: "committed-changes".to_string(),
                 kind: "patch".to_string(),
-                path: committed_patch.patch_path.display().to_string(),
+                path: retained_patch_path.display().to_string(),
                 sha256: Some(committed_patch.sha256.clone()),
             },
             normalized_patch.changed_files.clone(),
@@ -1392,7 +1396,7 @@ fn promote_committed_changes(
         patch_artifact: AgentTaskPromotionArtifactRef {
             id: "committed-changes".to_string(),
             kind: "patch".to_string(),
-            path: committed_patch.patch_path.display().to_string(),
+            path: retained_patch_path.display().to_string(),
             sha256: Some(committed_patch.sha256),
         },
         changed_files: persisted_changed_files(normalized_patch.changed_files, candidate.as_ref()),
@@ -1419,6 +1423,67 @@ fn promote_committed_changes(
         }),
         operator_notification,
     })
+}
+
+/// Retain the controller-generated committed delta before its producer path can
+/// be cleaned up. Only an existing controller run may own this projection.
+fn retain_committed_changes_artifact(
+    options: &AgentTaskPromotionOptions,
+    outcome: &AgentTaskOutcome,
+    patch: &str,
+    sha256: &str,
+) -> Result<Option<PathBuf>> {
+    let Some(run_id) = options.source_run_id.as_deref() else {
+        return Ok(None);
+    };
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    if store.get_run(run_id)?.is_none() {
+        return Ok(None);
+    }
+    let mut snapshot = tempfile::NamedTempFile::new().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create committed changes artifact snapshot".to_string()),
+        )
+    })?;
+    snapshot
+        .as_file_mut()
+        .write_all(patch.as_bytes())
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("write committed changes artifact snapshot".to_string()),
+            )
+        })?;
+    snapshot
+        .as_file_mut()
+        .seek(SeekFrom::Start(0))
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("rewind committed changes artifact snapshot".to_string()),
+            )
+        })?;
+    let record_id = format!(
+        "agent-task-committed-changes-{}",
+        content_hash::sha256_hex(format!("{run_id}\0{}\0{sha256}", outcome.task_id).as_bytes())
+    );
+    let projection = store.record_verified_artifact_from_open_file_with_id(
+        run_id,
+        "patch",
+        snapshot.as_file_mut(),
+        &record_id,
+        i64::try_from(patch.len()).unwrap_or(i64::MAX),
+        sha256,
+        json!({
+            "agent_task": {
+                "task_id": outcome.task_id,
+                "logical_artifact_id": "committed-changes",
+                "projection": "committed_changes"
+            }
+        }),
+    )?;
+    Ok(Some(PathBuf::from(projection.path)))
 }
 
 fn run_promotion_gates(

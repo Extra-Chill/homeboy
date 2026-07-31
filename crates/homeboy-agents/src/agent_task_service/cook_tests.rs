@@ -9,9 +9,11 @@ use super::super::cook_adoption::{
 };
 use super::super::cook_baseline::git_output;
 use super::super::cook_promotion::{
-    cook_report, finalize_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend,
-    moving_base_recovery_for_run, moving_base_recovery_from_promotion, moving_base_recovery_report,
-    next_moving_base_recovery, persisted_promotion_for_attempt, recover_cook_pr_with_backend,
+    cook_finalization_options, cook_report, finalize_cook_pr_with_backend,
+    finalize_or_load_cook_pr_with_backend, moving_base_recovery_for_run,
+    moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
+    persist_manual_finalization_intent, persist_manual_finalization_receipt,
+    persisted_promotion_for_attempt, recover_cook_pr_with_backend,
     recover_moving_base_cook_candidate, refreshed_moving_base_recovery, selected_candidate_task_id,
     MovingBaseCookRecovery,
 };
@@ -21,8 +23,8 @@ use crate::agent_task::{
     AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
 };
 use crate::agent_task_finalization::{
-    AgentTaskPrDurableGateProof, AgentTaskPrFinalizationBackend, AgentTaskPrRef,
-    AgentTaskPublicationBinding, AgentTaskPublicationGitTracking,
+    AgentTaskPrDurableGateProof, AgentTaskPrFinalizationBackend, AgentTaskPrFinalizationReport,
+    AgentTaskPrRef, AgentTaskPublicationBinding, AgentTaskPublicationGitTracking,
     RealAgentTaskPrFinalizationBackend,
 };
 use crate::agent_task_scheduler::AgentTaskState;
@@ -5604,6 +5606,8 @@ struct CaptureBackend {
     committed: bool,
     pushed: bool,
     created: bool,
+    candidate_state: Option<crate::agent_task_finalization::AgentTaskPrCandidateState>,
+    committed_sha: Option<String>,
     hydrate_run_id: Option<String>,
     hydrate_gate_proof_run_id: Option<String>,
     synthetic_gate_proof: Option<AgentTaskPromotionReport>,
@@ -5659,6 +5663,18 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
     fn changed_files(&mut self, _path: &str) -> Result<Vec<String>> {
         Ok(vec!["src/lib.rs".to_string()])
     }
+    fn candidate_state(
+        &mut self,
+        _path: &str,
+        _base: &crate::agent_task_finalization::AgentTaskPrResolvedBase,
+        _head: &str,
+    ) -> Result<crate::agent_task_finalization::AgentTaskPrCandidateState> {
+        Ok(self.candidate_state.clone().unwrap_or(
+            crate::agent_task_finalization::AgentTaskPrCandidateState::Dirty {
+                changed_files: vec!["src/lib.rs".to_string()],
+            },
+        ))
+    }
     fn validate_publication_identity(
         &mut self,
         _path: &str,
@@ -5689,7 +5705,11 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
                 commit_sha: None,
                 scope: "commit_host_policy".to_string(),
             });
-        proof.commit_sha = Some("candidate-sha".to_string());
+        proof.commit_sha = Some(
+            self.committed_sha
+                .clone()
+                .unwrap_or_else(|| "candidate-sha".to_string()),
+        );
         proof.scope = "commit_host_policy".to_string();
         Ok(proof)
     }
@@ -6550,6 +6570,289 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
             );
         }
         assert!(backend.committed && backend.pushed && backend.created);
+    });
+}
+
+#[test]
+fn manual_preflight_intent_does_not_block_normal_cook_finalization() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-10980-normal";
+        let run_id = "cook-10980-normal-attempt-1";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = run_id.to_string();
+        options.head = Some("fix/8058".to_string());
+        options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        options.gates = VerifyGateOptions {
+            verify: vec!["cargo test --locked agent_task_promotion --lib".to_string()],
+            ..Default::default()
+        };
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).expect("submit run");
+        seed_review_form_aggregate(run_id, &options.initial_plan);
+
+        let mut manual =
+            cook_finalization_options(&options, run_id, &promotion(run_id), Vec::new())
+                .expect("manual options");
+        manual.manual_finalization = true;
+        let mut preflight_backend = CaptureBackend {
+            candidate_state: Some(
+                crate::agent_task_finalization::AgentTaskPrCandidateState::Committed {
+                    changed_files: vec!["src/lib.rs".to_string()],
+                    push_required: false,
+                },
+            ),
+            ..Default::default()
+        };
+        let intent = crate::agent_task_finalization::preflight_pr_with_backend(
+            manual,
+            &mut preflight_backend,
+        )
+        .expect("manual preflight");
+        persist_manual_finalization_intent(run_id, &intent).expect("persist intent");
+        assert!(agent_task_lifecycle::status(run_id)
+            .expect("status")
+            .metadata["cook_finalization"]
+            .is_null());
+
+        let mut normal_backend = CaptureBackend::default();
+        let receipt = finalize_or_load_cook_pr_with_backend(
+            &options,
+            run_id,
+            &promotion(run_id),
+            &mut normal_backend,
+        )
+        .expect("normal Cook finalization continues");
+        assert_eq!(receipt["status"], "review_ready");
+        assert!(normal_backend.created);
+
+        let generic_receipt =
+            serde_json::json!({ "status": "review_ready", "pr": { "number": 42 } });
+        agent_task_lifecycle::record_cook_finalization(run_id, generic_receipt.clone())
+            .expect("persist generic normal receipt");
+        let mut recovery_backend = CaptureBackend::default();
+        let recovered =
+            recover_cook_pr_with_backend(cook_id, Vec::new(), false, &mut recovery_backend)
+                .expect("normal finalization receipt takes precedence over stale manual intent");
+        assert_eq!(recovered, generic_receipt);
+        assert!(!recovery_backend.created);
+    });
+}
+
+#[test]
+fn manual_preflight_recovers_without_a_persisted_promotion_and_rejects_tampering() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-10980";
+        let run_id = "cook-10980-attempt-1";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = run_id.to_string();
+        options.head = Some("fix/8058".to_string());
+        options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        options.gates = VerifyGateOptions {
+            verify: vec!["cargo test --locked agent_task_promotion --lib".to_string()],
+            ..Default::default()
+        };
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).expect("submit run");
+        seed_review_form_aggregate(run_id, &options.initial_plan);
+
+        let mut finalization =
+            cook_finalization_options(&options, run_id, &promotion(run_id), Vec::new())
+                .expect("manual finalization options");
+        finalization.manual_finalization = true;
+        let clean_candidate =
+            crate::agent_task_finalization::AgentTaskPrCandidateState::Committed {
+                changed_files: vec!["src/lib.rs".to_string()],
+                push_required: false,
+            };
+        let mut preflight_backend = CaptureBackend {
+            candidate_state: Some(clean_candidate.clone()),
+            ..Default::default()
+        };
+        let preflight = crate::agent_task_finalization::preflight_pr_with_backend(
+            finalization,
+            &mut preflight_backend,
+        )
+        .expect("manual preflight");
+        assert_eq!(preflight.status, "validated");
+        assert!(
+            !preflight_backend.committed && !preflight_backend.pushed && !preflight_backend.created
+        );
+        let mut copied_from_another_run = preflight.clone();
+        copied_from_another_run.run_id = "another-cook-attempt".to_string();
+        let error = persist_manual_finalization_intent(run_id, &copied_from_another_run)
+            .expect_err("a dossier copied from another run cannot be persisted");
+        assert!(error.message.contains("different durable run"));
+        assert!(agent_task_lifecycle::status(run_id)
+            .expect("status")
+            .metadata["manual_finalization_intent"]
+            .is_null());
+
+        let mut malformed = preflight.clone();
+        malformed.status = "review_ready".to_string();
+        let error = persist_manual_finalization_intent(run_id, &malformed)
+            .expect_err("a non-preflight dossier cannot be persisted");
+        assert!(error
+            .message
+            .contains("dossier failed integrity validation"));
+        assert!(agent_task_lifecycle::status(run_id)
+            .expect("status")
+            .metadata["manual_finalization_intent"]
+            .is_null());
+
+        let preflight = serde_json::to_value(preflight).expect("serialize preflight");
+
+        let mut coherently_tampered = preflight.clone();
+        for pointer in [
+            "/changed_files",
+            "/publication_intent/changed_files",
+            "/finalization_outcome/changed_files",
+        ] {
+            *coherently_tampered
+                .pointer_mut(pointer)
+                .expect("changed-files field") = serde_json::json!(["tampered.rs"]);
+        }
+        agent_task_lifecycle::record_manual_finalization_intent(run_id, coherently_tampered)
+            .expect("persist coherent tampering");
+        let error = recover_cook_pr_with_backend(
+            cook_id,
+            Vec::new(),
+            false,
+            &mut CaptureBackend {
+                candidate_state: Some(clean_candidate.clone()),
+                ..Default::default()
+            },
+        )
+        .expect_err("candidate scope tampering fails closed");
+        assert!(error.message.contains("changed files no longer match"));
+
+        let preflight_report = serde_json::from_value(preflight.clone()).expect("parse preflight");
+        persist_manual_finalization_intent(run_id, &preflight_report)
+            .expect("persist manual dossier");
+        let error = recover_cook_pr_with_backend(
+            cook_id,
+            Vec::new(),
+            false,
+            &mut CaptureBackend {
+                candidate_state: Some(clean_candidate.clone()),
+                committed_sha: Some("different-candidate-sha".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect_err("candidate SHA mismatch fails closed");
+        assert!(error.message.contains("no longer matches"));
+
+        let mut publish_backend = CaptureBackend {
+            candidate_state: Some(clean_candidate),
+            ..Default::default()
+        };
+        let published =
+            recover_cook_pr_with_backend(cook_id, Vec::new(), false, &mut publish_backend)
+                .expect("recover manual publication");
+        assert_eq!(published["status"], "review_ready");
+        assert!(publish_backend.created);
+        assert!(!publish_backend.committed && !publish_backend.pushed);
+        let mut repeated_backend = CaptureBackend::default();
+        let repeated =
+            recover_cook_pr_with_backend(cook_id, Vec::new(), false, &mut repeated_backend)
+                .expect("completed manual recovery is idempotent");
+        assert_eq!(repeated, published);
+        assert!(!repeated_backend.created);
+
+        let mut different_candidate: AgentTaskPrFinalizationReport =
+            serde_json::from_value(published.clone()).expect("parse receipt");
+        different_candidate.changed_files = vec!["different.rs".to_string()];
+        different_candidate.path = "/different-worktree".to_string();
+        different_candidate.base = "different-base".to_string();
+        different_candidate.head = "different-head".to_string();
+        different_candidate.publication_intent.changed_files =
+            different_candidate.changed_files.clone();
+        different_candidate.publication_intent.target.path = Some(different_candidate.path.clone());
+        different_candidate.publication_intent.target.base = Some(different_candidate.base.clone());
+        different_candidate.publication_intent.target.head = Some(different_candidate.head.clone());
+        different_candidate.publication_proof.target =
+            different_candidate.publication_intent.target.clone();
+        different_candidate.finalization_outcome.target =
+            different_candidate.publication_intent.target.clone();
+        different_candidate.publication_proof.target.url = different_candidate.pr_url.clone();
+        different_candidate.finalization_outcome.target.url = different_candidate.pr_url.clone();
+        different_candidate.finalization_outcome.base = different_candidate.base.clone();
+        different_candidate.finalization_outcome.head = different_candidate.head.clone();
+        different_candidate.finalization_outcome.changed_files =
+            different_candidate.changed_files.clone();
+        let binding = different_candidate
+            .publication_proof
+            .binding
+            .as_mut()
+            .expect("publication binding");
+        binding.candidate_sha = "different-candidate-sha".to_string();
+        binding.remote_sha = binding.candidate_sha.clone();
+        binding.pr_head_sha = binding.candidate_sha.clone();
+        binding.changed_files = different_candidate.changed_files.clone();
+        different_candidate
+            .publication_proof
+            .git_identity
+            .as_mut()
+            .expect("Git identity")
+            .commit_sha = Some("different-candidate-sha".to_string());
+        let before = agent_task_lifecycle::status(run_id).expect("receipt before rejection");
+        let error = persist_manual_finalization_receipt(run_id, &different_candidate)
+            .expect_err("a self-consistent receipt for a different candidate cannot persist");
+        assert!(error.message.contains("controller validation"));
+        assert_eq!(
+            agent_task_lifecycle::status(run_id)
+                .expect("receipt after rejection")
+                .metadata,
+            before.metadata
+        );
+
+        for (pointer, replacement) in [
+            ("/path", serde_json::json!("/tampered")),
+            ("/base", serde_json::json!("tampered-base")),
+            ("/head", serde_json::json!("tampered-head")),
+            ("/proof", serde_json::json!({"tampered": true})),
+            ("/review_dossier", serde_json::json!({"tampered": true})),
+        ] {
+            let mut tampered = published.clone();
+            *tampered
+                .pointer_mut(pointer)
+                .expect("authoritative receipt field") = replacement;
+            agent_task_lifecycle::record_cook_finalization(run_id, tampered)
+                .expect("persist coherent receipt tampering");
+            let error = recover_cook_pr_with_backend(
+                run_id,
+                Vec::new(),
+                false,
+                &mut CaptureBackend::default(),
+            )
+            .expect_err("receipt tampering fails closed");
+            assert!(error.message.contains("finalization"));
+        }
+
+        let mut reassigned_receipt: AgentTaskPrFinalizationReport =
+            serde_json::from_value(published.clone()).expect("parse receipt");
+        reassigned_receipt.run_id = "another-cook-attempt".to_string();
+        let error = persist_manual_finalization_receipt(run_id, &reassigned_receipt)
+            .expect_err("a reassigned receipt cannot be persisted");
+        assert!(error.message.contains("controller validation"));
+
+        let mut malformed_receipt: AgentTaskPrFinalizationReport =
+            serde_json::from_value(published.clone()).expect("parse receipt");
+        malformed_receipt.pr_action = "none".to_string();
+        let error = persist_manual_finalization_receipt(run_id, &malformed_receipt)
+            .expect_err("a non-publication receipt cannot be persisted");
+        assert!(error.message.contains("controller validation"));
+
+        let published_report = serde_json::from_value(published.clone()).expect("parse receipt");
+        persist_manual_finalization_receipt(run_id, &published_report)
+            .expect("restore valid manual receipt");
+        let mut tampered = published;
+        tampered["changed_files"] = serde_json::json!(["tampered.rs"]);
+        agent_task_lifecycle::record_cook_finalization(run_id, tampered)
+            .expect("persist tampering");
+        let error =
+            recover_cook_pr_with_backend(run_id, Vec::new(), false, &mut CaptureBackend::default())
+                .expect_err("tampered dossier fails closed");
+        assert!(error.message.contains("integrity validation"));
     });
 }
 

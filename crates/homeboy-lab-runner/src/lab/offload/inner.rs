@@ -725,9 +725,9 @@ pub(crate) fn exec_lab_context(
                 }
                 return match selection.source {
                     LabRunnerSelectionSource::Default => {
-                        if request.placement == homeboy_lab_runner_contract::Placement::Lab {
-                            Err(local_execution_denied_error(&reason, Some(runner_id)))
-                        } else if !request.allow_local_fallback {
+                        if !request.placement_decision.verifies_outcome(
+                            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+                        ) {
                             Err(selected_runner_fallback_error(
                                 selection,
                                 "Lab offload selected a runner but its daemon did not respond",
@@ -737,6 +737,7 @@ pub(crate) fn exec_lab_context(
                                 )],
                             ))
                         } else {
+                            record_local_outcome(&request)?;
                             Ok(LabOffloadOutcome::RunLocal {
                                 metadata: Some(lab_offload_metadata_with_workspace_mapping(
                                     &context.plan,
@@ -793,6 +794,23 @@ pub(crate) fn exec_lab_context(
         context.plan,
         PlanStep::builder("lab.exec", "lab.exec", PlanStepStatus::Success).build(),
     );
+    if let Some(run_id) = context.agent_task_run_id.as_deref() {
+        let outcome = request
+            .placement_decision
+            .outcome(
+                homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+                Some(runner_id.to_string()),
+            )
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "execution_placement_outcome",
+                    "Lab provider completed an execution forbidden by the canonical placement decision",
+                    Some(run_id.to_string()),
+                    None,
+                )
+            })?;
+        agent_task_lifecycle::record_execution_placement_outcome(run_id, outcome)?;
+    }
     let dependency_cache_save_outputs =
         save_dependency_caches(runner_id, &context.dependency_cache_saves)?;
     if !dependency_cache_save_outputs.is_empty() {
@@ -1500,17 +1518,20 @@ pub(crate) fn run_lab_offload_inner(
                     .skip_reason(reason.clone())
                     .build(),
                 );
-                if request.placement == homeboy_lab_runner_contract::Placement::Lab {
+                if !request.placement_decision.verifies_outcome(
+                    homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+                ) {
                     return Err(local_execution_denied_error(&reason, Some(runner_id)));
                 }
                 overhead.set_fallback_reason(&reason);
-                return Ok(automatic_capability_fallback(
+                return automatic_capability_fallback(
+                    &request,
                     plan,
                     runner_id,
                     &runner_status,
                     reason,
                     &overhead,
-                ));
+                );
             }
             Err(err) => return Err(err),
         };
@@ -1553,13 +1574,13 @@ pub(crate) fn run_lab_offload_inner(
                     );
                     overhead.set_fallback_reason(&reason);
                     return automatic_capability_fallback_or_error(
+                        &request,
                         plan,
                         &selection,
                         &runner_status,
                         reason,
                         remediation,
-                        request.allow_local_fallback,
-                        request.placement,
+                        &request.placement_decision,
                         &overhead,
                     );
                 }

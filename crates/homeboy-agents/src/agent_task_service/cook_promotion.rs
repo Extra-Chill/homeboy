@@ -13,9 +13,10 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 use crate::agent_task_finalization::{
-    finalize_pr_with_backend, preflight_pr_with_backend, AgentTaskPrEvidence,
-    AgentTaskPrFinalizationBackend, AgentTaskPrFinalizationOptions, AgentTaskPrRuntimeGuardrails,
-    AgentTaskPrSourceRelationship, AgentTaskPrVerification, RealAgentTaskPrFinalizationBackend,
+    finalize_pr_with_backend, preflight_pr_with_backend, validate_publication_intent,
+    AgentTaskPrEvidence, AgentTaskPrFinalizationBackend, AgentTaskPrFinalizationOptions,
+    AgentTaskPrFinalizationReport, AgentTaskPrRuntimeGuardrails, AgentTaskPrSourceRelationship,
+    AgentTaskPrVerification, RealAgentTaskPrFinalizationBackend,
 };
 use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::{
@@ -1139,7 +1140,7 @@ pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         .map(|report| serde_json::to_value(report).unwrap_or(Value::Null))
 }
 
-fn cook_finalization_options(
+pub(crate) fn cook_finalization_options(
     options: &AgentTaskCookServiceOptions,
     successful_run_id: &str,
     promotion: &AgentTaskPromotionReport,
@@ -1219,8 +1220,42 @@ fn cook_finalization_options(
         review_dossier,
         review_profile: resolve_review_profile(&path)?,
         manual_finalization: false,
+        expected_candidate_sha: None,
         protected_branches: options.protected_branches.clone(),
     })
+}
+
+/// Persist only a controller-validated manual preflight dossier for recovery.
+pub fn persist_manual_finalization_intent(
+    run_id: &str,
+    report: &AgentTaskPrFinalizationReport,
+) -> Result<crate::agent_task_lifecycle::AgentTaskRunRecord> {
+    validate_manual_preflight_report(report, run_id)?;
+    agent_task_lifecycle::record_manual_finalization_intent(
+        run_id,
+        serde_json::to_value(report).expect("finalization report serializes"),
+    )
+}
+
+/// Persist only a controller-published manual receipt bound to its preflight dossier.
+pub fn persist_manual_finalization_receipt(
+    run_id: &str,
+    report: &AgentTaskPrFinalizationReport,
+) -> Result<crate::agent_task_lifecycle::AgentTaskRunRecord> {
+    let record = agent_task_lifecycle::status(run_id)?;
+    let intent = manual_finalization_intent_for_run(&record, run_id)?;
+    if !valid_manual_finalization_receipt(report, &intent, &record, run_id, false) {
+        return Err(Error::validation_invalid_argument(
+            "cook_finalization",
+            "manual finalization receipt failed controller validation",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    agent_task_lifecycle::record_manual_finalization_receipt(
+        run_id,
+        serde_json::to_value(report).expect("finalization report serializes"),
+    )
 }
 
 /// Recover publication from the durable Cook recipe and applied promotion.
@@ -1255,6 +1290,33 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             )
         })?
     };
+    if let Some(receipt) = completed_finalization_receipt_for_recovery(&recipe, run_or_cook_id)? {
+        return Ok(receipt);
+    }
+    if let Some(report) = manual_finalization_intent_for_recovery(&recipe, run_or_cook_id)? {
+        if !overrides.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "review_overrides",
+                "recovered manual finalization must execute the preflight-validated dossier unchanged",
+                None,
+                None,
+            ));
+        }
+        let finalization = manual_finalization_options(report)?;
+        let report = if preflight {
+            preflight_pr_with_backend(finalization, backend)?
+        } else {
+            finalize_pr_with_backend(finalization, backend)?
+        };
+        let value = serde_json::to_value(&report).unwrap_or(Value::Null);
+        if !preflight {
+            persist_manual_finalization_receipt(
+                value["run_id"].as_str().unwrap_or_default(),
+                &report,
+            )?;
+        }
+        return Ok(value);
+    }
     let run_id = if recipe
         .attempts
         .iter()
@@ -1314,6 +1376,425 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         agent_task_lifecycle::record_cook_finalization(&run_id, value.clone())?;
     }
     Ok(value)
+}
+
+fn manual_finalization_run_ids<'a>(
+    recipe: &'a super::cook_recipe::AgentTaskCookRecipe,
+) -> Vec<&'a str> {
+    recipe
+        .attempts
+        .iter()
+        .rev()
+        .map(|attempt| attempt.run_id.as_str())
+        .collect()
+}
+
+fn completed_finalization_receipt_for_recovery(
+    recipe: &super::cook_recipe::AgentTaskCookRecipe,
+    run_or_cook_id: &str,
+) -> Result<Option<Value>> {
+    let run_ids = if recipe
+        .attempts
+        .iter()
+        .any(|attempt| attempt.run_id == run_or_cook_id)
+    {
+        vec![run_or_cook_id]
+    } else {
+        manual_finalization_run_ids(recipe)
+    };
+    for run_id in run_ids {
+        let record = agent_task_lifecycle::status(run_id)?;
+        let Some(value) = record.metadata.get("cook_finalization") else {
+            continue;
+        };
+        if value["status"] != "review_ready" {
+            continue;
+        }
+        // Normal Cook finalization receipts intentionally have a lightweight,
+        // generic shape. Only the explicit manual receipt schema requires the
+        // additional recovery integrity contract.
+        if value["manual_finalization"] == true {
+            let report: AgentTaskPrFinalizationReport = serde_json::from_value(value.clone())
+                .map_err(|_| {
+                    Error::validation_invalid_argument(
+                        "cook_finalization",
+                        "persisted manual finalization receipt is invalid",
+                        Some(run_id.to_string()),
+                        None,
+                    )
+                })?;
+            let intent = manual_finalization_intent_for_run(&record, run_id)?;
+            if !valid_manual_finalization_receipt(&report, &intent, &record, run_id, true) {
+                return Err(Error::validation_invalid_argument(
+                    "cook_finalization",
+                    "persisted manual finalization receipt failed integrity validation",
+                    Some(run_id.to_string()),
+                    None,
+                ));
+            }
+        }
+        return Ok(Some(value.clone()));
+    }
+    Ok(None)
+}
+
+fn manual_finalization_intent_for_recovery(
+    recipe: &super::cook_recipe::AgentTaskCookRecipe,
+    run_or_cook_id: &str,
+) -> Result<Option<AgentTaskPrFinalizationReport>> {
+    let run_ids = if recipe
+        .attempts
+        .iter()
+        .any(|attempt| attempt.run_id == run_or_cook_id)
+    {
+        vec![run_or_cook_id]
+    } else {
+        manual_finalization_run_ids(recipe)
+    };
+    for run_id in run_ids {
+        let record = agent_task_lifecycle::status(run_id)?;
+        let Some(_) = record.metadata.get("manual_finalization_intent") else {
+            continue;
+        };
+        let report = manual_finalization_intent_for_run(&record, run_id)?;
+        return Ok(Some(report));
+    }
+    Ok(None)
+}
+
+fn manual_finalization_intent_for_run(
+    record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
+    run_id: &str,
+) -> Result<AgentTaskPrFinalizationReport> {
+    let value = record
+        .metadata
+        .get("manual_finalization_intent")
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "manual_finalization_intent",
+                "manual finalization receipt has no persisted validated intent",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    let expected_digest = record
+        .metadata
+        .get("manual_finalization_intent_digest")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if expected_digest != agent_task_lifecycle::manual_finalization_intent_digest(value) {
+        return Err(Error::validation_invalid_argument(
+            "manual_finalization_intent",
+            "persisted manual finalization intent failed integrity validation",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    let report: AgentTaskPrFinalizationReport =
+        serde_json::from_value(value.clone()).map_err(|_| {
+            Error::validation_invalid_argument(
+                "manual_finalization_intent",
+                "persisted manual finalization intent is invalid",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    if report.run_id != run_id {
+        return Err(Error::validation_invalid_argument(
+            "manual_finalization_intent.run_id",
+            "persisted manual finalization intent belongs to a different durable run",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    Ok(report)
+}
+
+fn valid_manual_finalization_receipt(
+    report: &AgentTaskPrFinalizationReport,
+    intent: &AgentTaskPrFinalizationReport,
+    record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
+    run_id: &str,
+    require_persisted_digest: bool,
+) -> bool {
+    let Some(binding) = report.publication_proof.binding.as_ref() else {
+        return false;
+    };
+    let Some(git_identity) = report.publication_proof.git_identity.as_ref() else {
+        return false;
+    };
+    let Some(intent_git_identity) = intent.publication_proof.git_identity.as_ref() else {
+        return false;
+    };
+    report.schema == crate::agent_task_finalization::AGENT_TASK_PR_FINALIZATION_SCHEMA
+        && report.run_id == run_id
+        && intent.status == "validated"
+        && intent.manual_finalization
+        && receipt_matches_manual_preflight(
+            report,
+            intent,
+            binding,
+            git_identity,
+            intent_git_identity,
+        )
+        && (!require_persisted_digest
+            || (record.metadata["manual_finalization_receipt_digest"]
+                == serde_json::json!(agent_task_lifecycle::manual_finalization_intent_digest(
+                    &serde_json::to_value(report).expect("finalization report serializes"),
+                ))
+                && record.metadata["manual_finalization_receipt_intent_digest"]
+                    == record.metadata["manual_finalization_intent_digest"]))
+        && validate_publication_intent(&report.publication_intent).is_ok()
+        && report.publication_intent.run_id == run_id
+        && report.publication_proof.run_id == run_id
+        && report.finalization_outcome.run_id == run_id
+        && report.publication_proof.schema
+            == crate::agent_task_finalization::AGENT_TASK_PUBLICATION_PROOF_SCHEMA
+        && report.publication_proof.intent_schema == report.publication_intent.schema
+        && report.publication_proof.status == "review_ready"
+        && report.finalization_outcome.schema
+            == crate::agent_task_finalization::AGENT_TASK_PR_FINALIZATION_OUTCOME_SCHEMA
+        && matches!(report.pr_action.as_str(), "created" | "updated")
+        && report.publication_proof.adapter_action.as_deref() == Some(report.pr_action.as_str())
+        && report.publication_proof.adapter_ref == report.pr_url
+        && report.pr_number.is_some()
+        && report.pr_url.is_some()
+        && same_publication_target(
+            &report.publication_proof.target,
+            &report.publication_intent.target,
+        )
+        && report.finalization_outcome.target == report.publication_proof.target
+        && report.publication_proof.target.url == report.pr_url
+        && report.finalization_outcome.pr_number == report.pr_number
+        && report.finalization_outcome.pr_url == report.pr_url
+        && report.finalization_outcome.status == "review_ready"
+        && report.finalization_outcome.publication_action == report.pr_action
+        && report.finalization_outcome.publication_status == "review_ready"
+        && report.finalization_outcome.published
+        && !report.finalization_outcome.committed
+        && !report.finalization_outcome.pushed
+        && binding.candidate_sha == binding.remote_sha
+        && binding.candidate_sha == binding.pr_head_sha
+        && git_identity.commit_sha.as_deref() == Some(binding.candidate_sha.as_str())
+        && report
+            .publication_proof
+            .git_tracking
+            .as_ref()
+            .is_none_or(|tracking| tracking.verified_remote_sha == binding.candidate_sha)
+        && binding.repository == binding.head_repository
+        && binding.changed_files == report.changed_files
+        && report.publication_intent.changed_files == report.changed_files
+        && report.finalization_outcome.changed_files == report.changed_files
+}
+
+fn receipt_matches_manual_preflight(
+    receipt: &AgentTaskPrFinalizationReport,
+    intent: &AgentTaskPrFinalizationReport,
+    binding: &crate::agent_task_finalization::AgentTaskPublicationBinding,
+    git_identity: &homeboy_core::git::GitIdentityProof,
+    intent_git_identity: &homeboy_core::git::GitIdentityProof,
+) -> bool {
+    let mut receipt_dossier = receipt.review_dossier.clone();
+    receipt_dossier
+        .evidence
+        .retain(|evidence| intent.review_dossier.evidence.contains(evidence));
+    receipt.path == intent.path
+        && receipt.base == intent.base
+        && receipt.head == intent.head
+        && receipt.title == intent.title
+        && receipt.changed_files == intent.changed_files
+        && receipt.proof == intent.proof
+        && receipt_dossier == intent.review_dossier
+        && receipt.review_dossier.evidence.iter().all(|evidence| {
+            intent.review_dossier.evidence.contains(evidence)
+                || is_publication_base_observation(evidence, receipt)
+        })
+        && intent
+            .review_dossier
+            .evidence
+            .iter()
+            .all(|evidence| receipt.review_dossier.evidence.contains(evidence))
+        && receipt.publication_intent.proof == intent.publication_intent.proof
+        && same_preflight_publication_target(
+            &receipt.publication_intent.target,
+            &intent.publication_intent.target,
+        )
+        && intent_git_identity.commit_sha.is_some()
+        && git_identity.commit_sha == intent_git_identity.commit_sha
+        && binding.candidate_sha
+            == intent_git_identity
+                .commit_sha
+                .as_deref()
+                .unwrap_or_default()
+}
+
+fn is_publication_base_observation(
+    evidence: &AgentTaskReviewEvidence,
+    receipt: &AgentTaskPrFinalizationReport,
+) -> bool {
+    if evidence.url.is_some() {
+        return false;
+    }
+    let target = &receipt.publication_intent.target;
+    let verified_base_sha = target.verified_base_sha.as_deref().unwrap_or_default();
+    if verified_base_sha.is_empty() {
+        return false;
+    }
+    let expected = match target.publication_base_sha.as_deref() {
+        Some(publication_base_sha) if publication_base_sha == verified_base_sha => format!(
+            "Base unchanged since verification: {} remains at {}.",
+            receipt.base, verified_base_sha
+        ),
+        Some(publication_base_sha) => format!(
+            "Base advanced after verification: verified {} at {}; publication observed {}. Candidate ancestry was validated against the verified snapshot.",
+            receipt.base, verified_base_sha, publication_base_sha
+        ),
+        None => format!(
+            "Base observation unavailable immediately before publication; candidate ancestry was validated against verified {} at {}.",
+            receipt.base, verified_base_sha
+        ),
+    };
+    evidence.summary == expected
+}
+
+fn same_publication_target(
+    published: &crate::agent_task_finalization::AgentTaskPublicationTarget,
+    intent: &crate::agent_task_finalization::AgentTaskPublicationTarget,
+) -> bool {
+    let mut published = published.clone();
+    published.url = None;
+    published == *intent
+}
+
+/// Publication can add a PR URL and a live-base observation; all preflight
+/// target fields remain immutable.
+fn same_preflight_publication_target(
+    receipt: &crate::agent_task_finalization::AgentTaskPublicationTarget,
+    intent: &crate::agent_task_finalization::AgentTaskPublicationTarget,
+) -> bool {
+    let mut receipt = receipt.clone();
+    let mut intent = intent.clone();
+    receipt.url = None;
+    receipt.publication_base_sha = None;
+    intent.url = None;
+    intent.publication_base_sha = None;
+    receipt == intent
+}
+
+fn manual_finalization_options(
+    report: AgentTaskPrFinalizationReport,
+) -> Result<AgentTaskPrFinalizationOptions> {
+    validate_manual_preflight_report(&report, &report.run_id)?;
+    let target = &report.publication_intent.target;
+    let path = target.path.clone().filter(|path| path == &report.path);
+    let base = target.base.clone().filter(|base| base == &report.base);
+    let head = target.head.clone().filter(|head| head == &report.head);
+    let verified_base_sha = target.verified_base_sha.clone();
+    let expected_candidate_sha = report
+        .publication_proof
+        .git_identity
+        .as_ref()
+        .and_then(|identity| identity.commit_sha.clone());
+    if path.is_none()
+        || base.is_none()
+        || head.is_none()
+        || verified_base_sha.as_deref().unwrap_or_default().is_empty()
+        || expected_candidate_sha
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty()
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_finalization",
+            "persisted manual finalization dossier is missing its immutable publication target",
+            None,
+            None,
+        ));
+    }
+    let path = path.expect("validated path");
+    Ok(AgentTaskPrFinalizationOptions {
+        path: path.clone(),
+        run_id: report.run_id,
+        base: base.expect("validated base"),
+        verified_base_sha,
+        head,
+        title: report.title,
+        // An immutable recovered candidate must never reach commit mutation.
+        commit_message: "recovered manual finalization".to_string(),
+        gate_results: report.gate_results,
+        normalized_gate_results: report.normalized_gate_results,
+        changed_files: report.changed_files,
+        evidence: report.evidence,
+        ai_used_for: report.review_dossier.ai_assistance.used_for.clone(),
+        review_dossier: report.review_dossier,
+        review_profile: resolve_review_profile(&path)?,
+        manual_finalization: true,
+        expected_candidate_sha,
+        protected_branches: vec![
+            "main".to_string(),
+            "master".to_string(),
+            "trunk".to_string(),
+        ],
+    })
+}
+
+fn validate_manual_preflight_report(
+    report: &AgentTaskPrFinalizationReport,
+    run_id: &str,
+) -> Result<()> {
+    if report.run_id != run_id {
+        return Err(Error::validation_invalid_argument(
+            "manual_finalization_intent.run_id",
+            "manual finalization dossier belongs to a different durable run",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    if report.schema != crate::agent_task_finalization::AGENT_TASK_PR_FINALIZATION_SCHEMA
+        || report.status != "validated"
+        || !report.manual_finalization
+        || report.title.trim().is_empty()
+        || report.publication_proof.schema
+            != crate::agent_task_finalization::AGENT_TASK_PUBLICATION_PROOF_SCHEMA
+        || report.publication_proof.status != "validated"
+        || report.publication_proof.intent_schema != report.publication_intent.schema
+        || report.publication_proof.adapter_action.is_some()
+        || report.publication_proof.adapter_ref.is_some()
+        || report.proof != report.publication_intent.proof
+        || report.proof != report.publication_proof.proof
+        || report.run_id != report.publication_intent.run_id
+        || report.run_id != report.publication_proof.run_id
+        || report.changed_files != report.publication_intent.changed_files
+        || report.changed_files != report.finalization_outcome.changed_files
+        || report.publication_intent.target != report.publication_proof.target
+        || report.publication_intent.target != report.finalization_outcome.target
+        || report.finalization_outcome.schema
+            != crate::agent_task_finalization::AGENT_TASK_PR_FINALIZATION_OUTCOME_SCHEMA
+        || report.finalization_outcome.run_id != report.run_id
+        || report.finalization_outcome.status != "validated"
+        || report.finalization_outcome.publication_status != "validated"
+        || report.finalization_outcome.publication_action != "none"
+        || report.finalization_outcome.base != report.base
+        || report.finalization_outcome.head != report.head
+        || report.finalization_outcome.published
+        || report.finalization_outcome.committed
+        || report.finalization_outcome.pushed
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_finalization",
+            "persisted manual finalization dossier failed integrity validation",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    validate_publication_intent(&report.publication_intent).map_err(|_| {
+        Error::validation_invalid_argument(
+            "cook_finalization",
+            "persisted manual finalization dossier has an invalid publication intent",
+            None,
+            None,
+        )
+    })
 }
 
 fn cook_review_dossier(

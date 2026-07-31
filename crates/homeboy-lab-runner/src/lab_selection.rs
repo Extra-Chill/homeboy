@@ -965,7 +965,7 @@ pub(super) fn release_gate_local_hot_denied_error(message: String, field: &str) 
     )
 }
 
-fn runner_status_tunnel_mode(runner_id: &str) -> RunnerTunnelMode {
+pub(super) fn runner_status_tunnel_mode(runner_id: &str) -> RunnerTunnelMode {
     status(runner_id).map_or(RunnerTunnelMode::DirectSsh, |status| {
         status_tunnel_mode(&status)
     })

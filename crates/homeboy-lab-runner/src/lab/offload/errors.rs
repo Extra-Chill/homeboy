@@ -273,12 +273,13 @@ pub(crate) fn in_flight_daemon_disconnect_outcome(
 }
 
 pub(crate) fn automatic_capability_fallback(
+    request: &LabOffloadRequest<'_>,
     plan: HomeboyPlan,
     runner_id: &str,
     runner_status: &RunnerStatusReport,
     reason: String,
     overhead: &LabOffloadOverhead,
-) -> LabOffloadOutcome {
+) -> Result<LabOffloadOutcome> {
     let mut metadata = lab_offload_metadata(
         &plan,
         "automatic",
@@ -289,30 +290,27 @@ pub(crate) fn automatic_capability_fallback(
         Some(&reason),
     );
     attach_lab_offload_overhead(&mut metadata, overhead);
-    LabOffloadOutcome::RunLocal {
+    record_local_outcome(request)?;
+    Ok(LabOffloadOutcome::RunLocal {
         metadata: Some(metadata),
         plan,
         messages: vec![format!("Lab offload: {reason}; running locally.")],
-    }
+    })
 }
 
 pub(crate) fn automatic_capability_fallback_or_error(
+    request: &LabOffloadRequest<'_>,
     plan: HomeboyPlan,
     selection: &LabRunnerSelection,
     runner_status: &RunnerStatusReport,
     reason: String,
     remediation: Vec<String>,
-    allow_local_fallback: bool,
-    placement: homeboy_lab_runner_contract::Placement,
+    placement_decision: &homeboy_lab_runner_contract::ExecutionPlacementDecision,
     overhead: &LabOffloadOverhead,
 ) -> Result<LabOffloadOutcome> {
-    if placement == homeboy_lab_runner_contract::Placement::Lab {
-        return Err(local_execution_denied_error(
-            &reason,
-            Some(&selection.runner_id),
-        ));
-    }
-    if !allow_local_fallback {
+    if !placement_decision
+        .verifies_outcome(homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local)
+    {
         return Err(selected_runner_fallback_error(
             selection,
             "Lab offload selected a runner that is missing required capability parity",
@@ -321,13 +319,14 @@ pub(crate) fn automatic_capability_fallback_or_error(
         ));
     }
 
-    Ok(automatic_capability_fallback(
+    automatic_capability_fallback(
+        request,
         plan,
         &selection.runner_id,
         runner_status,
         reason,
         overhead,
-    ))
+    )
 }
 
 pub(crate) fn selected_runner_fallback_error(

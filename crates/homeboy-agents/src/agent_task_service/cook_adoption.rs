@@ -698,7 +698,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         "finalization",
         "finalize pull request",
     )?;
-    let finalization = match finalize_or_load_cook_pr_with_backend(
+    let mut finalization = match finalize_or_load_cook_pr_with_backend(
         &options,
         &record.run_id,
         &promotion,
@@ -713,6 +713,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
             return Err(error);
         }
     };
+    project_execution_placement(&mut finalization, &record.metadata);
     agent_task_lifecycle::finish_candidate_adoption(&record.run_id, None)?;
     let status = finalization["status"]
         .as_str()
@@ -728,6 +729,55 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         exit_code,
         Some(record.run_id.as_str()),
     ))
+}
+
+/// PR/finalization evidence is a projection of the durable decision, never a
+/// fresh interpretation of runner or environment metadata.
+fn project_execution_placement(finalization: &mut Value, metadata: &Value) {
+    if let Some(decision) = metadata.get("execution_placement_decision") {
+        finalization["execution_placement_decision"] = decision.clone();
+    }
+    if let Some(outcome) = metadata.get("execution_placement_outcome") {
+        finalization["execution_placement_outcome"] = outcome.clone();
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+
+    #[test]
+    fn finalization_projects_the_exact_durable_placement_decision_and_outcome_ids() {
+        let decision = serde_json::json!({
+            "decision_id": "epd-durable-decision",
+            "runner": { "runner_id": "fixture-lab", "source": "policy" }
+        });
+        let outcome = serde_json::json!({
+            "decision_id": "epd-durable-decision",
+            "effective": "lab",
+            "runner_id": "fixture-lab"
+        });
+        let metadata = serde_json::json!({
+            "execution_placement_decision": decision,
+            "execution_placement_outcome": outcome
+        });
+        let mut finalization = serde_json::json!({ "status": "review_ready" });
+
+        project_execution_placement(&mut finalization, &metadata);
+
+        assert_eq!(
+            finalization["execution_placement_decision"],
+            metadata["execution_placement_decision"]
+        );
+        assert_eq!(
+            finalization["execution_placement_outcome"],
+            metadata["execution_placement_outcome"]
+        );
+        assert_eq!(
+            finalization["execution_placement_decision"]["decision_id"],
+            finalization["execution_placement_outcome"]["decision_id"]
+        );
+    }
 }
 
 fn reusable_applied_adoption_promotion(
