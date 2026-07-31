@@ -1415,7 +1415,7 @@ fn terminal_executor_artifact_projection_rejects_mismatched_bytes() {
         record_run_aggregate("projection-tampered", &plan, &aggregate).expect("record aggregate");
 
         let record = status("projection-tampered").expect("terminal record");
-        assert_eq!(record.metadata["artifact_projection"]["status"], "pending");
+        assert_eq!(record.metadata["artifact_projection"]["status"], "failed");
         assert!(record.metadata["artifact_projection"]["error"]
             .as_str()
             .is_some_and(|error| error.contains("does not match")));
@@ -1540,7 +1540,7 @@ fn duplicate_runner_artifact_ids_fail_closed_before_projection() {
         record_run_aggregate(&submitted.run_id, &plan, &aggregate).expect("record aggregate");
 
         let record = status(&submitted.run_id).expect("terminal record");
-        assert_eq!(record.metadata["artifact_projection"]["status"], "pending");
+        assert_eq!(record.metadata["artifact_projection"]["status"], "failed");
         assert!(record.metadata["artifact_projection"]["error"]
             .as_str()
             .is_some_and(|error| error.contains("reuses artifact id 'patch'")));

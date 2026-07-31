@@ -1606,7 +1606,7 @@ fn terminal_reconciliation_rejects_conflicting_directly_imported_artifact() {
         record_run_aggregate(&submitted.run_id, &plan, &aggregate)
             .expect("terminal state is persisted");
         let record = store::read_record(&submitted.run_id).expect("terminal record");
-        assert_eq!(record.metadata["artifact_projection"]["status"], "pending");
+        assert_eq!(record.metadata["artifact_projection"]["status"], "failed");
         assert!(record.metadata["artifact_projection"]["error"]
             .as_str()
             .is_some_and(|error| error.contains("conflicts with terminal artifact projection")));

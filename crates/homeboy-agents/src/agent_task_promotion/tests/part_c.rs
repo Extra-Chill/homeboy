@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[test]
-fn bridge_reconciliation_marks_missing_or_mismatched_finalized_bytes_pending() {
+fn bridge_reconciliation_marks_missing_or_mismatched_finalized_bytes_failed() {
     homeboy_core::test_support::with_isolated_home(|_| {
         for (run_id, contents) in [
             ("recovered-missing-finalized", None),
@@ -82,10 +82,10 @@ fn bridge_reconciliation_marks_missing_or_mismatched_finalized_bytes_pending() {
                 None,
                 Some(&identity),
             )
-            .expect("bridge preserves aggregate while surfacing pending projection");
+            .expect("bridge preserves aggregate while surfacing failed projection");
 
             let record = crate::agent_task_lifecycle::status(run_id).expect("lifecycle status");
-            assert_eq!(record.metadata["artifact_projection"]["status"], "pending");
+            assert_eq!(record.metadata["artifact_projection"]["status"], "failed");
             assert!(record.metadata["artifact_projection"]["error"]
                 .as_str()
                 .expect("actionable error")

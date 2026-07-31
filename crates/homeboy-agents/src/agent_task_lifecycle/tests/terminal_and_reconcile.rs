@@ -1535,7 +1535,7 @@ fn detached_lab_handoff_upgrades_existing_observation_record() {
 }
 
 #[test]
-fn status_backfills_legacy_runner_provenance_and_mirrors_a_verified_projection_idempotently() {
+fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() {
     with_isolated_home(|_| {
         use sha2::Digest;
         use std::io::{Read, Write};
@@ -1681,6 +1681,10 @@ fn status_backfills_legacy_runner_provenance_and_mirrors_a_verified_projection_i
 
         let plan = test_plan();
         let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.status = AgentTaskAggregateStatus::PartialRecoverable;
+        aggregate.totals.succeeded = 0;
+        aggregate.totals.candidate_recoverable = 1;
+        aggregate.outcomes[0].status = AgentTaskOutcomeStatus::CandidateRecoverable;
         aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
             schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
             id: "patch".to_string(),
@@ -1689,7 +1693,9 @@ fn status_backfills_legacy_runner_provenance_and_mirrors_a_verified_projection_i
             label: None,
             role: None,
             semantic_key: None,
-            path: Some("/home/runner/.homeboy/executor-finalized/patch.diff".to_string()),
+            // The production #11006 aggregate retained the typed runner artifact
+            // identity and integrity fields but omitted its producer-local path.
+            path: None,
             url: None,
             mime: Some("text/x-patch".to_string()),
             size_bytes: Some(patch.len() as u64),
@@ -1725,8 +1731,14 @@ fn status_backfills_legacy_runner_provenance_and_mirrors_a_verified_projection_i
         }
 
         let record = status("detached-run").expect("status");
+        assert_eq!(record.state, AgentTaskRunState::PartialRecoverable);
         assert_eq!(record.metadata["runner_id"], "local");
         assert_eq!(record.metadata["artifact_projection"]["status"], "complete");
+        assert_eq!(
+            terminal_artifact_projection_readiness("detached-run").expect("projection readiness"),
+            None,
+            "a verified controller mirror makes a pathless runner declaration continuable"
+        );
         let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
         let artifact = homeboy_core::observation::runs_service::resolve_artifact_for_run(
             &store,

@@ -1569,6 +1569,36 @@ pub fn status_with_options(
                     &record,
                 ) {
                     Ok(()) => {
+                        if let Some(reason) =
+                            crate::agent_task_lifecycle::terminal_artifact_projection_readiness(
+                                &record.run_id,
+                            )?
+                        {
+                            let projection_status = record
+                                .metadata
+                                .pointer("/artifact_projection/status")
+                                .and_then(Value::as_str)
+                                .unwrap_or("pending")
+                                .to_string();
+                            let run_id = record.run_id.clone();
+                            let repair_command = format!("homeboy agent-task status {run_id}");
+                            record.ensure_metadata_object().insert(
+                                "cook_continuation_scheduler".to_string(),
+                                json!({
+                                    "status": format!("artifact_projection_{projection_status}"),
+                                    "cook_id": cook_id,
+                                    "run_id": run_id,
+                                    "phase": "artifact_projection",
+                                    "message": reason,
+                                    "repair_command": repair_command,
+                                }),
+                            );
+                            store::write_record(&record)?;
+                            return Ok(AgentTaskStatusOutcome {
+                                record,
+                                runner_probe,
+                            });
+                        }
                         let existing_scheduler_status = record
                             .metadata
                             .get("cook_continuation_scheduler")

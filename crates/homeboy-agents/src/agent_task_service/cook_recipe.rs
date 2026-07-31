@@ -824,6 +824,37 @@ pub fn validate_recipe_attempt_record(
             ]),
         ));
     }
+    let controller_plan = agent_task_lifecycle::load_controller_plan(run_id)?;
+    let plan_identity_matches = controller_plan.tasks.len() == attempt.plan.tasks.len()
+        && attempt.plan.tasks.iter().all(|expected| {
+            controller_plan
+                .tasks
+                .iter()
+                .find(|observed| observed.task_id == expected.task_id)
+                .is_some_and(|observed| {
+                    observed.source_refs == expected.source_refs
+                        && observed.workspace.slug == expected.workspace.slug
+                        && observed.workspace.component_id == expected.workspace.component_id
+                        && observed.workspace.branch == expected.workspace.branch
+                        && observed.workspace.base_ref == expected.workspace.base_ref
+                        && observed.workspace.task_url == expected.workspace.task_url
+                        && observed.workspace.attempt == expected.workspace.attempt
+                })
+        });
+    if !plan_identity_matches {
+        return Err(Error::validation_invalid_argument(
+            "cook_recipe.attempts.plan",
+            format!(
+                "durable controller plan for Cook `{}` attempt `{run_id}` does not match the immutable recipe repository, base, and candidate inputs",
+                recipe.cook_id
+            ),
+            Some(run_id.to_string()),
+            Some(vec![
+                "Inspect the controller-owned recipe and run plan; do not continue across repository or base identities."
+                    .to_string(),
+            ]),
+        ));
+    }
     Ok(())
 }
 
@@ -1775,8 +1806,8 @@ fn reclaim_dead_claims(root: &std::path::Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::agent_task::{
-        AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus,
-        AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
+        AgentTaskArtifact, AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome,
+        AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
     };
     use crate::agent_task_scheduler::{
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
@@ -1895,6 +1926,22 @@ mod tests {
             assert!(error
                 .message
                 .contains("observed Cook `other-cook` run `run`"));
+        });
+    }
+
+    #[test]
+    fn recipe_attempt_identity_rejects_controller_plan_base_drift() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let (mut recipe, _) = persist_recipe_run();
+            let record = crate::agent_task_lifecycle::persisted_status("run").unwrap();
+            recipe.attempts[0].plan.tasks[0].workspace.base_ref = Some("other-base".to_string());
+
+            let error = validate_recipe_attempt_record(&recipe, "run", &record)
+                .expect_err("controller plan drift must fail closed");
+
+            assert!(error
+                .message
+                .contains("does not match the immutable recipe"));
         });
     }
 
@@ -2411,6 +2458,48 @@ mod tests {
                 Some(0)
             );
             assert_eq!(executions.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn status_exposes_failed_artifact_projection_as_a_continuation_phase() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let (_, plan) = persist_recipe_run();
+            let patch = home.path().join("candidate.patch");
+            fs::write(&patch, b"candidate").expect("write candidate patch");
+            let mut aggregate = succeeded_aggregate(&plan);
+            aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
+                schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                id: "patch".to_string(),
+                kind: "patch".to_string(),
+                name: None,
+                label: None,
+                role: None,
+                semantic_key: None,
+                path: Some(patch.display().to_string()),
+                url: None,
+                mime: Some("text/x-patch".to_string()),
+                size_bytes: Some(9),
+                sha256: Some("0".repeat(64)),
+                metadata: serde_json::json!({ "executor_artifact_finalized": true }),
+            });
+            crate::agent_task_lifecycle::record_run_aggregate("run", &plan, &aggregate).unwrap();
+
+            let record = crate::agent_task_lifecycle::status("run").unwrap();
+
+            assert_eq!(
+                record.metadata["cook_continuation_scheduler"]["status"],
+                "artifact_projection_failed"
+            );
+            assert_eq!(
+                record.metadata["cook_continuation_scheduler"]["phase"],
+                "artifact_projection"
+            );
+            assert_eq!(
+                record.metadata["cook_continuation_scheduler"]["repair_command"],
+                "homeboy agent-task status run"
+            );
+            assert!(claim_continuation().unwrap().is_none());
         });
     }
 
