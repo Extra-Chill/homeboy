@@ -12,18 +12,39 @@ pub(super) fn run_if_configured(
     project: &Project,
     config: &DeployConfig,
 ) -> Result<Option<DeployOrchestrationResult>> {
-    if config.component_ids.is_empty() {
+    let component_ids = if config.component_ids.is_empty() && config.check {
+        project
+            .components
+            .iter()
+            .map(|component| component.id.as_str())
+            .collect::<Vec<_>>()
+    } else {
+        config
+            .component_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    };
+    if component_ids.is_empty() {
         return Ok(None);
     }
-    let components = config
-        .component_ids
+    let components = component_ids
         .iter()
         .map(|id| homeboy_core::project::resolve_project_component(project, id))
         .collect::<Result<Vec<_>>>()?;
-    if components
+    let provider_count = components
         .iter()
-        .all(|component| component.deployment_provider.is_some())
-    {
+        .filter(|component| component.deployment_provider.is_some())
+        .count();
+    if config.check && provider_count > 0 && provider_count < components.len() {
+        return Err(Error::validation_invalid_argument(
+            "component_ids",
+            "Project-wide check spans provider-owned and server-deployed components",
+            Some(project_id.to_string()),
+            Some(vec!["Run component-scoped checks so each component uses its declared deployment lifecycle".to_string()]),
+        ));
+    }
+    if provider_count == components.len() {
         let results = components
             .iter()
             .map(|component| run_component(project_id, project, component, config))
@@ -340,8 +361,10 @@ fn repository_contract(component: &Component, contract: &str) -> Result<PathBuf>
 #[cfg(test)]
 mod tests {
     use super::{
-        layered_payload, layered_provider_evidence, repository_contract, validate_repository_policy,
+        layered_payload, layered_provider_evidence, repository_contract, run_if_configured,
+        validate_repository_policy,
     };
+    use crate::deploy::DeployConfig;
     use homeboy_core::component::{Component, DeploymentProviderAttachment};
     use homeboy_core::project::{Project, ProjectComponentAttachment};
     use std::process::Command;
@@ -473,6 +496,164 @@ mod tests {
             .output()
             .expect("git command");
         assert!(output.status.success(), "git {:?} failed", args);
+    }
+
+    fn provider_repository(id: &str) -> tempfile::TempDir {
+        let repository = tempfile::tempdir().expect("repository");
+        std::fs::write(
+            repository.path().join("homeboy.json"),
+            serde_json::json!({
+                "id": id,
+                "deployment_provider": {
+                    "extension": "fixture-provider",
+                    "provider": "fixture.deploy",
+                    "policy": { "repository": "shared" }
+                }
+            })
+            .to_string(),
+        )
+        .expect("portable component");
+        git(repository.path(), &["init", "--quiet"]);
+        git(repository.path(), &["add", "."]);
+        git(
+            repository.path(),
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        repository
+    }
+
+    fn write_provider_extension(home: &std::path::Path, dry_run_command: Option<&str>) {
+        let extension = home.join(".config/homeboy/extensions/fixture-provider");
+        std::fs::create_dir_all(&extension).expect("extension directory");
+        let mut provider = serde_json::json!({
+            "id": "fixture.deploy",
+            "command": "sh {{extension_path}}/run.sh apply {{payload.contract}}",
+            "layered_input": { "schema": "homeboy/deployment-provider-payload/v1" }
+        });
+        if let Some(command) = dry_run_command {
+            provider["dry_run_command"] = serde_json::Value::String(command.to_string());
+        }
+        std::fs::write(
+            extension.join("fixture-provider.json"),
+            serde_json::json!({
+                "name": "fixture-provider",
+                "version": "1.0.0",
+                "deployment_providers": [provider]
+            })
+            .to_string(),
+        )
+        .expect("extension manifest");
+        std::fs::write(
+            extension.join("run.sh"),
+            "#!/bin/sh\nif [ \"$1\" = apply ]; then touch \"$HOMEBOY_COMPONENT_PATH/applied\"; fi\nprintf '%s' '{\"status\":\"checked\"}'\n",
+        )
+        .expect("provider script");
+    }
+
+    fn provider_project(repository: &std::path::Path) -> Project {
+        Project {
+            id: "site".to_string(),
+            components: vec![ProjectComponentAttachment {
+                id: "fixture".to_string(),
+                local_path: repository.to_string_lossy().to_string(),
+                deployment_provider_input: Some(serde_json::json!({ "target": "site" })),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn project_wide_check_dispatches_to_provider_without_ssh_configuration() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let repository = provider_repository("fixture");
+            write_provider_extension(
+                home.path(),
+                Some("sh {{extension_path}}/run.sh check {{payload.contract}}"),
+            );
+            let project = provider_project(repository.path());
+
+            let result =
+                run_if_configured("site", &project, &DeployConfig::check_all_no_pull_head())
+                    .expect("provider check")
+                    .expect("provider-owned result");
+
+            assert_eq!(result.summary.total, 1);
+            assert_eq!(result.results[0].status, "validated");
+            assert_eq!(
+                result.results[0].deployment_provider.as_ref().unwrap()["status"],
+                "opaque"
+            );
+            assert!(!repository.path().join("applied").exists());
+        });
+    }
+
+    #[test]
+    fn provider_without_check_capability_returns_provider_aware_error() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let repository = provider_repository("fixture");
+            write_provider_extension(home.path(), None);
+            let project = provider_project(repository.path());
+
+            let error =
+                run_if_configured("site", &project, &DeployConfig::check_all_no_pull_head())
+                    .expect_err("missing check capability must be explicit");
+
+            assert_eq!(
+                error.details["field"],
+                "deployment_provider.dry_run_command"
+            );
+            assert!(error.message.contains("Provider 'fixture.deploy'"));
+            assert!(!error.message.contains("server_id"));
+        });
+    }
+
+    #[test]
+    fn project_wide_check_requires_mixed_components_to_be_checked_separately() {
+        let provider = provider_repository("provider");
+        let generic = tempfile::tempdir().expect("generic repository");
+        std::fs::write(
+            generic.path().join("homeboy.json"),
+            r#"{"id":"generic","deploy_strategy":"git"}"#,
+        )
+        .expect("generic component");
+        let project = Project {
+            id: "site".to_string(),
+            components: vec![
+                ProjectComponentAttachment {
+                    id: "provider".to_string(),
+                    local_path: provider.path().to_string_lossy().to_string(),
+                    ..Default::default()
+                },
+                ProjectComponentAttachment {
+                    id: "generic".to_string(),
+                    local_path: generic.path().to_string_lossy().to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let error = run_if_configured("site", &project, &DeployConfig::check_all_no_pull_head())
+            .expect_err("mixed project-wide check must not omit provider components");
+
+        assert_eq!(error.details["field"], "component_ids");
+        assert_eq!(error.details["id"], "site");
+        assert_eq!(
+            error.details["tried"],
+            serde_json::json!([
+                "Run component-scoped checks so each component uses its declared deployment lifecycle"
+            ])
+        );
+        assert!(!error.message.contains("server_id"));
     }
 
     #[test]
