@@ -1284,11 +1284,27 @@ fn relative_import_specifiers(content: &str) -> Vec<(usize, String)> {
 /// Line-scoped on purpose: a multi-line `import { ... } from './x.mjs'` still
 /// puts the specifier on the same line as its `from`, and staying line-scoped
 /// keeps this a scan rather than a parser.
+///
+/// Quoted runs that no import keyword introduced are skipped whole, so JavaScript
+/// embedded in a string value is data rather than code. Studio's
+/// `mysql-fuzz-runner.mjs` passes a whole ES module to `node -e` inside a
+/// template literal; its `import ... from './packages/...'` resolves against the
+/// Studio checkout at run time, not against the workload directory, and must not
+/// be reported here.
 fn line_module_specifiers(line: &str) -> Vec<String> {
     let chars: Vec<char> = line.chars().collect();
     let mut specifiers = Vec::new();
     let mut index = 0usize;
     while index < chars.len() {
+        let character = chars[index];
+        if character == '\\' {
+            index += 2;
+            continue;
+        }
+        if is_quote(character) {
+            index = skip_string_literal(&chars, index);
+            continue;
+        }
         let Some(keyword_length) = import_keyword_at(&chars, index) else {
             index += 1;
             continue;
@@ -1297,22 +1313,39 @@ fn line_module_specifiers(line: &str) -> Vec<String> {
         while cursor < chars.len() && (chars[cursor].is_whitespace() || chars[cursor] == '(') {
             cursor += 1;
         }
-        let quote = chars.get(cursor).copied();
-        if !matches!(quote, Some('\'' | '"' | '`')) {
+        if !chars.get(cursor).copied().is_some_and(is_quote) {
             index += keyword_length;
             continue;
         }
-        let quote = quote.expect("quote character");
-        cursor += 1;
-        let mut specifier = String::new();
-        while cursor < chars.len() && chars[cursor] != quote {
-            specifier.push(chars[cursor]);
-            cursor += 1;
-        }
-        specifiers.push(specifier);
-        index = cursor.saturating_add(1);
+        let end = skip_string_literal(&chars, cursor);
+        let content_end =
+            if chars.get(end - 1).copied() == chars.get(cursor).copied() && end > cursor + 1 {
+                end - 1
+            } else {
+                end
+            };
+        specifiers.push(chars[cursor + 1..content_end].iter().collect());
+        index = end;
     }
     specifiers
+}
+
+fn is_quote(character: char) -> bool {
+    matches!(character, '\'' | '"' | '`')
+}
+
+/// Index just past the closing quote of the string literal opening at `open`.
+fn skip_string_literal(chars: &[char], open: usize) -> usize {
+    let quote = chars[open];
+    let mut index = open + 1;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => index += 2,
+            character if character == quote => return index + 1,
+            _ => index += 1,
+        }
+    }
+    index
 }
 
 /// Match an import keyword at `index` on identifier boundaries, so `fromage`
@@ -2205,6 +2238,7 @@ mod tests {
             "export * from '../star.mjs';\n",
             "const s = fromage('./not-an-import');\n",
             "const t = importer('./also-not');\n",
+            "const script = `import x from './embedded-source.mjs'; x();`;\n",
             "import {\n  many,\n  names\n} from '../multi/line.mjs';\n",
         );
 
@@ -2219,7 +2253,7 @@ mod tests {
                 (7, "./helper.cjs".to_string()),
                 (8, "./dynamic.mjs".to_string()),
                 (9, "../star.mjs".to_string()),
-                (15, "../multi/line.mjs".to_string()),
+                (16, "../multi/line.mjs".to_string()),
             ]
         );
     }
