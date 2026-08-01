@@ -598,11 +598,7 @@ fn build_runner_command_path(
         for rel in HOME_BIN_DIRS {
             push_existing_path(&mut paths, &mut seen, home.join(rel));
         }
-        push_existing_path(
-            &mut paths,
-            &mut seen,
-            home.join([".car", "go"].concat()).join("bin"),
-        );
+        push_existing_path(&mut paths, &mut seen, home.join(".cargo").join("bin"));
         push_existing_path(&mut paths, &mut seen, home.join(".kimaki/bin"));
         push_node_bins(&mut paths, &mut seen, &home.join(".local/opt"), "node-");
         push_node_bins(&mut paths, &mut seen, &home.join(".nvm/versions/node"), "");
@@ -677,7 +673,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let home = tmp.path().join("home");
         let local_bin = home.join(".local/bin");
-        let toolchain_bin = home.join([".car", "go"].concat()).join("bin");
+        let toolchain_bin = home.join(".cargo").join("bin");
         let kimaki_bin = home.join(".kimaki/bin");
         let local_node = home.join(".local/opt/node-v24.13.1-linux-x64/bin");
         let nvm_node = home.join(".nvm/versions/node/v20.0.0/bin");

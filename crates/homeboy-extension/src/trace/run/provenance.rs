@@ -147,7 +147,7 @@ pub(super) fn git_provenance(path: &Path, source: Option<&str>) -> TraceGitProve
 fn homeboy_git_provenance() -> TraceGitProvenance {
     let exe_path = std::env::current_exe().ok();
     let exe_parent = exe_path.as_deref().and_then(Path::parent);
-    let manifest_dir = env!(concat!("CARGO", "_MANIFEST_DIR"));
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let provenance = exe_parent
         .map(|path| git_provenance(path, Some("homeboy")))
         .filter(|provenance| provenance.sha.is_some());

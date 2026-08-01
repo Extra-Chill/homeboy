@@ -21,7 +21,7 @@ pub(super) fn source_workspace_with_package_name(package_name: &str) -> tempfile
 pub(super) fn write_source_workspace_files(path: &Path, package_name: &str) {
     let manifest = serde_json::json!({ "id": package_name });
     std::fs::write(path.join("homeboy.json"), manifest.to_string()).expect("manifest");
-    let package_manifest = ["Car", "go.toml"].concat();
+    let package_manifest = "Cargo.toml";
     std::fs::write(
         path.join(package_manifest),
         format!("[package]\nname = \"{package_name}\"\nversion = \"0.0.0\"\n"),

@@ -765,6 +765,7 @@ version = "0.1.0"
 dependencies = [
  "homeboy-engine-primitives",
  "homeboy-finding",
+ "homeboy-product-identity",
  "regex",
  "serde",
  "serde_json",

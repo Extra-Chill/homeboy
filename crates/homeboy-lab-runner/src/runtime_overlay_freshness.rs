@@ -66,8 +66,7 @@ const MTIME_WALK_SKIPPED_DIRECTORY_NAMES: &[&str] = &[".git", "node_modules"];
 /// error for a single run. Accepts the usual truthy spellings (`1`, `true`,
 /// `yes`, `on`). Mirrors the opt-in gate style already used for the
 /// controller↔runner version check.
-pub(super) const REQUIRE_FRESH_RUNTIME_OVERLAY_ENV: &str =
-    concat!("HOME", "BOY_REQUIRE_FRESH_RUNTIME_OVERLAY");
+pub(super) const REQUIRE_FRESH_RUNTIME_OVERLAY_ENV: &str = "HOMEBOY_REQUIRE_FRESH_RUNTIME_OVERLAY";
 
 /// Build provenance for a runtime overlay's artifact directory. Folded into the
 /// synced-overlay record so a stale build is auditable from `homeboy runs`.

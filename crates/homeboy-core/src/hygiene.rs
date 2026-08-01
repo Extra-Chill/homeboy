@@ -292,7 +292,7 @@ fn validation_dependency_ids_from_value(value: &serde_json::Value) -> Vec<String
         .collect()
 }
 
-const PORTABLE_CONFIG_FILE: &str = concat!("homeboy", ".json");
+const PORTABLE_CONFIG_FILE: &str = "homeboy.json";
 
 /// Collect the declared `validation_dependencies` extension IDs from a portable
 /// homeboy.json manifest. Pure single-machine manifest parsing (no runner) — a
@@ -886,7 +886,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    const PORTABLE_CONFIG_FILE: &str = concat!("homeboy", ".json");
+    const PORTABLE_CONFIG_FILE: &str = "homeboy.json";
 
     fn git(path: &Path, args: &[&str]) {
         let output = Command::new("git")

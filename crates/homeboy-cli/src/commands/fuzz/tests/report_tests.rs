@@ -287,6 +287,6 @@ fn fuzz_command_tests_keep_core_fixtures_product_neutral() {
     ]
     .concat()
     .to_ascii_lowercase();
-    let forbidden = ["word", "press"].concat();
+    let forbidden = "wordpress".to_string();
     assert!(!source.contains(&forbidden));
 }

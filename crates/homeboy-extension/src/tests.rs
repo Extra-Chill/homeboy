@@ -488,7 +488,7 @@ fn structured_sidecar_declarations_reject_unknown_fields() {
 
 #[test]
 fn manifest_parses_changed_test_routing_contract() {
-    let fixture_extension = ["p", "hp"].concat();
+    let fixture_extension = "php".to_string();
     let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
         "name": "Example",
         "version": "0.0.0",
@@ -552,7 +552,7 @@ fn manifest_parses_passthrough_filter_contract() {
 
 #[test]
 fn manifest_parses_archive_install_deploy_contract() {
-    let script_extension = ["p", "hp"].concat();
+    let script_extension = "php".to_string();
     let script_glob = format!("*.{script_extension}");
     let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
         "name": "Example",
@@ -619,8 +619,8 @@ fn deploy_contract_rejects_unknown_active_policy_keys() {
 
 #[test]
 fn archive_install_required_header_rejects_ambiguous_selector() {
-    let protected_path = format!("/{}/plugins/", ["wp", "-content"].concat());
-    let script_extension = ["p", "hp"].concat();
+    let protected_path = "/wp-content/plugins/".to_string();
+    let script_extension = "php".to_string();
     let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
         "name": "Example",
         "version": "0.0.0",
@@ -644,7 +644,7 @@ fn archive_install_required_header_rejects_ambiguous_selector() {
 
 #[test]
 fn archive_install_required_header_rejects_missing_selector() {
-    let protected_path = format!("/{}/plugins/", ["wp", "-content"].concat());
+    let protected_path = "/wp-content/plugins/".to_string();
     let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
         "name": "Example",
         "version": "0.0.0",
