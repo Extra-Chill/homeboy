@@ -47,12 +47,12 @@ pub(super) fn local_path_diagnostic_for(
         if standalone_registration_exists(id) {
             Some(format!(
                 "homeboy component reconcile {id} --apply # updates local_path to {}",
-                shell_quote_for_hint(&candidate)
+                quote_path(&candidate)
             ))
         } else {
             Some(format!(
                 "homeboy component set {id} --local-path {}",
-                shell_quote_for_hint(&candidate)
+                quote_path(&candidate)
             ))
         }
     } else if status != "ok" {
@@ -122,8 +122,4 @@ pub(super) fn detect_git_root(path: &Path) -> Option<PathBuf> {
     // helper (trimmed, non-empty toplevel as a `PathBuf`) instead of assembling
     // the raw arg-vector. The `.git`-exists fast path above is preserved.
     crate::git::repo_root(path)
-}
-
-fn shell_quote_for_hint(value: &str) -> String {
-    quote_path(value)
 }

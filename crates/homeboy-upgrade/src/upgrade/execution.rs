@@ -517,16 +517,21 @@ fn source_swap_failure_diagnostics_for_paths(
         };
         format!(
             "{prefix} -m 0755 {} {}",
-            shell_quote_path(built),
-            shell_quote_path(active)
+            quote_path(&built.display().to_string()),
+            quote_path(&active.display().to_string())
         )
     });
 
     let built_binary_command = built_binary.map(|built| {
         let mut command = format!(
             "{} upgrade --method source --source-path {} --force",
-            shell_quote_path(built),
-            shell_quote_path(source_workspace.unwrap_or_else(|| Path::new(".")))
+            quote_path(&built.display().to_string()),
+            quote_path(
+                &source_workspace
+                    .unwrap_or_else(|| Path::new("."))
+                    .display()
+                    .to_string()
+            )
         );
         command.push_str(" --skip-runners --skip-extensions");
         command
@@ -676,10 +681,6 @@ fn make_source_install_executable(path: &Path) -> Result<()> {
 
 fn display_path(path: &Path) -> String {
     path.display().to_string()
-}
-
-fn shell_quote_path(path: &Path) -> String {
-    quote_path(&path.display().to_string())
 }
 
 /// Read back the active binary version after a successful swap, retrying while

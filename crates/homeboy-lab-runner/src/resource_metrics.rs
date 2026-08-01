@@ -1038,7 +1038,9 @@ mod tests {
             "-c",
             &format!(
                 "sh -c 'trap \"\" TERM; while :; do :; done' & echo $! > {}; wait",
-                shell_quote_path(&descendant_pid_file)
+                homeboy_engine_primitives::shell::quote_path(
+                    &descendant_pid_file.display().to_string()
+                )
             ),
         ]);
 
@@ -1066,14 +1068,6 @@ mod tests {
             .parse::<libc::pid_t>()
             .expect("numeric descendant pid");
         assert_ne!(unsafe { libc::kill(descendant_pid, 0) }, 0);
-    }
-
-    #[cfg(unix)]
-    fn shell_quote_path(path: &std::path::Path) -> String {
-        format!(
-            "'{}'",
-            path.display().to_string().replace('\'', "'\\\"'\\\"'")
-        )
     }
 
     #[cfg(unix)]

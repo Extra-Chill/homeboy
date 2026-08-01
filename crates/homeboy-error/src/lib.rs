@@ -66,9 +66,17 @@ impl ExecutableAction {
     }
 }
 
-// Kept byte-for-byte compatible with homeboy-engine-primitives::shell::quote_arg.
-// homeboy-error is below that crate in the dependency graph, so it cannot import it.
-fn posix_quote_arg(arg: &str) -> String {
+/// POSIX-quote a single argument for rendering a command back to the user.
+///
+/// Kept byte-for-byte compatible with
+/// `homeboy_engine_primitives::shell::quote_arg`. `homeboy-error` is *below*
+/// that crate in the dependency graph, so it cannot import the primitive and
+/// this duplicate is a genuine structural constraint rather than drift.
+///
+/// It is `pub` solely so `homeboy-engine-primitives` (which depends on this
+/// crate) can assert the byte-equality this comment claims. Prefer
+/// `shell::quote_arg` in any crate that can reach it.
+pub fn posix_quote_arg(arg: &str) -> String {
     if arg.is_empty() {
         return "''".to_string();
     }

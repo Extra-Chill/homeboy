@@ -25,6 +25,7 @@ use super::spec::{RigResourcesSpec, RigSpec};
 use super::state::now_rfc3339;
 use homeboy_core::error::{Error, Result, RigResourceConflictInfo};
 use homeboy_core::paths;
+use homeboy_engine_primitives::shell::quote_arg;
 use lock::LeaseIndexLock;
 
 /// On-disk lease held by one active mutating rig command.
@@ -448,26 +449,15 @@ fn run_lease_diagnostic(lease: RigRunLease) -> RigRunLeaseDiagnostic {
         reclaimable_without_force,
         inspect_command: run_id.map(|run_id| format!("homeboy runs show {run_id}")),
         safe_cleanup_command: reclaimable_without_force.then(|| {
-            format!("homeboy rig release-lock {}", shell_quote(&lease.rig_id))
+            format!("homeboy rig release-lock {}", quote_arg(&lease.rig_id))
         }),
         reconcile_command: "homeboy runs resources --actionable".to_string(),
         force_release_warning: format!(
             "Do not use `homeboy rig release-lock {} --force` while pid {} is still running unless you have independently confirmed the holder is wedged and will never finish; force-release only removes the local guardrail and does not stop the holder process.",
-            shell_quote(&lease.rig_id),
+            quote_arg(&lease.rig_id),
             lease.pid
         ),
         resources: lease.resources,
-    }
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 

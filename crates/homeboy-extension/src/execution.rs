@@ -259,7 +259,7 @@ pub fn run_deployment_provider(
             None,
         )
     })?;
-    let quoted_contract = shell_quote(contract);
+    let quoted_contract = shell::quote_path(contract);
     let command_template = if dry_run {
         provider.dry_run_command.as_deref().ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -300,10 +300,6 @@ pub fn run_deployment_provider(
         project_id: Some(project_id.to_string()),
         output: Some(execution.output),
     })
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Execute a extension action (API call).

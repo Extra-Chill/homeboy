@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fs4::fs_std::FileExt;
 use homeboy_engine_primitives::content_hash;
+use homeboy_engine_primitives::shell::quote_path;
 use serde::Serialize;
 use serde_json::json;
 
@@ -262,7 +263,7 @@ pub fn cleanup_shared_cargo_targets(
         let apply = if options.apply { " --apply" } else { "" };
         format!(
             "homeboy cleanup --include shared-cargo-targets{apply} --cursor {}",
-            shell_quote(cursor)
+            quote_path(cursor)
         )
     });
     let skipped_count = retained_by_reason.values().sum();
@@ -342,7 +343,7 @@ fn storage_status(
         legacy_discovery_command: moved.then(|| {
             format!(
                 "HOMEBOY_CARGO_TARGET_ROOT={} homeboy cleanup --include shared-cargo-targets",
-                shell_quote(&legacy_root.display().to_string())
+                quote_path(&legacy_root.display().to_string())
             )
         }),
     })
@@ -741,9 +742,6 @@ fn path_size(path: &Path) -> Result<u64> {
 }
 fn io_error(error: std::io::Error, operation: &str) -> Error {
     Error::internal_io(error.to_string(), Some(operation.to_string()))
-}
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]

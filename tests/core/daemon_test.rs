@@ -2660,11 +2660,6 @@ fn assert_pid_exits(pid: libc::pid_t) {
 }
 
 #[cfg(unix)]
-fn shell_quote_path(path: &std::path::Path) -> String {
-    format!("'{}'", path.display().to_string().replace('\'', "'\"'\"'"))
-}
-
-#[cfg(unix)]
 #[test]
 fn daemon_cancellation_reaps_cooperative_child_process_group() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -2674,7 +2669,7 @@ fn daemon_cancellation_reaps_cooperative_child_process_group() {
         "-c",
         &format!(
             "sleep 30 & echo $! > {}; wait",
-            shell_quote_path(&descendant)
+            homeboy_engine_primitives::shell::quote_path(&descendant.display().to_string())
         ),
     ]);
     crate::engine::command::isolate_process_tree(&mut command);
@@ -2699,7 +2694,7 @@ fn daemon_cancellation_escalates_and_reaps_term_resistant_parent_and_descendant(
         "-c",
         &format!(
             "trap '' TERM; sh -c 'trap \"\" TERM; while :; do :; done' & echo $! > {}; wait",
-            shell_quote_path(&descendant)
+            homeboy_engine_primitives::shell::quote_path(&descendant.display().to_string())
         ),
     ]);
     crate::engine::command::isolate_process_tree(&mut command);

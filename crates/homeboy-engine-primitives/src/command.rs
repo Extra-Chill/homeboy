@@ -1064,7 +1064,7 @@ mod tests {
         let pid_file = temp.path().join("descendant.pid");
         let script = format!(
             "trap '' TERM; sh -c 'trap \"\" TERM; while :; do :; done' & echo $! > {}; wait",
-            shell_quote_path(&pid_file)
+            crate::shell::quote_path(&pid_file.display().to_string())
         );
         let mut command = Command::new("sh");
         command.args(["-c", &script]);
@@ -1091,7 +1091,7 @@ mod tests {
         let pid_file = temp.path().join("upload-child.pid");
         let script = format!(
             "trap '' TERM; sh -c 'trap \"\" TERM; while :; do :; done' & echo $! > {}; wait",
-            shell_quote_path(&pid_file)
+            crate::shell::quote_path(&pid_file.display().to_string())
         );
         let mut command = Command::new("sh");
         command.args(["-c", &script]);
@@ -1145,7 +1145,7 @@ mod tests {
         let pid_file = temp.path().join("descendant.pid");
         let script = format!(
             "sleep 30 & echo $! > {}; printf done",
-            shell_quote_path(&pid_file)
+            crate::shell::quote_path(&pid_file.display().to_string())
         );
         let mut command = Command::new("sh");
         command.args(["-c", &script]);
@@ -1173,13 +1173,5 @@ mod tests {
             .parse::<libc::pid_t>()
             .expect("numeric descendant pid");
         assert_ne!(unsafe { libc::kill(descendant_pid, 0) }, 0);
-    }
-
-    #[cfg(unix)]
-    fn shell_quote_path(path: &std::path::Path) -> String {
-        format!(
-            "'{}'",
-            path.display().to_string().replace('\'', "'\\\"'\\\"'")
-        )
     }
 }

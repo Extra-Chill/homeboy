@@ -737,7 +737,7 @@ fn explicit_source_upgrade_runs_build_phase_without_upstream_on_local_branch_or_
         let build_marker = checkout.path().join("build-phase");
         let upgrade_command = format!(
             "set -e\ngit fetch origin\ngit reset --hard origin/main\nsh -c 'git pull --ff-only'\nprintf built > {}",
-            shell_quote_path(&build_marker)
+            quote_path(&build_marker.display().to_string())
         );
         let command =
             source_upgrade_command_for_prepared_workspace(&upgrade_command, checkout.path(), true)
@@ -773,7 +773,7 @@ fn explicit_source_upgrade_skips_git_switch_main_and_reaches_build_phase() {
     // `set -e` would abort before the build). `git checkout -b` is also skipped.
     let upgrade_command = format!(
         "set -e\ngit switch main\ngit checkout main\nprintf built > {}",
-        shell_quote_path(&build_marker)
+        quote_path(&build_marker.display().to_string())
     );
     let command =
         source_upgrade_command_for_prepared_workspace(&upgrade_command, checkout.path(), true)
