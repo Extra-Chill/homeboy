@@ -249,6 +249,10 @@ fn persist_bench_artifact(
 
     match record {
         Ok(record) => {
+            // The source URL can be a tunnel or runner-local address. Keep it
+            // in the persisted provenance metadata, but never present it as a
+            // reviewer-facing reference after durable promotion.
+            artifact.url = None;
             artifact.path = Some(record.path.clone());
             apply_recorded_bench_artifact_links(scenario_id, run_index, name, artifact, &record)
         }

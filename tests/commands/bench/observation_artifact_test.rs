@@ -22,6 +22,7 @@ fn bench_observation_reports_missing_and_blocked_artifacts() {
             "promoted".to_string(),
             BenchArtifact {
                 path: Some("promoted.json".to_string()),
+                url: Some("https://expired-runner.example/promoted.json".to_string()),
                 required_durable: true,
                 ..BenchArtifact::default()
             },
@@ -91,6 +92,10 @@ fn bench_observation_reports_missing_and_blocked_artifacts() {
         assert_eq!(workflow.status, "failed");
         assert_eq!(workflow.exit_code, 1);
         assert!(workflow.failure.is_some());
+        assert_eq!(
+            workflow.results.as_ref().unwrap().scenarios[0].artifacts["promoted"].url,
+            None
+        );
         assert!(
             workflow.results.as_ref().unwrap().scenarios[0].artifacts["promoted"]
                 .observation_artifact_id

@@ -72,6 +72,18 @@ fn bench_artifact_serializes_required_durable_contract() {
 }
 
 #[test]
+fn bench_artifact_accepts_mixed_legacy_and_durable_records() {
+    let legacy: BenchArtifact =
+        serde_json::from_str(r#"{"path":"artifacts/legacy.png"}"#).expect("legacy artifact");
+    let durable: BenchArtifact =
+        serde_json::from_str(r#"{"path":"artifacts/current.png","required_durable":true}"#)
+            .expect("durable artifact");
+
+    assert!(!legacy.required_durable);
+    assert!(durable.required_durable);
+}
+
+#[test]
 fn bench_artifact_serializes_preview_metadata_when_present() {
     let artifact = BenchArtifact {
         path: Some("artifacts/preview.json".to_string()),
