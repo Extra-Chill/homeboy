@@ -523,9 +523,188 @@ fn json_parse_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
                 display_relative(root, file),
                 error
             ));
+            continue;
+        }
+        for duplicate in duplicate_json_keys(&content) {
+            failures.push(format!(
+                "{} duplicate JSON key `{}` in {} at line {} and line {}; the later value silently wins",
+                display_relative(root, file),
+                duplicate.key,
+                display_pointer(&duplicate.pointer),
+                duplicate.first_line,
+                duplicate.second_line
+            ));
         }
     }
     Ok(failures)
+}
+
+/// A key declared more than once inside the same JSON object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DuplicateJsonKey {
+    /// RFC 6901 pointer to the containing object.
+    pointer: String,
+    key: String,
+    first_line: usize,
+    second_line: usize,
+}
+
+struct ScanFrame {
+    object: bool,
+    pointer: String,
+    keys: BTreeMap<String, usize>,
+    index: usize,
+    current_key: String,
+}
+
+/// Report keys declared more than once inside the same JSON object.
+///
+/// `serde_json` accepts duplicate object keys and silently keeps the last one,
+/// so a rig spec can lose an entire declaration with no signal at all. In
+/// chubes4/homeboy-rigs, `woocommerce-wp-codebox-target.base.json` declares
+/// `"lifecycle"` twice and the first block's `intent: "external"` is dropped,
+/// changing that rig's cleanup contract invisibly.
+///
+/// This is a raw token pass rather than a `serde` visitor because the visitor
+/// API cannot report where in the source each declaration sits, and "the key
+/// appears twice" is only actionable with both locations. The scan assumes the
+/// input already parses — callers run it only after `serde_json` has accepted
+/// the document.
+fn duplicate_json_keys(content: &str) -> Vec<DuplicateJsonKey> {
+    let chars: Vec<char> = content.chars().collect();
+    let mut duplicates = Vec::new();
+    let mut stack: Vec<ScanFrame> = Vec::new();
+    let mut expect_key = false;
+    let mut line = 1usize;
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        match chars[index] {
+            '\n' => {
+                line += 1;
+                index += 1;
+            }
+            '"' => {
+                let start_line = line;
+                let (value, next) = read_json_string(&chars, index, &mut line);
+                index = next;
+                if expect_key {
+                    if let Some(frame) = stack.last_mut() {
+                        match frame.keys.get(&value) {
+                            Some(first_line) => duplicates.push(DuplicateJsonKey {
+                                pointer: frame.pointer.clone(),
+                                key: value.clone(),
+                                first_line: *first_line,
+                                second_line: start_line,
+                            }),
+                            None => {
+                                frame.keys.insert(value.clone(), start_line);
+                            }
+                        }
+                        frame.current_key = value;
+                    }
+                    expect_key = false;
+                }
+            }
+            open @ ('{' | '[') => {
+                let pointer = child_pointer(&stack);
+                stack.push(ScanFrame {
+                    object: open == '{',
+                    pointer,
+                    keys: BTreeMap::new(),
+                    index: 0,
+                    current_key: String::new(),
+                });
+                expect_key = open == '{';
+                index += 1;
+            }
+            '}' | ']' => {
+                stack.pop();
+                expect_key = false;
+                index += 1;
+            }
+            ',' => {
+                if let Some(frame) = stack.last_mut() {
+                    if !frame.object {
+                        frame.index += 1;
+                    }
+                    expect_key = frame.object;
+                } else {
+                    expect_key = false;
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+
+    duplicates
+}
+
+/// Consume a JSON string literal starting at `open_quote`, returning its
+/// decoded value and the index just past the closing quote.
+fn read_json_string(chars: &[char], open_quote: usize, line: &mut usize) -> (String, usize) {
+    let mut value = String::new();
+    let mut index = open_quote + 1;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => {
+                if let Some(escaped) = chars.get(index + 1) {
+                    match escaped {
+                        'n' => value.push('\n'),
+                        't' => value.push('\t'),
+                        'r' => value.push('\r'),
+                        'b' => value.push('\u{8}'),
+                        'f' => value.push('\u{c}'),
+                        'u' => {
+                            let hex: String = chars.iter().skip(index + 2).take(4).collect();
+                            if let Some(decoded) =
+                                u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
+                            {
+                                value.push(decoded);
+                            }
+                            index += 4;
+                        }
+                        other => value.push(*other),
+                    }
+                }
+                index += 2;
+            }
+            '"' => return (value, index + 1),
+            '\n' => {
+                *line += 1;
+                value.push('\n');
+                index += 1;
+            }
+            other => {
+                value.push(other);
+                index += 1;
+            }
+        }
+    }
+    (value, index)
+}
+
+fn child_pointer(stack: &[ScanFrame]) -> String {
+    match stack.last() {
+        None => String::new(),
+        Some(parent) if parent.object => {
+            format!("{}/{}", parent.pointer, escape_pointer(&parent.current_key))
+        }
+        Some(parent) => format!("{}/{}", parent.pointer, parent.index),
+    }
+}
+
+fn escape_pointer(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
+}
+
+fn display_pointer(pointer: &str) -> &str {
+    if pointer.is_empty() {
+        "the document root"
+    } else {
+        pointer
+    }
 }
 
 fn template_source_root(root: &Path, file: &Path) -> Result<PathBuf> {
@@ -1381,6 +1560,114 @@ mod tests {
             "contract error: {:?}",
             contract_step.error
         );
+    }
+
+    fn json_step(outcome: &PipelineOutcome) -> &PipelineStepOutcome {
+        outcome
+            .steps
+            .iter()
+            .find(|step| step.label.contains("JSON specs parse"))
+            .expect("json step")
+    }
+
+    #[test]
+    fn duplicate_json_keys_reports_both_declaration_lines() {
+        let content = "{\n  \"lifecycle\": {\n    \"cleanup\": { \"intent\": \"external\" }\n  },\n  \"id\": \"x\",\n  \"lifecycle\": {\n    \"cleanup\": \"dry_run\"\n  }\n}\n";
+
+        let duplicates = duplicate_json_keys(content);
+
+        assert_eq!(
+            duplicates,
+            vec![DuplicateJsonKey {
+                pointer: String::new(),
+                key: "lifecycle".to_string(),
+                first_line: 2,
+                second_line: 6,
+            }]
+        );
+    }
+
+    #[test]
+    fn duplicate_json_keys_points_at_the_containing_object() {
+        let nested = duplicate_json_keys("{\n  \"a\": {\n    \"b\": 1,\n    \"b\": 2\n  }\n}\n");
+        assert_eq!(nested.len(), 1, "{nested:?}");
+        assert_eq!(nested[0].pointer, "/a");
+
+        let in_array = duplicate_json_keys(
+            "{\n  \"list\": [\n    { \"k\": 1 },\n    { \"k\": 1, \"k\": 2 }\n  ]\n}\n",
+        );
+        assert_eq!(in_array.len(), 1, "{in_array:?}");
+        assert_eq!(in_array[0].pointer, "/list/1");
+    }
+
+    #[test]
+    fn duplicate_json_keys_ignores_object_syntax_inside_string_values() {
+        let content = "{\n  \"cmd\": \"{ \\\"a\\\": 1, \\\"a\\\": 2 }\",\n  \"note\": \"he said \\\"hi\\\" }\",\n  \"other\": \"[,{\",\n  \"a\": 1\n}\n";
+
+        assert!(duplicate_json_keys(content).is_empty());
+    }
+
+    #[test]
+    fn duplicate_json_keys_accepts_a_clean_document() {
+        let content = "{\n  \"a\": 1,\n  \"b\": { \"a\": 2 },\n  \"c\": [1, 2, {\"a\": 3}]\n}\n";
+
+        assert!(duplicate_json_keys(content).is_empty());
+    }
+
+    #[test]
+    fn duplicate_json_keys_decodes_escaped_key_names() {
+        // `"a\u0062"` and `"ab"` are the same key; serde_json keeps only the last.
+        let duplicates = duplicate_json_keys("{\n  \"a\\u0062\": 1,\n  \"ab\": 2\n}\n");
+
+        assert_eq!(duplicates.len(), 1, "{duplicates:?}");
+        assert_eq!(duplicates[0].key, "ab");
+    }
+
+    #[test]
+    fn package_lint_reports_duplicate_keys_in_a_rig_spec() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("duplicate");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            "{\n  \"id\": \"duplicate\",\n  \"lifecycle\": {\n    \"cleanup\": { \"intent\": \"external\", \"reason\": \"sandbox owns teardown\" }\n  },\n  \"lifecycle\": {\n    \"cleanup\": \"dry_run\"\n  }\n}\n",
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = json_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        let error = step.error.as_ref().expect("json error");
+        assert!(error.contains("duplicate JSON key `lifecycle`"), "{error}");
+        assert!(error.contains("line 3 and line 6"), "{error}");
+    }
+
+    #[test]
+    fn package_lint_reports_duplicate_keys_in_a_base_spec() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("duplicate");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("duplicate.base.json"),
+            "{\n  \"trace\": { \"default_component\": \"app\" },\n  \"trace\": { \"default_component\": \"other\" }\n}\n",
+        )
+        .expect("write base");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{ "extends": "./duplicate.base.json", "id": "duplicate" }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = json_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        assert!(step
+            .error
+            .as_ref()
+            .expect("json error")
+            .contains("duplicate.base.json duplicate JSON key `trace`"));
     }
 
     #[test]
