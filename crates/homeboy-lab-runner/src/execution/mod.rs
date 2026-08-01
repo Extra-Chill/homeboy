@@ -15,7 +15,7 @@ use homeboy_core::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobStatus};
 use homeboy_core::engine::command::CommandCaptureMetadata;
 use homeboy_core::env_materialization_plan::EnvMaterializationPlan;
 use homeboy_core::error::{Error, ErrorCode, Result};
-use homeboy_core::lab_contract::{LabRunnerWorkload, LabRunnerWorkloadArtifactRef};
+use homeboy_core::lab_contract::LabRunnerWorkload;
 use homeboy_core::observation::{NewRunRecord, ObservationStore, RunListFilter, RunStatus};
 use homeboy_core::runner_execution_envelope::{
     BinaryProvenance, ExtensionProvenance, OrchestrationTargetProvenance, PathMaterializationEntry,
@@ -388,16 +388,26 @@ fn runner_execution_record_for_output(
         .clone()
         .or_else(|| mirror_run_id.clone())
         .unwrap_or_else(|| format!("runner-exec:{}:{}", runner.id, transport));
-    let mut artifact_refs = job_artifact_refs(artifacts);
+    // The workload artifact refs are now literally the same type as the job
+    // artifacts, so this is a clone rather than a field-by-field rebuild that
+    // dropped mime/size_bytes/sha256.
+    let mut artifact_refs = artifacts.to_vec();
     if let Some(result) = runner_result {
-        artifact_refs.extend(result.artifact_refs.iter().map(|artifact| {
-            LabRunnerWorkloadArtifactRef {
-                id: artifact.artifact_id.clone(),
-                name: artifact.name.clone(),
-                path: artifact.path.clone(),
-                url: artifact.url.clone(),
-            }
-        }));
+        artifact_refs.extend(
+            result
+                .artifact_refs
+                .iter()
+                .map(|artifact| JobArtifactMetadata {
+                    id: artifact.artifact_id.clone(),
+                    name: artifact.name.clone(),
+                    path: artifact.path.clone(),
+                    url: artifact.url.clone(),
+                    mime: artifact.mime.clone(),
+                    size_bytes: artifact.size_bytes,
+                    sha256: artifact.sha256.clone(),
+                    ..Default::default()
+                }),
+        );
     }
     artifact_refs.sort_by(|left, right| left.id.cmp(&right.id));
     artifact_refs.dedup_by(|left, right| left.id == right.id);
@@ -538,18 +548,6 @@ fn extension_provenance(required_extensions: &[String]) -> Vec<ExtensionProvenan
     extensions.sort_by(|left, right| left.extension_id.cmp(&right.extension_id));
     extensions.dedup_by(|left, right| left.extension_id == right.extension_id);
     extensions
-}
-
-fn job_artifact_refs(artifacts: &[JobArtifactMetadata]) -> Vec<LabRunnerWorkloadArtifactRef> {
-    artifacts
-        .iter()
-        .map(|artifact| LabRunnerWorkloadArtifactRef {
-            id: artifact.id.clone(),
-            name: artifact.name.clone(),
-            path: artifact.path.clone(),
-            url: artifact.url.clone(),
-        })
-        .collect()
 }
 
 fn runner_execution_next_actions(runner_id: &str, job_id: &str) -> Vec<RunnerExecutionNextAction> {

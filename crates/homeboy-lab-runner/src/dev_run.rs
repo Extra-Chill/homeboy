@@ -9,7 +9,7 @@ use crate::{
 };
 use homeboy_core::error::{Error, Result};
 use homeboy_core::lab_contract::{
-    LabRunnerWorkload, LabRunnerWorkloadArtifactRef, LabRunnerWorkloadAssignment,
+    JobArtifactMetadata, LabRunnerWorkload, LabRunnerWorkloadAssignment,
     LabRunnerWorkloadCommandFamily, LabRunnerWorkloadKind, LabRunnerWorkloadMutationPolicy,
     LabRunnerWorkloadResultRefs, LabRunnerWorkloadSecrets, LabRunnerWorkloadState,
     LabRunnerWorkloadWorkspaceMappings, LAB_RUNNER_WORKLOAD_SCHEMA,
@@ -529,11 +529,12 @@ fn extension_dev_run_execution_outcome(
             record
                 .artifact_refs
                 .iter()
-                .map(|artifact| LabRunnerWorkloadArtifactRef {
+                .map(|artifact| JobArtifactMetadata {
                     id: artifact.id.clone(),
                     name: artifact.name.clone(),
                     path: artifact.path.clone(),
                     url: artifact.url.clone(),
+                    ..Default::default()
                 })
                 .collect()
         })

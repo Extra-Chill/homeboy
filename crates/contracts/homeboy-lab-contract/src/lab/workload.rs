@@ -128,11 +128,26 @@ pub struct LabRunnerWorkloadResultRefs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<LabRunnerWorkloadArtifactRef>,
+    pub artifacts: Vec<JobArtifactMetadata>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LabRunnerWorkloadArtifactRef {
+/// Canonical artifact pointer shared by Lab workloads, runner execution
+/// records, and the runner job model.
+///
+/// This is the single artifact-pointer shape. `JobArtifactMetadata`
+/// used to be a separate `{id, name, path, url}` struct here that was a strict
+/// field-subset of the api-jobs `JobArtifactMetadata`, so crossing between them
+/// meant a field-by-field rebuild that silently dropped `mime`, `size_bytes`
+/// and `sha256`. The type lives in this crate because `homeboy-api-jobs-contract`
+/// already depends on `homeboy-lab-contract`; defining it the other way round
+/// would be a dependency cycle.
+///
+/// Every added field is `Option` + `skip_serializing_if`, so a value carrying
+/// only the old four fields serializes byte-identically to the pre-collapse
+/// wire shape, and pre-collapse JSON still deserializes. Neither struct used
+/// `deny_unknown_fields`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct JobArtifactMetadata {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -140,6 +155,16 @@ pub struct LabRunnerWorkloadArtifactRef {
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 impl LabRunnerWorkloadCommandFamily {
@@ -167,5 +192,78 @@ impl LabRunnerWorkloadCommandFamily {
             label if label.starts_with("tunnel") => Self::Service,
             _ => Self::Unknown,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// #11137 collapsed `LabRunnerWorkloadArtifactRef` onto
+    /// `JobArtifactMetadata`. The former was a strict field-subset of the
+    /// latter, so records written by an older binary must still deserialize and
+    /// re-serialize byte-identically. This matters because the type is embedded
+    /// in two schemas published to external cross-language consumers via the
+    /// contract schema catalog: `homeboy/runner-workload/v1` and
+    /// `homeboy/runner-exec-handoff/v1`.
+    #[test]
+    fn artifact_refs_keep_the_pre_collapse_wire_shape() {
+        let payload = json!([
+            {
+                "id": "report",
+                "name": "summary",
+                "path": "artifacts/summary.json",
+                "url": "https://example.test/summary.json"
+            },
+            { "id": "bare" }
+        ]);
+
+        let refs: Vec<JobArtifactMetadata> =
+            serde_json::from_value(payload.clone()).expect("legacy refs deserialize");
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].id, "report");
+        assert_eq!(refs[0].name.as_deref(), Some("summary"));
+        assert_eq!(refs[0].path.as_deref(), Some("artifacts/summary.json"));
+        assert_eq!(refs[1].id, "bare");
+        assert_eq!(refs[1].name, None);
+
+        // Fields gained in the collapse stay absent from the wire form, so the
+        // round trip is byte-identical to the pre-collapse shape.
+        assert_eq!(refs[0].mime, None);
+        assert_eq!(refs[0].size_bytes, None);
+        assert_eq!(refs[0].sha256, None);
+
+        let reserialized = serde_json::to_value(&refs).expect("refs serialize");
+        assert_eq!(reserialized, payload);
+    }
+
+    /// The added fields are additive: when they are populated they serialize
+    /// alongside the original four, and a consumer that ignores them still sees
+    /// the pre-collapse shape.
+    #[test]
+    fn artifact_ref_added_fields_are_additive() {
+        let artifact = JobArtifactMetadata {
+            id: "report".to_string(),
+            path: Some("artifacts/summary.json".to_string()),
+            sha256: Some("abc123".to_string()),
+            size_bytes: Some(42),
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&artifact).expect("artifact serializes");
+        assert_eq!(
+            value,
+            json!({
+                "id": "report",
+                "path": "artifacts/summary.json",
+                "sha256": "abc123",
+                "size_bytes": 42
+            })
+        );
+
+        let round_tripped: JobArtifactMetadata =
+            serde_json::from_value(value).expect("artifact deserializes");
+        assert_eq!(round_tripped, artifact);
     }
 }

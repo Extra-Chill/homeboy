@@ -638,14 +638,13 @@ pub(crate) fn lab_runner_workload_with_result_refs(
     workload.result_refs.mirror_run_id = mirror_run_id.map(str::to_string);
     workload.result_refs.artifacts = artifacts
         .iter()
-        .map(
-            |artifact| homeboy_core::lab_contract::LabRunnerWorkloadArtifactRef {
-                id: artifact.id.clone(),
-                name: artifact.name.clone(),
-                path: artifact.path.clone(),
-                url: artifact.url.clone(),
-            },
-        )
+        .map(|artifact| homeboy_core::lab_contract::JobArtifactMetadata {
+            id: artifact.id.clone(),
+            name: artifact.name.clone(),
+            path: artifact.path.clone(),
+            url: artifact.url.clone(),
+            ..Default::default()
+        })
         .collect();
     workload
 }
