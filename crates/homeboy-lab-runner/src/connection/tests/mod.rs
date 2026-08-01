@@ -17,6 +17,7 @@ use super::connection_daemon::{
     daemon_identity_from_body, daemon_runtime_loaded_paths_from_body,
     daemon_runtime_stale_paths_from_body, daemon_version_from_body, versions_match,
 };
+use homeboy_core::daemon::{DaemonFreshnessReport, DaemonRecoveryEvidence};
 use homeboy_core::test_support;
 
 pub(super) fn command_output(
@@ -251,5 +252,26 @@ pub(super) fn remote_daemon_status_for_test_with_reason(
         work_evidence: RemoteDaemonWorkEvidence::Unknown,
         endpoint_probe_error: None,
         termination_evidence: None,
+        daemon_freshness: (stale_reason_code == Some(DaemonStaleReasonCode::PidDead)).then(|| {
+            DaemonFreshnessReport {
+                fresh: false,
+                stale_reason_code,
+                restartable: false,
+                lease_id: Some(lease_id.to_string()),
+                pid: Some(pid),
+                recovery_evidence: Some(DaemonRecoveryEvidence::ProvenDead),
+                ownership_evidence: None,
+                adoption_command: Some(format!(
+                    "homeboy daemon adopt-orphan --lease-id {lease_id} --confirm-pid-dead"
+                )),
+                binary_hash: None,
+                daemon_version: None,
+                daemon_build_identity: None,
+                runtime_paths: None,
+                active_jobs,
+                termination_evidence: None,
+                repair_plan: Vec::new(),
+            }
+        }),
     }
 }

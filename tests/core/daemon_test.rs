@@ -1762,6 +1762,22 @@ fn local_freshness_report_carries_the_same_evidence_fields_as_the_remote_produce
 }
 
 #[test]
+fn dead_lease_conflict_suppresses_the_adoption_command_until_candidate_attribution_clears() {
+    let candidate = DaemonProcessCandidate {
+        pid: 4242,
+        executable: "/tmp/homeboy".to_string(),
+        cmdline: "HOME=/tmp/home homeboy daemon serve --addr 127.0.0.1:0".to_string(),
+        bind_endpoint: Some("127.0.0.1:0".to_string()),
+        durable_store_path: Some("/tmp/home/.config/homeboy/daemon/jobs.json".to_string()),
+        build_identity: None,
+        ownership: DaemonProcessOwnership::Ambiguous,
+    };
+
+    assert!(has_conflicting_process_candidates(&[candidate]));
+    assert!(!has_conflicting_process_candidates(&[]));
+}
+
+#[test]
 fn local_freshness_report_plans_explicit_reconciliation_for_a_restartable_lease() {
     let _home = HomeGuard::new();
     let state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
@@ -2180,8 +2196,9 @@ fn lease_bound_stop_converges_term_resistant_mixed_version_supervisor_and_daemon
     let supervisor_pid = supervisor.id();
     let deadline = Instant::now() + Duration::from_secs(2);
     let daemon_pid = loop {
-        if let Ok(pid) = std::fs::read_to_string(&marker_path)
-            .map(|pid| pid.trim().parse::<u32>().expect("child PID"))
+        if let Some(pid) = std::fs::read_to_string(&marker_path)
+            .ok()
+            .and_then(|pid| pid.trim().parse::<u32>().ok())
         {
             break pid;
         }
@@ -2199,7 +2216,7 @@ fn lease_bound_stop_converges_term_resistant_mixed_version_supervisor_and_daemon
     write_daemon_state_for_test(&state);
 
     let started = Instant::now();
-    let result = stop_for_lease(&state.lease_id).expect("managed lease stop converges pair");
+    let result = stop().expect("ordinary stop converges stale supervised pair");
 
     assert!(result.stopped);
     assert!(started.elapsed() < Duration::from_secs(10));
@@ -2209,6 +2226,56 @@ fn lease_bound_stop_converges_term_resistant_mixed_version_supervisor_and_daemon
     assert!(!pid_is_running(daemon_pid));
     assert!(!pid_is_running(supervisor_pid));
     assert!(!state_path().expect("state path").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn ordinary_stop_escalates_a_fresh_term_resistant_supervised_daemon() {
+    let _home = HomeGuard::new();
+    let startup_token = "fresh-supervised-daemon";
+    let marker = tempfile::NamedTempFile::new().expect("child PID marker");
+    let marker_path = marker.path().to_string_lossy().into_owned();
+    let supervisor = Command::new("sh")
+        .args([
+            "-c",
+            ": daemon supervise; trap '' TERM; sh -c 'trap \"\" TERM; while :; do sleep 1; done' homeboy daemon serve --startup-token \"$2\" & echo $! > \"$3\"; child=$!; while kill -0 \"$child\" 2>/dev/null; do sleep 1; done; while :; do sleep 1; done",
+            "homeboy",
+            "--startup-token",
+            startup_token,
+            marker_path.as_str(),
+        ])
+        .env(DAEMON_STARTUP_TOKEN_ENV, startup_token)
+        .spawn()
+        .expect("start TERM-resistant fresh supervisor");
+    let supervisor_pid = supervisor.id();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let daemon_pid = loop {
+        if let Some(pid) = std::fs::read_to_string(&marker_path)
+            .ok()
+            .and_then(|pid| pid.trim().parse::<u32>().ok())
+        {
+            break pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "supervisor did not start daemon child"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let mut state = daemon_state_for_test(daemon_pid, "127.0.0.1:1");
+    state.startup_token = startup_token.to_string();
+    write_daemon_state_for_test(&state);
+
+    let started = Instant::now();
+    let result = stop().expect("ordinary fresh stop converges pair");
+
+    assert!(result.stopped);
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let evidence = result.termination_evidence.expect("termination evidence");
+    assert!(evidence.os_evidence.contains("daemon pid"));
+    assert!(evidence.os_evidence.contains("supervisor SIGKILL"));
+    assert!(!pid_is_running(daemon_pid));
+    assert!(!pid_is_running(supervisor_pid));
 }
 
 #[cfg(target_os = "linux")]
@@ -2277,7 +2344,7 @@ fn force_stop_matching_idle_lease_retires_a_reused_pid_without_signaling() {
 }
 
 #[test]
-fn force_stop_default_non_force_behavior_remains_unchanged() {
+fn ordinary_stop_retires_a_live_unowned_stale_lease_without_signaling() {
     let _home = HomeGuard::new();
     let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
     state.binary_sha256 = Some("stale-binary-hash".to_string());
@@ -2288,7 +2355,8 @@ fn force_stop_default_non_force_behavior_remains_unchanged() {
     assert!(!result.stopped);
     assert_eq!(result.pid, Some(std::process::id()));
     assert!(result.termination_evidence.is_none());
-    assert!(state_path().expect("state path").exists());
+    assert!(result.already_absent);
+    assert!(!state_path().expect("state path").exists());
 }
 
 #[test]

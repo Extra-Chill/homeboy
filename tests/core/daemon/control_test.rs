@@ -415,7 +415,7 @@ fn daemon_process_attribution_proves_explicit_different_state_directory_unrelate
 }
 
 #[test]
-fn daemon_process_attribution_proves_unrelated_and_fails_closed_when_ambiguous() {
+fn daemon_process_attribution_proves_unrelated_and_keeps_unbound_daemon_ambiguous() {
     let home = tempfile::tempdir().expect("home");
     let other_home = tempfile::tempdir().expect("other home");
     let jobs = home.path().join(".config/homeboy/daemon/jobs.json");
@@ -440,10 +440,27 @@ fn daemon_process_attribution_proves_unrelated_and_fails_closed_when_ambiguous()
     );
     assert_eq!(
         super::parse_daemon_process_candidate(&ambiguous, &jobs, Some(&executable))
-            .expect("ambiguous")
+            .expect("unbound daemon candidate")
             .ownership,
         super::super::DaemonProcessOwnership::Ambiguous
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn candidate_attribution_reads_command_env_store_identity_from_procfs() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let mut process = Command::new("sh")
+        .args(["-c", "sleep 30"])
+        .env(crate::paths::DAEMON_STATE_DIR_ENV, state_dir.path())
+        .spawn()
+        .expect("process with daemon state environment");
+
+    let store = super::process_durable_store_path(process.id()).expect("procfs store path");
+    process.kill().expect("stop process");
+    process.wait().expect("reap process");
+
+    assert_eq!(store, state_dir.path().join("jobs.json"));
 }
 
 #[test]
@@ -500,52 +517,6 @@ fn dead_persisted_lease_with_ambiguous_candidates_refuses_replacement_before_spa
         error.details["candidates"].as_array().map(Vec::len),
         Some(2)
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn adopt_orphan_with_dead_lease_and_ambiguous_listeners_never_spawns_replacement() {
-    with_isolated_home(|_| {
-        let mut first = Command::new("sh")
-            .args([
-                "-c",
-                "sleep 30 & wait # homeboy daemon serve --addr 127.0.0.1:0",
-            ])
-            .spawn()
-            .expect("first ambiguous daemon candidate");
-        let mut second = Command::new("sh")
-            .args([
-                "-c",
-                "sleep 30 & wait # homeboy daemon serve --addr 127.0.0.1:0",
-            ])
-            .spawn()
-            .expect("second ambiguous daemon candidate");
-        let state_path = crate::paths::daemon_state_file().expect("state path");
-        let mut state = fake_daemon_state(fake_daemon(u32::MAX, "lease-dead"));
-        state.state_path = state_path.display().to_string();
-        std::fs::create_dir_all(state_path.parent().expect("state parent")).expect("state parent");
-        std::fs::write(&state_path, serde_json::to_vec(&state).expect("state JSON"))
-            .expect("persist dead lease");
-        let original = std::fs::read(&state_path).expect("read persisted lease");
-        let started = std::time::Instant::now();
-
-        let result = super::adopt_orphaned_lease("lease-dead", &[], "127.0.0.1:0");
-        first.kill().expect("stop first candidate");
-        second.kill().expect("stop second candidate");
-        first.wait().expect("reap first candidate");
-        second.wait().expect("reap second candidate");
-        let error = result.expect_err("ambiguous listeners prevent dead-lease replacement");
-
-        assert!(started.elapsed() < Duration::from_secs(1));
-        assert_eq!(
-            error.details["classification"],
-            "daemon_unleased_process_conflict"
-        );
-        assert_eq!(
-            std::fs::read(&state_path).expect("read retained lease"),
-            original
-        );
-    });
 }
 
 #[test]

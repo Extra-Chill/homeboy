@@ -400,6 +400,12 @@ pub(super) fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> 
         });
     };
 
+    // A stale binary cannot serve the current client's lifecycle request. For
+    // an idle, token-owned lease, converge through the bounded direct path.
+    if !validation.fresh && validation.running {
+        return force_stop_for_lease_unlocked(&state.lease_id);
+    }
+
     if !validation.fresh || !validation.running {
         if !validation.running && path.exists() {
             remove_lease_if_identity_matches(&path, &DaemonLeaseIdentity::from_state(state))?;
@@ -447,6 +453,34 @@ pub(super) fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> 
         let active_job_ids = active_daemon_job_ids()?;
         if !force && !active_job_ids.is_empty() {
             return Err(active_jobs_block_daemon_stop_error(state, &active_job_ids));
+        }
+        if !force {
+            let termination = terminate_exact_supervised_daemon(&path, &identity, state)?;
+            let evidence = DaemonTerminationEvidence {
+                classification: DaemonTerminationClassification::CleanStop,
+                observed_at: chrono::Utc::now().to_rfc3339(),
+                lease_id: Some(state.lease_id.clone()),
+                pid: Some(pid),
+                binary_identity: Some(state.build_identity.display.clone()),
+                active_jobs: 0,
+                resource_evidence:
+                    "unavailable: ordinary stop does not collect OS resource snapshots".to_string(),
+                os_evidence: termination,
+                exit_code: None,
+                signal: Some(SIGNAL_TERMINATE),
+                stdout: None,
+                stderr: None,
+                stop_requested: true,
+            };
+            write_termination_evidence(&evidence)?;
+            remove_lease_if_identity_matches(&path, &identity)?;
+            return Ok(DaemonStopResult {
+                stopped: true,
+                already_absent: false,
+                pid: Some(pid),
+                state_path: state_path_display,
+                termination_evidence: Some(evidence),
+            });
         }
         write_termination_evidence(&DaemonTerminationEvidence {
             classification: DaemonTerminationClassification::CleanStop,

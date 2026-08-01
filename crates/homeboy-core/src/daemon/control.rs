@@ -5,6 +5,8 @@
 //! artifact fetch, and filesystem persistence live here so the orchestration is
 //! testable and reusable outside the CLI.
 
+use std::collections::VecDeque;
+use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -53,6 +55,13 @@ pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonPr
     Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| parse_daemon_process_candidate(line, jobs_path, current_exe.as_deref()))
+        .map(|mut candidate| {
+            if let Some(store) = process_durable_store_path(candidate.pid) {
+                candidate.durable_store_path = Some(store.display().to_string());
+                candidate.ownership = classify_candidate_store(&candidate, jobs_path, &store);
+            }
+            candidate
+        })
         .collect())
 }
 
@@ -88,8 +97,23 @@ pub fn supervise(addr: &str, startup_token: &str) -> Result<()> {
                 Some("spawn supervised daemon".to_string()),
             )
         })?;
+    supervise_child(child)
+}
+
+/// Own the post-spawn supervisor lifecycle. Kept separate so the real child
+/// pipes and persisted evidence can be exercised without replacing the CLI.
+fn supervise_child(mut child: std::process::Child) -> Result<()> {
     let pid = child.id();
-    let output = child.wait_with_output().map_err(|error| {
+    // A daemon can run indefinitely. Drain both pipes while it runs, retaining
+    // only a diagnostic tail so supervisor RSS cannot grow with child output.
+    let child_stdout = child.stdout.take().expect("piped stdout");
+    let child_stderr = child.stderr.take().expect("piped stderr");
+    let stdout = thread::spawn(move || bounded_redacted_reader(child_stdout));
+    let stderr = thread::spawn(move || bounded_redacted_reader(child_stderr));
+    let status = child.wait();
+    let stdout = join_output_reader(stdout, "stdout");
+    let stderr = join_output_reader(stderr, "stderr");
+    let status = status.map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("wait for supervised daemon".to_string()),
@@ -102,7 +126,7 @@ pub fn supervise(addr: &str, startup_token: &str) -> Result<()> {
     let stop_requested = prior
         .as_ref()
         .is_some_and(|evidence| evidence.stop_requested && evidence.pid == Some(pid));
-    let (exit_code, signal) = exit_details(&output.status);
+    let (exit_code, signal) = exit_details(&status);
     let evidence = DaemonTerminationEvidence {
         classification: if stop_requested { DaemonTerminationClassification::CleanStop } else { DaemonTerminationClassification::UnexpectedExit },
         observed_at: chrono::Utc::now().to_rfc3339(),
@@ -113,21 +137,93 @@ pub fn supervise(addr: &str, startup_token: &str) -> Result<()> {
         resource_evidence: "unavailable: launcher does not collect OS resource snapshots".to_string(),
         os_evidence: "unavailable: no OS evidence collected; exit status and signal are launcher observations only".to_string(),
         exit_code, signal,
-        stdout: bounded_redacted(&output.stdout), stderr: bounded_redacted(&output.stderr), stop_requested,
+        stdout, stderr, stop_requested,
     };
     super::write_termination_evidence(&evidence)
 }
 
-fn bounded_redacted(bytes: &[u8]) -> Option<String> {
+fn join_output_reader(reader: thread::JoinHandle<Option<String>>, stream: &str) -> Option<String> {
+    reader
+        .join()
+        .unwrap_or_else(|_| Some(format!("[{stream} reader panicked after child reaped]")))
+}
+
+/// Redact complete, bounded records before retaining them. An overlong record
+/// is discarded rather than retaining an unredacted suffix whose key occurred
+/// before the retention boundary.
+fn bounded_redacted_reader(mut reader: impl Read) -> Option<String> {
     const LIMIT: usize = 4096;
-    if bytes.is_empty() {
+    const RECORD_LIMIT: usize = 4096;
+    let mut tail = VecDeque::with_capacity(LIMIT);
+    let mut buffer = [0; 8192];
+    let mut record = Vec::with_capacity(RECORD_LIMIT);
+    let mut discarding_record = false;
+    let mut truncated = false;
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error) => {
+                append_redacted_tail(
+                    &mut tail,
+                    LIMIT,
+                    &format!("[output read failed: {:?}]", error.kind()),
+                );
+                truncated = true;
+                break;
+            }
+        };
+        if count == 0 {
+            break;
+        }
+        for byte in &buffer[..count] {
+            if *byte == b'\n' {
+                if discarding_record {
+                    discarding_record = false;
+                    truncated = true;
+                } else {
+                    append_redacted_tail(&mut tail, LIMIT, &String::from_utf8_lossy(&record));
+                }
+                record.clear();
+            } else if !discarding_record {
+                if record.len() == RECORD_LIMIT {
+                    // The record may contain a secret that spans its boundary.
+                    // Keep none of it until a newline starts a new record.
+                    record.clear();
+                    discarding_record = true;
+                    truncated = true;
+                } else {
+                    record.push(*byte);
+                }
+            }
+        }
+    }
+    if !record.is_empty() && !discarding_record {
+        append_redacted_tail(&mut tail, LIMIT, &String::from_utf8_lossy(&record));
+    }
+    if tail.is_empty() {
         return None;
     }
-    let mut text = String::from_utf8_lossy(&bytes[..bytes.len().min(LIMIT)]).to_string();
-    if bytes.len() > LIMIT {
+    let bytes = tail.make_contiguous();
+    let mut text = String::from_utf8_lossy(bytes).to_string();
+    if truncated {
         text.push_str("\n[truncated]");
     }
-    Some(crate::redaction::redact_string(&text))
+    Some(text)
+}
+
+fn append_redacted_tail(tail: &mut VecDeque<u8>, limit: usize, record: &str) {
+    let redacted = crate::redaction::redact_string(record);
+    let bytes = redacted.as_bytes();
+    if bytes.len() >= limit {
+        tail.clear();
+        tail.extend(&bytes[bytes.len() - limit..]);
+        return;
+    }
+    let overflow = tail.len().saturating_add(bytes.len()).saturating_sub(limit);
+    if overflow > 0 {
+        tail.drain(..overflow);
+    }
+    tail.extend(bytes);
 }
 
 #[cfg(unix)]
@@ -150,7 +246,7 @@ fn parse_daemon_process_candidate(
     let pid = fields.next()?.parse().ok()?;
     let executable = fields.next()?.to_string();
     let cmdline = fields.collect::<Vec<_>>().join(" ");
-    if !cmdline.contains("daemon serve") {
+    if !command_has_daemon_serve(&cmdline) {
         return None;
     }
     let bind_endpoint = cmdline
@@ -172,20 +268,70 @@ fn parse_daemon_process_candidate(
     let executable_matches = current_exe.is_some_and(|current| {
         Path::new(&executable).canonicalize().ok().as_deref() == Some(current)
     });
-    let ownership = match durable_store_path.as_deref() {
-        Some(store) if store != jobs_path => DaemonProcessOwnership::Unrelated,
-        Some(_) if executable_matches => DaemonProcessOwnership::Owning,
-        _ => DaemonProcessOwnership::Ambiguous,
-    };
-    Some(DaemonProcessCandidate {
+    let mut candidate = DaemonProcessCandidate {
         pid,
         executable: executable.clone(),
         cmdline: normalize_cmdline(&cmdline),
         bind_endpoint,
-        durable_store_path: durable_store_path.map(|path| path.display().to_string()),
+        durable_store_path: durable_store_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
         build_identity: executable_matches.then_some("current_executable".to_string()),
-        ownership,
-    })
+        ownership: DaemonProcessOwnership::Ambiguous,
+    };
+    if let Some(store) = durable_store_path {
+        candidate.ownership = classify_candidate_store(&candidate, jobs_path, &store);
+    }
+    Some(candidate)
+}
+
+fn command_has_daemon_serve(cmdline: &str) -> bool {
+    cmdline
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|arguments| arguments == ["daemon", "serve"])
+}
+
+fn classify_candidate_store(
+    candidate: &DaemonProcessCandidate,
+    jobs_path: &Path,
+    store: &Path,
+) -> DaemonProcessOwnership {
+    if store != jobs_path {
+        DaemonProcessOwnership::Unrelated
+    } else if candidate.build_identity.is_some() {
+        DaemonProcessOwnership::Owning
+    } else {
+        DaemonProcessOwnership::Ambiguous
+    }
+}
+
+/// `Command::env` does not become argv. Linux exposes the authoritative
+/// inherited environment via procfs; other platforms retain an ambiguous,
+/// fail-closed candidate when argv lacks a durable-store identity.
+#[cfg(target_os = "linux")]
+fn process_durable_store_path(pid: u32) -> Option<PathBuf> {
+    let environment = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    let assignment = |key: &str| {
+        environment
+            .split(|byte| *byte == 0)
+            .find_map(|entry| entry.strip_prefix(format!("{key}=").as_bytes()))
+            .and_then(|value| std::str::from_utf8(value).ok())
+    };
+    assignment(crate::paths::DAEMON_STATE_DIR_ENV)
+        .filter(|value| !value.is_empty())
+        .map(|value| Path::new(value).join("jobs.json"))
+        .or_else(|| {
+            assignment("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|value| Path::new(value).join(".config/homeboy/daemon/jobs.json"))
+        })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_durable_store_path(_pid: u32) -> Option<PathBuf> {
+    None
 }
 
 fn normalize_cmdline(cmdline: &str) -> String {
@@ -1378,6 +1524,12 @@ where
             None,
         )
     })?;
+    // A free owner lock excludes a serving daemon, but it does not identify a
+    // foreground `daemon serve` candidate that failed before taking that lock.
+    // Reject that stale-candidate split view before reconciling jobs so retrying
+    // the status-provided command cannot mutate durable evidence and then fail
+    // during replacement startup.
+    refuse_unleased_process_conflict()?;
     // Revalidate after taking the lifecycle-critical lock: a PID can be reused
     // between status inspection and exact orphan adoption.
     if !pid_is_proven_dead(state.pid, &pid_is_running) {
@@ -2248,13 +2400,105 @@ mod termination_tests {
     use super::*;
 
     #[test]
-    fn termination_output_is_bounded_and_redacted() {
-        let output =
-            bounded_redacted(format!("token=super-secret\n{}", "x".repeat(5_000)).as_bytes())
-                .expect("output");
+    fn termination_output_reader_retains_only_a_bounded_redacted_tail() {
+        let mut bytes = vec![b'x'; 8 * 1024 * 1024];
+        bytes.extend_from_slice(b"\ntoken=super-secret\nfinal diagnostic");
+        let output = bounded_redacted_reader(std::io::Cursor::new(bytes)).expect("output");
         assert!(output.contains("[REDACTED]"));
         assert!(output.contains("[truncated]"));
+        assert!(output.contains("final diagnostic"));
         assert!(output.len() < 4_200);
+    }
+
+    #[test]
+    fn output_reader_redacts_a_secret_split_across_read_boundaries() {
+        struct ChunkedReader {
+            bytes: Vec<u8>,
+            offset: usize,
+        }
+
+        impl Read for ChunkedReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.offset == self.bytes.len() {
+                    return Ok(0);
+                }
+                let count = 3.min(self.bytes.len() - self.offset).min(buffer.len());
+                buffer[..count].copy_from_slice(&self.bytes[self.offset..self.offset + count]);
+                self.offset += count;
+                Ok(count)
+            }
+        }
+
+        let output = bounded_redacted_reader(ChunkedReader {
+            bytes: b"before token=boundary-secret after\n".to_vec(),
+            offset: 0,
+        })
+        .expect("output");
+
+        assert!(output.contains("token=[REDACTED]"));
+        assert!(!output.contains("boundary-secret"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_reader_drains_sustained_os_pipe_output_with_a_bounded_tail() {
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                "i=0; while [ $i -lt 8192 ]; do printf 'diagnostic-%s\\n' \"$i\"; i=$((i + 1)); done; printf 'token=pipe-secret\\n'",
+            ])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("output fixture");
+        let output =
+            bounded_redacted_reader(child.stdout.take().expect("fixture stdout")).expect("output");
+        assert!(child.wait().expect("reap fixture").success());
+        assert!(output.contains("token=[REDACTED]"));
+        assert!(!output.contains("pipe-secret"));
+        assert!(output.len() <= 4096);
+    }
+
+    #[test]
+    fn output_reader_preserves_bounded_read_failure_diagnostics() {
+        struct FailingReader;
+
+        impl Read for FailingReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("token=read-secret"))
+            }
+        }
+
+        let output = bounded_redacted_reader(FailingReader).expect("diagnostic");
+        assert!(output.contains("output read failed"));
+        assert!(!output.contains("read-secret"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supervise_child_persists_bounded_redacted_concurrent_pipe_output() {
+        crate::test_support::with_isolated_home(|_| {
+            let child = Command::new("sh")
+                .args([
+                    "-c",
+                    "(i=0; while [ $i -lt 4096 ]; do printf 'stdout-%s token=stdout-secret\\n' \"$i\"; i=$((i + 1)); done) & (i=0; while [ $i -lt 4096 ]; do printf 'stderr-%s token=stderr-secret\\n' \"$i\" >&2; i=$((i + 1)); done) & wait",
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("concurrent output fixture");
+
+            supervise_child(child).expect("supervise fixture");
+
+            let evidence = super::super::read_termination_evidence()
+                .expect("read evidence")
+                .expect("termination evidence");
+            for output in [evidence.stdout, evidence.stderr] {
+                let output = output.expect("stream evidence");
+                assert!(output.len() < 4_200);
+                assert!(output.contains("token=[REDACTED]"));
+                assert!(!output.contains("secret"));
+            }
+        });
     }
 
     #[cfg(unix)]
