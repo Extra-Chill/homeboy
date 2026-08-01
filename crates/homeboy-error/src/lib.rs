@@ -281,6 +281,25 @@ pub struct Error {
     pub details: Value,
     pub hints: Vec<Hint>,
     pub retryable: Option<bool>,
+    /// The error this one was built from, when the constructor had it.
+    ///
+    /// `code`/`message`/`details` are homeboy's *reported* view of a failure:
+    /// stable, structured, and safe to render. This is the original value,
+    /// kept so `std::error::Error::source` can walk the chain and so a caller
+    /// can downcast to (for example) `io::Error` to read an `ErrorKind`
+    /// instead of pattern-matching a rendered string.
+    ///
+    /// `Arc` rather than `Box` because `Error` is `Clone`, and a boxed trait
+    /// object is not. Clones therefore share one source, which is correct:
+    /// the cause is a fact about the failure, not about a copy of the report.
+    ///
+    /// Deliberately not serialized. `Error` is projected into
+    /// `homeboy/command-result/v3` envelopes field by field — it derives
+    /// neither `Serialize` nor `Deserialize` — so the wire contract is
+    /// unchanged and a round-tripped error simply has no source. Anything an
+    /// operator or a machine consumer must see belongs in `details`, which is
+    /// serialized; this field is for in-process inspection.
+    pub source: Option<std::sync::Arc<dyn std::error::Error + Send + Sync>>,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -291,7 +310,13 @@ impl std::fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_ref()
+            .map(|source| &**source as &(dyn std::error::Error + 'static))
+    }
+}
 
 /// Let `?` carry a real `io::Error` instead of forcing a manual stringify.
 ///
@@ -306,7 +331,7 @@ impl std::error::Error for Error {}
 /// least resistance again.
 impl From<std::io::Error> for Error {
     fn from(error: std::io::Error) -> Self {
-        Self::from_io_error(&error, None)
+        Self::from_io_error(&error, None).with_source(error)
     }
 }
 
@@ -317,7 +342,7 @@ impl From<std::io::Error> for Error {
 /// storage exhaustion) rather than as a JSON failure.
 impl From<serde_json::Error> for Error {
     fn from(error: serde_json::Error) -> Self {
-        Self::from_json_error(&error, None)
+        Self::from_json_error(&error, None).with_source(error)
     }
 }
 
@@ -654,7 +679,18 @@ impl Error {
             details,
             hints: Vec::new(),
             retryable: None,
+            source: None,
         }
+    }
+
+    /// Attach the error this one was built from.
+    ///
+    /// Additive: it changes neither `code`, `message`, nor `details`, so the
+    /// reported contract is untouched and only `std::error::Error::source`
+    /// (and downcasting) gain anything.
+    pub fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        self.source = Some(std::sync::Arc::new(source));
+        self
     }
 
     /// A write failed, or was refused, because the filesystem has no capacity.
@@ -1786,6 +1822,101 @@ mod conversion_tests {
             .as_str()
             .expect("io error text")
             .contains("provider closed stdin"));
+    }
+
+    /// `source()` is what lets a caller reach the typed cause instead of
+    /// re-parsing a rendered string (#11134).
+    #[test]
+    fn the_question_mark_conversion_exposes_the_cause_through_source() {
+        use std::error::Error as _;
+
+        let error = io_via_question_mark(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "keyfile is not readable",
+        ))
+        .expect_err("io failure converts");
+
+        let source = error.source().expect("the cause is reachable");
+        assert!(source.to_string().contains("keyfile is not readable"));
+    }
+
+    /// The point of keeping the *typed* cause rather than its text: a caller
+    /// can read an `ErrorKind` instead of matching on a message.
+    #[test]
+    fn the_cause_can_be_downcast_back_to_the_original_io_error() {
+        use std::error::Error as _;
+
+        let error = Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+
+        let cause = error
+            .source()
+            .expect("cause")
+            .downcast_ref::<std::io::Error>()
+            .expect("the original io error survives");
+        assert_eq!(cause.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn a_json_conversion_also_carries_its_cause() {
+        use std::error::Error as _;
+
+        let error = json_via_question_mark("{ not json").expect_err("syntax failure converts");
+
+        assert!(error
+            .source()
+            .expect("cause")
+            .downcast_ref::<serde_json::Error>()
+            .is_some());
+    }
+
+    /// An error built without a cause must report none, not an empty stand-in.
+    #[test]
+    fn an_error_constructed_without_a_cause_reports_no_source() {
+        use std::error::Error as _;
+
+        assert!(Error::internal_unexpected("no cause").source().is_none());
+    }
+
+    /// `Error` is `Clone`, so the source is `Arc`-shared rather than boxed.
+    /// A clone must still see the cause.
+    #[test]
+    fn cloning_an_error_preserves_its_cause() {
+        use std::error::Error as _;
+
+        let error = Error::from(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        let clone = error.clone();
+
+        assert!(clone.source().is_some());
+        assert_eq!(clone.code, ErrorCode::StorageExhausted);
+    }
+
+    /// Attaching a cause must not disturb the reported contract, which is what
+    /// every consumer and every envelope actually reads.
+    #[test]
+    fn attaching_a_cause_does_not_change_the_reported_contract() {
+        let plain = Error::internal_io("boom", Some("context".to_string()));
+        let sourced = Error::internal_io("boom", Some("context".to_string()))
+            .with_source(std::io::Error::from(std::io::ErrorKind::NotFound));
+
+        assert_eq!(plain.code, sourced.code);
+        assert_eq!(plain.message, sourced.message);
+        assert_eq!(plain.details, sourced.details);
+        assert_eq!(plain.retryable, sourced.retryable);
+    }
+
+    /// The cause is in-process state, not wire state. `Error` derives no
+    /// serde impls, so the envelope projection is unchanged by definition —
+    /// this pins that `details` (which *is* serialized) stays clean.
+    #[test]
+    fn the_cause_does_not_leak_into_the_serialized_details() {
+        let error = Error::from(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "secret-path-detail",
+        ));
+
+        let details = error.details.as_object().expect("object details");
+        assert!(!details.contains_key("source"));
+        assert!(!details.contains_key("cause"));
     }
 
     /// `?` cannot attach context, so the contextful constructors must stay the

@@ -325,6 +325,7 @@ mod tests {
                 details: json!({ "http_status": 404 }),
                 hints: Vec::new(),
                 retryable: None,
+                source: None,
             };
             record_evicted_evidence_loss(&store, &run, &error).expect("eviction recorded");
             let terminal = store.get_run(run_id).expect("read").expect("terminal run");
