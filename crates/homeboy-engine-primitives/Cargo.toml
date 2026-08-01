@@ -17,6 +17,11 @@ homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
 homeboy-paths = { version = "0.1.0", path = "../homeboy-paths" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Link-time inventory of every declared provider registry. Each
+# `provider_registry!` expansion submits a descriptor so the CLI's
+# registration completeness test can enumerate registries it was never told
+# about, instead of the subsystem silently degrading to its no-op.
+inventory = "0.3"
 toml = "1.0.3"
 regex = "1.11"
 libc = "0.2"

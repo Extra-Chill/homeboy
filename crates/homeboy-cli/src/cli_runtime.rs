@@ -119,6 +119,220 @@ pub fn current_augmented_command_safety_manifest() -> CommandSafetyManifest {
     )
 }
 
+/// Register every provider hook the CLI wires before the startup terminal-run
+/// reconcile.
+///
+/// Split out of [`CliRuntime::run_from_args`] so the set of registrations is a
+/// named, callable list instead of an inline sequence no test could reach. An
+/// omission here is silent at runtime — a boxed provider registry with an empty
+/// slot dispatches to its no-op — so `register_all_providers` exists to give the
+/// completeness test the exact startup wiring the binary performs.
+///
+/// Order is load-bearing and preserved verbatim from the original inline block.
+pub fn register_startup_providers_before_reconcile() {
+    // Register the config-level artifact_root resolver before any command runs
+    // so paths::artifact_root() can honor global config without paths depending
+    // on the defaults layer (breaks the paths <-> defaults dependency cycle).
+    crate::core::paths::set_config_artifact_root_resolver(|| {
+        crate::core::defaults::load_config().artifact_root
+    });
+    // Register optional feature crates' config entities with core so their
+    // IDs/aliases participate in cross-entity collision detection. Core owns
+    // the collision invariant but must not depend on these optional features.
+    homeboy_tunnel::register();
+    // Register the audit manifest provider so code_audit can read extension
+    // manifests (detector rules, test mappings, provided extensions) without
+    // depending on the extension layer's loader — the seam that lets audit
+    // become its own crate.
+    // Register the in-core release provider so core's status mechanics
+    // (fleet/project/context/git change reporting/tag-gap) get deploy+release
+    // behavior through the hook. Moves out with deploy/release when they
+    // become the homeboy-release crate.
+    crate::release::provider_impl::register();
+    homeboy_extension::audit_manifest_provider::register();
+    homeboy_extension::component_script::register_component_script_runner();
+    homeboy_extension::build::register_component_build_runner();
+    homeboy_extension::lifecycle::register_component_install_runner();
+    // Register extension-backed audit providers so code_audit can load
+    // grammars and run fallback fingerprint scripts without depending on the
+    // extension registry or script runner.
+    homeboy_extension::audit_fingerprint_script_provider::register();
+    homeboy_extension::audit_grammar_source_provider::register();
+    // Register the audit recorded-artifact provider so the artifact-portability
+    // detector can read past runs' artifacts from the observation store without
+    // code_audit depending on observation — the last seam before audit becomes
+    // its own crate.
+    crate::core::observation::audit_artifact_provider::register();
+    // Register the audit fixability provider so code_audit can report how
+    // fixable its findings are without calling up into the refactor engine's
+    // fix planner — the seam that removes the last code_audit->refactor edge.
+    // Register the rig toolchain provider so core's extension exec-env
+    // builder can prepend the rig toolchain PATH.
+    crate::rig::provider::register();
+    crate::stack::provider::register();
+    crate::refactor::audit_fixability_provider::register();
+    // Register the refactor transform provider so core's extension
+    // test-drift auto-fixer can apply generated transform rules.
+    crate::refactor::transform_provider::register();
+    // Register the audit component provider so code_audit can resolve the
+    // component under audit (path, extension ids, audit rules, scope excludes)
+    // without depending on the component layer — the last cross-layer seam
+    // before audit becomes its own crate.
+    crate::core::component::audit_provider::register();
+    // Register the runner-evidence provider so observation::runs_service can
+    // enrich run/artifact lookups with live runner + daemon evidence without
+    // core depending on runner behavior. (Runner is still in-crate today;
+    // this registration is the seam that lets it become its own crate.)
+    crate::runner::register_runner_evidence_provider();
+    // Register the runner job-preparation provider so api_jobs can compute
+    // the secret-env plan and validate workload dispatch for remote-runner
+    // jobs without core depending on runner behavior.
+    crate::runner::register_runner_job_preparation_provider();
+    // Register the lab-workspace provenance provider so the agent-task
+    // scheduler can verify lab-materialized workspaces without core depending
+    // on runner behavior.
+    crate::runner::register_lab_workspace_provenance_provider();
+    // Register the runner-continuation provider so the agent-task lifecycle
+    // can reconcile and resume runs dispatched to a remote runner without
+    // core depending on runner behavior.
+    crate::runner::register_runner_continuation_provider();
+}
+
+/// Register every provider hook the CLI wires after the startup terminal-run
+/// reconcile.
+///
+/// Takes the agent-task config rather than loading it so the completeness test
+/// can drive the full registration sequence without touching the ambient home
+/// directory.
+pub fn register_startup_providers_after_reconcile(
+    agent_task: &crate::core::defaults::AgentTaskConfig,
+) -> Result<(), crate::core::error::Error> {
+    // Register the runner daemon-exec driver so the daemon's /exec endpoint
+    // can prepare and run a runner job as a local child without core
+    // depending on runner process-execution behavior.
+    crate::runner::register_runner_daemon_exec_driver();
+    // Lab owns its durable staging/dispatch controller-job interpretation;
+    // core only owns the generic daemon lifecycle.
+    crate::runner::register_lab_staging_controller_driver();
+    crate::agents::agent_task_service::register_promotion_job_driver();
+    crate::commands::cleanup::register_cleanup_job_driver();
+    // The configured acceptance verifier is the one registration that is
+    // conditional: `register_acceptance_verifier_from_config` is a no-op when
+    // no verifier is configured, which is why the completeness test treats
+    // that registry as deliberately optional.
+    crate::agents::agent_task_lifecycle::register_acceptance_verifier_from_config(agent_task)?;
+    crate::runner::enable_production_lab_staging();
+    // Register the runner workspace-root provider so the daemon file API can
+    // resolve a runner's configured workspace_root without core depending on
+    // the runner config registry.
+    crate::runner::register_runner_workspace_root_provider();
+    // Register Runner as a config entity so it participates in config
+    // id/alias collision detection, mirroring how feature crates register
+    // their own entities (moves into the runner crate once extracted).
+    crate::runner::register_runner_config_entity();
+    // Register the runner-upgrade provider so the core upgrade flow can
+    // refresh configured runners without depending on runner behavior.
+    crate::runner::register_runner_upgrade();
+    // Register the runner-availability provider so the controller action loop
+    // can gate execution on a runner's live status.
+    crate::runner::register_runner_availability_provider();
+    // Register the Lab-offload provider so core's lab_routing can execute an
+    // offload without depending on runner behavior.
+    crate::runner::register_runner_lab_offload_provider();
+    // Register the workspace-snapshot provider so core's hygiene subsystem
+    // can materialize an isolated validation-dependency workspace without
+    // depending on runner behavior.
+    crate::runner::register_workspace_snapshot_provider();
+    // Register the agent-task controller pin-reference provider so core's
+    // controller-runtime retention report can discover which pinned
+    // executables are still referenced by nonterminal durable agent-task
+    // records without core depending on the agent-task subsystem. (This is
+    // the seam that lets agent-task become its own crate.)
+    crate::agents::agent_task_lifecycle::controller_pin_reference_provider::register();
+    // Register the loop-spec validation provider so core's proof validator
+    // can validate a materialized agent-task loop-spec artifact without
+    // depending on the agent-task subsystem.
+    crate::agents::agent_task_controller_service::loop_spec_validation_provider::register();
+    // Register the gate-feedback candidate-baseline provider so core's
+    // worktree-safety logic can accept a dirty worktree that is a verified
+    // agent-task gate-feedback candidate without depending on the agent-task
+    // subsystem.
+    crate::agents::agent_task_candidate_baseline::register();
+    // Register the agent-task activity provider so core's activity report
+    // includes durable agent-task records and their health summary without
+    // depending on the agent-task subsystem.
+    crate::agents::agent_task_lifecycle::activity_provider::register();
+    // Register the bench agent-task matrix provider so core's cross-rig
+    // bench comparison can project rig entries into an agent-task matrix
+    // without depending on the agent-task subsystem.
+    crate::agents::agent_task::bench_matrix_provider::register();
+    // Register the agent-task terminal-recovery provider so core's job store
+    // can recover terminal jobs from durable agent-task runs.
+    crate::agents::api_jobs_terminal_recovery::register();
+    // Register the agent-task secret provider so core's trace secret
+    // resolution can consult the agent-task secret store.
+    crate::agents::agent_task_secrets::register();
+    // Register the extension provider-discovery validator so core's
+    // extension install/repair can verify declared agent-runtime providers.
+    crate::agents::agent_task_provider::discovery::register();
+    // Register the command-label resolver so core::runner can map dispatched
+    // argv to a hot-command label without depending on the full CLI parser.
+    crate::runner::set_command_label_resolver(|argv| {
+        let cli = <crate::cli_surface::Cli as clap::Parser>::try_parse_from(argv).ok()?;
+        let route_contract = cli.command.lab_route_contract().ok()??;
+        Some(route_contract.command.hot_label.to_string())
+    });
+    // Register the agent-task dispatch resolver so core::runner can extract a
+    // cook dispatch command from argv without depending on the CLI parser.
+    crate::runner::set_agent_task_dispatch_resolver(|argv| {
+        let cli =
+            <crate::cli_surface::Cli as clap::Parser>::try_parse_from(argv).map_err(|error| {
+                crate::core::error::Error::validation_invalid_argument(
+                    "agent-task",
+                    "failed to parse agent-task arguments while compiling Lab provider policy",
+                    Some(error.to_string()),
+                    None,
+                )
+            })?;
+        Ok(match cli.command {
+            crate::cli_surface::Commands::AgentTask(agent_task) => match agent_task.command {
+                crate::commands::agent_task::AgentTaskCommand::Cook(cook) => {
+                    Some(cook.dispatch.into())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+    });
+    // Register the Lab-runner hint provider so core::runner can compose
+    // `--runner`/`--placement` unsupported errors from the command-spec table
+    // without depending on `command_contract`.
+    crate::runner::set_lab_runner_hint_provider(|| {
+        let summary = crate::command_contract::lab_runner_support_summary();
+        crate::runner::LabRunnerHint {
+            hint: summary.hint,
+            unsupported_message: summary.unsupported_message,
+        }
+    });
+
+    Ok(())
+}
+
+/// Every provider registration the CLI performs at startup, in the exact order
+/// [`CliRuntime::run_from_args`] performs them.
+///
+/// `run_from_args` calls the two halves separately because it interleaves a
+/// terminal-run reconcile between them. This is the entry point the
+/// registration-completeness test drives; keeping it as the sole other caller is
+/// what makes "every declared provider registry is populated afterwards" a
+/// meaningful assertion about the real binary.
+pub fn register_all_providers(
+    agent_task: &crate::core::defaults::AgentTaskConfig,
+) -> Result<(), crate::core::error::Error> {
+    register_startup_providers_before_reconcile();
+    register_startup_providers_after_reconcile(agent_task)
+}
+
 impl CliRuntime {
     pub fn new() -> Self {
         Self {
@@ -134,72 +348,7 @@ impl CliRuntime {
             return std::process::ExitCode::from(2);
         }
 
-        // Register the config-level artifact_root resolver before any command runs
-        // so paths::artifact_root() can honor global config without paths depending
-        // on the defaults layer (breaks the paths <-> defaults dependency cycle).
-        crate::core::paths::set_config_artifact_root_resolver(|| {
-            crate::core::defaults::load_config().artifact_root
-        });
-        // Register optional feature crates' config entities with core so their
-        // IDs/aliases participate in cross-entity collision detection. Core owns
-        // the collision invariant but must not depend on these optional features.
-        homeboy_tunnel::register();
-        // Register the audit manifest provider so code_audit can read extension
-        // manifests (detector rules, test mappings, provided extensions) without
-        // depending on the extension layer's loader — the seam that lets audit
-        // become its own crate.
-        // Register the in-core release provider so core's status mechanics
-        // (fleet/project/context/git change reporting/tag-gap) get deploy+release
-        // behavior through the hook. Moves out with deploy/release when they
-        // become the homeboy-release crate.
-        crate::release::provider_impl::register();
-        homeboy_extension::audit_manifest_provider::register();
-        homeboy_extension::component_script::register_component_script_runner();
-        homeboy_extension::build::register_component_build_runner();
-        homeboy_extension::lifecycle::register_component_install_runner();
-        // Register extension-backed audit providers so code_audit can load
-        // grammars and run fallback fingerprint scripts without depending on the
-        // extension registry or script runner.
-        homeboy_extension::audit_fingerprint_script_provider::register();
-        homeboy_extension::audit_grammar_source_provider::register();
-        // Register the audit recorded-artifact provider so the artifact-portability
-        // detector can read past runs' artifacts from the observation store without
-        // code_audit depending on observation — the last seam before audit becomes
-        // its own crate.
-        crate::core::observation::audit_artifact_provider::register();
-        // Register the audit fixability provider so code_audit can report how
-        // fixable its findings are without calling up into the refactor engine's
-        // fix planner — the seam that removes the last code_audit->refactor edge.
-        // Register the rig toolchain provider so core's extension exec-env
-        // builder can prepend the rig toolchain PATH.
-        crate::rig::provider::register();
-        crate::stack::provider::register();
-        crate::refactor::audit_fixability_provider::register();
-        // Register the refactor transform provider so core's extension
-        // test-drift auto-fixer can apply generated transform rules.
-        crate::refactor::transform_provider::register();
-        // Register the audit component provider so code_audit can resolve the
-        // component under audit (path, extension ids, audit rules, scope excludes)
-        // without depending on the component layer — the last cross-layer seam
-        // before audit becomes its own crate.
-        crate::core::component::audit_provider::register();
-        // Register the runner-evidence provider so observation::runs_service can
-        // enrich run/artifact lookups with live runner + daemon evidence without
-        // core depending on runner behavior. (Runner is still in-crate today;
-        // this registration is the seam that lets it become its own crate.)
-        crate::runner::register_runner_evidence_provider();
-        // Register the runner job-preparation provider so api_jobs can compute
-        // the secret-env plan and validate workload dispatch for remote-runner
-        // jobs without core depending on runner behavior.
-        crate::runner::register_runner_job_preparation_provider();
-        // Register the lab-workspace provenance provider so the agent-task
-        // scheduler can verify lab-materialized workspaces without core depending
-        // on runner behavior.
-        crate::runner::register_lab_workspace_provenance_provider();
-        // Register the runner-continuation provider so the agent-task lifecycle
-        // can reconcile and resume runs dispatched to a remote runner without
-        // core depending on runner behavior.
-        crate::runner::register_runner_continuation_provider();
+        register_startup_providers_before_reconcile();
         // Recover completed generic runner-exec jobs before a mutating invocation
         // can evict their evidence. Read-only commands must not mutate durable
         // state during startup.
@@ -213,118 +362,11 @@ impl CliRuntime {
         {
             let _ = crate::runner::reconcile_terminal_runner_exec_runs();
         }
-        // Register the runner daemon-exec driver so the daemon's /exec endpoint
-        // can prepare and run a runner job as a local child without core
-        // depending on runner process-execution behavior.
-        crate::runner::register_runner_daemon_exec_driver();
-        // Lab owns its durable staging/dispatch controller-job interpretation;
-        // core only owns the generic daemon lifecycle.
-        crate::runner::register_lab_staging_controller_driver();
-        crate::agents::agent_task_service::register_promotion_job_driver();
-        crate::commands::cleanup::register_cleanup_job_driver();
         let config = crate::core::defaults::load_config();
-        if let Err(error) =
-            crate::agents::agent_task_lifecycle::register_acceptance_verifier_from_config(
-                &config.agent_task,
-            )
-        {
+        if let Err(error) = register_startup_providers_after_reconcile(&config.agent_task) {
             eprintln!("error: {error}");
             return std::process::ExitCode::from(2);
         }
-        crate::runner::enable_production_lab_staging();
-        // Register the runner workspace-root provider so the daemon file API can
-        // resolve a runner's configured workspace_root without core depending on
-        // the runner config registry.
-        crate::runner::register_runner_workspace_root_provider();
-        // Register Runner as a config entity so it participates in config
-        // id/alias collision detection, mirroring how feature crates register
-        // their own entities (moves into the runner crate once extracted).
-        crate::runner::register_runner_config_entity();
-        // Register the runner-upgrade provider so the core upgrade flow can
-        // refresh configured runners without depending on runner behavior.
-        crate::runner::register_runner_upgrade();
-        // Register the runner-availability provider so the controller action loop
-        // can gate execution on a runner's live status.
-        crate::runner::register_runner_availability_provider();
-        // Register the Lab-offload provider so core's lab_routing can execute an
-        // offload without depending on runner behavior.
-        crate::runner::register_runner_lab_offload_provider();
-        // Register the workspace-snapshot provider so core's hygiene subsystem
-        // can materialize an isolated validation-dependency workspace without
-        // depending on runner behavior.
-        crate::runner::register_workspace_snapshot_provider();
-        // Register the agent-task controller pin-reference provider so core's
-        // controller-runtime retention report can discover which pinned
-        // executables are still referenced by nonterminal durable agent-task
-        // records without core depending on the agent-task subsystem. (This is
-        // the seam that lets agent-task become its own crate.)
-        crate::agents::agent_task_lifecycle::controller_pin_reference_provider::register();
-        // Register the loop-spec validation provider so core's proof validator
-        // can validate a materialized agent-task loop-spec artifact without
-        // depending on the agent-task subsystem.
-        crate::agents::agent_task_controller_service::loop_spec_validation_provider::register();
-        // Register the gate-feedback candidate-baseline provider so core's
-        // worktree-safety logic can accept a dirty worktree that is a verified
-        // agent-task gate-feedback candidate without depending on the agent-task
-        // subsystem.
-        crate::agents::agent_task_candidate_baseline::register();
-        // Register the agent-task activity provider so core's activity report
-        // includes durable agent-task records and their health summary without
-        // depending on the agent-task subsystem.
-        crate::agents::agent_task_lifecycle::activity_provider::register();
-        // Register the bench agent-task matrix provider so core's cross-rig
-        // bench comparison can project rig entries into an agent-task matrix
-        // without depending on the agent-task subsystem.
-        crate::agents::agent_task::bench_matrix_provider::register();
-        // Register the agent-task terminal-recovery provider so core's job store
-        // can recover terminal jobs from durable agent-task runs.
-        crate::agents::api_jobs_terminal_recovery::register();
-        // Register the agent-task secret provider so core's trace secret
-        // resolution can consult the agent-task secret store.
-        crate::agents::agent_task_secrets::register();
-        // Register the extension provider-discovery validator so core's
-        // extension install/repair can verify declared agent-runtime providers.
-        crate::agents::agent_task_provider::discovery::register();
-        // Register the command-label resolver so core::runner can map dispatched
-        // argv to a hot-command label without depending on the full CLI parser.
-        crate::runner::set_command_label_resolver(|argv| {
-            let cli = <crate::cli_surface::Cli as clap::Parser>::try_parse_from(argv).ok()?;
-            let route_contract = cli.command.lab_route_contract().ok()??;
-            Some(route_contract.command.hot_label.to_string())
-        });
-        // Register the agent-task dispatch resolver so core::runner can extract a
-        // cook dispatch command from argv without depending on the CLI parser.
-        crate::runner::set_agent_task_dispatch_resolver(|argv| {
-            let cli = <crate::cli_surface::Cli as clap::Parser>::try_parse_from(argv).map_err(
-                |error| {
-                    crate::core::error::Error::validation_invalid_argument(
-                        "agent-task",
-                        "failed to parse agent-task arguments while compiling Lab provider policy",
-                        Some(error.to_string()),
-                        None,
-                    )
-                },
-            )?;
-            Ok(match cli.command {
-                crate::cli_surface::Commands::AgentTask(agent_task) => match agent_task.command {
-                    crate::commands::agent_task::AgentTaskCommand::Cook(cook) => {
-                        Some(cook.dispatch.into())
-                    }
-                    _ => None,
-                },
-                _ => None,
-            })
-        });
-        // Register the Lab-runner hint provider so core::runner can compose
-        // `--runner`/`--placement` unsupported errors from the command-spec table
-        // without depending on `command_contract`.
-        crate::runner::set_lab_runner_hint_provider(|| {
-            let summary = crate::command_contract::lab_runner_support_summary();
-            crate::runner::LabRunnerHint {
-                hint: summary.hint,
-                unsupported_message: summary.unsupported_message,
-            }
-        });
         // Deferred records outlive their worker. Startup restarts the singleton
         // so expired claims recover without another deferral request.
         if !matches!(
