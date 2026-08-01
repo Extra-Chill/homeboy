@@ -180,7 +180,7 @@ jobs:
     outputs:
       cargo-cache-key: ${{ steps.cargo-cache-key.outputs.key }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
@@ -198,7 +198,7 @@ jobs:
 
       - name: Cache cargo
         if: steps.cargo-cache-key.outputs.key != ''
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -212,7 +212,7 @@ jobs:
         run: ${{ inputs.build-command }}
 
       - name: Check out Homeboy Action
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
           ref: ${{ inputs.action-ref }}
@@ -230,7 +230,7 @@ jobs:
           auto-setup: 'false'
 
       - name: Upload candidate Homeboy binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: homeboy-candidate-binary-${{ github.run_attempt }}
           path: /usr/local/bin/homeboy
@@ -350,14 +350,14 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
       - name: Restore candidate cargo cache
         if: needs.binary.outputs.cargo-cache-key != ''
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -366,7 +366,7 @@ jobs:
           key: ${{ needs.binary.outputs.cargo-cache-key }}
 
       - name: Check out Homeboy Action
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
           ref: ${{ inputs.action-ref }}
@@ -380,7 +380,7 @@ jobs:
 
       - name: Generate GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         continue-on-error: true
         with:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
@@ -451,7 +451,7 @@ jobs:
 
       - name: Upload candidate phase evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: homeboy-differential-candidate-${{ matrix.artifact_key }}-${{ github.run_attempt }}
           path: differential-phase
@@ -466,14 +466,14 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
 
       - name: Restore candidate cargo cache
         if: needs.binary.outputs.cargo-cache-key != ''
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -481,7 +481,7 @@ jobs:
             target
           key: ${{ needs.binary.outputs.cargo-cache-key }}
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
           ref: ${{ inputs.action-ref }}
@@ -538,7 +538,7 @@ jobs:
           cp -R homeboy-ci-results differential-phase/baseline/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/baseline/homeboy-ci-results
       - name: Upload baseline phase evidence
         if: always() && matrix.baseline == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: homeboy-differential-baseline-${{ matrix.artifact_key }}-${{ github.run_attempt }}
           path: differential-phase
@@ -554,7 +554,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
           ref: ${{ inputs.action-ref }}
@@ -568,7 +568,7 @@ jobs:
         run: sudo cp "${{ steps.candidate-binary.outputs.binary-path }}" /usr/local/bin/homeboy
       - id: action-revision
         run: echo "value=$(git -C .homeboy-action rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         continue-on-error: true
         with:
           pattern: homeboy-differential-*-${{ matrix.artifact_key }}-*
@@ -590,7 +590,7 @@ jobs:
       - name: Generate GitHub App token
         id: app-token
         if: always() && inputs.pr-comment != 'false'
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         continue-on-error: true
         with:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
@@ -620,10 +620,10 @@ jobs:
     if: ${{ github.event_name == 'pull_request' && inputs.pr-policy != '' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
           ref: ${{ inputs.action-ref }}
@@ -637,7 +637,7 @@ jobs:
         run: sudo cp "${{ steps.candidate-binary.outputs.binary-path }}" /usr/local/bin/homeboy
       - name: Generate GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         continue-on-error: true
         with:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}

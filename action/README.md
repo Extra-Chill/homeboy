@@ -87,7 +87,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -283,7 +283,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: Extra-Chill/homeboy-action@v2
         with:
           extension: rust
@@ -293,7 +293,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: Extra-Chill/homeboy-action@v2
         with:
           extension: rust
@@ -303,7 +303,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: Extra-Chill/homeboy-action@v2
         with:
           extension: rust
@@ -318,7 +318,7 @@ All three jobs write to the **same PR comment** automatically.
 Use `pr-policy` to classify whether a PR is safe for deterministic auto-merge after Homeboy checks pass. Homeboy core reads changed files from GitHub, applies repo-local author, branch, path, and content rules, then exposes `pr-policy-safe` and optionally merges the PR.
 
 ```yaml
-- uses: actions/checkout@v4
+- uses: actions/checkout@v6
 
 - uses: Extra-Chill/homeboy-action@v2
   with:
@@ -380,7 +380,7 @@ jobs:
     outputs:
       should-release: ${{ steps.check.outputs.should-release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: Check for releasable commits
@@ -395,7 +395,7 @@ jobs:
     if: needs.check.outputs.should-release == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: cargo fmt --check && cargo clippy && cargo test
       - uses: Extra-Chill/homeboy-action@v2
         with:
@@ -411,7 +411,7 @@ jobs:
       released: ${{ steps.release.outputs.released }}
       release-tag: ${{ steps.release.outputs.release-tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -433,11 +433,11 @@ jobs:
     if: needs.prepare.outputs.released == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.prepare.outputs.release-tag }}
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: artifacts-*
           path: artifacts
@@ -481,7 +481,7 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -515,7 +515,7 @@ jobs:
       issues: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -553,7 +553,7 @@ jobs:
       issues: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 

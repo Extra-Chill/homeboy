@@ -497,7 +497,7 @@ runs:
     - name: Download Homeboy observations
       if: steps.check-pr-state.outputs.active != 'false' && steps.resolve-commands.outputs.resolved-commands != '' && inputs.import-observations == 'true'
       continue-on-error: true
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         pattern: homeboy-observations-*
         path: homeboy-observations-import
@@ -585,7 +585,7 @@ runs:
 
     - name: Upload Homeboy observations
       if: always() && steps.check-pr-state.outputs.active != 'false' && steps.resolve-commands.outputs.resolved-commands != ''
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ steps.artifact-names.outputs.homeboy-observations }}
         path: homeboy-observations/**

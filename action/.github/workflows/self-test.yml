@@ -29,7 +29,7 @@ jobs:
     steps:
       # Full history: the scope tests resolve real revisions (`HEAD~1`) against
       # this checkout, which a shallow clone cannot provide.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 

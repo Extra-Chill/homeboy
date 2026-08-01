@@ -58,17 +58,27 @@ assert_not_contains '^  create-release:' "${WORKFLOW}" "release workflow has no 
 assert_not_contains 'gh release create' "${WORKFLOW}" "release workflow does not shell out to gh release create"
 assert_not_contains 'docs/CHANGELOG.md' "${WORKFLOW}" "release workflow does not parse changelog notes"
 
-# GitHub-hosted workflow dependencies must use published action majors (#275).
-assert_count 'actions/checkout@v4' '9' "${CI_WORKFLOW}" "reusable CI workflow uses checkout v4 for every checkout"
-assert_count 'actions/create-github-app-token@v2' '3' "${CI_WORKFLOW}" "reusable CI workflow uses app-token v2"
-assert_not_contains 'actions/checkout@v6' "${CI_WORKFLOW}" "reusable CI workflow does not use unavailable checkout v6"
-assert_not_contains 'actions/create-github-app-token@v3' "${CI_WORKFLOW}" "reusable CI workflow does not use unavailable app-token v3"
+# GitHub-hosted workflow dependencies must use Node 24-capable action majors (#321).
+assert_count 'actions/checkout@v6' '9' "${CI_WORKFLOW}" "reusable CI workflow uses checkout v6 for every checkout"
+assert_count 'actions/cache@v5' '3' "${CI_WORKFLOW}" "reusable CI workflow uses cache v5"
+assert_count 'actions/upload-artifact@v7' '3' "${CI_WORKFLOW}" "reusable CI workflow uses artifact upload v7"
+assert_count 'actions/download-artifact@v7' '1' "${CI_WORKFLOW}" "reusable CI workflow uses artifact download v7"
+assert_count 'actions/create-github-app-token@v3' '3' "${CI_WORKFLOW}" "reusable CI workflow uses app-token v3"
+assert_not_contains 'actions/checkout@v4' "${CI_WORKFLOW}" "reusable CI workflow has no checkout v4 references"
+assert_not_contains 'actions/cache@v4' "${CI_WORKFLOW}" "reusable CI workflow has no cache v4 references"
+assert_not_contains 'actions/\(upload\|download\)-artifact@v4' "${CI_WORKFLOW}" "reusable CI workflow has no artifact v4 references"
+assert_not_contains 'actions/create-github-app-token@v2' "${CI_WORKFLOW}" "reusable CI workflow has no app-token v2 references"
 assert_not_contains 'merge-multiple: true' "${CI_WORKFLOW}" "reusable CI workflow never merges competing binary artifacts"
 assert_contains 'actions: read' "${CI_WORKFLOW}" "reusable CI workflow can download current-run artifacts"
-assert_count 'actions/checkout@v4' '3' "${WORKFLOW}" "release workflow uses checkout v4 for every checkout"
-assert_count 'actions/create-github-app-token@v2' '1' "${WORKFLOW}" "release workflow uses app-token v2"
-assert_not_contains 'actions/checkout@v6' "${WORKFLOW}" "release workflow does not use unavailable checkout v6"
-assert_not_contains 'actions/create-github-app-token@v3' "${WORKFLOW}" "release workflow does not use unavailable app-token v3"
+assert_count 'actions/checkout@v6' '3' "${WORKFLOW}" "release workflow uses checkout v6 for every checkout"
+assert_count 'actions/create-github-app-token@v3' '1' "${WORKFLOW}" "release workflow uses app-token v3"
+assert_not_contains 'actions/checkout@v4' "${WORKFLOW}" "release workflow has no checkout v4 references"
+assert_not_contains 'actions/create-github-app-token@v2' "${WORKFLOW}" "release workflow has no app-token v2 references"
+assert_contains 'actions/checkout@v6' "${SELF_TEST_WORKFLOW}" "self-test workflow uses checkout v6"
+assert_not_contains 'actions/checkout@v4' "${SELF_TEST_WORKFLOW}" "self-test workflow has no checkout v4 references"
+assert_count 'actions/upload-artifact@v7' '3' "${ROOT_DIR}/action.yml" "composite action uses artifact upload v7"
+assert_count 'actions/download-artifact@v7' '1' "${ROOT_DIR}/action.yml" "composite action uses artifact download v7"
+assert_not_contains 'actions/\(upload\|download\)-artifact@v4' "${ROOT_DIR}/action.yml" "composite action has no artifact v4 references"
 
 # Releasing moves the floating v2 tag, so the action's own shell tests must
 # gate publication rather than running advisory-only (or not at all).
