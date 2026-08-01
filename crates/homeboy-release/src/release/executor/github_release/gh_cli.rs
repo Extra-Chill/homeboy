@@ -3162,6 +3162,125 @@ mod tests {
         assert_eq!(error.message, "authenticated asset download failed");
     }
 
+    /// A release verification failure that came from a real `gh` invocation must
+    /// reach the operator as a code + captured evidence + a hint, not a sentence.
+    /// This is the contract #11135 exists to establish.
+    #[test]
+    fn command_backed_failure_lifts_into_structured_error_with_evidence() {
+        let error = GitHubReleaseMetadataError::from_command_failure(
+            "could not download GitHub Release asset 'component.zip'",
+            "gh api release asset download",
+            "repos/owner/repo/releases/assets/42",
+            &GhCommandOutput {
+                stdout: String::new(),
+                stderr: "HTTP 404: not found\nX-GitHub-Request-Id: AB12:CD34".to_string(),
+                exit_code: Some(1),
+                timed_out: false,
+            },
+        );
+
+        let structured = error.into_structured_error("release assets");
+
+        assert_eq!(
+            structured.code,
+            homeboy_core::error::ErrorCode::ValidationInvalidArgument
+        );
+        let evidence = structured
+            .details
+            .get("command_evidence")
+            .expect("command evidence must survive the boundary");
+        assert_eq!(
+            evidence.get("command").and_then(|value| value.as_str()),
+            Some("gh api release asset download repos/owner/repo/releases/assets/42")
+        );
+        assert_eq!(
+            evidence.get("exit_code").and_then(|value| value.as_i64()),
+            Some(1)
+        );
+        assert!(evidence
+            .get("stderr")
+            .and_then(|value| value.as_str())
+            .is_some_and(|stderr| stderr.contains("404")));
+        let hint = &structured.hints.first().expect("operator hint").message;
+        assert!(hint.contains("HTTP 404"), "unexpected hint: {hint}");
+        assert!(hint.contains("AB12:CD34"), "unexpected hint: {hint}");
+    }
+
+    /// A timeout kills the child before it reports a status. Report that as a
+    /// timeout rather than inventing an exit code.
+    #[test]
+    fn timed_out_command_failure_is_named_as_a_timeout() {
+        let error = GitHubReleaseMetadataError::from_command_failure(
+            "download timed out",
+            "gh api release asset download",
+            "repos/owner/repo/releases/assets/42",
+            &GhCommandOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                timed_out: true,
+            },
+        );
+
+        let structured = error.into_structured_error("release assets");
+
+        let hint = &structured.hints.first().expect("operator hint").message;
+        assert!(hint.contains("timed out"), "unexpected hint: {hint}");
+        assert_eq!(
+            structured
+                .details
+                .get("command_evidence")
+                .and_then(|evidence| evidence.get("exit_code"))
+                .and_then(|value| value.as_i64()),
+            Some(-1)
+        );
+    }
+
+    /// Failures with no `gh` invocation behind them must not fabricate evidence.
+    #[test]
+    fn message_only_failure_carries_no_command_evidence() {
+        let structured = GitHubReleaseMetadataError::message("GitHub Release is missing an asset")
+            .into_structured_error("release assets");
+
+        assert!(structured.details.get("command_evidence").is_none());
+        assert!(structured.hints.is_empty());
+    }
+
+    /// The `&[]` hole: a verification failure used to reach `upload_failed_result`
+    /// with its diagnostics dropped, so `error_details` was absent entirely.
+    #[test]
+    fn verification_failure_propagates_command_diagnostics() {
+        let publication = ReleaseAssetPublication {
+            target_name: "component.zip".to_string(),
+            sha256: "a".repeat(64),
+            size: 15,
+            source_path: "component.zip".to_string(),
+        };
+
+        let error = verify_release_publications_with(
+            &[publication],
+            &[remote_asset("component.zip", 15, None)],
+            &mut |_, _| {
+                Err(GitHubReleaseMetadataError::from_command_failure(
+                    "authenticated asset download failed",
+                    "gh api release asset download",
+                    "repos/owner/repo/releases/assets/7",
+                    &GhCommandOutput {
+                        stdout: String::new(),
+                        stderr: "HTTP 403: Forbidden".to_string(),
+                        exit_code: Some(1),
+                        timed_out: false,
+                    },
+                ))
+            },
+        )
+        .expect_err("download failure must fail closed");
+
+        assert_eq!(error.diagnostics.len(), 1);
+        assert_eq!(error.diagnostics[0].http_status, Some(403));
+        assert_eq!(error.diagnostics[0].exit_code, Some(1));
+    }
+
     #[test]
     fn duplicate_remote_asset_name_is_ambiguous() {
         let publication = ReleaseAssetPublication {
