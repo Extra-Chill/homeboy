@@ -738,6 +738,51 @@ pub fn persist_notification_route(
     store::write_record(&record)
 }
 
+/// Read back the route a run was launched with.
+///
+/// The route a caller supplied is bound to the launching *thread*
+/// (`notification_route::current`), which a process that did not launch the
+/// cook — `cook --continue`, controller adoption, claimed continuation — never
+/// inherits. It is also persisted on the durable record by
+/// [`persist_notification_route`], and that copy survives the process. This is
+/// the same durable read the daemon completion backstop and `runs watch`
+/// already perform (#11115).
+///
+/// A missing record, a record without a route, or a malformed route is `None`:
+/// notification routing is observability and must never fail a cook.
+pub fn durable_notification_route(
+    run_id: &str,
+) -> Option<homeboy_core::notification_route::NotificationRoute> {
+    if run_id.trim().is_empty() {
+        return None;
+    }
+    let record = store::read_record(&resolve_run_id(run_id).ok()?).ok()?;
+    homeboy_core::notification_route::NotificationRoute::from_metadata(&record.metadata)
+}
+
+/// Claim the single terminal notification a Cook is allowed to deliver.
+///
+/// Returns `Ok(true)` for the caller that won the claim and `Ok(false)` for
+/// every later one, mirroring `ObservationStore::mark_notification_delivered`
+/// — same `{at, by}` marker, same only-if-absent semantics, same
+/// "the winner dispatches" contract. It differs only in its key: that marker
+/// is a column on one `runs` row, and a Cook spans many runs
+/// (`{cook_id}-attempt-{n}-{suffix}`), so a per-run marker cannot dedupe a
+/// per-cook event. Durable route rehydration (#11115) lets a second process
+/// reach the same cook's terminal boundary, so the cook needs its own claim.
+pub fn claim_cook_terminal_notification(cook_id: &str, delivered_by: &str) -> Result<bool> {
+    if cook_id.trim().is_empty() {
+        return Ok(false);
+    }
+    store::claim_cook_notification(
+        cook_id,
+        &json!({
+            "at": now_timestamp(),
+            "by": delivered_by,
+        }),
+    )
+}
+
 pub fn record_completed_run(
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
