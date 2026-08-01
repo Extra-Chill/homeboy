@@ -6,5 +6,16 @@
       "file": "swift.json",
       "pattern": "\"version\":\\s*\"([0-9.]+)\""
     }
-  ]
+  ],
+  "self_checks": {
+    "lint": [
+      "jq empty swift.json",
+      "find . -name '*.sh' -print0 | xargs -0 -r -n1 bash -n",
+      "python3 -c 'import ast,sys;[ast.parse(open(f).read(),f) for f in sys.argv[1:]]' scripts/fingerprint.py"
+    ],
+    "test": [
+      "bash tests/fingerprint-smoke.sh",
+      "bash tests/swift-extension-smoke.sh"
+    ]
+  }
 }
