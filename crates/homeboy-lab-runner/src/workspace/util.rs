@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, ErrorCode, Result};
-use homeboy_core::server::{self, Server, SshClient};
+use homeboy_core::server::{self, Server, SshClient, TRANSIENT_SSH_STDERR_PATTERNS};
 
 use super::super::Runner;
 
@@ -182,23 +182,6 @@ pub(crate) fn run_shell_command(command: &str, action: &str) -> Result<()> {
         output.status.code().unwrap_or(-1),
     )))
 }
-
-/// SSH connection failures worth retrying, matched against the piped command's
-/// stderr. Kept in sync with `homeboy_core::server::is_transient_ssh_error`,
-/// which operates on the runner `CommandOutput` type rather than the local
-/// `sh` process output available here.
-const TRANSIENT_SSH_STDERR_PATTERNS: [&str; 10] = [
-    "connection refused",
-    "connection reset",
-    "connection timed out",
-    "no route to host",
-    "network is unreachable",
-    "temporary failure in name resolution",
-    "could not resolve hostname",
-    "broken pipe",
-    "ssh_exchange_identification",
-    "connection closed by remote host",
-];
 
 /// Return a retryable [`ErrorCode::RunnerLabTransportFailure`] when a piped
 /// materialization command failed because its SSH transport dropped, or `None`

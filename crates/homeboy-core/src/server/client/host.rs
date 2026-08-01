@@ -87,24 +87,34 @@ fn successful_command_stdout(output: std::process::Output) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// SSH connection failures worth retrying, matched case-insensitively against
+/// lowercased stderr.
+///
+/// This is the single source of truth for the pattern list. Callers that work
+/// with a different output type (for example `homeboy-lab-runner`, which sees a
+/// raw `std::process::Output` from a piped `sh` invocation rather than a
+/// [`CommandOutput`]) import this constant instead of restating the patterns.
+pub const TRANSIENT_SSH_STDERR_PATTERNS: [&str; 10] = [
+    "connection refused",
+    "connection reset",
+    "connection timed out",
+    "no route to host",
+    "network is unreachable",
+    "temporary failure in name resolution",
+    "could not resolve hostname",
+    "broken pipe",
+    "ssh_exchange_identification",
+    "connection closed by remote host",
+];
+
 /// Check if an SSH failure is a transient connection error worth retrying.
 pub fn is_transient_ssh_error(output: &CommandOutput) -> bool {
     let stderr = output.stderr.to_lowercase();
     // SSH exit code 255 = connection error (not a remote command failure)
     let is_connection_exit = output.exit_code == 255;
 
-    let transient_patterns = [
-        "connection refused",
-        "connection reset",
-        "connection timed out",
-        "no route to host",
-        "network is unreachable",
-        "temporary failure in name resolution",
-        "could not resolve hostname",
-        "broken pipe",
-        "ssh_exchange_identification",
-        "connection closed by remote host",
-    ];
-
-    is_connection_exit || transient_patterns.iter().any(|p| stderr.contains(p))
+    is_connection_exit
+        || TRANSIENT_SSH_STDERR_PATTERNS
+            .iter()
+            .any(|p| stderr.contains(p))
 }
