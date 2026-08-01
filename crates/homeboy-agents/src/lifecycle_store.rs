@@ -334,6 +334,44 @@ pub(super) fn cook_index_exists(cook_id: &str) -> Result<bool> {
     Ok(cook_index_path(cook_id)?.exists())
 }
 
+/// Claim the one terminal notification a Cook is allowed to deliver.
+///
+/// The claim is the creation of the marker file itself: `create_new` is
+/// `O_EXCL`, so exactly one caller — in any process, on any thread — observes
+/// `Ok(true)`. This is the cook-scoped counterpart of
+/// `ObservationStore::mark_notification_delivered`, which cannot serve here
+/// because it is keyed on a `runs` row and a Cook id is an alias with no row
+/// of its own.
+pub(super) fn claim_cook_notification(cook_id: &str, marker: &Value) -> Result<bool> {
+    let path = cook_index_path(&sanitize_run_id(cook_id))?.with_file_name("notification.json");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(parent.display().to_string()))
+        })?;
+    }
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            let bytes = serde_json::to_vec(marker).map_err(|error| {
+                Error::internal_json(error.to_string(), Some(path.display().to_string()))
+            })?;
+            file.write_all(&bytes).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(path.display().to_string()))
+            })?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some(path.display().to_string()),
+        )),
+    }
+}
+
 pub(super) fn update_cook_index(
     cook_id: &str,
     mutate: impl FnOnce(&mut AgentTaskCookIndex) -> bool,

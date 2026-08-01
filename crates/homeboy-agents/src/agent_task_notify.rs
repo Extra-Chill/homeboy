@@ -24,13 +24,16 @@
 use homeboy_core::notification_payload::{
     NotifyAction, NotifyEventKind, NotifyLink, NotifyPayload, NotifySubject,
 };
-use homeboy_core::notification_route;
+use homeboy_core::notification_route::{self, NotificationRoute};
 use homeboy_core::notify::{self, NotifyEvent};
 
 use crate::agent_task_service::AgentTaskCookReport;
 
 /// Generic subject class for every cook lifecycle notification.
 const COOK_SUBJECT_KIND: &str = "agent_task_cook";
+
+/// Attribution recorded on the cook-level exactly-once marker.
+const COOK_TERMINAL_DELIVERED_BY: &str = "cook-controller";
 
 /// Whether a cook lifecycle event is delivered.
 ///
@@ -44,8 +47,28 @@ fn should_deliver(kind: NotifyEventKind, has_explicit_route: bool) -> bool {
     kind.is_terminal() || has_explicit_route
 }
 
-fn deliver(event: NotifyEvent) {
-    let route = notification_route::current();
+/// The destination this cook's events belong to.
+///
+/// `notification_route::current()` is a **thread-local**, so it only answers in
+/// the process and on the thread that accepted `--notification-route`. A cook
+/// resumed elsewhere — `cook --continue`, controller adoption, a claimed
+/// continuation — starts with an empty one, which silently downgraded the whole
+/// arc: `Started`/`Progress` were dropped by `should_deliver`, and the terminal
+/// event went to the ambient default transport instead of the thread that
+/// launched the work. The route is already persisted on the durable record, and
+/// both the daemon completion backstop and `runs watch` already read it back
+/// from there; this closes the same gap for cook lifecycle events (#11115).
+///
+/// In-process thread hops are still covered by
+/// `notification_route::capture`/`bind`; the thread-local deliberately wins so
+/// an explicitly bound route is never overridden by durable metadata.
+fn effective_route(run_id: &str) -> Option<NotificationRoute> {
+    notification_route::current()
+        .or_else(|| crate::agent_task_lifecycle::durable_notification_route(run_id))
+}
+
+fn deliver(event: NotifyEvent, run_id: &str) {
+    let route = effective_route(run_id);
     if !should_deliver(event.kind, route.is_some()) {
         return;
     }
@@ -122,6 +145,7 @@ pub(crate) fn cook_started(
         NotifyEvent::lifecycle(NotifyEventKind::Started, cook_id, "started")
             .with_title(format!("cook started — {title}"))
             .with_payload(payload),
+        run_id,
     );
 }
 
@@ -158,6 +182,7 @@ pub(crate) fn cook_retrying(
         NotifyEvent::lifecycle(NotifyEventKind::Progress, cook_id, "retrying")
             .with_title(format!("cook attempt {attempt} of {max_attempts}"))
             .with_payload(payload),
+        run_id,
     );
 }
 
@@ -232,8 +257,35 @@ fn terminal_payload(
 }
 
 /// The cook reached a terminal outcome.
+///
+/// Delivered at most once per *cook*. The pre-existing exactly-once marker is
+/// keyed on a `runs` row, which dedupes one attempt against the runner-direct
+/// and daemon-backstop paths but cannot dedupe an event whose subject is the
+/// cook. That was tolerable while only the launching thread could deliver;
+/// durable route rehydration (#11115) means a second process reaching the same
+/// terminal boundary — a `--continue` over an already-terminal cook, an adopted
+/// controller — would now re-announce an outcome the operator already has.
 pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str>, exit_code: i32) {
+    // Claim before building the payload, and treat a failed claim the same as a
+    // lost one: the runner-direct and daemon-backstop paths also decline to
+    // dispatch when their marker cannot be established, because a duplicated
+    // terminal notification is worse than a missing one.
+    let claimed = crate::agent_task_lifecycle::claim_cook_terminal_notification(
+        &report.cook_id,
+        COOK_TERMINAL_DELIVERED_BY,
+    )
+    .unwrap_or(false);
+    if !claimed {
+        return;
+    }
     let succeeded = exit_code == 0;
+    // The cook id resolves through the same alias index when a report carries
+    // no latest attempt, so a terminal event is never left unroutable.
+    let route_run_id = report
+        .latest_run_id
+        .clone()
+        .filter(|run_id| !run_id.trim().is_empty())
+        .unwrap_or_else(|| report.cook_id.clone());
     let payload = terminal_payload(report, component, exit_code);
     deliver(
         NotifyEvent::lifecycle(payload.kind, &report.cook_id, &report.status)
@@ -247,6 +299,7 @@ pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str
                 report.cook_id
             ))
             .with_payload(payload),
+        &route_run_id,
     );
 }
 
@@ -412,7 +465,87 @@ mod tests {
             cook_started("cook-abc", "run-1", "task", None, "main", 3, "claude");
             cook_retrying("cook-abc", "run-1", None, 2, 3);
             cook_terminal(&report("succeeded", None), None, 0);
-            cook_terminal(&report("durable_failure", None), None, 1);
+            // A distinct cook: the terminal event is now claimed once per cook,
+            // so reusing `cook-abc` would exercise the dedupe rather than the
+            // failure path.
+            let mut failed = report("durable_failure", None);
+            failed.cook_id = "cook-def".to_string();
+            cook_terminal(&failed, None, 1);
+        });
+    }
+
+    fn route(destination: &str) -> NotificationRoute {
+        NotificationRoute::new("extension", destination).expect("route")
+    }
+
+    fn seed_run_with_route(run_id: &str, destination: &str) {
+        let plan = crate::agent_task_scheduler::AgentTaskPlan::new("notify-plan", Vec::new());
+        crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("durable run");
+        crate::agent_task_lifecycle::persist_notification_route(run_id, &route(destination))
+            .expect("persist route");
+    }
+
+    #[test]
+    fn a_cook_resumed_in_a_new_process_recovers_its_route_from_the_durable_record() {
+        // #11115: `notification_route::current()` is a thread-local, so a
+        // process that did not launch the cook (`cook --continue`, controller
+        // adoption, claimed continuation) has none. Without the durable
+        // fallback the whole arc degrades: Started/Progress are dropped and the
+        // terminal event lands on the ambient default transport instead of the
+        // thread that asked for this work. No route is bound here — that is the
+        // resumed process.
+        homeboy_core::test_support::with_isolated_home(|_| {
+            seed_run_with_route("cook-resumed-attempt-1-aaaa", "thread-42");
+            assert!(notification_route::current().is_none());
+
+            let resolved = effective_route("cook-resumed-attempt-1-aaaa");
+
+            assert_eq!(resolved, Some(route("thread-42")));
+        });
+    }
+
+    #[test]
+    fn an_explicitly_bound_route_still_wins_over_durable_metadata() {
+        // The thread-local is the caller's live intent; durable metadata is
+        // only the fallback for a process that has none. In-process thread hops
+        // keep using capture/bind and must not be overridden.
+        homeboy_core::test_support::with_isolated_home(|_| {
+            seed_run_with_route("cook-bound-attempt-1-aaaa", "durable-thread");
+
+            let resolved = notification_route::with_current(Some(route("live-thread")), || {
+                effective_route("cook-bound-attempt-1-aaaa")
+            });
+
+            assert_eq!(resolved, Some(route("live-thread")));
+        });
+    }
+
+    #[test]
+    fn an_unroutable_run_is_silent_rather_than_a_cook_failure() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            assert!(effective_route("no-such-run").is_none());
+            assert!(effective_route("").is_none());
+        });
+    }
+
+    #[test]
+    fn the_terminal_event_is_claimed_once_per_cook_not_once_per_attempt() {
+        // The pre-existing exactly-once marker is a column on one `runs` row,
+        // so it cannot dedupe an event whose subject is the cook. Durable route
+        // rehydration lets a second process reach the same terminal boundary,
+        // so the claim has to be keyed the way the event is.
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let claim = |cook_id: &str| {
+                crate::agent_task_lifecycle::claim_cook_terminal_notification(cook_id, "test")
+                    .expect("claim")
+            };
+
+            assert!(claim("cook-once"));
+            assert!(!claim("cook-once"));
+            // Every other cook still gets its one delivery.
+            assert!(claim("cook-other"));
+            // An empty id is never claimable, so it can never suppress a real one.
+            assert!(!claim(""));
         });
     }
 }
