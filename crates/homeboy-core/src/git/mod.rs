@@ -331,6 +331,7 @@ fn identity_error(message: &str, details: serde_json::Value) -> crate::error::Er
         details,
         hints: Vec::new(),
         retryable: Some(false),
+        source: None,
     }
 }
 

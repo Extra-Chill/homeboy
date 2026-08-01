@@ -585,7 +585,7 @@ fn clear_path(path: &Path) -> Result<()> {
 fn contained_path(root: &Path, path: impl AsRef<Path>) -> Result<PathBuf> {
     let path =
         homeboy_paths::resolve_contained_local_path(root, path, "dependency_materialization")
-            .map_err(Into::into)?;
+            .map_err(Error::from)?;
     let root =
         fs::canonicalize(root).map_err(|error| io_error("resolve dependency workspace", error))?;
     let mut ancestor = path.as_path();

@@ -281,6 +281,25 @@ pub struct Error {
     pub details: Value,
     pub hints: Vec<Hint>,
     pub retryable: Option<bool>,
+    /// The error this one was built from, when the constructor had it.
+    ///
+    /// `code`/`message`/`details` are homeboy's *reported* view of a failure:
+    /// stable, structured, and safe to render. This is the original value,
+    /// kept so `std::error::Error::source` can walk the chain and so a caller
+    /// can downcast to (for example) `io::Error` to read an `ErrorKind`
+    /// instead of pattern-matching a rendered string.
+    ///
+    /// `Arc` rather than `Box` because `Error` is `Clone`, and a boxed trait
+    /// object is not. Clones therefore share one source, which is correct:
+    /// the cause is a fact about the failure, not about a copy of the report.
+    ///
+    /// Deliberately not serialized. `Error` is projected into
+    /// `homeboy/command-result/v3` envelopes field by field — it derives
+    /// neither `Serialize` nor `Deserialize` — so the wire contract is
+    /// unchanged and a round-tripped error simply has no source. Anything an
+    /// operator or a machine consumer must see belongs in `details`, which is
+    /// serialized; this field is for in-process inspection.
+    pub source: Option<std::sync::Arc<dyn std::error::Error + Send + Sync>>,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -291,7 +310,41 @@ impl std::fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_ref()
+            .map(|source| &**source as &(dyn std::error::Error + 'static))
+    }
+}
+
+/// Let `?` carry a real `io::Error` instead of forcing a manual stringify.
+///
+/// Routed through [`Error::from_io_error`] on purpose: that is where #11188's
+/// storage-exhaustion classification lives, and a conversion that bypassed it
+/// would silently re-collapse every `ENOSPC` back into `internal.io_error`.
+///
+/// The conversion cannot attach context — `?` has nowhere to put it — so a
+/// site that knows which file or which operation failed should still call
+/// [`Error::from_io_error`] with a context string. This impl exists so that
+/// *discarding the error entirely* (`.map_err(|_| ...)`) is never the path of
+/// least resistance again.
+impl From<std::io::Error> for Error {
+    fn from(error: std::io::Error) -> Self {
+        Self::from_io_error(&error, None).with_source(error)
+    }
+}
+
+/// Let `?` carry a real `serde_json::Error`.
+///
+/// Delegates to [`Error::from_json_error`], so a serialization failure that is
+/// really a failed *write* is reported as an IO failure (and classified for
+/// storage exhaustion) rather than as a JSON failure.
+impl From<serde_json::Error> for Error {
+    fn from(error: serde_json::Error) -> Self {
+        Self::from_json_error(&error, None).with_source(error)
+    }
+}
 
 #[derive(Debug, Serialize)]
 
@@ -476,10 +529,11 @@ pub fn io_error_is_storage_exhausted(error: &std::io::Error) -> bool {
 /// Whether an already-stringified io/SQLite error reports exhausted storage.
 ///
 /// Most homeboy call sites stringify an `io::Error` before it ever reaches this
-/// crate — `Error::internal_io` takes `impl Into<String>`, and there is no
-/// `From<io::Error>` yet (#11134) — so the typed classifier above cannot see
-/// them. These markers are the stable operating-system and SQLite renderings of
-/// a filesystem that cannot accept another byte or another inode.
+/// crate — `Error::internal_io` takes `impl Into<String>`, and the typed
+/// [`From<std::io::Error>`] conversion added in #11134 only covers sites that
+/// have been migrated onto `?` — so the typed classifier above cannot see them.
+/// These markers are the stable operating-system and SQLite renderings of a
+/// filesystem that cannot accept another byte or another inode.
 pub fn message_reports_storage_exhaustion(message: &str) -> bool {
     const MARKERS: &[&str] = &[
         "no space left on device",
@@ -586,9 +640,35 @@ pub struct SshIdentityFileNotFoundDetails {
     pub identity_file: String,
 }
 
-/// Serialize a details struct to JSON Value, falling back to empty object on failure.
+/// Present in `details` when the details struct itself failed to serialize.
+///
+/// A consumer that finds this key is reading an error whose evidence was lost
+/// in transit, and should say so rather than reporting "no details".
+pub const DETAILS_SERIALIZATION_ERROR_KEY: &str = "_homeboy_details_serialization_error";
+
+/// Serialize a details struct to a JSON `Value`, reporting its own failures.
+///
+/// This used to swallow the error and return an empty object, which is
+/// indistinguishable from an error that legitimately carries no details — so a
+/// details struct that could not serialize produced a *silently* evidence-free
+/// error, and the reason was gone. Now the failure lands in the payload under
+/// [`DETAILS_SERIALIZATION_ERROR_KEY`].
+///
+/// Still infallible on purpose: this runs while an error is being constructed,
+/// frequently on a failure path, and panicking or returning a `Result` here
+/// would replace a reportable problem with an unreportable one.
 fn to_details(details: impl Serialize) -> Value {
-    serde_json::to_value(details).unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
+    match serde_json::to_value(details) {
+        Ok(value) => value,
+        Err(error) => {
+            let mut map = serde_json::Map::new();
+            map.insert(
+                DETAILS_SERIALIZATION_ERROR_KEY.to_string(),
+                Value::String(error.to_string()),
+            );
+            Value::Object(map)
+        }
+    }
 }
 
 impl Error {
@@ -599,7 +679,18 @@ impl Error {
             details,
             hints: Vec::new(),
             retryable: None,
+            source: None,
         }
+    }
+
+    /// Attach the error this one was built from.
+    ///
+    /// Additive: it changes neither `code`, `message`, nor `details`, so the
+    /// reported contract is untouched and only `std::error::Error::source`
+    /// (and downcasting) gain anything.
+    pub fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        self.source = Some(std::sync::Arc::new(source));
+        self
     }
 
     /// A write failed, or was refused, because the filesystem has no capacity.
@@ -638,15 +729,38 @@ impl Error {
 
     /// Classify a live `io::Error`, keeping storage exhaustion distinguishable.
     ///
-    /// Deliberately *not* a `From<io::Error>` impl. Adding that conversion is
-    /// its own migration across ~1500 call sites and is tracked separately
-    /// (#11134); this constructor exists so the sites that matter can classify
-    /// today without waiting for it.
+    /// This is the contextful form. [`From<std::io::Error>`] delegates here
+    /// with `None`, so every conversion — explicit or via `?` — goes through
+    /// the same ENOSPC classification (#11188). Prefer this constructor
+    /// wherever the call site knows *what it was doing*: a bare `?` yields a
+    /// correctly coded error with no operation attached, which is enough to
+    /// act on but not enough to locate.
     pub fn from_io_error(error: &std::io::Error, context: Option<String>) -> Self {
         if io_error_is_storage_exhausted(error) {
             return Self::storage_exhausted(error.to_string(), context);
         }
         Self::internal_io(error.to_string(), context)
+    }
+
+    /// Classify a `serde_json` failure, keeping storage exhaustion visible.
+    ///
+    /// `serde_json`'s writer-side entry points (`to_writer`,
+    /// `to_writer_pretty`) wrap the underlying `io::Error` rather than
+    /// returning it, so a full filesystem reaches a caller as a
+    /// `serde_json::Error`. Reporting that as `internal.json_error` is how a
+    /// disk-full write comes to look like malformed JSON — the exact
+    /// misdirection #10603 was diagnosed through. Io-category failures are
+    /// therefore routed to [`Error::internal_io`], which carries #11188's
+    /// ENOSPC classification; only genuine syntax/data/EOF failures stay
+    /// `internal.json_error`.
+    pub fn from_json_error(error: &serde_json::Error, context: Option<String>) -> Self {
+        if error.is_io() {
+            if error.io_error_kind() == Some(std::io::ErrorKind::StorageFull) {
+                return Self::storage_exhausted(error.to_string(), context);
+            }
+            return Self::internal_io(error.to_string(), context);
+        }
+        Self::internal_json(error.to_string(), context)
     }
 
     /// Whether this error reports an out-of-capacity filesystem.
@@ -1581,6 +1695,311 @@ mod storage_exhaustion_tests {
         assert!(!details.contains_key("available_bytes"));
         assert!(!details.contains_key("reserve_inodes"));
         assert!(!details.contains_key("context"));
+    }
+}
+
+/// `?` must be able to carry a real error, and must not lose the #11188
+/// storage classification on the way through (#11134).
+#[cfg(test)]
+mod conversion_tests {
+    use super::*;
+
+    fn io_via_question_mark(error: std::io::Error) -> Result<()> {
+        Err(error)?;
+        Ok(())
+    }
+
+    fn json_via_question_mark(text: &str) -> Result<Value> {
+        Ok(serde_json::from_str(text)?)
+    }
+
+    /// A writer that fails the way a full or severed destination fails.
+    ///
+    /// Used instead of `serde_json::Error::io`, which is `#[doc(hidden)]` and
+    /// documented as "Not public API". This produces a genuine io-category
+    /// `serde_json::Error` through the same public path production code takes.
+    struct FailingWriter {
+        kind: std::io::ErrorKind,
+        message: &'static str,
+    }
+
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(self.kind, self.message))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn json_write_failure(kind: std::io::ErrorKind, message: &'static str) -> serde_json::Error {
+        serde_json::to_writer(
+            FailingWriter { kind, message },
+            &serde_json::json!({ "payload": true }),
+        )
+        .expect_err("the writer always fails")
+    }
+
+    /// The whole point: a bare `?` keeps the errno-derived text that
+    /// `.map_err(|_| ...)` throws away.
+    #[test]
+    fn the_question_mark_conversion_preserves_the_underlying_io_message() {
+        let error = io_via_question_mark(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "keyfile is not readable",
+        ))
+        .expect_err("io failure converts");
+
+        assert_eq!(error.code, ErrorCode::InternalIoError);
+        assert!(
+            error.details["error"]
+                .as_str()
+                .expect("io error text")
+                .contains("keyfile is not readable"),
+            "{:?}",
+            error.details
+        );
+    }
+
+    /// A conversion that bypassed `from_io_error` would re-collapse ENOSPC
+    /// into `internal.io_error` and undo #11188 everywhere `?` is used.
+    #[test]
+    fn the_question_mark_conversion_still_classifies_storage_exhaustion() {
+        let error = io_via_question_mark(std::io::Error::from(std::io::ErrorKind::StorageFull))
+            .expect_err("storage failure converts");
+
+        assert_eq!(error.code, ErrorCode::StorageExhausted);
+        assert!(error.is_storage_exhausted());
+        assert_eq!(error.retryable, Some(false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_raw_enospc_survives_the_question_mark_conversion() {
+        let error = io_via_question_mark(std::io::Error::from_raw_os_error(ENOSPC))
+            .expect_err("enospc converts");
+
+        assert!(error.is_storage_exhausted());
+    }
+
+    #[test]
+    fn a_json_syntax_failure_converts_to_a_json_error() {
+        let error = json_via_question_mark("{ not json").expect_err("syntax failure converts");
+
+        assert_eq!(error.code, ErrorCode::InternalJsonError);
+        assert!(!error.details["error"]
+            .as_str()
+            .expect("json error text")
+            .is_empty());
+    }
+
+    /// `serde_json::to_writer` on a full disk returns a `serde_json::Error`
+    /// wrapping the `io::Error`. Calling that "JSON error" is how a disk-full
+    /// deploy gets misread as malformed payload.
+    #[test]
+    fn a_json_error_wrapping_a_full_disk_is_reported_as_storage_exhaustion() {
+        let wrapped =
+            json_write_failure(std::io::ErrorKind::StorageFull, "no space left on device");
+
+        assert!(wrapped.is_io(), "expected an io-category json error");
+        let error = Error::from(wrapped);
+
+        assert_eq!(error.code, ErrorCode::StorageExhausted);
+        assert!(error.is_storage_exhausted());
+    }
+
+    /// An io-category `serde_json::Error` is a failed write, not bad JSON.
+    #[test]
+    fn a_json_error_wrapping_an_ordinary_io_failure_is_reported_as_an_io_error() {
+        let wrapped = json_write_failure(std::io::ErrorKind::BrokenPipe, "provider closed stdin");
+
+        let error = Error::from_json_error(&wrapped, Some("write provider input".to_string()));
+
+        assert_eq!(error.code, ErrorCode::InternalIoError);
+        assert_eq!(error.details["context"], "write provider input");
+        assert!(error.details["error"]
+            .as_str()
+            .expect("io error text")
+            .contains("provider closed stdin"));
+    }
+
+    /// `source()` is what lets a caller reach the typed cause instead of
+    /// re-parsing a rendered string (#11134).
+    #[test]
+    fn the_question_mark_conversion_exposes_the_cause_through_source() {
+        use std::error::Error as _;
+
+        let error = io_via_question_mark(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "keyfile is not readable",
+        ))
+        .expect_err("io failure converts");
+
+        let source = error.source().expect("the cause is reachable");
+        assert!(source.to_string().contains("keyfile is not readable"));
+    }
+
+    /// The point of keeping the *typed* cause rather than its text: a caller
+    /// can read an `ErrorKind` instead of matching on a message.
+    #[test]
+    fn the_cause_can_be_downcast_back_to_the_original_io_error() {
+        use std::error::Error as _;
+
+        let error = Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+
+        let cause = error
+            .source()
+            .expect("cause")
+            .downcast_ref::<std::io::Error>()
+            .expect("the original io error survives");
+        assert_eq!(cause.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn a_json_conversion_also_carries_its_cause() {
+        use std::error::Error as _;
+
+        let error = json_via_question_mark("{ not json").expect_err("syntax failure converts");
+
+        assert!(error
+            .source()
+            .expect("cause")
+            .downcast_ref::<serde_json::Error>()
+            .is_some());
+    }
+
+    /// An error built without a cause must report none, not an empty stand-in.
+    #[test]
+    fn an_error_constructed_without_a_cause_reports_no_source() {
+        use std::error::Error as _;
+
+        assert!(Error::internal_unexpected("no cause").source().is_none());
+    }
+
+    /// `Error` is `Clone`, so the source is `Arc`-shared rather than boxed.
+    /// A clone must still see the cause.
+    #[test]
+    fn cloning_an_error_preserves_its_cause() {
+        use std::error::Error as _;
+
+        let error = Error::from(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        let clone = error.clone();
+
+        assert!(clone.source().is_some());
+        assert_eq!(clone.code, ErrorCode::StorageExhausted);
+    }
+
+    /// Attaching a cause must not disturb the reported contract, which is what
+    /// every consumer and every envelope actually reads.
+    #[test]
+    fn attaching_a_cause_does_not_change_the_reported_contract() {
+        let plain = Error::internal_io("boom", Some("context".to_string()));
+        let sourced = Error::internal_io("boom", Some("context".to_string()))
+            .with_source(std::io::Error::from(std::io::ErrorKind::NotFound));
+
+        assert_eq!(plain.code, sourced.code);
+        assert_eq!(plain.message, sourced.message);
+        assert_eq!(plain.details, sourced.details);
+        assert_eq!(plain.retryable, sourced.retryable);
+    }
+
+    /// The cause is in-process state, not wire state. `Error` derives no
+    /// serde impls, so the envelope projection is unchanged by definition —
+    /// this pins that `details` (which *is* serialized) stays clean.
+    #[test]
+    fn the_cause_does_not_leak_into_the_serialized_details() {
+        let error = Error::from(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "secret-path-detail",
+        ));
+
+        let details = error.details.as_object().expect("object details");
+        assert!(!details.contains_key("source"));
+        assert!(!details.contains_key("cause"));
+    }
+
+    /// `?` cannot attach context, so the contextful constructors must stay the
+    /// preferred form for sites that know which operation failed.
+    #[test]
+    fn the_contextful_constructor_records_what_the_caller_was_doing() {
+        let error = Error::from_io_error(
+            &std::io::Error::from(std::io::ErrorKind::NotFound),
+            Some("read deployment provider policy".to_string()),
+        );
+
+        assert_eq!(error.details["context"], "read deployment provider policy");
+    }
+}
+
+/// A details struct that fails to serialize must not look like an error that
+/// simply had no details (#11134).
+#[cfg(test)]
+mod details_serialization_tests {
+    use super::*;
+
+    /// Serialization fails the way a real details struct fails: a map keyed by
+    /// something JSON cannot use as an object key.
+    struct UnserializableDetails;
+
+    impl Serialize for UnserializableDetails {
+        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            use serde::ser::SerializeMap;
+            let mut map = serializer.serialize_map(Some(1))?;
+            map.serialize_key(&[1u8, 2, 3])?;
+            map.serialize_value(&"value")?;
+            map.end()
+        }
+    }
+
+    #[test]
+    fn a_details_struct_that_cannot_serialize_says_so_instead_of_vanishing() {
+        let details = to_details(UnserializableDetails);
+
+        let object = details.as_object().expect("object details");
+        assert_eq!(
+            object.len(),
+            1,
+            "a failure must not be indistinguishable from an empty object"
+        );
+        let reported = object[DETAILS_SERIALIZATION_ERROR_KEY]
+            .as_str()
+            .expect("the serialization failure is reported as a string");
+        assert!(!reported.is_empty(), "the reason must survive");
+    }
+
+    /// The marker only appears on failure — an error with genuinely no details
+    /// must stay a clean empty object.
+    #[test]
+    fn a_successful_serialization_carries_no_failure_marker() {
+        let error = Error::internal_unexpected("plain");
+
+        assert!(!error
+            .details
+            .as_object()
+            .expect("object details")
+            .contains_key(DETAILS_SERIALIZATION_ERROR_KEY));
+        assert_eq!(
+            to_details(serde_json::json!({})),
+            Value::Object(serde_json::Map::new())
+        );
+    }
+
+    /// Construction must survive the failure: this runs on a failure path, so
+    /// replacing a reportable error with a panic would be strictly worse.
+    #[test]
+    fn constructing_an_error_survives_a_failed_details_serialization() {
+        let error = Error::new(
+            ErrorCode::InternalUnexpected,
+            "fixture",
+            to_details(UnserializableDetails),
+        );
+
+        assert_eq!(error.code, ErrorCode::InternalUnexpected);
+        assert!(error.details[DETAILS_SERIALIZATION_ERROR_KEY].is_string());
     }
 }
 

@@ -232,13 +232,27 @@ fn layered_provider_evidence(stdout: &str, expected_schema: &str) -> serde_json:
     }
 }
 
+/// What `layered_payload` was doing when a step failed.
+///
+/// Named rather than inlined because three of these steps used to emit the
+/// same literal — `"Could not prepare deployment provider input"` — which made
+/// a failure unattributable to a line. `distinct_payload_step_contexts` pins
+/// that they stay distinguishable (#11134).
+const ENCODE_POLICY_CONTEXT: &str =
+    "canonically encode the deployment provider policy for its digest";
+const CREATE_INPUT_CONTEXT: &str = "create the deployment provider input tempfile";
+#[cfg(unix)]
+const SECURE_INPUT_CONTEXT: &str = "restrict the deployment provider input tempfile to mode 0600";
+const WRITE_INPUT_CONTEXT: &str = "write the deployment provider payload to its input tempfile";
+const FLUSH_INPUT_CONTEXT: &str = "flush the deployment provider input tempfile";
+
 fn layered_payload(
     component: &Component,
     policy: &serde_json::Value,
     target: Option<&serde_json::Value>,
 ) -> Result<tempfile::NamedTempFile> {
     let policy_bytes = homeboy_engine_primitives::canonical_json::canonical_json_bytes(policy)
-        .map_err(|_| Error::internal_io("Could not serialize deployment provider policy", None))?;
+        .map_err(|error| Error::from_json_error(&error, Some(ENCODE_POLICY_CONTEXT.to_string())))?;
     let revision = clean_head_revision(component)?;
     let payload = serde_json::json!({
         "schema": homeboy_extension::DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA,
@@ -253,19 +267,28 @@ fn layered_payload(
         "target": target,
         "source": { "component": component.id, "revision": revision },
     });
+    // Each step below reports its own operation and hands over the real error.
+    // Discarding it with `|_|` cost the errno, the path, and the kind — which
+    // is how an out-of-space or read-only /tmp reached an operator as the
+    // unactionable sentence "Could not prepare deployment provider input".
+    // Routing through `from_io_error`/`from_json_error` also keeps #11188's
+    // ENOSPC classification, so a full disk here is `storage.exhausted` rather
+    // than a generic `internal.io_error` the caller cannot degrade on.
     let mut file = tempfile::NamedTempFile::new()
-        .map_err(|_| Error::internal_io("Could not prepare deployment provider input", None))?;
+        .map_err(|error| Error::from_io_error(&error, Some(CREATE_INPUT_CONTEXT.to_string())))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         file.as_file()
             .set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| Error::internal_io("Could not secure deployment provider input", None))?;
+            .map_err(|error| {
+                Error::from_io_error(&error, Some(SECURE_INPUT_CONTEXT.to_string()))
+            })?;
     }
     serde_json::to_writer(&mut file, &payload)
-        .map_err(|_| Error::internal_io("Could not prepare deployment provider input", None))?;
+        .map_err(|error| Error::from_json_error(&error, Some(WRITE_INPUT_CONTEXT.to_string())))?;
     file.flush()
-        .map_err(|_| Error::internal_io("Could not prepare deployment provider input", None))?;
+        .map_err(|error| Error::from_io_error(&error, Some(FLUSH_INPUT_CONTEXT.to_string())))?;
     Ok(file)
 }
 
@@ -362,12 +385,60 @@ fn repository_contract(component: &Component, contract: &str) -> Result<PathBuf>
 mod tests {
     use super::{
         layered_payload, layered_provider_evidence, repository_contract, run_if_configured,
-        validate_repository_policy,
+        validate_repository_policy, CREATE_INPUT_CONTEXT, ENCODE_POLICY_CONTEXT,
+        FLUSH_INPUT_CONTEXT, WRITE_INPUT_CONTEXT,
     };
     use crate::deploy::DeployConfig;
     use homeboy_core::component::{Component, DeploymentProviderAttachment};
+    use homeboy_core::error::Error;
     use homeboy_core::project::{Project, ProjectComponentAttachment};
     use std::process::Command;
+
+    /// Three of these steps used to emit the identical literal
+    /// `"Could not prepare deployment provider input"`, so a report named the
+    /// function but not the line (#11134).
+    #[test]
+    fn every_payload_step_reports_a_distinct_operation() {
+        let mut contexts = vec![
+            ENCODE_POLICY_CONTEXT,
+            CREATE_INPUT_CONTEXT,
+            WRITE_INPUT_CONTEXT,
+            FLUSH_INPUT_CONTEXT,
+        ];
+        #[cfg(unix)]
+        contexts.push(super::SECURE_INPUT_CONTEXT);
+
+        let total = contexts.len();
+        contexts.sort_unstable();
+        contexts.dedup();
+
+        assert_eq!(
+            contexts.len(),
+            total,
+            "payload steps must stay individually attributable: {contexts:?}"
+        );
+        assert!(contexts.iter().all(|context| !context.is_empty()));
+    }
+
+    /// `.map_err(|_| ...)` discarded the `io::Error` outright, so the report
+    /// carried no errno, no path, and no kind. The classifying constructors
+    /// must keep all of it alongside the operation.
+    #[test]
+    fn a_failed_payload_step_reports_the_underlying_io_error() {
+        let io_error = std::fs::File::create(
+            std::path::Path::new("/homeboy-nonexistent-root").join("provider-input"),
+        )
+        .expect_err("creating under a missing root fails");
+
+        let error = Error::from_io_error(&io_error, Some(CREATE_INPUT_CONTEXT.to_string()));
+
+        assert_eq!(error.details["context"], CREATE_INPUT_CONTEXT);
+        let reported = error.details["error"].as_str().expect("io error text");
+        assert!(
+            reported.contains("os error"),
+            "the errno must survive: {reported}"
+        );
+    }
 
     #[test]
     fn requires_a_repository_contained_contract_file() {
