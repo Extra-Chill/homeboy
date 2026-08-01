@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.23] - 2026-08-01
+
+### Fixed
+- resolve canonical Codebox contracts module
+
 ## [3.34.22] - 2026-07-31
 
 ### Fixed
