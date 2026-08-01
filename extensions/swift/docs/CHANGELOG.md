@@ -2,6 +2,11 @@
 
 All notable changes to the **swift** extension will be documented in this file.
 
+## [2.8.3] - 2026-08-01
+
+### Changed
+- gate pull requests on every extension's declared self_checks
+
 ## [2.8.2] - 2026-07-29
 
 ### Fixed
