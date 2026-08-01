@@ -26,7 +26,7 @@ use super::state::now_rfc3339;
 use homeboy_core::error::{Error, Result, RigResourceConflictInfo};
 use homeboy_core::paths;
 use homeboy_engine_primitives::shell::quote_arg;
-use lock::LeaseIndexLock;
+use lock::acquire as acquire_lease_index_lock;
 
 /// On-disk lease held by one active mutating rig command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,7 +77,7 @@ pub struct ActiveRigRunLease {
 
 impl Drop for ActiveRigRunLease {
     fn drop(&mut self) {
-        let Ok(_lock) = LeaseIndexLock::acquire() else {
+        let Ok(_lock) = acquire_lease_index_lock() else {
             return;
         };
         let Ok(path) = lease_path(&self.rig_id) else {
@@ -109,7 +109,7 @@ pub fn acquire_active_run_lease_with_settings(
         return Ok(None);
     }
 
-    let _lock = LeaseIndexLock::acquire()?;
+    let _lock = acquire_lease_index_lock()?;
     fs::create_dir_all(paths::rig_leases_dir()?).map_err(|e| {
         Error::internal_unexpected(format!("Failed to create rig lease directory: {}", e))
     })?;
@@ -371,7 +371,7 @@ pub enum ReleaseLeaseOutcome {
 /// local guardrail so a new run can proceed. With `force`, the caller is
 /// asserting the holder is dead or wedged.
 pub fn release_active_run_lease(rig_id: &str, force: bool) -> Result<ReleaseLeaseOutcome> {
-    let _lock = LeaseIndexLock::acquire()?;
+    let _lock = acquire_lease_index_lock()?;
     let path = lease_path(rig_id)?;
     let Some(lease) = read_lease(&path)? else {
         return Ok(ReleaseLeaseOutcome::NoLease {

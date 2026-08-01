@@ -3,16 +3,12 @@
 use crate::engine::run_dir::RunDir;
 use crate::error::{Error, Result};
 use crate::paths;
+use homeboy_engine_primitives::fs_index_lock::{FsIndexLock, FsIndexLockConfig};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::{Duration, SystemTime};
 
-const LOCK_NAME: &str = ".index.lock";
-const LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
-const LOCK_ATTEMPTS: usize = 100;
-const LOCK_SLEEP: Duration = Duration::from_millis(20);
+const INVOCATION_INDEX_LOCK: FsIndexLockConfig = FsIndexLockConfig::index("invocation lease");
 const PORT_POOL_START: u16 = 20_000;
 const PORT_POOL_END: u16 = 60_999;
 
@@ -160,7 +156,7 @@ impl InvocationGuard {
 
         let mut port_base = None;
         let mut port_max = None;
-        let _lock = InvocationIndexLock::acquire()?;
+        let _lock = acquire_invocation_index_lock()?;
         fs::create_dir_all(invocation_leases_dir()?).map_err(|e| {
             Error::internal_unexpected(format!(
                 "Failed to create invocation lease directory: {}",
@@ -366,7 +362,7 @@ impl Drop for InvocationGuard {
         let Some(id) = &self.lease_id else {
             return;
         };
-        let Ok(_lock) = InvocationIndexLock::acquire() else {
+        let Ok(_lock) = acquire_invocation_index_lock() else {
             return;
         };
         let Ok(path) = lease_path(id) else {
@@ -584,69 +580,15 @@ fn invocation_leases_dir() -> Result<PathBuf> {
     Ok(paths::homeboy()?.join("invocation-leases"))
 }
 
-struct InvocationIndexLock {
-    path: PathBuf,
-}
+type InvocationIndexLock = FsIndexLock;
 
-impl InvocationIndexLock {
-    fn acquire() -> Result<Self> {
-        let dir = invocation_leases_dir()?;
-        fs::create_dir_all(&dir).map_err(|e| {
-            Error::internal_unexpected(format!(
-                "Failed to create invocation lease directory: {}",
-                e
-            ))
-        })?;
-        let path = dir.join(LOCK_NAME);
-        for _ in 0..LOCK_ATTEMPTS {
-            match fs::create_dir(&path) {
-                Ok(()) => return Ok(Self { path }),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    remove_stale_index_lock(&path)?;
-                    thread::sleep(LOCK_SLEEP);
-                }
-                Err(e) => {
-                    return Err(Error::internal_unexpected(format!(
-                        "Failed to acquire invocation lease lock {}: {}",
-                        path.display(),
-                        e
-                    )))
-                }
-            }
-        }
-        Err(Error::internal_unexpected(format!(
-            "Timed out acquiring invocation lease lock {}",
-            path.display()
-        )))
-    }
-}
-
-impl Drop for InvocationIndexLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir(&self.path);
-    }
-}
-
-fn remove_stale_index_lock(path: &Path) -> Result<()> {
-    let Ok(metadata) = fs::metadata(path) else {
-        return Ok(());
-    };
-    let Ok(modified) = metadata.modified() else {
-        return Ok(());
-    };
-    if SystemTime::now()
-        .duration_since(modified)
-        .is_ok_and(|age| age > LOCK_STALE_AFTER)
-    {
-        fs::remove_dir(path).map_err(|e| {
-            Error::internal_unexpected(format!(
-                "Failed to remove stale invocation lease lock {}: {}",
-                path.display(),
-                e
-            ))
-        })?;
-    }
-    Ok(())
+/// Block until the invocation lease index lock is held. Released on drop.
+///
+/// Mechanics (mkdir-lock, mtime stale reclaim, the shared 30s/100-attempt/20ms
+/// tuning) live in `homeboy_engine_primitives::fs_index_lock`, which
+/// `homeboy-rig`'s lease index also uses.
+fn acquire_invocation_index_lock() -> Result<InvocationIndexLock> {
+    FsIndexLock::acquire_in(&invocation_leases_dir()?, INVOCATION_INDEX_LOCK)
 }
 
 #[cfg(test)]
