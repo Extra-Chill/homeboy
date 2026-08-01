@@ -23,6 +23,12 @@ pub use cargo_targets::{
 };
 mod automatic_retention;
 pub use automatic_retention::{run_automatic_cargo_retention, AutomaticRetentionOutput};
+pub mod degraded;
+pub use degraded::{
+    degraded_cleanup, observation_store_availability, DegradedCleanupCategory,
+    DegradedCleanupOptions, DegradedCleanupOutcome, StoreAvailability,
+    STORE_INDEPENDENT_CLEANUP_CATEGORIES,
+};
 mod extension_declarations;
 mod policy;
 pub use policy::{

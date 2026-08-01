@@ -430,6 +430,9 @@ pub fn cleanup_downloads(args: RunsArtifactCleanupDownloadsArgs) -> CmdResult<Ru
         runner: args.runner,
         run_id: args.run_id,
         limit: policy.scan_limit(),
+        // The specialist has not probed the store, so it keeps the normal
+        // liveness path rather than defaulting itself into "retain everything".
+        ..RunnerDownloadCleanupOptions::default()
     })?;
 
     Ok((

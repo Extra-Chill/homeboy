@@ -314,6 +314,49 @@ fn unavailable_liveness_retains_everything_instead_of_vetoing_nothing() {
     assert!(cache.exists());
 }
 
+/// A caller that has already established the store will not open reaches the
+/// same fail-closed verdict without attempting another one.
+///
+/// This routes through `sweep`, not `sweep_with`, so it exercises the real
+/// production wiring: with `store_available: false` no `open_initialized` is
+/// reachable at all. Under inode exhaustion every failing open is one more
+/// `create_dir_all` plus journal-file creation against a filesystem that has
+/// nothing left to give (#11127, #10603).
+#[test]
+fn a_declared_unavailable_store_fails_closed_without_attempting_an_open() {
+    let home = tempfile::tempdir().expect("home");
+    let cache = write_cached_download(home.path(), "lab", "run-1", "trace.zip", b"trace");
+    let degraded = RunnerDownloadCleanupOptions {
+        apply: true,
+        store_available: false,
+        ..RunnerDownloadCleanupOptions::default()
+    };
+
+    let outcome = sweep(
+        home.path(),
+        &degraded,
+        &filters(&degraded),
+        RUNNER_DOWNLOAD_MIN_AGE,
+        clock_past_the_floor(),
+    )
+    .expect("degraded sweep");
+
+    assert_eq!(outcome.liveness, RunnerDownloadLiveness::Unavailable);
+    assert_eq!(outcome.planned_count, 0);
+    assert_eq!(outcome.removed_count, 0);
+    assert!(
+        cache.exists(),
+        "a closed store must retain these bytes, never release them"
+    );
+}
+
+/// The gate defaults to "available" so a caller that never probed is not
+/// silently downgraded into retaining everything.
+#[test]
+fn the_default_assumes_the_store_is_available() {
+    assert!(RunnerDownloadCleanupOptions::default().store_available);
+}
+
 #[test]
 fn a_missing_run_row_does_not_by_itself_authorize_removal() {
     // Row absence is not a delete proof (#10284): runner-side run ids often

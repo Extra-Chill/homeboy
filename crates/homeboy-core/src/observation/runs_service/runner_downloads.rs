@@ -142,6 +142,19 @@ pub struct RunnerDownloadCleanupOptions {
     /// callers from [`crate::cleanup::CleanupPolicy::scan_limit`], which fails
     /// closed to zero rather than widening to `usize::MAX`.
     pub limit: usize,
+    /// Whether the caller has already established that the observation store
+    /// can be opened.
+    ///
+    /// `false` skips the liveness open entirely and goes straight to the
+    /// fail-closed verdict this sweep would have reached anyway. That changes
+    /// no outcome — an unopenable store already vetoes every candidate — but it
+    /// avoids one more `create_dir_all` plus journal-file creation against a
+    /// filesystem that has no inode left to give, which is the exact condition
+    /// a degraded sweep is running under (#11127, #10603).
+    ///
+    /// Defaults to `true`: a caller that has not probed must not be silently
+    /// downgraded into retaining everything.
+    pub store_available: bool,
 }
 
 impl Default for RunnerDownloadCleanupOptions {
@@ -151,6 +164,7 @@ impl Default for RunnerDownloadCleanupOptions {
             runner: None,
             run_id: None,
             limit: DEFAULT_INSPECTION_LIMIT,
+            store_available: true,
         }
     }
 }
@@ -301,14 +315,16 @@ fn sweep(
     min_age: Duration,
     now: SystemTime,
 ) -> Result<RunnerDownloadCleanupOutcome> {
-    sweep_with(
-        artifact_root,
-        options,
-        filters,
-        min_age,
-        now,
-        LivenessVeto::read,
-    )
+    // A caller that already knows the store will not open gets the same
+    // fail-closed veto without paying for another failing open.
+    let store_available = options.store_available;
+    sweep_with(artifact_root, options, filters, min_age, now, move || {
+        if store_available {
+            LivenessVeto::read()
+        } else {
+            LivenessVeto::unavailable()
+        }
+    })
 }
 
 /// The sweep with its liveness source injected.
@@ -654,6 +670,13 @@ struct LivenessVeto {
 }
 
 impl LivenessVeto {
+    /// The veto a caller reaches when liveness cannot be established: retain
+    /// everything. Identical to what [`LivenessVeto::read`] returns on a failed
+    /// open, reachable without attempting one.
+    fn unavailable() -> Self {
+        Self { running: None }
+    }
+
     fn read() -> Self {
         let Ok(store) = ObservationStore::open_initialized() else {
             return Self { running: None };
