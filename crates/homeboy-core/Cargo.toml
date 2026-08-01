@@ -28,7 +28,6 @@ homeboy-command-contract = { version = "0.1.0", path = "../contracts/homeboy-com
 homeboy-api-jobs-contract = { version = "0.1.0", path = "../contracts/homeboy-api-jobs-contract" }
 homeboy-source-snapshot-contract = { version = "0.1.0", path = "../contracts/homeboy-source-snapshot-contract" }
 homeboy-component-contract = { version = "0.1.0", path = "../contracts/homeboy-component-contract" }
-homeboy-execution-contract = { version = "0.1.0", path = "../contracts/homeboy-execution-contract" }
 homeboy-gate-contract = { version = "0.1.0", path = "../contracts/homeboy-gate-contract" }
 homeboy-run-lifecycle-contract = { version = "0.1.0", path = "../contracts/homeboy-run-lifecycle-contract" }
 homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
