@@ -201,9 +201,7 @@ pub(crate) fn run_github_release(
                         .map(|contents| (asset.name.clone(), contents))
                 })
                 .collect::<std::result::Result<std::collections::BTreeMap<_, _>, _>>()
-                .map_err(|error| {
-                    Error::validation_invalid_argument("release assets", error, None, None)
-                })?;
+                .map_err(|error| error.into_structured_error("release assets"))?;
             validate_draft_adoption(&tag, &adoption.expected_assets, &metadata, &sidecars)
                 .map_err(|error| {
                     Error::validation_invalid_argument("release assets", error, None, None)
@@ -238,9 +236,7 @@ pub(crate) fn run_github_release(
                         .map(|contents| (asset.name.clone(), contents))
                 })
                 .collect::<std::result::Result<std::collections::BTreeMap<_, _>, _>>()
-                .map_err(|error| {
-                    Error::validation_invalid_argument("release assets", error, None, None)
-                })?;
+                .map_err(|error| error.into_structured_error("release assets"))?;
             validate_draft_adoption(&tag, &adoption.expected_assets, &current, &current_sidecars)
                 .map_err(|error| {
                 Error::validation_invalid_argument("release assets", error, None, None)
@@ -419,7 +415,7 @@ pub(crate) fn run_github_release(
             &component.github,
             &repo_flag,
         )
-        .map_err(|error| Error::validation_invalid_argument("release assets", error, None, None))?;
+        .map_err(|error| error.into_structured_error("release assets"))?;
         homeboy_core::log_status!(
             "release",
             "GitHub Release {} already exists for {} — uploading {} canonical artifact(s), reusing {} verified artifact(s)",
@@ -497,16 +493,17 @@ pub(crate) fn run_github_release(
             &component.github,
             &repo_flag,
         ) {
+            let diagnostics = error.diagnostics;
             return Ok(upload_failed_result(
                 &tag,
                 &github,
                 String::new(),
-                error,
+                error.message,
                 None,
                 false,
                 artifact_paths.len(),
                 repair_commands(None, None),
-                &[],
+                &diagnostics,
             ));
         }
         if metadata.is_draft {
@@ -663,16 +660,17 @@ pub(crate) fn run_github_release(
         &component.github,
         &repo_flag,
     ) {
+        let diagnostics = error.diagnostics;
         return Ok(upload_failed_result(
             &tag,
             &github,
             String::new(),
-            error,
+            error.message,
             None,
             false,
             artifact_paths.len(),
             repair_commands(notes_start_tag.as_deref(), persisted_notes_path.as_deref()),
-            &[],
+            &diagnostics,
         ));
     }
     let publish_args = ["release", "edit", &tag, "--draft=false", "-R", &repo_flag];

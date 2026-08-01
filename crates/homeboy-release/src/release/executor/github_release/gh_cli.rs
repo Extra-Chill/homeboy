@@ -3,6 +3,7 @@
 use crate::release::types::ReleaseState;
 use homeboy_core::component::GithubConfig;
 use homeboy_core::engine::shell::quote_arg;
+use homeboy_core::error::CommandEvidence;
 use homeboy_core::git::release_download::GitHubRepo;
 use homeboy_core::redaction::RedactionPolicy;
 use homeboy_engine_primitives::command::{
@@ -25,6 +26,9 @@ const GITHUB_RELEASE_DOWNLOAD_READER_CLEANUP_TIMEOUT: Duration = Duration::from_
 const GITHUB_RELEASE_DOWNLOAD_PIPE_CHUNKS_PER_TURN: usize = 4;
 const GITHUB_COMMAND_DIAGNOSTIC_TEXT_LIMIT: usize = 4096;
 const GITHUB_COMMAND_OUTPUT_LIMIT: usize = 1024 * 1024;
+/// Suffix [`bound_text`] appends when it truncates, used to set
+/// [`CommandEvidence::truncated`] honestly.
+const DIAGNOSTIC_TRUNCATION_MARKER: &str = "...[truncated]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GhCommandOutput {
@@ -57,6 +61,105 @@ pub(crate) struct GitHubReleaseMetadataError {
 }
 
 impl GitHubReleaseMetadataError {
+    /// A failure that no `gh` invocation produced: local I/O, a parse error, or
+    /// a violated publication invariant. Carries no diagnostics because there is
+    /// no command output to retain.
+    pub(crate) fn message(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    /// A failure produced by a `gh` invocation, retaining bounded command
+    /// evidence (exit code, timeout flag, stdout/stderr, HTTP status, GitHub
+    /// request id) alongside the message.
+    ///
+    /// This is the whole point of the type: a release that fails here is
+    /// diagnosed from *what ran*, not from the sentence describing it.
+    pub(crate) fn from_command_failure(
+        message: impl Into<String>,
+        operation: &str,
+        endpoint: &str,
+        output: &GhCommandOutput,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            diagnostics: vec![gh_failure_diagnostic(operation, endpoint, output)],
+        }
+    }
+
+    /// Lift into a structured [`homeboy_core::error::Error`] carrying
+    /// [`CommandEvidence`], so the operator sees an error code, what ran, its
+    /// exit code, and its bounded output instead of a bare sentence.
+    ///
+    /// Without this, every failure arriving through the release verification
+    /// path reached the CLI as `Result<_, String>` and was rendered as one line
+    /// with no code, no evidence, and no hint (#11135).
+    pub(crate) fn into_structured_error(self, field: &str) -> homeboy_core::error::Error {
+        let evidence = self.command_evidence();
+        let hint = self.operator_hint();
+        let error = homeboy_core::error::Error::validation_invalid_argument_with_evidence(
+            field,
+            self.message,
+            None,
+            None,
+            evidence,
+        );
+        match hint {
+            Some(hint) => error.with_hint(hint),
+            None => error,
+        }
+    }
+
+    /// Project the first captured diagnostic into the ecosystem-agnostic
+    /// [`CommandEvidence`] shape. The first diagnostic is the originating
+    /// failure; [`Self::join`] appends later ones in order.
+    fn command_evidence(&self) -> Option<CommandEvidence> {
+        let diagnostic = self.diagnostics.first()?;
+        let truncated = diagnostic.stdout.ends_with(DIAGNOSTIC_TRUNCATION_MARKER)
+            || diagnostic.stderr.ends_with(DIAGNOSTIC_TRUNCATION_MARKER);
+        let command = if diagnostic.endpoint.is_empty() {
+            diagnostic.operation.clone()
+        } else {
+            format!("{} {}", diagnostic.operation, diagnostic.endpoint)
+        };
+        Some(CommandEvidence {
+            command,
+            cwd: None,
+            location: Some("local".to_string()),
+            // A timeout kills the child before it reports a status, so there is
+            // no real exit code to report. `timed_out` is preserved verbatim in
+            // the retained diagnostic and named in the hint.
+            exit_code: diagnostic.exit_code.unwrap_or(-1),
+            stdout: diagnostic.stdout.clone(),
+            stderr: diagnostic.stderr.clone(),
+            truncated,
+        })
+    }
+
+    /// Turn the retained diagnostics into a next action. HTTP status and the
+    /// GitHub request id are the two facts that make a release failure
+    /// reportable to GitHub without re-running the release.
+    fn operator_hint(&self) -> Option<String> {
+        let diagnostic = self.diagnostics.first()?;
+        let mut hint = if diagnostic.timed_out {
+            format!("`{}` timed out", diagnostic.operation)
+        } else {
+            format!("`{}` failed", diagnostic.operation)
+        };
+        if let Some(status) = diagnostic.http_status {
+            hint.push_str(&format!(" with HTTP {status}"));
+        }
+        if let Some(request_id) = &diagnostic.github_request_id {
+            hint.push_str(&format!(" (GitHub request id {request_id})"));
+        }
+        hint.push_str(
+            "; inspect `error_details.failures` for the captured command output before retrying",
+        );
+        Some(hint)
+    }
+
     /// Combine two resolution failures so neither is lost.
     ///
     /// A stranded release is diagnosed from why EVERY lookup failed. Collapsing
@@ -303,7 +406,8 @@ pub(crate) fn reconcile_release_publications(
     github: &GitHubRepo,
     config: &GithubConfig,
     repo_flag: &str,
-) -> Result<(Vec<ReleaseAssetPublication>, Vec<ReleaseAssetPublication>), String> {
+) -> Result<(Vec<ReleaseAssetPublication>, Vec<ReleaseAssetPublication>), GitHubReleaseMetadataError>
+{
     reconcile_release_publications_with(publications, remote_assets, &mut |asset, expected_size| {
         download_release_asset_identity(github, config, repo_flag, asset, expected_size)
     })
@@ -312,8 +416,12 @@ pub(crate) fn reconcile_release_publications(
 fn reconcile_release_publications_with(
     publications: &[ReleaseAssetPublication],
     remote_assets: &[GitHubReleaseAsset],
-    verify_digestless: &mut impl FnMut(&GitHubReleaseAsset, u64) -> Result<(u64, String), String>,
-) -> Result<(Vec<ReleaseAssetPublication>, Vec<ReleaseAssetPublication>), String> {
+    verify_digestless: &mut impl FnMut(
+        &GitHubReleaseAsset,
+        u64,
+    ) -> Result<(u64, String), GitHubReleaseMetadataError>,
+) -> Result<(Vec<ReleaseAssetPublication>, Vec<ReleaseAssetPublication>), GitHubReleaseMetadataError>
+{
     let mut upload = Vec::new();
     let mut existing = Vec::new();
     for publication in publications {
@@ -326,20 +434,20 @@ fn reconcile_release_publications_with(
             continue;
         };
         if matches.len() != 1 {
-            return Err(format!(
+            return Err(GitHubReleaseMetadataError::message(format!(
                 "GitHub Release has multiple assets named '{}'; canonical publication ownership is ambiguous",
                 publication.target_name
-            ));
+            )));
         }
         if verify_release_publication(publication, remote, verify_digestless)? {
             existing.push(publication.clone());
         } else {
             let observed = canonical_remote_digest(remote)?
                 .unwrap_or_else(|| "downloaded bytes with no reported digest".to_string());
-            return Err(format!(
+            return Err(GitHubReleaseMetadataError::message(format!(
                 "GitHub Release asset '{}' conflicts with the canonical publication bytes (expected sha256:{}, found {})",
                 publication.target_name, publication.sha256, observed
-            ));
+            )));
         }
     }
     Ok((upload, existing))
@@ -751,7 +859,7 @@ pub(crate) fn verify_release_publications(
     github: &GitHubRepo,
     config: &GithubConfig,
     repo_flag: &str,
-) -> Result<(), String> {
+) -> Result<(), GitHubReleaseMetadataError> {
     verify_release_publications_with(publications, assets, &mut |asset, expected_size| {
         download_release_asset_identity(github, config, repo_flag, asset, expected_size)
     })
@@ -760,30 +868,33 @@ pub(crate) fn verify_release_publications(
 fn verify_release_publications_with(
     publications: &[ReleaseAssetPublication],
     assets: &[GitHubReleaseAsset],
-    verify_digestless: &mut impl FnMut(&GitHubReleaseAsset, u64) -> Result<(u64, String), String>,
-) -> Result<(), String> {
+    verify_digestless: &mut impl FnMut(
+        &GitHubReleaseAsset,
+        u64,
+    ) -> Result<(u64, String), GitHubReleaseMetadataError>,
+) -> Result<(), GitHubReleaseMetadataError> {
     for publication in publications {
         let matches = assets
             .iter()
             .filter(|asset| asset.name == publication.target_name)
             .collect::<Vec<_>>();
         let asset = matches.first().copied().ok_or_else(|| {
-            format!(
+            GitHubReleaseMetadataError::message(format!(
                 "GitHub Release is missing uploaded asset '{}'",
                 publication.target_name
-            )
+            ))
         })?;
         if matches.len() != 1 {
-            return Err(format!(
+            return Err(GitHubReleaseMetadataError::message(format!(
                 "GitHub Release has multiple assets named '{}'; canonical publication ownership is ambiguous",
                 publication.target_name
-            ));
+            )));
         }
         if !verify_release_publication(publication, asset, verify_digestless)? {
-            return Err(format!(
+            return Err(GitHubReleaseMetadataError::message(format!(
                 "GitHub Release asset '{}' does not match the canonical publication bytes",
                 publication.target_name
-            ));
+            )));
         }
     }
     Ok(())
@@ -792,8 +903,11 @@ fn verify_release_publications_with(
 fn verify_release_publication(
     publication: &ReleaseAssetPublication,
     asset: &GitHubReleaseAsset,
-    verify_digestless: &mut impl FnMut(&GitHubReleaseAsset, u64) -> Result<(u64, String), String>,
-) -> Result<bool, String> {
+    verify_digestless: &mut impl FnMut(
+        &GitHubReleaseAsset,
+        u64,
+    ) -> Result<(u64, String), GitHubReleaseMetadataError>,
+) -> Result<bool, GitHubReleaseMetadataError> {
     if asset.size != publication.size {
         return Ok(false);
     }
@@ -810,18 +924,18 @@ pub(crate) fn download_release_asset_identity(
     repo_flag: &str,
     asset: &GitHubReleaseAsset,
     expected_size: u64,
-) -> Result<(u64, String), String> {
+) -> Result<(u64, String), GitHubReleaseMetadataError> {
     let asset_id = asset.id.ok_or_else(|| {
-        format!(
+        GitHubReleaseMetadataError::message(format!(
             "GitHub Release asset '{}' has no digest or asset ID; cannot safely verify canonical publication ownership",
             asset.name
-        )
+        ))
     })?;
     if asset.size != expected_size {
-        return Err(format!(
+        return Err(GitHubReleaseMetadataError::message(format!(
             "GitHub Release asset '{}' has size {}, expected {}",
             asset.name, asset.size, expected_size
-        ));
+        )));
     }
     let endpoint = format!("repos/{repo_flag}/releases/assets/{asset_id}");
     let mut command = gh_command(
@@ -835,6 +949,7 @@ pub(crate) fn download_release_asset_identity(
         expected_size,
         github_release_upload_timeout(),
         None,
+        &endpoint,
     )
 }
 
@@ -843,17 +958,20 @@ pub(crate) fn download_small_release_asset(
     config: &GithubConfig,
     repo_flag: &str,
     asset: &GitHubReleaseAsset,
-) -> Result<String, String> {
+) -> Result<String, GitHubReleaseMetadataError> {
     const MAX_CHECKSUM_BYTES: u64 = 64 * 1024;
     if asset.size == 0 || asset.size > MAX_CHECKSUM_BYTES {
-        return Err(format!(
+        return Err(GitHubReleaseMetadataError::message(format!(
             "checksum asset '{}' exceeds the 64 KiB adoption limit",
             asset.name
-        ));
+        )));
     }
-    let id = asset
-        .id
-        .ok_or_else(|| format!("checksum asset '{}' has no GitHub asset ID", asset.name))?;
+    let id = asset.id.ok_or_else(|| {
+        GitHubReleaseMetadataError::message(format!(
+            "checksum asset '{}' has no GitHub asset ID",
+            asset.name
+        ))
+    })?;
     let endpoint = format!("repos/{repo_flag}/releases/assets/{id}");
     let output = run_gh_command(
         gh_command(
@@ -863,14 +981,28 @@ pub(crate) fn download_small_release_asset(
         ),
         github_release_upload_timeout(),
     );
-    if output.timed_out
-        || output.exit_code != Some(0)
-        || output.stdout.len() as u64 != asset.size
-        || output.stdout.len() as u64 > MAX_CHECKSUM_BYTES
-    {
-        return Err(format!(
-            "could not download bounded checksum asset '{}'",
-            asset.name
+    if output.timed_out || output.exit_code != Some(0) {
+        return Err(GitHubReleaseMetadataError::from_command_failure(
+            format!("could not download bounded checksum asset '{}'", asset.name),
+            "gh api release asset download",
+            &endpoint,
+            &output,
+        ));
+    }
+    // A short read is not a command failure — `gh` exited 0 — but it still
+    // invalidates the checksum, so name the size mismatch instead of reporting
+    // the same opaque sentence for both causes.
+    if output.stdout.len() as u64 != asset.size || output.stdout.len() as u64 > MAX_CHECKSUM_BYTES {
+        return Err(GitHubReleaseMetadataError::from_command_failure(
+            format!(
+                "checksum asset '{}' downloaded {} bytes, expected {}",
+                asset.name,
+                output.stdout.len(),
+                asset.size
+            ),
+            "gh api release asset download",
+            &endpoint,
+            &output,
         ));
     }
     Ok(output.stdout)
@@ -882,56 +1014,57 @@ fn run_bounded_asset_download(
     expected_size: u64,
     timeout: Duration,
     temp_dir: Option<&std::path::Path>,
-) -> Result<(u64, String), String> {
+    endpoint: &str,
+) -> Result<(u64, String), GitHubReleaseMetadataError> {
     let download = match temp_dir {
         Some(directory) => tempfile::NamedTempFile::new_in(directory),
         None => tempfile::NamedTempFile::new(),
     }
     .map_err(|error| {
-        format!(
+        GitHubReleaseMetadataError::message(format!(
             "could not create temporary file for GitHub Release asset '{}': {error}",
             asset_name
-        )
+        ))
     })?;
     let mut output_file = download.reopen().map_err(|error| {
-        format!(
+        GitHubReleaseMetadataError::message(format!(
             "could not open temporary file for GitHub Release asset '{}': {error}",
             asset_name
-        )
+        ))
     })?;
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut containment =
         homeboy_core::process::ProcessContainment::prepare(command).map_err(|error| {
-            format!(
+            GitHubReleaseMetadataError::message(format!(
                 "could not contain GitHub Release asset '{}' download: {error}",
                 asset_name
-            )
+            ))
         })?;
     let mut child = command.spawn().map_err(|error| {
-        format!(
+        GitHubReleaseMetadataError::message(format!(
             "could not download GitHub Release asset '{}': {error}",
             asset_name
-        )
+        ))
     })?;
     if let Err(error) = containment.attach(&child) {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(format!(
+        return Err(GitHubReleaseMetadataError::message(format!(
             "could not contain GitHub Release asset '{}' download: {error}",
             asset_name
-        ));
+        )));
     }
     let mut stdout = child.stdout.take().ok_or_else(|| {
-        format!(
+        GitHubReleaseMetadataError::message(format!(
             "could not capture download stream for GitHub Release asset '{}'",
             asset_name
-        )
+        ))
     })?;
     let mut stderr = child.stderr.take().ok_or_else(|| {
-        format!(
+        GitHubReleaseMetadataError::message(format!(
             "could not capture download diagnostics for GitHub Release asset '{}'",
             asset_name
-        )
+        ))
     })?;
     let started = Instant::now();
     let mut hasher = Sha256::new();
@@ -942,6 +1075,7 @@ fn run_bounded_asset_download(
     let mut stderr_open = true;
     let mut status = None;
     let mut exited_at = None;
+    let mut timed_out = false;
     let outcome = loop {
         if stdout_open {
             stdout_open = match drain_available_pipe(
@@ -1008,6 +1142,7 @@ fn run_bounded_asset_download(
                     exited_at = Some(Instant::now());
                 }
                 Ok(None) if started.elapsed() >= timeout => {
+                    timed_out = true;
                     break Err(format!(
                         "download of GitHub Release asset '{}' timed out",
                         asset_name
@@ -1031,6 +1166,16 @@ fn run_bounded_asset_download(
         }
         std::thread::sleep(Duration::from_millis(10));
     };
+    // Build the captured evidence BEFORE branching on the outcome: a failed
+    // streamed download never produces a `GhCommandOutput`, which is exactly why
+    // its stderr used to be flattened into a sentence and lost (#11135).
+    let captured_stderr = || {
+        let mut text = String::from_utf8_lossy(&diagnostics).to_string();
+        if diagnostics_truncated {
+            text.push_str("\n[diagnostics truncated]");
+        }
+        text
+    };
     let status = match outcome {
         Ok(status) => status,
         Err(error) => {
@@ -1039,26 +1184,41 @@ fn run_bounded_asset_download(
                     .err()
                     .map(|cleanup| format!("; {cleanup}"))
                     .unwrap_or_default();
-            return Err(format!("{error}{cleanup}"));
+            let output = GhCommandOutput {
+                stdout: String::new(),
+                stderr: captured_stderr(),
+                exit_code: status.and_then(|status: std::process::ExitStatus| status.code()),
+                timed_out,
+            };
+            return Err(GitHubReleaseMetadataError::from_command_failure(
+                format!("{error}{cleanup}"),
+                "gh api release asset download",
+                endpoint,
+                &output,
+            ));
         }
     };
     containment
         .cleanup_after_leader_exit_bounded(GITHUB_RELEASE_DOWNLOAD_READER_CLEANUP_TIMEOUT)
         .map_err(|error| {
-            format!(
+            GitHubReleaseMetadataError::message(format!(
                 "could not clean up GitHub Release asset '{}' download containment: {error}",
                 asset_name
-            )
+            ))
         })?;
-    let mut diagnostics = String::from_utf8_lossy(&diagnostics).to_string();
-    if diagnostics_truncated {
-        diagnostics.push_str("\n[diagnostics truncated]");
-    }
+    let diagnostics = captured_stderr();
     if !status.success() {
-        return Err(format!(
-            "could not download GitHub Release asset '{}': {}",
-            asset_name,
-            diagnostics.trim()
+        let output = GhCommandOutput {
+            stdout: String::new(),
+            stderr: diagnostics,
+            exit_code: status.code(),
+            timed_out: false,
+        };
+        return Err(GitHubReleaseMetadataError::from_command_failure(
+            format!("could not download GitHub Release asset '{}'", asset_name),
+            "gh api release asset download",
+            endpoint,
+            &output,
         ));
     }
     Ok((size, format!("{:x}", hasher.finalize())))
@@ -1185,21 +1345,23 @@ fn drain_available_pipe<R: Read>(
 
 /// GitHub REST represents release asset checksums as `sha256:<hex>`. Preserve
 /// that algorithm marker while canonicalizing hex case before authority checks.
-fn canonical_remote_digest(asset: &GitHubReleaseAsset) -> Result<Option<String>, String> {
+fn canonical_remote_digest(
+    asset: &GitHubReleaseAsset,
+) -> Result<Option<String>, GitHubReleaseMetadataError> {
     let Some(digest) = asset.digest.as_deref() else {
         return Ok(None);
     };
     let Some(hex) = digest.strip_prefix("sha256:") else {
-        return Err(format!(
+        return Err(GitHubReleaseMetadataError::message(format!(
             "GitHub Release asset '{}' has an invalid digest; cannot safely verify canonical publication ownership",
             asset.name
-        ));
+        )));
     };
     if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(format!(
+        return Err(GitHubReleaseMetadataError::message(format!(
             "GitHub Release asset '{}' has an invalid digest; cannot safely verify canonical publication ownership",
             asset.name
-        ));
+        )));
     }
     Ok(Some(format!("sha256:{}", hex.to_ascii_lowercase())))
 }
@@ -1261,7 +1423,15 @@ pub(crate) fn validate_draft_adoption(
         ));
     }
     for asset in &metadata.assets {
-        if asset.state != "uploaded" || asset.size == 0 || canonical_remote_digest(asset)?.is_none()
+        // `canonical_remote_digest` inspects already-fetched metadata and never
+        // captures command evidence, so flattening to the message here is
+        // lossless. Draft adoption stays on the string channel deliberately
+        // (#11135): it has no `gh` invocation of its own to report.
+        if asset.state != "uploaded"
+            || asset.size == 0
+            || canonical_remote_digest(asset)
+                .map_err(|error| error.message)?
+                .is_none()
         {
             return Err(format!(
                 "draft adoption asset '{}' is not an uploaded non-empty SHA-256 GitHub asset",
@@ -1319,7 +1489,9 @@ pub(crate) fn validate_draft_adoption(
     }
     for asset in &metadata.assets {
         if let Some(expected_digest) = references.get(&asset.name) {
-            if canonical_remote_digest(asset)?.as_deref()
+            if canonical_remote_digest(asset)
+                .map_err(|error| error.message)?
+                .as_deref()
                 != Some(&format!("sha256:{expected_digest}"))
             {
                 return Err(format!(
@@ -1412,7 +1584,7 @@ fn bound_text(value: &str, limit: usize) -> String {
     while !value.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}...[truncated]", &value[..end])
+    format!("{}{DIAGNOSTIC_TRUNCATION_MARKER}", &value[..end])
 }
 
 fn parse_http_status(value: &str) -> Option<u16> {
@@ -2060,7 +2232,10 @@ mod tests {
         assert!(validate_draft_adoption("v1.2.3", &expected, &metadata, &sidecars).is_err());
     }
 
-    fn unexpected_download(_: &GitHubReleaseAsset, _: u64) -> Result<(u64, String), String> {
+    fn unexpected_download(
+        _: &GitHubReleaseAsset,
+        _: u64,
+    ) -> Result<(u64, String), GitHubReleaseMetadataError> {
         panic!("digest-present asset must not be downloaded")
     }
 
@@ -2166,6 +2341,7 @@ mod tests {
             11,
             Duration::from_secs(5),
             Some(temp.path()),
+            "repos/owner/repo/releases/assets/1",
         )
         .expect("stderr pressure must not deadlock the asset stream");
 
@@ -2192,10 +2368,11 @@ mod tests {
             4,
             Duration::from_secs(5),
             Some(temp.path()),
+            "repos/owner/repo/releases/assets/1",
         )
         .expect_err("oversized output must fail closed");
 
-        assert!(error.contains("exceeded expected byte length 4"));
+        assert!(error.message.contains("exceeded expected byte length 4"));
         assert_eq!(
             std::fs::read_dir(temp.path())
                 .expect("read tempdir")
@@ -2217,12 +2394,13 @@ mod tests {
             4,
             Duration::from_millis(20),
             Some(temp.path()),
+            "repos/owner/repo/releases/assets/1",
         )
         .expect_err("stalled output must time out");
 
-        assert!(error.contains("timed out"));
+        assert!(error.message.contains("timed out"));
         assert!(
-            !error.contains("owned process tree"),
+            !error.message.contains("owned process tree"),
             "reaping the direct child must not be reported as failed tree cleanup: {error}"
         );
         assert_eq!(
@@ -2254,6 +2432,7 @@ mod tests {
                 u64::MAX,
                 Duration::from_millis(30),
                 Some(&downloads),
+                "repos/owner/repo/releases/assets/1",
             );
             let _ = result_tx.send((result, started.elapsed()));
         });
@@ -2263,7 +2442,10 @@ mod tests {
             .expect("continuous output exceeded the external bound");
         worker.join().expect("download worker");
         let error = result.expect_err("continuous output must time out");
-        assert!(error.contains("timed out"), "unexpected error: {error}");
+        assert!(
+            error.message.contains("timed out"),
+            "unexpected error: {error}"
+        );
         assert!(
             elapsed < Duration::from_secs(2),
             "continuous output cleanup took {elapsed:?}"
@@ -2291,6 +2473,7 @@ mod tests {
                 4,
                 Duration::from_secs(5),
                 Some(&downloads),
+                "repos/owner/repo/releases/assets/1",
             );
             let _ = result_tx.send(result);
         });
@@ -2301,7 +2484,7 @@ mod tests {
             .expect_err("inherited descendant pipes must fail cleanup");
         worker.join().expect("download worker");
         assert!(
-            error.contains("pipes remained open"),
+            error.message.contains("pipes remained open"),
             "unexpected error: {error}"
         );
         let pid = std::fs::read_to_string(&descendant_pid)
@@ -2374,8 +2557,14 @@ mod tests {
             let mut command = Command::new("sh");
             command.args(["-c", &script]);
             let started = Instant::now();
-            let result =
-                run_bounded_asset_download(&mut command, "asset.zip", 4, timeout, Some(&downloads));
+            let result = run_bounded_asset_download(
+                &mut command,
+                "asset.zip",
+                4,
+                timeout,
+                Some(&downloads),
+                "repos/owner/repo/releases/assets/1",
+            );
             let _ = result_tx.send((result, started.elapsed()));
         });
 
@@ -2384,7 +2573,10 @@ mod tests {
             .unwrap_or_else(|_| panic!("{case} cleanup exceeded the external bound"));
         worker.join().expect("download worker");
         let error = result.unwrap_err();
-        assert!(error.contains(expected_error), "unexpected error: {error}");
+        assert!(
+            error.message.contains(expected_error),
+            "unexpected error: {error}"
+        );
         assert!(
             elapsed < Duration::from_secs(2),
             "{case} cleanup took {elapsed:?}"
@@ -2799,7 +2991,7 @@ mod tests {
         assert_eq!(finalizing.tag_name, planned.tag_name);
         assert!(!finalizing.is_draft);
         assert_eq!(
-            error,
+            error.message,
             format!(
                 "GitHub Release asset 'component.zip' conflicts with the canonical publication bytes (expected sha256:{}, found sha256:{})",
                 "a".repeat(64),
@@ -2827,7 +3019,9 @@ mod tests {
                 &mut unexpected_download,
             )
             .expect_err("unverifiable remote digest must fail closed");
-            assert!(error.contains("cannot safely verify canonical publication ownership"));
+            assert!(error
+                .message
+                .contains("cannot safely verify canonical publication ownership"));
         }
 
         let error = reconcile_release_publications_with(
@@ -2840,7 +3034,9 @@ mod tests {
             &mut unexpected_download,
         )
         .expect_err("mismatching remote digest must fail closed");
-        assert!(error.contains("conflicts with the canonical publication bytes"));
+        assert!(error
+            .message
+            .contains("conflicts with the canonical publication bytes"));
     }
 
     #[test]
@@ -2862,7 +3058,9 @@ mod tests {
             &mut unexpected_download,
         )
         .expect_err("conflicting bytes must fail");
-        assert!(error.contains("conflicts with the canonical publication bytes"));
+        assert!(error
+            .message
+            .contains("conflicts with the canonical publication bytes"));
     }
 
     #[test]
@@ -2904,7 +3102,9 @@ mod tests {
         )
         .expect_err("different downloaded bytes must fail closed");
 
-        assert!(error.contains("conflicts with the canonical publication bytes"));
+        assert!(error
+            .message
+            .contains("conflicts with the canonical publication bytes"));
     }
 
     #[test]
@@ -2921,7 +3121,9 @@ mod tests {
             &mut |_, _| Ok((15, "b".repeat(64))),
         )
         .expect_err("digestless assets require matching downloaded bytes");
-        assert!(missing_digest.contains("conflicts with the canonical publication bytes"));
+        assert!(missing_digest
+            .message
+            .contains("conflicts with the canonical publication bytes"));
 
         let mismatched_digest = reconcile_release_publications_with(
             &[publication],
@@ -2933,7 +3135,9 @@ mod tests {
             &mut unexpected_download,
         )
         .expect_err("mismatched GitHub digest must fail closed");
-        assert!(mismatched_digest.contains("conflicts with the canonical publication bytes"));
+        assert!(mismatched_digest
+            .message
+            .contains("conflicts with the canonical publication bytes"));
     }
 
     #[test]
@@ -2947,11 +3151,134 @@ mod tests {
         let error = reconcile_release_publications_with(
             &[publication],
             &[remote_asset("component.zip", 15, None)],
-            &mut |_, _| Err("authenticated asset download failed".to_string()),
+            &mut |_, _| {
+                Err(GitHubReleaseMetadataError::message(
+                    "authenticated asset download failed",
+                ))
+            },
         )
         .expect_err("download failure must fail closed");
 
-        assert_eq!(error, "authenticated asset download failed");
+        assert_eq!(error.message, "authenticated asset download failed");
+    }
+
+    /// A release verification failure that came from a real `gh` invocation must
+    /// reach the operator as a code + captured evidence + a hint, not a sentence.
+    /// This is the contract #11135 exists to establish.
+    #[test]
+    fn command_backed_failure_lifts_into_structured_error_with_evidence() {
+        let error = GitHubReleaseMetadataError::from_command_failure(
+            "could not download GitHub Release asset 'component.zip'",
+            "gh api release asset download",
+            "repos/owner/repo/releases/assets/42",
+            &GhCommandOutput {
+                stdout: String::new(),
+                stderr: "HTTP 404: not found\nX-GitHub-Request-Id: AB12:CD34".to_string(),
+                exit_code: Some(1),
+                timed_out: false,
+            },
+        );
+
+        let structured = error.into_structured_error("release assets");
+
+        assert_eq!(
+            structured.code,
+            homeboy_core::error::ErrorCode::ValidationInvalidArgument
+        );
+        let evidence = structured
+            .details
+            .get("command_evidence")
+            .expect("command evidence must survive the boundary");
+        assert_eq!(
+            evidence.get("command").and_then(|value| value.as_str()),
+            Some("gh api release asset download repos/owner/repo/releases/assets/42")
+        );
+        assert_eq!(
+            evidence.get("exit_code").and_then(|value| value.as_i64()),
+            Some(1)
+        );
+        assert!(evidence
+            .get("stderr")
+            .and_then(|value| value.as_str())
+            .is_some_and(|stderr| stderr.contains("404")));
+        let hint = &structured.hints.first().expect("operator hint").message;
+        assert!(hint.contains("HTTP 404"), "unexpected hint: {hint}");
+        assert!(hint.contains("AB12:CD34"), "unexpected hint: {hint}");
+    }
+
+    /// A timeout kills the child before it reports a status. Report that as a
+    /// timeout rather than inventing an exit code.
+    #[test]
+    fn timed_out_command_failure_is_named_as_a_timeout() {
+        let error = GitHubReleaseMetadataError::from_command_failure(
+            "download timed out",
+            "gh api release asset download",
+            "repos/owner/repo/releases/assets/42",
+            &GhCommandOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                timed_out: true,
+            },
+        );
+
+        let structured = error.into_structured_error("release assets");
+
+        let hint = &structured.hints.first().expect("operator hint").message;
+        assert!(hint.contains("timed out"), "unexpected hint: {hint}");
+        assert_eq!(
+            structured
+                .details
+                .get("command_evidence")
+                .and_then(|evidence| evidence.get("exit_code"))
+                .and_then(|value| value.as_i64()),
+            Some(-1)
+        );
+    }
+
+    /// Failures with no `gh` invocation behind them must not fabricate evidence.
+    #[test]
+    fn message_only_failure_carries_no_command_evidence() {
+        let structured = GitHubReleaseMetadataError::message("GitHub Release is missing an asset")
+            .into_structured_error("release assets");
+
+        assert!(structured.details.get("command_evidence").is_none());
+        assert!(structured.hints.is_empty());
+    }
+
+    /// The `&[]` hole: a verification failure used to reach `upload_failed_result`
+    /// with its diagnostics dropped, so `error_details` was absent entirely.
+    #[test]
+    fn verification_failure_propagates_command_diagnostics() {
+        let publication = ReleaseAssetPublication {
+            target_name: "component.zip".to_string(),
+            sha256: "a".repeat(64),
+            size: 15,
+            source_path: "component.zip".to_string(),
+        };
+
+        let error = verify_release_publications_with(
+            &[publication],
+            &[remote_asset("component.zip", 15, None)],
+            &mut |_, _| {
+                Err(GitHubReleaseMetadataError::from_command_failure(
+                    "authenticated asset download failed",
+                    "gh api release asset download",
+                    "repos/owner/repo/releases/assets/7",
+                    &GhCommandOutput {
+                        stdout: String::new(),
+                        stderr: "HTTP 403: Forbidden".to_string(),
+                        exit_code: Some(1),
+                        timed_out: false,
+                    },
+                ))
+            },
+        )
+        .expect_err("download failure must fail closed");
+
+        assert_eq!(error.diagnostics.len(), 1);
+        assert_eq!(error.diagnostics[0].http_status, Some(403));
+        assert_eq!(error.diagnostics[0].exit_code, Some(1));
     }
 
     #[test]
@@ -2972,7 +3299,9 @@ mod tests {
         )
         .expect_err("duplicate canonical names must fail closed");
 
-        assert!(error.contains("canonical publication ownership is ambiguous"));
+        assert!(error
+            .message
+            .contains("canonical publication ownership is ambiguous"));
     }
 
     #[test]
