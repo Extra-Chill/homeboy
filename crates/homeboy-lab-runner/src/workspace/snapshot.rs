@@ -74,6 +74,7 @@ pub(crate) fn snapshot_identity(
     excludes: &[String],
     includes: &[String],
 ) -> Result<String> {
+    homeboy_core::repository_integrity::verify_tracked_symlink_portability(local_path, "HEAD")?;
     let head =
         git_output(local_path, &["rev-parse", "HEAD"]).unwrap_or_else(|_| "nogit".to_string());
     let status = snapshot_git_output(local_path, &["status", "--porcelain=v1"], excludes)
