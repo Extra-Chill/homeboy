@@ -145,6 +145,7 @@ impl ObservationStore {
                     prepared.push((existing, None, None));
                     continue;
                 }
+                preflight_artifact_capacity(&stored_path)?;
                 let staged_path = staged_artifact_path(&stored_path, Uuid::new_v4());
                 staged_paths.push(staged_path.clone());
                 match publication.artifact_type {
@@ -696,6 +697,7 @@ impl ObservationStore {
             .map(str::to_string)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         let stored_path = persisted_artifact_path(run_id, &id, path)?;
+        preflight_artifact_capacity(&stored_path)?;
         let staged_path = staged_artifact_path(&stored_path, Uuid::new_v4());
         copy_artifact_file(path, &staged_path)?;
         let staged_metadata = fs::metadata(&staged_path).map_err(|error| {
@@ -942,6 +944,7 @@ impl ObservationStore {
         }
         let created_at = chrono::Utc::now().to_rfc3339();
         let stored_path = persisted_artifact_path(run_id, &id, path)?;
+        preflight_artifact_capacity(&stored_path)?;
         copy_artifact_directory(path, &stored_path)?;
         let path_string = stored_path.to_string_lossy().to_string();
 
@@ -1695,6 +1698,50 @@ fn remote_projection_identity_matches(
         && existing.metadata_json == incoming.metadata_json
 }
 
+/// Refuse to stage artifact bytes onto a filesystem that has definitively run
+/// out, and warn once when it is below the configured reserve.
+///
+/// Publication is the right place for this gate. It is the last moment before
+/// homeboy writes potentially very large bytes, and a copy that dies partway
+/// through `ENOSPC` leaves a `.artifact-<uuid>.staging` sibling behind — the
+/// crash residue `cleanup_orphaned_artifact_bytes` exists to reap. Refusing
+/// before the copy converts a leak plus an undifferentiated IO failure into one
+/// named `storage.exhausted` error the operator can act on (#11127, #10603).
+///
+/// Only a measured zero blocks; a breached reserve warns. See
+/// [`crate::capacity`] for why the ladder is lopsided.
+fn preflight_artifact_capacity(stored_path: &Path) -> Result<()> {
+    // Probe the nearest existing ancestor: the run directory is often created
+    // moments later, and a `statvfs` of a path that does not exist yet reports
+    // nothing at all.
+    let probe = stored_path
+        .ancestors()
+        .find(|candidate| candidate.exists())
+        .unwrap_or(stored_path);
+    let preflight = crate::capacity::preflight_capacity(
+        probe,
+        "artifact publication",
+        crate::capacity::CapacityReserve::configured(),
+    );
+    match preflight.into_result()? {
+        Some(warning) => {
+            warn_artifact_capacity_once(&warning);
+            Ok(())
+        }
+        None => Ok(()),
+    }
+}
+
+/// A reserve breach is a standing condition, not a per-artifact event. Warning
+/// once per process keeps it visible without burying the run's real output
+/// under one line per published file.
+fn warn_artifact_capacity_once(warning: &str) {
+    static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    WARNED.get_or_init(|| {
+        eprintln!("Warning: {warning}. Reclaim capacity with `homeboy cleanup --apply`.");
+    });
+}
+
 fn staged_artifact_path(stored_path: &Path, staging_id: Uuid) -> std::path::PathBuf {
     // Keep sibling staging names well below common NAME_MAX limits regardless of
     // the content-addressed final artifact name.
@@ -1719,6 +1766,36 @@ mod tests {
     use crate::observation::{ArtifactViewerLink, NewRunRecord};
     use crate::test_support::with_isolated_home;
     use std::collections::BTreeSet;
+
+    /// The preflight gates every publication path, so a healthy filesystem must
+    /// stay silently healthy. A capacity gate that fails closed on a machine
+    /// with space would block more work than the exhaustion it prevents.
+    #[test]
+    fn the_capacity_preflight_admits_a_healthy_filesystem() {
+        with_isolated_home(|home| {
+            let target = home.path().join("run").join("artifact.bin");
+
+            preflight_artifact_capacity(&target).expect("a healthy filesystem must admit a write");
+        });
+    }
+
+    /// It must also resolve a target whose directory does not exist yet — the
+    /// run directory is frequently created moments after the path is computed,
+    /// and probing a non-existent path measures nothing at all.
+    #[test]
+    fn the_capacity_preflight_probes_the_nearest_existing_ancestor() {
+        with_isolated_home(|home| {
+            let unborn = home
+                .path()
+                .join("not")
+                .join("created")
+                .join("yet")
+                .join("artifact.bin");
+
+            preflight_artifact_capacity(&unborn)
+                .expect("an unborn target must not read as an unmeasurable filesystem");
+        });
+    }
 
     #[test]
     fn stable_artifact_id_publishes_copied_bytes_and_rejects_conflicts() {
