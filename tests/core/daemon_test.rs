@@ -901,6 +901,8 @@ fn controller_job_outlives_tcp_client_after_durable_response_handoff() {
         .expect("submit durable job")
         .json()
         .expect("parse durable job response");
+    assert_eq!(submitted["success"], true);
+    assert_eq!(submitted["data"]["endpoint"], "controller.jobs.create");
     let job_id = submitted["data"]["body"]["job"]["id"]
         .as_str()
         .expect("durable job ID")
