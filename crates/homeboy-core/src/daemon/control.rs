@@ -5,6 +5,8 @@
 //! artifact fetch, and filesystem persistence live here so the orchestration is
 //! testable and reusable outside the CLI.
 
+use std::collections::VecDeque;
+use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -65,7 +67,7 @@ pub fn supervise(addr: &str, startup_token: &str) -> Result<()> {
             Some("resolve current executable".to_string()),
         )
     })?;
-    let child = Command::new(exe)
+    let mut child = Command::new(exe)
         // The argument is the portable, exact ownership proof used when a
         // platform cannot inspect a process environment. Keep it aligned with
         // the persisted admission token for the lifetime of this daemon.
@@ -89,7 +91,16 @@ pub fn supervise(addr: &str, startup_token: &str) -> Result<()> {
             )
         })?;
     let pid = child.id();
-    let output = child.wait_with_output().map_err(|error| {
+    // A daemon can run indefinitely. Drain both pipes while it runs, retaining
+    // only a diagnostic tail so supervisor RSS cannot grow with child output.
+    let child_stdout = child.stdout.take().expect("piped stdout");
+    let child_stderr = child.stderr.take().expect("piped stderr");
+    let stdout = thread::spawn(move || bounded_redacted_reader(child_stdout));
+    let stderr = thread::spawn(move || bounded_redacted_reader(child_stderr));
+    let status = child.wait();
+    let stdout = stdout.join().ok().flatten();
+    let stderr = stderr.join().ok().flatten();
+    let status = status.map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("wait for supervised daemon".to_string()),
@@ -102,7 +113,7 @@ pub fn supervise(addr: &str, startup_token: &str) -> Result<()> {
     let stop_requested = prior
         .as_ref()
         .is_some_and(|evidence| evidence.stop_requested && evidence.pid == Some(pid));
-    let (exit_code, signal) = exit_details(&output.status);
+    let (exit_code, signal) = exit_details(&status);
     let evidence = DaemonTerminationEvidence {
         classification: if stop_requested { DaemonTerminationClassification::CleanStop } else { DaemonTerminationClassification::UnexpectedExit },
         observed_at: chrono::Utc::now().to_rfc3339(),
@@ -113,18 +124,40 @@ pub fn supervise(addr: &str, startup_token: &str) -> Result<()> {
         resource_evidence: "unavailable: launcher does not collect OS resource snapshots".to_string(),
         os_evidence: "unavailable: no OS evidence collected; exit status and signal are launcher observations only".to_string(),
         exit_code, signal,
-        stdout: bounded_redacted(&output.stdout), stderr: bounded_redacted(&output.stderr), stop_requested,
+        stdout, stderr, stop_requested,
     };
     super::write_termination_evidence(&evidence)
 }
 
-fn bounded_redacted(bytes: &[u8]) -> Option<String> {
+fn bounded_redacted_reader(mut reader: impl Read) -> Option<String> {
     const LIMIT: usize = 4096;
-    if bytes.is_empty() {
+    let mut tail = VecDeque::with_capacity(LIMIT);
+    let mut buffer = [0; 8192];
+    let mut truncated = false;
+    loop {
+        let count = reader.read(&mut buffer).ok()?;
+        if count == 0 {
+            break;
+        }
+        if count >= LIMIT {
+            tail.clear();
+            tail.extend(&buffer[count - LIMIT..count]);
+            truncated = true;
+            continue;
+        }
+        let overflow = tail.len().saturating_add(count).saturating_sub(LIMIT);
+        if overflow > 0 {
+            tail.drain(..overflow);
+            truncated = true;
+        }
+        tail.extend(&buffer[..count]);
+    }
+    if tail.is_empty() {
         return None;
     }
-    let mut text = String::from_utf8_lossy(&bytes[..bytes.len().min(LIMIT)]).to_string();
-    if bytes.len() > LIMIT {
+    let bytes = tail.make_contiguous();
+    let mut text = String::from_utf8_lossy(bytes).to_string();
+    if truncated {
         text.push_str("\n[truncated]");
     }
     Some(crate::redaction::redact_string(&text))
@@ -2248,12 +2281,13 @@ mod termination_tests {
     use super::*;
 
     #[test]
-    fn termination_output_is_bounded_and_redacted() {
-        let output =
-            bounded_redacted(format!("token=super-secret\n{}", "x".repeat(5_000)).as_bytes())
-                .expect("output");
+    fn termination_output_reader_retains_only_a_bounded_redacted_tail() {
+        let mut bytes = vec![b'x'; 8 * 1024 * 1024];
+        bytes.extend_from_slice(b"\ntoken=super-secret\nfinal diagnostic");
+        let output = bounded_redacted_reader(std::io::Cursor::new(bytes)).expect("output");
         assert!(output.contains("[REDACTED]"));
         assert!(output.contains("[truncated]"));
+        assert!(output.contains("final diagnostic"));
         assert!(output.len() < 4_200);
     }
 

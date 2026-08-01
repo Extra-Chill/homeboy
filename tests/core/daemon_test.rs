@@ -2180,8 +2180,9 @@ fn lease_bound_stop_converges_term_resistant_mixed_version_supervisor_and_daemon
     let supervisor_pid = supervisor.id();
     let deadline = Instant::now() + Duration::from_secs(2);
     let daemon_pid = loop {
-        if let Ok(pid) = std::fs::read_to_string(&marker_path)
-            .map(|pid| pid.trim().parse::<u32>().expect("child PID"))
+        if let Some(pid) = std::fs::read_to_string(&marker_path)
+            .ok()
+            .and_then(|pid| pid.trim().parse::<u32>().ok())
         {
             break pid;
         }
