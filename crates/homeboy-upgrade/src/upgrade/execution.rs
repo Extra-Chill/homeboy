@@ -100,8 +100,15 @@ pub(crate) fn execute_upgrade(
     explicit_source_path: bool,
     force: bool,
     previous_build_identity: Option<&str>,
+    selected_binary_version: Option<&str>,
 ) -> Result<(bool, Option<String>, Option<String>, Option<String>)> {
     let defaults = defaults::load_defaults();
+    // The binary installer replaces `command -v homeboy`. Capture that path
+    // before its shell runs so verification proves the intended PATH target was
+    // replaced rather than merely finding some other Homeboy afterward.
+    let binary_destination = (method == InstallMethod::Binary)
+        .then(active_binary_path)
+        .transpose()?;
     let output = match method {
         InstallMethod::Homebrew => {
             let cmd = &defaults.install_methods.homebrew.upgrade_command;
@@ -199,19 +206,42 @@ pub(crate) fn execute_upgrade(
     // false-negative `upgraded: false` / `new_version: null` on a successful
     // upgrade. Retry the read-back until it reports a verifiable version before
     // giving up. See issue #3463.
-    let (success, active_binary) = verify_upgrade_with_retry(
-        method,
-        force,
-        current_version(),
-        previous_build_identity,
-        VERIFY_READBACK_ATTEMPTS,
-        VERIFY_READBACK_DELAY,
-        || active_binary_info().ok().flatten(),
-        std::thread::sleep,
-    );
+    let (success, active_binary) = if let Some(selected_version) = selected_binary_version {
+        let destination = binary_destination
+            .as_deref()
+            .expect("binary upgrades capture a PATH destination");
+        verify_binary_upgrade_with_retry(
+            destination,
+            selected_version,
+            VERIFY_READBACK_ATTEMPTS,
+            VERIFY_READBACK_DELAY,
+            std::thread::sleep,
+        )
+    } else {
+        verify_upgrade_with_retry(
+            method,
+            force,
+            current_version(),
+            previous_build_identity,
+            VERIFY_READBACK_ATTEMPTS,
+            VERIFY_READBACK_DELAY,
+            || active_binary_info().ok().flatten(),
+            std::thread::sleep,
+        )
+    };
 
     let new_version = active_binary.as_ref().and_then(|info| info.version.clone());
-    let new_build_identity = active_binary.and_then(|info| info.build_identity);
+    let new_build_identity = active_binary
+        .as_ref()
+        .and_then(|info| info.build_identity.clone());
+
+    if method == InstallMethod::Binary && !success {
+        return Err(binary_swap_failure(
+            selected_binary_version.expect("binary upgrades select a release version"),
+            binary_destination.as_deref(),
+            active_binary.as_ref(),
+        ));
+    }
 
     // A source upgrade's command is responsible for swapping the freshly built
     // artifact into the active binary on disk. When that command exits 0 but the
@@ -222,6 +252,31 @@ pub(crate) fn execute_upgrade(
     // believe the roll-forward succeeded. Fail loudly with an actionable reason
     // so urgent source fixes are not silently dropped (#5772).
     Ok((success, new_version, new_build_identity, None))
+}
+
+fn binary_swap_failure(
+    selected_version: &str,
+    destination: Option<&Path>,
+    observed: Option<&ActiveBinaryInfo>,
+) -> Error {
+    let destination = destination
+        .map(display_path)
+        .unwrap_or_else(|| "unresolved".to_string());
+    let observed_version = observed
+        .and_then(|info| info.version.as_deref())
+        .unwrap_or("unverifiable");
+
+    Error::internal_unexpected(format!(
+        "binary upgrade did not activate the selected release {selected_version} at {destination} (observed {observed_version})"
+    ))
+    .with_hint(format!(
+        "The PATH-active destination was not verified after the installer exited: {destination}"
+    ))
+    .with_hint(format!(
+        "Expected `{destination} --version` to report {selected_version}, but it reported {observed_version}."
+    ))
+    .with_hint("Inspect PATH shadowing with: type -a homeboy")
+    .with_hint("Retry explicitly after correcting the active destination: homeboy upgrade --force --method binary")
 }
 
 fn complete_source_upgrade(
@@ -674,6 +729,83 @@ where
 
         // Hold onto the most informative read so the caller can still report a
         // version even if verification never flips to success.
+        if active_binary
+            .as_ref()
+            .and_then(|info| info.version.as_deref())
+            .is_some()
+            || last_seen.is_none()
+        {
+            last_seen = active_binary;
+        }
+
+        if attempt + 1 < attempts {
+            sleep(delay);
+        }
+    }
+
+    (false, last_seen)
+}
+
+fn verify_binary_upgrade_with_retry<S>(
+    destination: &Path,
+    selected_version: &str,
+    attempts: u32,
+    delay: Duration,
+    sleep: S,
+) -> (bool, Option<ActiveBinaryInfo>)
+where
+    S: FnMut(Duration),
+{
+    verify_binary_upgrade_with_retry_reader(
+        selected_version,
+        attempts,
+        delay,
+        || active_binary_info_at(destination).ok().flatten(),
+        sleep,
+    )
+}
+
+fn verify_binary_upgrade_with_retry_reader<R, S>(
+    selected_version: &str,
+    attempts: u32,
+    delay: Duration,
+    read_active: R,
+    sleep: S,
+) -> (bool, Option<ActiveBinaryInfo>)
+where
+    R: FnMut() -> Option<ActiveBinaryInfo>,
+    S: FnMut(Duration),
+{
+    verify_with_retry(
+        attempts,
+        delay,
+        read_active,
+        |info| info.version.as_deref() == Some(selected_version),
+        sleep,
+    )
+}
+
+fn verify_with_retry<R, V, S>(
+    attempts: u32,
+    delay: Duration,
+    mut read_active: R,
+    mut verified: V,
+    mut sleep: S,
+) -> (bool, Option<ActiveBinaryInfo>)
+where
+    R: FnMut() -> Option<ActiveBinaryInfo>,
+    V: FnMut(&ActiveBinaryInfo) -> bool,
+    S: FnMut(Duration),
+{
+    let attempts = attempts.max(1);
+    let mut last_seen: Option<ActiveBinaryInfo> = None;
+
+    for attempt in 0..attempts {
+        let active_binary = read_active();
+        if active_binary.as_ref().is_some_and(|info| verified(info)) {
+            return (true, active_binary);
+        }
+
         if active_binary
             .as_ref()
             .and_then(|info| info.version.as_deref())

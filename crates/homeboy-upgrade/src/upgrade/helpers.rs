@@ -232,7 +232,7 @@ pub fn run_upgrade_with_method(
 
     // Check if a release update is available unless an explicit source target
     // has already been approved for controller replacement.
-    if !replacement_approved {
+    let release_target = if !replacement_approved {
         let check = check_for_updates()?;
         if !controller_replacement_proceeds(force, source_upgrade_decision, check.update_available)
         {
@@ -309,7 +309,22 @@ pub fn run_upgrade_with_method(
                 services_pending_restart: Vec::new(),
             });
         }
-    }
+        check.latest_version
+    } else {
+        None
+    };
+
+    // Binary upgrades install GitHub's latest release asset. Resolve that
+    // release before mutation so post-swap verification can prove the PATH
+    // destination runs the exact release selected for this operation.
+    let selected_binary_version = if install_method == InstallMethod::Binary {
+        match release_target {
+            Some(version) => Some(version),
+            None => Some(fetch_latest_version(InstallMethod::Binary)?),
+        }
+    } else {
+        None
+    };
 
     // Execute the upgrade
     promotion_lease.assert_generation()?;
@@ -319,6 +334,7 @@ pub fn run_upgrade_with_method(
         source_path.is_some(),
         force,
         previous_build_identity.as_deref(),
+        selected_binary_version.as_deref(),
     )?;
     let upgrade_completed = should_sync_after_upgrade(new_version.as_deref());
     if upgrade_completed {
