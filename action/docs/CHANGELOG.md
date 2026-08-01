@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.10.6] - 2026-08-01
+
+### Fixed
+- fail candidate after terminal evidence
+
 ## [2.10.5] - 2026-08-01
 
 ### Fixed
