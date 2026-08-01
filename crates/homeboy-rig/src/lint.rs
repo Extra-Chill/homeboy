@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use serde::Deserialize;
@@ -64,13 +64,15 @@ pub fn run_package_lint_at_with_ignores(
     let ignore_policy = IgnorePolicy::new(&declared_ignores);
     collect_files(root, &mut files, &ignore_policy)?;
 
+    let materialized = collect_materialized_rigs(root, &files)?;
     let conflict_failures = conflict_marker_failures(root, &files)?;
     let json_failures = json_parse_failures(root, &files)?;
-    let template_failures = template_materialization_failures(root, &files)?;
-    let unknown_field_failures = unknown_top_level_field_failures(root, &files)?;
+    let template_failures = materialized.materialization_failures.clone();
+    let unknown_field_failures = unknown_top_level_field_failures(&materialized.rigs);
+    let component_env_failures = component_path_env_agreement_failures(&materialized.rigs);
     let contract_failures = contract_validation_failures(root)?;
-    let portability_failures = portability_failures(root, &files)?;
-    let reference_failures = workload_reference_failures(root, &files)?;
+    let portability_failures = portability_failures(root, &files, &materialized.rigs)?;
+    let reference_failures = workload_reference_failures(root, &files, &materialized.rigs)?;
     let steps = vec![
         aggregate_step(
             "rig-package-lint",
@@ -90,7 +92,12 @@ pub fn run_package_lint_at_with_ignores(
         aggregate_step(
             "rig-package-lint",
             "rig package specs satisfy the Homeboy rig contract",
-            [unknown_field_failures, contract_failures].concat(),
+            [
+                unknown_field_failures,
+                component_env_failures,
+                contract_failures,
+            ]
+            .concat(),
         ),
         aggregate_step(
             "rig-package-lint",
@@ -143,8 +150,47 @@ const KNOWN_RIG_TOP_LEVEL_FIELDS: &[&str] = &[
     "trace_workloads",
 ];
 
-fn unknown_top_level_field_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
-    let mut failures = Vec::new();
+/// One rig, resolved through its `extends` chain.
+///
+/// Rig-shaped lint checks run against [`MaterializedRig::value`] rather than the
+/// bytes on disk. The `extends` refactor moved most rig content into
+/// `*.base.json` files that a raw `rig.json` filename filter never sees, so any
+/// check that reads the authored file only inspects whatever the leaf spec
+/// happened to override.
+struct MaterializedRig {
+    /// `rig.json` path relative to the lint root, used for failure attribution.
+    rel: String,
+    /// Package root the rig belongs to, used to resolve `${package.root}`.
+    package_root: PathBuf,
+    /// The rig spec with its `extends` chain merged in.
+    value: serde_json::Value,
+}
+
+struct MaterializedRigs {
+    rigs: Vec<MaterializedRig>,
+    materialization_failures: Vec<String>,
+}
+
+impl MaterializedRig {
+    fn id(&self) -> Option<&str> {
+        self.value
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    }
+}
+
+/// The lint unit is "each rig, materialized" — not "each JSON file".
+///
+/// A `*.base.json` consumed only through `extends` may legitimately be
+/// incomplete on its own (no `id`, no `components`), so linting base files
+/// standalone would report contract failures that are not defects. Materializing
+/// each `rig.json` instead covers every base file through the rigs that actually
+/// consume it, in the shape the runtime will see.
+fn collect_materialized_rigs(root: &Path, files: &[PathBuf]) -> Result<MaterializedRigs> {
+    let mut rigs = Vec::new();
+    let mut materialization_failures = Vec::new();
     for file in files
         .iter()
         .filter(|path| path.file_name() == Some(OsStr::new("rig.json")))
@@ -152,10 +198,49 @@ fn unknown_top_level_field_failures(root: &Path, files: &[PathBuf]) -> Result<Ve
         let content = fs::read_to_string(file).map_err(|error| {
             Error::internal_io(error.to_string(), Some(format!("read {}", file.display())))
         })?;
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+        // Unparseable specs are reported by the JSON parse aggregate; there is
+        // nothing to materialize and nothing rig-shaped to check.
+        let Ok(raw) = serde_json::from_str::<serde_json::Value>(&content) else {
             continue;
         };
-        let Some(object) = value.as_object() else {
+        let declares_extends = content.contains("\"extends\"");
+
+        let materialized = template_source_root(root, file)
+            .and_then(|source_root| super::install::materialize_rig_spec(file, &source_root));
+        let value = match materialized {
+            Ok(value) => value,
+            Err(error) => {
+                // Only rigs that actually declare `extends` can fail template
+                // materialization in a way the author can act on; everything else
+                // falls back to the authored spec so the rig-shaped checks below
+                // still run.
+                if declares_extends {
+                    materialization_failures.push(format!(
+                        "{} template materialization failed: {}",
+                        display_relative(root, file),
+                        error.message
+                    ));
+                }
+                raw
+            }
+        };
+
+        rigs.push(MaterializedRig {
+            rel: display_relative(root, file),
+            package_root: package_root_for_rig(root, file),
+            value,
+        });
+    }
+    Ok(MaterializedRigs {
+        rigs,
+        materialization_failures,
+    })
+}
+
+fn unknown_top_level_field_failures(rigs: &[MaterializedRig]) -> Vec<String> {
+    let mut failures = Vec::new();
+    for rig in rigs {
+        let Some(object) = rig.value.as_object() else {
             continue;
         };
         for key in object.keys() {
@@ -164,12 +249,163 @@ fn unknown_top_level_field_failures(root: &Path, files: &[PathBuf]) -> Result<Ve
             }
             failures.push(format!(
                 "{}: unknown top-level rig field `{}` (use `x-*` for extension-owned metadata)",
-                display_relative(root, file),
-                key
+                rig.rel, key
             ));
         }
     }
-    Ok(failures)
+    failures
+}
+
+const COMPONENT_PATH_ENV_PREFIX: &str = "HOMEBOY_RIG_COMPONENT_PATH__";
+const COMPONENT_CHECKOUT_ROOT_ENV_PREFIX: &str = "HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__";
+
+/// A rig's component override env vars carry the rig id in their own name, so
+/// renaming a rig silently unbinds every `${env.HOMEBOY_RIG_COMPONENT_PATH__*}`
+/// reference the spec makes. `${env.*}` resolves an unset name to the empty
+/// string, so nothing fails — the component just points at nothing.
+///
+/// In chubes4/homeboy-rigs, `studio-agent-claude-trunk/rig.json` still
+/// references `..._STUDIO_AGENT_CLAUDE_EVALTIMING__STUDIO` from before a rename.
+/// `portability_failures` only looks for `/Users/` and `~/Developer/` literals,
+/// so it sees a perfectly portable path that resolves to nothing.
+///
+/// Require every such reference to agree with the rig it lives in, and to name
+/// a component that rig declares. The canonical names come from `expand.rs` so
+/// the sanitization rule stays in exactly one place: passing an empty component
+/// id yields the rig-scoped prefix every name for this rig must start with.
+fn component_path_env_agreement_failures(rigs: &[MaterializedRig]) -> Vec<String> {
+    let mut failures = Vec::new();
+    for rig in rigs {
+        // A rig with no usable id is already reported by the contract aggregate;
+        // there is no canonical name to compare against.
+        let Some(rig_id) = rig.id() else {
+            continue;
+        };
+        let declared: Vec<String> = rig
+            .value
+            .get("components")
+            .and_then(|components| components.as_object())
+            .map(|components| components.keys().cloned().collect())
+            .unwrap_or_default();
+
+        let path_prefix = crate::expand::rig_component_path_override_env_name(rig_id, "");
+        let checkout_prefix =
+            crate::expand::rig_component_checkout_root_override_env_name(rig_id, "");
+
+        for (pointer, name) in component_override_env_references(&rig.value) {
+            let (kind, prefix, expected) = if name.starts_with(COMPONENT_PATH_ENV_PREFIX) {
+                (
+                    "component path",
+                    &path_prefix,
+                    declared
+                        .iter()
+                        .map(|component| {
+                            crate::expand::rig_component_path_override_env_name(rig_id, component)
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                (
+                    "component checkout root",
+                    &checkout_prefix,
+                    declared
+                        .iter()
+                        .map(|component| {
+                            crate::expand::rig_component_checkout_root_override_env_name(
+                                rig_id, component,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            };
+
+            if !name.starts_with(prefix.as_str()) {
+                failures.push(format!(
+                    "{}: {} references ${{env.{name}}}, but this rig's {kind} override env vars must be named `{prefix}<COMPONENT>` for rig id `{rig_id}`; an unset name expands to the empty string",
+                    rig.rel,
+                    display_pointer(&pointer)
+                ));
+                continue;
+            }
+            if !expected.iter().any(|candidate| candidate == &name) {
+                let component = name.trim_start_matches(prefix.as_str());
+                failures.push(format!(
+                    "{}: {} references ${{env.{name}}}, but rig `{rig_id}` declares no component matching `{component}` (declared: {})",
+                    rig.rel,
+                    display_pointer(&pointer),
+                    if declared.is_empty() {
+                        "none".to_string()
+                    } else {
+                        declared.join(", ")
+                    }
+                ));
+            }
+        }
+    }
+    failures
+}
+
+/// Every `${env.HOMEBOY_RIG_COMPONENT_{PATH,CHECKOUT_ROOT}__*}` reference in a
+/// rig spec, paired with a JSON pointer to the string that contains it.
+fn component_override_env_references(value: &serde_json::Value) -> Vec<(String, String)> {
+    let mut references = Vec::new();
+    collect_component_override_env_references(value, "", &mut references);
+    references
+}
+
+fn collect_component_override_env_references(
+    value: &serde_json::Value,
+    pointer: &str,
+    references: &mut Vec<(String, String)>,
+) {
+    match value {
+        serde_json::Value::String(text) => {
+            for name in env_reference_names(text) {
+                if name.starts_with(COMPONENT_PATH_ENV_PREFIX)
+                    || name.starts_with(COMPONENT_CHECKOUT_ROOT_ENV_PREFIX)
+                {
+                    references.push((pointer.to_string(), name));
+                }
+            }
+        }
+        serde_json::Value::Array(entries) => {
+            for (index, entry) in entries.iter().enumerate() {
+                collect_component_override_env_references(
+                    entry,
+                    &format!("{pointer}/{index}"),
+                    references,
+                );
+            }
+        }
+        serde_json::Value::Object(entries) => {
+            for (key, entry) in entries {
+                collect_component_override_env_references(
+                    entry,
+                    &format!("{pointer}/{}", escape_pointer(key)),
+                    references,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Extract the `<NAME>` of every `${env.<NAME>}` interpolation in `text`.
+fn env_reference_names(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut remaining = text;
+    while let Some(start) = remaining.find("${env.") {
+        let after = &remaining[start + "${env.".len()..];
+        let Some(end) = after.find('}') else {
+            break;
+        };
+        let name = after[..end].trim();
+        if !name.is_empty() {
+            names.push(name.to_string());
+        }
+        remaining = &after[end + 1..];
+    }
+    names
 }
 
 fn contract_validation_failures(root: &Path) -> Result<Vec<String>> {
@@ -442,33 +678,188 @@ fn json_parse_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
                 display_relative(root, file),
                 error
             ));
+            continue;
+        }
+        for duplicate in duplicate_json_keys(&content) {
+            failures.push(format!(
+                "{} duplicate JSON key `{}` in {} at line {} and line {}; the later value silently wins",
+                display_relative(root, file),
+                duplicate.key,
+                display_pointer(&duplicate.pointer),
+                duplicate.first_line,
+                duplicate.second_line
+            ));
         }
     }
     Ok(failures)
 }
 
-fn template_materialization_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
-    let mut failures = Vec::new();
-    for file in files
-        .iter()
-        .filter(|path| path.file_name() == Some(OsStr::new("rig.json")))
-    {
-        let content = fs::read_to_string(file).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("read {}", file.display())))
-        })?;
-        if !content.contains("\"extends\"") {
-            continue;
-        }
-        let source_root = template_source_root(root, file)?;
-        if let Err(error) = super::install::materialize_rig_spec(file, &source_root) {
-            failures.push(format!(
-                "{} template materialization failed: {}",
-                display_relative(root, file),
-                error.message
-            ));
+/// A key declared more than once inside the same JSON object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DuplicateJsonKey {
+    /// RFC 6901 pointer to the containing object.
+    pointer: String,
+    key: String,
+    first_line: usize,
+    second_line: usize,
+}
+
+struct ScanFrame {
+    object: bool,
+    pointer: String,
+    keys: BTreeMap<String, usize>,
+    index: usize,
+    current_key: String,
+}
+
+/// Report keys declared more than once inside the same JSON object.
+///
+/// `serde_json` accepts duplicate object keys and silently keeps the last one,
+/// so a rig spec can lose an entire declaration with no signal at all. In
+/// chubes4/homeboy-rigs, `woocommerce-wp-codebox-target.base.json` declares
+/// `"lifecycle"` twice and the first block's `intent: "external"` is dropped,
+/// changing that rig's cleanup contract invisibly.
+///
+/// This is a raw token pass rather than a `serde` visitor because the visitor
+/// API cannot report where in the source each declaration sits, and "the key
+/// appears twice" is only actionable with both locations. The scan assumes the
+/// input already parses — callers run it only after `serde_json` has accepted
+/// the document.
+fn duplicate_json_keys(content: &str) -> Vec<DuplicateJsonKey> {
+    let chars: Vec<char> = content.chars().collect();
+    let mut duplicates = Vec::new();
+    let mut stack: Vec<ScanFrame> = Vec::new();
+    let mut expect_key = false;
+    let mut line = 1usize;
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        match chars[index] {
+            '\n' => {
+                line += 1;
+                index += 1;
+            }
+            '"' => {
+                let start_line = line;
+                let (value, next) = read_json_string(&chars, index, &mut line);
+                index = next;
+                if expect_key {
+                    if let Some(frame) = stack.last_mut() {
+                        match frame.keys.get(&value) {
+                            Some(first_line) => duplicates.push(DuplicateJsonKey {
+                                pointer: frame.pointer.clone(),
+                                key: value.clone(),
+                                first_line: *first_line,
+                                second_line: start_line,
+                            }),
+                            None => {
+                                frame.keys.insert(value.clone(), start_line);
+                            }
+                        }
+                        frame.current_key = value;
+                    }
+                    expect_key = false;
+                }
+            }
+            open @ ('{' | '[') => {
+                let pointer = child_pointer(&stack);
+                stack.push(ScanFrame {
+                    object: open == '{',
+                    pointer,
+                    keys: BTreeMap::new(),
+                    index: 0,
+                    current_key: String::new(),
+                });
+                expect_key = open == '{';
+                index += 1;
+            }
+            '}' | ']' => {
+                stack.pop();
+                expect_key = false;
+                index += 1;
+            }
+            ',' => {
+                if let Some(frame) = stack.last_mut() {
+                    if !frame.object {
+                        frame.index += 1;
+                    }
+                    expect_key = frame.object;
+                } else {
+                    expect_key = false;
+                }
+                index += 1;
+            }
+            _ => index += 1,
         }
     }
-    Ok(failures)
+
+    duplicates
+}
+
+/// Consume a JSON string literal starting at `open_quote`, returning its
+/// decoded value and the index just past the closing quote.
+fn read_json_string(chars: &[char], open_quote: usize, line: &mut usize) -> (String, usize) {
+    let mut value = String::new();
+    let mut index = open_quote + 1;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => {
+                if let Some(escaped) = chars.get(index + 1) {
+                    match escaped {
+                        'n' => value.push('\n'),
+                        't' => value.push('\t'),
+                        'r' => value.push('\r'),
+                        'b' => value.push('\u{8}'),
+                        'f' => value.push('\u{c}'),
+                        'u' => {
+                            let hex: String = chars.iter().skip(index + 2).take(4).collect();
+                            if let Some(decoded) =
+                                u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
+                            {
+                                value.push(decoded);
+                            }
+                            index += 4;
+                        }
+                        other => value.push(*other),
+                    }
+                }
+                index += 2;
+            }
+            '"' => return (value, index + 1),
+            '\n' => {
+                *line += 1;
+                value.push('\n');
+                index += 1;
+            }
+            other => {
+                value.push(other);
+                index += 1;
+            }
+        }
+    }
+    (value, index)
+}
+
+fn child_pointer(stack: &[ScanFrame]) -> String {
+    match stack.last() {
+        None => String::new(),
+        Some(parent) if parent.object => {
+            format!("{}/{}", parent.pointer, escape_pointer(&parent.current_key))
+        }
+        Some(parent) => format!("{}/{}", parent.pointer, parent.index),
+    }
+}
+
+fn escape_pointer(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
+}
+
+fn display_pointer(pointer: &str) -> &str {
+    if pointer.is_empty() {
+        "the document root"
+    } else {
+        pointer
+    }
 }
 
 fn template_source_root(root: &Path, file: &Path) -> Result<PathBuf> {
@@ -492,7 +883,11 @@ fn template_source_root(root: &Path, file: &Path) -> Result<PathBuf> {
     })
 }
 
-fn portability_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
+fn portability_failures(
+    root: &Path,
+    files: &[PathBuf],
+    rigs: &[MaterializedRig],
+) -> Result<Vec<String>> {
     let mut failures = Vec::new();
     for file in files.iter().filter(|path| portable_source_file(path)) {
         let content = fs::read_to_string(file).unwrap_or_default();
@@ -510,19 +905,10 @@ fn portability_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
         }
     }
 
-    for file in files
-        .iter()
-        .filter(|path| path.file_name() == Some(OsStr::new("rig.json")))
-    {
-        let content = fs::read_to_string(file).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("read {}", file.display())))
-        })?;
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
-            continue;
-        };
-        failures.extend(shared_path_failures(root, file, &value));
-        failures.extend(resource_retention_failures(root, file, &value));
-        failures.extend(lifecycle_step_source_failures(root, file, &value));
+    for rig in rigs {
+        failures.extend(shared_path_failures(&rig.rel, &rig.value));
+        failures.extend(resource_retention_failures(&rig.rel, &rig.value));
+        failures.extend(lifecycle_step_source_failures(&rig.rel, &rig.value));
     }
 
     Ok(failures)
@@ -547,8 +933,7 @@ fn portable_source_file(path: &Path) -> bool {
     )
 }
 
-fn shared_path_failures(root: &Path, file: &Path, rig: &serde_json::Value) -> Vec<String> {
-    let rel = display_relative(root, file);
+fn shared_path_failures(rel: &str, rig: &serde_json::Value) -> Vec<String> {
     let Some(shared_paths) = rig.get("shared_paths") else {
         return Vec::new();
     };
@@ -592,12 +977,7 @@ fn shared_path_failures(root: &Path, file: &Path, rig: &serde_json::Value) -> Ve
 /// serde no longer rejects a step that declares neither. The executor still
 /// fails closed at run time, but a rig author should not have to run `rig up`
 /// to find out — that is what this lint is for.
-fn lifecycle_step_source_failures(
-    root: &Path,
-    file: &Path,
-    rig: &serde_json::Value,
-) -> Vec<String> {
-    let rel = display_relative(root, file);
+fn lifecycle_step_source_failures(rel: &str, rig: &serde_json::Value) -> Vec<String> {
     let Some(pipelines) = rig.get("pipeline").and_then(|value| value.as_object()) else {
         return Vec::new();
     };
@@ -669,8 +1049,7 @@ fn lifecycle_workload_ref_failures(location: &str, workload: &serde_json::Value)
 /// `delete_after_ttl` without a `ttl` is contract-invalid: the lifecycle record
 /// would fail validation and the run's whole lifecycle index would be dropped.
 /// Catch it at lint time instead of losing the artifact at runtime.
-fn resource_retention_failures(root: &Path, file: &Path, rig: &serde_json::Value) -> Vec<String> {
-    let rel = display_relative(root, file);
+fn resource_retention_failures(rel: &str, rig: &serde_json::Value) -> Vec<String> {
     let Some(resources) = rig.get("resources").and_then(|value| value.as_object()) else {
         return Vec::new();
     };
@@ -678,7 +1057,7 @@ fn resource_retention_failures(root: &Path, file: &Path, rig: &serde_json::Value
     let mut failures = Vec::new();
 
     if let Some(lifecycle) = resources.get("lifecycle") {
-        failures.extend(retention_failure(&rel, "resources.lifecycle", lifecycle));
+        failures.extend(retention_failure(rel, "resources.lifecycle", lifecycle));
     }
     if let Some(by_class) = resources.get("lifecycle_by_class") {
         match by_class.as_object() {
@@ -691,7 +1070,7 @@ fn resource_retention_failures(root: &Path, file: &Path, rig: &serde_json::Value
                         continue;
                     }
                     failures.extend(retention_failure(
-                        &rel,
+                        rel,
                         &format!("resources.lifecycle_by_class.{class}"),
                         retention,
                     ));
@@ -726,42 +1105,280 @@ fn retention_failure(rel: &str, label: &str, retention: &serde_json::Value) -> O
     None
 }
 
-fn workload_reference_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
+fn workload_reference_failures(
+    root: &Path,
+    files: &[PathBuf],
+    rigs: &[MaterializedRig],
+) -> Result<Vec<String>> {
     let fuzz_workloads = collect_fuzz_workloads(root, files)?;
     let mut failures = Vec::new();
-    for file in files
-        .iter()
-        .filter(|path| path.file_name() == Some(OsStr::new("rig.json")))
-    {
-        let content = fs::read_to_string(file).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("read {}", file.display())))
-        })?;
-        let Ok(rig) = serde_json::from_str::<serde_json::Value>(&content) else {
-            continue;
-        };
-        let package_root = package_root_for_rig(root, file);
-        let rel = display_relative(root, file);
+    for rig in rigs {
         failures.extend(fuzz_workload_failures(
             root,
-            &package_root,
-            &rel,
-            &rig,
+            &rig.package_root,
+            &rig.rel,
+            &rig.value,
             &fuzz_workloads,
         ));
         failures.extend(profile_reference_failures(
-            &rel,
-            &rig,
+            &rig.rel,
+            &rig.value,
             "fuzz_workloads",
             "fuzz_profiles",
         ));
         failures.extend(bench_reference_failures(
-            &rel,
-            &rig,
+            &rig.rel,
+            &rig.value,
             &fuzz_workloads,
-            &package_root,
+            &rig.package_root,
         ));
     }
+    failures.extend(workload_import_failures(root, rigs));
     Ok(failures)
+}
+
+/// Module specifier keywords this scan understands. Deliberately the whole list:
+/// this is a static relative-specifier check, not a module resolver.
+const IMPORT_KEYWORDS: &[&str] = &["from", "import", "require"];
+
+/// Relative `import` / `require` specifiers in declared workload files must
+/// resolve to a file that exists.
+///
+/// A workload is only ever loaded by its runner, so a wrong relative depth is
+/// invisible to every other check in this lint: the JSON is valid, the path in
+/// the rig spec exists, and the profile reference resolves. In
+/// chubes4/homeboy-rigs, four Gutenberg `.trace.mjs` workloads import
+/// `'../shared/wp-codebox/recipe.mjs'` where the correct depth is
+/// `'../../../shared/...'`, and CI lints that package green.
+///
+/// Scope is intentionally narrow. Only static relative specifiers (`./`, `../`)
+/// are resolved. Bare specifiers are skipped entirely — no `node_modules`
+/// lookup, no `package.json` `exports` map, no conditional exports, no import
+/// maps. The walk follows resolvable relative imports transitively so a broken
+/// specifier in a shared helper is reported too.
+fn workload_import_failures(root: &Path, rigs: &[MaterializedRig]) -> Vec<String> {
+    let mut failures = Vec::new();
+    let mut visited: BTreeSet<PathBuf> = BTreeSet::new();
+
+    for rig in rigs {
+        let mut queue: Vec<PathBuf> = Vec::new();
+        for key in ["bench_workloads", "fuzz_workloads", "trace_workloads"] {
+            for declaration in declared_workload_paths(&rig.value, key) {
+                if let Some(resolved) = resolve_package_path(&declaration, &rig.package_root) {
+                    queue.push(resolved);
+                }
+            }
+        }
+
+        while let Some(file) = queue.pop() {
+            if !is_module_source(&file) || !file.is_file() {
+                continue;
+            }
+            let canonical = file.canonicalize().unwrap_or_else(|_| file.clone());
+            if !visited.insert(canonical) {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&file) else {
+                continue;
+            };
+            let Some(directory) = file.parent().map(Path::to_path_buf) else {
+                continue;
+            };
+            for (line, specifier) in relative_import_specifiers(&content) {
+                match resolve_relative_specifier(&directory, &specifier) {
+                    Some(target) => queue.push(target),
+                    None => failures.push(format!(
+                        "{}:{line}: unresolved relative import '{specifier}' (nothing at {})",
+                        display_relative(root, &file),
+                        display_relative(root, &lexically_normalized(&directory.join(&specifier)))
+                    )),
+                }
+            }
+        }
+    }
+
+    failures
+}
+
+fn declared_workload_paths(rig: &serde_json::Value, key: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let Some(workloads) = rig.get(key).and_then(|value| value.as_object()) else {
+        return paths;
+    };
+    for declarations in workloads.values().filter_map(|value| value.as_array()) {
+        for declaration in declarations {
+            let path = declaration
+                .as_str()
+                .or_else(|| declaration.get("path").and_then(|value| value.as_str()));
+            if let Some(path) = path {
+                paths.push(path.to_string());
+            }
+        }
+    }
+    paths
+}
+
+fn is_module_source(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(OsStr::to_str),
+        Some("mjs" | "js" | "cjs")
+    )
+}
+
+fn resolve_relative_specifier(directory: &Path, specifier: &str) -> Option<PathBuf> {
+    let base = directory.join(specifier);
+    if base.is_file() {
+        return Some(base);
+    }
+    for suffix in [".mjs", ".js", ".cjs", ".json"] {
+        let candidate = PathBuf::from(format!("{}{suffix}", base.to_string_lossy()));
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    for index in ["index.mjs", "index.js", "index.cjs"] {
+        let candidate = base.join(index);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Collapse `.` and `..` segments without touching the filesystem, so a failure
+/// message names the path the author meant rather than `bench/../shared/...`.
+fn lexically_normalized(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push("..");
+                }
+            }
+            other => normalized.push(other),
+        }
+    }
+    normalized
+}
+
+fn relative_import_specifiers(content: &str) -> Vec<(usize, String)> {
+    let mut specifiers = Vec::new();
+    for (offset, line) in content.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
+            continue;
+        }
+        for specifier in line_module_specifiers(line) {
+            if specifier.starts_with("./") || specifier.starts_with("../") {
+                specifiers.push((offset + 1, specifier));
+            }
+        }
+    }
+    specifiers
+}
+
+/// Collect quoted module specifiers introduced by an import keyword on one line.
+///
+/// Line-scoped on purpose: a multi-line `import { ... } from './x.mjs'` still
+/// puts the specifier on the same line as its `from`, and staying line-scoped
+/// keeps this a scan rather than a parser.
+///
+/// Quoted runs that no import keyword introduced are skipped whole, so JavaScript
+/// embedded in a string value is data rather than code. Studio's
+/// `mysql-fuzz-runner.mjs` passes a whole ES module to `node -e` inside a
+/// template literal; its `import ... from './packages/...'` resolves against the
+/// Studio checkout at run time, not against the workload directory, and must not
+/// be reported here.
+fn line_module_specifiers(line: &str) -> Vec<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut specifiers = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let character = chars[index];
+        if character == '\\' {
+            index += 2;
+            continue;
+        }
+        if is_quote(character) {
+            index = skip_string_literal(&chars, index);
+            continue;
+        }
+        let Some(keyword_length) = import_keyword_at(&chars, index) else {
+            index += 1;
+            continue;
+        };
+        let mut cursor = index + keyword_length;
+        while cursor < chars.len() && (chars[cursor].is_whitespace() || chars[cursor] == '(') {
+            cursor += 1;
+        }
+        if !chars.get(cursor).copied().is_some_and(is_quote) {
+            index += keyword_length;
+            continue;
+        }
+        let end = skip_string_literal(&chars, cursor);
+        let content_end =
+            if chars.get(end - 1).copied() == chars.get(cursor).copied() && end > cursor + 1 {
+                end - 1
+            } else {
+                end
+            };
+        specifiers.push(chars[cursor + 1..content_end].iter().collect());
+        index = end;
+    }
+    specifiers
+}
+
+fn is_quote(character: char) -> bool {
+    matches!(character, '\'' | '"' | '`')
+}
+
+/// Index just past the closing quote of the string literal opening at `open`.
+fn skip_string_literal(chars: &[char], open: usize) -> usize {
+    let quote = chars[open];
+    let mut index = open + 1;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => index += 2,
+            character if character == quote => return index + 1,
+            _ => index += 1,
+        }
+    }
+    index
+}
+
+/// Match an import keyword at `index` on identifier boundaries, so `fromage`
+/// and `importer` are not mistaken for `from` and `import`.
+fn import_keyword_at(chars: &[char], index: usize) -> Option<usize> {
+    if index > 0 && is_identifier_char(chars[index - 1]) {
+        return None;
+    }
+    for keyword in IMPORT_KEYWORDS {
+        let length = keyword.chars().count();
+        if chars.len() < index + length {
+            continue;
+        }
+        if !chars[index..index + length]
+            .iter()
+            .copied()
+            .eq(keyword.chars())
+        {
+            continue;
+        }
+        if chars
+            .get(index + length)
+            .is_some_and(|next| is_identifier_char(*next))
+        {
+            continue;
+        }
+        return Some(length);
+    }
+    None
+}
+
+fn is_identifier_char(value: char) -> bool {
+    value.is_alphanumeric() || value == '_' || value == '$'
 }
 
 fn collect_fuzz_workloads(
@@ -1343,6 +1960,557 @@ mod tests {
             "contract error: {:?}",
             contract_step.error
         );
+    }
+
+    fn json_step(outcome: &PipelineOutcome) -> &PipelineStepOutcome {
+        outcome
+            .steps
+            .iter()
+            .find(|step| step.label.contains("JSON specs parse"))
+            .expect("json step")
+    }
+
+    #[test]
+    fn duplicate_json_keys_reports_both_declaration_lines() {
+        let content = "{\n  \"lifecycle\": {\n    \"cleanup\": { \"intent\": \"external\" }\n  },\n  \"id\": \"x\",\n  \"lifecycle\": {\n    \"cleanup\": \"dry_run\"\n  }\n}\n";
+
+        let duplicates = duplicate_json_keys(content);
+
+        assert_eq!(
+            duplicates,
+            vec![DuplicateJsonKey {
+                pointer: String::new(),
+                key: "lifecycle".to_string(),
+                first_line: 2,
+                second_line: 6,
+            }]
+        );
+    }
+
+    #[test]
+    fn duplicate_json_keys_points_at_the_containing_object() {
+        let nested = duplicate_json_keys("{\n  \"a\": {\n    \"b\": 1,\n    \"b\": 2\n  }\n}\n");
+        assert_eq!(nested.len(), 1, "{nested:?}");
+        assert_eq!(nested[0].pointer, "/a");
+
+        let in_array = duplicate_json_keys(
+            "{\n  \"list\": [\n    { \"k\": 1 },\n    { \"k\": 1, \"k\": 2 }\n  ]\n}\n",
+        );
+        assert_eq!(in_array.len(), 1, "{in_array:?}");
+        assert_eq!(in_array[0].pointer, "/list/1");
+    }
+
+    #[test]
+    fn duplicate_json_keys_ignores_object_syntax_inside_string_values() {
+        let content = "{\n  \"cmd\": \"{ \\\"a\\\": 1, \\\"a\\\": 2 }\",\n  \"note\": \"he said \\\"hi\\\" }\",\n  \"other\": \"[,{\",\n  \"a\": 1\n}\n";
+
+        assert!(duplicate_json_keys(content).is_empty());
+    }
+
+    #[test]
+    fn duplicate_json_keys_accepts_a_clean_document() {
+        let content = "{\n  \"a\": 1,\n  \"b\": { \"a\": 2 },\n  \"c\": [1, 2, {\"a\": 3}]\n}\n";
+
+        assert!(duplicate_json_keys(content).is_empty());
+    }
+
+    #[test]
+    fn duplicate_json_keys_decodes_escaped_key_names() {
+        // `"a\u0062"` and `"ab"` are the same key; serde_json keeps only the last.
+        let duplicates = duplicate_json_keys("{\n  \"a\\u0062\": 1,\n  \"ab\": 2\n}\n");
+
+        assert_eq!(duplicates.len(), 1, "{duplicates:?}");
+        assert_eq!(duplicates[0].key, "ab");
+    }
+
+    #[test]
+    fn package_lint_reports_duplicate_keys_in_a_rig_spec() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("duplicate");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            "{\n  \"id\": \"duplicate\",\n  \"lifecycle\": {\n    \"cleanup\": { \"intent\": \"external\", \"reason\": \"sandbox owns teardown\" }\n  },\n  \"lifecycle\": {\n    \"cleanup\": \"dry_run\"\n  }\n}\n",
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = json_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        let error = step.error.as_ref().expect("json error");
+        assert!(error.contains("duplicate JSON key `lifecycle`"), "{error}");
+        assert!(error.contains("line 3 and line 6"), "{error}");
+    }
+
+    #[test]
+    fn package_lint_reports_duplicate_keys_in_a_base_spec() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("duplicate");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("duplicate.base.json"),
+            "{\n  \"trace\": { \"default_component\": \"app\" },\n  \"trace\": { \"default_component\": \"other\" }\n}\n",
+        )
+        .expect("write base");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{ "extends": "./duplicate.base.json", "id": "duplicate" }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = json_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        assert!(step
+            .error
+            .as_ref()
+            .expect("json error")
+            .contains("duplicate.base.json duplicate JSON key `trace`"));
+    }
+
+    fn contract_step(outcome: &PipelineOutcome) -> &PipelineStepOutcome {
+        outcome
+            .steps
+            .iter()
+            .find(|step| step.label.contains("Homeboy rig contract"))
+            .expect("contract step")
+    }
+
+    #[test]
+    fn env_reference_names_extracts_every_interpolation() {
+        let names = env_reference_names(
+            "${env.HOMEBOY_RIG_COMPONENT_PATH__A__B}/x/${env.HOMEBOY_SETTINGS_NS} ${broken",
+        );
+
+        assert_eq!(
+            names,
+            vec![
+                "HOMEBOY_RIG_COMPONENT_PATH__A__B".to_string(),
+                "HOMEBOY_SETTINGS_NS".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn package_lint_reports_component_env_var_naming_a_different_rig() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("studio-agent-claude-trunk");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "studio-agent-claude-trunk",
+                "components": {
+                    "studio": {
+                        "path": "${env.HOMEBOY_RIG_COMPONENT_PATH__STUDIO_AGENT_CLAUDE_EVALTIMING__STUDIO}"
+                    }
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = contract_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        let error = step.error.as_ref().expect("contract error");
+        assert!(
+            error.contains("HOMEBOY_RIG_COMPONENT_PATH__STUDIO_AGENT_CLAUDE_EVALTIMING__STUDIO"),
+            "{error}"
+        );
+        assert!(
+            error.contains("`HOMEBOY_RIG_COMPONENT_PATH__STUDIO_AGENT_CLAUDE_TRUNK__<COMPONENT>`"),
+            "{error}"
+        );
+        assert!(error.contains("/components/studio/path"), "{error}");
+    }
+
+    #[test]
+    fn package_lint_reports_component_env_var_naming_an_undeclared_component() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("agreement");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "agreement",
+                "components": {
+                    "studio": { "path": "/tmp/studio" }
+                },
+                "resources": {
+                    "paths": ["${env.HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__AGREEMENT__WORDPRESS}"]
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = contract_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        let error = step.error.as_ref().expect("contract error");
+        assert!(
+            error.contains("declares no component matching `WORDPRESS`"),
+            "{error}"
+        );
+        assert!(error.contains("declared: studio"), "{error}");
+    }
+
+    #[test]
+    fn package_lint_accepts_component_env_vars_that_agree_with_the_rig_id() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("gutenberg-pattern-assets");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "gutenberg-pattern-assets",
+                "components": {
+                    "gutenberg": {
+                        "path": "${env.HOMEBOY_RIG_COMPONENT_PATH__GUTENBERG_PATTERN_ASSETS__GUTENBERG}"
+                    }
+                },
+                "resources": {
+                    "exclusive": ["ns:${env.HOMEBOY_SETTINGS_NAMESPACE}"]
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = contract_step(&outcome);
+
+        assert_eq!(step.status, "pass", "{:?}", step.error);
+    }
+
+    #[test]
+    fn package_lint_checks_component_env_agreement_through_extends() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("renamed");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("renamed.base.json"),
+            r#"{
+                "components": {
+                    "app": { "path": "${env.HOMEBOY_RIG_COMPONENT_PATH__OLD_NAME__APP}" }
+                }
+            }"#,
+        )
+        .expect("write base");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{ "extends": "./renamed.base.json", "id": "renamed" }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = contract_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        assert!(step
+            .error
+            .as_ref()
+            .expect("contract error")
+            .contains("`HOMEBOY_RIG_COMPONENT_PATH__RENAMED__<COMPONENT>`"));
+    }
+
+    fn reference_step(outcome: &PipelineOutcome) -> &PipelineStepOutcome {
+        outcome
+            .steps
+            .iter()
+            .find(|step| step.label.contains("profiles reference declared workloads"))
+            .expect("reference step")
+    }
+
+    #[test]
+    fn relative_import_specifiers_collects_only_static_relative_module_specifiers() {
+        let content = concat!(
+            "// import { fake } from '../commented-out.mjs';\n",
+            "import { recipe } from '../shared/recipe.mjs';\n",
+            "import defaults from \"../../lib/thing.js\";\n",
+            "import './side-effect.mjs';\n",
+            "import fs from 'node:fs';\n",
+            "import { a } from 'some-package';\n",
+            "const helper = require('./helper.cjs');\n",
+            "const mod = await import('./dynamic.mjs');\n",
+            "export * from '../star.mjs';\n",
+            "const s = fromage('./not-an-import');\n",
+            "const t = importer('./also-not');\n",
+            "const script = `import x from './embedded-source.mjs'; x();`;\n",
+            "import {\n  many,\n  names\n} from '../multi/line.mjs';\n",
+        );
+
+        let specifiers = relative_import_specifiers(content);
+
+        assert_eq!(
+            specifiers,
+            vec![
+                (2, "../shared/recipe.mjs".to_string()),
+                (3, "../../lib/thing.js".to_string()),
+                (4, "./side-effect.mjs".to_string()),
+                (7, "./helper.cjs".to_string()),
+                (8, "./dynamic.mjs".to_string()),
+                (9, "../star.mjs".to_string()),
+                (16, "../multi/line.mjs".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn lexical_normalization_collapses_parent_segments() {
+        assert_eq!(
+            lexically_normalized(Path::new("pkg/bench/../shared/recipe.mjs")),
+            PathBuf::from("pkg/shared/recipe.mjs")
+        );
+    }
+
+    #[test]
+    fn package_lint_reports_unresolvable_workload_imports() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("imports");
+        let bench_dir = temp.path().join("bench");
+        let shared_dir = temp.path().join("shared").join("wp-codebox");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::create_dir_all(&bench_dir).expect("bench dir");
+        fs::create_dir_all(&shared_dir).expect("shared dir");
+        fs::write(shared_dir.join("recipe.mjs"), "export const recipe = 1;\n")
+            .expect("write shared helper");
+        // The correct depth from `bench/` is `../shared/wp-codebox/recipe.mjs`;
+        // this workload is one level too shallow, exactly like the four Gutenberg
+        // trace workloads in chubes4/homeboy-rigs.
+        fs::write(
+            bench_dir.join("pattern-preview-assets.trace.mjs"),
+            "import { recipe } from './shared/wp-codebox/recipe.mjs';\nexport default recipe;\n",
+        )
+        .expect("write workload");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "imports",
+                "trace_workloads": {
+                    "nodejs": [
+                        { "path": "${package.root}/bench/pattern-preview-assets.trace.mjs" }
+                    ]
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = reference_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        let error = step.error.as_ref().expect("reference error");
+        assert!(
+            error.contains(
+                "bench/pattern-preview-assets.trace.mjs:1: unresolved relative import './shared/wp-codebox/recipe.mjs'"
+            ),
+            "{error}"
+        );
+        assert!(
+            error.contains("bench/shared/wp-codebox/recipe.mjs"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn package_lint_accepts_resolvable_workload_imports() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("imports");
+        let bench_dir = temp.path().join("bench");
+        let shared_dir = temp.path().join("shared").join("wp-codebox");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::create_dir_all(&bench_dir).expect("bench dir");
+        fs::create_dir_all(&shared_dir).expect("shared dir");
+        fs::write(shared_dir.join("recipe.mjs"), "export const recipe = 1;\n")
+            .expect("write shared helper");
+        fs::write(
+            bench_dir.join("workload.bench.mjs"),
+            concat!(
+                "import { recipe } from '../shared/wp-codebox/recipe.mjs';\n",
+                "import fs from 'node:fs';\n",
+                "import { chromium } from 'playwright';\n",
+                "export default recipe && fs && chromium;\n",
+            ),
+        )
+        .expect("write workload");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "imports",
+                "bench_workloads": {
+                    "nodejs": [{ "path": "${package.root}/bench/workload.bench.mjs" }]
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = reference_step(&outcome);
+
+        assert_eq!(step.status, "pass", "{:?}", step.error);
+    }
+
+    #[test]
+    fn package_lint_follows_workload_imports_transitively() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("imports");
+        let bench_dir = temp.path().join("bench");
+        let shared_dir = temp.path().join("shared");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::create_dir_all(&bench_dir).expect("bench dir");
+        fs::create_dir_all(&shared_dir).expect("shared dir");
+        fs::write(
+            bench_dir.join("workload.bench.mjs"),
+            "import { helper } from '../shared/helper.mjs';\nexport default helper;\n",
+        )
+        .expect("write workload");
+        fs::write(
+            shared_dir.join("helper.mjs"),
+            "import { missing } from './does-not-exist.mjs';\nexport const helper = missing;\n",
+        )
+        .expect("write helper");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "imports",
+                "bench_workloads": {
+                    "nodejs": [{ "path": "${package.root}/bench/workload.bench.mjs" }]
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = reference_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        assert!(step
+            .error
+            .as_ref()
+            .expect("reference error")
+            .contains("shared/helper.mjs:1: unresolved relative import './does-not-exist.mjs'"));
+    }
+
+    #[test]
+    fn package_lint_resolves_extensionless_and_directory_index_imports() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("imports");
+        let bench_dir = temp.path().join("bench");
+        let lib_dir = temp.path().join("lib");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::create_dir_all(&bench_dir).expect("bench dir");
+        fs::create_dir_all(lib_dir.join("pack")).expect("lib dirs");
+        fs::write(lib_dir.join("thing.js"), "export const thing = 1;\n").expect("write thing");
+        fs::write(
+            lib_dir.join("pack").join("index.mjs"),
+            "export const p = 1;\n",
+        )
+        .expect("write index");
+        fs::write(
+            bench_dir.join("workload.bench.mjs"),
+            "import { thing } from '../lib/thing';\nimport { p } from '../lib/pack';\nexport default thing && p;\n",
+        )
+        .expect("write workload");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "imports",
+                "bench_workloads": {
+                    "nodejs": [{ "path": "${package.root}/bench/workload.bench.mjs" }]
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = reference_step(&outcome);
+
+        assert_eq!(step.status, "pass", "{:?}", step.error);
+    }
+
+    #[test]
+    fn package_lint_reports_rig_shaped_failures_inherited_from_a_base_spec() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("inherited");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("inherited.base.json"),
+            r#"{
+                "components": {},
+                "shared_paths": [{"link":"shared","target":"shared"}],
+                "resources": {
+                    "lifecycle_by_class": {
+                        "ports": {"cleanup_policy": "delete_after_ttl"}
+                    }
+                },
+                "pipeline": {
+                    "up": [{ "kind": "lifecycle", "op": "prepare" }]
+                },
+                "typoed_field": true
+            }"#,
+        )
+        .expect("write base");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "extends": "./inherited.base.json",
+                "id": "inherited"
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+
+        let portability = portability_step(&outcome);
+        assert_eq!(portability.status, "fail", "{:?}", portability.error);
+        let error = portability.error.as_ref().expect("portability error");
+        assert!(error.contains("shared_paths[0]"), "{error}");
+        assert!(error.contains("delete_after_ttl without a ttl"), "{error}");
+        assert!(
+            error.contains("declares neither `lifecycle` nor `workload`"),
+            "{error}"
+        );
+
+        let contract = outcome
+            .steps
+            .iter()
+            .find(|step| step.label.contains("Homeboy rig contract"))
+            .expect("contract step");
+        assert!(contract
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unknown top-level rig field `typoed_field`"));
+    }
+
+    #[test]
+    fn package_lint_does_not_lint_base_specs_as_standalone_rigs() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("inherited");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        // A base spec has no `id` and no `components` of its own. Linting it as a
+        // standalone rig would report contract failures that are not defects.
+        fs::write(
+            rig_dir.join("inherited.base.json"),
+            r#"{ "trace": { "default_component": "app" } }"#,
+        )
+        .expect("write base");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "extends": "./inherited.base.json",
+                "id": "inherited",
+                "components": { "app": { "path": "/tmp/app" } }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+
+        assert_eq!(outcome.failed, 0, "{:?}", outcome.steps);
     }
 
     #[test]
