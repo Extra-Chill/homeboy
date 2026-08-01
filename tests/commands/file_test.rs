@@ -1,5 +1,6 @@
 use super::args::{EditArgs, FileModifications, LineOperations, PatternOperations};
 use super::{run, FileArgs, FileCommand, FileCommandOutput};
+use crate::commands::utils::args::MutationArgs;
 use crate::test_support::with_isolated_home;
 use std::path::Path;
 
@@ -72,7 +73,7 @@ fn file_delete_without_apply_returns_plan_and_preserves_file() {
                 project_id: project_id.to_string(),
                 path: "sample.txt".to_string(),
                 recursive: false,
-                apply: false,
+                mutation: MutationArgs::from(false),
             },
         })
     });
@@ -105,7 +106,7 @@ fn file_mkdir_without_apply_returns_plan_and_preserves_filesystem() {
             command: FileCommand::Mkdir {
                 project_id: project_id.to_string(),
                 path: "new-dir".to_string(),
-                apply: false,
+                mutation: MutationArgs::from(false),
             },
         })
     });
@@ -141,7 +142,7 @@ fn file_rename_without_apply_returns_plan_and_preserves_filesystem() {
                 project_id: project_id.to_string(),
                 old_path: "old.txt".to_string(),
                 new_path: "new.txt".to_string(),
-                apply: false,
+                mutation: MutationArgs::from(false),
             },
         })
     });

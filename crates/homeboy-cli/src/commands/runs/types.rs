@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 
+use crate::commands::utils::args::MutationArgs;
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
@@ -708,9 +709,10 @@ pub use capture_types::*;
 
 #[derive(Args, Clone, Default)]
 pub struct RunsArtifactCleanupDownloadsArgs {
-    /// Delete the planned cached downloads. Without this flag, only reports the plan.
-    #[arg(long)]
-    pub apply: bool,
+    // Delete the planned cached downloads. Without this flag, only reports
+    // the plan. Shared plan-default mutation group (#11139).
+    #[command(flatten)]
+    pub mutation: MutationArgs,
     /// Limit cleanup to one runner id under the local runner artifact cache.
     #[arg(long)]
     pub runner: Option<String>,
@@ -750,9 +752,11 @@ pub struct RunsArtifactCleanupDownloadsOutput {
 
 #[derive(Args, Clone)]
 pub struct RunsArtifactCleanupPersistedArgs {
-    /// Delete planned artifact files/directories and their DB rows. Without this flag, only reports the plan.
-    #[arg(long)]
-    pub apply: bool,
+    // Delete planned artifact files/directories and their DB rows. Without
+    // this flag, only reports the plan. Shared plan-default mutation group
+    // (#11139).
+    #[command(flatten)]
+    pub mutation: MutationArgs,
     /// Only include artifacts older than this many days.
     /// Defaults to the configured `retention.terminal_run_days`.
     #[arg(long)]

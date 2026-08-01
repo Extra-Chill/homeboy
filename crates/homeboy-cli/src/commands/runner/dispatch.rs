@@ -216,12 +216,12 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
         })),
         RunnerCommand::CachePrune {
             runner_id,
-            apply,
+            mutation,
             min_age_hours,
         } => map_cache_prune(runner::prune_homeboy_binary_cache(
             &runner_id,
             runner::RunnerBinaryCachePruneOptions {
-                apply,
+                apply: mutation.is_apply(),
                 // One named age floor shared with `homeboy cleanup --include
                 // runner-binary-caches` (#10316).
                 min_age_hours: min_age_hours

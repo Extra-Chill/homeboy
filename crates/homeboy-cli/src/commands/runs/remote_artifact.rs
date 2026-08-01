@@ -29,6 +29,7 @@ use super::types::{
 };
 use super::CmdResult;
 use crate::commands::cleanup::RUNNER_DOWNLOADS_METADATA;
+use crate::commands::utils::args::MutationArgs;
 
 pub fn get(artifact: ArtifactRecord, output: Option<PathBuf>) -> CmdResult<RunsOutput> {
     let download = runs_service::download_remote_artifact(artifact, output)?;
@@ -426,7 +427,7 @@ pub fn cleanup_downloads(args: RunsArtifactCleanupDownloadsArgs) -> CmdResult<Ru
     // deliberately unexposed (#10564).
     let policy = resolve_cleanup_policy(CleanupPolicyOverrides::default())?;
     let outcome = runs_service::cleanup_runner_downloads(RunnerDownloadCleanupOptions {
-        apply: args.apply,
+        apply: args.mutation.is_apply(),
         runner: args.runner,
         run_id: args.run_id,
         limit: policy.scan_limit(),
@@ -440,8 +441,9 @@ pub fn cleanup_downloads(args: RunsArtifactCleanupDownloadsArgs) -> CmdResult<Ru
             command: "runs.artifact.cleanup-downloads",
             cleanup_category: RUNNER_DOWNLOADS_METADATA.category,
             canonical_cleanup_command: RUNNER_DOWNLOADS_METADATA
-                .canonical_cleanup_command(args.apply),
-            specialist_cleanup_command: RUNNER_DOWNLOADS_METADATA.specialist_command(args.apply),
+                .canonical_cleanup_command(args.mutation.is_apply()),
+            specialist_cleanup_command: RUNNER_DOWNLOADS_METADATA
+                .specialist_command(args.mutation.is_apply()),
             dry_run: outcome.dry_run,
             retention: policy,
             root: outcome.root.display().to_string(),
@@ -473,7 +475,7 @@ pub fn cleanup_persisted(args: RunsArtifactCleanupPersistedArgs) -> CmdResult<Ru
         ..CleanupPolicyOverrides::default()
     })?;
     let outcome = runs_service::cleanup_persisted_artifacts(PersistedArtifactCleanupOptions {
-        apply: args.apply,
+        apply: args.mutation.is_apply(),
         older_than_days: policy.terminal_run_days,
         run_id: args.run_id,
         kind: args.kind,
@@ -985,7 +987,7 @@ mod tests {
             fs::write(run_dir.join("report.json"), b"{}").expect("report");
 
             let dry = cleanup_downloads(RunsArtifactCleanupDownloadsArgs {
-                apply: false,
+                mutation: MutationArgs::from(false),
                 runner: Some("local".to_string()),
                 run_id: Some("run-1".to_string()),
             })
@@ -1045,7 +1047,7 @@ mod tests {
             // nothing: the narrowing filter selects a candidate, it does not
             // waive the age floor.
             let applied = cleanup_downloads(RunsArtifactCleanupDownloadsArgs {
-                apply: true,
+                mutation: MutationArgs::from(true),
                 runner: Some("local".to_string()),
                 run_id: Some("run-1".to_string()),
             })
@@ -1094,7 +1096,7 @@ mod tests {
             // The retention contract never reaps evidence while its run owns an
             // active lease, even when the age threshold is zero.
             let active = cleanup_persisted(RunsArtifactCleanupPersistedArgs {
-                apply: true,
+                mutation: MutationArgs::from(true),
                 older_than_days: Some(0),
                 run_id: Some(run.id.clone()),
                 kind: None,
@@ -1118,7 +1120,7 @@ mod tests {
                 .expect("finish run");
 
             let dry = cleanup_persisted(RunsArtifactCleanupPersistedArgs {
-                apply: false,
+                mutation: MutationArgs::from(false),
                 older_than_days: Some(0),
                 run_id: Some(run.id.clone()),
                 kind: None,
@@ -1140,7 +1142,7 @@ mod tests {
             assert!(store.get_artifact(&artifact.id).expect("get").is_some());
 
             let applied = cleanup_persisted(RunsArtifactCleanupPersistedArgs {
-                apply: true,
+                mutation: MutationArgs::from(true),
                 older_than_days: Some(0),
                 run_id: Some(run.id.clone()),
                 kind: None,
@@ -1165,7 +1167,7 @@ mod tests {
     #[test]
     fn cleanup_downloads_requires_runner_for_run_filter() {
         let result = cleanup_downloads(RunsArtifactCleanupDownloadsArgs {
-            apply: false,
+            mutation: MutationArgs::from(false),
             runner: None,
             run_id: Some("run-1".to_string()),
         });
@@ -1184,7 +1186,7 @@ mod tests {
             (Some("/tmp/outside".to_string()), None),
         ] {
             let result = cleanup_downloads(RunsArtifactCleanupDownloadsArgs {
-                apply: false,
+                mutation: MutationArgs::from(false),
                 runner,
                 run_id,
             });

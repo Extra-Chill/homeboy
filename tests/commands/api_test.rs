@@ -1,3 +1,5 @@
+use crate::commands::utils::args::MutationArgs;
+
 use super::{require_apply_for_mutation, ApiArgs, ApiCommand};
 
 #[test]
@@ -6,28 +8,28 @@ fn api_mutating_commands_require_apply() {
         ApiCommand::Post {
             project_id: "site".to_string(),
             endpoint: "/wp/v2/posts".to_string(),
-            apply: false,
+            mutation: MutationArgs::from(false),
             body: None,
             form: Vec::new(),
         },
         ApiCommand::Put {
             project_id: "site".to_string(),
             endpoint: "/wp/v2/posts/1".to_string(),
-            apply: false,
+            mutation: MutationArgs::from(false),
             body: None,
             form: Vec::new(),
         },
         ApiCommand::Patch {
             project_id: "site".to_string(),
             endpoint: "/wp/v2/posts/1".to_string(),
-            apply: false,
+            mutation: MutationArgs::from(false),
             body: None,
             form: Vec::new(),
         },
         ApiCommand::Delete {
             project_id: "site".to_string(),
             endpoint: "/wp/v2/posts/1".to_string(),
-            apply: false,
+            mutation: MutationArgs::from(false),
         },
     ] {
         let err = require_apply_for_mutation(&ApiArgs { command })
@@ -53,7 +55,7 @@ fn api_get_and_applied_mutations_pass_apply_guard() {
         command: ApiCommand::Post {
             project_id: "site".to_string(),
             endpoint: "/wp/v2/posts".to_string(),
-            apply: true,
+            mutation: MutationArgs::from(true),
             body: None,
             form: Vec::new(),
         },

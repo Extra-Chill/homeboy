@@ -1,5 +1,6 @@
 use clap::{Args, Subcommand};
 
+use crate::commands::utils::args::MutationArgs;
 use homeboy::core::server::transfer::TransferConfig;
 
 /// Inspect and modify remote project files.
@@ -41,9 +42,10 @@ pub(crate) enum FileCommand {
         project_id: String,
         /// Remote file path
         path: String,
-        /// Apply the destructive write. Without this flag, prints a plan only.
-        #[arg(long)]
-        apply: bool,
+        // Apply the destructive write. Without this flag, prints a plan only.
+        // Shared plan-default mutation group (#11139).
+        #[command(flatten)]
+        mutation: MutationArgs,
     },
     /// Create a directory
     Mkdir {
@@ -51,9 +53,10 @@ pub(crate) enum FileCommand {
         project_id: String,
         /// Remote directory path
         path: String,
-        /// Apply the directory creation. Without this flag, prints a plan only.
-        #[arg(long)]
-        apply: bool,
+        // Apply the directory creation. Without this flag, prints a plan only.
+        // Shared plan-default mutation group (#11139).
+        #[command(flatten)]
+        mutation: MutationArgs,
     },
     /// Delete a file or directory
     Delete {
@@ -64,9 +67,10 @@ pub(crate) enum FileCommand {
         /// Delete directories recursively
         #[arg(short, long)]
         recursive: bool,
-        /// Apply the destructive delete. Without this flag, prints a plan only.
-        #[arg(long)]
-        apply: bool,
+        // Apply the destructive delete. Without this flag, prints a plan only.
+        // Shared plan-default mutation group (#11139).
+        #[command(flatten)]
+        mutation: MutationArgs,
     },
     /// Rename or move a file
     Rename {
@@ -76,9 +80,10 @@ pub(crate) enum FileCommand {
         old_path: String,
         /// New path
         new_path: String,
-        /// Apply the rename/move. Without this flag, prints a plan only.
-        #[arg(long)]
-        apply: bool,
+        // Apply the rename/move. Without this flag, prints a plan only.
+        // Shared plan-default mutation group (#11139).
+        #[command(flatten)]
+        mutation: MutationArgs,
     },
     /// Find files by name pattern
     Find {

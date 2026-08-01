@@ -1219,23 +1219,219 @@ impl LintSniffArgs {
 }
 
 // ============================================================================
-// WriteModeArgs: --write (dry-run by default)
+// Mutation vocabulary: MutationArgs / WriteModeArgs / DryRunArgs
 // ============================================================================
+//
+// Homeboy speaks three different mutation vocabularies, and the *default
+// polarity* is unknowable without reading each command (#11139):
+//
+//   --apply     the default is PLAN;    passing the flag EXECUTES.
+//   --write     the default is PLAN;    passing the flag EXECUTES.
+//   --dry-run   the default is EXECUTE; passing the flag PREVIEWS.
+//
+// This governs destructive operations, so the polarity of any single
+// command is deliberately NOT changed here. [`MutationArgs`] gives the
+// plan-default family one declaration and one predicate; the other two
+// groups keep their existing meaning and are documented so the asymmetry
+// is legible rather than implicit.
+//
+// Commands that carry BOTH vocabularies at once are the sharpest edge and
+// are intentionally left alone by this group: `deploy` (`--dry-run`
+// previews, `--apply` confirms dangerous modes), `release` (a flattened
+// `DryRunArgs` *and* its own `--apply`), `harvest`, and the `agent-task`
+// reconcile args. Folding those into one group cannot be done without
+// deciding a polarity, which is a behavior change.
 
+/// Which side of the plan/execute boundary a run lands on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationMode {
+    /// Report the plan; mutate nothing.
+    Plan,
+    /// Execute the mutation.
+    Apply,
+}
+
+/// The plan-default mutation switch: `--apply` executes, bare is a plan.
+///
+/// Modeled directly on `worktree cleanup`, which already declares exactly
+/// this pair — `--apply` to execute plus a `--dry-run` that conflicts with
+/// it and names the plan-only default.
+///
+/// `--dry-run` here is **not** an inverting alias of `--apply`. It is an
+/// explicit spelling of the default the command already had, so an
+/// operator script written against the `--dry-run` vocabulary keeps
+/// meaning "do not mutate" on an `--apply`-style command instead of
+/// failing with `unexpected argument`. Adding it cannot flip a default:
+/// the only field that authorizes a mutation is still `apply`.
+#[derive(Args, Debug, Clone, Default)]
+pub struct MutationArgs {
+    /// Execute the mutation. Without this flag the command reports a plan only.
+    #[arg(long)]
+    pub apply: bool,
+
+    /// Explicitly request the plan-only default. Never mutates.
+    #[arg(long, conflicts_with = "apply")]
+    pub dry_run: bool,
+}
+
+impl MutationArgs {
+    /// True when the operator authorized the mutation.
+    pub fn is_apply(&self) -> bool {
+        self.apply
+    }
+
+    /// True when this run must not mutate anything.
+    ///
+    /// The plan-only default means this is simply `!apply`; `--dry-run`
+    /// makes that default explicit rather than adding a second way to
+    /// suppress a mutation.
+    pub fn is_dry_run(&self) -> bool {
+        !self.apply
+    }
+
+    /// The resolved plan/execute mode.
+    pub fn mode(&self) -> MutationMode {
+        if self.apply {
+            MutationMode::Apply
+        } else {
+            MutationMode::Plan
+        }
+    }
+}
+
+impl From<bool> for MutationArgs {
+    /// Build the group from a bare `apply` bool, for call sites that still
+    /// thread the primitive through helper functions.
+    fn from(apply: bool) -> Self {
+        Self {
+            apply,
+            dry_run: !apply,
+        }
+    }
+}
+
+/// Plan-default mutation switch spelled `--write`.
+///
+/// Same polarity as [`MutationArgs`] under a different name. Consumer:
+/// `refactor`.
 #[derive(Args, Debug, Clone, Default)]
 pub struct WriteModeArgs {
     #[arg(long)]
     pub write: bool,
 }
 
-// ============================================================================
-// DryRunArgs: --dry-run (execute by default)
-// ============================================================================
+impl WriteModeArgs {
+    /// True when the operator authorized the mutation.
+    pub fn is_apply(&self) -> bool {
+        self.write
+    }
 
+    /// The resolved plan/execute mode.
+    pub fn mode(&self) -> MutationMode {
+        if self.write {
+            MutationMode::Apply
+        } else {
+            MutationMode::Plan
+        }
+    }
+}
+
+/// Execute-default mutation switch: bare executes, `--dry-run` previews.
+///
+/// **Opposite polarity to [`MutationArgs`] and [`WriteModeArgs`].** This is
+/// the group whose default actually mutates, which is why it is not merged
+/// into `MutationArgs` — doing so would silently repolarize every consumer.
+/// Consumer: `release`.
 #[derive(Args, Debug, Clone, Default)]
 pub struct DryRunArgs {
     #[arg(long)]
     pub dry_run: bool,
+}
+
+impl DryRunArgs {
+    /// True when this run must not mutate anything.
+    pub fn is_dry_run(&self) -> bool {
+        self.dry_run
+    }
+
+    /// The resolved plan/execute mode.
+    pub fn mode(&self) -> MutationMode {
+        if self.dry_run {
+            MutationMode::Plan
+        } else {
+            MutationMode::Apply
+        }
+    }
+}
+
+#[cfg(test)]
+mod mutation_args_tests {
+    use super::{DryRunArgs, MutationArgs, MutationMode, WriteModeArgs};
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct MutationCli {
+        #[command(flatten)]
+        mutation: MutationArgs,
+    }
+
+    fn parse(args: &[&str]) -> MutationArgs {
+        MutationCli::try_parse_from(args)
+            .expect("mutation args should parse")
+            .mutation
+    }
+
+    #[test]
+    fn bare_invocation_plans() {
+        let args = parse(&["mutating"]);
+        assert!(!args.is_apply());
+        assert!(args.is_dry_run());
+        assert_eq!(args.mode(), MutationMode::Plan);
+    }
+
+    #[test]
+    fn apply_executes() {
+        let args = parse(&["mutating", "--apply"]);
+        assert!(args.is_apply());
+        assert!(!args.is_dry_run());
+        assert_eq!(args.mode(), MutationMode::Apply);
+    }
+
+    #[test]
+    fn dry_run_is_the_default_spelled_out_and_never_executes() {
+        let args = parse(&["mutating", "--dry-run"]);
+        assert!(!args.is_apply());
+        assert!(args.is_dry_run());
+        assert_eq!(args.mode(), MutationMode::Plan);
+        assert_eq!(args.mode(), parse(&["mutating"]).mode());
+    }
+
+    #[test]
+    fn apply_and_dry_run_cannot_be_combined() {
+        assert!(MutationCli::try_parse_from(["mutating", "--apply", "--dry-run"]).is_err());
+        assert!(MutationCli::try_parse_from(["mutating", "--dry-run", "--apply"]).is_err());
+    }
+
+    #[test]
+    fn write_mode_shares_the_plan_default_polarity() {
+        assert_eq!(WriteModeArgs::default().mode(), MutationMode::Plan);
+        assert_eq!(WriteModeArgs { write: true }.mode(), MutationMode::Apply);
+    }
+
+    #[test]
+    fn dry_run_args_has_the_opposite_polarity() {
+        // The invariant this whole group exists to make visible: a bare
+        // DryRunArgs command MUTATES, while a bare MutationArgs command
+        // does not. Nothing in this change reconciles the two.
+        assert_eq!(DryRunArgs::default().mode(), MutationMode::Apply);
+        assert_eq!(MutationArgs::default().mode(), MutationMode::Plan);
+    }
+
+    #[test]
+    fn from_bool_round_trips_helper_threaded_apply_flags() {
+        assert_eq!(MutationArgs::from(true).mode(), MutationMode::Apply);
+        assert_eq!(MutationArgs::from(false).mode(), MutationMode::Plan);
+    }
 }
 
 // ============================================================================

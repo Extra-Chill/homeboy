@@ -1,6 +1,7 @@
 use clap::{Subcommand, ValueEnum};
 use serde::Serialize;
 
+use crate::commands::utils::args::MutationArgs;
 use homeboy::core::cleanup;
 use homeboy::runner::runners::{
     self as runner, RunnerWorkspaceApplyOutput, RunnerWorkspaceListOutput,
@@ -124,9 +125,10 @@ pub(super) enum RunnerWorkspaceCommand {
         /// Runner ID
         runner_id: String,
 
-        /// Delete the previewed orphaned workspaces. Without this flag, the command is a dry run.
-        #[arg(long)]
-        apply: bool,
+        // Delete the previewed orphaned workspaces. Without this flag, the
+        // command is a dry run. Shared plan-default mutation group (#11139).
+        #[command(flatten)]
+        mutation: MutationArgs,
 
         /// Minimum workspace age before it can be considered orphaned.
         /// Defaults to the shared runner age floor
@@ -229,7 +231,7 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
         }
         RunnerWorkspaceCommand::Prune {
             runner_id,
-            apply,
+            mutation,
             min_age_hours,
             limit,
             passes,
@@ -240,7 +242,7 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
         } => runner::prune_workspaces(
             &runner_id,
             runner::RunnerWorkspacePruneOptions {
-                apply,
+                apply: mutation.is_apply(),
                 // One named age floor shared with `homeboy cleanup --include
                 // remote-lab-workspaces`, which used to carry its own literal
                 // `24` beside this command's `default_value_t = 24` (#10316).

@@ -7,6 +7,7 @@ use super::doctor;
 use super::lifecycle;
 use super::refresh_plan;
 use super::workspace;
+use crate::commands::utils::args::MutationArgs;
 
 #[derive(Args)]
 pub struct RunnerArgs {
@@ -367,9 +368,10 @@ pub(super) enum RunnerCommand {
         /// Runner ID
         runner_id: String,
 
-        /// Delete eligible slots. Omit for inventory only.
-        #[arg(long)]
-        apply: bool,
+        // Delete eligible slots. Omit for inventory only.
+        // Shared plan-default mutation group (#11139).
+        #[command(flatten)]
+        mutation: MutationArgs,
 
         /// Minimum slot age before an unselected slot is eligible.
         /// Defaults to the shared runner age floor

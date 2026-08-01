@@ -160,7 +160,7 @@ pub(super) fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             component_id,
             refs,
             update_branches,
-            apply,
+            mutation,
             merge_method,
             path_args,
         } => {
@@ -175,7 +175,7 @@ pub(super) fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
                 PrFleetOptions {
                     refs,
                     update_branches,
-                    apply,
+                    apply: mutation.is_apply(),
                     merge_method,
                     path,
                 },

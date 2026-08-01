@@ -8,6 +8,7 @@ use homeboy::runner::runners::{self as runner, Runner, RunnerKind, RunnerStatusR
 use homeboy_upgrade::self_status::{self, ControllerRuntimeInput, RunnerRuntimeInput};
 use serde_json::Value;
 
+use crate::commands::utils::args::MutationArgs;
 use crate::commands::{docs, resources, CmdResult};
 
 #[derive(Args)]
@@ -44,9 +45,10 @@ pub struct SelfDoctorArgs {}
 
 #[derive(Args)]
 pub struct SelfCleanupRuntimeTmpArgs {
-    /// Delete planned temp entries. Without this flag, only reports the plan.
-    #[arg(long)]
-    pub apply: bool,
+    // Delete planned temp entries. Without this flag, only reports the plan.
+    // Shared plan-default mutation group (#11139).
+    #[command(flatten)]
+    pub mutation: MutationArgs,
     /// Only include entries older than this many days.
     /// Defaults to the configured `retention.runtime_tmp_days`.
     #[arg(long)]
@@ -147,7 +149,7 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
             })?;
             let output = engine::temp::cleanup_runtime_tmp_bounded(
                 engine::temp::RuntimeTempCleanupOptions {
-                    apply: args.apply,
+                    apply: args.mutation.is_apply(),
                     older_than_days: policy.runtime_tmp_days,
                     managed_older_than_days: None,
                     prefix: args.prefix.as_deref(),
@@ -288,7 +290,7 @@ mod tests {
         assert_eq!(cli.args.run_max_bytes, None);
         assert_eq!(cli.args.run_max_count, None);
         assert_eq!(cli.args.prefix, None);
-        assert!(!cli.args.apply);
+        assert!(!cli.args.mutation.is_apply());
     }
 
     #[test]

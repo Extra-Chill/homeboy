@@ -1,5 +1,7 @@
 use clap::{Args, Subcommand};
 
+use crate::commands::utils::args::MutationArgs;
+
 #[derive(Args)]
 pub(super) struct ComponentPathArgs {
     /// Workspace path to discover the component from a portable homeboy.json
@@ -345,9 +347,10 @@ pub(super) enum PrCommand {
         #[arg(long)]
         update_branches: bool,
 
-        /// Merge green, clean PRs. Without this flag the command is read-only.
-        #[arg(long)]
-        apply: bool,
+        // Merge green, clean PRs. Without this flag the command is
+        // read-only. Shared plan-default mutation group (#11139).
+        #[command(flatten)]
+        mutation: MutationArgs,
 
         /// Merge method: merge, squash, or rebase.
         #[arg(long, default_value = "squash")]
