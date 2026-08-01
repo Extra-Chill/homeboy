@@ -15,6 +15,7 @@
 // Stable top-level contracts
 // ----------------------------------------------------------------------------
 
+pub use crate::daemon_repair_codes;
 pub use crate::runner_capability_inventory;
 pub use crate::{
     apply_change_artifact, apply_workspace_patch, broker_auth_store_path,

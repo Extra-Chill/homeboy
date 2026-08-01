@@ -39,6 +39,7 @@ mod daemon_exec_driver;
 mod daemon_health;
 mod daemon_http_get;
 mod daemon_repair;
+pub use daemon_repair::codes as daemon_repair_codes;
 mod evidence;
 mod execution;
 mod execution_bundle;

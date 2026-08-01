@@ -8,59 +8,181 @@
 //! emits is therefore restated here in controller-side `homeboy runner`
 //! commands bound to an explicit runner id.
 //!
-//! These builders are the single definition of each command string, so the
-//! `adoption_command` a report carries and the `repair_plan` step that executes
-//! it can never drift apart.
+//! Each builder produces an [`ExecutableAction`] — argv, not text. The command
+//! string a report carries is rendered from that argv, so the `adoption_command`
+//! a report advertises, the `repair_plan` step an operator reads, and the
+//! arguments an executor would run can never drift apart, and no consumer has to
+//! parse a rendered shell command back into arguments to act on it (#11103).
 
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonRepairStep, DaemonStaleReasonCode};
-use homeboy_core::engine::shell;
+use homeboy_core::error::{ActionSafety, ExecutableAction};
 
-pub(crate) const RUNNER_DISCONNECT: &str = "runner_disconnect";
-pub(crate) const RUNNER_CONNECT: &str = "runner_connect";
-pub(crate) const RUNNER_REFRESH_HOMEBOY: &str = "runner_refresh_homeboy";
-pub(crate) const RUNNER_ADOPT_ORPHAN_LEASE: &str = "runner_adopt_orphan_lease";
-pub(crate) const RUNNER_RECONCILE_LEASELESS_ORPHANS: &str = "runner_reconcile_leaseless_orphans";
-pub(crate) const STALE_DAEMON_RECOVERY: &str = "stale_daemon_recovery";
+/// The step codes a repair executor dispatches on.
+///
+/// Public because dispatch crosses a crate boundary: `homeboy runner doctor
+/// --repair` lives in the CLI and executes the plan this crate composed. The
+/// code is the contract — an executor matches on it and supplies typed values
+/// from the report, and never parses the rendered command string (#11103).
+pub mod codes {
+    pub const RUNNER_DISCONNECT: &str = "runner_disconnect";
+    pub const RUNNER_CONNECT: &str = "runner_connect";
+    pub const RUNNER_REFRESH_HOMEBOY: &str = "runner_refresh_homeboy";
+    pub const RUNNER_ADOPT_ORPHAN_LEASE: &str = "runner_adopt_orphan_lease";
+    pub const RUNNER_RECONCILE_LEASELESS_ORPHANS: &str = "runner_reconcile_leaseless_orphans";
+    /// A recovery command a runner advertised as text. It has no argv behind it,
+    /// so it is surfaced to the operator rather than executed.
+    pub const STALE_DAEMON_RECOVERY: &str = "stale_daemon_recovery";
+    /// The read-only step emitted when the evidence authorizes no mutation. A
+    /// report matching no repair branch must still hand back something to run.
+    pub const RUNNER_DIAGNOSE: &str = "runner_diagnose";
+}
 
+pub(crate) use codes::{
+    RUNNER_ADOPT_ORPHAN_LEASE, RUNNER_CONNECT, RUNNER_DIAGNOSE, RUNNER_DISCONNECT,
+    RUNNER_RECONCILE_LEASELESS_ORPHANS, RUNNER_REFRESH_HOMEBOY, STALE_DAEMON_RECOVERY,
+};
+
+/// A step known only as text. Nothing may execute it implicitly.
 pub(crate) fn step(code: &str, command: String) -> DaemonRepairStep {
-    DaemonRepairStep {
-        code: code.to_string(),
-        command,
-    }
+    DaemonRepairStep::text(code, command)
+}
+
+/// A step whose argv is authoritative; its text is rendered from the action.
+pub(crate) fn action_step(code: &str, action: ExecutableAction) -> DaemonRepairStep {
+    DaemonRepairStep::executable(code, action)
+}
+
+fn runner_action(
+    id: &str,
+    label: String,
+    args: impl IntoIterator<Item = String>,
+    safety: ActionSafety,
+) -> ExecutableAction {
+    ExecutableAction::new(id, label, "homeboy", args, safety)
 }
 
 /// `homeboy runner disconnect <id>`.
-pub(crate) fn disconnect_command(runner_id: &str) -> String {
-    format!("homeboy runner disconnect {}", shell::quote_arg(runner_id))
+pub(crate) fn disconnect_action(runner_id: &str) -> ExecutableAction {
+    runner_action(
+        "runner.disconnect",
+        format!("disconnect runner {runner_id}"),
+        [
+            "runner".to_string(),
+            "disconnect".to_string(),
+            runner_id.to_string(),
+        ],
+        ActionSafety::Mutating,
+    )
 }
 
 /// `homeboy runner connect <id>`.
-pub(crate) fn connect_command(runner_id: &str) -> String {
-    format!("homeboy runner connect {}", shell::quote_arg(runner_id))
+pub(crate) fn connect_action(runner_id: &str) -> ExecutableAction {
+    runner_action(
+        "runner.connect",
+        format!("connect runner {runner_id}"),
+        [
+            "runner".to_string(),
+            "connect".to_string(),
+            runner_id.to_string(),
+        ],
+        ActionSafety::Mutating,
+    )
 }
 
 /// `homeboy runner connect <id> --adopt-orphan-lease <lease> --confirm-pid-dead`.
-pub(crate) fn adopt_orphan_lease_command(runner_id: &str, lease_id: &str) -> String {
-    format!(
-        "homeboy runner connect {} --adopt-orphan-lease {} --confirm-pid-dead",
-        shell::quote_arg(runner_id),
-        shell::quote_arg(lease_id)
+pub(crate) fn adopt_orphan_lease_action(runner_id: &str, lease_id: &str) -> ExecutableAction {
+    runner_action(
+        "runner.adopt_orphan_lease",
+        format!("adopt proven-dead lease {lease_id} on runner {runner_id}"),
+        [
+            "runner".to_string(),
+            "connect".to_string(),
+            runner_id.to_string(),
+            "--adopt-orphan-lease".to_string(),
+            lease_id.to_string(),
+            "--confirm-pid-dead".to_string(),
+        ],
+        ActionSafety::Mutating,
     )
 }
 
 /// `homeboy runner connect <id> --reconcile-leaseless-orphans --confirm-no-daemon-owner`.
-pub(crate) fn reconcile_leaseless_orphans_command(runner_id: &str) -> String {
-    format!(
-        "homeboy runner connect {} --reconcile-leaseless-orphans --confirm-no-daemon-owner",
-        shell::quote_arg(runner_id)
+pub(crate) fn reconcile_leaseless_orphans_action(runner_id: &str) -> ExecutableAction {
+    runner_action(
+        "runner.reconcile_leaseless_orphans",
+        format!("reconcile lease-less durable jobs on runner {runner_id}"),
+        [
+            "runner".to_string(),
+            "connect".to_string(),
+            runner_id.to_string(),
+            "--reconcile-leaseless-orphans".to_string(),
+            "--confirm-no-daemon-owner".to_string(),
+        ],
+        ActionSafety::Mutating,
     )
 }
 
 /// `homeboy runner refresh-homeboy <id> --reconnect`.
-pub(crate) fn refresh_homeboy_command(runner_id: &str) -> String {
-    format!(
-        "homeboy runner refresh-homeboy {} --reconnect",
-        shell::quote_arg(runner_id)
+pub(crate) fn refresh_homeboy_action(runner_id: &str) -> ExecutableAction {
+    refresh_homeboy_action_for_ref(runner_id, None)
+}
+
+/// `homeboy runner refresh-homeboy <id> [--ref <ref>] --reconnect`.
+///
+/// The recovery ref, when one is known, names the exact commit the runner's
+/// configured job binary should be rebuilt at. Reconnecting the same drifted
+/// binary would only reproduce the mismatch.
+pub(crate) fn refresh_homeboy_action_for_ref(
+    runner_id: &str,
+    recovery_ref: Option<&str>,
+) -> ExecutableAction {
+    let mut args = vec![
+        "runner".to_string(),
+        "refresh-homeboy".to_string(),
+        runner_id.to_string(),
+    ];
+    if let Some(recovery_ref) = recovery_ref {
+        args.push("--ref".to_string());
+        args.push(recovery_ref.to_string());
+    }
+    args.push("--reconnect".to_string());
+    runner_action(
+        "runner.refresh_homeboy",
+        format!("refresh runner {runner_id}"),
+        args,
+        ActionSafety::Mutating,
+    )
+}
+
+/// `homeboy runner refresh-homeboy <id> --ref <commit> --reconnect --allow-downgrade`.
+///
+/// Controller convergence can require moving the runner *back* to the
+/// controller's commit, which the ordinary refresh refuses.
+pub(crate) fn refresh_homeboy_downgrade_action(
+    runner_id: &str,
+    controller_commit: &str,
+) -> ExecutableAction {
+    let mut action = refresh_homeboy_action_for_ref(runner_id, Some(controller_commit));
+    action.args.push("--allow-downgrade".to_string());
+    action
+}
+
+/// `homeboy runner doctor <id> --scope lab-offload`.
+///
+/// Read-only, and deliberately not a repair: it is what an operator (or an
+/// automated repairer) should run when the report authorizes no mutation.
+pub(crate) fn diagnose_action(runner_id: &str) -> ExecutableAction {
+    runner_action(
+        "runner.doctor",
+        format!("re-probe runner {runner_id} daemon evidence"),
+        [
+            "runner".to_string(),
+            "doctor".to_string(),
+            runner_id.to_string(),
+            "--scope".to_string(),
+            "lab-offload".to_string(),
+        ],
+        ActionSafety::ReadOnly,
     )
 }
 
@@ -70,8 +192,8 @@ pub(crate) fn refresh_homeboy_command(runner_id: &str) -> String {
 /// daemon, so it stays deliberately generic.
 pub(crate) fn reconnect_plan(runner_id: &str) -> Vec<DaemonRepairStep> {
     vec![
-        step(RUNNER_DISCONNECT, disconnect_command(runner_id)),
-        step(RUNNER_CONNECT, connect_command(runner_id)),
+        action_step(RUNNER_DISCONNECT, disconnect_action(runner_id)),
+        action_step(RUNNER_CONNECT, connect_action(runner_id)),
     ]
 }
 
@@ -96,9 +218,9 @@ pub(crate) fn controller_frame_plan(
         && report.adoption_command.is_some()
     {
         if let Some(lease_id) = report.lease_id.as_deref().filter(|_| report.pid.is_some()) {
-            return vec![step(
+            return vec![action_step(
                 RUNNER_ADOPT_ORPHAN_LEASE,
-                adopt_orphan_lease_command(runner_id, lease_id),
+                adopt_orphan_lease_action(runner_id, lease_id),
             )];
         }
     }
@@ -115,9 +237,9 @@ pub(crate) fn controller_frame_plan(
             )
         )
     {
-        return vec![step(
+        return vec![action_step(
             RUNNER_RECONCILE_LEASELESS_ORPHANS,
-            reconcile_leaseless_orphans_command(runner_id),
+            reconcile_leaseless_orphans_action(runner_id),
         )];
     }
     // An identity drift is a binary problem, not a lease problem: reconnecting
@@ -130,15 +252,19 @@ pub(crate) fn controller_frame_plan(
                 | DaemonStaleReasonCode::BinaryHashMismatch
         )
     ) {
-        return vec![step(
+        return vec![action_step(
             RUNNER_REFRESH_HOMEBOY,
-            refresh_homeboy_command(runner_id),
+            refresh_homeboy_action(runner_id),
         )];
     }
     if report.restartable {
         return reconnect_plan(runner_id);
     }
-    Vec::new()
+    // A stale report that matched no branch above named a real problem and no
+    // authorized mutation. Returning an empty plan hands the operator nothing
+    // at all, so the honest answer is the read-only re-probe: the evidence that
+    // would let a later pass match a branch (#11103).
+    vec![action_step(RUNNER_DIAGNOSE, diagnose_action(runner_id))]
 }
 
 /// Render a plan as the `&&`-joined shell text used in operator prose.
@@ -214,7 +340,11 @@ mod tests {
 
     #[test]
     fn a_dead_lease_with_conflicting_candidates_does_not_rebuild_adoption() {
-        assert!(plan(&report(Some(DaemonStaleReasonCode::PidDead), 0, false)).is_empty());
+        assert!(
+            plan(&report(Some(DaemonStaleReasonCode::PidDead), 0, false))
+                .iter()
+                .all(|(code, _)| code != RUNNER_ADOPT_ORPHAN_LEASE)
+        );
     }
 
     #[test]
@@ -262,6 +392,67 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// #11103: a report that matches no repair branch used to return an empty
+    /// plan, so the operator was handed a stale daemon and nothing to do about
+    /// it. The fallback is read-only rather than a guessed mutation.
+    #[test]
+    fn a_report_matching_no_branch_still_produces_an_actionable_step() {
+        let plan = controller_frame_plan(
+            "homeboy-lab",
+            &report(Some(DaemonStaleReasonCode::TransportUnreachable), 0, false),
+        );
+
+        assert_eq!(plan.len(), 1, "an unmatched stale report is never empty");
+        assert_eq!(plan[0].code, RUNNER_DIAGNOSE);
+        assert_eq!(
+            plan[0].command,
+            "homeboy runner doctor homeboy-lab --scope lab-offload"
+        );
+        let action = plan[0].action.as_ref().expect("fallback carries argv");
+        assert_eq!(action.safety, ActionSafety::ReadOnly);
+        assert_eq!(action.args[0], "runner");
+        assert_eq!(action.args[1], "doctor");
+    }
+
+    /// Every branch must carry argv, or the executor is back to shell-parsing
+    /// the rendered text it was handed.
+    #[test]
+    fn every_controller_frame_step_carries_executable_argv() {
+        for code in [
+            DaemonStaleReasonCode::PidDead,
+            DaemonStaleReasonCode::LeaseMissing,
+            DaemonStaleReasonCode::LeaseCorrupt,
+            DaemonStaleReasonCode::VersionMismatch,
+            DaemonStaleReasonCode::BuildIdentityMismatch,
+            DaemonStaleReasonCode::BinaryHashMismatch,
+            DaemonStaleReasonCode::RuntimePathsDrift,
+            DaemonStaleReasonCode::TransportUnreachable,
+            DaemonStaleReasonCode::LeaseSchemaMismatch,
+        ] {
+            for restartable in [true, false] {
+                for active_jobs in [0, 1] {
+                    let mut report = report(Some(code), active_jobs, restartable);
+                    report.adoption_command = Some("daemon-authored".to_string());
+                    let plan = controller_frame_plan("homeboy-lab", &report);
+                    assert!(!plan.is_empty(), "{code:?} produced no step at all");
+                    for step in plan {
+                        let action = step.action.as_ref().unwrap_or_else(|| {
+                            panic!("{code:?} step {} carries no argv", step.code)
+                        });
+                        assert_eq!(
+                            step.command,
+                            action.render_command(),
+                            "{code:?} step {} rendered text drifted from its argv",
+                            step.code
+                        );
+                        assert_eq!(action.program, "homeboy");
+                        assert_eq!(action.args.first().map(String::as_str), Some("runner"));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

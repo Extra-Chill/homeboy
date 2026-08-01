@@ -10,7 +10,8 @@ use homeboy::agents::agent_tasks::provider::{
 use homeboy::core::engine::shell;
 use homeboy::core::server::{self, Server, SshClient};
 use homeboy::runner::runners::{
-    self as runner, Runner, RunnerKind, RunnerToolRegistry, RunnerToolSpec, RunnerTunnelMode,
+    self as runner, daemon_repair_codes, Runner, RunnerKind, RunnerToolRegistry, RunnerToolSpec,
+    RunnerTunnelMode,
 };
 use serde::Serialize;
 

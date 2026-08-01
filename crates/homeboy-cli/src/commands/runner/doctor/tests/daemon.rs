@@ -214,3 +214,171 @@ fn disconnected_lab_doctor_reuses_daemon_recovery_envelope() {
     );
     assert_eq!(report.daemon_recovery.expect("recovery").active_jobs, 1);
 }
+
+/// #11103: the repair plan was computed everywhere and executed nowhere.
+/// `--repair` refused most scopes outright and, for the one scope it handled,
+/// emitted a fixed disconnect/connect pair regardless of what the report said.
+/// These pin the dispatch itself: code in, typed action out, no shell parsing.
+mod repair_dispatch {
+    use super::super::super::repair::{dispatch_for, DaemonRepairDispatch};
+    use homeboy::core::daemon::DaemonRepairStep;
+    use homeboy::core::error::{ActionSafety, ExecutableAction};
+    use homeboy::runner::runners::daemon_repair_codes;
+
+    fn action(args: &[&str]) -> ExecutableAction {
+        ExecutableAction::new(
+            "runner.refresh_homeboy",
+            "refresh",
+            "homeboy",
+            args.iter().map(|arg| arg.to_string()),
+            ActionSafety::Mutating,
+        )
+    }
+
+    /// The live reproduction on the machine that motivated this fix: a
+    /// reachable daemon whose build identity no longer matches the binary. It
+    /// must reach the binary refresh, not a session reconnect that would
+    /// reproduce the same mismatch.
+    #[test]
+    fn a_version_mismatch_step_dispatches_to_a_binary_refresh() {
+        let step = DaemonRepairStep::executable(
+            daemon_repair_codes::RUNNER_REFRESH_HOMEBOY,
+            action(&["runner", "refresh-homeboy", "lab", "--reconnect"]),
+        );
+
+        assert_eq!(
+            dispatch_for(&step, Some("lease-live")),
+            DaemonRepairDispatch::RefreshHomeboy {
+                git_ref: None,
+                allow_downgrade: false,
+            }
+        );
+    }
+
+    /// The recovery ref and the downgrade allowance come from the step's argv,
+    /// which is the authoritative form. Nothing re-parses the rendered command.
+    #[test]
+    fn refresh_arguments_are_read_from_argv_not_from_the_rendered_command() {
+        let step = DaemonRepairStep::executable(
+            daemon_repair_codes::RUNNER_REFRESH_HOMEBOY,
+            action(&[
+                "runner",
+                "refresh-homeboy",
+                "lab",
+                "--ref",
+                "abc123",
+                "--reconnect",
+                "--allow-downgrade",
+            ]),
+        );
+
+        assert_eq!(
+            dispatch_for(&step, None),
+            DaemonRepairDispatch::RefreshHomeboy {
+                git_ref: Some("abc123".to_string()),
+                allow_downgrade: true,
+            }
+        );
+    }
+
+    /// The lease comes from the report's typed evidence, never from the text.
+    #[test]
+    fn an_adoption_step_takes_its_lease_from_the_report() {
+        let step = DaemonRepairStep::text(
+            daemon_repair_codes::RUNNER_ADOPT_ORPHAN_LEASE,
+            "homeboy runner connect lab --adopt-orphan-lease lease-in-text --confirm-pid-dead",
+        );
+
+        assert_eq!(
+            dispatch_for(&step, Some("lease-from-report")),
+            DaemonRepairDispatch::AdoptOrphanLease {
+                lease_id: "lease-from-report".to_string(),
+            },
+            "the lease must come from typed evidence, not from the command string"
+        );
+    }
+
+    #[test]
+    fn an_adoption_step_without_a_lease_refuses_rather_than_guessing() {
+        let step = DaemonRepairStep::text(
+            daemon_repair_codes::RUNNER_ADOPT_ORPHAN_LEASE,
+            "homeboy runner connect lab --adopt-orphan-lease lease-in-text --confirm-pid-dead",
+        );
+
+        let DaemonRepairDispatch::NotAutomatable { reason } = dispatch_for(&step, None) else {
+            panic!("an adoption with no lease must not be executed");
+        };
+        assert!(reason.contains("no lease id"), "{reason}");
+    }
+
+    /// The empty-plan case. A report matching no repair branch now yields a
+    /// read-only diagnosis, and the executor must surface it with an explicit
+    /// reason instead of either running it as a repair or saying nothing.
+    #[test]
+    fn an_unmatched_report_yields_an_explicit_refusal_not_silence() {
+        let step = DaemonRepairStep::text(
+            daemon_repair_codes::RUNNER_DIAGNOSE,
+            "homeboy runner doctor lab --scope lab-offload",
+        );
+
+        let DaemonRepairDispatch::NotAutomatable { reason } =
+            dispatch_for(&step, Some("lease-live"))
+        else {
+            panic!("a read-only diagnosis is not a repair to apply");
+        };
+        assert!(reason.contains("authorizes no mutation"), "{reason}");
+        assert!(!reason.is_empty());
+    }
+
+    /// A recovery command a runner advertised as text has no argv behind it, so
+    /// it is reported rather than executed. It must not fall through silently.
+    #[test]
+    fn an_untyped_recovery_command_is_reported_rather_than_executed() {
+        let step = DaemonRepairStep::text(
+            daemon_repair_codes::STALE_DAEMON_RECOVERY,
+            "homeboy runner refresh-homeboy lab --ref abc123 --reconnect",
+        );
+
+        let DaemonRepairDispatch::NotAutomatable { reason } = dispatch_for(&step, None) else {
+            panic!("an untyped step must never be shell-parsed into an execution");
+        };
+        assert!(
+            reason.contains(daemon_repair_codes::STALE_DAEMON_RECOVERY),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn the_generic_reconnect_plan_still_dispatches_step_by_step() {
+        assert_eq!(
+            dispatch_for(
+                &DaemonRepairStep::text(
+                    daemon_repair_codes::RUNNER_DISCONNECT,
+                    "homeboy runner disconnect lab"
+                ),
+                None
+            ),
+            DaemonRepairDispatch::Disconnect
+        );
+        assert_eq!(
+            dispatch_for(
+                &DaemonRepairStep::text(
+                    daemon_repair_codes::RUNNER_CONNECT,
+                    "homeboy runner connect lab"
+                ),
+                None
+            ),
+            DaemonRepairDispatch::Connect
+        );
+        assert_eq!(
+            dispatch_for(
+                &DaemonRepairStep::text(
+                    daemon_repair_codes::RUNNER_RECONCILE_LEASELESS_ORPHANS,
+                    "homeboy runner connect lab --reconcile-leaseless-orphans --confirm-no-daemon-owner"
+                ),
+                None
+            ),
+            DaemonRepairDispatch::ReconcileLeaselessOrphans
+        );
+    }
+}

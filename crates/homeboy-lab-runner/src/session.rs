@@ -6,6 +6,7 @@ use homeboy_core::daemon::{
 };
 
 use homeboy_core::engine::shell;
+use homeboy_core::error::{ActionSafety, ExecutableAction};
 use homeboy_core::redaction::redact_argv_shell_display;
 
 use homeboy_core::api_jobs::{ActiveRunnerJobSummary, Job, JobArtifactMetadata, JobStatus};
@@ -938,6 +939,7 @@ mod status_serialization_tests {
             changed_runtime_paths: Vec::new(),
             message: "stale".to_string(),
             recovery_commands: Vec::new(),
+            recovery_actions: Vec::new(),
         });
         let summary = report.admission_summary(0);
         assert!(!summary.daemon_fresh);
@@ -964,22 +966,35 @@ mod status_serialization_tests {
             display: "homeboy 0.323.1+6899aabbccdd".to_string(),
         };
 
+        let actions = recovery_action(
+            "homeboy-lab",
+            Some("homeboy 0.323.1+c8a6673b6abc"),
+            &initiating,
+        );
+
+        // The rendered text is derived from the argv, so asserting on both
+        // pins that a consumer executing this recovery runs exactly what the
+        // operator was shown (#11104).
         assert_eq!(
-            recovery_command(
-                "homeboy-lab",
-                Some("homeboy 0.323.1+c8a6673b6abc"),
-                &initiating,
-            ),
+            rendered_commands(&actions),
             ["homeboy runner refresh-homeboy homeboy-lab --ref c8a6673b6abc --reconnect"]
+        );
+        assert_eq!(
+            actions[0].args,
+            [
+                "runner",
+                "refresh-homeboy",
+                "homeboy-lab",
+                "--ref",
+                "c8a6673b6abc",
+                "--reconnect"
+            ]
         );
         for configured in [
             "homeboy 0.323.1+c8a6673b6abc-dirty",
             "homeboy not-a-version",
         ] {
-            assert_eq!(
-                recovery_command("homeboy-lab", Some(configured), &initiating),
-                Vec::<String>::new(),
-            );
+            assert!(recovery_action("homeboy-lab", Some(configured), &initiating).is_empty());
         }
     }
 
@@ -1045,6 +1060,16 @@ pub struct RunnerStaleDaemonWarning {
     pub changed_runtime_paths: Vec<RunnerChangedRuntimePath>,
     pub message: String,
     pub recovery_commands: Vec<String>,
+    /// Argv for `recovery_commands`, in the same order.
+    ///
+    /// Deliberately not serialized: the wire contract stays the string list.
+    /// This is how an in-process consumer executes a recovery without parsing
+    /// that list back into arguments (#11104). It is written only through
+    /// [`RunnerStaleDaemonWarning::set_recovery`], which renders the strings
+    /// from the argv, so the two can never disagree. It is empty exactly when
+    /// the recovery has no typed form.
+    #[serde(skip)]
+    pub(crate) recovery_actions: Vec<ExecutableAction>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -1072,11 +1097,12 @@ impl RunnerStaleDaemonWarning {
         session_homeboy_build_identity: Option<String>,
         current_homeboy_build_identity: Option<String>,
     ) -> Self {
-        let recovery_commands = recovery_command(
+        let recovery_actions = recovery_action(
             runner_id,
             current_homeboy_build_identity.as_deref(),
             &homeboy_product_identity::build_identity(),
         );
+        let recovery_commands = rendered_commands(&recovery_actions);
         let message = if !same_homeboy_version(&session_homeboy_version, &current_homeboy_version) {
             format!(
                 "connected runner daemon control plane version `{session_homeboy_version}` differs from configured job command binary version `{current_homeboy_version}`; run recovery_commands in order when runner active jobs are drained"
@@ -1109,7 +1135,19 @@ impl RunnerStaleDaemonWarning {
             stale_runtime_paths: Vec::new(),
             changed_runtime_paths: Vec::new(),
             recovery_commands,
+            recovery_actions,
         }
+    }
+
+    /// The one place a recovery is assigned.
+    ///
+    /// Argv in, text out: `recovery_commands` and `refresh_command` are both
+    /// rendered from the actions, so a consumer can execute the recovery
+    /// directly and still read exactly what it would run.
+    fn set_recovery(&mut self, actions: Vec<ExecutableAction>) {
+        self.recovery_commands = rendered_commands(&actions);
+        self.refresh_command = self.recovery_commands.join(" && ");
+        self.recovery_actions = actions;
     }
 
     pub fn with_controller_compatibility(
@@ -1131,8 +1169,13 @@ impl RunnerStaleDaemonWarning {
                     .as_deref()
                     .unwrap_or(&self.job_command_binary_version),
             );
-            self.recovery_commands = vec!["homeboy upgrade --force".to_string()];
-            self.refresh_command = self.recovery_commands.join(" && ");
+            self.set_recovery(vec![ExecutableAction::new(
+                "upgrade.force",
+                "rebuild the controller binary".to_string(),
+                "homeboy",
+                ["upgrade".to_string(), "--force".to_string()],
+                ActionSafety::Mutating,
+            )]);
         } else if daemon_matches_configured {
             self.compatibility_reason = Some(if controller_version_matches {
                 "controller_configured_identity_skew"
@@ -1153,15 +1196,28 @@ impl RunnerStaleDaemonWarning {
                     .filter(|identity| identity.git_dirty != Some(true))
                     .and_then(|identity| identity.git_commit)
                 {
-                    self.recovery_commands = vec![format!(
-                        "homeboy runner refresh-homeboy {} --ref {controller_commit} --reconnect --allow-downgrade",
-                        shell::quote_arg(runner_id),
-                    )];
-                    self.refresh_command = self.recovery_commands.join(" && ");
+                    self.set_recovery(vec![
+                        crate::daemon_repair::refresh_homeboy_downgrade_action(
+                            runner_id,
+                            &controller_commit,
+                        ),
+                    ]);
                 }
             }
         }
         self
+    }
+
+    /// Each recovery command paired with its argv, in order.
+    ///
+    /// The argv is `None` only when this warning's recovery has no typed form,
+    /// which is the one case a consumer must surface rather than execute.
+    pub(crate) fn recovery_steps(&self) -> Vec<(String, Option<ExecutableAction>)> {
+        self.recovery_commands
+            .iter()
+            .enumerate()
+            .map(|(index, command)| (command.clone(), self.recovery_actions.get(index).cloned()))
+            .collect()
     }
 
     pub(crate) fn recovery_ref(&self) -> Option<String> {
@@ -1225,19 +1281,26 @@ impl RunnerStaleDaemonWarning {
     }
 }
 
-fn recovery_command(
+/// The recovery for an identity-drifted runner daemon, as argv.
+///
+/// A rendered string is derived from this; nothing derives argv from a string.
+fn recovery_action(
     runner_id: &str,
     configured_identity: Option<&str>,
     initiating_identity: &homeboy_product_identity::BuildIdentity,
-) -> Vec<String> {
+) -> Vec<ExecutableAction> {
     recovery_ref(configured_identity, initiating_identity)
         .map(|recovery_ref| {
-            format!(
-                "homeboy runner refresh-homeboy {} --ref {recovery_ref} --reconnect",
-                shell::quote_arg(runner_id),
-            )
+            crate::daemon_repair::refresh_homeboy_action_for_ref(runner_id, Some(&recovery_ref))
         })
         .into_iter()
+        .collect()
+}
+
+fn rendered_commands(actions: &[ExecutableAction]) -> Vec<String> {
+    actions
+        .iter()
+        .map(ExecutableAction::render_command)
         .collect()
 }
 
