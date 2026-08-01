@@ -15,7 +15,9 @@ use homeboy_core::api_jobs::{
     RunnerJobLifecycleMetadata, RunnerJobProjection,
 };
 use homeboy_core::error::{Error, ErrorCode};
-use homeboy_core::observation::{ArtifactRecord, NewRunRecord, ObservationStore, RunRecord};
+use homeboy_core::observation::{
+    runs_service, ArtifactRecord, NewRunRecord, ObservationStore, RunRecord,
+};
 use homeboy_core::server::{RunnerPolicy, RunnerSettings};
 
 use super::detail::{
@@ -1586,7 +1588,12 @@ fn terminal_mirroring_keeps_every_declared_visual_artifact_after_runner_cleanup(
         .expect("all declared visual artifacts are durably mirrored");
 
         workspace.close().expect("runner workspace cleanup");
-        let persisted = store.list_artifacts(&run_id).expect("persisted artifacts");
+        drop(store);
+
+        // A reviewer opens the controller store after the runner is gone and
+        // retrieves bytes by the stable run/artifact reference alone.
+        let reader = ObservationStore::open_initialized().expect("reviewer store");
+        let persisted = reader.list_artifacts(&run_id).expect("persisted artifacts");
         assert_eq!(persisted.len(), 21);
         for artifact in persisted {
             assert_eq!(artifact.artifact_type, "file");
@@ -1595,6 +1602,20 @@ fn terminal_mirroring_keeps_every_declared_visual_artifact_after_runner_cleanup(
                 .expect("controller artifact")
                 .is_empty());
         }
+        let artifact = runs_service::resolve_artifact_for_run(&reader, &run_id, "visual-00")
+            .expect("reviewer resolves durable artifact");
+        let reviewer_copy = tempfile::NamedTempFile::new().expect("reviewer output");
+        let outcome = runs_service::copy_local_file_artifact(
+            artifact,
+            Some(reviewer_copy.path().to_path_buf()),
+        )
+        .expect("reviewer retrieves durable artifact");
+        assert_eq!(outcome.run_id, run_id);
+        assert_eq!(outcome.artifact_id, "visual-00");
+        assert_eq!(
+            fs::read(reviewer_copy.path()).expect("reviewer bytes"),
+            b"png-0"
+        );
     });
 }
 

@@ -169,6 +169,7 @@ mod fixtures {
             kind: Some("preview".to_string()),
             label: Some("Public preview".to_string()),
             observation_artifact_id: Some("obs-preview".to_string()),
+            required_durable: false,
             role: role.map(str::to_string),
             preview_url: Some(preview_url.to_string()),
             public_url: Some(preview_url.to_string()),
