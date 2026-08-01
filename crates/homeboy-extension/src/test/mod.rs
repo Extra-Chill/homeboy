@@ -39,9 +39,9 @@ pub use parsing::{
 };
 pub use report::TestCommandOutput;
 pub use run::{
-    run_main_test_workflow, run_self_check_test_workflow,
-    run_self_check_test_workflow_with_progress, RawTestOutput, TestRunWorkflowArgs,
-    TestRunWorkflowResult,
+    finalize_test_result_after_artifact_hydration, run_main_test_workflow,
+    run_self_check_test_workflow, run_self_check_test_workflow_with_progress, RawTestOutput,
+    TestRunWorkflowArgs, TestRunWorkflowResult,
 };
 pub use workflow::{
     auto_fix_test_drift, detect_test_drift, AutoFixDriftOutput, AutoFixDriftWorkflowResult,

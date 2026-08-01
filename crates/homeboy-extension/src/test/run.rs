@@ -144,6 +144,27 @@ fn test_run_status(
     }
 }
 
+/// Re-finalize a test result when persisted artifacts add missing test counts.
+///
+/// Only a successful runner may be promoted by delayed evidence. A nonzero
+/// runner exit remains the primary failure even if its eventual counts pass.
+pub fn finalize_test_result_after_artifact_hydration(workflow: &mut TestRunWorkflowResult) {
+    if workflow.runner_exit_code != Some(0) || workflow.test_counts.is_none() {
+        return;
+    }
+
+    let status = test_run_status(true, workflow.test_counts.as_ref(), false);
+    workflow.status = status.to_string();
+    workflow.exit_code = if status == "passed" { 0 } else { 1 };
+    if workflow
+        .baseline_comparison
+        .as_ref()
+        .is_some_and(|comparison| comparison.regression)
+    {
+        workflow.exit_code = 1;
+    }
+}
+
 fn no_tests_applicable(
     policy_enabled: bool,
     evidence_file: &Path,
@@ -274,6 +295,7 @@ fn run_main_test_workflow_inner(
                     status: "failed".to_string(),
                     component: args.component_label,
                     exit_code: 1,
+                    runner_exit_code: None,
                     test_counts: None,
                     test_durations: None,
                     findings,
@@ -310,6 +332,7 @@ fn run_main_test_workflow_inner(
                 status: "passed".to_string(),
                 component: args.component_label,
                 exit_code: 0,
+                runner_exit_code: None,
                 test_counts: None,
                 test_durations: None,
                 findings: None,
@@ -698,6 +721,7 @@ fn run_main_test_workflow_inner(
         status: status.to_string(),
         component: args.component_label,
         exit_code,
+        runner_exit_code: Some(output.exit_code),
         test_counts,
         test_durations,
         findings,
@@ -908,6 +932,7 @@ fn failed_test_workflow(
         status: "failed".to_string(),
         component,
         exit_code: 2,
+        runner_exit_code: None,
         test_counts: None,
         test_durations: None,
         findings: None,
@@ -1249,6 +1274,7 @@ pub fn run_self_check_test_workflow_with_progress(
         status,
         component: component_label,
         exit_code: output.exit_code,
+        runner_exit_code: Some(output.exit_code),
         test_counts: None,
         test_durations: None,
         findings: None,
@@ -1834,6 +1860,7 @@ mod tests {
                 status: "failed".to_string(),
                 component: "fixture".to_string(),
                 exit_code: 1,
+                runner_exit_code: None,
                 test_counts: Some(TestCounts::new(1, 0, 1, 0)),
                 test_durations: None,
                 findings: None,
@@ -1929,6 +1956,7 @@ mod tests {
             status: "failed".to_string(),
             component: "homeboy".to_string(),
             exit_code: 101,
+            runner_exit_code: None,
             test_counts: None,
             test_durations: None,
             findings: Some(findings),

@@ -80,6 +80,9 @@ pub struct TestRunWorkflowResult {
     pub status: String,
     pub component: String,
     pub exit_code: i32,
+    /// The unmodified test-runner exit used when artifacts finalize the result.
+    #[serde(skip)]
+    pub runner_exit_code: Option<i32>,
     pub test_counts: Option<TestCounts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_durations: Option<TestDurations>,
