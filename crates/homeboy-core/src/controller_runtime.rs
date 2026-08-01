@@ -20,6 +20,8 @@ pub const CONTROLLER_RUNTIME_METADATA_KEY: &str = "controller_runtime";
 pub(crate) const TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV: &str =
     "HOMEBOY_TEST_CONTROLLER_RUNTIME_EXECUTABLE";
 #[cfg(any(test, feature = "test-support"))]
+pub(crate) const TEST_CONTROLLER_RUNTIME_STORE_ENV: &str = "HOMEBOY_TEST_CONTROLLER_RUNTIME_STORE";
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) const TEST_CONTROLLER_RUNTIME_IDENTITY_ENV: &str =
     "HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY";
 
@@ -2303,7 +2305,7 @@ fn is_executable(metadata: &fs::Metadata) -> bool {
 }
 
 fn pinned_path(identity: &str, digest: &str) -> Result<PathBuf> {
-    Ok(paths::homeboy_data()?
+    Ok(controller_runtime_store_root()?
         .join("controller-runtimes")
         .join(format!(
             "{}-{}",
@@ -2314,7 +2316,7 @@ fn pinned_path(identity: &str, digest: &str) -> Result<PathBuf> {
 }
 
 fn recovered_pinned_path(identity: &str, digest: &str) -> Result<PathBuf> {
-    Ok(paths::homeboy_data()?
+    Ok(controller_runtime_store_root()?
         .join("controller-runtimes")
         .join(format!(
             "{}-{}",
@@ -2323,6 +2325,15 @@ fn recovered_pinned_path(identity: &str, digest: &str) -> Result<PathBuf> {
         ))
         .join(format!("recovery-{}", uuid::Uuid::new_v4()))
         .join("homeboy"))
+}
+
+fn controller_runtime_store_root() -> Result<PathBuf> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(path) = std::env::var_os(TEST_CONTROLLER_RUNTIME_STORE_ENV) {
+        return Ok(PathBuf::from(path));
+    }
+
+    paths::homeboy_data()
 }
 
 fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Result<()> {

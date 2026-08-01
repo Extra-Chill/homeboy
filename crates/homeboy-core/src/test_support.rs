@@ -12,6 +12,8 @@ use crate::api_jobs::{Job, JobEventKind, JobStore, RemoteRunnerJobRequest, Remot
 static SHARED_EMPTY_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
 static SHARED_COMMITTED_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
 static SHARED_CONTROLLER_RUNTIME_FIXTURE: OnceLock<TempDir> = OnceLock::new();
+static SHARED_HOMEBOY_CONTROLLER_RUNTIME_FIXTURE: OnceLock<TempDir> = OnceLock::new();
+static SHARED_CONTROLLER_RUNTIME_STORE: OnceLock<TempDir> = OnceLock::new();
 static EXEC_CAPABLE_TEMP_BASE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 static SHORT_EXEC_CAPABLE_TEMP_BASE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 /// Runs the leaked-tempdir sweep exactly once per test process.
@@ -138,11 +140,17 @@ impl HermeticTestContext {
             )
             .env(
                 crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV,
-                test_controller_fixture(),
+                test_controller_fixture(binary),
             )
             .env(
                 crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
                 crate::build_identity::current().display,
+            )
+            // Runtime pins are immutable content-addressed files, so tests can
+            // share them without sharing mutable Homeboy state.
+            .env(
+                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_STORE_ENV,
+                test_controller_runtime_store(),
             );
         command
     }
@@ -271,7 +279,7 @@ impl HomeGuard {
         );
         std::env::set_var(
             crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV,
-            test_controller_fixture(),
+            test_controller_fixture(TestBinary::CurrentTest),
         );
         std::env::set_var(
             crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
@@ -597,13 +605,25 @@ impl Drop for HomeGuard {
     }
 }
 
-fn test_controller_fixture() -> PathBuf {
-    SHARED_CONTROLLER_RUNTIME_FIXTURE
+fn test_controller_fixture(binary: TestBinary) -> PathBuf {
+    let fixture = match binary {
+        TestBinary::CurrentTest => &SHARED_CONTROLLER_RUNTIME_FIXTURE,
+        TestBinary::HomeboyFixture => &SHARED_HOMEBOY_CONTROLLER_RUNTIME_FIXTURE,
+    };
+    fixture
         .get_or_init(|| {
             let directory = exec_capable_tempdir();
             let path = directory.path().join("homeboy-controller-fixture");
             fs::copy(
-                std::env::current_exe().expect("current test executable"),
+                match binary {
+                    TestBinary::CurrentTest => {
+                        std::env::current_exe().expect("current test executable")
+                    }
+                    TestBinary::HomeboyFixture => PathBuf::from(
+                        std::env::var_os("CARGO_BIN_EXE_homeboy")
+                            .expect("CARGO_BIN_EXE_homeboy fixture binary"),
+                    ),
+                },
                 &path,
             )
             .expect("copy controller fixture");
@@ -612,6 +632,12 @@ fn test_controller_fixture() -> PathBuf {
         })
         .path()
         .join("homeboy-controller-fixture")
+}
+
+fn test_controller_runtime_store() -> &'static Path {
+    SHARED_CONTROLLER_RUNTIME_STORE
+        .get_or_init(exec_capable_tempdir)
+        .path()
 }
 
 fn make_test_controller_fixture_read_only(path: &Path) {
