@@ -16,11 +16,10 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 
 use super::{
-    current_binary_sha256, read_termination_evidence, runtime_path_fingerprint,
+    current_binary_sha256, read_termination_evidence, recovery_actions, runtime_path_fingerprint,
     DaemonFreshnessReport, DaemonRecoveryEvidence, DaemonRepairStep, DaemonRuntimeSnapshot,
     DaemonStaleReasonCode, DaemonState, DAEMON_LEASE_SCHEMA,
 };
-use crate::engine::shell;
 use crate::process::pid_is_running;
 use crate::{build_identity, Error, Result};
 
@@ -230,41 +229,42 @@ pub(crate) fn freshness_report_from_validation(
         ));
     }
 
-    let adoption_command = if proven_dead {
-        Some(format!(
-            "homeboy daemon adopt-orphan --lease-id {} --confirm-pid-dead",
-            shell::quote_arg(lease_id.as_deref().expect("proven dead lease"))
+    // One definition of each recovery invocation, as argv. The adoption command
+    // and the repair step are the same action in two shapes, so both are
+    // rendered from the action rather than written out twice.
+    let adoption_action = if proven_dead {
+        Some(recovery_actions::adopt_orphan(
+            lease_id.as_deref().expect("proven dead lease"),
         ))
     } else if leaseless_reconciliation_available {
-        Some("homeboy daemon reconcile-leaseless-orphans --confirm-no-daemon-owner".to_string())
+        Some(recovery_actions::reconcile_leaseless_orphans())
     } else {
         None
     };
+    let adoption_command = adoption_action
+        .as_ref()
+        .map(crate::error::ExecutableAction::render_command);
 
     // A restartable lease has nothing durable to protect, so a plain stop/start
     // is the whole repair. Otherwise the repair is exactly the explicit
-    // reconciliation the evidence authorizes; anything else would be prose.
+    // reconciliation the evidence authorizes; anything else would be prose. The
+    // last case is deliberately empty here: a local report that authorizes no
+    // mutation is completed by the dispatcher, which owns the diagnostic step.
     let repair_plan = if restartable {
         vec![
-            DaemonRepairStep {
-                code: "daemon_stop".to_string(),
-                command: "homeboy daemon stop".to_string(),
-            },
-            DaemonRepairStep {
-                code: "daemon_start".to_string(),
-                command: "homeboy daemon start".to_string(),
-            },
+            DaemonRepairStep::executable(recovery_actions::DAEMON_STOP, recovery_actions::stop()),
+            DaemonRepairStep::executable(recovery_actions::DAEMON_START, recovery_actions::start()),
         ]
     } else if proven_dead {
-        vec![DaemonRepairStep {
-            code: "daemon_adopt_orphan".to_string(),
-            command: adoption_command.clone().expect("proven dead adoption"),
-        }]
+        vec![DaemonRepairStep::executable(
+            recovery_actions::DAEMON_ADOPT_ORPHAN,
+            adoption_action.clone().expect("proven dead adoption"),
+        )]
     } else if leaseless_reconciliation_available {
-        vec![DaemonRepairStep {
-            code: "daemon_reconcile_leaseless_orphans".to_string(),
-            command: adoption_command.clone().expect("leaseless adoption"),
-        }]
+        vec![DaemonRepairStep::executable(
+            recovery_actions::DAEMON_RECONCILE_LEASELESS_ORPHANS,
+            adoption_action.clone().expect("leaseless adoption"),
+        )]
     } else {
         Vec::new()
     };

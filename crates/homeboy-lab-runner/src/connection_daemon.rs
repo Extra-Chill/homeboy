@@ -491,9 +491,10 @@ fn into_controller_frame(
     report.repair_plan = daemon_repair::controller_frame_plan(runner_id, &report);
     // An adoption command is one explicit, operator-confirmed action. A
     // multi-step restart sequence is a plan, not an adoption, so it is exposed
-    // only as steps.
+    // only as steps, and the read-only fallback is a diagnosis rather than an
+    // adoption an operator could mistake for one.
     report.adoption_command = match report.repair_plan.as_slice() {
-        [step] => Some(step.command.clone()),
+        [step] if step.code != daemon_repair::RUNNER_DIAGNOSE => Some(step.command.clone()),
         _ => None,
     };
     report

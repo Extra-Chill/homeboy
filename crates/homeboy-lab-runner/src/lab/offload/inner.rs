@@ -2834,6 +2834,7 @@ mod tests {
             changed_runtime_paths: Vec::new(),
             message: "daemon is stale".to_string(),
             recovery_commands: Vec::new(),
+            recovery_actions: Vec::new(),
         });
 
         let error = require_available_lab_runner("homeboy-lab", &status, None, "cook")

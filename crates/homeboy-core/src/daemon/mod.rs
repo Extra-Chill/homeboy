@@ -16,7 +16,7 @@ use crate::api_jobs::{
     RunnerJobLifecycleMetadata,
 };
 use crate::build_identity;
-use crate::error::{Error, RemoteCommandFailedDetails, Result, TargetDetails};
+use crate::error::{Error, ExecutableAction, RemoteCommandFailedDetails, Result, TargetDetails};
 use crate::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
 use crate::lab_contract::LabRunnerWorkload;
 use crate::paths;
@@ -33,6 +33,7 @@ mod control;
 pub mod controller_job_driver;
 mod daemon_lease;
 mod patch_capture;
+pub mod recovery_actions;
 mod remote_runner;
 pub mod runner_exec_driver;
 mod runner_files;
@@ -529,10 +530,42 @@ pub enum DaemonRecoveryEvidence {
     Unavailable,
 }
 
+/// One step of a repair a caller may execute.
+///
+/// `action` is the contract; `command` is presentation. A step built through
+/// [`DaemonRepairStep::executable`] renders its own text from the argv, so an
+/// executor never has to parse the string back into arguments and the two can
+/// never drift. Steps whose text came from an untyped upstream source (a remote
+/// runner's advertised recovery command, for instance) carry `None` and are
+/// surfaced to the operator rather than executed.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DaemonRepairStep {
     pub code: String,
+    /// Presentation only whenever `action` is present.
     pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<ExecutableAction>,
+}
+
+impl DaemonRepairStep {
+    /// A step known only as operator prose. Nothing may execute it implicitly.
+    pub fn text(code: impl Into<String>, command: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            command: command.into(),
+            action: None,
+        }
+    }
+
+    /// A step whose argv is authoritative. The rendered command is derived, so
+    /// the text an operator reads is exactly what an executor would run.
+    pub fn executable(code: impl Into<String>, action: ExecutableAction) -> Self {
+        Self {
+            code: code.into(),
+            command: action.render_command(),
+            action: Some(action),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

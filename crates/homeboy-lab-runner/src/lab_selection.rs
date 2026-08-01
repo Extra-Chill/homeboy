@@ -693,18 +693,25 @@ fn daemon_repair_steps(runner_id: &str, status: &RunnerStatusReport) -> Vec<Daem
     {
         return report.repair_plan.clone();
     }
-    let stale_commands = status
-        .stale_daemon
-        .as_ref()
-        .map(|warning| warning.recovery_commands.as_slice())
-        .unwrap_or_default();
-    if !stale_commands.is_empty() {
-        return stale_commands
-            .iter()
-            .map(|command| {
-                daemon_repair::step(daemon_repair::STALE_DAEMON_RECOVERY, command.clone())
+    if let Some(warning) = status.stale_daemon.as_ref() {
+        // The warning renders its own text from argv, so a step keeps the
+        // action alongside the string instead of forcing a consumer to
+        // reconstruct one from the other. A recovery with no typed form (an
+        // older warning, or one whose command came from the runner rather than
+        // from a builder) degrades to text and is surfaced, not executed.
+        let steps: Vec<_> = warning
+            .recovery_steps()
+            .into_iter()
+            .map(|(command, action)| match action {
+                Some(action) => {
+                    daemon_repair::action_step(daemon_repair::STALE_DAEMON_RECOVERY, action)
+                }
+                None => daemon_repair::step(daemon_repair::STALE_DAEMON_RECOVERY, command),
             })
             .collect();
+        if !steps.is_empty() {
+            return steps;
+        }
     }
     daemon_repair::reconnect_plan(runner_id)
 }
@@ -713,38 +720,34 @@ fn daemon_repair_command(runner_id: &str, status: &RunnerStatusReport) -> String
     daemon_repair::render(&daemon_repair_steps(runner_id, status))
 }
 
+/// The one repair a caller may execute directly, when there is exactly one.
+///
+/// #11104: this used to rebuild a `refresh-homeboy` action from scratch and
+/// then lift it only if it rendered to a byte-identical string to the plan's
+/// sole command. Five producers emit five different commands, so the equality
+/// guard threw away the argv the plan had already computed for four of them.
+/// Now the plan carries the action, so the action is simply read off the step.
+/// A multi-step plan is a plan, not one action, and still yields `None`; so
+/// does a step with no typed form, and so does the read-only diagnosis, which
+/// must not be presented as a repair the caller can apply.
 fn daemon_repair_action(runner_id: &str, status: &RunnerStatusReport) -> Option<ExecutableAction> {
     let steps = daemon_repair_steps(runner_id, status);
     let recovery_plan: Vec<&str> = steps.iter().map(|step| step.command.as_str()).collect();
-    let recovery_ref = match status.stale_daemon.as_ref() {
-        Some(warning) => warning.recovery_ref()?,
-        None => homeboy_product_identity::build_identity()
-            .git_commit
-            .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version())),
+    let [step] = steps.as_slice() else {
+        return None;
     };
-    let action = ExecutableAction::new(
-        "runner.refresh_homeboy",
-        format!("refresh runner {runner_id}"),
-        "homeboy",
-        [
-            "runner",
-            "refresh-homeboy",
-            runner_id,
-            "--ref",
-            &recovery_ref,
-            "--reconnect",
-        ],
-        ActionSafety::Mutating,
+    let action = step.action.clone()?;
+    if action.safety != ActionSafety::Mutating {
+        return None;
+    }
+    Some(
+        action
+            .requiring_confirmation("operator")
+            .with_evidence(serde_json::json!({
+                "runner_id": runner_id,
+                "recovery_plan": recovery_plan,
+            })),
     )
-    .requiring_confirmation("operator")
-    .with_evidence(serde_json::json!({
-        "runner_id": runner_id,
-        "recovery_plan": recovery_plan,
-    }));
-
-    // The report exposes shell text, not argv. Only lift a single command that
-    // exactly matches this explicit action; never parse or approximate a plan.
-    (recovery_plan.len() == 1 && recovery_plan[0] == action.render_command()).then_some(action)
 }
 
 pub(super) fn resolve_lab_runner_selection(
@@ -1037,9 +1040,9 @@ mod daemon_repair_step_tests {
         // values to it instead of re-parsing `&&`-joined shell text.
         let report = status_report(
             "homeboy-lab",
-            Some(freshness_with_plan(vec![daemon_repair::step(
+            Some(freshness_with_plan(vec![daemon_repair::action_step(
                 daemon_repair::RUNNER_ADOPT_ORPHAN_LEASE,
-                daemon_repair::adopt_orphan_lease_command("homeboy-lab", "lease-dead"),
+                daemon_repair::adopt_orphan_lease_action("homeboy-lab", "lease-dead"),
             )])),
             None,
         );

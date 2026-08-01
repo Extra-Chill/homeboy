@@ -517,22 +517,22 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
     // and falling back to generic reconnect prose discards the evidence the SSH
     // probe just paid for (#10302).
     let repair_step = if proven_dead && adoption_eligible {
-        Some(daemon_repair::step(
+        Some(daemon_repair::action_step(
             daemon_repair::RUNNER_ADOPT_ORPHAN_LEASE,
-            daemon_repair::adopt_orphan_lease_command(
+            daemon_repair::adopt_orphan_lease_action(
                 runner_id,
                 lease_id.as_deref().expect("proven dead lease"),
             ),
         ))
     } else if leaseless_reconciliation_available {
-        Some(daemon_repair::step(
+        Some(daemon_repair::action_step(
             daemon_repair::RUNNER_RECONCILE_LEASELESS_ORPHANS,
-            daemon_repair::reconcile_leaseless_orphans_command(runner_id),
+            daemon_repair::reconcile_leaseless_orphans_action(runner_id),
         ))
     } else if recoverable_fresh_idle {
-        Some(daemon_repair::step(
+        Some(daemon_repair::action_step(
             daemon_repair::RUNNER_CONNECT,
-            daemon_repair::connect_command(runner_id),
+            daemon_repair::connect_action(runner_id),
         ))
     } else {
         None
