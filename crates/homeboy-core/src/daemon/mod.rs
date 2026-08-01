@@ -157,6 +157,12 @@ pub struct LocalControllerJobClient {
     client: reqwest::blocking::Client,
 }
 
+fn controller_job_response(value: &serde_json::Value) -> Option<&serde_json::Value> {
+    value
+        .pointer("/data/body/job")
+        .or_else(|| value.pointer("/data/job"))
+}
+
 impl LocalControllerJobClient {
     pub fn connect() -> Result<Self> {
         let daemon = ensure_running(DEFAULT_ADDR)?;
@@ -201,7 +207,7 @@ impl LocalControllerJobClient {
             )));
         }
         let job: crate::api_jobs::Job =
-            serde_json::from_value(value.pointer("/data/job").cloned().ok_or_else(|| {
+            serde_json::from_value(controller_job_response(&value).cloned().ok_or_else(|| {
                 Error::internal_unexpected("local controller-job cancellation response has no job")
             })?)
             .map_err(|error| {
@@ -245,7 +251,7 @@ impl LocalControllerJobClient {
             )));
         }
         let job: crate::api_jobs::Job =
-            serde_json::from_value(value.pointer("/data/job").cloned().ok_or_else(|| {
+            serde_json::from_value(controller_job_response(&value).cloned().ok_or_else(|| {
                 Error::internal_unexpected("local controller-job submission response has no job")
             })?)
             .map_err(|error| {
@@ -281,7 +287,7 @@ impl LocalControllerJobClient {
                 "local controller job start failed: {value}"
             )));
         }
-        serde_json::from_value(value.pointer("/data/job").cloned().ok_or_else(|| {
+        serde_json::from_value(controller_job_response(&value).cloned().ok_or_else(|| {
             Error::internal_unexpected("local controller-job start response has no job")
         })?)
         .map_err(|error| {
@@ -314,7 +320,7 @@ impl LocalControllerJobClient {
                 "local controller job status failed: {value}"
             )));
         }
-        serde_json::from_value(value.pointer("/data/job").cloned().ok_or_else(|| {
+        serde_json::from_value(controller_job_response(&value).cloned().ok_or_else(|| {
             Error::internal_unexpected("local controller-job status response has no job")
         })?)
         .map_err(|error| {
@@ -349,7 +355,7 @@ impl LocalControllerJobClient {
                 "local controller job start failed: {value}"
             )));
         }
-        serde_json::from_value(value.pointer("/data/job").cloned().ok_or_else(|| {
+        serde_json::from_value(controller_job_response(&value).cloned().ok_or_else(|| {
             Error::internal_unexpected("local controller-job start response has no job")
         })?)
         .map_err(|error| {
@@ -2845,6 +2851,18 @@ mod tests {
     use crate::daemon::runner_exec_driver::{
         self, DaemonExecOutput, PreparedDaemonExec, RunnerExecDriver, RunnerExecPrepareRequest,
     };
+
+    #[test]
+    fn controller_job_client_accepts_endpoint_and_legacy_response_shapes() {
+        let endpoint = json!({ "data": { "body": { "job": { "id": "endpoint" } } } });
+        let legacy = json!({ "data": { "job": { "id": "legacy" } } });
+
+        assert_eq!(
+            controller_job_response(&endpoint).unwrap()["id"],
+            "endpoint"
+        );
+        assert_eq!(controller_job_response(&legacy).unwrap()["id"], "legacy");
+    }
 
     /// Polling cadence is independent of any schedule's own cadence, and an
     /// operator can opt out of daemon-driven scheduling entirely.
