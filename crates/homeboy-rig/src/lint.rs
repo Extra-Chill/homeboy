@@ -64,13 +64,14 @@ pub fn run_package_lint_at_with_ignores(
     let ignore_policy = IgnorePolicy::new(&declared_ignores);
     collect_files(root, &mut files, &ignore_policy)?;
 
+    let materialized = collect_materialized_rigs(root, &files)?;
     let conflict_failures = conflict_marker_failures(root, &files)?;
     let json_failures = json_parse_failures(root, &files)?;
-    let template_failures = template_materialization_failures(root, &files)?;
-    let unknown_field_failures = unknown_top_level_field_failures(root, &files)?;
+    let template_failures = materialized.materialization_failures.clone();
+    let unknown_field_failures = unknown_top_level_field_failures(&materialized.rigs);
     let contract_failures = contract_validation_failures(root)?;
-    let portability_failures = portability_failures(root, &files)?;
-    let reference_failures = workload_reference_failures(root, &files)?;
+    let portability_failures = portability_failures(root, &files, &materialized.rigs)?;
+    let reference_failures = workload_reference_failures(root, &files, &materialized.rigs)?;
     let steps = vec![
         aggregate_step(
             "rig-package-lint",
@@ -143,8 +144,49 @@ const KNOWN_RIG_TOP_LEVEL_FIELDS: &[&str] = &[
     "trace_workloads",
 ];
 
-fn unknown_top_level_field_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
-    let mut failures = Vec::new();
+/// One rig, resolved through its `extends` chain.
+///
+/// Rig-shaped lint checks run against [`MaterializedRig::value`] rather than the
+/// bytes on disk. The `extends` refactor moved most rig content into
+/// `*.base.json` files that a raw `rig.json` filename filter never sees, so any
+/// check that reads the authored file only inspects whatever the leaf spec
+/// happened to override.
+struct MaterializedRig {
+    /// Path to the authoring `rig.json`, used for failure attribution.
+    path: PathBuf,
+    /// `rig.json` path relative to the lint root.
+    rel: String,
+    /// Package root the rig belongs to, used to resolve `${package.root}`.
+    package_root: PathBuf,
+    /// The rig spec with its `extends` chain merged in.
+    value: serde_json::Value,
+}
+
+struct MaterializedRigs {
+    rigs: Vec<MaterializedRig>,
+    materialization_failures: Vec<String>,
+}
+
+impl MaterializedRig {
+    fn id(&self) -> Option<&str> {
+        self.value
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    }
+}
+
+/// The lint unit is "each rig, materialized" — not "each JSON file".
+///
+/// A `*.base.json` consumed only through `extends` may legitimately be
+/// incomplete on its own (no `id`, no `components`), so linting base files
+/// standalone would report contract failures that are not defects. Materializing
+/// each `rig.json` instead covers every base file through the rigs that actually
+/// consume it, in the shape the runtime will see.
+fn collect_materialized_rigs(root: &Path, files: &[PathBuf]) -> Result<MaterializedRigs> {
+    let mut rigs = Vec::new();
+    let mut materialization_failures = Vec::new();
     for file in files
         .iter()
         .filter(|path| path.file_name() == Some(OsStr::new("rig.json")))
@@ -152,10 +194,50 @@ fn unknown_top_level_field_failures(root: &Path, files: &[PathBuf]) -> Result<Ve
         let content = fs::read_to_string(file).map_err(|error| {
             Error::internal_io(error.to_string(), Some(format!("read {}", file.display())))
         })?;
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+        // Unparseable specs are reported by the JSON parse aggregate; there is
+        // nothing to materialize and nothing rig-shaped to check.
+        let Ok(raw) = serde_json::from_str::<serde_json::Value>(&content) else {
             continue;
         };
-        let Some(object) = value.as_object() else {
+        let declares_extends = content.contains("\"extends\"");
+
+        let materialized = template_source_root(root, file)
+            .and_then(|source_root| super::install::materialize_rig_spec(file, &source_root));
+        let value = match materialized {
+            Ok(value) => value,
+            Err(error) => {
+                // Only rigs that actually declare `extends` can fail template
+                // materialization in a way the author can act on; everything else
+                // falls back to the authored spec so the rig-shaped checks below
+                // still run.
+                if declares_extends {
+                    materialization_failures.push(format!(
+                        "{} template materialization failed: {}",
+                        display_relative(root, file),
+                        error.message
+                    ));
+                }
+                raw
+            }
+        };
+
+        rigs.push(MaterializedRig {
+            rel: display_relative(root, file),
+            package_root: package_root_for_rig(root, file),
+            path: file.clone(),
+            value,
+        });
+    }
+    Ok(MaterializedRigs {
+        rigs,
+        materialization_failures,
+    })
+}
+
+fn unknown_top_level_field_failures(rigs: &[MaterializedRig]) -> Vec<String> {
+    let mut failures = Vec::new();
+    for rig in rigs {
+        let Some(object) = rig.value.as_object() else {
             continue;
         };
         for key in object.keys() {
@@ -164,12 +246,11 @@ fn unknown_top_level_field_failures(root: &Path, files: &[PathBuf]) -> Result<Ve
             }
             failures.push(format!(
                 "{}: unknown top-level rig field `{}` (use `x-*` for extension-owned metadata)",
-                display_relative(root, file),
-                key
+                rig.rel, key
             ));
         }
     }
-    Ok(failures)
+    failures
 }
 
 fn contract_validation_failures(root: &Path) -> Result<Vec<String>> {
@@ -447,30 +528,6 @@ fn json_parse_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
     Ok(failures)
 }
 
-fn template_materialization_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
-    let mut failures = Vec::new();
-    for file in files
-        .iter()
-        .filter(|path| path.file_name() == Some(OsStr::new("rig.json")))
-    {
-        let content = fs::read_to_string(file).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("read {}", file.display())))
-        })?;
-        if !content.contains("\"extends\"") {
-            continue;
-        }
-        let source_root = template_source_root(root, file)?;
-        if let Err(error) = super::install::materialize_rig_spec(file, &source_root) {
-            failures.push(format!(
-                "{} template materialization failed: {}",
-                display_relative(root, file),
-                error.message
-            ));
-        }
-    }
-    Ok(failures)
-}
-
 fn template_source_root(root: &Path, file: &Path) -> Result<PathBuf> {
     let id = file
         .parent()
@@ -492,7 +549,11 @@ fn template_source_root(root: &Path, file: &Path) -> Result<PathBuf> {
     })
 }
 
-fn portability_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
+fn portability_failures(
+    root: &Path,
+    files: &[PathBuf],
+    rigs: &[MaterializedRig],
+) -> Result<Vec<String>> {
     let mut failures = Vec::new();
     for file in files.iter().filter(|path| portable_source_file(path)) {
         let content = fs::read_to_string(file).unwrap_or_default();
@@ -510,19 +571,10 @@ fn portability_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
         }
     }
 
-    for file in files
-        .iter()
-        .filter(|path| path.file_name() == Some(OsStr::new("rig.json")))
-    {
-        let content = fs::read_to_string(file).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("read {}", file.display())))
-        })?;
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
-            continue;
-        };
-        failures.extend(shared_path_failures(root, file, &value));
-        failures.extend(resource_retention_failures(root, file, &value));
-        failures.extend(lifecycle_step_source_failures(root, file, &value));
+    for rig in rigs {
+        failures.extend(shared_path_failures(&rig.rel, &rig.value));
+        failures.extend(resource_retention_failures(&rig.rel, &rig.value));
+        failures.extend(lifecycle_step_source_failures(&rig.rel, &rig.value));
     }
 
     Ok(failures)
@@ -547,8 +599,7 @@ fn portable_source_file(path: &Path) -> bool {
     )
 }
 
-fn shared_path_failures(root: &Path, file: &Path, rig: &serde_json::Value) -> Vec<String> {
-    let rel = display_relative(root, file);
+fn shared_path_failures(rel: &str, rig: &serde_json::Value) -> Vec<String> {
     let Some(shared_paths) = rig.get("shared_paths") else {
         return Vec::new();
     };
@@ -592,12 +643,7 @@ fn shared_path_failures(root: &Path, file: &Path, rig: &serde_json::Value) -> Ve
 /// serde no longer rejects a step that declares neither. The executor still
 /// fails closed at run time, but a rig author should not have to run `rig up`
 /// to find out — that is what this lint is for.
-fn lifecycle_step_source_failures(
-    root: &Path,
-    file: &Path,
-    rig: &serde_json::Value,
-) -> Vec<String> {
-    let rel = display_relative(root, file);
+fn lifecycle_step_source_failures(rel: &str, rig: &serde_json::Value) -> Vec<String> {
     let Some(pipelines) = rig.get("pipeline").and_then(|value| value.as_object()) else {
         return Vec::new();
     };
@@ -669,8 +715,7 @@ fn lifecycle_workload_ref_failures(location: &str, workload: &serde_json::Value)
 /// `delete_after_ttl` without a `ttl` is contract-invalid: the lifecycle record
 /// would fail validation and the run's whole lifecycle index would be dropped.
 /// Catch it at lint time instead of losing the artifact at runtime.
-fn resource_retention_failures(root: &Path, file: &Path, rig: &serde_json::Value) -> Vec<String> {
-    let rel = display_relative(root, file);
+fn resource_retention_failures(rel: &str, rig: &serde_json::Value) -> Vec<String> {
     let Some(resources) = rig.get("resources").and_then(|value| value.as_object()) else {
         return Vec::new();
     };
@@ -678,7 +723,7 @@ fn resource_retention_failures(root: &Path, file: &Path, rig: &serde_json::Value
     let mut failures = Vec::new();
 
     if let Some(lifecycle) = resources.get("lifecycle") {
-        failures.extend(retention_failure(&rel, "resources.lifecycle", lifecycle));
+        failures.extend(retention_failure(rel, "resources.lifecycle", lifecycle));
     }
     if let Some(by_class) = resources.get("lifecycle_by_class") {
         match by_class.as_object() {
@@ -691,7 +736,7 @@ fn resource_retention_failures(root: &Path, file: &Path, rig: &serde_json::Value
                         continue;
                     }
                     failures.extend(retention_failure(
-                        &rel,
+                        rel,
                         &format!("resources.lifecycle_by_class.{class}"),
                         retention,
                     ));
@@ -726,39 +771,32 @@ fn retention_failure(rel: &str, label: &str, retention: &serde_json::Value) -> O
     None
 }
 
-fn workload_reference_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
+fn workload_reference_failures(
+    root: &Path,
+    files: &[PathBuf],
+    rigs: &[MaterializedRig],
+) -> Result<Vec<String>> {
     let fuzz_workloads = collect_fuzz_workloads(root, files)?;
     let mut failures = Vec::new();
-    for file in files
-        .iter()
-        .filter(|path| path.file_name() == Some(OsStr::new("rig.json")))
-    {
-        let content = fs::read_to_string(file).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("read {}", file.display())))
-        })?;
-        let Ok(rig) = serde_json::from_str::<serde_json::Value>(&content) else {
-            continue;
-        };
-        let package_root = package_root_for_rig(root, file);
-        let rel = display_relative(root, file);
+    for rig in rigs {
         failures.extend(fuzz_workload_failures(
             root,
-            &package_root,
-            &rel,
-            &rig,
+            &rig.package_root,
+            &rig.rel,
+            &rig.value,
             &fuzz_workloads,
         ));
         failures.extend(profile_reference_failures(
-            &rel,
-            &rig,
+            &rig.rel,
+            &rig.value,
             "fuzz_workloads",
             "fuzz_profiles",
         ));
         failures.extend(bench_reference_failures(
-            &rel,
-            &rig,
+            &rig.rel,
+            &rig.value,
             &fuzz_workloads,
-            &package_root,
+            &rig.package_root,
         ));
     }
     Ok(failures)
@@ -1343,6 +1381,88 @@ mod tests {
             "contract error: {:?}",
             contract_step.error
         );
+    }
+
+    #[test]
+    fn package_lint_reports_rig_shaped_failures_inherited_from_a_base_spec() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("inherited");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("inherited.base.json"),
+            r#"{
+                "components": {},
+                "shared_paths": [{"link":"shared","target":"shared"}],
+                "resources": {
+                    "lifecycle_by_class": {
+                        "ports": {"cleanup_policy": "delete_after_ttl"}
+                    }
+                },
+                "pipeline": {
+                    "up": [{ "kind": "lifecycle", "op": "prepare" }]
+                },
+                "typoed_field": true
+            }"#,
+        )
+        .expect("write base");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "extends": "./inherited.base.json",
+                "id": "inherited"
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+
+        let portability = portability_step(&outcome);
+        assert_eq!(portability.status, "fail", "{:?}", portability.error);
+        let error = portability.error.as_ref().expect("portability error");
+        assert!(error.contains("shared_paths[0]"), "{error}");
+        assert!(error.contains("delete_after_ttl without a ttl"), "{error}");
+        assert!(
+            error.contains("declares neither `lifecycle` nor `workload`"),
+            "{error}"
+        );
+
+        let contract = outcome
+            .steps
+            .iter()
+            .find(|step| step.label.contains("Homeboy rig contract"))
+            .expect("contract step");
+        assert!(contract
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unknown top-level rig field `typoed_field`"));
+    }
+
+    #[test]
+    fn package_lint_does_not_lint_base_specs_as_standalone_rigs() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("inherited");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        // A base spec has no `id` and no `components` of its own. Linting it as a
+        // standalone rig would report contract failures that are not defects.
+        fs::write(
+            rig_dir.join("inherited.base.json"),
+            r#"{ "trace": { "default_component": "app" } }"#,
+        )
+        .expect("write base");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "extends": "./inherited.base.json",
+                "id": "inherited",
+                "components": { "app": { "path": "/tmp/app" } }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+
+        assert_eq!(outcome.failed, 0, "{:?}", outcome.steps);
     }
 
     #[test]
