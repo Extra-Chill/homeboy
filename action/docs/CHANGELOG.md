@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.10.5] - 2026-08-01
+
+### Fixed
+- move action dependencies to Node 24
+
 ## [2.10.4] - 2026-07-31
 
 ### Fixed
