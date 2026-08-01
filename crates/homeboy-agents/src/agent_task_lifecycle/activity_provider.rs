@@ -16,7 +16,7 @@ use homeboy_core::activity::{
     ActivityNextAction, ActivityRunnerRefs, ActivityState,
 };
 
-use super::{load_controller_plan, plan_has_retry_materialization_identity};
+use super::{load_controller_plan, plan_has_retry_materialization_identity, resolve_run_id};
 use homeboy_core::run_lifecycle_record::RunExecutionState;
 use homeboy_core::Result;
 
@@ -35,9 +35,7 @@ impl ActivityAgentTaskProvider for AgentTaskActivityProvider {
     /// daemon job UUID, a malformed record — is `None`, not an error, so id
     /// resolution falls through to the next provider.
     fn probe_by_id(&self, id: &str) -> Result<Option<ActivityItem>> {
-        Ok(agent_task_lifecycle::exact_record(id)
-            .ok()
-            .map(item_from_agent_task))
+        Ok(record_for_id(id).map(item_from_agent_task))
     }
 
     /// One pass over the durable records yields both the projected items and
@@ -54,6 +52,35 @@ impl ActivityAgentTaskProvider for AgentTaskActivityProvider {
         })?;
         Ok((items, health))
     }
+}
+
+/// Resolve an id the way every operator-facing action already claims to.
+///
+/// A durable run id resolves directly. A **Cook id** does not: attempts are
+/// stored under `{cook_id}-attempt-{n}-{suffix}`, so `exact_record(cook_id)`
+/// is always a miss and `activity watch <cook_id>` reported
+/// `activity item not found` — even though the cook notification that handed
+/// the operator that command emitted it next to `agent-task status <cook_id>`,
+/// which *does* resolve because it routes through the same Cook alias index
+/// (#11112). The two actions disagreed about what a cook id is.
+///
+/// The fallback is additive: run ids keep their existing single-read
+/// behaviour and only an id that missed pays for the alias lookup.
+///
+/// Both steps are pure reads. `resolve_run_id` is an indexed
+/// `read_cook_index`, not the reconciling `status()` — resolving one id must
+/// still never mutate persisted state (#10308).
+fn record_for_id(id: &str) -> Option<AgentTaskRunRecord> {
+    if let Ok(record) = agent_task_lifecycle::exact_record(id) {
+        return Some(record);
+    }
+    let resolved = resolve_run_id(id).ok()?;
+    if resolved == id {
+        // Not a Cook alias: `resolve_run_id` echoed the id back, so a second
+        // `exact_record` would repeat the miss above.
+        return None;
+    }
+    agent_task_lifecycle::exact_record(&resolved).ok()
 }
 
 fn metadata_string(value: &Value, keys: &[&str]) -> Option<String> {
@@ -260,6 +287,78 @@ mod tests {
 
             assert_eq!(shown.schema, report.schema);
             assert!(shown.agent_task_record_health.is_null());
+        });
+    }
+
+    #[test]
+    fn probe_by_id_resolves_a_cook_id_through_its_alias_index_without_writing() {
+        // #11112: a cook notification hands the operator
+        // `homeboy activity watch <cook_id>`, but attempts are stored under
+        // `{cook_id}-attempt-{n}-{suffix}`, so the exact read always missed and
+        // the command reported `activity item not found`. The alias must
+        // resolve to the latest attempt — and, like every other activity read,
+        // must not mutate persisted state (#10308).
+        with_isolated_home(|_| {
+            let cook_id = "cook-alias";
+            let attempt = seed_record("cook-alias-attempt-1-aaaa");
+            agent_task_lifecycle::replace_cook_index_for_test(
+                &crate::agent_task_lifecycle::AgentTaskCookIndex {
+                    schema: crate::agent_task_lifecycle::schemas::COOK_INDEX.to_string(),
+                    cook_id: cook_id.to_string(),
+                    latest_run_id: attempt.clone(),
+                    latest_substantive_candidate: None,
+                    attempts: vec![crate::agent_task_lifecycle::AgentTaskCookIndexAttempt {
+                        attempt: 1,
+                        run_id: attempt.clone(),
+                        recorded_at: "2026-01-01T00:00:00Z".to_string(),
+                    }],
+                },
+            )
+            .expect("durable cook index");
+            let before = agent_task_lifecycle::exact_record(&attempt).expect("attempt record");
+
+            let item = AgentTaskActivityProvider
+                .probe_by_id(cook_id)
+                .expect("probe")
+                .expect("cook id resolves to its latest attempt");
+
+            assert_eq!(item.id, attempt);
+            assert_eq!(item.source_store, "agent-task.lifecycle");
+            assert_eq!(
+                item.refs.agent_task_run_id.as_deref(),
+                Some(attempt.as_str())
+            );
+            assert_eq!(
+                agent_task_lifecycle::exact_record(&attempt).expect("record remains readable"),
+                before
+            );
+        });
+    }
+
+    #[test]
+    fn probe_by_id_still_prefers_an_exact_run_id_over_the_alias_fallback() {
+        // The fallback is additive. A run id that resolves directly must never
+        // be redirected to whatever a same-named cook index happens to point at.
+        with_isolated_home(|_| {
+            let direct = seed_record("cook-alias-attempt-2-bbbb");
+            let other = seed_record("cook-alias-attempt-9-cccc");
+            agent_task_lifecycle::replace_cook_index_for_test(
+                &crate::agent_task_lifecycle::AgentTaskCookIndex {
+                    schema: crate::agent_task_lifecycle::schemas::COOK_INDEX.to_string(),
+                    cook_id: direct.clone(),
+                    latest_run_id: other,
+                    latest_substantive_candidate: None,
+                    attempts: Vec::new(),
+                },
+            )
+            .expect("durable cook index");
+
+            let item = AgentTaskActivityProvider
+                .probe_by_id(&direct)
+                .expect("probe")
+                .expect("run id resolves exactly");
+
+            assert_eq!(item.id, direct);
         });
     }
 

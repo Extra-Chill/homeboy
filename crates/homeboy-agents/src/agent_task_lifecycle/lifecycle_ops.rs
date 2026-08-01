@@ -2748,7 +2748,18 @@ pub fn exact_record(run_id: &str) -> Result<AgentTaskRunRecord> {
     store::read_record(&sanitize_run_id(run_id))
 }
 
-fn resolve_run_id(run_id: &str) -> Result<String> {
+/// Resolve a caller-supplied identifier to the durable run it addresses.
+///
+/// A Cook id is an alias, not a record: attempts are stored under
+/// `{cook_id}-attempt-{n}-{suffix}`, so `exact_record(cook_id)` always misses.
+/// This maps the alias through the durable Cook index and returns the id
+/// unchanged when it is not an alias.
+///
+/// This is a **pure read**: `store::read_cook_index` is a single
+/// `fs::read_to_string` of `agent-task-cooks/<id>/index.json` and writes
+/// nothing. Read models that must not mutate persisted state (`activity`,
+/// #10308) may use it; `status()` may not, because it reconciles.
+pub(crate) fn resolve_run_id(run_id: &str) -> Result<String> {
     let run_id = sanitize_run_id(run_id);
     match store::read_cook_index(&run_id) {
         Ok(index) => Ok(index.latest_run_id),
