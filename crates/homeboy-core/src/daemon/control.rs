@@ -67,7 +67,7 @@ pub fn supervise(addr: &str, startup_token: &str) -> Result<()> {
             Some("resolve current executable".to_string()),
         )
     })?;
-    let mut child = Command::new(exe)
+    let child = Command::new(exe)
         // The argument is the portable, exact ownership proof used when a
         // platform cannot inspect a process environment. Keep it aligned with
         // the persisted admission token for the lifetime of this daemon.
@@ -90,6 +90,12 @@ pub fn supervise(addr: &str, startup_token: &str) -> Result<()> {
                 Some("spawn supervised daemon".to_string()),
             )
         })?;
+    supervise_child(child)
+}
+
+/// Own the post-spawn supervisor lifecycle. Kept separate so the real child
+/// pipes and persisted evidence can be exercised without replacing the CLI.
+fn supervise_child(mut child: std::process::Child) -> Result<()> {
     let pid = child.id();
     // A daemon can run indefinitely. Drain both pipes while it runs, retaining
     // only a diagnostic tail so supervisor RSS cannot grow with child output.
@@ -2402,6 +2408,34 @@ mod termination_tests {
         let output = bounded_redacted_reader(FailingReader).expect("diagnostic");
         assert!(output.contains("output read failed"));
         assert!(!output.contains("read-secret"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supervise_child_persists_bounded_redacted_concurrent_pipe_output() {
+        crate::test_support::with_isolated_home(|_| {
+            let child = Command::new("sh")
+                .args([
+                    "-c",
+                    "(i=0; while [ $i -lt 4096 ]; do printf 'stdout-%s token=stdout-secret\\n' \"$i\"; i=$((i + 1)); done) & (i=0; while [ $i -lt 4096 ]; do printf 'stderr-%s token=stderr-secret\\n' \"$i\" >&2; i=$((i + 1)); done) & wait",
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("concurrent output fixture");
+
+            supervise_child(child).expect("supervise fixture");
+
+            let evidence = super::super::read_termination_evidence()
+                .expect("read evidence")
+                .expect("termination evidence");
+            for output in [evidence.stdout, evidence.stderr] {
+                let output = output.expect("stream evidence");
+                assert!(output.len() < 4_200);
+                assert!(output.contains("token=[REDACTED]"));
+                assert!(!output.contains("secret"));
+            }
+        });
     }
 
     #[cfg(unix)]
