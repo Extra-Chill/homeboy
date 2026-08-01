@@ -70,69 +70,103 @@ fn scope_lab_cli_arguments_at_path(
 /// Command paths that expose the Lab execution placement/runner flags in their
 /// `--help`, mirroring the Lab-portable command surface. Kept explicit so the
 /// help surface is deterministic and reviewable.
+///
+/// Declared as DATA rather than a `matches!` arm chain (#11141). This table is
+/// a second source of truth for "is this path Lab-portable", parallel to each
+/// command's `lab_contract()`, and while it was control flow nothing could
+/// enumerate it — so nothing could assert the two agreed, and nothing could
+/// catch a path spelling that clap does not expose (the #10313 failure mode,
+/// which here would silently hide the placement flags forever). The tests
+/// below now assert both.
+///
+/// The coarse dimension — which top-level commands are Lab-supported at all —
+/// is NOT restated here; `lab_cli_arguments_are_visible_for_path` reads it from
+/// `COMMAND_SPECS`, so this table only refines a registry fact instead of
+/// re-declaring one.
+const LAB_VISIBLE_COMMAND_PATHS: &[&[&str]] = &[
+    &["agent-task", "cook"],
+    &["agent-task", "run-plan"],
+    &["agent-task", "run"],
+    &["agent-task", "run-next"],
+    &["agent-task", "status"],
+    &["agent-task", "list"],
+    &["agent-task", "active"],
+    &["agent-task", "latest"],
+    &["agent-task", "logs"],
+    &["agent-task", "artifacts"],
+    &["agent-task", "evidence"],
+    &["agent-task", "review"],
+    &["agent-task", "retry"],
+    &["agent-task", "promote"],
+    &["agent-task", "providers"],
+    &["agent-task", "fanout", "submit-batch"],
+    &["agent-task", "fanout", "status"],
+    &["agent-task", "fanout", "artifacts"],
+    // The fanout coordinator is controller-owned, but split placement hands
+    // each child attempt to the selected runner, so the placement arguments are
+    // load-bearing here and must stay discoverable.
+    &["agent-task", "fanout", "cook-batch"],
+    &["agent-task", "fanout", "run-plan"],
+    &["agent-task", "auth", "status"],
+    &["agent-task", "controller", "from-spec"],
+    &["agent-task", "controller", "run-from-spec"],
+    &["agent-task", "controller", "materialize"],
+    &["agent-task", "controller", "resume"],
+    &["bench"],
+    &["bench", "matrix"],
+    &["fuzz"],
+    &["fuzz", "run"],
+    &["fuzz", "run-campaign"],
+    &["fuzz", "list"],
+    &["fuzz", "plan"],
+    &["fuzz", "doctor"],
+    &["review"],
+    &["review", "audit"],
+    &["review", "lint"],
+    &["review", "test"],
+    &["trace"],
+    &["refactor"],
+    &["rig", "check"],
+    &["rig", "run"],
+    &["runtime", "refresh"],
+    &["worktree", "cleanup"],
+    &["extension", "update"],
+    &["extension", "refresh"],
+    &["extension", "dev-run"],
+    &["extension", "show"],
+    &["tunnel", "preview-consumer", "run"],
+    &["tunnel", "service", "expose"],
+    &["tunnel", "service", "start"],
+];
+
 fn lab_cli_arguments_are_visible_for_path(path: &[String]) -> bool {
-    matches!(
-        path.iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .as_slice(),
-        ["agent-task", "cook"]
-            | ["agent-task", "run-plan"]
-            | ["agent-task", "run"]
-            | ["agent-task", "run-next"]
-            | ["agent-task", "status"]
-            | ["agent-task", "list"]
-            | ["agent-task", "active"]
-            | ["agent-task", "latest"]
-            | ["agent-task", "logs"]
-            | ["agent-task", "artifacts"]
-            | ["agent-task", "evidence"]
-            | ["agent-task", "review"]
-            | ["agent-task", "retry"]
-            | ["agent-task", "promote"]
-            | ["agent-task", "providers"]
-            | ["agent-task", "fanout", "submit-batch"]
-            | ["agent-task", "fanout", "status"]
-            | ["agent-task", "fanout", "artifacts"]
-            // The fanout coordinator is controller-owned, but split placement
-            // hands each child attempt to the selected runner, so the placement
-            // arguments are load-bearing here and must stay discoverable.
-            | ["agent-task", "fanout", "cook-batch"]
-            | ["agent-task", "fanout", "run-plan"]
-            | ["agent-task", "auth", "status"]
-            | ["agent-task", "controller", "from-spec"]
-            | ["agent-task", "controller", "run-from-spec"]
-            | ["agent-task", "controller", "materialize"]
-            | ["agent-task", "controller", "resume"]
-            | ["bench"]
-            | ["bench", "matrix"]
-            | ["fuzz"]
-            | ["fuzz", "run"]
-            | ["fuzz", "run-campaign"]
-            | ["fuzz", "list"]
-            | ["fuzz", "plan"]
-            | ["fuzz", "doctor"]
-            | ["review"]
-            | ["review", "audit"]
-            | ["review", "lint"]
-            | ["review", "test"]
-            | ["trace"]
-            | ["refactor"]
-            | ["rig", "check"]
-            | ["rig", "run"]
-            | ["runtime", "refresh"]
-            | ["worktree", "cleanup"]
-            | ["extension", "update"]
-            | ["extension", "refresh"]
-            | ["extension", "dev-run"]
-            | ["extension", "show"]
-            | ["tunnel", "preview-consumer", "run"]
-            | ["tunnel", "service", "expose"]
-            | ["tunnel", "service", "start"]
-    )
+    let path = path.iter().map(String::as_str).collect::<Vec<_>>();
+
+    // `CommandSpec.lab_supported` already answers "does this command family
+    // route to Lab at all". Gate on it so a path table entry can only ever
+    // NARROW a registry fact, never invent one: adding a Lab-visible path under
+    // a command the registry does not declare Lab-supported now shows nothing
+    // and fails the agreement test below, instead of quietly advertising
+    // placement flags on a command that cannot honour them.
+    if !path
+        .first()
+        .copied()
+        .is_some_and(top_level_command_is_lab_supported)
+    {
+        return false;
+    }
+
+    LAB_VISIBLE_COMMAND_PATHS.contains(&path.as_slice())
+}
+
+fn top_level_command_is_lab_supported(name: &str) -> bool {
+    crate::command_contract::registered_command(name).is_some_and(|spec| spec.lab_supported)
 }
 
 mod support;
+
+#[cfg(test)]
+mod tests;
 
 // The lab contract types (workload / handoff / typed identifiers) and the
 // lab-runnable command labels now live in the homeboy-lab-contract crate.
