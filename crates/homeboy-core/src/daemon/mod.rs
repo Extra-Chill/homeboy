@@ -1254,14 +1254,37 @@ fn completion_notify_loop(interval: std::time::Duration, shutdown: mpsc::Receive
                 );
             }
             let running_after = list_running_run_ids(&store);
-            for completed_id in tracker.observe(running_after) {
+            // Departure from the running set is only a *candidate* completion.
+            // Confirm terminality against the record itself before reporting:
+            // marking delivery is irreversible, so a run wrongly reported here
+            // would consume its exactly-once marker while still in flight and
+            // silence its real completion on every path.
+            let mut terminal_runs: HashMap<String, crate::observation::RunRecord> = HashMap::new();
+            let completed = tracker.observe(running_after, |run_id| match store.get_run(run_id) {
+                Ok(Some(run)) => {
+                    match crate::observation::RunStatus::from_label(&run.status) {
+                        Some(status) if status.is_terminal() => {
+                            terminal_runs.insert(run_id.to_string(), run);
+                            completion_tracker::RunTerminality::Terminal
+                        }
+                        // Still running, or a status label Homeboy does not
+                        // own: keep watching rather than guessing terminality.
+                        _ => completion_tracker::RunTerminality::Unresolved,
+                    }
+                }
+                Ok(None) => completion_tracker::RunTerminality::Vanished,
+                // A transient store error is not evidence of completion.
+                Err(_) => completion_tracker::RunTerminality::Unresolved,
+            });
+            for completed_id in completed {
                 let already_delivered = store
                     .is_notification_delivered(&completed_id)
                     .unwrap_or(false);
                 if already_delivered {
                     continue;
                 }
-                let run = store.get_run(&completed_id).ok().flatten();
+                // Loaded by the terminality resolver above; no second read.
+                let run = terminal_runs.remove(&completed_id);
                 let status = run
                     .as_ref()
                     .map(|run| run.status.as_str())
@@ -1295,13 +1318,15 @@ fn completion_notify_loop(interval: std::time::Duration, shutdown: mpsc::Receive
     }
 }
 
+/// Every run currently marked running — exhaustively, not a page of them.
+///
+/// A bounded page here is a silent truncation, not a guard: the completion
+/// notifier's only signal is presence in this set, so any run the bound cuts off
+/// reads as "gone". `list_active_runs` is the unbounded query that exists for
+/// exactly this reason.
 fn list_running_run_ids(store: &crate::observation::ObservationStore) -> Vec<String> {
     store
-        .list_runs(crate::observation::RunListFilter {
-            status: Some(crate::observation::RunStatus::Running.as_str().to_string()),
-            limit: Some(1000),
-            ..Default::default()
-        })
+        .list_active_runs()
         .unwrap_or_default()
         .into_iter()
         .map(|run| run.id)
