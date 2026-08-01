@@ -69,6 +69,7 @@ pub fn run_package_lint_at_with_ignores(
     let json_failures = json_parse_failures(root, &files)?;
     let template_failures = materialized.materialization_failures.clone();
     let unknown_field_failures = unknown_top_level_field_failures(&materialized.rigs);
+    let component_env_failures = component_path_env_agreement_failures(&materialized.rigs);
     let contract_failures = contract_validation_failures(root)?;
     let portability_failures = portability_failures(root, &files, &materialized.rigs)?;
     let reference_failures = workload_reference_failures(root, &files, &materialized.rigs)?;
@@ -91,7 +92,12 @@ pub fn run_package_lint_at_with_ignores(
         aggregate_step(
             "rig-package-lint",
             "rig package specs satisfy the Homeboy rig contract",
-            [unknown_field_failures, contract_failures].concat(),
+            [
+                unknown_field_failures,
+                component_env_failures,
+                contract_failures,
+            ]
+            .concat(),
         ),
         aggregate_step(
             "rig-package-lint",
@@ -251,6 +257,158 @@ fn unknown_top_level_field_failures(rigs: &[MaterializedRig]) -> Vec<String> {
         }
     }
     failures
+}
+
+const COMPONENT_PATH_ENV_PREFIX: &str = "HOMEBOY_RIG_COMPONENT_PATH__";
+const COMPONENT_CHECKOUT_ROOT_ENV_PREFIX: &str = "HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__";
+
+/// A rig's component override env vars carry the rig id in their own name, so
+/// renaming a rig silently unbinds every `${env.HOMEBOY_RIG_COMPONENT_PATH__*}`
+/// reference the spec makes. `${env.*}` resolves an unset name to the empty
+/// string, so nothing fails — the component just points at nothing.
+///
+/// In chubes4/homeboy-rigs, `studio-agent-claude-trunk/rig.json` still
+/// references `..._STUDIO_AGENT_CLAUDE_EVALTIMING__STUDIO` from before a rename.
+/// `portability_failures` only looks for `/Users/` and `~/Developer/` literals,
+/// so it sees a perfectly portable path that resolves to nothing.
+///
+/// Require every such reference to agree with the rig it lives in, and to name
+/// a component that rig declares. The canonical names come from `expand.rs` so
+/// the sanitization rule stays in exactly one place: passing an empty component
+/// id yields the rig-scoped prefix every name for this rig must start with.
+fn component_path_env_agreement_failures(rigs: &[MaterializedRig]) -> Vec<String> {
+    let mut failures = Vec::new();
+    for rig in rigs {
+        // A rig with no usable id is already reported by the contract aggregate;
+        // there is no canonical name to compare against.
+        let Some(rig_id) = rig.id() else {
+            continue;
+        };
+        let declared: Vec<String> = rig
+            .value
+            .get("components")
+            .and_then(|components| components.as_object())
+            .map(|components| components.keys().cloned().collect())
+            .unwrap_or_default();
+
+        let path_prefix = crate::expand::rig_component_path_override_env_name(rig_id, "");
+        let checkout_prefix =
+            crate::expand::rig_component_checkout_root_override_env_name(rig_id, "");
+
+        for (pointer, name) in component_override_env_references(&rig.value) {
+            let (kind, prefix, expected) = if name.starts_with(COMPONENT_PATH_ENV_PREFIX) {
+                (
+                    "component path",
+                    &path_prefix,
+                    declared
+                        .iter()
+                        .map(|component| {
+                            crate::expand::rig_component_path_override_env_name(rig_id, component)
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                (
+                    "component checkout root",
+                    &checkout_prefix,
+                    declared
+                        .iter()
+                        .map(|component| {
+                            crate::expand::rig_component_checkout_root_override_env_name(
+                                rig_id, component,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            };
+
+            if !name.starts_with(prefix.as_str()) {
+                failures.push(format!(
+                    "{}: {} references ${{env.{name}}}, but this rig's {kind} override env vars must be named `{prefix}<COMPONENT>` for rig id `{rig_id}`; an unset name expands to the empty string",
+                    rig.rel,
+                    display_pointer(&pointer)
+                ));
+                continue;
+            }
+            if !expected.iter().any(|candidate| candidate == &name) {
+                let component = name.trim_start_matches(prefix.as_str());
+                failures.push(format!(
+                    "{}: {} references ${{env.{name}}}, but rig `{rig_id}` declares no component matching `{component}` (declared: {})",
+                    rig.rel,
+                    display_pointer(&pointer),
+                    if declared.is_empty() {
+                        "none".to_string()
+                    } else {
+                        declared.join(", ")
+                    }
+                ));
+            }
+        }
+    }
+    failures
+}
+
+/// Every `${env.HOMEBOY_RIG_COMPONENT_{PATH,CHECKOUT_ROOT}__*}` reference in a
+/// rig spec, paired with a JSON pointer to the string that contains it.
+fn component_override_env_references(value: &serde_json::Value) -> Vec<(String, String)> {
+    let mut references = Vec::new();
+    collect_component_override_env_references(value, "", &mut references);
+    references
+}
+
+fn collect_component_override_env_references(
+    value: &serde_json::Value,
+    pointer: &str,
+    references: &mut Vec<(String, String)>,
+) {
+    match value {
+        serde_json::Value::String(text) => {
+            for name in env_reference_names(text) {
+                if name.starts_with(COMPONENT_PATH_ENV_PREFIX)
+                    || name.starts_with(COMPONENT_CHECKOUT_ROOT_ENV_PREFIX)
+                {
+                    references.push((pointer.to_string(), name));
+                }
+            }
+        }
+        serde_json::Value::Array(entries) => {
+            for (index, entry) in entries.iter().enumerate() {
+                collect_component_override_env_references(
+                    entry,
+                    &format!("{pointer}/{index}"),
+                    references,
+                );
+            }
+        }
+        serde_json::Value::Object(entries) => {
+            for (key, entry) in entries {
+                collect_component_override_env_references(
+                    entry,
+                    &format!("{pointer}/{}", escape_pointer(key)),
+                    references,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Extract the `<NAME>` of every `${env.<NAME>}` interpolation in `text`.
+fn env_reference_names(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut remaining = text;
+    while let Some(start) = remaining.find("${env.") {
+        let after = &remaining[start + "${env.".len()..];
+        let Some(end) = after.find('}') else {
+            break;
+        };
+        let name = after[..end].trim();
+        if !name.is_empty() {
+            names.push(name.to_string());
+        }
+        remaining = &after[end + 1..];
+    }
+    names
 }
 
 fn contract_validation_failures(root: &Path) -> Result<Vec<String>> {
@@ -1668,6 +1826,152 @@ mod tests {
             .as_ref()
             .expect("json error")
             .contains("duplicate.base.json duplicate JSON key `trace`"));
+    }
+
+    fn contract_step(outcome: &PipelineOutcome) -> &PipelineStepOutcome {
+        outcome
+            .steps
+            .iter()
+            .find(|step| step.label.contains("Homeboy rig contract"))
+            .expect("contract step")
+    }
+
+    #[test]
+    fn env_reference_names_extracts_every_interpolation() {
+        let names = env_reference_names(
+            "${env.HOMEBOY_RIG_COMPONENT_PATH__A__B}/x/${env.HOMEBOY_SETTINGS_NS} ${broken",
+        );
+
+        assert_eq!(
+            names,
+            vec![
+                "HOMEBOY_RIG_COMPONENT_PATH__A__B".to_string(),
+                "HOMEBOY_SETTINGS_NS".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn package_lint_reports_component_env_var_naming_a_different_rig() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("studio-agent-claude-trunk");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "studio-agent-claude-trunk",
+                "components": {
+                    "studio": {
+                        "path": "${env.HOMEBOY_RIG_COMPONENT_PATH__STUDIO_AGENT_CLAUDE_EVALTIMING__STUDIO}"
+                    }
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = contract_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        let error = step.error.as_ref().expect("contract error");
+        assert!(
+            error.contains("HOMEBOY_RIG_COMPONENT_PATH__STUDIO_AGENT_CLAUDE_EVALTIMING__STUDIO"),
+            "{error}"
+        );
+        assert!(
+            error.contains("`HOMEBOY_RIG_COMPONENT_PATH__STUDIO_AGENT_CLAUDE_TRUNK__<COMPONENT>`"),
+            "{error}"
+        );
+        assert!(error.contains("/components/studio/path"), "{error}");
+    }
+
+    #[test]
+    fn package_lint_reports_component_env_var_naming_an_undeclared_component() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("agreement");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "agreement",
+                "components": {
+                    "studio": { "path": "/tmp/studio" }
+                },
+                "resources": {
+                    "paths": ["${env.HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__AGREEMENT__WORDPRESS}"]
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = contract_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        let error = step.error.as_ref().expect("contract error");
+        assert!(
+            error.contains("declares no component matching `WORDPRESS`"),
+            "{error}"
+        );
+        assert!(error.contains("declared: studio"), "{error}");
+    }
+
+    #[test]
+    fn package_lint_accepts_component_env_vars_that_agree_with_the_rig_id() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("gutenberg-pattern-assets");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "gutenberg-pattern-assets",
+                "components": {
+                    "gutenberg": {
+                        "path": "${env.HOMEBOY_RIG_COMPONENT_PATH__GUTENBERG_PATTERN_ASSETS__GUTENBERG}"
+                    }
+                },
+                "resources": {
+                    "exclusive": ["ns:${env.HOMEBOY_SETTINGS_NAMESPACE}"]
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = contract_step(&outcome);
+
+        assert_eq!(step.status, "pass", "{:?}", step.error);
+    }
+
+    #[test]
+    fn package_lint_checks_component_env_agreement_through_extends() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("renamed");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("renamed.base.json"),
+            r#"{
+                "components": {
+                    "app": { "path": "${env.HOMEBOY_RIG_COMPONENT_PATH__OLD_NAME__APP}" }
+                }
+            }"#,
+        )
+        .expect("write base");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{ "extends": "./renamed.base.json", "id": "renamed" }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = contract_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        assert!(step
+            .error
+            .as_ref()
+            .expect("contract error")
+            .contains("`HOMEBOY_RIG_COMPONENT_PATH__RENAMED__<COMPONENT>`"));
     }
 
     #[test]
