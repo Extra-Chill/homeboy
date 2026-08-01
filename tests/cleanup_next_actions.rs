@@ -3,14 +3,23 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[test]
+#[cfg(unix)]
 fn aggregate_repo_artifact_next_action_runs_outside_a_checkout() {
     let fixture = tempfile::tempdir().expect("fixture");
     let repository = fixture.path().join("repository");
     let invocation_dir = fixture.path().join("operator-cwd");
     let components_dir = fixture.path().join(".config/homeboy/components");
+    let tools = fixture.path().join("tools");
     std::fs::create_dir_all(repository.join("target/debug")).expect("target directory");
     std::fs::create_dir_all(&invocation_dir).expect("operator directory");
     std::fs::create_dir_all(&components_dir).expect("components directory");
+    std::fs::create_dir_all(&tools).expect("tools directory");
+    write_executable(&tools.join("ps"), "#!/bin/sh\nexit 0\n");
+    let path = format!(
+        "{}:{}",
+        tools.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     std::fs::write(repository.join(".gitignore"), "target/\n").expect("target ignore rule");
     std::fs::write(repository.join("target/debug/app"), "artifact").expect("target artifact");
     run_git(&repository, &["init", "-b", "main"]);
@@ -37,10 +46,11 @@ fn aggregate_repo_artifact_next_action_runs_outside_a_checkout() {
     )
     .expect("component registration");
 
-    let inventory = run_cleanup(
+    let inventory = run_cleanup_with_path(
         fixture.path(),
         &invocation_dir,
         &["--include", "repo-artifacts"],
+        &path,
     );
     assert_eq!(inventory["success"], true, "{inventory:#}");
     assert_eq!(
@@ -61,9 +71,18 @@ fn aggregate_repo_artifact_next_action_runs_outside_a_checkout() {
     );
 
     let args: Vec<_> = next_command.split_whitespace().skip(2).collect();
-    let applied = run_cleanup(fixture.path(), &invocation_dir, &args);
+    let applied = run_cleanup_with_path(fixture.path(), &invocation_dir, &args, &path);
     assert_eq!(applied["success"], true, "{applied:#}");
-    assert!(!repository.join("target").exists());
+    let job_id = applied
+        .pointer("/data/job_id")
+        .and_then(Value::as_str)
+        .expect("cleanup job ID");
+    let completed = wait_for_cleanup_job(fixture.path(), &invocation_dir, job_id, &path);
+    assert_eq!(completed["data"]["status"], "succeeded", "{completed:#}");
+    let artifact_removed = !repository.join("target").exists();
+    let stopped = run_homeboy(fixture.path(), &invocation_dir, &["daemon", "stop"], &path);
+    assert_eq!(stopped["success"], true, "{stopped:#}");
+    assert!(artifact_removed);
 }
 
 #[test]
@@ -186,6 +205,22 @@ fn run_homeboy(home: &Path, cwd: &Path, args: &[&str], path: &str) -> Value {
             String::from_utf8_lossy(&output.stderr)
         )
     })
+}
+
+fn wait_for_cleanup_job(home: &Path, cwd: &Path, job_id: &str, path: &str) -> Value {
+    let mut latest = Value::Null;
+    for _ in 0..100 {
+        latest = run_cleanup_with_path(home, cwd, &["status", job_id], path);
+        if latest
+            .pointer("/data/status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| matches!(status, "succeeded" | "failed" | "cancelled"))
+        {
+            return latest;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("cleanup job did not finish: {latest:#}");
 }
 
 #[cfg(unix)]
