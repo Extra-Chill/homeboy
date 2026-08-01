@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use serde::Deserialize;
@@ -158,9 +158,7 @@ const KNOWN_RIG_TOP_LEVEL_FIELDS: &[&str] = &[
 /// check that reads the authored file only inspects whatever the leaf spec
 /// happened to override.
 struct MaterializedRig {
-    /// Path to the authoring `rig.json`, used for failure attribution.
-    path: PathBuf,
-    /// `rig.json` path relative to the lint root.
+    /// `rig.json` path relative to the lint root, used for failure attribution.
     rel: String,
     /// Package root the rig belongs to, used to resolve `${package.root}`.
     package_root: PathBuf,
@@ -230,7 +228,6 @@ fn collect_materialized_rigs(root: &Path, files: &[PathBuf]) -> Result<Materiali
         rigs.push(MaterializedRig {
             rel: display_relative(root, file),
             package_root: package_root_for_rig(root, file),
-            path: file.clone(),
             value,
         });
     }
@@ -1136,7 +1133,219 @@ fn workload_reference_failures(
             &rig.package_root,
         ));
     }
+    failures.extend(workload_import_failures(root, rigs));
     Ok(failures)
+}
+
+/// Module specifier keywords this scan understands. Deliberately the whole list:
+/// this is a static relative-specifier check, not a module resolver.
+const IMPORT_KEYWORDS: &[&str] = &["from", "import", "require"];
+
+/// Relative `import` / `require` specifiers in declared workload files must
+/// resolve to a file that exists.
+///
+/// A workload is only ever loaded by its runner, so a wrong relative depth is
+/// invisible to every other check in this lint: the JSON is valid, the path in
+/// the rig spec exists, and the profile reference resolves. In
+/// chubes4/homeboy-rigs, four Gutenberg `.trace.mjs` workloads import
+/// `'../shared/wp-codebox/recipe.mjs'` where the correct depth is
+/// `'../../../shared/...'`, and CI lints that package green.
+///
+/// Scope is intentionally narrow. Only static relative specifiers (`./`, `../`)
+/// are resolved. Bare specifiers are skipped entirely — no `node_modules`
+/// lookup, no `package.json` `exports` map, no conditional exports, no import
+/// maps. The walk follows resolvable relative imports transitively so a broken
+/// specifier in a shared helper is reported too.
+fn workload_import_failures(root: &Path, rigs: &[MaterializedRig]) -> Vec<String> {
+    let mut failures = Vec::new();
+    let mut visited: BTreeSet<PathBuf> = BTreeSet::new();
+
+    for rig in rigs {
+        let mut queue: Vec<PathBuf> = Vec::new();
+        for key in ["bench_workloads", "fuzz_workloads", "trace_workloads"] {
+            for declaration in declared_workload_paths(&rig.value, key) {
+                if let Some(resolved) = resolve_package_path(&declaration, &rig.package_root) {
+                    queue.push(resolved);
+                }
+            }
+        }
+
+        while let Some(file) = queue.pop() {
+            if !is_module_source(&file) || !file.is_file() {
+                continue;
+            }
+            let canonical = file.canonicalize().unwrap_or_else(|_| file.clone());
+            if !visited.insert(canonical) {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&file) else {
+                continue;
+            };
+            let Some(directory) = file.parent().map(Path::to_path_buf) else {
+                continue;
+            };
+            for (line, specifier) in relative_import_specifiers(&content) {
+                match resolve_relative_specifier(&directory, &specifier) {
+                    Some(target) => queue.push(target),
+                    None => failures.push(format!(
+                        "{}:{line}: unresolved relative import '{specifier}' (nothing at {})",
+                        display_relative(root, &file),
+                        display_relative(root, &lexically_normalized(&directory.join(&specifier)))
+                    )),
+                }
+            }
+        }
+    }
+
+    failures
+}
+
+fn declared_workload_paths(rig: &serde_json::Value, key: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let Some(workloads) = rig.get(key).and_then(|value| value.as_object()) else {
+        return paths;
+    };
+    for declarations in workloads.values().filter_map(|value| value.as_array()) {
+        for declaration in declarations {
+            let path = declaration
+                .as_str()
+                .or_else(|| declaration.get("path").and_then(|value| value.as_str()));
+            if let Some(path) = path {
+                paths.push(path.to_string());
+            }
+        }
+    }
+    paths
+}
+
+fn is_module_source(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(OsStr::to_str),
+        Some("mjs" | "js" | "cjs")
+    )
+}
+
+fn resolve_relative_specifier(directory: &Path, specifier: &str) -> Option<PathBuf> {
+    let base = directory.join(specifier);
+    if base.is_file() {
+        return Some(base);
+    }
+    for suffix in [".mjs", ".js", ".cjs", ".json"] {
+        let candidate = PathBuf::from(format!("{}{suffix}", base.to_string_lossy()));
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    for index in ["index.mjs", "index.js", "index.cjs"] {
+        let candidate = base.join(index);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Collapse `.` and `..` segments without touching the filesystem, so a failure
+/// message names the path the author meant rather than `bench/../shared/...`.
+fn lexically_normalized(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push("..");
+                }
+            }
+            other => normalized.push(other),
+        }
+    }
+    normalized
+}
+
+fn relative_import_specifiers(content: &str) -> Vec<(usize, String)> {
+    let mut specifiers = Vec::new();
+    for (offset, line) in content.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
+            continue;
+        }
+        for specifier in line_module_specifiers(line) {
+            if specifier.starts_with("./") || specifier.starts_with("../") {
+                specifiers.push((offset + 1, specifier));
+            }
+        }
+    }
+    specifiers
+}
+
+/// Collect quoted module specifiers introduced by an import keyword on one line.
+///
+/// Line-scoped on purpose: a multi-line `import { ... } from './x.mjs'` still
+/// puts the specifier on the same line as its `from`, and staying line-scoped
+/// keeps this a scan rather than a parser.
+fn line_module_specifiers(line: &str) -> Vec<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut specifiers = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let Some(keyword_length) = import_keyword_at(&chars, index) else {
+            index += 1;
+            continue;
+        };
+        let mut cursor = index + keyword_length;
+        while cursor < chars.len() && (chars[cursor].is_whitespace() || chars[cursor] == '(') {
+            cursor += 1;
+        }
+        let quote = chars.get(cursor).copied();
+        if !matches!(quote, Some('\'' | '"' | '`')) {
+            index += keyword_length;
+            continue;
+        }
+        let quote = quote.expect("quote character");
+        cursor += 1;
+        let mut specifier = String::new();
+        while cursor < chars.len() && chars[cursor] != quote {
+            specifier.push(chars[cursor]);
+            cursor += 1;
+        }
+        specifiers.push(specifier);
+        index = cursor.saturating_add(1);
+    }
+    specifiers
+}
+
+/// Match an import keyword at `index` on identifier boundaries, so `fromage`
+/// and `importer` are not mistaken for `from` and `import`.
+fn import_keyword_at(chars: &[char], index: usize) -> Option<usize> {
+    if index > 0 && is_identifier_char(chars[index - 1]) {
+        return None;
+    }
+    for keyword in IMPORT_KEYWORDS {
+        let length = keyword.chars().count();
+        if chars.len() < index + length {
+            continue;
+        }
+        if !chars[index..index + length]
+            .iter()
+            .copied()
+            .eq(keyword.chars())
+        {
+            continue;
+        }
+        if chars
+            .get(index + length)
+            .is_some_and(|next| is_identifier_char(*next))
+        {
+            continue;
+        }
+        return Some(length);
+    }
+    None
+}
+
+fn is_identifier_char(value: char) -> bool {
+    value.is_alphanumeric() || value == '_' || value == '$'
 }
 
 fn collect_fuzz_workloads(
@@ -1972,6 +2181,220 @@ mod tests {
             .as_ref()
             .expect("contract error")
             .contains("`HOMEBOY_RIG_COMPONENT_PATH__RENAMED__<COMPONENT>`"));
+    }
+
+    fn reference_step(outcome: &PipelineOutcome) -> &PipelineStepOutcome {
+        outcome
+            .steps
+            .iter()
+            .find(|step| step.label.contains("profiles reference declared workloads"))
+            .expect("reference step")
+    }
+
+    #[test]
+    fn relative_import_specifiers_collects_only_static_relative_module_specifiers() {
+        let content = concat!(
+            "// import { fake } from '../commented-out.mjs';\n",
+            "import { recipe } from '../shared/recipe.mjs';\n",
+            "import defaults from \"../../lib/thing.js\";\n",
+            "import './side-effect.mjs';\n",
+            "import fs from 'node:fs';\n",
+            "import { a } from 'some-package';\n",
+            "const helper = require('./helper.cjs');\n",
+            "const mod = await import('./dynamic.mjs');\n",
+            "export * from '../star.mjs';\n",
+            "const s = fromage('./not-an-import');\n",
+            "const t = importer('./also-not');\n",
+            "import {\n  many,\n  names\n} from '../multi/line.mjs';\n",
+        );
+
+        let specifiers = relative_import_specifiers(content);
+
+        assert_eq!(
+            specifiers,
+            vec![
+                (2, "../shared/recipe.mjs".to_string()),
+                (3, "../../lib/thing.js".to_string()),
+                (4, "./side-effect.mjs".to_string()),
+                (7, "./helper.cjs".to_string()),
+                (8, "./dynamic.mjs".to_string()),
+                (9, "../star.mjs".to_string()),
+                (15, "../multi/line.mjs".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn lexical_normalization_collapses_parent_segments() {
+        assert_eq!(
+            lexically_normalized(Path::new("pkg/bench/../shared/recipe.mjs")),
+            PathBuf::from("pkg/shared/recipe.mjs")
+        );
+    }
+
+    #[test]
+    fn package_lint_reports_unresolvable_workload_imports() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("imports");
+        let bench_dir = temp.path().join("bench");
+        let shared_dir = temp.path().join("shared").join("wp-codebox");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::create_dir_all(&bench_dir).expect("bench dir");
+        fs::create_dir_all(&shared_dir).expect("shared dir");
+        fs::write(shared_dir.join("recipe.mjs"), "export const recipe = 1;\n")
+            .expect("write shared helper");
+        // The correct depth from `bench/` is `../shared/wp-codebox/recipe.mjs`;
+        // this workload is one level too shallow, exactly like the four Gutenberg
+        // trace workloads in chubes4/homeboy-rigs.
+        fs::write(
+            bench_dir.join("pattern-preview-assets.trace.mjs"),
+            "import { recipe } from './shared/wp-codebox/recipe.mjs';\nexport default recipe;\n",
+        )
+        .expect("write workload");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "imports",
+                "trace_workloads": {
+                    "nodejs": [
+                        { "path": "${package.root}/bench/pattern-preview-assets.trace.mjs" }
+                    ]
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = reference_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        let error = step.error.as_ref().expect("reference error");
+        assert!(
+            error.contains(
+                "bench/pattern-preview-assets.trace.mjs:1: unresolved relative import './shared/wp-codebox/recipe.mjs'"
+            ),
+            "{error}"
+        );
+        assert!(
+            error.contains("bench/shared/wp-codebox/recipe.mjs"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn package_lint_accepts_resolvable_workload_imports() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("imports");
+        let bench_dir = temp.path().join("bench");
+        let shared_dir = temp.path().join("shared").join("wp-codebox");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::create_dir_all(&bench_dir).expect("bench dir");
+        fs::create_dir_all(&shared_dir).expect("shared dir");
+        fs::write(shared_dir.join("recipe.mjs"), "export const recipe = 1;\n")
+            .expect("write shared helper");
+        fs::write(
+            bench_dir.join("workload.bench.mjs"),
+            concat!(
+                "import { recipe } from '../shared/wp-codebox/recipe.mjs';\n",
+                "import fs from 'node:fs';\n",
+                "import { chromium } from 'playwright';\n",
+                "export default recipe && fs && chromium;\n",
+            ),
+        )
+        .expect("write workload");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "imports",
+                "bench_workloads": {
+                    "nodejs": [{ "path": "${package.root}/bench/workload.bench.mjs" }]
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = reference_step(&outcome);
+
+        assert_eq!(step.status, "pass", "{:?}", step.error);
+    }
+
+    #[test]
+    fn package_lint_follows_workload_imports_transitively() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("imports");
+        let bench_dir = temp.path().join("bench");
+        let shared_dir = temp.path().join("shared");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::create_dir_all(&bench_dir).expect("bench dir");
+        fs::create_dir_all(&shared_dir).expect("shared dir");
+        fs::write(
+            bench_dir.join("workload.bench.mjs"),
+            "import { helper } from '../shared/helper.mjs';\nexport default helper;\n",
+        )
+        .expect("write workload");
+        fs::write(
+            shared_dir.join("helper.mjs"),
+            "import { missing } from './does-not-exist.mjs';\nexport const helper = missing;\n",
+        )
+        .expect("write helper");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "imports",
+                "bench_workloads": {
+                    "nodejs": [{ "path": "${package.root}/bench/workload.bench.mjs" }]
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = reference_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        assert!(step
+            .error
+            .as_ref()
+            .expect("reference error")
+            .contains("shared/helper.mjs:1: unresolved relative import './does-not-exist.mjs'"));
+    }
+
+    #[test]
+    fn package_lint_resolves_extensionless_and_directory_index_imports() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("imports");
+        let bench_dir = temp.path().join("bench");
+        let lib_dir = temp.path().join("lib");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::create_dir_all(&bench_dir).expect("bench dir");
+        fs::create_dir_all(lib_dir.join("pack")).expect("lib dirs");
+        fs::write(lib_dir.join("thing.js"), "export const thing = 1;\n").expect("write thing");
+        fs::write(
+            lib_dir.join("pack").join("index.mjs"),
+            "export const p = 1;\n",
+        )
+        .expect("write index");
+        fs::write(
+            bench_dir.join("workload.bench.mjs"),
+            "import { thing } from '../lib/thing';\nimport { p } from '../lib/pack';\nexport default thing && p;\n",
+        )
+        .expect("write workload");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "imports",
+                "bench_workloads": {
+                    "nodejs": [{ "path": "${package.root}/bench/workload.bench.mjs" }]
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = reference_step(&outcome);
+
+        assert_eq!(step.status, "pass", "{:?}", step.error);
     }
 
     #[test]
