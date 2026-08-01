@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.327.3] - 2026-08-01
+
+### Fixed
+- retire the core-boundary policy's self-inflicted noise, see interpreters, derive the policy section
+- use GitHub App client IDs
+- document the two-layer defaults contract, fail safe on a malformed override
+
 ## [0.327.2] - 2026-08-01
 
 ### Fixed
