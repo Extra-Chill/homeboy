@@ -58,7 +58,7 @@ fn contradictory_cook_arguments_survive_controller_transport_context() {
     let cook = |args: &[&str]| {
         let context = HermeticTestContext::new();
         context
-            .command(TestBinary::HomeboyFixture)
+            .controller_runtime_command(TestBinary::HomeboyFixture)
             .env(
                 homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV,
                 r#"{"runner_id":"homeboy-lab"}"#,

@@ -20,6 +20,8 @@ pub const CONTROLLER_RUNTIME_METADATA_KEY: &str = "controller_runtime";
 pub(crate) const TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV: &str =
     "HOMEBOY_TEST_CONTROLLER_RUNTIME_EXECUTABLE";
 #[cfg(any(test, feature = "test-support"))]
+pub(crate) const TEST_CONTROLLER_RUNTIME_STORE_ENV: &str = "HOMEBOY_TEST_CONTROLLER_RUNTIME_STORE";
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) const TEST_CONTROLLER_RUNTIME_IDENTITY_ENV: &str =
     "HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY";
 
@@ -2303,7 +2305,7 @@ fn is_executable(metadata: &fs::Metadata) -> bool {
 }
 
 fn pinned_path(identity: &str, digest: &str) -> Result<PathBuf> {
-    Ok(paths::homeboy_data()?
+    Ok(controller_runtime_store_root()?
         .join("controller-runtimes")
         .join(format!(
             "{}-{}",
@@ -2314,7 +2316,7 @@ fn pinned_path(identity: &str, digest: &str) -> Result<PathBuf> {
 }
 
 fn recovered_pinned_path(identity: &str, digest: &str) -> Result<PathBuf> {
-    Ok(paths::homeboy_data()?
+    Ok(controller_runtime_store_root()?
         .join("controller-runtimes")
         .join(format!(
             "{}-{}",
@@ -2323,6 +2325,15 @@ fn recovered_pinned_path(identity: &str, digest: &str) -> Result<PathBuf> {
         ))
         .join(format!("recovery-{}", uuid::Uuid::new_v4()))
         .join("homeboy"))
+}
+
+fn controller_runtime_store_root() -> Result<PathBuf> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(path) = std::env::var_os(TEST_CONTROLLER_RUNTIME_STORE_ENV) {
+        return Ok(PathBuf::from(path));
+    }
+
+    paths::homeboy_data()
 }
 
 fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Result<()> {
@@ -3444,7 +3455,11 @@ mod tests {
 
             let temporary = tempfile::tempdir().expect("temporary executable directory");
             let source = temporary.path().join("homeboy");
-            fs::write(&source, b"controller bytes").expect("write controller");
+            fs::write(
+                &source,
+                "#!/bin/sh\nif [ \"$1\" = self ] && [ \"$2\" = identity ]; then\n  printf '%s\\n' '{\"data\":{\"display\":\"homeboy 0.0.0+fixture\"}}'\n  exit 0\nfi\nexit 1\n",
+            )
+            .expect("write controller");
             fs::set_permissions(&source, fs::Permissions::from_mode(0o755))
                 .expect("make controller executable");
 
@@ -3949,27 +3964,16 @@ mod tests {
 
             let (a_enqueued, a_enqueued_result) = std::sync::mpsc::channel();
             let (a_release, a_release_result) = std::sync::mpsc::channel();
-            let seal_a =
-                std::thread::spawn(move || match pin_current_queued("seal-a", || Ok(false)) {
-                    Ok(_runtime) => {
-                        let _ = a_enqueued.send(Ok(()));
-                        let _ = a_release_result.recv();
-                    }
-                    Err(error) => {
-                        let _ = a_enqueued.send(Err(error.message));
-                    }
-                });
-
-            let (b_enqueued, b_enqueued_result) = std::sync::mpsc::channel();
-            let b_handle =
-                std::thread::spawn(move || match pin_current_queued("seal-b", || Ok(false)) {
-                    Ok(_runtime) => {
-                        let _ = b_enqueued.send(Ok(()));
-                    }
-                    Err(error) => {
-                        let _ = b_enqueued.send(Err(error.message));
-                    }
-                });
+            let seal_a = std::thread::spawn(move || match admit_current_for("seal-a") {
+                Ok(admission) => {
+                    let _ = a_enqueued.send(Ok(()));
+                    let _ = a_release_result.recv();
+                    drop(admission);
+                }
+                Err(error) => {
+                    let _ = a_enqueued.send(Err(error.message));
+                }
+            });
 
             let waiting_a = (0..40)
                 .map(|_| {
@@ -3984,6 +3988,21 @@ mod tests {
                 .find_map(|status| status)
                 .expect("seal-a queues behind existing owner");
             assert_eq!(waiting_a["position"], 2);
+
+            // Enqueue B only after A is durably visible, so this asserts FIFO
+            // order rather than scheduler order between two spawned threads.
+            let (b_enqueued, b_enqueued_result) = std::sync::mpsc::channel();
+            let (b_release, b_release_result) = std::sync::mpsc::channel();
+            let b_handle = std::thread::spawn(move || match admit_current_for("seal-b") {
+                Ok(admission) => {
+                    let _ = b_enqueued.send(Ok(()));
+                    let _ = b_release_result.recv();
+                    drop(admission);
+                }
+                Err(error) => {
+                    let _ = b_enqueued.send(Err(error.message));
+                }
+            });
 
             let waiting_b = (0..40)
                 .map(|_| {
@@ -4024,6 +4043,7 @@ mod tests {
                 admission_status("seal-b").expect("seal-b admitted")["state"],
                 "admitted"
             );
+            b_release.send(()).expect("release seal-b");
             b_handle.join().expect("seal-b thread exits");
         });
     }
