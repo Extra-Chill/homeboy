@@ -538,6 +538,63 @@
       ]
     }
   },
+  "audit_rules": {
+    "layer_rules": [
+      {
+        "name": "contracts-own-no-process-execution",
+        "forbid": {
+          "glob": "crates/contracts/**",
+          "patterns": [
+            "std::process::Command",
+            "std::process::exit",
+            "reqwest::",
+            "tokio::spawn"
+          ]
+        }
+      },
+      {
+        "name": "engine-primitives-own-no-domain-crates",
+        "forbid": {
+          "glob": "crates/homeboy-engine-primitives/src/**",
+          "patterns": [
+            "homeboy_core::",
+            "homeboy_cli::",
+            "homeboy_agents::",
+            "homeboy_rig::"
+          ]
+        }
+      },
+      {
+        "name": "cli-surface-owns-no-process-execution",
+        "forbid": {
+          "glob": "crates/homeboy-cli/src/cli_surface/**",
+          "patterns": [
+            "std::process::Command",
+            "std::process::exit"
+          ]
+        }
+      },
+      {
+        "name": "command-contract-owns-no-process-execution",
+        "forbid": {
+          "glob": "crates/homeboy-cli/src/command_contract/**",
+          "patterns": [
+            "std::process::Command",
+            "std::process::exit"
+          ]
+        }
+      },
+      {
+        "name": "rig-owns-no-service-implementation",
+        "forbid": {
+          "glob": "crates/homeboy-rig/src/**",
+          "patterns": [
+            "http.server"
+          ]
+        }
+      }
+    ]
+  },
   "auto_cleanup": false,
   "autofix_verify": {
     "args": [
@@ -551,7 +608,7 @@
     "audit": {
       "context_id": "homeboy",
       "created_at": "2026-07-27T04:11:26Z",
-      "item_count": 1515,
+      "item_count": 1517,
       "known_fingerprints": [
         "Commands::crates/homeboy-cli/src/commands/agent_task_dispatch.rs::MissingMethod",
         "Src::crates/contracts/homeboy-audit-contract/src/finding.rs::MissingMethod",
@@ -1624,6 +1681,8 @@
         "intra-method-duplication::crates/homeboy-tunnel/src/preview_ingress/http.rs::IntraMethodDuplicate",
         "intra-method-duplication::crates/homeboy-tunnel/src/preview_ingress/serve.rs::IntraMethodDuplicate",
         "intra-method-duplication::tests/core/daemon/control_test.rs::IntraMethodDuplicate",
+        "layer_ownership::crates/homeboy-rig/src/service.rs::LayerOwnershipViolation",
+        "layer_ownership::crates/homeboy-rig/src/spec.rs::LayerOwnershipViolation",
         "near-duplication::crates/contracts/homeboy-lifecycle-contract/src/artifact_contract.rs::NearDuplicate",
         "near-duplication::crates/homeboy-agents/src/agent_task_controller_service/artifacts.rs::NearDuplicate",
         "near-duplication::crates/homeboy-agents/src/agent_task_controller_service/field_access.rs::NearDuplicate",
