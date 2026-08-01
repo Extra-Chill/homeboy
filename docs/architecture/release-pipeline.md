@@ -33,6 +33,7 @@ Common executable step kinds include:
 - `preflight.working_tree`
 - `preflight.remote_sync`
 - `preflight.bump_policy`
+- `preflight.test_secret_env`
 - `preflight.lint`
 - `preflight.test`
 - `preflight.changelog_bootstrap`
@@ -51,6 +52,15 @@ Common executable step kinds include:
 
 Some preflight and changelog planning steps are plan-only. They appear in the
 release plan for visibility but are not executed as mutating steps.
+
+`preflight.test_secret_env` resolves the secret identities the component's test
+extension declares — static `test.secret_env` plus any settings-conditional
+`test.secret_env_projections` — against the merged effective settings. It runs
+before `preflight.dependencies` so an unresolvable runner/service credential is
+reported as the configuration failure it is, rather than as a test-gate failure
+after hydration has already run. Only identity names are recorded as step
+evidence; resolved values reach the test child and nothing else. The step is
+disabled whenever the test gate itself is skipped.
 
 ## Extension Boundary
 

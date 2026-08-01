@@ -269,6 +269,33 @@ fn lint_workflow_failure(
     error
 }
 
+/// Validate that every secret identity the component's test capability declares
+/// can be resolved from an authorized controller source.
+///
+/// The test runner resolves these immediately before spawning the extension
+/// child, so an unresolvable declaration surfaces as a test-gate failure after
+/// dependency hydration has already run — and reads like a component test
+/// failure rather than the runner/service misconfiguration it is. Running the
+/// same resolver ahead of hydration fails closed at the point of diagnosis
+/// instead. (#10402)
+///
+/// Returns the declared identity names, which are safe to report. Resolved
+/// values are discarded here; only the test child ever receives them.
+pub(super) fn validate_test_secret_env(component: &Component) -> Result<Vec<String>> {
+    let names = extension::test::declared_secret_env_names(component)?;
+    if names.is_empty() {
+        return Ok(names);
+    }
+
+    homeboy_core::secret_env::resolve_local_required(
+        names.clone(),
+        "test.secret_env",
+        "extension child",
+    )?;
+
+    Ok(names)
+}
+
 /// Run release tests via the component's extension.
 ///
 /// Returns whether a test command was available and executed. Missing test
@@ -470,7 +497,7 @@ fn is_runner_infrastructure_failure(output: &extension::RunnerOutput) -> bool {
 mod tests {
     use super::{
         code_quality_failure_message, is_runner_infrastructure_failure, validate_lint_quality,
-        validate_test_quality, LintQualityOutcome,
+        validate_test_quality, validate_test_secret_env, LintQualityOutcome,
     };
     use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
     use homeboy_core::error::Error;
@@ -932,6 +959,104 @@ mod tests {
             assert!(error.message.contains("PROJECTED_RELEASE_SECRET"));
             assert!(!error.to_string().contains("available-static-secret"));
             assert!(!marker.exists());
+        });
+    }
+
+    /// The declared-test-secret gate must reach the same verdict the test
+    /// runner would, without hydrating dependencies or spawning the child, and
+    /// must report identity names rather than a test failure. (#10402)
+    #[test]
+    fn validate_test_secret_env_rejects_missing_conditional_identity_without_spawning() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = test_env_guard();
+            let source = tempfile::tempdir().expect("source dir");
+            let marker = source.path().join("preflight-child-ran");
+            let component = conditional_extension_test_component(
+                home.path(),
+                source.path(),
+                &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+            );
+            std::env::set_var("DECLARED_RELEASE_SECRET", "available-static-secret");
+            std::env::remove_var("PROJECTED_RELEASE_SECRET");
+
+            let error = validate_test_secret_env(&component)
+                .expect_err("missing projected identity blocks the release before hydration");
+            std::env::remove_var("DECLARED_RELEASE_SECRET");
+
+            assert_eq!(error.details["field"], "test.secret_env");
+            assert!(error.message.contains("PROJECTED_RELEASE_SECRET"));
+            assert!(
+                !error.to_string().contains("available-static-secret"),
+                "resolved values must never reach the diagnostic"
+            );
+            assert!(
+                !marker.exists(),
+                "the gate must not spawn the extension test child"
+            );
+        });
+    }
+
+    #[test]
+    fn validate_test_secret_env_reports_resolvable_identities_by_name() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = test_env_guard();
+            let source = tempfile::tempdir().expect("source dir");
+            let marker = source.path().join("preflight-child-ran");
+            let component = conditional_extension_test_component(
+                home.path(),
+                source.path(),
+                &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+            );
+            std::env::set_var("DECLARED_RELEASE_SECRET", "available-static-secret");
+            std::env::set_var("PROJECTED_RELEASE_SECRET", "available-projected-secret");
+
+            let names =
+                validate_test_secret_env(&component).expect("declared identities all resolve");
+            std::env::remove_var("DECLARED_RELEASE_SECRET");
+            std::env::remove_var("PROJECTED_RELEASE_SECRET");
+
+            assert_eq!(
+                names,
+                vec!["DECLARED_RELEASE_SECRET", "PROJECTED_RELEASE_SECRET"]
+            );
+            assert!(!marker.exists());
+        });
+    }
+
+    /// A component with no declared test secrets must stay releasable, and a
+    /// non-matching projection must not manufacture a requirement.
+    #[test]
+    fn validate_test_secret_env_is_inert_without_matching_declarations() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = test_env_guard();
+            let source = tempfile::tempdir().expect("source dir");
+            let mut component = conditional_extension_test_component(
+                home.path(),
+                source.path(),
+                "#!/bin/sh\nexit 0\n",
+            );
+            component
+                .extensions
+                .as_mut()
+                .and_then(|extensions| extensions.get_mut("release-test-fixture"))
+                .expect("release extension")
+                .settings
+                .insert("service".to_string(), serde_json::json!({"mode":"local"}));
+            std::env::set_var("DECLARED_RELEASE_SECRET", "available-static-secret");
+            std::env::remove_var("PROJECTED_RELEASE_SECRET");
+
+            assert_eq!(
+                validate_test_secret_env(&component)
+                    .expect("non-matching projection requires no conditional identity"),
+                vec!["DECLARED_RELEASE_SECRET"]
+            );
+            std::env::remove_var("DECLARED_RELEASE_SECRET");
+
+            assert!(
+                validate_test_secret_env(&component_without_quality_runners())
+                    .expect("a component without a test extension declares nothing")
+                    .is_empty()
+            );
         });
     }
 

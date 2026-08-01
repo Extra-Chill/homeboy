@@ -1489,6 +1489,41 @@ mod tests {
         });
     }
 
+    /// The names callers can resolve ahead of a run must match what the runner
+    /// itself would require, so a pre-run gate cannot disagree with the gate it
+    /// is meant to front. (#10402)
+    #[test]
+    fn declared_secret_env_names_match_the_runner_requirement_without_spawning() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = conditional_secret_env_guard();
+            let source = tempfile::tempdir().expect("source dir");
+            let marker = source.path().join("declared-names-child-ran");
+
+            let matching = conditional_test_component(home.path(), source.path(), "remote");
+            std::fs::write(
+                home.path()
+                    .join(".config/homeboy/extensions/conditional-secret-fixture/test.sh"),
+                format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+            )
+            .expect("marker script");
+
+            assert_eq!(
+                crate::test::declared_secret_env_names(&matching).expect("matching declaration"),
+                vec!["FIRST_PROJECTED_SECRET", "SECOND_PROJECTED_SECRET"]
+            );
+
+            let local = conditional_test_component(home.path(), source.path(), "local");
+            assert!(crate::test::declared_secret_env_names(&local)
+                .expect("non-matching declaration")
+                .is_empty());
+
+            assert!(
+                !marker.exists(),
+                "resolving declared names must not spawn the test child"
+            );
+        });
+    }
+
     #[test]
     fn review_test_missing_projected_secret_fails_before_spawn() {
         homeboy_core::test_support::with_isolated_home(|home| {

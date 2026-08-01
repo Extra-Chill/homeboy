@@ -30,6 +30,7 @@ fn test_build_preflight_steps() {
             "preflight.recovery_artifacts",
             "preflight.remote_sync",
             "preflight.bump_policy",
+            "preflight.test_secret_env",
             "preflight.dependencies",
             "preflight.audit",
             "preflight.lint",
@@ -226,12 +227,86 @@ fn release_plan_records_explicit_quality_preflights() {
         Some("no-release-audit-policy")
     );
     assert_eq!(dependencies.status, PlanStepStatus::Ready);
-    assert_eq!(dependencies.needs, vec!["preflight.bump_policy"]);
+    assert_eq!(dependencies.needs, vec!["preflight.test_secret_env"]);
     assert_eq!(lint.status, PlanStepStatus::Ready);
     assert_eq!(lint.needs, vec!["preflight.dependencies"]);
     assert_eq!(test.status, PlanStepStatus::Ready);
     assert_eq!(test.needs, vec!["preflight.lint"]);
     assert_eq!(changelog_bootstrap.needs, vec!["preflight.test"]);
+}
+
+/// The declared-test-secret gate resolves the identities the test child needs
+/// before hydration runs, and is disabled whenever the test gate itself is
+/// skipped. (#10402)
+#[test]
+fn release_plan_gates_declared_test_secrets_before_dependency_hydration() {
+    let options = ReleaseOptions {
+        bump_type: "patch".to_string(),
+        ..Default::default()
+    };
+
+    let steps = build_preflight_steps(&options, None, &[]);
+    let secret_env = steps
+        .iter()
+        .position(|step| step.id == "preflight.test_secret_env")
+        .expect("declared test secret step");
+    let dependencies = steps
+        .iter()
+        .position(|step| step.id == "preflight.dependencies")
+        .expect("dependencies step");
+
+    assert!(secret_env < dependencies);
+    assert_eq!(steps[secret_env].status, PlanStepStatus::Ready);
+    assert_eq!(steps[secret_env].needs, vec!["preflight.bump_policy"]);
+    assert_eq!(
+        steps[secret_env].label.as_deref(),
+        Some("Validate declared test secret environment")
+    );
+}
+
+#[test]
+fn release_plan_disables_declared_test_secret_gate_when_test_gate_is_skipped() {
+    for (options, reason) in [
+        (
+            ReleaseOptions {
+                bump_type: "patch".to_string(),
+                skip_checks: true,
+                ..Default::default()
+            },
+            "--skip-checks",
+        ),
+        (
+            ReleaseOptions {
+                bump_type: "patch".to_string(),
+                skip_checks_granular: vec!["Tests".to_string()],
+                ..Default::default()
+            },
+            "--skip-checks=<check>",
+        ),
+    ] {
+        let steps = build_preflight_steps(&options, None, &[]);
+        let secret_env = steps
+            .iter()
+            .find(|step| step.id == "preflight.test_secret_env")
+            .expect("declared test secret step");
+        let test = steps
+            .iter()
+            .find(|step| step.id == "preflight.test")
+            .expect("test step");
+
+        assert_eq!(secret_env.status, PlanStepStatus::Disabled);
+        assert_eq!(
+            secret_env
+                .inputs
+                .get("reason")
+                .and_then(|value| value.as_str()),
+            Some(reason)
+        );
+        // The gate exists only to front `preflight.test`; it must never be
+        // enabled while the gate it fronts is disabled.
+        assert_eq!(test.status, secret_env.status);
+        assert_eq!(test.inputs.get("reason"), secret_env.inputs.get("reason"));
+    }
 }
 
 #[test]
