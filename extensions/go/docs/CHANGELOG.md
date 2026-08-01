@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.8.3] - 2026-08-01
+
+### Changed
+- gate pull requests on every extension's declared self_checks
+
 ## [1.8.2] - 2026-07-29
 
 ### Fixed
