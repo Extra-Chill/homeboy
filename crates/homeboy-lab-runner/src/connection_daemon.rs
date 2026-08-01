@@ -755,6 +755,38 @@ mod tests {
         assert_eq!(daemon_pid_from_body(&body), Some(7331));
     }
 
+    #[test]
+    fn controller_frame_preserves_dead_lease_adoption_eligibility() {
+        let mut conflict = report("lease-dead", 7331).freshness;
+        conflict.stale_reason_code = Some(DaemonStaleReasonCode::PidDead);
+        conflict.recovery_evidence = Some(homeboy_core::daemon::DaemonRecoveryEvidence::ProvenDead);
+        conflict.active_jobs = 0;
+        conflict.adoption_command = None;
+        conflict.repair_plan.clear();
+
+        let conflict = into_controller_frame(conflict, "remote-lab");
+        assert!(conflict.adoption_command.is_none());
+        assert!(conflict
+            .repair_plan
+            .iter()
+            .all(|step| step.code != daemon_repair::RUNNER_ADOPT_ORPHAN_LEASE));
+
+        let mut eligible = report("lease-dead", 7331).freshness;
+        eligible.stale_reason_code = Some(DaemonStaleReasonCode::PidDead);
+        eligible.recovery_evidence = Some(homeboy_core::daemon::DaemonRecoveryEvidence::ProvenDead);
+        eligible.active_jobs = 0;
+        eligible.adoption_command = Some(
+            "homeboy daemon adopt-orphan --lease-id lease-dead --confirm-pid-dead".to_string(),
+        );
+
+        let eligible = into_controller_frame(eligible, "remote-lab");
+        assert_eq!(
+            eligible.adoption_command.as_deref(),
+            Some("homeboy runner connect remote-lab --adopt-orphan-lease lease-dead --confirm-pid-dead")
+        );
+        assert_eq!(eligible.repair_plan.len(), 1);
+    }
+
     /// #8459: a freshly started daemon can accept the TCP connection before its
     /// HTTP handler answers `/health`, so the first probe fails with a
     /// transport error. The probe must retry within its settle budget and

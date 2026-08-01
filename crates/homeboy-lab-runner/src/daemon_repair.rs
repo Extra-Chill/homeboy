@@ -88,7 +88,13 @@ pub(crate) fn controller_frame_plan(
     if report.fresh && report.stale_reason_code.is_none() {
         return Vec::new();
     }
-    if report.stale_reason_code == Some(DaemonStaleReasonCode::PidDead) {
+    // Adoption eligibility is authored by the daemon after its process and
+    // candidate checks. `PidDead` alone is insufficient once the report has
+    // crossed the runner boundary: a conflicting candidate deliberately clears
+    // this command and must not have it reconstructed here.
+    if report.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
+        && report.adoption_command.is_some()
+    {
         if let Some(lease_id) = report.lease_id.as_deref().filter(|_| report.pid.is_some()) {
             return vec![step(
                 RUNNER_ADOPT_ORPHAN_LEASE,
@@ -194,13 +200,21 @@ mod tests {
 
     #[test]
     fn a_dead_lease_becomes_an_explicit_runner_side_adoption() {
+        let mut report = report(Some(DaemonStaleReasonCode::PidDead), 1, false);
+        report.adoption_command =
+            Some("homeboy daemon adopt-orphan --lease-id lease-remote".to_string());
         assert_eq!(
-            plan(&report(Some(DaemonStaleReasonCode::PidDead), 1, false)),
+            plan(&report),
             vec![(
                 RUNNER_ADOPT_ORPHAN_LEASE.to_string(),
                 "homeboy runner connect homeboy-lab --adopt-orphan-lease lease-remote --confirm-pid-dead".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn a_dead_lease_with_conflicting_candidates_does_not_rebuild_adoption() {
+        assert!(plan(&report(Some(DaemonStaleReasonCode::PidDead), 0, false)).is_empty());
     }
 
     #[test]

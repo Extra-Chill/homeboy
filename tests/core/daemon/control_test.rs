@@ -415,7 +415,7 @@ fn daemon_process_attribution_proves_explicit_different_state_directory_unrelate
 }
 
 #[test]
-fn daemon_process_attribution_proves_unrelated_and_ignores_unbound_commands() {
+fn daemon_process_attribution_proves_unrelated_and_keeps_unbound_daemon_ambiguous() {
     let home = tempfile::tempdir().expect("home");
     let other_home = tempfile::tempdir().expect("other home");
     let jobs = home.path().join(".config/homeboy/daemon/jobs.json");
@@ -438,7 +438,29 @@ fn daemon_process_attribution_proves_unrelated_and_ignores_unbound_commands() {
             .ownership,
         super::super::DaemonProcessOwnership::Unrelated
     );
-    assert!(super::parse_daemon_process_candidate(&ambiguous, &jobs, Some(&executable)).is_none());
+    assert_eq!(
+        super::parse_daemon_process_candidate(&ambiguous, &jobs, Some(&executable))
+            .expect("unbound daemon candidate")
+            .ownership,
+        super::super::DaemonProcessOwnership::Ambiguous
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn candidate_attribution_reads_command_env_store_identity_from_procfs() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let mut process = Command::new("sh")
+        .args(["-c", "sleep 30"])
+        .env(crate::paths::DAEMON_STATE_DIR_ENV, state_dir.path())
+        .spawn()
+        .expect("process with daemon state environment");
+
+    let store = super::process_durable_store_path(process.id()).expect("procfs store path");
+    process.kill().expect("stop process");
+    process.wait().expect("reap process");
+
+    assert_eq!(store, state_dir.path().join("jobs.json"));
 }
 
 #[test]

@@ -55,6 +55,13 @@ pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonPr
     Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| parse_daemon_process_candidate(line, jobs_path, current_exe.as_deref()))
+        .map(|mut candidate| {
+            if let Some(store) = process_durable_store_path(candidate.pid) {
+                candidate.durable_store_path = Some(store.display().to_string());
+                candidate.ownership = classify_candidate_store(&candidate, jobs_path, &store);
+            }
+            candidate
+        })
         .collect())
 }
 
@@ -239,7 +246,7 @@ fn parse_daemon_process_candidate(
     let pid = fields.next()?.parse().ok()?;
     let executable = fields.next()?.to_string();
     let cmdline = fields.collect::<Vec<_>>().join(" ");
-    if !cmdline.contains("daemon serve") {
+    if !command_has_daemon_serve(&cmdline) {
         return None;
     }
     let bind_endpoint = cmdline
@@ -258,27 +265,73 @@ fn parse_daemon_process_candidate(
     let durable_store_path = state_dir
         .map(|state_dir| Path::new(state_dir).join("jobs.json"))
         .or_else(|| home.map(|home| Path::new(home).join(".config/homeboy/daemon/jobs.json")));
-    // A command-line fragment alone cannot attribute a process to this daemon
-    // store. In particular, shells and test runners can carry `daemon serve` in
-    // their arguments while owning no Homeboy state at all.
-    let durable_store_path = durable_store_path?;
     let executable_matches = current_exe.is_some_and(|current| {
         Path::new(&executable).canonicalize().ok().as_deref() == Some(current)
     });
-    let ownership = match durable_store_path.as_path() {
-        store if store != jobs_path => DaemonProcessOwnership::Unrelated,
-        _ if executable_matches => DaemonProcessOwnership::Owning,
-        _ => DaemonProcessOwnership::Ambiguous,
-    };
-    Some(DaemonProcessCandidate {
+    let mut candidate = DaemonProcessCandidate {
         pid,
         executable: executable.clone(),
         cmdline: normalize_cmdline(&cmdline),
         bind_endpoint,
-        durable_store_path: Some(durable_store_path.display().to_string()),
+        durable_store_path: durable_store_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
         build_identity: executable_matches.then_some("current_executable".to_string()),
-        ownership,
-    })
+        ownership: DaemonProcessOwnership::Ambiguous,
+    };
+    if let Some(store) = durable_store_path {
+        candidate.ownership = classify_candidate_store(&candidate, jobs_path, &store);
+    }
+    Some(candidate)
+}
+
+fn command_has_daemon_serve(cmdline: &str) -> bool {
+    cmdline
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|arguments| arguments == ["daemon", "serve"])
+}
+
+fn classify_candidate_store(
+    candidate: &DaemonProcessCandidate,
+    jobs_path: &Path,
+    store: &Path,
+) -> DaemonProcessOwnership {
+    if store != jobs_path {
+        DaemonProcessOwnership::Unrelated
+    } else if candidate.build_identity.is_some() {
+        DaemonProcessOwnership::Owning
+    } else {
+        DaemonProcessOwnership::Ambiguous
+    }
+}
+
+/// `Command::env` does not become argv. Linux exposes the authoritative
+/// inherited environment via procfs; other platforms retain an ambiguous,
+/// fail-closed candidate when argv lacks a durable-store identity.
+#[cfg(target_os = "linux")]
+fn process_durable_store_path(pid: u32) -> Option<PathBuf> {
+    let environment = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    let assignment = |key: &str| {
+        environment
+            .split(|byte| *byte == 0)
+            .find_map(|entry| entry.strip_prefix(format!("{key}=").as_bytes()))
+            .and_then(|value| std::str::from_utf8(value).ok())
+    };
+    assignment(crate::paths::DAEMON_STATE_DIR_ENV)
+        .filter(|value| !value.is_empty())
+        .map(|value| Path::new(value).join("jobs.json"))
+        .or_else(|| {
+            assignment("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|value| Path::new(value).join(".config/homeboy/daemon/jobs.json"))
+        })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_durable_store_path(_pid: u32) -> Option<PathBuf> {
+    None
 }
 
 fn normalize_cmdline(cmdline: &str) -> String {
