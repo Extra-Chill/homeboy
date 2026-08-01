@@ -221,19 +221,14 @@ struct ExtensionDefaultsFile {
     detector_profile: ExtensionProvidedDetectorProfile,
 }
 
-/// Environment variable naming the external extension-provided defaults JSON
-/// file. Kept split so the literal token never appears verbatim in core source.
-fn extension_defaults_path_env() -> String {
-    ["HOMEBOY", "EXTENSION_DEFAULTS_PATH"].join("_")
-}
-
 /// Load the extension-provided detector-profile literals from the external
 /// defaults file named by `HOMEBOY_EXTENSION_DEFAULTS_PATH`. Returns an empty
 /// profile when the variable is unset, the file is unreadable, or it declares no
 /// `detector_profile` section — exactly the behavior of a generic core with no
 /// ecosystem extension installed.
 pub fn extension_provided_detector_profile() -> ExtensionProvidedDetectorProfile {
-    let Ok(path) = std::env::var(extension_defaults_path_env()) else {
+    let env_var = homeboy_product_identity::PRODUCT_IDENTITY.env_var("EXTENSION_DEFAULTS_PATH");
+    let Ok(path) = std::env::var(env_var) else {
         return ExtensionProvidedDetectorProfile::default();
     };
     let Ok(content) = std::fs::read_to_string(path) else {

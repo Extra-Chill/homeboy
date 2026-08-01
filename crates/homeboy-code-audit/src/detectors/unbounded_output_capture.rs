@@ -122,29 +122,49 @@ fn strip_test_modules(content: &str) -> String {
     stripped
 }
 
-fn has_unbounded_capture_shape(content: &str) -> bool {
-    let captures_stream_chunks = content.contains("extend_from_slice(&buf[..n])")
-        || content.contains("captured.extend_from_slice")
-        || content.contains("read_to_string(&mut")
-        || content.contains("wait_with_output()");
-    if !captures_stream_chunks {
-        return false;
-    }
+/// Number of lines scanned on each side of a capture site when looking for
+/// evidence of a retention bound.
+const CAPTURE_BOUND_WINDOW_LINES: usize = 24;
 
+/// Shapes that accumulate a child process' stdout/stderr into memory.
+const CAPTURE_MARKERS: [&str; 4] = [
+    "extend_from_slice(&buf[..n])",
+    "captured.extend_from_slice",
+    "read_to_string(&mut",
+    "wait_with_output()",
+];
+
+fn has_unbounded_capture_shape(content: &str) -> bool {
     let output_like = content.contains("stdout") || content.contains("stderr");
     if !output_like {
         return false;
     }
 
-    let has_bound = content.contains("limit_bytes")
-        || content.contains("retained_bytes")
-        || content.contains("truncated")
-        || content.contains("BoundedCapture")
-        || content.contains("MAX_OUTPUT")
-        || content.contains("OUTPUT_LIMIT")
-        || content.contains("take(");
+    let lines: Vec<&str> = content.lines().collect();
+    lines.iter().enumerate().any(|(index, line)| {
+        if !CAPTURE_MARKERS.iter().any(|marker| line.contains(marker)) {
+            return false;
+        }
 
-    !has_bound
+        // A retention bound is only evidence for *this* capture when it sits
+        // near the capture site. Matching anywhere in the file lets an
+        // unrelated token elsewhere exempt every capture in the module.
+        let start = index.saturating_sub(CAPTURE_BOUND_WINDOW_LINES);
+        let end = lines.len().min(index + CAPTURE_BOUND_WINDOW_LINES + 1);
+        !has_capture_bound(&lines[start..end].join("\n"))
+    })
+}
+
+fn has_capture_bound(window: &str) -> bool {
+    // `take(` is deliberately absent: `Option::take`, `Iterator::take` and
+    // `ChildStdin::take` are common enough that matching it exempts captures
+    // that have no output bound at all.
+    window.contains("limit_bytes")
+        || window.contains("retained_bytes")
+        || window.contains("truncated")
+        || window.contains("BoundedCapture")
+        || window.contains("MAX_OUTPUT")
+        || window.contains("OUTPUT_LIMIT")
 }
 
 fn has_unbounded_detail_output_shape(content: &str) -> bool {
@@ -239,6 +259,78 @@ mod tests {
                 let stdout = "";
                 let stderr = "";
                 let _ = (&mut captured, stdout, stderr);
+            }
+            "#,
+        );
+
+        assert!(run(&[&file]).is_empty());
+    }
+
+    #[test]
+    fn unrelated_option_take_does_not_exempt_capture() {
+        // Regression: `child.stdin.take()` is an `Option::take`, not an output
+        // bound, but a whole-file `contains("take(")` treated it as one.
+        let file = fp(
+            "src/download.rs",
+            r#"
+            fn run_child(mut child: Child) -> Result<Output, Error> {
+                let mut stdin = child.stdin.take().ok_or_else(|| Error::NoStdin)?;
+                stdin.write_all(b"payload")?;
+                drop(stdin);
+                let output = child.wait_with_output().map_err(|e| Error::Wait(e))?;
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let _ = stderr;
+                Ok(output)
+            }
+            "#,
+        );
+
+        let findings = run(&[&file]);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, AuditFinding::UnboundedOutputCapture);
+    }
+
+    #[test]
+    fn bound_far_from_capture_site_does_not_exempt_it() {
+        let mut content = String::from(
+            r#"
+            struct Bounded { limit_bytes: usize }
+            fn bounded_capture(stdout: &str) -> Bounded {
+                Bounded { limit_bytes: 65536 }
+            }
+            "#,
+        );
+        for index in 0..80 {
+            content.push_str(&format!("            fn filler_{index}() {{}}\n"));
+        }
+        content.push_str(
+            r#"
+            fn unbounded_capture(child: Child) -> Output {
+                child.wait_with_output().expect("wait")
+            }
+            "#,
+        );
+
+        let findings = run(&[&fp("src/capture.rs", &content)]);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, AuditFinding::UnboundedOutputCapture);
+    }
+
+    #[test]
+    fn accepts_capture_with_bound_at_the_capture_site() {
+        let file = fp(
+            "src/capture.rs",
+            r#"
+            fn capture(child: Child) -> String {
+                let limit_bytes = 65536;
+                let output = child.wait_with_output().expect("wait");
+                let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let truncated = stdout.len() > limit_bytes;
+                stdout.truncate(limit_bytes);
+                let _ = truncated;
+                stdout
             }
             "#,
         );

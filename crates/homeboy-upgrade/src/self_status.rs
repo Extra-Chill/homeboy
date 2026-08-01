@@ -289,7 +289,7 @@ fn find_source_checkout(binary: &Path) -> Option<PathBuf> {
         if ancestor.file_name().and_then(|name| name.to_str()) == Some("target") {
             return ancestor.parent().map(Path::to_path_buf);
         }
-        let package_manifest = ["Car", "go.toml"].concat();
+        let package_manifest = "Cargo.toml";
         if ancestor.join(package_manifest).is_file() && ancestor.join("src/main.rs").is_file() {
             return Some(ancestor.to_path_buf());
         }

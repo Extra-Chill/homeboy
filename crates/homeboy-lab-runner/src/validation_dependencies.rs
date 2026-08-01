@@ -10,7 +10,7 @@ use homeboy_core::{git::clone_repo, paths};
 use super::workspace::{materialize_snapshot, parent_remote_path, sanitize_path_segment};
 use super::Runner;
 
-const PORTABLE_CONFIG_FILE: &str = concat!("homeboy", ".json");
+const PORTABLE_CONFIG_FILE: &str = "homeboy.json";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RunnerValidationDependencySyncOutput {

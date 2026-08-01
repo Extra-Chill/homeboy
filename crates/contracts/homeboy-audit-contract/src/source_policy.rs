@@ -123,6 +123,7 @@ fn core_boundary_term(term: &str) -> Option<SourcePolicyTerm> {
         value: value.to_string(),
         label: None,
         match_mode: Some(match_mode),
+        detect_split: false,
     })
 }
 
@@ -195,6 +196,17 @@ pub struct SourcePolicyTerm {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub match_mode: Option<SourcePolicyMatchMode>,
+    /// Also match this term when source code reassembles it from adjacent
+    /// string-literal fragments — `["car", "go"].concat()`, `concat!("car",
+    /// "go")`, `format!("{}{}", "car", "go")` — so the literal never appears
+    /// verbatim and a plain grep cannot see it.
+    ///
+    /// Scoped deliberately: this recognizes a single seam between two adjacent
+    /// quoted fragments, which covers observed evasions. It is not a general
+    /// obfuscation analyzer and does not resolve `.join("<sep>")` separators,
+    /// variable indirection, or character-code arithmetic.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detect_split: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -428,4 +440,28 @@ fn default_requested_detector_convention() -> String {
 
 fn default_config_roundtrip_key_capture() -> String {
     "key".to_string()
+}
+
+#[cfg(test)]
+mod detect_split_schema_tests {
+    use super::*;
+
+    #[test]
+    fn detect_split_defaults_to_false_and_round_trips() {
+        let implicit: SourcePolicyTerm = serde_json::from_str(r#"{"value":"florp"}"#).unwrap();
+        assert!(!implicit.detect_split);
+
+        let explicit: SourcePolicyTerm =
+            serde_json::from_str(r#"{"value":"florp","detect_split":true}"#).unwrap();
+        assert!(explicit.detect_split);
+
+        // Absent by default so existing configs serialize unchanged.
+        assert_eq!(
+            serde_json::to_string(&implicit).unwrap(),
+            r#"{"value":"florp"}"#
+        );
+        assert!(serde_json::to_string(&explicit)
+            .unwrap()
+            .contains(r#""detect_split":true"#));
+    }
 }

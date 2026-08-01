@@ -20,10 +20,9 @@ use super::{
     RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
-pub(super) const LAB_EXTRA_WORKSPACES_ENV: &str = concat!("HOME", "BOY_LAB_EXTRA_WORKSPACES");
-pub(super) const LAB_EXTRA_WORKSPACES_JSON_ENV: &str =
-    concat!("HOME", "BOY_LAB_EXTRA_WORKSPACES_JSON");
-pub(super) const LAB_WORKSPACE_MAPPING_SCHEMA: &str = concat!("home", "boy/workspace-map/v1");
+pub(super) const LAB_EXTRA_WORKSPACES_ENV: &str = "HOMEBOY_LAB_EXTRA_WORKSPACES";
+pub(super) const LAB_EXTRA_WORKSPACES_JSON_ENV: &str = "HOMEBOY_LAB_EXTRA_WORKSPACES_JSON";
+pub(super) const LAB_WORKSPACE_MAPPING_SCHEMA: &str = "homeboy/workspace-map/v1";
 
 /// Config channel for declared runtime overlays. A runtime overlay is a
 /// first-class, ecosystem-agnostic contract for materializing a built runtime
@@ -33,9 +32,8 @@ pub(super) const LAB_WORKSPACE_MAPPING_SCHEMA: &str = concat!("home", "boy/works
 /// as data) that Homeboy runs on the runner AFTER the sync and BEFORE the hot
 /// command. The install command is opaque data — core only forwards it to the
 /// runner and never assumes any package manager, language, or tooling.
-pub(super) const LAB_RUNTIME_OVERLAYS_JSON_ENV: &str =
-    concat!("HOME", "BOY_LAB_RUNTIME_OVERLAYS_JSON");
-pub(super) const LAB_RUNTIME_OVERLAY_SCHEMA: &str = concat!("home", "boy/lab-runtime-overlay/v1");
+pub(super) const LAB_RUNTIME_OVERLAYS_JSON_ENV: &str = "HOMEBOY_LAB_RUNTIME_OVERLAYS_JSON";
+pub(super) const LAB_RUNTIME_OVERLAY_SCHEMA: &str = "homeboy/lab-runtime-overlay/v1";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(super) struct LabWorkspaceMappingEntry {
