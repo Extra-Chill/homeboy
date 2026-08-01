@@ -159,7 +159,13 @@ pub(crate) fn run_github_release(
         // ships nothing. This step is the pipeline's last chance to close that
         // window, so "a release object exists" is not sufficient to report
         // success; it must also be published.
-        let metadata = match gh_release_metadata(&github, &component.github, &tag, &repo_flag) {
+        let metadata = match gh_release_metadata(
+            &github,
+            &component.github,
+            &tag,
+            &repo_flag,
+            false,
+        ) {
             Ok(metadata) => metadata,
             Err(error) => {
                 let repair = repair_commands(None, None);
@@ -207,7 +213,13 @@ pub(crate) fn run_github_release(
                     Error::validation_invalid_argument("release assets", error, None, None)
                 })?;
             // Re-read immediately before un-drafting so a concurrent asset edit cannot race validation.
-            let current = match gh_release_metadata(&github, &component.github, &tag, &repo_flag) {
+            let current = match gh_release_metadata(
+                &github,
+                &component.github,
+                &tag,
+                &repo_flag,
+                false,
+            ) {
                 Ok(metadata) => metadata,
                 Err(error) => {
                     let repair = repair_commands(None, None);
@@ -469,23 +481,24 @@ pub(crate) fn run_github_release(
             ));
         }
 
-        let metadata = match gh_release_metadata(&github, &component.github, &tag, &repo_flag) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                let diagnostics = error.diagnostics;
-                return Ok(upload_failed_result(
-                    &tag,
-                    &github,
-                    String::new(),
-                    error.message,
-                    None,
-                    false,
-                    artifact_paths.len(),
-                    repair_commands(None, None),
-                    &diagnostics,
-                ));
-            }
-        };
+        let metadata =
+            match gh_release_metadata(&github, &component.github, &tag, &repo_flag, false) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    let diagnostics = error.diagnostics;
+                    return Ok(upload_failed_result(
+                        &tag,
+                        &github,
+                        String::new(),
+                        error.message,
+                        None,
+                        false,
+                        artifact_paths.len(),
+                        repair_commands(None, None),
+                        &diagnostics,
+                    ));
+                }
+            };
         if let Err(error) = verify_release_publications(
             &publications,
             &metadata.assets,
@@ -636,7 +649,11 @@ pub(crate) fn run_github_release(
         ));
     }
 
-    let metadata = match gh_release_metadata(&github, &component.github, &tag, &repo_flag) {
+    // `expect_draft: true` — the release was created with `--draft` a few lines
+    // above, and `releases/tags/{tag}` 404s for drafts by design. Attempting it
+    // here is a guaranteed-failing round trip that only succeeds at pushing an
+    // irrelevant 404 to the front of the error message (#11145).
+    let metadata = match gh_release_metadata(&github, &component.github, &tag, &repo_flag, true) {
         Ok(metadata) => metadata,
         Err(error) => {
             let diagnostics = error.diagnostics;
