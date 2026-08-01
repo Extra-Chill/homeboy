@@ -2456,6 +2456,18 @@ pub(crate) fn compact_aggregate_summary(
     summary
 }
 
+/// The default view for `homeboy agent-task cook`. `--full` is opt-in, so this
+/// is what an external orchestrator actually receives back from a cook.
+///
+/// "Compact" must still mean "actionable". `cook_failure_context` already
+/// computes the exact runnable recovery commands for the failed Cook state, and
+/// the notification path forwards them verbatim — the pull channel has no reason
+/// to be poorer than the push channel from the same computation. Only the
+/// runnable/classification fields are surfaced here; `diagnostic` and
+/// `blocking_claim` stay behind `--full` because they carry provider and gate
+/// evidence that `cook_failure_context` deliberately keeps out of a command
+/// envelope. Output only grows on the failure path: `failure_context` is `None`
+/// whenever `exit_code == 0`.
 pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
     if full {
         return value;
@@ -2478,8 +2490,49 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
         "attempts": attempts.iter().take(COMPACT_TASK_LIMIT).map(|attempt| compact_fields(attempt, &["attempt", "run_id", "run_state", "aggregate_path"])).collect::<Vec<_>>(),
         "attempts_omitted": attempts.len().saturating_sub(COMPACT_TASK_LIMIT),
         "finalization": value.get("finalization").map(|finalization| compact_fields(finalization, &["schema", "status", "pr_number", "pr_url", "updated_at", "created_at"])),
-        "selected_candidate": value.get("selected_candidate").map(|candidate| compact_fields(candidate, &["latest_attempt_run_id", "run_id", "attempt", "selected_task_id", "selected_artifact_id", "reason", "incomplete", "skipped_newer_attempts", "applied_promotion"])),
+        "selected_candidate": value.get("selected_candidate").map(|candidate| compact_fields(candidate, &["latest_attempt_run_id", "run_id", "attempt", "invocation_scoped", "selected_task_id", "selected_artifact_id", "reason", "incomplete", "skipped_newer_attempts", "applied_promotion"])),
     });
+    // The run ids this invocation actually dispatched, so a caller can tell them
+    // apart from the cross-invocation history `latest_run_id` may be drawn from.
+    if let Some(invocation_run_ids) = value.get("invocation_run_ids") {
+        summary["invocation_run_ids"] = invocation_run_ids.clone();
+    }
+    // The recovery commands the Cook already computed for its own failed state.
+    // `diagnostic` and `blocking_claim` are deliberately absent: they carry
+    // provider and gate evidence that stays behind `--full` and `diagnose`.
+    if let Some(failure_context) = value.get("failure_context") {
+        summary["failure_context"] = compact_fields(
+            failure_context,
+            &[
+                "latest_run_id",
+                "selected_run_id",
+                "durable_recipe_ref",
+                "lifecycle_state",
+                "phase",
+                "reason_code",
+                "provider_budget_consumed",
+                "provider_executions_consumed",
+                "recovery_legal",
+                "recovery_reason",
+                "legal_actions",
+                "next_actions",
+            ],
+        );
+    }
+    // The promotion report this carries is full evidence, so keep only the
+    // blocker and the continuation the caller is expected to act on.
+    if let Some(moving_base_recovery) = value.get("moving_base_recovery") {
+        summary["moving_base_recovery"] = compact_fields(
+            moving_base_recovery,
+            &[
+                "run_id",
+                "prior_verified_base",
+                "blocker",
+                "continuation",
+                "base_movements",
+            ],
+        );
+    }
     if let Some(run_id) = latest_run_id {
         summary["full_command"] = json!(format!("homeboy agent-task status {run_id} --full"));
         summary["evidence_command"] = json!(format!("homeboy agent-task evidence {run_id}"));
@@ -3571,6 +3624,127 @@ mod tests {
             compact["full_command"],
             "homeboy agent-task status run-14 --full"
         );
+        assert!(
+            compact.get("failure_context").is_none(),
+            "a report without failure_context must not grow one"
+        );
+        assert_eq!(compact_cook_report(report.clone(), true), report);
+    }
+
+    /// #11113: `cook_failure_context` already computes the runnable recovery
+    /// commands, and the notification path forwards them. The default (compact)
+    /// view discarded the whole thing, so the pull channel was strictly poorer
+    /// than the push channel from the same computation.
+    #[test]
+    fn compact_cook_report_keeps_failure_context_actionable() {
+        let report = json!({
+            "schema": "homeboy/agent-task-cook/v1",
+            "cook_id": "cook-11113",
+            "latest_run_id": "run-2",
+            "history_run_ids": ["run-1", "run-2"],
+            "invocation_run_ids": ["run-2"],
+            "status": "durable_failure",
+            "attempts": [],
+            "failure_context": {
+                "cook_id": "cook-11113",
+                "latest_run_id": "run-2",
+                "selected_run_id": "run-1",
+                "durable_recipe_ref": "homeboy://agent-task/cooks/cook-11113/recipe",
+                "lifecycle_state": "Failed",
+                "phase": "promotion",
+                "reason_code": "operation_in_progress",
+                "provider_budget_consumed": true,
+                "provider_executions_consumed": 3,
+                "recovery_legal": true,
+                "recovery_reason": "y".repeat(COMPACT_TEXT_LIMIT + 1),
+                "legal_actions": [
+                    { "action": "status", "command": "homeboy agent-task status run-2 --full" },
+                    { "action": "diagnose", "command": "homeboy agent-task diagnose run-2" }
+                ],
+                "next_actions": [
+                    { "action": "status", "command": "homeboy agent-task status run-2 --full" }
+                ],
+                "diagnostic": { "code": "promotion_rejected", "evidence": "private gate output" },
+                "blocking_claim": { "state": "Running", "evidence": "private claim payload" }
+            }
+        });
+
+        let compact = compact_cook_report(report.clone(), false);
+        let context = &compact["failure_context"];
+
+        assert_eq!(context["phase"], "promotion");
+        assert_eq!(context["reason_code"], "operation_in_progress");
+        assert_eq!(context["recovery_legal"], true);
+        assert_eq!(context["provider_executions_consumed"], 3);
+        assert_eq!(
+            context["legal_actions"][1]["command"],
+            "homeboy agent-task diagnose run-2"
+        );
+        assert_eq!(
+            context["next_actions"][0]["command"],
+            "homeboy agent-task status run-2 --full"
+        );
+        assert_eq!(compact["invocation_run_ids"], json!(["run-2"]));
+
+        // Private evidence stays behind --full and `diagnose`.
+        assert!(
+            context.get("diagnostic").is_none(),
+            "diagnostic carries provider and gate evidence"
+        );
+        assert!(
+            context.get("blocking_claim").is_none(),
+            "blocking_claim carries claim payload evidence"
+        );
+
+        // The compact text budget still applies to the fields that are kept.
+        assert_eq!(
+            context["recovery_reason"]
+                .as_str()
+                .expect("recovery_reason")
+                .chars()
+                .count(),
+            COMPACT_TEXT_LIMIT + 3,
+            "long prose must still be truncated to the compact budget"
+        );
+
+        assert_eq!(compact_cook_report(report.clone(), true), report);
+    }
+
+    /// The moving-base recovery carries a full promotion report. Compact keeps
+    /// the blocker and the continuation, not the evidence.
+    #[test]
+    fn compact_cook_report_keeps_moving_base_continuation_without_promotion_evidence() {
+        let report = json!({
+            "schema": "homeboy/agent-task-cook/v1",
+            "cook_id": "cook-11113-moving-base",
+            "latest_run_id": "run-3",
+            "status": "candidate_recoverable",
+            "attempts": [],
+            "moving_base_recovery": {
+                "schema": "homeboy/agent-task-cook-moving-base-recovery/v1",
+                "cook_id": "cook-11113-moving-base",
+                "run_id": "run-3",
+                "prior_verified_base": "abc123",
+                "blocker": "base moved during promotion",
+                "continuation": "homeboy agent-task cook-continue run-3",
+                "base_movements": 2,
+                "promotion": { "nested_evidence": "x".repeat(COMPACT_TEXT_LIMIT + 1) },
+                "passed_gates": { "nested_evidence": "x".repeat(COMPACT_TEXT_LIMIT + 1) }
+            }
+        });
+
+        let compact = compact_cook_report(report.clone(), false);
+        let recovery = &compact["moving_base_recovery"];
+
+        assert_eq!(recovery["blocker"], "base moved during promotion");
+        assert_eq!(
+            recovery["continuation"],
+            "homeboy agent-task cook-continue run-3"
+        );
+        assert_eq!(recovery["base_movements"], 2);
+        assert!(recovery.get("promotion").is_none());
+        assert!(recovery.get("passed_gates").is_none());
+
         assert_eq!(compact_cook_report(report.clone(), true), report);
     }
 

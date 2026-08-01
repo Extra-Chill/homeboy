@@ -362,10 +362,11 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
     let cook_stdout = std::fs::read(&cook_stdout_path).expect("read Cook stdout");
     let cook_stderr = std::fs::read(&cook_stderr_path).expect("read Cook stderr");
     if !cook_status.success() {
-        // The summary Cook view carries no `failure_context`, so the exit
-        // status alone names no cause (#10237). A failing Cook is exactly when
-        // the controller's own record and the daemon it delegated to are worth
-        // reading, so hydrate both before panicking.
+        // The summary Cook view now carries `failure_context` (#11113), but it
+        // deliberately withholds the provider and gate evidence behind
+        // `--full`/`diagnose`. A failing Cook is exactly when the controller's
+        // own record and the daemon it delegated to are worth reading, so
+        // hydrate both before panicking.
         let reported_run_id = serde_json::from_slice::<serde_json::Value>(&cook_stdout)
             .ok()
             .and_then(|report| {

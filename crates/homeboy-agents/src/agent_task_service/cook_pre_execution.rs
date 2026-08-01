@@ -23,7 +23,7 @@ use super::cook::{
     AgentTaskCookAttemptDispatcher, AgentTaskCookAttemptReport, AgentTaskCookReport,
     AgentTaskCookServiceOptions,
 };
-use super::cook_promotion::cook_report;
+use super::cook_promotion::{cook_report, CookReportInput};
 use super::AgentTaskRunResult;
 
 /// Persist the controller-owned initial attempt before transport preparation so
@@ -169,17 +169,17 @@ pub(crate) fn pre_execution_failure_report(
 ) -> AgentTaskRunResult<AgentTaskCookReport> {
     let phase = failure.phase.as_deref().unwrap_or("cook_pre_execution");
     let classification = failure.classification.as_deref().unwrap_or("unknown");
-    let mut report = cook_report(
+    let mut report = cook_report(CookReportInput {
         cook_id,
-        "pre_execution_failure",
+        status: "pre_execution_failure",
         attempts,
-        None,
-        Some(format!(
+        finalization: None,
+        stop_reason: Some(format!(
             "pre-provider failure in phase `{phase}` classified as `{classification}`: {error}"
         )),
-        1,
+        exit_code: 1,
         invocation_latest_run_id,
-    );
+    });
     report.value.terminal_phase = failure.phase;
     report.value.terminal_failure_classification = failure.classification;
     report

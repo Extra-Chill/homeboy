@@ -15,7 +15,7 @@ use super::super::cook_promotion::{
     persist_manual_finalization_intent, persist_manual_finalization_receipt,
     persisted_promotion_for_attempt, recover_cook_pr_with_backend,
     recover_moving_base_cook_candidate, refreshed_moving_base_recovery, selected_candidate_task_id,
-    MovingBaseCookRecovery,
+    CookReportInput, MovingBaseCookRecovery,
 };
 use super::super::cook_recipe::persist_initial_recipe;
 use super::*;
@@ -5154,15 +5154,15 @@ fn cook_report_emits_selected_candidate_provenance_without_redefining_latest_run
         })
         .expect("persist promotion provenance");
 
-        let report = cook_report(
-            cook_id.to_string(),
-            "completed",
-            Vec::new(),
-            None,
-            None,
-            0,
-            Some(latest_run_id),
-        );
+        let report = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "completed",
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 0,
+            invocation_latest_run_id: Some(latest_run_id),
+        });
         assert_eq!(report.value.latest_run_id.as_deref(), Some(latest_run_id));
         let provenance = report
             .value
@@ -5268,18 +5268,18 @@ fn resume_promoted_patch_guidance_keeps_the_exhausted_zero_byte_attempt_as_lates
         assert_eq!(pointer.run_id, candidate_run_id);
         assert_eq!(pointer.attempt, 1);
 
-        let report = cook_report(
-            cook_id.to_string(),
-            "execution_budget_exhausted",
-            Vec::new(),
-            None,
-            Some(
+        let report = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "execution_budget_exhausted",
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: Some(
                 "provider execution stopped because max_provider_executions was exhausted"
                     .to_string(),
             ),
-            1,
-            Some(&latest_empty_run_id),
-        );
+            exit_code: 1,
+            invocation_latest_run_id: Some(&latest_empty_run_id),
+        });
 
         assert_eq!(
             report.value.latest_run_id.as_deref(),
@@ -5322,15 +5322,15 @@ fn resume_promoted_patch_guidance_keeps_the_exhausted_zero_byte_attempt_as_lates
                 serde_json::json!(1);
         })
         .expect("remove destination proof");
-        let unproven = cook_report(
-            cook_id.to_string(),
-            "execution_budget_exhausted",
-            Vec::new(),
-            None,
-            None,
-            1,
-            Some(&latest_empty_run_id),
-        )
+        let unproven = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "execution_budget_exhausted",
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 1,
+            invocation_latest_run_id: Some(&latest_empty_run_id),
+        })
         .value
         .failure_context
         .expect("unproven destination context");
@@ -7726,10 +7726,10 @@ fn cook_report_latest_run_id_prefers_invocation_over_stale_cook_index() {
         let fresh_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 2);
         let invocation_run_ids = vec![fresh_run_id.clone()];
 
-        let report = cook_report(
-            cook_id.to_string(),
-            "execution_budget_exhausted",
-            vec![AgentTaskCookAttemptReport {
+        let report = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "execution_budget_exhausted",
+            attempts: vec![AgentTaskCookAttemptReport {
                 attempt: 2,
                 run_id: fresh_run_id.clone(),
                 run_state: "Running".to_string(),
@@ -7737,11 +7737,13 @@ fn cook_report_latest_run_id_prefers_invocation_over_stale_cook_index() {
                 promotion: None,
                 feedback: None,
             }],
-            None,
-            Some("provider execution stopped because budget was exhausted".to_string()),
-            1,
-            Some(&fresh_run_id),
-        );
+            finalization: None,
+            stop_reason: Some(
+                "provider execution stopped because budget was exhausted".to_string(),
+            ),
+            exit_code: 1,
+            invocation_latest_run_id: Some(&fresh_run_id),
+        });
 
         assert_eq!(
             report.value.latest_run_id.as_deref(),
@@ -7764,6 +7766,154 @@ fn cook_report_latest_run_id_prefers_invocation_over_stale_cook_index() {
         assert!(
             report.value.history_run_ids.contains(&fresh_run_id),
             "history_run_ids should include the current invocation's run"
+        );
+    });
+}
+
+/// #11114 (a): the controller-failure path passed `None` for the invocation run
+/// id, so it reported whatever the cross-invocation Cook index happened to name
+/// — and `cook_failure_context` stamped that same stale id into every recovery
+/// command it emitted. The orchestrator was handed `status`/`diagnose` commands
+/// for a prior session's run.
+#[test]
+fn durable_controller_failure_reports_this_invocation_run_not_the_stale_cook_index() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-11114-controller-failure";
+        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        persist_initial_recipe(&options).expect("persist durable recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id))
+            .expect("materialize this invocation's run");
+
+        // A prior session left the cross-invocation Cook index pointing at its
+        // own run. That is the value this path used to report.
+        let stale_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&stale_run_id))
+            .expect("materialize the prior session's run");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, &stale_run_id)
+            .expect("index the prior session's run");
+        assert_eq!(
+            agent_task_lifecycle::cook_index(cook_id)
+                .expect("cook index")
+                .latest_run_id,
+            stale_run_id,
+            "fixture must leave the cross-invocation index on the prior session's run"
+        );
+
+        let report = durable_cook_error_report(
+            &options,
+            Error::internal_unexpected("controller failed after durable creation"),
+        )
+        .expect("controller failure converts into the Cook result contract");
+
+        assert_eq!(
+            report.value.latest_run_id.as_deref(),
+            Some(options.initial_run_id.as_str()),
+            "a controller failure must report THIS invocation's run"
+        );
+        assert!(
+            report
+                .value
+                .invocation_run_ids
+                .contains(&options.initial_run_id),
+            "invocation scope must not be empty just because no attempt report exists"
+        );
+        assert!(
+            !report.value.invocation_run_ids.contains(&stale_run_id),
+            "the prior session's run is history, not this invocation"
+        );
+
+        let context = report
+            .value
+            .failure_context
+            .expect("durable failure context");
+        assert_eq!(context.phase, "controller");
+        assert_eq!(context.latest_run_id, options.initial_run_id);
+        for action in context.legal_actions.iter().chain(&context.next_actions) {
+            // Candidate-selection actions intentionally address the selected
+            // cross-invocation candidate; the run-addressed diagnostics must not.
+            if !matches!(action.action.as_str(), "status" | "diagnose" | "reconcile") {
+                continue;
+            }
+            assert!(
+                action.command.contains(&options.initial_run_id),
+                "recovery command must address this invocation's run: {}",
+                action.command
+            );
+            assert!(
+                !action.command.contains(&stale_run_id),
+                "recovery command must not address the prior session's run: {}",
+                action.command
+            );
+        }
+    });
+}
+
+/// #11114: `select_cook_candidate` deliberately spans invocations, so a report
+/// can name this invocation's `latest_run_id` while `selected_candidate` names a
+/// prior attempt. `invocation_scoped` makes that difference legible instead of
+/// leaving the orchestrator to guess.
+#[test]
+fn selected_candidate_provenance_flags_cross_invocation_selection() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("candidate artifacts");
+        let cook_id = "cook-11114-selection-scope";
+        let selected_run_id = "cook-11114-selection-scope-1";
+        let latest_run_id = "cook-11114-selection-scope-2";
+        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        for (attempt, run_id) in [(1, selected_run_id), (2, latest_run_id)] {
+            agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
+                .expect("persist lifecycle record");
+            agent_task_lifecycle::record_cook_attempt(cook_id, attempt, run_id)
+                .expect("persist attempt index entry");
+        }
+        seed_substantive_candidate_aggregate(
+            selected_run_id,
+            &options.initial_plan,
+            &temp.path().join("selected.patch"),
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        seed_substantive_candidate_aggregate(
+            latest_run_id,
+            &options.initial_plan,
+            &temp.path().join("malformed.patch"),
+            "nonempty malformed newer artifact\n",
+        );
+
+        let cross_invocation = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "completed",
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 0,
+            invocation_latest_run_id: Some(latest_run_id),
+        })
+        .value
+        .selected_candidate
+        .expect("selected candidate provenance");
+        assert_eq!(cross_invocation["run_id"], selected_run_id);
+        assert_eq!(
+            cross_invocation["invocation_scoped"],
+            serde_json::json!(false),
+            "a candidate selected from a prior attempt must be flagged as out of invocation scope"
+        );
+
+        let in_invocation = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "completed",
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 0,
+            invocation_latest_run_id: Some(selected_run_id),
+        })
+        .value
+        .selected_candidate
+        .expect("selected candidate provenance");
+        assert_eq!(
+            in_invocation["invocation_scoped"],
+            serde_json::json!(true),
+            "a candidate this invocation produced must be flagged as invocation scoped"
         );
     });
 }
@@ -7791,15 +7941,17 @@ fn post_materialization_failure_families_expose_only_durable_identity_and_legal_
             "follow_up_materialization_failure",
             "finalization_failure",
         ] {
-            let report = cook_report(
-                cook_id.to_string(),
+            let report = cook_report(CookReportInput {
+                cook_id: cook_id.to_string(),
                 status,
-                Vec::new(),
-                None,
-                Some("private provider evidence remains in durable diagnostics".to_string()),
-                1,
-                Some(&options.initial_run_id),
-            );
+                attempts: Vec::new(),
+                finalization: None,
+                stop_reason: Some(
+                    "private provider evidence remains in durable diagnostics".to_string(),
+                ),
+                exit_code: 1,
+                invocation_latest_run_id: Some(&options.initial_run_id),
+            });
             let value = serde_json::to_value(report.value).expect("serialize command data");
             let context = &value["failure_context"];
 
@@ -7970,10 +8122,10 @@ fn re_materialize_follow_up_baseline_recovers_after_worktree_deletion() {
 fn cook_report_invocation_run_ids_populated_for_policy_failure() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let fresh_run_id = "agent-task-fresh-abc123".to_string();
-        let report = cook_report(
-            "cook-test".to_string(),
-            "policy_failure",
-            vec![AgentTaskCookAttemptReport {
+        let report = cook_report(CookReportInput {
+            cook_id: "cook-test".to_string(),
+            status: "policy_failure",
+            attempts: vec![AgentTaskCookAttemptReport {
                 attempt: 1,
                 run_id: fresh_run_id.clone(),
                 run_state: "Succeeded".to_string(),
@@ -7981,11 +8133,11 @@ fn cook_report_invocation_run_ids_populated_for_policy_failure() {
                 promotion: None,
                 feedback: None,
             }],
-            None,
-            Some("policy failure".to_string()),
-            1,
-            Some(&fresh_run_id),
-        );
+            finalization: None,
+            stop_reason: Some("policy failure".to_string()),
+            exit_code: 1,
+            invocation_latest_run_id: Some(&fresh_run_id),
+        });
 
         assert_eq!(report.value.invocation_run_ids, vec![fresh_run_id.clone()]);
         assert_eq!(
