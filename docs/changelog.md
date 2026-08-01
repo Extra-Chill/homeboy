@@ -4,6 +4,33 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.327.1] - 2026-08-01
+
+### Changed
+- cover supervised output shutdown
+- verify durable artifact retrieval
+
+### Fixed
+- share immutable controller runtime pins
+- finalize delayed artifact results
+- lint the materialized rig spec, and add duplicate-key, env-agreement, and workload-import checks
+- retain daemon recovery authorization
+- preserve recovery eligibility
+- guard dead lease recovery candidates
+- bound safe ordinary shutdown
+- bound supervisor output retention
+- hide expired artifact sources after promotion
+- retain required artifacts durably
+- keep CLI help independent of controller state
+- keep the default cook report actionable by forwarding failure_context
+- rehydrate a cook's notification route across processes
+- resolve a Cook id in the agent-task activity probe
+- stop reporting a prior session's run id from two cook paths
+- confirm terminal status before reporting a run completed
+- verify intentional no-change results
+- clean captured attempt worktrees
+- reject escaping tracked symlinks
+
 ## [0.327.0] - 2026-08-01
 
 ### Added
