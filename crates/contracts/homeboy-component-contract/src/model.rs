@@ -290,7 +290,7 @@ impl From<RawComponent> for Component {
             capability_extensions: raw.capability_extensions,
             version_targets: raw.version_targets,
             changelog_target: raw.changelog_target,
-            harvest_excludes: None,
+            harvest_excludes: raw.harvest_excludes,
             changelog_next_section_label: raw.changelog_next_section_label,
             changelog_next_section_aliases: raw.changelog_next_section_aliases,
             hooks: raw.hooks,
@@ -649,6 +649,54 @@ mod tests {
             base.canonical_attachment_identity().expect("base"),
             drifted.canonical_attachment_identity().expect("drifted"),
             "real config drift must still change the attachment identity"
+        );
+    }
+
+    #[test]
+    fn harvest_excludes_survives_a_deserialize_serialize_round_trip() {
+        // `harvest_excludes` exists so the exclude set lives with the component
+        // instead of being retyped on every invocation (#10220). The
+        // `RawComponent` conversion used to drop it on the way in while
+        // preserving it on the way out, so a declared value round-tripped back
+        // to disk but was never visible to `harvest`, which reads
+        // `component.harvest_excludes` and could therefore never see a value.
+        let component: Component = serde_json::from_value(serde_json::json!({
+            "id": "agents-api",
+            "local_path": "/source/agents-api",
+            "remote_path": "wp-content/plugins/agents-api",
+            "harvest_excludes": ["composer.lock", "vendor/"]
+        }))
+        .expect("component with declared harvest excludes");
+
+        assert_eq!(
+            component.harvest_excludes.as_deref(),
+            Some(["composer.lock".to_string(), "vendor/".to_string()].as_slice()),
+            "declared harvest_excludes must survive deserialization"
+        );
+
+        let serialized = serde_json::to_value(&component).expect("serialize component");
+        assert_eq!(
+            serialized["harvest_excludes"],
+            serde_json::json!(["composer.lock", "vendor/"]),
+            "declared harvest_excludes must survive serialization"
+        );
+    }
+
+    #[test]
+    fn harvest_excludes_stays_absent_when_undeclared() {
+        let component: Component = serde_json::from_value(serde_json::json!({
+            "id": "agents-api",
+            "local_path": "/source/agents-api",
+            "remote_path": "wp-content/plugins/agents-api"
+        }))
+        .expect("component without harvest excludes");
+
+        assert!(component.harvest_excludes.is_none());
+
+        let serialized = serde_json::to_value(&component).expect("serialize component");
+        assert!(
+            serialized.get("harvest_excludes").is_none(),
+            "an undeclared exclude set must not be materialized into the serialized config"
         );
     }
 }
