@@ -615,9 +615,35 @@ pub struct SshIdentityFileNotFoundDetails {
     pub identity_file: String,
 }
 
-/// Serialize a details struct to JSON Value, falling back to empty object on failure.
+/// Present in `details` when the details struct itself failed to serialize.
+///
+/// A consumer that finds this key is reading an error whose evidence was lost
+/// in transit, and should say so rather than reporting "no details".
+pub const DETAILS_SERIALIZATION_ERROR_KEY: &str = "_homeboy_details_serialization_error";
+
+/// Serialize a details struct to a JSON `Value`, reporting its own failures.
+///
+/// This used to swallow the error and return an empty object, which is
+/// indistinguishable from an error that legitimately carries no details — so a
+/// details struct that could not serialize produced a *silently* evidence-free
+/// error, and the reason was gone. Now the failure lands in the payload under
+/// [`DETAILS_SERIALIZATION_ERROR_KEY`].
+///
+/// Still infallible on purpose: this runs while an error is being constructed,
+/// frequently on a failure path, and panicking or returning a `Result` here
+/// would replace a reportable problem with an unreportable one.
 fn to_details(details: impl Serialize) -> Value {
-    serde_json::to_value(details).unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
+    match serde_json::to_value(details) {
+        Ok(value) => value,
+        Err(error) => {
+            let mut map = serde_json::Map::new();
+            map.insert(
+                DETAILS_SERIALIZATION_ERROR_KEY.to_string(),
+                Value::String(error.to_string()),
+            );
+            Value::Object(map)
+        }
+    }
 }
 
 impl Error {
@@ -1772,6 +1798,77 @@ mod conversion_tests {
         );
 
         assert_eq!(error.details["context"], "read deployment provider policy");
+    }
+}
+
+/// A details struct that fails to serialize must not look like an error that
+/// simply had no details (#11134).
+#[cfg(test)]
+mod details_serialization_tests {
+    use super::*;
+
+    /// Serialization fails the way a real details struct fails: a map keyed by
+    /// something JSON cannot use as an object key.
+    struct UnserializableDetails;
+
+    impl Serialize for UnserializableDetails {
+        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            use serde::ser::SerializeMap;
+            let mut map = serializer.serialize_map(Some(1))?;
+            map.serialize_key(&[1u8, 2, 3])?;
+            map.serialize_value(&"value")?;
+            map.end()
+        }
+    }
+
+    #[test]
+    fn a_details_struct_that_cannot_serialize_says_so_instead_of_vanishing() {
+        let details = to_details(UnserializableDetails);
+
+        let object = details.as_object().expect("object details");
+        assert_eq!(
+            object.len(),
+            1,
+            "a failure must not be indistinguishable from an empty object"
+        );
+        let reported = object[DETAILS_SERIALIZATION_ERROR_KEY]
+            .as_str()
+            .expect("the serialization failure is reported as a string");
+        assert!(!reported.is_empty(), "the reason must survive");
+    }
+
+    /// The marker only appears on failure — an error with genuinely no details
+    /// must stay a clean empty object.
+    #[test]
+    fn a_successful_serialization_carries_no_failure_marker() {
+        let error = Error::internal_unexpected("plain");
+
+        assert!(!error
+            .details
+            .as_object()
+            .expect("object details")
+            .contains_key(DETAILS_SERIALIZATION_ERROR_KEY));
+        assert_eq!(
+            to_details(serde_json::json!({})),
+            Value::Object(serde_json::Map::new())
+        );
+    }
+
+    /// Construction must survive the failure: this runs on a failure path, so
+    /// replacing a reportable error with a panic would be strictly worse.
+    #[test]
+    fn constructing_an_error_survives_a_failed_details_serialization() {
+        let error = Error::new(
+            ErrorCode::InternalUnexpected,
+            "fixture",
+            to_details(UnserializableDetails),
+        );
+
+        assert_eq!(error.code, ErrorCode::InternalUnexpected);
+        assert!(error.details[DETAILS_SERIALIZATION_ERROR_KEY].is_string());
     }
 }
 
