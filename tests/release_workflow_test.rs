@@ -73,21 +73,42 @@ fn release_workflow_has_no_generic_source_autofix() {
         "release workflow must not contain a gate-refactor job"
     );
     assert!(
-        !workflow.contains("autofix: 'true'"),
-        "release workflow must not enable generic source autofix"
-    );
-    assert!(
-        !workflow.contains("autofix-mode: always"),
-        "release workflow must not run autofix in always mode"
-    );
-    assert!(
-        !workflow.contains("autofix-open-pr: 'true'"),
-        "release workflow must not create autofix PRs"
+        !workflow.contains("autofix:"),
+        "release workflow must not pass the removed autofix action input"
     );
     assert!(
         !workflow.contains("refactor --from all"),
         "release workflow must not run a broad refactor --from all sweep"
     );
+}
+
+#[test]
+fn release_workflow_uses_current_direct_actions_without_changing_permissions() {
+    let workflow = release_workflow();
+
+    for (action, major) in [
+        ("actions/checkout", "v6"),
+        ("actions/cache", "v5"),
+        ("actions/cache/restore", "v5"),
+        ("actions/cache/save", "v5"),
+        ("actions/upload-artifact", "v7"),
+        ("actions/download-artifact", "v7"),
+        ("actions/create-github-app-token", "v3"),
+    ] {
+        assert!(
+            workflow.contains(&format!("{action}@{major}")),
+            "release workflow must use {action}@{major}"
+        );
+        assert!(
+            !workflow.contains(&format!("{action}@v4"))
+                && !workflow.contains(&format!("{action}@v1")),
+            "release workflow must not retain deprecated {action} majors"
+        );
+    }
+
+    assert!(workflow.contains(
+        "permissions:\n  actions: write\n  contents: write\n  issues: write\n  pull-requests: write"
+    ));
 }
 
 #[test]
@@ -99,24 +120,18 @@ fn release_workflow_declared_drift_maintenance_is_narrow_not_generic() {
     // (changes_are_only_drift / drift_file_paths), which gates on
     // extension-declared lockfile_paths + the audit baseline (homeboy.json).
     // The release workflow must not widen this into generic source mutation:
-    // every quality gate must run read-only (autofix disabled) so that no
+    // the quality gates must not receive the removed autofix input, so no
     // authored source fix is produced for the transaction to route.
     for job in ["gate-audit", "gate-lint", "gate-test"] {
         let section = job_section(workflow, job);
         assert!(
-            section.contains("autofix: 'false'"),
-            "{job} must run read-only (autofix disabled) so only declared generated drift can be maintained"
+            !section.contains("autofix:"),
+            "{job} must not pass the removed autofix input"
         );
     }
 
-    // The release workflow has no other writable action invocation. Generated
-    // drift remains owned by the core allowlist, rather than a workflow-level
-    // repair action that could stage authored source files.
-    assert_eq!(
-        workflow.matches("autofix:").count(),
-        3,
-        "only the three read-only quality gates may declare autofix behavior"
-    );
+    // Generated drift remains owned by the core allowlist, rather than a
+    // workflow-level repair action that could stage authored source files.
 }
 
 #[test]
@@ -143,7 +158,7 @@ fn release_quality_policy_defaults_to_lint_and_test_blocking() {
 fn release_quality_policy_checks_out_event_commit_before_running_script() {
     let policy = job_section(release_workflow(), "release-quality-policy");
 
-    let checkout_index = policy.find("actions/checkout@v4").expect(
+    let checkout_index = policy.find("actions/checkout@v6").expect(
         "release-quality-policy must check out the repository before running the policy script",
     );
     let script_index = policy
@@ -695,7 +710,7 @@ fn release_artifact_builds_survive_recovery_skips_but_fail_closed_on_required_bu
 fn release_host_checkout_fetches_full_history_for_finalizer_ancestry_validation() {
     let host = job_section(release_workflow(), "host");
     let checkout = host
-        .find("uses: actions/checkout@v4")
+        .find("uses: actions/checkout@v6")
         .expect("host must check out the release tag");
     let finalizer = host
         .find("Finish Homeboy release pipeline at tag")
@@ -1153,7 +1168,7 @@ fn release_recovery_records_control_binary_lineage_against_the_release_target() 
 fn release_recovery_builds_its_control_binary_from_main_not_the_recovered_tag() {
     let workflow = release_workflow();
     let gate_build = job_section(workflow, "gate-build");
-    let checkout = release_step_block(gate_build, "uses: actions/checkout@v4");
+    let checkout = release_step_block(gate_build, "uses: actions/checkout@v6");
 
     assert!(
         checkout.contains("ref: ${{ github.sha }}"),
