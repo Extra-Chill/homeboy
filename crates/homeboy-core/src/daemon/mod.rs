@@ -157,10 +157,14 @@ pub struct LocalControllerJobClient {
     client: reqwest::blocking::Client,
 }
 
+/// Extract the `job` a controller-job endpoint returned.
+///
+/// Reaches the payload through [`daemon_endpoint_payload`] rather than spelling
+/// the wire path again, so this reader cannot drift away from the writer that
+/// produced it. Both the `/controller/jobs*` routes and the read-only
+/// `GET /jobs/<id>` route place the job at the same key inside that payload.
 fn controller_job_response(value: &serde_json::Value) -> Option<&serde_json::Value> {
-    value
-        .pointer("/data/body/job")
-        .or_else(|| value.pointer("/data/job"))
+    daemon_endpoint_payload(value)?.get("job")
 }
 
 impl LocalControllerJobClient {
@@ -1849,6 +1853,26 @@ fn daemon_freshness_report(job_store: &JobStore) -> Result<DaemonFreshnessReport
     Ok(freshness_report_from_validation(&validation, active_jobs))
 }
 
+/// JSON pointer to an endpoint payload inside a fully written daemon response.
+///
+/// This is the *one* place the wire path is spelled. Both producers of the
+/// envelope ([`daemon_endpoint_response`] and the read-only API's
+/// `HttpApiResponse`, which serializes to the same `{status, endpoint, body}`
+/// shape) sit beside it, and [`daemon_endpoint_payload`] is the only reader.
+/// A client that spells the path itself is how the durable controller-job
+/// submission shipped reading `/data/job` against a daemon that has only ever
+/// written `/data/body/job`. (#11032)
+const DAEMON_ENDPOINT_PAYLOAD_POINTER: &str = "/data/body";
+
+/// Read an endpoint payload back out of a written daemon response.
+///
+/// Deliberately has no fallback. Accepting a second shape would let the reader
+/// keep succeeding after the writer moved, which converts the next envelope
+/// drift from a loud failure into a silent one.
+pub(crate) fn daemon_endpoint_payload(response: &serde_json::Value) -> Option<&serde_json::Value> {
+    response.pointer(DAEMON_ENDPOINT_PAYLOAD_POINTER)
+}
+
 pub(super) fn daemon_endpoint_response(endpoint: &str, body: serde_json::Value) -> HttpResponse {
     HttpResponse {
         status_code: 200,
@@ -2852,16 +2876,81 @@ mod tests {
         self, DaemonExecOutput, PreparedDaemonExec, RunnerExecDriver, RunnerExecPrepareRequest,
     };
 
+    /// Round-trip the envelope through the exact functions that build it on the
+    /// wire, then read it with the client's reader.
+    ///
+    /// This is the seam that shipped inverted in v0.326.1: the daemon wrote the
+    /// job at `data.body.job` while `LocalControllerJobClient` read `data.job`,
+    /// and every `homeboy cleanup --apply` failed with "local controller-job
+    /// submission response has no job". Both sides were individually covered —
+    /// the daemon test asserted its own output shape, the client had no test at
+    /// all — so nothing observed that they disagreed. Composing the real writer
+    /// with the real reader is what makes that disagreement a test failure
+    /// instead of a release. (#11032)
     #[test]
-    fn controller_job_client_accepts_endpoint_and_legacy_response_shapes() {
-        let endpoint = json!({ "data": { "body": { "job": { "id": "endpoint" } } } });
-        let legacy = json!({ "data": { "job": { "id": "legacy" } } });
+    fn controller_job_reader_recovers_the_job_the_daemon_writer_produced() {
+        let routed = daemon_endpoint_response(
+            "controller.jobs.create",
+            json!({ "job": { "id": "written-by-the-daemon" } }),
+        );
+        let wire = daemon_response_envelope(routed.status_code, &routed.body);
+
+        assert_eq!(wire["success"], true);
+        assert_eq!(
+            controller_job_response(&wire).expect("reader recovers the written job")["id"],
+            "written-by-the-daemon"
+        );
+    }
+
+    /// `LocalControllerJobClient::status` polls the read-only `GET /jobs/<id>`
+    /// route, which builds its envelope from `HttpApiResponse` rather than
+    /// [`daemon_endpoint_response`]. Two independent producers of one shape is
+    /// exactly how these drift, so pin the second one through the same reader.
+    #[test]
+    fn controller_job_reader_recovers_the_job_the_read_only_api_produced() {
+        let api = crate::http_api::HttpApiResponse {
+            status: 200,
+            endpoint: "jobs.show".to_string(),
+            body: json!({ "command": "api.jobs.show", "job": { "id": "read-only-api" } }),
+        };
+        let routed = serde_json::to_value(&api).expect("serialize read-only API response");
+        let wire = daemon_response_envelope(api.status, &routed);
 
         assert_eq!(
-            controller_job_response(&endpoint).unwrap()["id"],
-            "endpoint"
+            controller_job_response(&wire).expect("reader recovers the API-written job")["id"],
+            "read-only-api"
         );
-        assert_eq!(controller_job_response(&legacy).unwrap()["id"], "legacy");
+    }
+
+    /// The reader must fail closed on a shape no producer emits. A tolerant
+    /// reader that also accepted `data.job` would keep returning `Some` after a
+    /// writer moved, turning the next envelope drift into silent wrong data
+    /// rather than the loud error that surfaced this bug.
+    #[test]
+    fn controller_job_reader_rejects_shapes_no_producer_writes() {
+        for foreign in [
+            json!({ "data": { "job": { "id": "never-written-by-any-route" } } }),
+            json!({ "job": { "id": "unwrapped" } }),
+            json!({ "data": { "body": { "not_a_job": {} } } }),
+            json!({ "success": true }),
+        ] {
+            assert!(
+                controller_job_response(&foreign).is_none(),
+                "reader accepted a shape no daemon route produces: {foreign}"
+            );
+        }
+    }
+
+    /// A failed response carries its payload at the same pointer, so a client
+    /// reading a 4xx envelope sees "no job" rather than a decode panic.
+    #[test]
+    fn failed_daemon_responses_keep_the_payload_pointer_stable() {
+        let wire = daemon_response_envelope(400, &json!({ "error": "bad_request" }));
+
+        assert_eq!(wire["success"], false);
+        assert_eq!(wire["error"], wire["data"]);
+        assert_eq!(daemon_endpoint_payload(&wire), None);
+        assert!(controller_job_response(&wire).is_none());
     }
 
     /// Polling cadence is independent of any schedule's own cadence, and an
@@ -4265,19 +4354,30 @@ fn http_content_length(headers: &str) -> Option<usize> {
     })
 }
 
+/// Wrap a routed [`HttpResponse`] body in the outer transport envelope written
+/// to the socket.
+///
+/// Extracted from [`write_http_response`] so the shape a client actually
+/// receives is reachable from a test without a TCP listener. The `data` key
+/// added here is the first segment of [`DAEMON_ENDPOINT_PAYLOAD_POINTER`].
+fn daemon_response_envelope(status_code: u16, body: &serde_json::Value) -> serde_json::Value {
+    let success = (200..300).contains(&status_code);
+    let mut envelope = json!({
+        "success": success,
+        "data": body,
+    });
+    if !success {
+        envelope["error"] = envelope["data"].clone();
+    }
+    envelope
+}
+
 fn write_http_response(mut stream: TcpStream, response: &HttpResponse) -> std::io::Result<()> {
     if let Some(artifact) = response.artifact.clone() {
         return artifact_download::write_response(stream, response.status_code, artifact);
     }
 
-    let success = (200..300).contains(&response.status_code);
-    let mut envelope = json!({
-        "success": success,
-        "data": response.body,
-    });
-    if !success {
-        envelope["error"] = envelope["data"].clone();
-    }
+    let envelope = daemon_response_envelope(response.status_code, &response.body);
     let body = serde_json::to_string_pretty(&envelope)
         .unwrap_or_else(|_| "{\"success\":false}".to_string());
     let status_text = match response.status_code {
