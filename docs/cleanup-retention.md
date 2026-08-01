@@ -227,6 +227,27 @@ granularity can make the top-level sum differ from root physical usage; the
 report states the direction and byte difference rather than hiding it. Existing
 `retained_bytes` and lifecycle aggregates remain unchanged for consumers.
 
+Since #11126 the **config root** (`~/.config/homeboy`) is probed as a fourth
+root, exposed as `filesystem.config_root` and as a `config_root` entry in
+`top_level`. It is usually a different volume from the data root and holds
+`rigs/{id}.state/logs/` (unbounded append), `rig-packages/`, `backups/`,
+`agent-runtimes/`, `runner-sessions/`, `runner-lease-evidence/`,
+`runner-job-execution-context/`, and `preview-ingress/routes/`. It was never
+probed before, so during the 2026-07-29 outage this report described a healthy
+system while the volume it omitted was full. Like the artifact and Cargo roots,
+it is classified `managed/external` and excluded from the data-root
+reconciliation totals, because it is not part of the walk those totals balance
+against. Double-counting is prevented by the same `starts_with` containment test
+the other external roots use, applied in both directions: two roots that merely
+share a filesystem occupy disjoint inodes and are not double-counted, but a
+config root nested in the data root (or a data root nested in the config root)
+is listed once.
+
+`runtime/tmp` used to live on the config root and no longer does (#11125), so
+after that change the config root should be small. It is still probed: an
+unprobed volume is an invisible one, and everything else in the list above
+still lives there.
+
 ## Remaining Scope
 
 The following Issue #8648 portions remain independently owned and are not
