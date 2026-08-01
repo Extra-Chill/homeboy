@@ -7,6 +7,28 @@ use serde::Deserialize;
 use std::fs;
 use std::sync::OnceLock;
 
+/// Defaults that an ecosystem extension may supply, with a generic fallback
+/// compiled into core.
+///
+/// Two documents implement this same schema, and they are deliberately NOT
+/// copies of each other (#11099):
+///
+/// * The bundled asset under this crate's `assets/defaults/` is core's
+///   fallback. It is framework-agnostic on purpose (#2240): only generic
+///   dev-tool manifests, a generic source layout, and no presupposed file
+///   extension. Four tests at the bottom of this file pin that agnosticism.
+/// * The document owned by the extensions repository is an ecosystem
+///   *override*, loaded at runtime via the `EXTENSION_DEFAULTS_PATH`
+///   environment variable. It intentionally carries the extra
+///   framework-specific candidates, source directories, and file extensions
+///   that core must not bake in.
+///
+/// So a field-by-field difference between the two is the design working, not
+/// drift. The one field where they must agree is
+/// `install_methods.source.upgrade_command`, which describes how *Homeboy
+/// itself* is rebuilt and has nothing to do with any ecosystem; the override
+/// copy is currently stale there and is tracked for a follow-up in the
+/// extensions repository.
 #[derive(Debug, Clone, Deserialize)]
 struct ExtensionProvidedDefaults {
     install_methods: InstallMethodsConfig,
@@ -21,6 +43,19 @@ fn extension_provided_defaults() -> &'static ExtensionProvidedDefaults {
     DEFAULTS.get_or_init(load_extension_provided_defaults)
 }
 
+/// Resolve the active defaults: an operator-supplied override when one is
+/// configured, otherwise the compiled-in bundled asset.
+///
+/// The bundled asset is load-bearing and cannot be reduced to an empty
+/// `Default` the way the detector profile was. `install_methods` drives
+/// `detect_install_method_from_exe_path`, which matches the running
+/// executable's path against `path_patterns`. With empty defaults every
+/// pattern list is empty, detection returns `InstallMethod::Unknown`, and
+/// `homeboy upgrade` fails outright with "Cannot upgrade: unknown
+/// installation method". Nothing sets `EXTENSION_DEFAULTS_PATH`
+/// automatically, so an install with no override configured would have no
+/// other source for these values — self-upgrade is a bootstrap path and must
+/// keep working with zero extensions installed.
 fn load_extension_provided_defaults() -> ExtensionProvidedDefaults {
     if let Some(defaults) = load_external_extension_provided_defaults() {
         return defaults;
@@ -32,15 +67,33 @@ fn load_extension_provided_defaults() -> ExtensionProvidedDefaults {
     )))
 }
 
+/// Load an operator-supplied defaults override, or `None` to fall back to the
+/// bundled asset.
+///
+/// Every failure mode here is operator input, so all of them fall back rather
+/// than abort: an unset variable, an unreadable file, and a file that does not
+/// parse as a defaults document. The parse case previously panicked through
+/// `expect`, which made a single malformed override file take down every
+/// command that touches defaults — including the `upgrade` path that would
+/// otherwise repair the install.
 fn load_external_extension_provided_defaults() -> Option<ExtensionProvidedDefaults> {
     let path =
         std::env::var(crate::product_identity::PRODUCT_IDENTITY.env_var("EXTENSION_DEFAULTS_PATH"))
             .ok()?;
     let content = fs::read_to_string(path).ok()?;
 
-    Some(parse_extension_provided_defaults(&content))
+    try_parse_extension_provided_defaults(&content)
 }
 
+/// Parse a defaults document supplied at runtime, returning `None` when it is
+/// not a valid defaults contract.
+fn try_parse_extension_provided_defaults(content: &str) -> Option<ExtensionProvidedDefaults> {
+    serde_json::from_str(content).ok()
+}
+
+/// Parse a defaults document that is expected to be well-formed, panicking if
+/// it is not. Reserved for the compiled-in bundled asset, where a parse failure
+/// is a build defect rather than bad operator input and should stay loud.
 fn parse_extension_provided_defaults(content: &str) -> ExtensionProvidedDefaults {
     serde_json::from_str(content).expect("extension-provided defaults asset should parse")
 }
@@ -176,6 +229,38 @@ mod tests {
         assert!(suffixes.contains(&".test.js".to_string()));
         assert!(suffixes.contains(&".spec.tsx".to_string()));
         assert!(suffixes.contains(&"_test.rs".to_string()));
+    }
+
+    #[test]
+    fn malformed_runtime_defaults_document_falls_back_to_bundled_asset() {
+        // An override file is untrusted operator input. A document that does
+        // not parse must yield None so the bundled asset stays in effect,
+        // rather than aborting every command that reads defaults — including
+        // the upgrade path that would otherwise repair the install.
+        assert!(try_parse_extension_provided_defaults("not a defaults document").is_none());
+        assert!(try_parse_extension_provided_defaults("{}").is_none());
+    }
+
+    #[test]
+    fn well_formed_runtime_defaults_document_overrides_bundled_asset() {
+        let defaults = try_parse_extension_provided_defaults(
+            r#"{
+                "install_methods": {},
+                "version_candidates": [],
+                "test_drift": {
+                    "source_dirs": ["lib"],
+                    "test_dirs": ["spec"],
+                    "file_extensions": ["rb"],
+                    "inline_tests": true
+                },
+                "direct_test_file_suffixes": ["_spec.rb"]
+            }"#,
+        )
+        .expect("well-formed defaults document parses");
+
+        assert_eq!(defaults.test_drift.source_dirs, ["lib"]);
+        assert_eq!(defaults.test_drift.test_dirs, ["spec"]);
+        assert_eq!(defaults.direct_test_file_suffixes, ["_spec.rb"]);
     }
 
     #[test]
