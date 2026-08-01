@@ -921,6 +921,7 @@ version = "0.1.0"
 dependencies = [
  "homeboy-error",
  "homeboy-paths",
+ "inventory",
  "libc",
  "regex",
  "serde",

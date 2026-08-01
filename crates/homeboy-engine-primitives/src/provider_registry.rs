@@ -56,6 +56,125 @@
 //! call. Used where holding the lock across the call would serialize real work.
 //! Its `optional:` form is the `Arc` counterpart of `with_optional:`: no no-op,
 //! accessor yields `Option<Arc<dyn Trait>>`.
+//!
+//! # Declaration inventory
+//!
+//! Every expansion also submits a [`DeclaredProviderRegistry`] descriptor to a
+//! link-time inventory. That closes the pattern's one genuinely silent failure
+//! mode: an unregistered boxed registry dispatches to its no-op, so deleting a
+//! `register_*()` call at startup produces no error, no log, and no test
+//! failure — the subsystem just stops doing anything. Because the descriptors
+//! are contributed by the declaration site rather than hand-listed, a registry
+//! that nobody ever wired up is visible to
+//! [`unregistered_provider_registry_ids`] the moment it exists.
+//!
+//! The inventory is pure metadata: it does not change what an unregistered
+//! registry *does*, only whether anything can notice. `homeboy-cli`'s
+//! `register_all_providers` completeness test is the consumer that turns
+//! noticing into a failing build.
+
+/// One declared provider registry, contributed to a link-time inventory by
+/// every `provider_registry!` / `provider_registry_arc!` expansion in the
+/// process.
+///
+/// The descriptor is metadata plus one probe. It exists so that "was this
+/// registry ever wired up?" is an answerable question: without it, an
+/// unregistered boxed registry is indistinguishable at runtime from one whose
+/// provider happens to do nothing.
+#[derive(Clone, Copy)]
+pub struct DeclaredProviderRegistry {
+    /// `module_path!()` of the declaration site. Unique per registry: two
+    /// registries in one module would collide on the generated slot accessor,
+    /// so a module hosts at most one.
+    pub module_path: &'static str,
+    /// The name of the generated registration entry point, e.g.
+    /// `register_stack_provider`.
+    pub register_fn: &'static str,
+    /// Whether the slot currently holds a provider. Takes the registry lock,
+    /// recovering from poisoning exactly like the accessors do.
+    pub is_registered: fn() -> bool,
+}
+
+impl DeclaredProviderRegistry {
+    /// Stable identifier: the declaration site's module path joined to the
+    /// registration entry point's name.
+    pub fn id(&self) -> String {
+        format!("{}::{}", self.module_path, self.register_fn)
+    }
+
+    /// Whether a provider has been registered into this registry.
+    pub fn registered(&self) -> bool {
+        (self.is_registered)()
+    }
+}
+
+impl std::fmt::Debug for DeclaredProviderRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeclaredProviderRegistry")
+            .field("id", &self.id())
+            .finish()
+    }
+}
+
+inventory::collect!(DeclaredProviderRegistry);
+
+/// Every provider registry declared by any crate linked into the current
+/// binary, sorted by [`DeclaredProviderRegistry::id`].
+///
+/// Only registries whose declaring crate is linked in are visible, which is
+/// exactly the set that binary can be expected to register.
+pub fn declared_provider_registries() -> Vec<&'static DeclaredProviderRegistry> {
+    let mut declared = inventory::iter::<DeclaredProviderRegistry>
+        .into_iter()
+        .collect::<Vec<_>>();
+    // Sorted by `id()` rather than by the `(module_path, register_fn)` tuple:
+    // the two orders differ (a parent module sorts before its child under the
+    // tuple, after it once `::` is part of the string), and `id()` is what
+    // callers report and diff against.
+    declared.sort_by_key(|registry| registry.id());
+    declared
+}
+
+/// The ids of every declared registry whose slot is still empty.
+///
+/// An empty boxed registry silently dispatches to its no-op, so this is the
+/// list of subsystems that are currently inert. A completeness test asserts it
+/// contains nothing but the registries that are deliberately conditional.
+pub fn unregistered_provider_registry_ids() -> Vec<String> {
+    declared_provider_registries()
+        .into_iter()
+        .filter(|registry| !registry.registered())
+        .map(DeclaredProviderRegistry::id)
+        .collect()
+}
+
+/// Internal: submit the declaration-site descriptor for the registry whose
+/// slot accessor was just generated. Shared by all four macro forms.
+///
+/// The probe closes over the enclosing module's generated `provider_slot()`,
+/// so it reports the live state of that specific registry.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __provider_registry_declare {
+    ($register:ident) => {
+        const _: () = {
+            fn is_registered() -> bool {
+                provider_slot()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_some()
+            }
+
+            $crate::inventory::submit! {
+                $crate::provider_registry::DeclaredProviderRegistry {
+                    module_path: ::std::module_path!(),
+                    register_fn: ::std::stringify!($register),
+                    is_registered: is_registered,
+                }
+            }
+        };
+    };
+}
 
 /// Declare a process-global boxed provider registry.
 ///
@@ -78,6 +197,7 @@ macro_rules! provider_registry {
         with: $with_vis:vis fn $with:ident $(,)?
     ) => {
         $crate::__provider_registry_slot!($provider);
+        $crate::__provider_registry_declare!($register);
 
         $(#[$register_meta])*
         $register_vis fn $register(provider: ::std::boxed::Box<dyn $provider>) {
@@ -109,6 +229,7 @@ macro_rules! provider_registry {
         with_optional: $with_vis:vis fn $with:ident $(,)?
     ) => {
         $crate::__provider_registry_slot!($provider);
+        $crate::__provider_registry_declare!($register);
 
         $(#[$register_meta])*
         $register_vis fn $register(provider: ::std::boxed::Box<dyn $provider>) {
@@ -155,6 +276,7 @@ macro_rules! provider_registry_arc {
         active: $active_vis:vis fn $active:ident $(,)?
     ) => {
         $crate::__provider_registry_arc_slot!($provider);
+        $crate::__provider_registry_declare!($register);
 
         $(#[$register_meta])*
         $register_vis fn $register(provider: ::std::sync::Arc<dyn $provider>) {
@@ -184,6 +306,7 @@ macro_rules! provider_registry_arc {
         optional: $active_vis:vis fn $active:ident $(,)?
     ) => {
         $crate::__provider_registry_arc_slot!($provider);
+        $crate::__provider_registry_declare!($register);
 
         $(#[$register_meta])*
         $register_vis fn $register(provider: ::std::sync::Arc<dyn $provider>) {
@@ -332,6 +455,78 @@ mod tests {
                 active_greeter().map(|g| g.greet()),
                 Some("real".to_string())
             );
+        }
+    }
+
+    // The declaration inventory is what turns "nobody registered this" from
+    // silence into an assertable fact. Its own registry lives in a dedicated
+    // module so no other test can register into it and mask the transition.
+    mod declaration_inventory {
+        use super::Greeter;
+        use crate::provider_registry::{
+            declared_provider_registries, unregistered_provider_registry_ids,
+        };
+
+        struct RealGreeter;
+
+        impl Greeter for RealGreeter {
+            fn greet(&self) -> String {
+                "real".to_string()
+            }
+        }
+
+        crate::provider_registry! {
+            provider: dyn Greeter,
+            noop: super::NoopGreeter,
+            /// Register the greeter used by this test module.
+            register: pub(crate) fn register_inventoried_greeter,
+            with: fn with_greeter,
+        }
+
+        const ID: &str = concat!(
+            module_path!(),
+            "::",
+            // Kept literal on purpose: the id is a contract the completeness
+            // test reads, so a rename has to be a deliberate edit here too.
+            "register_inventoried_greeter"
+        );
+
+        // One test: registration is a process-global one-way transition, so
+        // splitting the before/after halves would make them order-dependent.
+        #[test]
+        fn declares_itself_and_reports_the_registration_transition() {
+            // Declared without anyone having to list it anywhere.
+            let declared = declared_provider_registries();
+            let this = declared
+                .iter()
+                .find(|registry| registry.id() == ID)
+                .expect("the expansion submits its own descriptor");
+            assert_eq!(this.register_fn, "register_inventoried_greeter");
+
+            // Ids are sorted and unique, so the completeness test's diff of
+            // "declared but unregistered" is stable across runs.
+            let ids = declared
+                .iter()
+                .map(|registry| registry.id())
+                .collect::<Vec<_>>();
+            let mut sorted = ids.clone();
+            sorted.sort();
+            sorted.dedup();
+            assert_eq!(ids, sorted, "descriptors are sorted and unique by id");
+
+            // Before: inert, and the accessor silently yields the no-op. That
+            // pairing is the bug this inventory exists to make visible.
+            assert!(!this.registered());
+            assert!(unregistered_provider_registry_ids().contains(&ID.to_string()));
+            assert_eq!(with_greeter(|greeter| greeter.greet()), "noop");
+
+            register_inventoried_greeter(Box::new(RealGreeter));
+
+            // After: the same probe flips, so deleting the registration above
+            // is a test failure rather than a subsystem that quietly stops.
+            assert!(this.registered());
+            assert!(!unregistered_provider_registry_ids().contains(&ID.to_string()));
+            assert_eq!(with_greeter(|greeter| greeter.greet()), "real");
         }
     }
 }

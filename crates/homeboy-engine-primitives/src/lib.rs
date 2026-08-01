@@ -30,3 +30,13 @@ pub mod template;
 pub mod test_path;
 pub mod text;
 pub mod validation;
+
+// Re-exported so the `provider_registry!` / `provider_registry_arc!` expansions
+// can reach `inventory` as `$crate::inventory` from any crate in the workspace
+// without every one of them taking a direct dependency on it.
+#[doc(hidden)]
+pub use inventory;
+
+pub use provider_registry::{
+    declared_provider_registries, unregistered_provider_registry_ids, DeclaredProviderRegistry,
+};
