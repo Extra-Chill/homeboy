@@ -260,6 +260,9 @@ fn finding_for_match(
 struct TermMatcher {
     label: String,
     regex: Regex,
+    /// Matches the term reassembled from adjacent string-literal fragments.
+    /// Populated only when the term opts in with `detect_split`.
+    split_regex: Option<Regex>,
 }
 
 impl TermMatcher {
@@ -279,15 +282,64 @@ impl TermMatcher {
             SourcePolicyMatchMode::Regex => configured_regex_pattern(value, case_insensitive),
         };
 
+        // Regex terms are already author-controlled patterns; splitting their
+        // source text has no well-defined meaning, so only concrete terms opt in.
+        let split_regex = if term.detect_split && !matches!(mode, SourcePolicyMatchMode::Regex) {
+            split_literal_pattern(value, case_insensitive).and_then(|p| Regex::new(&p).ok())
+        } else {
+            None
+        };
+
         Regex::new(&pattern).ok().map(|regex| Self {
             label: term.label.clone().unwrap_or_else(|| value.to_string()),
             regex,
+            split_regex,
         })
     }
 
     fn matches(&self, line: &str) -> bool {
         self.regex.is_match(line)
+            || self
+                .split_regex
+                .as_ref()
+                .is_some_and(|regex| regex.is_match(line))
     }
+}
+
+/// Separator between two adjacent quoted fragments that a compiler or a
+/// `concat!`/`format!`/`[..].concat()` call rejoins into one literal:
+/// `"car", "go"`, `"car","go"`, `"car" + "go"`.
+const LITERAL_SEAM: &str = r#""\s*(?:,|\+)\s*""#;
+
+/// Build a pattern matching `value` when it is broken across one seam between
+/// two adjacent string literals. Deliberately recognizes a single seam rather
+/// than arbitrary fragmentation: that covers the evasions seen in this tree
+/// without turning the detector into a general obfuscation analyzer.
+fn split_literal_pattern(value: &str, case_insensitive: bool) -> Option<String> {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() < 2 {
+        return None;
+    }
+
+    let alternatives = (1..chars.len())
+        .map(|split| {
+            let head: String = chars[..split].iter().collect();
+            let tail: String = chars[split..].iter().collect();
+            format!(
+                "(?:{}{}{})",
+                regex::escape(&head),
+                LITERAL_SEAM,
+                regex::escape(&tail)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+
+    Some(format!(
+        "{}(?:{})",
+        case_prefix(case_insensitive),
+        alternatives
+    ))
 }
 
 fn token_pattern(value: &str, case_insensitive: bool) -> String {
@@ -389,11 +441,13 @@ mod tests {
                         value: "florpstack".to_string(),
                         label: None,
                         match_mode: None,
+                        detect_split: false,
                     },
                     SourcePolicyTerm {
                         value: "florp-run".to_string(),
                         label: None,
                         match_mode: Some(SourcePolicyMatchMode::Literal),
+                        detect_split: false,
                     },
                 ],
                 default_match: SourcePolicyMatchMode::Token,
@@ -469,6 +523,7 @@ mod tests { const SAMPLE: &str = "florpstack"; }
                 value: r#"widget_[0-9]+"#.to_string(),
                 label: Some("numbered widget".to_string()),
                 match_mode: Some(SourcePolicyMatchMode::Regex),
+                detect_split: false,
             }],
             default_match: SourcePolicyMatchMode::Token,
             case_insensitive: false,
@@ -479,6 +534,81 @@ mod tests { const SAMPLE: &str = "florpstack"; }
 
         assert_eq!(findings.len(), 1);
         assert!(findings[0].description.contains("numbered widget"));
+    }
+
+    fn split_rule(value: &str, detect_split: bool) -> SourcePolicyRule {
+        let mut rule = rule();
+        rule.rule = SourcePolicyRuleBody::ForbiddenTerms {
+            terms: vec![SourcePolicyTerm {
+                value: value.to_string(),
+                label: None,
+                match_mode: Some(SourcePolicyMatchMode::Literal),
+                detect_split,
+            }],
+            default_match: SourcePolicyMatchMode::Literal,
+            case_insensitive: true,
+        };
+        rule
+    }
+
+    #[test]
+    fn detect_split_sees_array_literal_reassembly() {
+        let fp = rust_fp(
+            "src/core/paths.rs",
+            r#"let dir = home.join([".flo", "rp"].concat());"#,
+        );
+
+        assert!(run(&[&fp], &[split_rule(".florp", false)]).is_empty());
+
+        let findings = run(&[&fp], &[split_rule(".florp", true)]);
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn detect_split_sees_concat_macro_reassembly() {
+        let fp = rust_fp(
+            "src/core/config.rs",
+            r#"const FILE: &str = concat!("florp", ".json");"#,
+        );
+
+        assert!(run(&[&fp], &[split_rule("florp.json", false)]).is_empty());
+        assert_eq!(run(&[&fp], &[split_rule("florp.json", true)]).len(), 1);
+    }
+
+    #[test]
+    fn detect_split_sees_format_and_plus_reassembly() {
+        let formatted = rust_fp(
+            "src/core/env.rs",
+            r#"let key = format!("{}{}", "FLO", "RP_HOME");"#,
+        );
+        let added = rust_fp("src/core/env.rs", r#"let key = "FLO" + "RP_HOME";"#);
+
+        assert_eq!(
+            run(&[&formatted], &[split_rule("FLORP_HOME", true)]).len(),
+            1
+        );
+        assert_eq!(run(&[&added], &[split_rule("FLORP_HOME", true)]).len(), 1);
+    }
+
+    #[test]
+    fn detect_split_reports_each_line_once_when_literal_is_intact() {
+        // The intact literal must not double-report via the split matcher.
+        let fp = rust_fp("src/core/paths.rs", r#"let dir = home.join(".florp");"#);
+
+        assert_eq!(run(&[&fp], &[split_rule(".florp", true)]).len(), 1);
+    }
+
+    #[test]
+    fn detect_split_does_not_match_unrelated_adjacent_literals() {
+        let fp = rust_fp(
+            "src/core/list.rs",
+            r#"let items = ["alpha", "beta", "gamma"];"#,
+        );
+
+        assert!(run(&[&fp], &[split_rule("florp", true)]).is_empty());
+        // A genuine seam is required, not merely two neighbouring strings.
+        let unrelated = rust_fp("src/core/list.rs", r#"let pair = ["flo", "wers"];"#);
+        assert!(run(&[&unrelated], &[split_rule("florp", true)]).is_empty());
     }
 
     #[test]
@@ -495,6 +625,7 @@ mod tests { const SAMPLE: &str = "florpstack"; }
                 value: "(?-i:FLORP_TOKEN)".to_string(),
                 label: Some("FLORP_TOKEN".to_string()),
                 match_mode: Some(SourcePolicyMatchMode::Regex),
+                detect_split: false,
             }],
             default_match: SourcePolicyMatchMode::Token,
             case_insensitive: true,
@@ -523,6 +654,7 @@ mod tests { const SAMPLE: &str = "florpstack"; }
                 value: r"florp\[E".to_string(),
                 label: Some("florp diagnostic code".to_string()),
                 match_mode: Some(SourcePolicyMatchMode::Regex),
+                detect_split: false,
             }],
             default_match: SourcePolicyMatchMode::Token,
             case_insensitive: true,
@@ -552,6 +684,7 @@ mod tests { const SAMPLE: &str = "florpstack"; }
                 value: "florpstack".to_string(),
                 label: None,
                 match_mode: Some(SourcePolicyMatchMode::Token),
+                detect_split: false,
             }],
             default_match: SourcePolicyMatchMode::Token,
             case_insensitive: true,
@@ -598,6 +731,7 @@ fn dispatch() {
                 value: "crate::commands::".to_string(),
                 label: Some("command-layer dependency".to_string()),
                 match_mode: Some(SourcePolicyMatchMode::Literal),
+                detect_split: false,
             }],
             default_match: SourcePolicyMatchMode::Literal,
             case_insensitive: false,
@@ -627,11 +761,13 @@ fn dispatch() {
                     value: "WidgetLang".to_string(),
                     label: None,
                     match_mode: Some(SourcePolicyMatchMode::Token),
+                    detect_split: false,
                 },
                 SourcePolicyTerm {
                     value: "widget-package.json".to_string(),
                     label: None,
                     match_mode: Some(SourcePolicyMatchMode::Literal),
+                    detect_split: false,
                 },
             ],
             default_match: SourcePolicyMatchMode::Token,
@@ -671,6 +807,7 @@ mod tests { const PACKAGE: &str = "widget-package.json"; }
                 value: r#"\bstd::process::Command\b|\bCommand::new\s*\("#.to_string(),
                 label: Some("direct process execution".to_string()),
                 match_mode: Some(SourcePolicyMatchMode::Regex),
+                detect_split: false,
             }],
             default_match: SourcePolicyMatchMode::Regex,
             case_insensitive: false,
