@@ -620,6 +620,12 @@ pub(super) fn run_materialized_provider_command_once(
                 &mut outcome,
                 &request.artifacts_path,
                 &request.artifacts_path_provenance,
+                request
+                    .request
+                    .workspace
+                    .root
+                    .as_deref()
+                    .map(std::path::Path::new),
             );
             validate_declared_outputs(&mut outcome, request);
             surface_provider_process_failure(

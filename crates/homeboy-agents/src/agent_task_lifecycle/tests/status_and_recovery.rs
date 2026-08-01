@@ -18,6 +18,14 @@ use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
 #[test]
+fn candidate_recoverable_provider_projection_is_failed_not_timed_out() {
+    assert_eq!(
+        provider_runtime_state_for_task_state(Some(AgentTaskState::CandidateRecoverable)),
+        ProviderRuntimeState::Failed
+    );
+}
+
+#[test]
 fn cook_alias_status_projects_active_adoption_from_earlier_attempt() {
     with_isolated_home(|_| {
         let cook_id = "cook-issue-9168-active";
