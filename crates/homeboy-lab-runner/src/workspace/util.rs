@@ -9,6 +9,47 @@ use homeboy_core::server::{self, Server, SshClient};
 
 use super::super::Runner;
 
+/// Interpreter used for every workspace shell program, chosen so a pipeline's
+/// exit status reflects *every* stage rather than only the last one.
+///
+/// Snapshot materialization hands the shell a program shaped like
+/// `(cd src && prepare && tar -cf - .) | ssh runner 'tar -xf -'`, with two
+/// further pipelines nested inside `prepare`. A POSIX shell reports only the
+/// last element's status, so a failing local `tar` — disk full, an unreadable
+/// file, a failed `mktemp`, a bad exclude — produced a truncated stream that
+/// the remote `tar -xf -` consumed happily and exited 0. The materialization
+/// was reported successful and the loss surfaced minutes later on the runner as
+/// an unrelated build or test failure, which is the most expensive shape a
+/// failure can take: the evidence points at the wrong subsystem (#11100).
+///
+/// `pipefail` cannot live in the program text. It is not POSIX, `dash` rejects
+/// it at runtime, and the materialization command is held to a
+/// `dash`-parseable contract precisely because a shell-syntax regression once
+/// reached `sh -c` unobserved (#10399). Selecting the interpreter keeps the
+/// emitted program byte-identical and portable.
+const PIPEFAIL_SHELL: &str = "bash";
+
+/// Fallback for hosts without `bash`. Pipelines then report last-stage status
+/// only, which is the pre-#11100 behavior — degraded, not broken.
+const POSIX_SHELL: &str = "sh";
+
+/// Run one shell program under a pipefail-capable interpreter.
+///
+/// Falls back to `sh` only when `bash` is genuinely absent, so a missing
+/// interpreter degrades to the historical behavior instead of failing the
+/// operation outright.
+fn shell_output(command: &str) -> std::io::Result<std::process::Output> {
+    match Command::new(PIPEFAIL_SHELL)
+        .args(["-o", "pipefail", "-c", command])
+        .output()
+    {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Command::new(POSIX_SHELL).args(["-c", command]).output()
+        }
+        other => other,
+    }
+}
+
 pub(super) fn validate_absolute_path(field: &str, path: &str) -> Result<()> {
     if path.starts_with('/') {
         return Ok(());
@@ -99,7 +140,7 @@ pub(crate) fn ssh_client_for_runner(runner: &Runner) -> Result<(Server, SshClien
 /// reading a synthetic snapshot checkout's HEAD over SSH) where a failure must
 /// not abort the surrounding operation.
 pub(crate) fn run_shell_capture(command: &str) -> Option<String> {
-    let output = Command::new("sh").args(["-c", command]).output().ok()?;
+    let output = shell_output(command).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -112,9 +153,7 @@ pub(crate) fn run_shell_capture(command: &str) -> Option<String> {
 }
 
 pub(crate) fn run_shell_command(command: &str, action: &str) -> Result<()> {
-    let output = Command::new("sh")
-        .args(["-c", command])
-        .output()
+    let output = shell_output(command)
         .map_err(|err| Error::internal_io(err.to_string(), Some(action.to_string())))?;
     if output.status.success() {
         return Ok(());

@@ -411,6 +411,47 @@ fn snapshot_git_falls_back_to_filesystem_snapshot_when_git_closure_is_unavailabl
     });
 }
 
+/// A failing producer must fail the materialization even when the consumer
+/// succeeds.
+///
+/// The archive pipeline is `(cd src && prepare && tar -cf - .) | ssh runner
+/// 'tar -xf -'`. Under a plain POSIX shell the status is the *consumer's*, and
+/// `tar -xf -` exits 0 on a truncated or empty stream — so a local `tar` that
+/// died on a full disk or an unreadable file shipped a partial workspace and
+/// reported success (#11100).
+#[test]
+fn a_failing_pipeline_producer_fails_the_command() {
+    let error = super::super::util::run_shell_command(
+        "sh -c 'printf partial; exit 19' | cat",
+        "materialize SSH workspace snapshot",
+    )
+    .expect_err("a failing pipeline producer must fail the command");
+
+    assert!(
+        error.message.contains("exit status 19"),
+        "the producer's status must be the reported status, not the consumer's: {}",
+        error.message
+    );
+}
+
+/// The consumer's failure must still win when it is the one that fails, so
+/// `pipefail` does not mask the SSH-side transport errors that
+/// `classify_transport_failure` depends on (#8803).
+#[test]
+fn a_failing_pipeline_consumer_still_fails_the_command() {
+    let error = super::super::util::run_shell_command(
+        "printf whole | sh -c 'exit 26'",
+        "materialize SSH workspace snapshot",
+    )
+    .expect_err("a failing pipeline consumer must fail the command");
+
+    assert!(
+        error.message.contains("exit status 26"),
+        "the consumer's status must survive: {}",
+        error.message
+    );
+}
+
 #[test]
 fn snapshot_command_failure_keeps_exit_status_and_silent_transport_cause() {
     let error =
