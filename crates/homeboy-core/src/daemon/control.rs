@@ -98,8 +98,8 @@ pub fn supervise(addr: &str, startup_token: &str) -> Result<()> {
     let stdout = thread::spawn(move || bounded_redacted_reader(child_stdout));
     let stderr = thread::spawn(move || bounded_redacted_reader(child_stderr));
     let status = child.wait();
-    let stdout = stdout.join().ok().flatten();
-    let stderr = stderr.join().ok().flatten();
+    let stdout = join_output_reader(stdout, "stdout");
+    let stderr = join_output_reader(stderr, "stderr");
     let status = status.map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -129,28 +129,63 @@ pub fn supervise(addr: &str, startup_token: &str) -> Result<()> {
     super::write_termination_evidence(&evidence)
 }
 
+fn join_output_reader(reader: thread::JoinHandle<Option<String>>, stream: &str) -> Option<String> {
+    reader
+        .join()
+        .unwrap_or_else(|_| Some(format!("[{stream} reader panicked after child reaped]")))
+}
+
+/// Redact complete, bounded records before retaining them. An overlong record
+/// is discarded rather than retaining an unredacted suffix whose key occurred
+/// before the retention boundary.
 fn bounded_redacted_reader(mut reader: impl Read) -> Option<String> {
     const LIMIT: usize = 4096;
+    const RECORD_LIMIT: usize = 4096;
     let mut tail = VecDeque::with_capacity(LIMIT);
     let mut buffer = [0; 8192];
+    let mut record = Vec::with_capacity(RECORD_LIMIT);
+    let mut discarding_record = false;
     let mut truncated = false;
     loop {
-        let count = reader.read(&mut buffer).ok()?;
+        let count = match reader.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error) => {
+                append_redacted_tail(
+                    &mut tail,
+                    LIMIT,
+                    &format!("[output read failed: {:?}]", error.kind()),
+                );
+                truncated = true;
+                break;
+            }
+        };
         if count == 0 {
             break;
         }
-        if count >= LIMIT {
-            tail.clear();
-            tail.extend(&buffer[count - LIMIT..count]);
-            truncated = true;
-            continue;
+        for byte in &buffer[..count] {
+            if *byte == b'\n' {
+                if discarding_record {
+                    discarding_record = false;
+                    truncated = true;
+                } else {
+                    append_redacted_tail(&mut tail, LIMIT, &String::from_utf8_lossy(&record));
+                }
+                record.clear();
+            } else if !discarding_record {
+                if record.len() == RECORD_LIMIT {
+                    // The record may contain a secret that spans its boundary.
+                    // Keep none of it until a newline starts a new record.
+                    record.clear();
+                    discarding_record = true;
+                    truncated = true;
+                } else {
+                    record.push(*byte);
+                }
+            }
         }
-        let overflow = tail.len().saturating_add(count).saturating_sub(LIMIT);
-        if overflow > 0 {
-            tail.drain(..overflow);
-            truncated = true;
-        }
-        tail.extend(&buffer[..count]);
+    }
+    if !record.is_empty() && !discarding_record {
+        append_redacted_tail(&mut tail, LIMIT, &String::from_utf8_lossy(&record));
     }
     if tail.is_empty() {
         return None;
@@ -160,7 +195,22 @@ fn bounded_redacted_reader(mut reader: impl Read) -> Option<String> {
     if truncated {
         text.push_str("\n[truncated]");
     }
-    Some(crate::redaction::redact_string(&text))
+    Some(text)
+}
+
+fn append_redacted_tail(tail: &mut VecDeque<u8>, limit: usize, record: &str) {
+    let redacted = crate::redaction::redact_string(record);
+    let bytes = redacted.as_bytes();
+    if bytes.len() >= limit {
+        tail.clear();
+        tail.extend(&bytes[bytes.len() - limit..]);
+        return;
+    }
+    let overflow = tail.len().saturating_add(bytes.len()).saturating_sub(limit);
+    if overflow > 0 {
+        tail.drain(..overflow);
+    }
+    tail.extend(bytes);
 }
 
 #[cfg(unix)]
@@ -2289,6 +2339,69 @@ mod termination_tests {
         assert!(output.contains("[truncated]"));
         assert!(output.contains("final diagnostic"));
         assert!(output.len() < 4_200);
+    }
+
+    #[test]
+    fn output_reader_redacts_a_secret_split_across_read_boundaries() {
+        struct ChunkedReader {
+            bytes: Vec<u8>,
+            offset: usize,
+        }
+
+        impl Read for ChunkedReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.offset == self.bytes.len() {
+                    return Ok(0);
+                }
+                let count = 3.min(self.bytes.len() - self.offset).min(buffer.len());
+                buffer[..count].copy_from_slice(&self.bytes[self.offset..self.offset + count]);
+                self.offset += count;
+                Ok(count)
+            }
+        }
+
+        let output = bounded_redacted_reader(ChunkedReader {
+            bytes: b"before token=boundary-secret after\n".to_vec(),
+            offset: 0,
+        })
+        .expect("output");
+
+        assert!(output.contains("token=[REDACTED]"));
+        assert!(!output.contains("boundary-secret"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_reader_drains_sustained_os_pipe_output_with_a_bounded_tail() {
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                "i=0; while [ $i -lt 8192 ]; do printf 'diagnostic-%s\\n' \"$i\"; i=$((i + 1)); done; printf 'token=pipe-secret\\n'",
+            ])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("output fixture");
+        let output =
+            bounded_redacted_reader(child.stdout.take().expect("fixture stdout")).expect("output");
+        assert!(child.wait().expect("reap fixture").success());
+        assert!(output.contains("token=[REDACTED]"));
+        assert!(!output.contains("pipe-secret"));
+        assert!(output.len() <= 4096);
+    }
+
+    #[test]
+    fn output_reader_preserves_bounded_read_failure_diagnostics() {
+        struct FailingReader;
+
+        impl Read for FailingReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("token=read-secret"))
+            }
+        }
+
+        let output = bounded_redacted_reader(FailingReader).expect("diagnostic");
+        assert!(output.contains("output read failed"));
+        assert!(!output.contains("read-secret"));
     }
 
     #[cfg(unix)]

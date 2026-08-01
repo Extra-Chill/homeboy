@@ -2200,7 +2200,7 @@ fn lease_bound_stop_converges_term_resistant_mixed_version_supervisor_and_daemon
     write_daemon_state_for_test(&state);
 
     let started = Instant::now();
-    let result = stop_for_lease(&state.lease_id).expect("managed lease stop converges pair");
+    let result = stop().expect("ordinary stop converges stale supervised pair");
 
     assert!(result.stopped);
     assert!(started.elapsed() < Duration::from_secs(10));
@@ -2278,7 +2278,7 @@ fn force_stop_matching_idle_lease_retires_a_reused_pid_without_signaling() {
 }
 
 #[test]
-fn force_stop_default_non_force_behavior_remains_unchanged() {
+fn ordinary_stop_retires_a_live_unowned_stale_lease_without_signaling() {
     let _home = HomeGuard::new();
     let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
     state.binary_sha256 = Some("stale-binary-hash".to_string());
@@ -2289,7 +2289,8 @@ fn force_stop_default_non_force_behavior_remains_unchanged() {
     assert!(!result.stopped);
     assert_eq!(result.pid, Some(std::process::id()));
     assert!(result.termination_evidence.is_none());
-    assert!(state_path().expect("state path").exists());
+    assert!(result.already_absent);
+    assert!(!state_path().expect("state path").exists());
 }
 
 #[test]
