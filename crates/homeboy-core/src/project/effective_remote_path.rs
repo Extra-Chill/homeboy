@@ -10,12 +10,17 @@ use crate::server::SshClient;
 use homeboy_extension_contract::RemotePathRootRule;
 use std::collections::HashSet;
 
-pub fn component_remote_path(component: &Component) -> String {
+/// Effective deploy remote path for a component.
+///
+/// Fallible since #11119: this is the deploy-facing resolver, so an unresolved
+/// multi-extension `remote_path_inference` conflict must be a hard error here
+/// rather than the empty string that deploy would then treat as "not set".
+pub fn component_remote_path(component: &Component) -> Result<String> {
     if component.remote_path.trim().is_empty() {
-        component::auto_resolve_remote_path(component)
-            .unwrap_or_else(|| component.remote_path.clone())
+        Ok(component::try_auto_resolve_remote_path(component)?
+            .unwrap_or_else(|| component.remote_path.clone()))
     } else {
-        component.remote_path.clone()
+        Ok(component.remote_path.clone())
     }
 }
 
@@ -24,7 +29,7 @@ pub fn resolve_effective_remote_path(
     component: &Component,
     fallback_base_path: &str,
 ) -> Result<String> {
-    let remote_path = component_remote_path(component);
+    let remote_path = component_remote_path(component)?;
 
     if remote_path.trim_start().starts_with('/') {
         return base_path::join_remote_path(Some(fallback_base_path), &remote_path);
@@ -409,7 +414,7 @@ mod tests {
     #[test]
     fn test_component_remote_path() {
         assert_eq!(
-            component_remote_path(&component("explicit/path")),
+            component_remote_path(&component("explicit/path")).expect("explicit path"),
             "explicit/path"
         );
 
@@ -418,7 +423,7 @@ mod tests {
             let mut auto = component("");
             auto.local_path = std::env::temp_dir().to_string_lossy().to_string();
 
-            assert_eq!(component_remote_path(&auto), "");
+            assert_eq!(component_remote_path(&auto).expect("no rule matched"), "");
         });
     }
 

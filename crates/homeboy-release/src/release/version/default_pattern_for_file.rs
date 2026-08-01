@@ -5,9 +5,11 @@ use homeboy_core::engine::codebase_scan;
 use homeboy_core::engine::local_files;
 use homeboy_core::engine::text;
 use homeboy_core::error::{Error, Result};
+use homeboy_core::extension_execution::{resolve_owner, SINCE_TAG_SURFACE};
 use homeboy_core::paths::resolve_path_string;
 use homeboy_extension::load_all_extensions;
 use regex::Regex;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -340,6 +342,66 @@ pub(crate) fn detect_unconfigured_patterns(component: &Component) -> Vec<Unconfi
     unconfigured
 }
 
+/// Resolve the single `deploy.since_tag` config that governs this component.
+///
+/// This used to be `component.extensions.keys().find_map(..)` — a first-match
+/// scan over a `HashMap<String, ScopedExtensionConfig>` built with
+/// `RandomState`. With two linked extensions both declaring `since_tag`, *which
+/// config won changed every process*, and this drives `@since` placeholder
+/// rewriting during release (#11119). Nothing about that failure was visible:
+/// the release simply rewrote a different set of file extensions on different
+/// runs.
+///
+/// Providers are now collected into a `BTreeMap` and resolved with the shared
+/// ownership rule:
+///
+/// - no provider → `Ok(None)` (no `@since` rewriting)
+/// - one distinct config → `Ok(Some(config))`, however many extensions declare
+///   it (agreeing extensions are not ambiguous)
+/// - conflicting configs → [`resolve_owner`] on the `since_tag` surface, then a
+///   hard error with a runnable fix command
+fn resolve_since_tag_config(
+    component: &Component,
+) -> Result<Option<homeboy_extension::SinceTagConfig>> {
+    use homeboy_extension::load_extension;
+
+    let Some(extensions) = component.extensions.as_ref() else {
+        return Ok(None);
+    };
+
+    let mut providers: BTreeMap<String, homeboy_extension::SinceTagConfig> = BTreeMap::new();
+    for extension_id in extensions.keys() {
+        let Ok(manifest) = load_extension(extension_id) else {
+            continue;
+        };
+        if let Some(config) = manifest.since_tag() {
+            providers.insert(extension_id.clone(), config.clone());
+        }
+    }
+
+    // `SinceTagConfig` has no `PartialEq`, so distinctness is keyed on its
+    // observable fields — the two things that decide what gets rewritten.
+    let distinct: BTreeSet<(Vec<String>, Option<String>)> = providers
+        .values()
+        .map(|config| {
+            (
+                config.extensions.clone(),
+                config.placeholder_pattern.clone(),
+            )
+        })
+        .collect();
+
+    match distinct.len() {
+        0 => Ok(None),
+        1 => Ok(providers.into_values().next()),
+        _ => {
+            let candidates: Vec<String> = providers.keys().cloned().collect();
+            let owner = resolve_owner(component, SINCE_TAG_SURFACE, &candidates)?;
+            Ok(providers.get(&owner).cloned())
+        }
+    }
+}
+
 /// Replace `@since` placeholder tags in source files with the actual version.
 /// Returns the total number of replacements made across all files.
 ///
@@ -349,18 +411,7 @@ pub(crate) fn replace_since_tag_placeholders(
     component: &Component,
     new_version: &str,
 ) -> Result<usize> {
-    use homeboy_extension::load_extension;
-
-    // Find the extension's since_tag config
-    let since_tag = component.extensions.as_ref().and_then(|extensions| {
-        extensions.keys().find_map(|extension_id| {
-            load_extension(extension_id)
-                .ok()
-                .and_then(|m| m.since_tag().cloned())
-        })
-    });
-
-    let config = match since_tag {
+    let config = match resolve_since_tag_config(component)? {
         Some(c) => c,
         None => return Ok(0),
     };

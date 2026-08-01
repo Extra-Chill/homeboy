@@ -495,12 +495,35 @@ fn auto_resolve_remote_path_returns_none_without_matching_extension_rule() {
     assert_eq!(crate::component::auto_resolve_remote_path(&component), None);
 }
 
-#[test]
-fn auto_resolve_remote_path_returns_none_on_conflicting_extension_rules() {
-    with_isolated_home(|home| {
-        let rule = |path: &str| {
-            format!(
-                r#"{{
+/// Like [`write_extension_fixture`] but also emits the top-level
+/// `composition.includes` block, so `composition.includes` primacy can be
+/// exercised. `write_extension_fixture`'s argument is nested under `deploy`.
+fn write_composing_extension_fixture(home: &Path, id: &str, includes: &[&str], deploy_json: &str) {
+    let dir = home.join(".config/homeboy/extensions").join(id);
+    std::fs::create_dir_all(&dir).expect("extension dir");
+    let includes_json = includes
+        .iter()
+        .map(|inc| format!("\"{}\"", inc))
+        .collect::<Vec<_>>()
+        .join(", ");
+    std::fs::write(
+        dir.join(format!("{}.json", id)),
+        format!(
+            r#"{{
+  "name": "{} extension",
+  "version": "1.0.0",
+  "composition": {{ "includes": [{}] }},
+  "deploy": {}
+}}"#,
+            id, includes_json, deploy_json
+        ),
+    )
+    .expect("extension manifest");
+}
+
+fn conflicting_remote_path_rule(path: &str) -> String {
+    format!(
+        r#"{{
 "remote_path_inference": [
   {{
     "when_file_contains": {{ "file": "marker.txt", "text": "Deployable" }},
@@ -508,25 +531,260 @@ fn auto_resolve_remote_path_returns_none_on_conflicting_extension_rules() {
   }}
 ]
   }}"#,
-                path
-            )
-        };
-        write_extension_fixture(home, "alpha", &rule("remote/alpha/{{dir_name}}"));
-        write_extension_fixture(home, "beta", &rule("remote/beta/{{dir_name}}"));
+        path
+    )
+}
+
+fn two_extension_conflict_component(home: &std::path::Path) -> Component {
+    let dir = home.join("my-component");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("marker.txt"), "Deployable component").unwrap();
+
+    Component {
+        id: "my-component".to_string(),
+        local_path: dir.to_string_lossy().to_string(),
+        extensions: Some(HashMap::from([
+            ("alpha".to_string(), ScopedExtensionConfig::default()),
+            ("beta".to_string(), ScopedExtensionConfig::default()),
+        ])),
+        ..Component::default()
+    }
+}
+
+/// #11119: conflicting `remote_path_inference` used to return `None`, which is
+/// indistinguishable from "no rule matched" — deploy then proceeded with an
+/// empty remote_path. It is a hard error now.
+#[test]
+fn try_auto_resolve_remote_path_errors_on_conflicting_extension_rules() {
+    with_isolated_home(|home| {
+        write_extension_fixture(
+            home,
+            "alpha",
+            &conflicting_remote_path_rule("remote/alpha/{{dir_name}}"),
+        );
+        write_extension_fixture(
+            home,
+            "beta",
+            &conflicting_remote_path_rule("remote/beta/{{dir_name}}"),
+        );
+
+        let component = two_extension_conflict_component(home);
+
+        let err = crate::component::try_auto_resolve_remote_path(&component)
+            .expect_err("conflicting remote_path rules must not resolve silently");
+        let message = err.to_string();
+
+        assert!(
+            message.contains("remote_path"),
+            "error must name the contested surface, got: {message}"
+        );
+        assert!(
+            message.contains("alpha") && message.contains("beta"),
+            "error must name both candidates, got: {message}"
+        );
+    });
+}
+
+/// #11120: the ambiguity error must hand back a command you can actually run.
+/// The old hint said only "Configure explicit <capability> extension ownership",
+/// naming neither `capability_extensions` nor any way to set it.
+#[test]
+fn ownership_ambiguity_error_names_a_runnable_command() {
+    with_isolated_home(|home| {
+        write_extension_fixture(
+            home,
+            "alpha",
+            &conflicting_remote_path_rule("remote/alpha/{{dir_name}}"),
+        );
+        write_extension_fixture(
+            home,
+            "beta",
+            &conflicting_remote_path_rule("remote/beta/{{dir_name}}"),
+        );
+
+        let component = two_extension_conflict_component(home);
+
+        let err = crate::component::try_auto_resolve_remote_path(&component)
+            .expect_err("conflicting rules must error");
+
+        let hint = err
+            .hints
+            .iter()
+            .map(|h| h.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            hint.contains(
+                "homeboy component set my-component --capability-extension remote_path=alpha"
+            ),
+            "hint must be a runnable disambiguation command, got: {hint}"
+        );
+
+        let tried: String = err.details["tried"]
+            .as_array()
+            .expect("tried hints")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            tried.contains("--capability-extension remote_path=alpha")
+                && tried.contains("--capability-extension remote_path=beta"),
+            "every candidate needs a runnable command, got: {tried}"
+        );
+    });
+}
+
+/// The conflict is resolvable through the same `capability_extensions` map the
+/// error now points at — including for a non-enum surface like `remote_path`,
+/// which has no `ExtensionCapability` variant.
+#[test]
+fn capability_extensions_resolves_remote_path_conflict() {
+    with_isolated_home(|home| {
+        write_extension_fixture(
+            home,
+            "alpha",
+            &conflicting_remote_path_rule("remote/alpha/{{dir_name}}"),
+        );
+        write_extension_fixture(
+            home,
+            "beta",
+            &conflicting_remote_path_rule("remote/beta/{{dir_name}}"),
+        );
+
+        let mut component = two_extension_conflict_component(home);
+        component
+            .capability_extensions
+            .insert("remote_path".to_string(), "beta".to_string());
+
+        assert_eq!(
+            crate::component::try_auto_resolve_remote_path(&component).expect("explicit owner"),
+            Some("remote/beta/my-component".to_string()),
+        );
+    });
+}
+
+/// `composition.includes` primacy applies to `remote_path` too, so the common
+/// WordPress-includes-nodejs shape resolves instead of erroring.
+#[test]
+fn composition_primacy_resolves_remote_path_conflict() {
+    with_isolated_home(|home| {
+        write_composing_extension_fixture(
+            home,
+            "alpha",
+            &["beta"],
+            &conflicting_remote_path_rule("remote/alpha/{{dir_name}}"),
+        );
+        write_extension_fixture(
+            home,
+            "beta",
+            &conflicting_remote_path_rule("remote/beta/{{dir_name}}"),
+        );
+
+        let component = two_extension_conflict_component(home);
+
+        assert_eq!(
+            crate::component::try_auto_resolve_remote_path(&component)
+                .expect("composition primacy resolves"),
+            Some("remote/alpha/my-component".to_string()),
+        );
+    });
+}
+
+/// Determinism guard for the `HashSet`/`HashMap` → `BTreeMap`/`BTreeSet`
+/// conversion. `Component.extensions` is a `HashMap` with `RandomState`, so
+/// iteration order differs per process *and* per instance. Resolution must not.
+#[test]
+fn remote_path_resolution_is_deterministic_across_repeated_resolution() {
+    with_isolated_home(|home| {
+        write_extension_fixture(
+            home,
+            "alpha",
+            &conflicting_remote_path_rule("remote/alpha/{{dir_name}}"),
+        );
+        write_extension_fixture(
+            home,
+            "beta",
+            &conflicting_remote_path_rule("remote/beta/{{dir_name}}"),
+        );
 
         let dir = home.join("my-component");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("marker.txt"), "Deployable component").unwrap();
 
-        let component = Component {
-            id: "my-component".to_string(),
-            local_path: dir.to_string_lossy().to_string(),
-            extensions: Some(HashMap::from([
-                ("alpha".to_string(), ScopedExtensionConfig::default()),
-                ("beta".to_string(), ScopedExtensionConfig::default()),
-            ])),
-            ..Component::default()
-        };
+        // Rebuild the component each iteration so the HashMap is freshly
+        // seeded, then assert the outcome never varies.
+        let mut observed = std::collections::BTreeSet::new();
+        for _ in 0..32 {
+            let mut component = Component {
+                id: "my-component".to_string(),
+                local_path: dir.to_string_lossy().to_string(),
+                extensions: Some(HashMap::from([
+                    ("alpha".to_string(), ScopedExtensionConfig::default()),
+                    ("beta".to_string(), ScopedExtensionConfig::default()),
+                ])),
+                ..Component::default()
+            };
+            component
+                .capability_extensions
+                .insert("remote_path".to_string(), "beta".to_string());
+
+            observed.insert(
+                crate::component::try_auto_resolve_remote_path(&component).expect("resolves"),
+            );
+        }
+
+        assert_eq!(
+            observed.len(),
+            1,
+            "resolution must not vary with HashMap iteration order, saw: {observed:?}"
+        );
+    });
+}
+
+/// Rules that agree are not a conflict, however many produce them. WordPress
+/// ships two plugin-detection rules that both render
+/// `wp-content/plugins/{{dir_name}}`.
+#[test]
+fn agreeing_remote_path_rules_are_not_ambiguous() {
+    with_isolated_home(|home| {
+        write_extension_fixture(
+            home,
+            "alpha",
+            &conflicting_remote_path_rule("remote/shared/{{dir_name}}"),
+        );
+        write_extension_fixture(
+            home,
+            "beta",
+            &conflicting_remote_path_rule("remote/shared/{{dir_name}}"),
+        );
+
+        let component = two_extension_conflict_component(home);
+
+        assert_eq!(
+            crate::component::try_auto_resolve_remote_path(&component).expect("agreeing rules"),
+            Some("remote/shared/my-component".to_string()),
+        );
+    });
+}
+
+/// Discovery callers have no error channel and must keep degrading to "unset"
+/// rather than fail — the infallible wrapper preserves the old return shape.
+#[test]
+fn auto_resolve_remote_path_still_degrades_to_none_on_conflict() {
+    with_isolated_home(|home| {
+        write_extension_fixture(
+            home,
+            "alpha",
+            &conflicting_remote_path_rule("remote/alpha/{{dir_name}}"),
+        );
+        write_extension_fixture(
+            home,
+            "beta",
+            &conflicting_remote_path_rule("remote/beta/{{dir_name}}"),
+        );
+
+        let component = two_extension_conflict_component(home);
 
         assert_eq!(crate::component::auto_resolve_remote_path(&component), None);
     });

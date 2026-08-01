@@ -144,7 +144,20 @@ pub(crate) fn prepare_component_deploy(
     // Auto-resolve remote_path from linked extension deploy policy when not explicitly set.
     // This is a deploy-time safety net; the primary resolution happens in
     // resolve_project_component (#812).
-    let effective_remote_path = component_remote_path(component);
+    //
+    // Fallible since #11119: an unresolved multi-extension `remote_path_inference`
+    // conflict used to collapse to an empty path and deploy anyway. Fail the
+    // component deploy instead.
+    let effective_remote_path = component_remote_path(component).map_err(|error| {
+        ComponentDeployResult::failed(
+            component,
+            base_path,
+            local_version.clone(),
+            remote_version.clone(),
+            error.to_string(),
+        )
+        .with_build_exit_code(build_exit_code)
+    })?;
     if component.remote_path.trim().is_empty() && !effective_remote_path.trim().is_empty() {
         homeboy_core::log_status!(
             "deploy",

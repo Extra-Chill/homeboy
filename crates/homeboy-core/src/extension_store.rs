@@ -113,6 +113,26 @@ pub fn find_extension_by_tool(tool: &str) -> Option<ExtensionManifest> {
 /// the given extension and whose `scripts` has the requested capability configured.
 ///
 /// Returns the extension manifest with `extension_path` populated.
+///
+/// # Known limitation (#11119)
+///
+/// This resolves over **every installed extension**, ignoring which extensions
+/// the component actually links, and takes the first match in
+/// `load_all_extensions()` order — which `config::list` sorts by id. So the
+/// winner is deterministic but *alphabetical*: `nodejs` beats `wordpress` for
+/// the five file extensions both manifests claim (`js`, `jsx`, `ts`, `tsx`,
+/// `json`), while [`crate::extension_execution::resolve_owner`] gives WordPress
+/// ownership via `composition.includes`. Two rules, opposite answers.
+///
+/// It is not routed through `resolve_owner` here because this function has no
+/// `&Component` in scope and neither do any of its nine callers (all returning
+/// `Option`, across homeboy-refactor / homeboy-extension / core's symbol
+/// graph). Threading component linkage through them is a separate change.
+///
+/// The contradiction is currently latent rather than live: among shipped
+/// extensions only `wordpress` declares `fingerprint`/`refactor` scripts for
+/// the contested file extensions, so the capability filter below eliminates
+/// `nodejs` before ordering matters.
 pub fn find_extension_for_file_ext(ext: &str, capability: &str) -> Option<ExtensionManifest> {
     load_all_extensions().ok().and_then(|extensions| {
         extensions.into_iter().find(|m| {

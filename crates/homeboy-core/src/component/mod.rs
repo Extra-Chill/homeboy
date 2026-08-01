@@ -57,7 +57,9 @@ pub use portable::{
     try_discover_from_portable, write_portable_config,
 };
 pub use relationships::{associated_projects, projects_using, rename_component, shared_components};
-pub use remote_path::{auto_resolve_remote_path, resolve_remote_path};
+pub use remote_path::{
+    auto_resolve_remote_path, resolve_remote_path, try_auto_resolve_remote_path,
+};
 pub use resolution::{
     local_path_is_relative, normalize_component_local_path, normalize_component_local_path_against,
     resolve, resolve_artifact, resolve_effective, resolve_target, resolve_target_from_component,
@@ -65,8 +67,8 @@ pub use resolution::{
 };
 pub use scope::{resolve_component_scope, EffectiveScope, ScopeCommand};
 pub use versioning::{
-    normalize_version_pattern, parse_version_targets, validate_version_pattern,
-    validate_version_target_conflict,
+    normalize_version_pattern, parse_capability_extensions, parse_version_targets,
+    validate_version_pattern, validate_version_target_conflict,
 };
 
 #[cfg(test)]
