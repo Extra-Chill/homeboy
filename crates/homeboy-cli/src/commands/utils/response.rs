@@ -473,6 +473,12 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
 
         ErrorCode::ObservationStoreBusy => 20,
 
+        // Exhausted storage is an environment fault, not a bug in the command
+        // that happened to be holding the pen when the filesystem gave out. It
+        // shares the operational exit code so a wrapper can distinguish it from
+        // an internal error and route to cleanup (#11127).
+        ErrorCode::StorageExhausted => 20,
+
         // A contended runtime promotion (another owner holds the lease) is a
         // transient "busy" condition, not a hard failure — map it to the
         // general error code alongside the other internal/unexpected states.

@@ -397,9 +397,39 @@ fn copy_artifact_directory_contents(source: &Path, target: &Path) -> Result<()> 
 pub(crate) fn sqlite_error(context: impl Into<String>) -> impl FnOnce(rusqlite::Error) -> Error {
     let context = context.into();
     move |error| {
+        // The observation store is the writer whose failure produced the
+        // #10603 deadlock: cleanup could not plan because opening the store
+        // needs an inode for its journal. Collapsing SQLITE_FULL into
+        // `internal.unexpected` is what made that unreadable, and what stopped
+        // any caller from degrading to a store-free path (#11127).
+        if sqlite_error_is_storage_exhausted(&error) {
+            return Error::storage_exhausted(
+                error.to_string(),
+                Some(format!("SQLite observation store: {context}")),
+            );
+        }
         Error::internal_unexpected(format!(
             "SQLite observation store error: {context}: {error}"
         ))
+    }
+}
+
+/// Whether a SQLite failure reports an out-of-capacity filesystem.
+///
+/// `SQLITE_FULL` is the direct signal. `SQLITE_IOERR` is checked through the
+/// message because SQLite reports an underlying `ENOSPC` from a journal or WAL
+/// write as a generic IO error with the operating-system text attached — which
+/// is exactly the write that fails first when inodes run out.
+pub(crate) fn sqlite_error_is_storage_exhausted(error: &rusqlite::Error) -> bool {
+    use rusqlite::ffi::ErrorCode;
+    match error {
+        rusqlite::Error::SqliteFailure(inner, message) => {
+            matches!(inner.code, ErrorCode::DiskFull)
+                || message
+                    .as_deref()
+                    .is_some_and(crate::error::message_reports_storage_exhaustion)
+        }
+        _ => false,
     }
 }
 

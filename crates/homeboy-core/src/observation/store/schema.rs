@@ -332,11 +332,50 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
     // WAL journaling lets readers and a single writer proceed concurrently,
     // which sharply reduces transient "database is locked" contention when
     // multiple homeboy processes touch the observation store at once.
-    // pragma_update may itself momentarily contend on the lock, so it is best
-    // effort: the busy_timeout above plus the write-retry wrapper still apply.
-    let _ = connection.pragma_update(None, "journal_mode", "WAL");
-    let _ = connection.pragma_update(None, "synchronous", "NORMAL");
+    // pragma_update may itself momentarily contend on the lock, so it stays
+    // best effort: the busy_timeout above plus the write-retry wrapper still
+    // apply.
+    //
+    // Best effort is not the same as silent. A discarded failure leaves the
+    // store running in rollback-journal mode with materially different
+    // concurrency behaviour and nobody told, so the next "database is locked"
+    // report has no way to reach its own cause.
+    for warning in apply_journal_pragmas(&connection) {
+        warn_pragma_once(&warning);
+    }
     Ok(connection)
+}
+
+/// Apply the concurrency pragmas, returning a warning per pragma that did not
+/// take. Pure so every branch is reachable without a contended database.
+fn apply_journal_pragmas(connection: &Connection) -> Vec<String> {
+    [("journal_mode", "WAL"), ("synchronous", "NORMAL")]
+        .into_iter()
+        .filter_map(|(pragma, value)| {
+            connection
+                .pragma_update(None, pragma, value)
+                .err()
+                .map(|error| pragma_warning(pragma, value, &error.to_string()))
+        })
+        .collect()
+}
+
+fn pragma_warning(pragma: &str, value: &str, error: &str) -> String {
+    format!(
+        "observation store could not set PRAGMA {pragma}={value}: {error}. The store keeps \
+         working with different concurrency behaviour; expect more transient \
+         `observation_store.busy` errors."
+    )
+}
+
+/// The condition is a property of the database, not of one open, and
+/// `open_connection` runs on nearly every command. Warning once per process
+/// keeps it visible without turning it into noise that gets filtered out.
+fn warn_pragma_once(warning: &str) {
+    static WARNED: OnceLock<()> = OnceLock::new();
+    WARNED.get_or_init(|| {
+        eprintln!("Warning: {warning}");
+    });
 }
 
 /// Open an existing observation store for a bounded metadata read.
@@ -513,6 +552,53 @@ fn column_exists(connection: &Connection, table: &str, column: &str) -> Result<b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real open must take both pragmas. Failure used to be discarded with
+    /// `let _ =`, so the store could silently fall back to rollback-journal
+    /// mode — different concurrency behaviour, nobody told, and the next
+    /// "database is locked" report unable to reach its own cause (#11127).
+    #[test]
+    fn a_healthy_connection_applies_both_concurrency_pragmas_without_warning() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let connection =
+            open_connection(&directory.path().join("observations.sqlite")).expect("open");
+
+        assert!(
+            apply_journal_pragmas(&connection).is_empty(),
+            "a healthy store must take both pragmas"
+        );
+        let mode: String = connection
+            .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
+            .expect("read journal mode");
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
+    }
+
+    /// The point of the change: a failure becomes words, not silence. The
+    /// warning has to name the pragma, the value, and the consequence.
+    #[test]
+    fn a_discarded_pragma_failure_becomes_an_actionable_warning() {
+        let warning = pragma_warning("journal_mode", "WAL", "database is locked");
+
+        assert!(warning.contains("journal_mode=WAL"), "{warning}");
+        assert!(warning.contains("database is locked"), "{warning}");
+        assert!(
+            warning.contains("observation_store.busy"),
+            "the warning must name what the operator will see instead: {warning}"
+        );
+    }
+
+    /// Every pragma that does not take produces exactly one warning, so a
+    /// second silent fallback cannot be introduced without a test noticing.
+    #[test]
+    fn one_warning_is_produced_per_pragma_that_did_not_take() {
+        let warnings: Vec<_> = [("journal_mode", "WAL"), ("synchronous", "NORMAL")]
+            .into_iter()
+            .map(|(pragma, value)| pragma_warning(pragma, value, "disk I/O error"))
+            .collect();
+
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.iter().all(|warning| warning.contains("PRAGMA")));
+    }
 
     #[test]
     fn migration_12_adds_both_missing_columns() {

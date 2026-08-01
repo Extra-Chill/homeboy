@@ -140,7 +140,7 @@ pub fn run(args: CleanupArgs) -> CmdResult<Value> {
         Some(CleanupCommand::Resume(args)) => {
             cleanup_job_resume(&args.job_id).map(|output| (output, 0))
         }
-        None if args.apply => submit_cleanup(args).map(|output| (output, 0)),
+        None if args.apply => apply_cleanup(args).map(|output| (output, 0)),
         None => cleanup_inventory(args).map(|result| (result.output, result.exit_code)),
     }
 }
@@ -282,6 +282,58 @@ fn cleanup_job_parse_error(error: serde_json::Error) -> homeboy::core::Error {
         None,
         None,
     )
+}
+
+/// Apply cleanup, falling back to a store-free sweep when the durable path
+/// cannot start.
+///
+/// `--apply` normally runs through the daemon so the sweep is durable and
+/// recoverable. Reaching the daemon needs the controller's own persistent
+/// state, which needs the filesystem — so at zero free inodes the submission
+/// fails and the operator is left with no way to reclaim anything. That is the
+/// #10603 deadlock in its purest form: *the only tool that can free space
+/// cannot start.*
+///
+/// The fallback is deliberately narrow. It triggers only when the failure is
+/// positively identified as exhausted storage, either by the submission error
+/// itself or by an observation-store probe. A daemon that is merely down, or a
+/// database that is merely corrupt, still surfaces its own error — silently
+/// downgrading a durable `--apply` into a partial in-process sweep for an
+/// unrelated fault would be worse than failing.
+fn apply_cleanup(args: CleanupArgs) -> homeboy::core::Result<Value> {
+    // Captured before `args` is consumed. The subcommand is `None` on this
+    // path, so these are the only fields the degraded sweep needs.
+    let overrides = CleanupPolicyOverrides {
+        runtime_tmp_managed_days: args.runtime_tmp_managed_older_than_days,
+        limit: args.limit,
+        ..CleanupPolicyOverrides::default()
+    };
+    let error = match submit_cleanup(args) {
+        Ok(output) => return Ok(output),
+        Err(error) => error,
+    };
+
+    let store = cleanup::observation_store_availability();
+    if !error.is_storage_exhausted() && !store.is_storage_exhausted() {
+        return Err(error);
+    }
+
+    let policy =
+        cleanup::cleanup_policy_from_retention(&defaults::load_config().retention, overrides)?;
+    let outcome = cleanup::degraded_cleanup(
+        cleanup::DegradedCleanupOptions::from_policy(&policy, true),
+        store,
+        format!(
+            "durable cleanup could not be submitted because storage is exhausted: {}",
+            error.message
+        ),
+    );
+    serde_json::to_value(outcome).map_err(|error| {
+        homeboy::core::Error::internal_json(
+            error.to_string(),
+            Some("serialize degraded cleanup output".to_string()),
+        )
+    })
 }
 
 fn submit_cleanup(args: CleanupArgs) -> homeboy::core::Result<Value> {
@@ -1013,6 +1065,9 @@ fn artifact_root_records(
         runner: None,
         run_id: None,
         limit: policy.scan_limit(),
+        // A read-only report has not probed the store, so it keeps the normal
+        // liveness path rather than defaulting itself into "retain everything".
+        ..RunnerDownloadCleanupOptions::default()
     })?;
     let downloads_root = downloads.root.display().to_string();
     if downloads.planned_count > 0 {
@@ -1525,6 +1580,14 @@ fn cleanup_inventory_with_deadline(
     )?;
     let terminal_run_days = policy.terminal_run_days;
     let limit = policy.limit;
+    // One probe for the whole sweep. Every database-backed category otherwise
+    // attempts its own `ObservationStore::open_initialized`, and each attempt
+    // is another `create_dir_all` plus WAL journal-file creation against a
+    // filesystem that may have no inode left to give — the exact state cleanup
+    // is being asked to recover from (#11127, #10603). Probing once turns N
+    // failing writes into one, and N generic per-category failures into one
+    // named degraded mode.
+    let store = cleanup::observation_store_availability();
     let mut categories = Vec::new();
 
     if selected.includes(CleanupCategoryArg::RepoArtifacts) {
@@ -1598,12 +1661,11 @@ fn cleanup_inventory_with_deadline(
     }
 
     if selected.includes(CleanupCategoryArg::TerminalRuns) {
-        isolate_cleanup_category(
+        isolate_store_backed_cleanup_category(
             &mut categories,
             TERMINAL_RUNS_METADATA,
             apply,
-            None,
-            None,
+            &store,
             || {
                 let output = runs_service::retain_terminal_runs(
                     runs_service::TerminalRunRetentionOptions {
@@ -1633,12 +1695,11 @@ fn cleanup_inventory_with_deadline(
     }
 
     if selected.includes(CleanupCategoryArg::PersistedRunArtifacts) {
-        isolate_cleanup_category(
+        isolate_store_backed_cleanup_category(
             &mut categories,
             PERSISTED_RUN_ARTIFACTS_METADATA,
             apply,
-            None,
-            None,
+            &store,
             || {
                 let persisted =
                     runs_service::cleanup_persisted_artifacts(PersistedArtifactCleanupOptions {
@@ -1722,6 +1783,11 @@ fn cleanup_inventory_with_deadline(
                         runner: None,
                         run_id: None,
                         limit: policy.scan_limit(),
+                        // Store-tolerant, not store-independent: with the
+                        // database shut its liveness veto fails closed and it
+                        // retains everything. Passing the probed answer keeps
+                        // that verdict without a second failing open.
+                        store_available: store.is_available(),
                     })?;
                 // `planned_count`, not `inspected_count`: a candidate is a resource
                 // selected for removal, not every entry the sweep walked past. Using
@@ -2073,6 +2139,70 @@ fn isolate_cleanup_category(
             specialist_command,
             error,
         )),
+    }
+}
+
+/// Run a category that cannot plan without the observation store, gating on a
+/// single probed availability answer.
+///
+/// When the store is unavailable the category is reported as skipped with a
+/// reason that names the store-independent categories, instead of attempting
+/// its own open and surfacing an undifferentiated failure. At zero free inodes
+/// that open cannot succeed and is itself another write against a filesystem
+/// with nothing left (#11127, #10603).
+fn isolate_store_backed_cleanup_category(
+    categories: &mut Vec<CleanupInventoryCategory>,
+    metadata: CleanupInventoryCategoryMetadata,
+    apply: bool,
+    store: &cleanup::StoreAvailability,
+    action: impl FnOnce() -> homeboy::core::Result<Vec<CleanupInventoryCategory>>,
+) {
+    match store.skip_reason() {
+        Some(reason) => categories.push(store_unavailable_category(metadata, apply, store, reason)),
+        None => isolate_cleanup_category(categories, metadata, apply, None, None, action),
+    }
+}
+
+/// A category skipped because the observation store could not be opened.
+///
+/// Reported as a failure, not a silent skip: the operator asked for cleanup and
+/// part of it did not happen. The `failure.code` carries the store's own error
+/// code, so `storage.exhausted` stays distinguishable all the way out to the
+/// command envelope.
+fn store_unavailable_category(
+    metadata: CleanupInventoryCategoryMetadata,
+    apply: bool,
+    store: &cleanup::StoreAvailability,
+    reason: String,
+) -> CleanupInventoryCategory {
+    let (code, retryable) = match store {
+        cleanup::StoreAvailability::Available => ("observation_store.unavailable", None),
+        // Retrying an exhausted filesystem changes nothing until capacity is
+        // reclaimed; any other fault might clear on its own.
+        cleanup::StoreAvailability::Unavailable {
+            code,
+            storage_exhausted,
+            ..
+        } => (code.as_str(), Some(!storage_exhausted)),
+    };
+    CleanupInventoryCategory {
+        category: metadata.category,
+        canonical_cleanup_command: metadata.canonical_cleanup_command(apply),
+        specialist_command: metadata.specialist_command(apply).to_string(),
+        included: true,
+        skipped: true,
+        skip_reason: Some(reason.clone()),
+        failure: Some(CleanupInventoryCategoryFailure {
+            code: code.to_string(),
+            message: reason,
+            retryable,
+        }),
+        candidate_count: 0,
+        applied_count: 0,
+        skipped_count: 1,
+        estimated_bytes: 0,
+        reclaimed_bytes: 0,
+        output: serde_json::to_value(store).unwrap_or(Value::Null),
     }
 }
 
@@ -3012,6 +3142,50 @@ mod count_unit_tests {
         ];
 
         assert_eq!(applied_category_count(&categories), 0);
+    }
+
+    /// A database-backed category skipped because the store will not open must
+    /// carry the store's own error code out to the envelope. Collapsing it into
+    /// an undifferentiated failure is what left #10603 unreadable, and the
+    /// remedy has to name the categories that still run — pointing a zero-inode
+    /// operator back at plain `homeboy cleanup --apply` is the loop.
+    #[test]
+    fn a_category_skipped_for_exhausted_storage_names_the_code_and_the_remedy() {
+        let store = cleanup::StoreAvailability::from_open_error(
+            &homeboy::core::Error::storage_exhausted("No space left on device (os error 28)", None),
+        );
+        let reason = store.skip_reason().expect("degraded skip reason");
+
+        let category = store_unavailable_category(TERMINAL_RUNS_METADATA, true, &store, reason);
+
+        assert!(category.skipped);
+        assert!(category
+            .skip_reason
+            .expect("skip reason")
+            .contains("orphaned-artifact-bytes"));
+        let failure = category.failure.expect("failure");
+        assert_eq!(failure.code, "storage.exhausted");
+        assert_eq!(
+            failure.retryable,
+            Some(false),
+            "retrying an exhausted filesystem changes nothing until capacity is reclaimed"
+        );
+    }
+
+    /// A corrupt database is not a full disk. It must stay retryable and must
+    /// not be laundered into a capacity story.
+    #[test]
+    fn a_category_skipped_for_a_non_capacity_store_fault_stays_retryable() {
+        let store = cleanup::StoreAvailability::from_open_error(
+            &homeboy::core::Error::internal_unexpected(
+                "SQLite observation store error: open: disk image is malformed",
+            ),
+        );
+        let reason = store.skip_reason().expect("degraded skip reason");
+
+        let category = store_unavailable_category(TERMINAL_RUNS_METADATA, true, &store, reason);
+
+        assert_eq!(category.failure.expect("failure").retryable, Some(true));
     }
 }
 

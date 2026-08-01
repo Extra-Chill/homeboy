@@ -150,6 +150,12 @@ pub enum ErrorCode {
 
     ObservationStoreBusy,
 
+    /// The filesystem could not accept a write because it is out of bytes or
+    /// out of inodes. Distinct from [`ErrorCode::InternalIoError`] so callers
+    /// can degrade instead of retrying, and so an operator reads "disk full"
+    /// rather than "write failed" (#11127, #10603).
+    StorageExhausted,
+
     InternalIoError,
     InternalJsonError,
     InternalUnexpected,
@@ -213,6 +219,8 @@ impl ErrorCode {
             ErrorCode::GitCommandFailed => "git.command_failed",
 
             ErrorCode::ObservationStoreBusy => "observation_store.busy",
+
+            ErrorCode::StorageExhausted => "storage.exhausted",
 
             ErrorCode::InternalIoError => "internal.io_error",
             ErrorCode::InternalJsonError => "internal.json_error",
@@ -415,6 +423,85 @@ pub struct InternalIoErrorDetails {
     pub context: Option<String>,
 }
 
+/// Evidence for a write that failed because the filesystem had no capacity.
+///
+/// Every field beyond `error` is optional because the classifier is reachable
+/// from two very different places: a live `io::Error` at the moment a write
+/// failed (which knows nothing about reserves), and a deliberate capacity
+/// preflight (which knows all of it). Both must produce the same code.
+#[derive(Debug, Default, Serialize)]
+pub struct StorageExhaustedDetails {
+    pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    /// Filesystem path the failing write targeted, when the caller knows it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_bytes: Option<u64>,
+    /// Free inodes. A filesystem with free bytes and none of these still fails
+    /// every write, which is precisely the state that produced #10603.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_inodes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reserve_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reserve_inodes: Option<u64>,
+}
+
+/// `ENOSPC` on every unix target homeboy builds for.
+///
+/// Checked alongside [`std::io::ErrorKind::StorageFull`] rather than instead of
+/// it: the mapped `ErrorKind` is the documented classification, and the raw
+/// errno is the fallback for any error value that was reconstructed without
+/// one (for example through `io::Error::from_raw_os_error` in a shim).
+#[cfg(unix)]
+const ENOSPC: i32 = 28;
+
+/// Whether a live `io::Error` reports an out-of-capacity filesystem.
+///
+/// Inode exhaustion also surfaces as `ENOSPC`, so this covers the #10603 state
+/// (free bytes, zero free inodes) without needing a separate probe.
+pub fn io_error_is_storage_exhausted(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::StorageFull {
+        return true;
+    }
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(ENOSPC) {
+        return true;
+    }
+    message_reports_storage_exhaustion(&error.to_string())
+}
+
+/// Whether an already-stringified io/SQLite error reports exhausted storage.
+///
+/// Most homeboy call sites stringify an `io::Error` before it ever reaches this
+/// crate — `Error::internal_io` takes `impl Into<String>`, and there is no
+/// `From<io::Error>` yet (#11134) — so the typed classifier above cannot see
+/// them. These markers are the stable operating-system and SQLite renderings of
+/// a filesystem that cannot accept another byte or another inode.
+pub fn message_reports_storage_exhaustion(message: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "no space left on device",
+        "database or disk is full",
+        "disk quota exceeded",
+        "enospc",
+        // `statvfs`-style phrasing used by homeboy's own capacity preflight.
+        "filesystem has no free inodes",
+    ];
+    let lowered = message.to_ascii_lowercase();
+    if MARKERS.iter().any(|marker| lowered.contains(marker)) {
+        return true;
+    }
+    // `io::Error`'s Display appends the raw errno. Errno 28 is ENOSPC on unix
+    // and something unrelated on Windows, so the numeric marker is unix-only.
+    #[cfg(unix)]
+    if lowered.contains("os error 28") {
+        return true;
+    }
+    false
+}
+
 #[derive(Debug, Serialize)]
 pub struct ObservationStoreBusyDetails {
     pub path: String,
@@ -513,6 +600,60 @@ impl Error {
             hints: Vec::new(),
             retryable: None,
         }
+    }
+
+    /// A write failed, or was refused, because the filesystem has no capacity.
+    ///
+    /// The hint names the degraded cleanup path on purpose. The reason #10603
+    /// deadlocked is that the only tool which can free capacity could not
+    /// start: opening the SQLite observation store needs an inode for its
+    /// journal, and there was none. The store-independent categories do not,
+    /// so they remain runnable in exactly the state that blocks everything
+    /// else.
+    pub fn storage_exhausted(error: impl Into<String>, context: Option<String>) -> Self {
+        Self::storage_exhausted_detailed(StorageExhaustedDetails {
+            error: error.into(),
+            context,
+            ..StorageExhaustedDetails::default()
+        })
+    }
+
+    /// [`Error::storage_exhausted`] carrying measured capacity evidence.
+    pub fn storage_exhausted_detailed(details: StorageExhaustedDetails) -> Self {
+        Self::new(
+            ErrorCode::StorageExhausted,
+            "Filesystem capacity exhausted",
+            to_details(details),
+        )
+        // Not retryable: the same write fails identically until capacity is
+        // reclaimed, so an automatic retry only burns the remaining budget.
+        .with_retryable(false)
+        .with_hint("Reclaim capacity with `homeboy cleanup --apply`.")
+        .with_hint(
+            "If cleanup cannot start because the observation store will not open, run the \
+             store-independent categories: `homeboy cleanup --include orphaned-artifact-bytes \
+             --include runtime-tmp --apply`.",
+        )
+    }
+
+    /// Classify a live `io::Error`, keeping storage exhaustion distinguishable.
+    ///
+    /// Deliberately *not* a `From<io::Error>` impl. Adding that conversion is
+    /// its own migration across ~1500 call sites and is tracked separately
+    /// (#11134); this constructor exists so the sites that matter can classify
+    /// today without waiting for it.
+    pub fn from_io_error(error: &std::io::Error, context: Option<String>) -> Self {
+        if io_error_is_storage_exhausted(error) {
+            return Self::storage_exhausted(error.to_string(), context);
+        }
+        Self::internal_io(error.to_string(), context)
+    }
+
+    /// Whether this error reports an out-of-capacity filesystem.
+    ///
+    /// The predicate callers use to decide between "retry" and "degrade".
+    pub fn is_storage_exhausted(&self) -> bool {
+        self.code == ErrorCode::StorageExhausted
     }
 
     pub fn observation_store_busy(
@@ -1231,11 +1372,21 @@ impl Error {
         Self::new(ErrorCode::ProjectNoActive, "No active project set", details)
     }
 
+    /// A generic IO failure.
+    ///
+    /// Storage exhaustion is split out here rather than at each of the ~1500
+    /// call sites that funnel into this constructor. Those sites hand over
+    /// `error.to_string()`, so this is the single place where an already
+    /// stringified `ENOSPC` is still recoverable. Leaving it collapsed into
+    /// `internal.io_error` is what made #10603 unreadable: every writer failed
+    /// with the same undifferentiated code, so no caller could degrade and the
+    /// operator was told "write failed" instead of "disk full" (#11127).
     pub fn internal_io(error: impl Into<String>, context: Option<String>) -> Self {
-        let details = to_details(InternalIoErrorDetails {
-            error: error.into(),
-            context,
-        });
+        let error = error.into();
+        if message_reports_storage_exhaustion(&error) {
+            return Self::storage_exhausted(error, context);
+        }
+        let details = to_details(InternalIoErrorDetails { error, context });
 
         Self::new(ErrorCode::InternalIoError, "IO error", details)
     }
@@ -1306,6 +1457,130 @@ impl Error {
             ),
             _ => self,
         }
+    }
+}
+
+/// Storage exhaustion must be distinguishable from every other IO failure.
+///
+/// #10603 was diagnosed only after the fact because every writer surfaced the
+/// same `internal.io_error`. These pin the classification, not the wording.
+#[cfg(test)]
+mod storage_exhaustion_tests {
+    use super::*;
+
+    #[test]
+    fn a_storage_full_io_error_does_not_collapse_into_a_generic_io_error() {
+        let full = std::io::Error::from(std::io::ErrorKind::StorageFull);
+
+        let error = Error::from_io_error(&full, Some("write evidence".to_string()));
+
+        assert_eq!(error.code, ErrorCode::StorageExhausted);
+        assert_eq!(error.code.as_str(), "storage.exhausted");
+        assert!(error.is_storage_exhausted());
+        assert_eq!(error.details["context"], "write evidence");
+    }
+
+    /// ENOSPC is what an out-of-*inodes* filesystem returns too, so the raw
+    /// errno path is the one that actually covers the #10603 state.
+    #[cfg(unix)]
+    #[test]
+    fn a_raw_enospc_errno_is_classified_as_storage_exhaustion() {
+        let raw = std::io::Error::from_raw_os_error(ENOSPC);
+
+        assert!(io_error_is_storage_exhausted(&raw));
+        assert!(Error::from_io_error(&raw, None).is_storage_exhausted());
+    }
+
+    /// The ~1500 existing call sites stringify before they reach this crate.
+    /// If the string form were not classified, the split would be invisible
+    /// everywhere it matters until #11134 lands `From<io::Error>`.
+    #[test]
+    fn an_already_stringified_enospc_is_still_classified() {
+        let error = Error::internal_io(
+            "No space left on device (os error 28)",
+            Some("persist artifact".to_string()),
+        );
+
+        assert_eq!(error.code, ErrorCode::StorageExhausted);
+        assert_eq!(error.details["context"], "persist artifact");
+    }
+
+    /// SQLite reports a full filesystem in its own words, and the observation
+    /// store is the writer whose failure produced the deadlock.
+    #[test]
+    fn the_sqlite_rendering_of_a_full_filesystem_is_classified() {
+        assert!(message_reports_storage_exhaustion(
+            "database or disk is full"
+        ));
+        assert!(message_reports_storage_exhaustion("Disk quota exceeded"));
+    }
+
+    #[test]
+    fn an_ordinary_io_failure_stays_a_generic_io_error() {
+        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+
+        let typed = Error::from_io_error(&missing, None);
+        let stringified = Error::internal_io("permission denied (os error 13)", None);
+
+        assert_eq!(typed.code, ErrorCode::InternalIoError);
+        assert_eq!(stringified.code, ErrorCode::InternalIoError);
+        assert!(!typed.is_storage_exhausted());
+    }
+
+    /// A caller that sees this must degrade, not spin. The same write fails
+    /// identically until capacity is reclaimed.
+    #[test]
+    fn storage_exhaustion_is_reported_as_not_retryable() {
+        assert_eq!(
+            Error::storage_exhausted("full", None).retryable,
+            Some(false)
+        );
+    }
+
+    /// The remedy has to name the *store-independent* categories. Pointing a
+    /// zero-inode operator at plain `homeboy cleanup --apply` is the loop that
+    /// #10603 could not escape.
+    #[test]
+    fn the_hint_names_a_remedy_that_survives_a_closed_observation_store() {
+        let error = Error::storage_exhausted("full", None);
+
+        let hints = error
+            .hints
+            .iter()
+            .map(|hint| hint.message.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(hints.contains("orphaned-artifact-bytes"), "{hints}");
+        assert!(hints.contains("runtime-tmp"), "{hints}");
+    }
+
+    #[test]
+    fn measured_capacity_evidence_survives_into_the_details() {
+        let error = Error::storage_exhausted_detailed(StorageExhaustedDetails {
+            error: "reserve breached".to_string(),
+            context: Some("preflight".to_string()),
+            path: Some("/var/lib/homeboy".to_string()),
+            available_bytes: Some(1024),
+            available_inodes: Some(0),
+            reserve_bytes: Some(5 * 1024 * 1024 * 1024),
+            reserve_inodes: Some(100_000),
+        });
+
+        assert_eq!(error.details["available_inodes"], 0);
+        assert_eq!(error.details["reserve_inodes"], 100_000);
+        assert_eq!(error.details["path"], "/var/lib/homeboy");
+    }
+
+    /// Absent measurements must not serialize as nulls a consumer has to
+    /// special-case.
+    #[test]
+    fn unmeasured_capacity_fields_are_omitted_entirely() {
+        let error = Error::storage_exhausted("full", None);
+
+        let details = error.details.as_object().expect("object details");
+        assert!(!details.contains_key("available_bytes"));
+        assert!(!details.contains_key("reserve_inodes"));
+        assert!(!details.contains_key("context"));
     }
 }
 
