@@ -49,6 +49,36 @@ required together. Explicit `--notification-transport` and
 `--notification-route` CLI values take precedence over these environment
 variables.
 
+## Storage Locations
+
+Homeboy writes to two base directories, and three of its largest stores can be
+relocated independently. An operator moving Homeboy onto a larger volume needs
+all of these, not just the first — see `homeboy cleanup retained-storage`, which
+probes every root listed here.
+
+| Root | Default | Override | Holds |
+| --- | --- | --- | --- |
+| Config root | `~/.config/homeboy` (`%APPDATA%\homeboy` on Windows) | `HOME` / `APPDATA` only | `homeboy.json`, component/project/server/extension declarations, `daemon/`, `rigs/`, `runner-sessions/`, `backups/`, `agent-runtimes/`, `preview-ingress/routes/` |
+| Data root | `$XDG_DATA_HOME/homeboy`, else `~/.local/share/homeboy` (`%LOCALAPPDATA%\homeboy` on Windows) | `HOMEBOY_DATA_DIR` | `homeboy.sqlite`, `artifacts/`, `cargo-targets/`, `controller-runtimes/`, `controller-scratch/`, `runtime/tmp/` |
+| Artifact root | `<data root>/artifacts` | `homeboy --artifact-root <dir>`, `HOMEBOY_ARTIFACT_ROOT`, or config `artifact_root` | Persisted run artifacts |
+| Shared Cargo target root | `<data root>/cargo-targets` | `HOMEBOY_CARGO_TARGET_ROOT` or config `cargo_target_root` | Reconstructable shared Cargo target directories |
+| Runtime temp root | `<data root>/runtime/tmp` | `HOMEBOY_RUNTIME_TMPDIR` | Per-workload scratch, exported to every child process as `TMPDIR`/`TMP`/`TEMP` |
+
+`HOMEBOY_RUNTIME_TMPDIR` is the highest-precedence runtime-temp setting and is
+worth knowing about: the runtime temp root is what Homeboy exports as `TMPDIR`,
+`TMP`, and `TEMP` to every child process it launches, so it absorbs build
+intermediates from workloads such as `cargo build`. It is the fastest-growing
+store on a busy controller. Before Homeboy 0.328 this root defaulted under the
+**config** root, so `HOMEBOY_DATA_DIR` did not move it; it now defaults under
+the data root, matching the resolution Homeboy has always used for remote
+shell workloads. A runtime temp root left behind under the config root by an
+older binary is drained automatically by `homeboy cleanup --include runtime-tmp`
+(and by the aggregate `homeboy cleanup`) using the same ownership and retention
+protocol as the active root — no flag required. That automatic drain is scoped
+to default resolution: if `HOMEBOY_RUNTIME_TMPDIR` is set, that root is the only
+one swept, and any residue under the config root is reported by
+`homeboy cleanup retained-storage`.
+
 ### `BenchConfig`
 
 - `local_execution` — Local benchmark execution policy: `allowed` (default) or `denied`.

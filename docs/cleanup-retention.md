@@ -160,6 +160,38 @@ symlinks, malformed or partial layouts, and candidates that change identity are
 retained. Apply revalidates selection, inode identity, layout, symlink state,
 and process ownership immediately before removal.
 
+## Runtime Temp Root Relocation
+
+The runtime temp root is what Homeboy exports as `TMPDIR`, `TMP`, and `TEMP` to
+every child process it launches, so it absorbs build intermediates from
+workloads such as `cargo build`. Through #11125 it defaulted to
+`<config root>/runtime/tmp` while the remote-shell protocol in the same module
+resolved `$HOMEBOY_DATA_DIR/runtime/tmp`. The two resolvers disagreeing meant an
+operator who moved storage to a large volume moved everything except the bytes
+that actually grow. It now defaults to `<data root>/runtime/tmp`, matching the
+remote protocol. `HOMEBOY_RUNTIME_TMPDIR` remains the highest-precedence
+override; see [Configuration Reference](reference/configuration.md#storage-locations).
+
+Entries an older binary left under the config root are not orphaned. They are
+tracked by owner metadata and are only ever reclaimed by the runtime-temp sweep,
+so `homeboy cleanup --include runtime-tmp` — and the aggregate `homeboy cleanup`
+— drains the superseded root as part of its normal pass. There is no flag and no
+separate command. The drain reuses the full ownership protocol rather than
+deleting blindly: active pins, live owner PIDs, active invocation leases, running
+persisted runs, and the corrupt-metadata quarantine grace all protect a
+superseded entry exactly as they protect an active one, and the configured
+retention window still applies. The sweep shares one bounded row budget across
+roots, restarts the superseded root from the beginning each invocation (nothing
+allocates there, so it needs no cursor), and removes the superseded root
+directory once it is empty. It never creates that directory: a root that was
+never used is left alone.
+
+The drain is scoped to default resolution. If `HOMEBOY_RUNTIME_TMPDIR` is set,
+that root is the only one swept, because the old resolver honored the same
+override and there is no superseded default in play. Residue under the config
+root from before an override was adopted is reported by
+`homeboy cleanup retained-storage`.
+
 ## Retained Storage Accounting
 
 `homeboy cleanup retained-storage` explains where disk went without deleting
@@ -194,6 +226,27 @@ hard links shared across top-level stores, directory metadata, and allocation
 granularity can make the top-level sum differ from root physical usage; the
 report states the direction and byte difference rather than hiding it. Existing
 `retained_bytes` and lifecycle aggregates remain unchanged for consumers.
+
+Since #11126 the **config root** (`~/.config/homeboy`) is probed as a fourth
+root, exposed as `filesystem.config_root` and as a `config_root` entry in
+`top_level`. It is usually a different volume from the data root and holds
+`rigs/{id}.state/logs/` (unbounded append), `rig-packages/`, `backups/`,
+`agent-runtimes/`, `runner-sessions/`, `runner-lease-evidence/`,
+`runner-job-execution-context/`, and `preview-ingress/routes/`. It was never
+probed before, so during the 2026-07-29 outage this report described a healthy
+system while the volume it omitted was full. Like the artifact and Cargo roots,
+it is classified `managed/external` and excluded from the data-root
+reconciliation totals, because it is not part of the walk those totals balance
+against. Double-counting is prevented by the same `starts_with` containment test
+the other external roots use, applied in both directions: two roots that merely
+share a filesystem occupy disjoint inodes and are not double-counted, but a
+config root nested in the data root (or a data root nested in the config root)
+is listed once.
+
+`runtime/tmp` used to live on the config root and no longer does (#11125), so
+after that change the config root should be small. It is still probed: an
+unprobed volume is an invisible one, and everything else in the list above
+still lives there.
 
 ## Remaining Scope
 

@@ -414,7 +414,14 @@ struct RetainedStorageSqlite {
 
 #[derive(Debug, Serialize)]
 struct RetainedStorageFilesystem {
+    /// The Homeboy **data** root. `reconciliation` balances this walk against
+    /// the non-external `top_level` entries.
     root: RetainedStorageFilesystemUsage,
+    /// The Homeboy **config** root (#11126). Frequently a different volume from
+    /// the data root, and previously never probed at all, so the one report
+    /// whose job is "where did my disk go" could describe a healthy system
+    /// while the volume holding it was full.
+    config_root: RetainedStorageFilesystemUsage,
     top_level: Vec<RetainedStorageFilesystemEntry>,
     reconciliation: RetainedStorageReconciliation,
     accounting_notes: Vec<&'static str>,
@@ -650,17 +657,20 @@ fn runtime_tmp_retained_record(row: engine::temp::RuntimeTempCleanupRow) -> Reta
 
 fn retained_storage_filesystem_inventory() -> homeboy::core::Result<RetainedStorageFilesystem> {
     let root = homeboy::core::paths::homeboy_data()?;
+    let config_root = homeboy::core::paths::homeboy()?;
     let artifact_root = homeboy::core::artifacts::root()?;
     let cargo_target_root = cleanup::shared_cargo_target_root()?;
-    retained_storage_filesystem_inventory_for(root, artifact_root, cargo_target_root)
+    retained_storage_filesystem_inventory_for(root, config_root, artifact_root, cargo_target_root)
 }
 
 fn retained_storage_filesystem_inventory_for(
     root: PathBuf,
+    config_root: PathBuf,
     artifact_root: PathBuf,
     cargo_target_root: PathBuf,
 ) -> homeboy::core::Result<RetainedStorageFilesystem> {
     let root_usage = filesystem_usage(&root)?;
+    let config_root_usage = filesystem_usage(&config_root)?;
     let mut top_level = Vec::new();
     if root.exists() {
         for entry in std::fs::read_dir(&root).map_err(|error| {
@@ -677,6 +687,28 @@ fn retained_storage_filesystem_inventory_for(
             })?;
             top_level.push(filesystem_entry(entry.path())?);
         }
+    }
+
+    // The config root is a second Homeboy volume, not a second copy of the
+    // first. It holds `rigs/{id}.state/logs/` (unbounded append), `backups/`,
+    // `rig-packages/`, `agent-runtimes/`, `runner-sessions/`,
+    // `runner-lease-evidence/`, `runner-job-execution-context/`, and
+    // `preview-ingress/routes/`. Before #11126 it was never probed, so this
+    // report described a healthy system during the 2026-07-29 outage.
+    //
+    // Double-counting is a containment question, not a same-filesystem
+    // question: two roots sharing a device still occupy disjoint inodes, so the
+    // guard is the same `starts_with` containment test the other external roots
+    // below already use, applied in both directions (`HOMEBOY_DATA_DIR` can be
+    // pointed at, or inside, the config root).
+    let config_root_is_nested = config_root.starts_with(&root) || root.starts_with(&config_root);
+    if !config_root_is_nested {
+        top_level.push(filesystem_entry_with_category(
+            config_root.clone(),
+            "config_root",
+            "managed/external",
+            "homeboy cleanup",
+        )?);
     }
 
     // An explicit artifact root can live on a separate volume. It is still a
@@ -716,6 +748,12 @@ fn retained_storage_filesystem_inventory_for(
             apparent_bytes: root_usage.apparent_bytes,
             physical_bytes: root_usage.physical_bytes,
         },
+        config_root: RetainedStorageFilesystemUsage {
+            path: config_root.display().to_string(),
+            exists: config_root.exists(),
+            apparent_bytes: config_root_usage.apparent_bytes,
+            physical_bytes: config_root_usage.physical_bytes,
+        },
         top_level,
         reconciliation: RetainedStorageReconciliation {
             top_level_apparent_bytes: apparent_total,
@@ -731,6 +769,8 @@ fn retained_storage_filesystem_inventory_for(
             "Root totals de-duplicate hard-linked inodes; independently measured top-level stores can count a cross-store hard link more than once.",
             "The root directory's own metadata and filesystem allocation granularity can leave a small reconciliation difference.",
             "Symlinks are measured as links and are not followed.",
+            "`reconciliation` balances the data root only. `managed/external` entries — including the config root — are measured and listed but are deliberately excluded from those totals, because they are not part of the data-root walk they would be reconciled against.",
+            "The config root is probed as a separate volume. It is omitted from `top_level` only when it contains, or is contained by, the data root; roots that merely share a filesystem occupy disjoint inodes and are not double-counted.",
         ],
     })
 }
@@ -3159,6 +3199,12 @@ mod tests {
                 apparent_bytes: 0,
                 physical_bytes: 0,
             },
+            config_root: RetainedStorageFilesystemUsage {
+                path: "/homeboy-config".to_string(),
+                exists: true,
+                apparent_bytes: 0,
+                physical_bytes: 0,
+            },
             top_level: Vec::new(),
             reconciliation: RetainedStorageReconciliation {
                 top_level_apparent_bytes: 0,
@@ -3213,12 +3259,14 @@ mod tests {
     #[test]
     fn retained_storage_filesystem_inventory_reports_configured_external_cargo_root() {
         let data = TempDir::new().expect("data root");
+        let config = TempDir::new().expect("config root");
         let cargo_root = TempDir::new().expect("cargo root");
         std::fs::write(cargo_root.path().join("artifact"), b"cargo output")
             .expect("cargo artifact");
 
         let inventory = retained_storage_filesystem_inventory_for(
             data.path().to_path_buf(),
+            config.path().to_path_buf(),
             data.path().join("artifacts"),
             cargo_root.path().to_path_buf(),
         )
@@ -3234,6 +3282,116 @@ mod tests {
         assert_eq!(
             cargo.cleanup_or_status_command,
             "homeboy cleanup --include shared-cargo-targets"
+        );
+    }
+
+    #[test]
+    fn retained_storage_probes_the_config_volume_the_data_root_cannot_see() {
+        // During the 2026-07-29 outage the config volume was full and this
+        // report said the system was healthy, because `homeboy()` was never
+        // probed. Every byte below lives on a root the data-root walk cannot
+        // reach.
+        let data = TempDir::new().expect("data root");
+        let config = TempDir::new().expect("config root");
+        let rig_logs = config.path().join("rigs").join("demo.state").join("logs");
+        std::fs::create_dir_all(&rig_logs).expect("rig log dir");
+        std::fs::write(rig_logs.join("runner.log"), vec![b'l'; 64 * 1024]).expect("rig log");
+        std::fs::create_dir_all(config.path().join("backups")).expect("backups");
+        std::fs::write(config.path().join("backups").join("homeboy.json"), b"{}")
+            .expect("backup file");
+
+        let inventory = retained_storage_filesystem_inventory_for(
+            data.path().to_path_buf(),
+            config.path().to_path_buf(),
+            data.path().join("artifacts"),
+            data.path().join("cargo-targets"),
+        )
+        .expect("filesystem inventory");
+
+        assert!(inventory.config_root.exists);
+        assert_eq!(
+            inventory.config_root.path,
+            config.path().display().to_string()
+        );
+        assert!(
+            inventory.config_root.apparent_bytes >= 64 * 1024,
+            "the config volume must be measured, not assumed empty"
+        );
+
+        let entry = inventory
+            .top_level
+            .iter()
+            .find(|entry| entry.category == "config_root")
+            .expect("config root is a probed top-level root");
+        assert_eq!(entry.classification, "managed/external");
+        assert_eq!(entry.cleanup_or_status_command, "homeboy cleanup");
+        assert!(
+            entry
+                .largest_examples
+                .iter()
+                .any(|child| child.path.ends_with("rigs")),
+            "the operator gets a drill-down into the volume that filled"
+        );
+
+        // `managed/external` roots are excluded from the data-root
+        // reconciliation on purpose: they are not part of the walk those
+        // totals balance against. The config volume is therefore reported
+        // without corrupting the data-root balance.
+        assert_eq!(inventory.reconciliation.top_level_apparent_bytes, 0);
+        assert!(
+            inventory.reconciliation.top_level_apparent_bytes
+                < inventory.config_root.apparent_bytes
+        );
+    }
+
+    #[test]
+    fn a_config_root_nested_in_the_data_root_is_never_listed_twice() {
+        // `HOMEBOY_DATA_DIR` can legally be pointed at the config root. Sharing
+        // a filesystem is not double-counting; sharing a subtree is.
+        let root = TempDir::new().expect("shared root");
+        std::fs::write(root.path().join("homeboy.json"), b"{}").expect("config file");
+
+        let inventory = retained_storage_filesystem_inventory_for(
+            root.path().to_path_buf(),
+            root.path().to_path_buf(),
+            root.path().join("artifacts"),
+            root.path().join("cargo-targets"),
+        )
+        .expect("filesystem inventory");
+
+        assert_eq!(
+            inventory
+                .top_level
+                .iter()
+                .filter(|entry| entry.category == "config_root")
+                .count(),
+            0,
+            "a config root already covered by the data-root walk must not be re-added"
+        );
+        assert_eq!(inventory.config_root.path, inventory.root.path);
+        assert!(inventory.config_root.exists);
+    }
+
+    #[test]
+    fn a_config_root_containing_the_data_root_is_not_double_counted() {
+        let config = TempDir::new().expect("config root");
+        let data = config.path().join("data");
+        std::fs::create_dir_all(&data).expect("nested data root");
+
+        let inventory = retained_storage_filesystem_inventory_for(
+            data.clone(),
+            config.path().to_path_buf(),
+            data.join("artifacts"),
+            data.join("cargo-targets"),
+        )
+        .expect("filesystem inventory");
+
+        assert!(
+            !inventory
+                .top_level
+                .iter()
+                .any(|entry| entry.category == "config_root"),
+            "a config root that contains the data root would count the data root twice"
         );
     }
 
