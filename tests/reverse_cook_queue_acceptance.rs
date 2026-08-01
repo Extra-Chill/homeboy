@@ -190,6 +190,12 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
         "HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY",
         homeboy_core::build_identity::current().display,
     );
+    // The daemon, submitting CLI, and detached worker all pin the same
+    // immutable controller binary while retaining independent mutable state.
+    std::env::set_var(
+        "HOMEBOY_TEST_CONTROLLER_RUNTIME_STORE",
+        homeboy_core::test_support::shared_controller_runtime_store(),
+    );
     ledger.mark("hermetic_context");
     let broker = ReverseBrokerFixture::start("lab");
     let (_checkout_guard, checkout) =
