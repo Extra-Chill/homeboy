@@ -57,7 +57,9 @@ pub use portable::{
     try_discover_from_portable, write_portable_config,
 };
 pub use relationships::{associated_projects, projects_using, rename_component, shared_components};
-pub use remote_path::{auto_resolve_remote_path, resolve_remote_path};
+pub use remote_path::{
+    auto_resolve_remote_path, resolve_remote_path, try_auto_resolve_remote_path,
+};
 pub use resolution::{
     local_path_is_relative, normalize_component_local_path, normalize_component_local_path_against,
     resolve, resolve_artifact, resolve_effective, resolve_target, resolve_target_from_component,
