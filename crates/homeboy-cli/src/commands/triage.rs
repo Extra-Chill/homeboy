@@ -7,6 +7,7 @@ use homeboy_triage::{
 use std::path::PathBuf;
 
 use super::utils::args::ScopeArgs;
+use super::utils::watch::TIMEOUT_EXIT_CODE;
 use super::CmdResult;
 
 #[derive(Args)]
@@ -172,7 +173,18 @@ pub fn run(args: TriageArgs) -> CmdResult<TriageCommandOutput> {
             merge_method: args.merge_method,
         };
         let output = triage::watch(options)?;
-        let exit_code = if output.target_reached { 0 } else { 1 };
+        // USER-VISIBLE: this used to be a bare `1`. Every other watch surface
+        // (`runs watch`, `activity watch`) exits `TIMEOUT_EXIT_CODE` (124, the
+        // GNU timeout(1) convention) when it does not settle in time, and
+        // `triage --watch` only ever fails to reach its target by timing out --
+        // the loop breaks on all-reached or on the deadline, nothing else. A
+        // watch surface with its own exit-code convention is exactly the drift
+        // the shared constant exists to prevent.
+        let exit_code = if output.target_reached {
+            0
+        } else {
+            TIMEOUT_EXIT_CODE
+        };
         return Ok((TriageCommandOutput::Watch(output), exit_code));
     }
 
