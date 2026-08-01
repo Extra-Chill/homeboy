@@ -956,7 +956,6 @@ dependencies = [
  "homeboy-lifecycle-contract",
  "homeboy-product-identity",
  "homeboy-refactor-contract",
- "homeboy-rig-contract",
  "libc",
  "regex",
  "reqwest",
@@ -1185,11 +1184,11 @@ dependencies = [
  "homeboy-core",
  "homeboy-engine-primitives",
  "homeboy-extension",
+ "homeboy-extension-contract",
  "homeboy-lab-runner-contract",
  "homeboy-lifecycle-contract",
  "homeboy-paths",
  "homeboy-product-identity",
- "homeboy-rig-contract",
  "homeboy-stack",
  "libc",
  "serde",
@@ -1197,13 +1196,6 @@ dependencies = [
  "sha2",
  "shellexpand",
  "tempfile",
-]
-
-[[package]]
-name = "homeboy-rig-contract"
-version = "0.1.0"
-dependencies = [
- "serde",
 ]
 
 [[package]]

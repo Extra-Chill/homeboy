@@ -1,11 +1,17 @@
 //! Shared rig trace-spec data types.
 //!
-//! Pure-data trace-dependency and public-preview spec types, read by both
-//! homeboy-core (the extension trace subsystem) and homeboy-rig. They sit below
-//! core so neither crate needs the other for these types.
+//! Pure-data trace-dependency and public-preview spec types, read by the
+//! extension trace subsystem and by homeboy-rig's spec parser.
+//!
+//! These lived in a `homeboy-rig-contract` crate whose entire public surface was
+//! these five `Trace*` types — a name that described the file they are read from
+//! rather than the subsystem that owns them. The actual rig *state* contract
+//! (`ComponentSnapshot`, `RigStateSnapshot`) lives in
+//! `homeboy-lifecycle-contract::rig_snapshot`, so the rig-contract name was
+//! doubly misleading. They now sit beside the other trace contracts
+//! (`trace_config`, `trace_parsing`, `trace_preview`, `trace_results`).
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
