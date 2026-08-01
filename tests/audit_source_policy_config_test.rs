@@ -145,6 +145,23 @@ fn org_and_product_identity_terms_are_configured() {
 }
 
 #[test]
+fn interpreter_and_agent_runtime_terms_are_configured() {
+    // #11098: the scanner listed `nodejs` but not `node`, and no interpreter or
+    // agent-runtime name at all — so it reported clean on core hardcoding
+    // `python3` (`homeboy-rig`'s `ServiceKind::HttpStatic`, core's artifact
+    // preview, the generic trace runner's interpreter table, and four
+    // core-shipped `runtime/*.sh` helpers that hard-fail without it).
+    let missing = missing_terms(&[
+        "python", "python3", "node", "opencode", "codex", "claude", "gemini",
+    ]);
+
+    assert!(
+        missing.is_empty(),
+        "core-agnostic-source lost interpreter/agent-runtime terms: {missing:?}"
+    );
+}
+
+#[test]
 fn ci_provider_terms_are_configured() {
     let missing = missing_terms(&[".github/workflows", "actions/"]);
 
@@ -201,6 +218,15 @@ fn new_term_findings_are_covered_by_the_baseline_policy_section() {
     // If a widening ever lands without its baseline rows, the full-profile
     // audit reports the whole class as brand-new debt. The section must at
     // least carry a row for each family this test pins.
+    //
+    // This pins WIDENING families only. `target/release` used to be pinned here
+    // and no longer is: #11096 allowlisted homeboy's own build artifact path
+    // (`target/release/homeboy`), which retired all 40 of that term's baseline
+    // rows as self-reference and test-tree noise. The term is still required —
+    // `rust_toolchain_terms_are_configured` pins it — but its one remaining
+    // live finding (`homeboy-upgrade/src/self_status.rs` reasoning about
+    // `/target/release/`) is unaccepted debt, not baselined debt. Requiring a
+    // baseline row for a narrowed family forces the noise back in.
     let config = homeboy_config();
     let section = config["baselines"]["audit"]["metadata"]["policy_sections"]
         .as_array()
@@ -215,7 +241,16 @@ fn new_term_findings_are_covered_by_the_baseline_policy_section() {
         .filter_map(|row| row.as_str())
         .collect::<Vec<_>>();
 
-    for term in ["target/release", "node_modules", "homebrew", "Extra-Chill"] {
+    for term in [
+        "node_modules",
+        "homebrew",
+        "Extra-Chill",
+        // #11098's widening: the agent-runtime and interpreter families the
+        // scanner was blind to until this list grew.
+        "python3",
+        "node",
+        "opencode",
+    ] {
         assert!(
             rows.iter()
                 .any(|row| row.contains(&format!("term `{term}`"))),
