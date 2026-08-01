@@ -35,6 +35,7 @@ pub(super) fn execute_release_plan_step(
         "preflight.recovery_artifacts" => Ok(Some(run_recovery_artifacts_preflight(step, context))),
         "preflight.remote_sync" => Ok(Some(run_remote_sync_preflight(step, context, None))),
         "preflight.bump_policy" => Ok(Some(run_bump_policy_preflight(step))),
+        "preflight.test_secret_env" => Ok(Some(run_test_secret_env_preflight(step, context))),
         "preflight.dependencies" => Ok(Some(run_dependencies_preflight(step, context))),
         "preflight.lint" => Ok(Some(run_lint_preflight(step, context))),
         "preflight.test" => Ok(Some(run_test_preflight(step, context))),
@@ -289,6 +290,7 @@ fn release_step_is_plan_only(step: &PlanStep) -> bool {
         && step.kind != "preflight.recovery_artifacts"
         && step.kind != "preflight.remote_sync"
         && step.kind != "preflight.bump_policy"
+        && step.kind != "preflight.test_secret_env"
         && step.kind != "preflight.dependencies"
         && step.kind != "preflight.lint"
         && step.kind != "preflight.test"
@@ -645,6 +647,32 @@ fn run_test_preflight(step: &PlanStep, context: &ReleaseExecutionContext) -> Rel
     }
 }
 
+/// Resolve the test capability's declared secret identities before dependency
+/// hydration, so a missing runner/service credential is reported as the
+/// configuration failure it is instead of a downstream test-gate failure.
+/// (#10402)
+fn run_test_secret_env_preflight(
+    step: &PlanStep,
+    context: &ReleaseExecutionContext,
+) -> ReleaseStepResult {
+    match super::planning_quality::validate_test_secret_env(context.component) {
+        // Identity names are declarations, not values, so they are safe to
+        // record as step evidence.
+        Ok(names) => ReleaseStepResult {
+            id: step.id.clone(),
+            step_type: step.kind.clone(),
+            status: ReleaseStepStatus::Success,
+            data: Some(serde_json::json!({
+                "ran": !names.is_empty(),
+                "declared_count": names.len(),
+                "declared": names,
+            })),
+            ..Default::default()
+        },
+        Err(err) => failed_result(&step.id, &step.kind, err),
+    }
+}
+
 fn successful_quality_result(step: &PlanStep, ran: bool) -> ReleaseStepResult {
     ReleaseStepResult {
         id: step.id.clone(),
@@ -721,6 +749,7 @@ pub(super) fn release_step_is_show_stopper(result: &ReleaseStepResult) -> bool {
             | "preflight.recovery_artifacts"
             | "preflight.remote_sync"
             | "preflight.bump_policy"
+            | "preflight.test_secret_env"
             | "preflight.dependencies"
             | "preflight.lint"
             | "preflight.test"
@@ -980,6 +1009,9 @@ mod tests {
         )));
         assert!(!release_step_is_plan_only(&plan_step(
             "preflight.bump_policy"
+        )));
+        assert!(!release_step_is_plan_only(&plan_step(
+            "preflight.test_secret_env"
         )));
         assert!(!release_step_is_plan_only(&plan_step(
             "preflight.dependencies"

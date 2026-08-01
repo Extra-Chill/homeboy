@@ -101,6 +101,13 @@ pub(in crate::release) fn build_preflight_steps(
 
     steps.extend(build_extension_release_preflight_steps(extensions));
 
+    // The test gate resolves its declared secret identities immediately before
+    // spawning the extension child. Resolving them here instead means a missing
+    // runner/service credential is diagnosed as the configuration failure it is,
+    // before dependency hydration spends time on a release that cannot pass its
+    // test gate. (#10402)
+    steps.push(build_test_secret_env_step(options));
+
     let dependencies_step = if options.skip_deps_hydration {
         disabled_step(
             "preflight.dependencies",
@@ -113,7 +120,7 @@ pub(in crate::release) fn build_preflight_steps(
             "preflight.dependencies",
             "preflight.dependencies",
             "Hydrate release dependencies",
-            vec!["preflight.bump_policy".to_string()],
+            vec!["preflight.test_secret_env".to_string()],
             StepConfig::new(),
         )
     };
@@ -157,6 +164,45 @@ pub(in crate::release) fn build_preflight_steps(
     steps
 }
 
+/// Build the declared-test-secret gate.
+///
+/// Disabled whenever the test gate itself is skipped: a release that never runs
+/// tests never resolves their secret declarations, so requiring them would block
+/// releases that are explicitly opting out of the gate. The skip decision is
+/// read back out of the shared quality planner rather than re-derived here, so
+/// this gate can never disagree with whether `preflight.test` actually runs.
+fn build_test_secret_env_step(options: &ReleaseOptions) -> PlanStep {
+    let quality = quality_plan_options(options);
+    let skip_reason = if quality.skip_checks {
+        Some(quality.skip_reason)
+    } else if quality.skip_test {
+        Some(quality.granular_skip_reason)
+    } else {
+        None
+    };
+
+    match skip_reason {
+        Some(reason) => disabled_step(
+            "preflight.test_secret_env",
+            "preflight.test_secret_env",
+            "Validate declared test secret environment",
+            string_config("reason", reason),
+        ),
+        None => ready_step(
+            "preflight.test_secret_env",
+            "preflight.test_secret_env",
+            "Validate declared test secret environment",
+            vec!["preflight.bump_policy".to_string()],
+            StepConfig::new(),
+        ),
+    }
+}
+
+fn quality_plan_options(options: &ReleaseOptions) -> QualityPlanOptions {
+    QualityPlanOptions::release_preflight("release", options.skip_checks)
+        .with_granular_skips(&options.skip_checks_granular)
+}
+
 fn build_extension_release_preflight_steps(extensions: &[ExtensionManifest]) -> Vec<PlanStep> {
     extensions
         .iter()
@@ -179,8 +225,7 @@ fn build_extension_release_preflight_steps(extensions: &[ExtensionManifest]) -> 
 }
 
 fn build_quality_steps(options: &ReleaseOptions) -> Vec<PlanStep> {
-    let mut quality_options = QualityPlanOptions::release_preflight("release", options.skip_checks)
-        .with_granular_skips(&options.skip_checks_granular);
+    let mut quality_options = quality_plan_options(options);
     quality_options.lint_needs = vec![if options.skip_deps_hydration {
         "preflight.bump_policy".to_string()
     } else {

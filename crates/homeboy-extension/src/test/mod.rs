@@ -117,6 +117,43 @@ fn looks_like_secret_env_name(name: &str) -> bool {
     .any(|marker| name.contains(marker))
 }
 
+/// Resolve the secret identity *names* the component's test capability
+/// declares, composing static `test.secret_env` with settings-conditional
+/// `test.secret_env_projections` against the merged effective settings.
+///
+/// This is the same declaration the test runner resolves immediately before it
+/// spawns the extension child, exposed so callers can validate resolvability
+/// ahead of expensive work (release dependency hydration) instead of
+/// discovering an unresolvable declaration as a test-gate failure. Only names
+/// are produced here; no secret value is ever read.
+///
+/// Returns an empty list when the component runs its own `scripts.test` (the
+/// extension runner, and therefore the declaration, is bypassed) or when no
+/// test extension resolves.
+pub fn declared_secret_env_names(component: &Component) -> homeboy_core::Result<Vec<String>> {
+    if component.has_script(ExtensionCapability::Test) {
+        return Ok(Vec::new());
+    }
+
+    let Ok(context) = resolve_test_command(component) else {
+        return Ok(Vec::new());
+    };
+    let Some(test) = crate::load_extension(&context.extension_id)?.test else {
+        return Ok(Vec::new());
+    };
+
+    let static_names = test.secret_env.into_keys().collect::<Vec<_>>();
+    let projections = test.secret_env_projections;
+    if static_names.is_empty() && projections.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let prepared =
+        crate::execution::prepare_capability_run(&context, Some(component), None, &[], &[], false)?;
+
+    effective_secret_env_names(&static_names, &projections, &prepared.settings_json)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_test_runner(
     component: &Component,

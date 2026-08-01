@@ -24,9 +24,14 @@ pub(super) fn build_initial_preflight_plan(
         .collect();
 
     if let Some(tag_step) = early_tag_availability_step(options, false) {
+        // Tag availability is the cheapest gate and must fail before any other
+        // preflight work, including the declared-test-secret gate that now
+        // precedes dependency hydration.
         let insert_at = steps
             .iter()
-            .position(|step| step.id == "preflight.dependencies")
+            .position(|step| {
+                step.id == "preflight.test_secret_env" || step.id == "preflight.dependencies"
+            })
             .unwrap_or(steps.len());
         steps.insert(insert_at, tag_step);
     }
@@ -59,6 +64,7 @@ pub(super) fn initial_executable_preflight_ids() -> &'static [&'static str] {
         "preflight.recovery_artifacts",
         "preflight.remote_sync",
         "preflight.tag_availability",
+        "preflight.test_secret_env",
         "preflight.dependencies",
         "preflight.lint",
         "preflight.test",
@@ -431,6 +437,7 @@ mod tests {
                 "preflight.recovery_artifacts",
                 "preflight.remote_sync",
                 "preflight.tag_availability",
+                "preflight.test_secret_env",
                 "preflight.dependencies",
                 "preflight.lint",
                 "preflight.test",
@@ -460,9 +467,44 @@ mod tests {
             .position(|step| step.id == "preflight.test")
             .expect("test preflight");
 
+        let secret_env = steps
+            .iter()
+            .position(|step| step.id == "preflight.test_secret_env")
+            .expect("declared test secret preflight");
+
         assert!(tag < lint, "tag availability must fail before lint runs");
         assert!(tag < test, "tag availability must fail before tests run");
+        assert!(
+            tag < secret_env,
+            "tag availability must fail before the declared-test-secret gate runs"
+        );
         assert_eq!(steps[tag].needs, vec!["preflight.remote_sync"]);
+    }
+
+    /// A missing runner/service credential must be diagnosed before dependency
+    /// hydration spends time on a release whose test gate cannot pass. (#10402)
+    #[test]
+    fn initial_preflight_plan_validates_declared_test_secrets_before_hydration() {
+        let options = ReleaseOptions {
+            bump_type: "none".to_string(),
+            ..Default::default()
+        };
+        let plan = super::build_initial_preflight_plan("fixture", &options);
+        let steps = plan.plan.steps;
+        let secret_env = steps
+            .iter()
+            .position(|step| step.id == "preflight.test_secret_env")
+            .expect("declared test secret preflight");
+        let deps = steps
+            .iter()
+            .position(|step| step.id == "preflight.dependencies")
+            .expect("dependency preflight");
+
+        assert!(
+            secret_env < deps,
+            "declared test secrets must resolve before dependencies hydrate"
+        );
+        assert_eq!(steps[deps].needs, vec!["preflight.test_secret_env"]);
     }
 
     #[test]
@@ -513,6 +555,7 @@ mod tests {
                 "preflight.head_identity",
                 "preflight.recovery_artifacts",
                 "preflight.remote_sync",
+                "preflight.test_secret_env",
                 "preflight.dependencies",
                 "preflight.lint",
                 "preflight.test",
