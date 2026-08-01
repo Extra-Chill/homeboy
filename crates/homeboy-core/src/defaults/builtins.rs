@@ -7,6 +7,28 @@ use serde::Deserialize;
 use std::fs;
 use std::sync::OnceLock;
 
+/// Defaults that an ecosystem extension may supply, with a generic fallback
+/// compiled into core.
+///
+/// Two documents implement this same schema, and they are deliberately NOT
+/// copies of each other (#11099):
+///
+/// * The bundled asset under this crate's `assets/defaults/` is core's
+///   fallback. It is framework-agnostic on purpose (#2240): only generic
+///   dev-tool manifests, a generic source layout, and no presupposed file
+///   extension. Four tests at the bottom of this file pin that agnosticism.
+/// * The document owned by the extensions repository is an ecosystem
+///   *override*, loaded at runtime via the `EXTENSION_DEFAULTS_PATH`
+///   environment variable. It intentionally carries the extra
+///   framework-specific candidates, source directories, and file extensions
+///   that core must not bake in.
+///
+/// So a field-by-field difference between the two is the design working, not
+/// drift. The one field where they must agree is
+/// `install_methods.source.upgrade_command`, which describes how *Homeboy
+/// itself* is rebuilt and has nothing to do with any ecosystem; the override
+/// copy is currently stale there and is tracked for a follow-up in the
+/// extensions repository.
 #[derive(Debug, Clone, Deserialize)]
 struct ExtensionProvidedDefaults {
     install_methods: InstallMethodsConfig,
@@ -21,6 +43,19 @@ fn extension_provided_defaults() -> &'static ExtensionProvidedDefaults {
     DEFAULTS.get_or_init(load_extension_provided_defaults)
 }
 
+/// Resolve the active defaults: an operator-supplied override when one is
+/// configured, otherwise the compiled-in bundled asset.
+///
+/// The bundled asset is load-bearing and cannot be reduced to an empty
+/// `Default` the way the detector profile was. `install_methods` drives
+/// `detect_install_method_from_exe_path`, which matches the running
+/// executable's path against `path_patterns`. With empty defaults every
+/// pattern list is empty, detection returns `InstallMethod::Unknown`, and
+/// `homeboy upgrade` fails outright with "Cannot upgrade: unknown
+/// installation method". Nothing sets `EXTENSION_DEFAULTS_PATH`
+/// automatically, so an install with no override configured would have no
+/// other source for these values — self-upgrade is a bootstrap path and must
+/// keep working with zero extensions installed.
 fn load_extension_provided_defaults() -> ExtensionProvidedDefaults {
     if let Some(defaults) = load_external_extension_provided_defaults() {
         return defaults;
