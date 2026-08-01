@@ -493,15 +493,15 @@ pub(crate) fn moving_base_recovery_report(
             recovery.blocker, recovery.continuation
         ))
     };
-    let mut report = cook_report(
+    let mut report = cook_report(CookReportInput {
         cook_id,
-        "candidate_recoverable",
+        status: "candidate_recoverable",
         attempts,
-        None,
+        finalization: None,
         stop_reason,
-        1,
+        exit_code: 1,
         invocation_latest_run_id,
-    );
+    });
     report.value.moving_base_recovery = Some(recovery);
     report
 }
@@ -2198,15 +2198,39 @@ fn review_form_for_finalization(
     Ok(form)
 }
 
-pub(crate) fn cook_report(
-    cook_id: String,
-    status: &str,
-    attempts: Vec<AgentTaskCookAttemptReport>,
-    finalization: Option<Value>,
-    stop_reason: Option<String>,
-    exit_code: i32,
-    invocation_latest_run_id: Option<&str>,
-) -> AgentTaskRunResult<AgentTaskCookReport> {
+/// Every field a Cook report is built from, named at the call site.
+///
+/// This is a struct input rather than a positional argument list because
+/// `invocation_latest_run_id` is the field that decides whether the report —
+/// and every recovery command derived from it — points at THIS invocation's
+/// run or at some prior session's run recorded in the cross-invocation Cook
+/// index. When it was an optional trailing positional argument, two call sites
+/// silently passed `None` and reported a stale run id to the orchestrator. A
+/// required named field makes that class of mistake a compile error.
+#[non_exhaustive]
+pub(crate) struct CookReportInput<'a> {
+    pub cook_id: String,
+    pub status: &'a str,
+    pub attempts: Vec<AgentTaskCookAttemptReport>,
+    pub finalization: Option<Value>,
+    pub stop_reason: Option<String>,
+    pub exit_code: i32,
+    /// The run this invocation is reporting on. `None` is legal only when the
+    /// caller genuinely has no invocation-scoped run id — it falls back to the
+    /// cross-invocation Cook index, which may name a prior session's run.
+    pub invocation_latest_run_id: Option<&'a str>,
+}
+
+pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<AgentTaskCookReport> {
+    let CookReportInput {
+        cook_id,
+        status,
+        attempts,
+        finalization,
+        stop_reason,
+        exit_code,
+        invocation_latest_run_id,
+    } = input;
     let history_run_ids = agent_task_lifecycle::cook_index(&cook_id)
         .map(|index| {
             index
@@ -2241,14 +2265,22 @@ pub(crate) fn cook_report(
                 .ok()
                 .and_then(|recipe| recipe.attempts.last().map(|attempt| attempt.run_id.clone()))
         });
-    let invocation_run_ids: Vec<String> = attempts
+    // A controller failure produces no attempt report, but its run id is still
+    // part of THIS invocation. Union it in so invocation scope is never empty
+    // just because the failure happened outside an attempt.
+    let mut invocation_run_ids: Vec<String> = attempts
         .iter()
         .map(|attempt| attempt.run_id.clone())
         .collect();
+    if let Some(run_id) = invocation_latest_run_id {
+        if !invocation_run_ids.iter().any(|known| known == run_id) {
+            invocation_run_ids.push(run_id.to_string());
+        }
+    }
     let failure_context = (exit_code != 0)
         .then(|| cook_failure_context(&cook_id, latest_run_id.as_deref()))
         .flatten();
-    let selected_candidate = cook_selected_candidate_provenance(&cook_id);
+    let selected_candidate = cook_selected_candidate_provenance(&cook_id, &invocation_run_ids);
     AgentTaskRunResult {
         value: AgentTaskCookReport {
             schema: "homeboy/agent-task-cook/v1",
@@ -2270,9 +2302,25 @@ pub(crate) fn cook_report(
     }
 }
 
-fn cook_selected_candidate_provenance(cook_id: &str) -> Option<Value> {
+/// `select_cook_candidate` deliberately selects across the whole Cook index
+/// with no invocation scope — adopting the best candidate across attempts is
+/// what a Cook is for. But a report can therefore say `latest_run_id: <this
+/// run>` while `selected_candidate.run_id` names a prior session's run, and
+/// `cook_failure_context` prefers that cross-invocation id when it builds
+/// recovery commands. The orchestrator could not previously tell the two apart.
+/// `invocation_scoped` states it explicitly. The selection itself is unchanged.
+fn cook_selected_candidate_provenance(
+    cook_id: &str,
+    invocation_run_ids: &[String],
+) -> Option<Value> {
     let selection = agent_task_lifecycle::select_cook_candidate(cook_id).ok()?;
     let mut value = serde_json::to_value(&selection).ok()?;
+    value["invocation_scoped"] = serde_json::json!(
+        !selection.run_id.is_empty()
+            && invocation_run_ids
+                .iter()
+                .any(|run_id| run_id == &selection.run_id)
+    );
     if selection.incomplete || selection.run_id.is_empty() {
         return Some(value);
     }

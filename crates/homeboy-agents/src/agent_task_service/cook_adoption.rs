@@ -40,7 +40,7 @@ use super::cook::{
 };
 use super::cook_promotion::{
     cook_report, finalize_or_load_cook_pr_with_backend, persisted_promotion_for_attempt,
-    promotion_source,
+    promotion_source, CookReportInput,
 };
 use super::AgentTaskRunResult;
 
@@ -327,15 +327,29 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                 } else {
                     1
                 };
-            return Ok(cook_report(
-                cook_id.to_string(),
-                &result.status,
-                Vec::new(),
-                None,
-                result.stop_reason,
+            // Replaying an already-completed adoption is exactly the path an
+            // orchestrator hits when it re-polls a Cook it already ran, so it
+            // is the path that must not fall back to the cross-invocation Cook
+            // index. Every sibling return in this file already reports the
+            // adopted record's run id; this one did not.
+            return Ok(cook_report(CookReportInput {
+                cook_id: cook_id.to_string(),
+                status: &result.status,
+                attempts: vec![AgentTaskCookAttemptReport {
+                    attempt: 1,
+                    run_id: record.run_id.clone(),
+                    run_state: format!("{:?}", record.state),
+                    aggregate_path: record.aggregate_path.clone(),
+                    promotion: persisted_promotion_for_attempt(&record.run_id)
+                        .ok()
+                        .flatten(),
+                    feedback: None,
+                }],
+                finalization: None,
+                stop_reason: result.stop_reason,
                 exit_code,
-                None,
-            ));
+                invocation_latest_run_id: Some(record.run_id.as_str()),
+            }));
         }
         let promotion = persisted_promotion_for_attempt(&record.run_id)?.ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -362,10 +376,10 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
             .and_then(|value| value["status"].as_str())
             .unwrap_or("green_no_finalize")
             .to_string();
-        return Ok(cook_report(
-            cook_id.to_string(),
-            &status,
-            vec![AgentTaskCookAttemptReport {
+        return Ok(cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: &status,
+            attempts: vec![AgentTaskCookAttemptReport {
                 attempt: 1,
                 run_id: record.run_id.clone(),
                 run_state: format!("{:?}", record.state),
@@ -374,10 +388,18 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                 feedback: Some(feedback),
             }],
             finalization,
-            Some("reused the completed candidate adoption result; set rerun_completed_gates to rerun its gates".to_string()),
-            if status == "review_ready" || status == "green_no_finalize" { 0 } else { 1 },
-            Some(record.run_id.as_str()),
-        ));
+            stop_reason: Some(
+                "reused the completed candidate adoption result; set \
+     rerun_completed_gates to rerun its gates"
+                    .to_string(),
+            ),
+            exit_code: if status == "review_ready" || status == "green_no_finalize" {
+                0
+            } else {
+                1
+            },
+            invocation_latest_run_id: Some(record.run_id.as_str()),
+        }));
     }
     let attempt_dispatcher =
         reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
@@ -544,18 +566,18 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                         .to_string(),
                 ),
             )?;
-            let report = cook_report(
-                cook_id.to_string(),
-                "policy_failure",
-                vec![attempt],
-                None,
-                Some(
+            let report = cook_report(CookReportInput {
+                cook_id: cook_id.to_string(),
+                status: "policy_failure",
+                attempts: vec![attempt],
+                finalization: None,
+                stop_reason: Some(
                     "candidate adoption feedback requested retry without a follow-up request"
                         .to_string(),
                 ),
-                1,
-                Some(record.run_id.as_str()),
-            );
+                exit_code: 1,
+                invocation_latest_run_id: Some(record.run_id.as_str()),
+            });
             persist_adoption_terminal_result(&record.run_id, &report.value)?;
             return Ok(report);
         };
@@ -629,17 +651,17 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                 Ok(result)
             }
             CookFollowUpDispatch::BudgetExhausted { reason } => {
-                let report = cook_report(
-                    cook_id.to_string(),
-                    "execution_budget_exhausted",
-                    vec![attempt],
-                    None,
-                    Some(format!(
+                let report = cook_report(CookReportInput {
+                    cook_id: cook_id.to_string(),
+                    status: "execution_budget_exhausted",
+                    attempts: vec![attempt],
+                    finalization: None,
+                    stop_reason: Some(format!(
                         "provider execution stopped because {reason} was exhausted"
                     )),
-                    1,
-                    Some(record.run_id.as_str()),
-                );
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(record.run_id.as_str()),
+                });
                 persist_adoption_terminal_result(&record.run_id, &report.value)?;
                 agent_task_lifecycle::finish_candidate_adoption(
                     &record.run_id,
@@ -648,15 +670,15 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                 Ok(report)
             }
             CookFollowUpDispatch::PolicyFailure { reason } => {
-                let report = cook_report(
-                    cook_id.to_string(),
-                    "policy_failure",
-                    vec![attempt],
-                    None,
-                    Some(reason.clone()),
-                    1,
-                    Some(record.run_id.as_str()),
-                );
+                let report = cook_report(CookReportInput {
+                    cook_id: cook_id.to_string(),
+                    status: "policy_failure",
+                    attempts: vec![attempt],
+                    finalization: None,
+                    stop_reason: Some(reason.clone()),
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(record.run_id.as_str()),
+                });
                 persist_adoption_terminal_result(&record.run_id, &report.value)?;
                 agent_task_lifecycle::finish_candidate_adoption(&record.run_id, Some(reason))?;
                 Ok(report)
@@ -668,30 +690,32 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
             &record.run_id,
             Some("adopted candidate did not pass the original deterministic gates".to_string()),
         )?;
-        return Ok(cook_report(
-            cook_id.to_string(),
-            "gate_failed",
-            vec![attempt],
-            None,
-            Some("adopted candidate did not pass the original deterministic gates".to_string()),
-            1,
-            Some(record.run_id.as_str()),
-        ));
+        return Ok(cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "gate_failed",
+            attempts: vec![attempt],
+            finalization: None,
+            stop_reason: Some(
+                "adopted candidate did not pass the original deterministic gates".to_string(),
+            ),
+            exit_code: 1,
+            invocation_latest_run_id: Some(record.run_id.as_str()),
+        }));
     }
     if options.no_finalize {
         agent_task_lifecycle::finish_candidate_adoption(&record.run_id, None)?;
-        return Ok(cook_report(
-            cook_id.to_string(),
-            "green_no_finalize",
-            vec![attempt],
-            None,
-            Some(
+        return Ok(cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "green_no_finalize",
+            attempts: vec![attempt],
+            finalization: None,
+            stop_reason: Some(
                 "adopted candidate passed deterministic gates; recipe skips finalization"
                     .to_string(),
             ),
-            0,
-            Some(record.run_id.as_str()),
-        ));
+            exit_code: 0,
+            invocation_latest_run_id: Some(record.run_id.as_str()),
+        }));
     }
     agent_task_lifecycle::checkpoint_candidate_adoption(
         &record.run_id,
@@ -720,15 +744,15 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         .unwrap_or("unknown")
         .to_string();
     let exit_code = if status == "review_ready" { 0 } else { 1 };
-    Ok(cook_report(
-        cook_id.to_string(),
-        &status,
-        vec![attempt],
-        Some(finalization),
-        None,
+    Ok(cook_report(CookReportInput {
+        cook_id: cook_id.to_string(),
+        status: &status,
+        attempts: vec![attempt],
+        finalization: Some(finalization),
+        stop_reason: None,
         exit_code,
-        Some(record.run_id.as_str()),
-    ))
+        invocation_latest_run_id: Some(record.run_id.as_str()),
+    }))
 }
 
 /// PR/finalization evidence is a projection of the durable decision, never a

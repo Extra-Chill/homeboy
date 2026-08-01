@@ -39,7 +39,8 @@ use super::cook_promotion::{
     is_moving_base_finalization_error, moving_base_recovery_for_run,
     moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
     persisted_promotion_for_attempt, promote_or_load_attempt, recover_moving_base_cook_candidate,
-    refreshed_moving_base_recovery, retryable_provider_discovery_failure, MovingBaseCookRecovery,
+    refreshed_moving_base_recovery, retryable_provider_discovery_failure, CookReportInput,
+    MovingBaseCookRecovery,
 };
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
 use super::AgentTaskRunResult;
@@ -129,15 +130,15 @@ fn pre_artifact_interruption_report(
     reason: String,
     exit_code: i32,
 ) -> AgentTaskRunResult<AgentTaskCookReport> {
-    let mut report = cook_report(
+    let mut report = cook_report(CookReportInput {
         cook_id,
-        "pre_artifact_interruption",
+        status: "pre_artifact_interruption",
         attempts,
-        None,
-        Some(reason),
+        finalization: None,
+        stop_reason: Some(reason),
         exit_code,
-        Some(run_id),
-    );
+        invocation_latest_run_id: Some(run_id),
+    });
     report.value.terminal_phase = Some(phase.name().to_string());
     report.value.terminal_failure_classification = Some("pre_artifact_interruption".to_string());
     report
@@ -1773,15 +1774,23 @@ fn durable_cook_error_report(
     error: Error,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     if super::recipe_exists(&options.cook_id)? {
-        let mut report = cook_report(
-            options.cook_id.clone(),
-            "durable_failure",
-            Vec::new(),
-            None,
-            Some("Cook stopped after durable creation; use the recovery actions in failure_context to inspect or continue it.".to_string()),
-            1,
-            None,
-        );
+        let mut report = cook_report(CookReportInput {
+            cook_id: options.cook_id.clone(),
+            status: "durable_failure",
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: Some(
+                "Cook stopped after durable creation; use the recovery actions in \
+                 failure_context to inspect or continue it."
+                    .to_string(),
+            ),
+            exit_code: 1,
+            // A controller failure still belongs to THIS invocation. Without
+            // this, the report — and every recovery command
+            // `cook_failure_context` stamps with it — falls back to the
+            // cross-invocation Cook index and can name a prior session's run.
+            invocation_latest_run_id: Some(&options.initial_run_id),
+        });
         if let Some(context) = &mut report.value.failure_context {
             // This is a controller failure, not a provider attempt. Keep a
             // bounded, redacted cause so continuation never needs redispatch.
@@ -2312,15 +2321,15 @@ where
                     ));
                 }
                 if attempt == max_attempts {
-                    return Ok(cook_report(
+                    return Ok(cook_report(CookReportInput {
                         cook_id,
-                        "retries_exhausted",
+                        status: "retries_exhausted",
                         attempts,
-                        None,
-                        Some(error.to_string()),
-                        1,
-                        Some(&run_id),
-                    ));
+                        finalization: None,
+                        stop_reason: Some(error.to_string()),
+                        exit_code: 1,
+                        invocation_latest_run_id: Some(&run_id),
+                    }));
                 }
                 let next_attempt = attempt + 1;
                 let next_run_id = agent_task_lifecycle::cook_attempt_run_id(&cook_id, next_attempt);
@@ -2366,15 +2375,15 @@ where
                 promotion: None,
                 feedback: None,
             });
-            return Ok(cook_report(
+            return Ok(cook_report(CookReportInput {
                 cook_id,
-                "in_flight",
+                status: "in_flight",
                 attempts,
-                None,
-                Some("provider attempt accepted by the runner daemon".to_string()),
-                0,
-                Some(&run_id),
-            ));
+                finalization: None,
+                stop_reason: Some("provider attempt accepted by the runner daemon".to_string()),
+                exit_code: 0,
+                invocation_latest_run_id: Some(&run_id),
+            }));
         }
         let plan = agent_task_lifecycle::load_plan_for_execution(&run_id)?;
         budget_limit.get_or_insert_with(|| plan.options.execution_budget.clone());
@@ -2460,15 +2469,17 @@ where
             .provider_rotations
             .saturating_add(remediation_category_usage.provider_rotations);
         let Some(source_request) = plan.tasks.first().cloned() else {
-            return Ok(cook_report(
+            return Ok(cook_report(CookReportInput {
                 cook_id,
-                "policy_failure",
+                status: "policy_failure",
                 attempts,
-                None,
-                Some("agent-task cook requires a plan with one source task".to_string()),
-                1,
-                Some(&run_id),
-            ));
+                finalization: None,
+                stop_reason: Some(
+                    "agent-task cook requires a plan with one source task".to_string(),
+                ),
+                exit_code: 1,
+                invocation_latest_run_id: Some(&run_id),
+            }));
         };
         validate_cook_candidate_group(&plan)?;
 
@@ -2488,18 +2499,18 @@ where
                 promotion: None,
                 feedback: None,
             });
-            return Ok(cook_report(
+            return Ok(cook_report(CookReportInput {
                 cook_id,
-                "provider_failure",
+                status: "provider_failure",
                 attempts,
-                None,
-                Some(format!(
+                finalization: None,
+                stop_reason: Some(format!(
                     "agent-task run {run_id} ended in state {:?}",
                     record.state
                 )),
-                1,
-                Some(&run_id),
-            ));
+                exit_code: 1,
+                invocation_latest_run_id: Some(&run_id),
+            }));
         }
 
         if let Some(finalization) = record
@@ -2524,15 +2535,15 @@ where
                 promotion: None,
                 feedback: None,
             });
-            return Ok(cook_report(
+            return Ok(cook_report(CookReportInput {
                 cook_id,
-                &status,
+                status: &status,
                 attempts,
-                Some(finalization),
-                None,
+                finalization: Some(finalization),
+                stop_reason: None,
                 exit_code,
-                Some(&run_id),
-            ));
+                invocation_latest_run_id: Some(&run_id),
+            }));
         }
 
         report_cook_progress(
@@ -2555,15 +2566,15 @@ where
                     feedback: None,
                 });
                 let recovery = "promotion provider response was rejected. The successful candidate remains durable; use failure_context to inspect or continue the Cook.".to_string();
-                return Ok(cook_report(
+                return Ok(cook_report(CookReportInput {
                     cook_id,
-                    "policy_failure",
+                    status: "policy_failure",
                     attempts,
-                    None,
-                    Some(recovery),
-                    1,
-                    Some(&run_id),
-                ));
+                    finalization: None,
+                    stop_reason: Some(recovery),
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(&run_id),
+                }));
             }
         };
 
@@ -2602,18 +2613,19 @@ where
         match feedback_status {
             AgentTaskCookLoopStatus::GreenCompleted => {
                 if options.no_finalize {
-                    return Ok(cook_report(
+                    return Ok(cook_report(CookReportInput {
                         cook_id,
-                        "green_no_finalize",
+                        status: "green_no_finalize",
                         attempts,
-                        None,
-                        Some(
-                            "deterministic gates completed green; --no-finalize skipped commit, push, and PR finalization"
+                        finalization: None,
+                        stop_reason: Some(
+                            "deterministic gates completed green; --no-finalize skipped \
+     commit, push, and PR finalization"
                                 .to_string(),
                         ),
-                        0,
-                        Some(&run_id),
-                    ));
+                        exit_code: 0,
+                        invocation_latest_run_id: Some(&run_id),
+                    }));
                 }
                 let mut active_moving_base_recovery = None;
                 let promotion = match moving_base_recovery_for_run(&run_id)? {
@@ -2718,20 +2730,26 @@ where
                         ));
                     }
                     Err(error) if error.message.contains("awaiting_acceptance") => {
-                        return Ok(cook_report(
+                        return Ok(cook_report(CookReportInput {
                             cook_id,
-                            "awaiting_acceptance",
+                            status: "awaiting_acceptance",
                             attempts,
-                            Some(serde_json::json!({
+                            finalization: Some(serde_json::json!({
                                 "status": "awaiting_acceptance",
                                 "reason": error.message,
                                 "run_id": run_id,
-                                "status_command": format!("homeboy agent-task status {run_id} --full"),
+                                "status_command": format!(
+                                    "homeboy agent-task status {run_id} --full"
+                                ),
                             })),
-                            Some("deterministic gates passed; an independent acceptance verdict is required before PR finalization".to_string()),
-                            1,
-                            Some(&run_id),
-                        ));
+                            stop_reason: Some(
+                                "deterministic gates passed; an independent acceptance verdict \
+     is required before PR finalization"
+                                    .to_string(),
+                            ),
+                            exit_code: 1,
+                            invocation_latest_run_id: Some(&run_id),
+                        }));
                     }
                     Err(error) => return Err(error),
                 };
@@ -2743,57 +2761,59 @@ where
                 let stop_reason = (final_status == "no_changes").then(|| {
                     "cook completed provider execution and gates, but finalization found no changed files; task likely still requires review or retry".to_string()
                 });
-                return Ok(cook_report(
+                return Ok(cook_report(CookReportInput {
                     cook_id,
-                    &final_status,
+                    status: &final_status,
                     attempts,
-                    Some(finalization),
+                    finalization: Some(finalization),
                     stop_reason,
                     exit_code,
-                    Some(&run_id),
-                ));
+                    invocation_latest_run_id: Some(&run_id),
+                }));
             }
             AgentTaskCookLoopStatus::NoChanges => {
-                return Ok(cook_report(
+                return Ok(cook_report(CookReportInput {
                     cook_id,
-                    "no_changes",
+                    status: "no_changes",
                     attempts,
-                    None,
-                    Some(
-                        "cook completed provider execution but produced no changed files; task likely still requires review or retry"
+                    finalization: None,
+                    stop_reason: Some(
+                        "cook completed provider execution but produced no changed \
+     files; task likely still requires review or retry"
                             .to_string(),
                     ),
-                    1,
-                    Some(&run_id),
-                ));
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(&run_id),
+                }));
             }
             AgentTaskCookLoopStatus::NoOpGateFailed => {
-                return Ok(cook_report(
+                return Ok(cook_report(CookReportInput {
                     cook_id,
-                    "no_op_gate_failed",
+                    status: "no_op_gate_failed",
                     attempts,
-                    None,
-                    Some(
-                        "provider produced no patch and the pinned candidate failed deterministic verification"
+                    finalization: None,
+                    stop_reason: Some(
+                        "provider produced no patch and the pinned candidate failed \
+     deterministic verification"
                             .to_string(),
                     ),
-                    1,
-                    Some(&run_id),
-                ));
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(&run_id),
+                }));
             }
             AgentTaskCookLoopStatus::RetryRequested => {
                 let Some(follow_up_request) = follow_up_request else {
-                    return Ok(cook_report(
+                    return Ok(cook_report(CookReportInput {
                         cook_id,
-                        "policy_failure",
+                        status: "policy_failure",
                         attempts,
-                        None,
-                        Some(
+                        finalization: None,
+                        stop_reason: Some(
                             "cook feedback requested retry without a follow-up request".to_string(),
                         ),
-                        1,
-                        Some(&run_id),
-                    ));
+                        exit_code: 1,
+                        invocation_latest_run_id: Some(&run_id),
+                    }));
                 };
                 let budget_limit = budget_limit
                     .as_ref()
@@ -2819,57 +2839,57 @@ where
                         run_id: next_run_id,
                     } => run_id = next_run_id,
                     CookFollowUpDispatch::BudgetExhausted { reason } => {
-                        return Ok(cook_report(
+                        return Ok(cook_report(CookReportInput {
                             cook_id,
-                            "execution_budget_exhausted",
+                            status: "execution_budget_exhausted",
                             attempts,
-                            None,
-                            Some(format!(
+                            finalization: None,
+                            stop_reason: Some(format!(
                                 "provider execution stopped because {reason} was exhausted"
                             )),
-                            1,
-                            Some(&run_id),
-                        ));
+                            exit_code: 1,
+                            invocation_latest_run_id: Some(&run_id),
+                        }));
                     }
                     CookFollowUpDispatch::PolicyFailure { reason } => {
-                        return Ok(cook_report(
+                        return Ok(cook_report(CookReportInput {
                             cook_id,
-                            "policy_failure",
+                            status: "policy_failure",
                             attempts,
-                            None,
-                            Some(reason),
-                            1,
-                            Some(&run_id),
-                        ));
+                            finalization: None,
+                            stop_reason: Some(reason),
+                            exit_code: 1,
+                            invocation_latest_run_id: Some(&run_id),
+                        }));
                     }
                 }
             }
             AgentTaskCookLoopStatus::RetriesExhausted => {
-                return Ok(cook_report(
+                return Ok(cook_report(CookReportInput {
                     cook_id,
-                    "retries_exhausted",
+                    status: "retries_exhausted",
                     attempts,
-                    None,
-                    Some(
+                    finalization: None,
+                    stop_reason: Some(
                         "deterministic gates stayed red after the configured attempt budget"
                             .to_string(),
                     ),
-                    1,
-                    Some(&run_id),
-                ));
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(&run_id),
+                }));
             }
         }
     }
 
-    Ok(cook_report(
+    Ok(cook_report(CookReportInput {
         cook_id,
-        "retries_exhausted",
+        status: "retries_exhausted",
         attempts,
-        None,
-        Some("cook attempt budget exhausted".to_string()),
-        1,
-        Some(&run_id),
-    ))
+        finalization: None,
+        stop_reason: Some("cook attempt budget exhausted".to_string()),
+        exit_code: 1,
+        invocation_latest_run_id: Some(&run_id),
+    }))
 }
 
 fn resumable_cook_run_id(
