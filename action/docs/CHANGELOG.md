@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.10.7] - 2026-08-01
+
+### Fixed
+- use GitHub App client IDs
+
 ## [2.10.6] - 2026-08-01
 
 ### Fixed
