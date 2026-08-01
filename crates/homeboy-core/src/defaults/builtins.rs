@@ -67,15 +67,33 @@ fn load_extension_provided_defaults() -> ExtensionProvidedDefaults {
     )))
 }
 
+/// Load an operator-supplied defaults override, or `None` to fall back to the
+/// bundled asset.
+///
+/// Every failure mode here is operator input, so all of them fall back rather
+/// than abort: an unset variable, an unreadable file, and a file that does not
+/// parse as a defaults document. The parse case previously panicked through
+/// `expect`, which made a single malformed override file take down every
+/// command that touches defaults — including the `upgrade` path that would
+/// otherwise repair the install.
 fn load_external_extension_provided_defaults() -> Option<ExtensionProvidedDefaults> {
     let path =
         std::env::var(crate::product_identity::PRODUCT_IDENTITY.env_var("EXTENSION_DEFAULTS_PATH"))
             .ok()?;
     let content = fs::read_to_string(path).ok()?;
 
-    Some(parse_extension_provided_defaults(&content))
+    try_parse_extension_provided_defaults(&content)
 }
 
+/// Parse a defaults document supplied at runtime, returning `None` when it is
+/// not a valid defaults contract.
+fn try_parse_extension_provided_defaults(content: &str) -> Option<ExtensionProvidedDefaults> {
+    serde_json::from_str(content).ok()
+}
+
+/// Parse a defaults document that is expected to be well-formed, panicking if
+/// it is not. Reserved for the compiled-in bundled asset, where a parse failure
+/// is a build defect rather than bad operator input and should stay loud.
 fn parse_extension_provided_defaults(content: &str) -> ExtensionProvidedDefaults {
     serde_json::from_str(content).expect("extension-provided defaults asset should parse")
 }
@@ -211,6 +229,38 @@ mod tests {
         assert!(suffixes.contains(&".test.js".to_string()));
         assert!(suffixes.contains(&".spec.tsx".to_string()));
         assert!(suffixes.contains(&"_test.rs".to_string()));
+    }
+
+    #[test]
+    fn malformed_runtime_defaults_document_falls_back_to_bundled_asset() {
+        // An override file is untrusted operator input. A document that does
+        // not parse must yield None so the bundled asset stays in effect,
+        // rather than aborting every command that reads defaults — including
+        // the upgrade path that would otherwise repair the install.
+        assert!(try_parse_extension_provided_defaults("not a defaults document").is_none());
+        assert!(try_parse_extension_provided_defaults("{}").is_none());
+    }
+
+    #[test]
+    fn well_formed_runtime_defaults_document_overrides_bundled_asset() {
+        let defaults = try_parse_extension_provided_defaults(
+            r#"{
+                "install_methods": {},
+                "version_candidates": [],
+                "test_drift": {
+                    "source_dirs": ["lib"],
+                    "test_dirs": ["spec"],
+                    "file_extensions": ["rb"],
+                    "inline_tests": true
+                },
+                "direct_test_file_suffixes": ["_spec.rb"]
+            }"#,
+        )
+        .expect("well-formed defaults document parses");
+
+        assert_eq!(defaults.test_drift.source_dirs, ["lib"]);
+        assert_eq!(defaults.test_drift.test_dirs, ["spec"]);
+        assert_eq!(defaults.direct_test_file_suffixes, ["_spec.rb"]);
     }
 
     #[test]
