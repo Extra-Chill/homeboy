@@ -29,6 +29,103 @@ fn test_verify_upgrade_with_retry() {
 }
 
 #[test]
+fn explicit_binary_upgrade_requires_the_selected_release_version() {
+    // #11152: a successful installer process is insufficient when it leaves a
+    // stale or shadowed executable on PATH. Explicit binary mode must verify
+    // the release selected before the swap, not just any newer version.
+    let reads = std::cell::RefCell::new(vec![
+        Some(ActiveBinaryInfo {
+            version: Some("0.326.1".to_string()),
+            build_identity: Some("homeboy 0.326.1".to_string()),
+        }),
+        Some(ActiveBinaryInfo {
+            version: Some("0.326.1".to_string()),
+            build_identity: Some("homeboy 0.326.1".to_string()),
+        }),
+    ]);
+
+    let (success, observed) = verify_binary_upgrade_with_retry_reader(
+        "0.326.2",
+        2,
+        Duration::ZERO,
+        || reads.borrow_mut().remove(0),
+        |_| {},
+    );
+
+    assert!(!success, "a different release must not verify as success");
+    assert_eq!(
+        observed.and_then(|info| info.version).as_deref(),
+        Some("0.326.1")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_binary_upgrade_reads_the_captured_destination_not_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // #11152: the installer replaces `command -v homeboy` before this process
+    // returns. Verification must execute that captured path, even when another
+    // Homeboy binary shadows it later on PATH.
+    let directory = tempfile::tempdir().expect("tempdir");
+    let destination = directory.path().join("homeboy");
+    std::fs::write(&destination, "#!/bin/sh\nprintf 'homeboy 0.326.0\\n'\n").expect("stale binary");
+    std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o755))
+        .expect("make stale binary executable");
+
+    let (success, observed) =
+        verify_binary_upgrade_with_retry(&destination, "0.326.1", 1, Duration::ZERO, |_| {});
+
+    assert!(!success, "the stale captured target must fail verification");
+    assert_eq!(
+        observed.and_then(|info| info.version).as_deref(),
+        Some("0.326.0")
+    );
+}
+
+#[test]
+fn explicit_binary_upgrade_accepts_the_selected_release_version() {
+    let (success, observed) = verify_binary_upgrade_with_retry_reader(
+        "0.326.1",
+        1,
+        Duration::ZERO,
+        || {
+            Some(ActiveBinaryInfo {
+                version: Some("0.326.1".to_string()),
+                build_identity: Some("homeboy 0.326.1".to_string()),
+            })
+        },
+        |_| {},
+    );
+
+    assert!(success);
+    assert_eq!(
+        observed.and_then(|info| info.version).as_deref(),
+        Some("0.326.1")
+    );
+}
+
+#[test]
+fn binary_swap_failure_identifies_the_target_and_observed_destination() {
+    let err = binary_swap_failure(
+        "0.326.1",
+        Some(Path::new("/Users/chubes/.cargo/bin/homeboy")),
+        Some(&ActiveBinaryInfo {
+            version: Some("0.326.0".to_string()),
+            build_identity: Some("homeboy 0.326.0".to_string()),
+        }),
+    );
+
+    assert!(err.message.contains("0.326.1"));
+    assert!(err.message.contains("/Users/chubes/.cargo/bin/homeboy"));
+    assert!(err.message.contains("observed 0.326.0"));
+    assert!(err
+        .hints
+        .iter()
+        .any(|hint| hint.message.contains("type -a homeboy")));
+}
+
+#[test]
 fn source_swap_failure_errors_when_active_binary_unchanged() {
     // Issue #5772: the source upgrade command exited 0 but the read-back
     // proves the active binary was not replaced — fail loudly instead of a
