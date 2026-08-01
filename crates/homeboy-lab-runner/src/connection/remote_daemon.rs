@@ -334,6 +334,9 @@ pub(super) struct RemoteDaemonStatus {
     pub(super) work_evidence: RemoteDaemonWorkEvidence,
     pub(super) endpoint_probe_error: Option<String>,
     pub(super) termination_evidence: Option<homeboy_core::daemon::DaemonTerminationEvidence>,
+    /// The daemon's own recovery authorization survives SSH status parsing.
+    /// Callers must not recreate a destructive action from stale reason alone.
+    pub(super) daemon_freshness: Option<DaemonFreshnessReport>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -454,6 +457,10 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
     let daemon = status.daemon.as_ref();
     let lease_id = daemon.and_then(|daemon| daemon.lease_id.clone());
     let pid = daemon.and_then(|daemon| daemon.pid);
+    let adoption_eligible = status
+        .daemon_freshness
+        .as_ref()
+        .is_some_and(|freshness| freshness.adoption_command.is_some());
     let proven_dead = status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
         && lease_id.is_some()
         && pid.is_some();
@@ -509,7 +516,7 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
     // is exactly the daemon an operator cannot look at, so leaving this empty
     // and falling back to generic reconnect prose discards the evidence the SSH
     // probe just paid for (#10302).
-    let repair_step = if proven_dead {
+    let repair_step = if proven_dead && adoption_eligible {
         Some(daemon_repair::step(
             daemon_repair::RUNNER_ADOPT_ORPHAN_LEASE,
             daemon_repair::adopt_orphan_lease_command(
@@ -1005,6 +1012,10 @@ fn remote_daemon_status_with_timeout(
         .get("termination_evidence")
         .cloned()
         .and_then(|value| serde_json::from_value(value).ok());
+    let daemon_freshness = data
+        .pointer("/freshness")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
     if !data
         .get("running")
         .and_then(Value::as_bool)
@@ -1023,6 +1034,7 @@ fn remote_daemon_status_with_timeout(
             work_evidence: RemoteDaemonWorkEvidence::Unknown,
             endpoint_probe_error: None,
             termination_evidence,
+            daemon_freshness,
         });
     }
     let Some(state) = data.get("state") else {
@@ -1042,6 +1054,7 @@ fn remote_daemon_status_with_timeout(
             work_evidence: RemoteDaemonWorkEvidence::Unknown,
             endpoint_probe_error: None,
             termination_evidence,
+            daemon_freshness,
         });
     };
     Ok(RemoteDaemonStatus {
@@ -1057,6 +1070,7 @@ fn remote_daemon_status_with_timeout(
         work_evidence: RemoteDaemonWorkEvidence::Unknown,
         endpoint_probe_error: None,
         termination_evidence,
+        daemon_freshness,
     })
 }
 

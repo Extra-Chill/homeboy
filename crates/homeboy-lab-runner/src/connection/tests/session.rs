@@ -20,6 +20,7 @@ fn first_connect_routes_to_idempotent_ensure_start_when_no_daemon_exists() {
         work_evidence: RemoteDaemonWorkEvidence::Unknown,
         endpoint_probe_error: None,
         termination_evidence: None,
+        daemon_freshness: None,
     };
 
     assert_eq!(
@@ -40,6 +41,7 @@ fn missing_daemon_state_with_active_jobs_refuses_ensure_running() {
         work_evidence: RemoteDaemonWorkEvidence::Unknown,
         endpoint_probe_error: None,
         termination_evidence: None,
+        daemon_freshness: None,
     };
 
     let error = remote_daemon_connect_action(None, &status)

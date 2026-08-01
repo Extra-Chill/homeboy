@@ -468,6 +468,28 @@ fn remote_dead_lease_recovery_exposes_exact_adoption_command() {
 }
 
 #[test]
+fn remote_conflicted_dead_lease_preserves_no_adoption_command() {
+    let mut status = remote_daemon_status_for_test_with_reason(
+        false,
+        false,
+        0,
+        "lease-dead",
+        4545,
+        Some(DaemonStaleReasonCode::PidDead),
+    );
+    status
+        .daemon_freshness
+        .as_mut()
+        .expect("daemon-authored freshness")
+        .adoption_command = None;
+
+    let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &status);
+
+    assert!(recovery.adoption_command.is_none());
+    assert!(recovery.repair_plan.is_empty());
+}
+
+#[test]
 fn remote_status_without_reason_is_evidence_unavailable_and_non_adoptable() {
     let status = remote_daemon_status_for_test(false, false, 1, "lease-unknown", 4545);
 
