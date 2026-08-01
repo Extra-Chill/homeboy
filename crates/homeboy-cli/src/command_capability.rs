@@ -2,6 +2,50 @@
 //!
 //! This intentionally uses only argv so it can run before extension discovery,
 //! configuration hydration, or any mutation coordination.
+//!
+//! ## Why this is not `command_safety_manifest_from(...).find_path(argv).mutates`
+//!
+//! #11141 proposed replacing this classifier with a lookup into the command
+//! safety manifest, on the theory that it duplicates `CommandSpec.safety`. The
+//! ordering objection this module states does NOT block that: the manifest
+//! derives from `COMMAND_SPECS` (static consts) plus `Cli::command()` (clap
+//! derive metadata), and `registered_command` is a linear scan over a static
+//! array — neither reads config nor discovers extensions. Verified 2026-08-01.
+//!
+//! The conversion is blocked by something else. The two tables answer different
+//! questions:
+//!
+//! - `CommandSafetyEntry.mutates` is ONE bool per command PATH, feeding a
+//!   documentation/audit projection that deliberately under-declares —
+//!   `command_safety_manifest_audit` is `report_only: true`, and a path with no
+//!   registry declaration resolves to `read_only()` by default.
+//! - `CommandCapability` is a per-INVOCATION runtime gate that must fail closed,
+//!   because `Mutation` is what authorizes `reconcile_terminal_runner_exec_runs`
+//!   (recovering completed runner-exec evidence before a mutating command can
+//!   evict it) and the deferred-workload worker restart.
+//!
+//! A per-path lookup cannot express the argument-conditional rows here at all:
+//! `status` is read-only until `--refresh`, and `project`/`rig`/`server` are
+//! read-only only when bare or `list`. Worse, the registry's silence is not
+//! evidence of read-only-ness. Every one of these resolves `mutates: false`
+//! today while this classifier correctly answers `Mutation`:
+//!
+//! - `status --refresh` — `ops_command_spec!(status)` is a bare `command_spec`,
+//!   so the manifest has no `--refresh` distinction and no subcommand table
+//! - `daemon start` — `ops_command_spec!(daemon)` likewise declares nothing
+//! - `runtime promotion-takeover` — `RUNTIME_SUBCOMMAND_SAFETY` declares only
+//!   `refresh`
+//! - `agent-task retry <run> --run` — `AGENT_TASK_SUBCOMMAND_SAFETY` declares no
+//!   `retry` row
+//!
+//! Converting would silently reclassify all four as `ReadOnly` and skip their
+//! startup recovery. `classifies_actions_as_mutations_by_default` below pins
+//! exactly that. The `_ => Mutation` fail-closed default the issue asks for is
+//! already in place.
+//!
+//! The duplication is real; the fix is not a per-path lookup. It would need the
+//! registry to carry a mutation-inducing-flag axis, and every silent path to be
+//! declared rather than defaulted.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandCapability {
