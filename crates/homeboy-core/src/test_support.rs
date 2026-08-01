@@ -150,7 +150,7 @@ impl HermeticTestContext {
             // share them without sharing mutable Homeboy state.
             .env(
                 crate::controller_runtime::TEST_CONTROLLER_RUNTIME_STORE_ENV,
-                test_controller_runtime_store(),
+                shared_controller_runtime_store(),
             );
         command
     }
@@ -634,7 +634,9 @@ fn test_controller_fixture(binary: TestBinary) -> PathBuf {
         .join("homeboy-controller-fixture")
 }
 
-fn test_controller_runtime_store() -> &'static Path {
+/// Return the process-wide immutable controller-runtime pin store for tests
+/// that spawn controller subprocesses outside `controller_runtime_command`.
+pub fn shared_controller_runtime_store() -> &'static Path {
     SHARED_CONTROLLER_RUNTIME_STORE
         .get_or_init(exec_capable_tempdir)
         .path()
@@ -1240,6 +1242,16 @@ fn handle_reverse_broker_request(
                 .map(|event| json!({ "event": event })),
             "heartbeat" => store
                 .renew_remote_runner_claim(job_id, runner_id, claim_id, 30_000)
+                .map(|job| json!({ "job": job })),
+            "consume" => store
+                .consume_remote_runner_execution(
+                    job_id,
+                    runner_id,
+                    claim_id,
+                    request.body["context_id"]
+                        .as_str()
+                        .expect("broker execution context id"),
+                )
                 .map(|job| json!({ "job": job })),
             "finish" => store
                 .finish_remote_runner_job(
