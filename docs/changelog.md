@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.327.2] - 2026-08-01
+
+### Fixed
+- execute the computed repair plan, and dispatch daemon recovery
+- modernize workflow actions
+- complete reverse broker receipt fixture
+- add io/json From impls and a cause chain, and stop discarding the errno at five deploy sites
+- carry gh command evidence through release publication verification
+- wire the disk budget to a decision, and keep cleanup runnable at zero inodes
+- put runtime temp on the data volume and probe the config volume in retained-storage
+- consolidate multi-extension ownership onto resolve_owner, add --capability-extension
+
 ## [0.327.1] - 2026-08-01
 
 ### Changed
