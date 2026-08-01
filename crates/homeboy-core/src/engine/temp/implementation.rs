@@ -600,15 +600,74 @@ mod owner_support {
         }
     }
 
+    /// The explicit runtime-temp root, when the operator pinned one.
+    pub(super) fn runtime_root_override() -> Option<PathBuf> {
+        let value = env::var(runtime_tmpdir_env()).ok()?;
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+    }
+
+    /// The active runtime-temp root: where new allocations land, and the
+    /// directory exported to every child process as `TMPDIR`.
+    ///
+    /// This resolves under the **data** root, not the config root. Runtime temp
+    /// is high-churn, machine-local, reconstructable bytes — a compiler
+    /// launched by a Homeboy workload writes its intermediates here — so it
+    /// belongs on the same volume an operator moves with `HOMEBOY_DATA_DIR`.
+    ///
+    /// It also makes the local resolver agree with the remote-shell protocol
+    /// this same file already ships in [`RuntimeTempOwner::remote_shell_command`],
+    /// which has always resolved `$HOMEBOY_DATA_DIR/runtime/tmp` ->
+    /// `$XDG_DATA_HOME/homeboy/runtime/tmp` -> `$HOME/.local/share/homeboy/runtime/tmp`.
+    /// The two resolvers disagreeing is the mechanism behind #11125: moving
+    /// storage to a large volume moved everything except the bytes that
+    /// actually grow.
     pub(super) fn runtime_root() -> Result<PathBuf> {
-        if let Ok(override_dir) = env::var(runtime_tmpdir_env()) {
-            let trimmed = override_dir.trim();
-            if !trimmed.is_empty() {
-                return Ok(PathBuf::from(trimmed));
-            }
+        if let Some(override_dir) = runtime_root_override() {
+            return Ok(override_dir);
         }
 
+        Ok(paths::homeboy_data()?.join("runtime").join("tmp"))
+    }
+
+    /// The pre-#11125 default runtime-temp root, under the **config** root.
+    ///
+    /// Nothing allocates here anymore. It is still swept so entries written by
+    /// an older binary keep being reclaimed instead of leaking forever.
+    pub(super) fn legacy_runtime_root() -> Result<PathBuf> {
         Ok(paths::homeboy()?.join("runtime").join("tmp"))
+    }
+
+    /// Superseded roots a full sweep must still drain, in sweep order.
+    ///
+    /// Only populated when the active root came from default resolution. An
+    /// explicit `HOMEBOY_RUNTIME_TMPDIR` is the operator naming exactly one
+    /// root, and under the old resolver that override also won — so there is no
+    /// superseded default in play for that process to inherit.
+    pub(super) fn superseded_runtime_roots() -> Vec<PathBuf> {
+        if runtime_root_override().is_some() {
+            return Vec::new();
+        }
+        let Ok(active) = runtime_root() else {
+            return Vec::new();
+        };
+        let Ok(legacy) = legacy_runtime_root() else {
+            return Vec::new();
+        };
+        // `is_dir` first: the sweep acquires a cleanup lock, which creates the
+        // root it is handed. Probing a root that was never used must not
+        // resurrect it on the volume this fix exists to keep clean.
+        if legacy.is_dir() && !same_runtime_root(&legacy, &active) {
+            vec![legacy]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn same_runtime_root(left: &Path, right: &Path) -> bool {
+        let left = fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+        let right = fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+        left == right
     }
 
     pub(super) fn runtime_tmpdir_env() -> String {
@@ -851,11 +910,76 @@ pub fn cleanup_runtime_tmp_bounded(
     cleanup_runtime_tmp_bounded_with_remover(options, remove_runtime_tmp_entry)
 }
 
+/// Sweep the active runtime-temp root, then drain every superseded root.
+///
+/// #11125 moved the default root from the config volume to the data volume.
+/// Entries written by an older binary are tracked by owner metadata and are
+/// only ever reclaimed by this sweep, so abandoning the old root would leak
+/// disk permanently. The superseded drain is therefore part of the normal
+/// sweep — there is no flag, no environment variable, and no separate command
+/// that has to be discovered before the bytes come back.
 fn cleanup_runtime_tmp_bounded_with_remover(
     options: RuntimeTempCleanupOptions<'_>,
     remover: RuntimeTempEntryRemover,
 ) -> Result<RuntimeTempCleanupOutput> {
-    let root = runtime_root()?;
+    let mut output = cleanup_runtime_tmp_root(runtime_root()?, options, remover)?;
+
+    for superseded in superseded_runtime_roots() {
+        // The bound is shared across roots so an aggregate sweep still returns
+        // a bounded report. Exhausting it here defers the drain to the next
+        // invocation rather than silently dropping it.
+        let remaining = options.limit.max(1).saturating_sub(output.rows.len());
+        if remaining == 0 {
+            output.has_more = true;
+            break;
+        }
+        // The superseded root is drain-only: nothing allocates into it, so it
+        // is restarted from the beginning every invocation and never
+        // participates in the caller's cursor. Repeated invocations converge.
+        let mut superseded_options = options;
+        superseded_options.cursor = None;
+        superseded_options.limit = remaining;
+        let drained = cleanup_runtime_tmp_root(superseded.clone(), superseded_options, remover)?;
+        merge_runtime_temp_cleanup(&mut output, drained);
+        if options.apply {
+            // Best effort, and only ever succeeds once the root is genuinely
+            // empty. Leaves nothing behind on the config volume after the last
+            // legacy entry is reclaimed.
+            let _ = fs::remove_dir(&superseded);
+        }
+    }
+
+    Ok(output)
+}
+
+/// Fold a superseded-root sweep into the active-root report.
+///
+/// Row order is preserved (active root first) and the reported
+/// `runtime_tmp_root` stays the active root, so the primary contract is
+/// unchanged. `next_cursor` also stays the active root's, because the
+/// superseded drain restarts each invocation and has no page to resume.
+fn merge_runtime_temp_cleanup(
+    output: &mut RuntimeTempCleanupOutput,
+    drained: RuntimeTempCleanupOutput,
+) {
+    output.totals.inspected_count += drained.totals.inspected_count;
+    output.totals.planned_size_bytes += drained.totals.planned_size_bytes;
+    output.totals.removed_size_bytes += drained.totals.removed_size_bytes;
+    output.planned_count += drained.planned_count;
+    output.removed_count += drained.removed_count;
+    output.skipped_count += drained.skipped_count;
+    output.planned_allocated_bytes += drained.planned_allocated_bytes;
+    output.removed_allocated_bytes += drained.removed_allocated_bytes;
+    output.verified_reclaimed_bytes += drained.verified_reclaimed_bytes;
+    output.has_more |= drained.has_more;
+    output.rows.extend(drained.rows);
+}
+
+fn cleanup_runtime_tmp_root(
+    root: PathBuf,
+    options: RuntimeTempCleanupOptions<'_>,
+    remover: RuntimeTempEntryRemover,
+) -> Result<RuntimeTempCleanupOutput> {
     let lock = acquire_cleanup_lock(&root)?;
     let mut output = RuntimeTempCleanupOutput {
         command: "self.cleanup-runtime-tmp",
@@ -1668,6 +1792,206 @@ mod tests {
             run_max_count: 100,
             cursor: None,
         }
+    }
+
+    /// Pin `HOMEBOY_DATA_DIR` for one test so data-root resolution never
+    /// depends on the ambient environment of the host running the suite.
+    struct DataDirGuard(Option<String>);
+
+    impl DataDirGuard {
+        fn set(path: &Path) -> Self {
+            let prior = env::var(paths::HOMEBOY_DATA_DIR_ENV).ok();
+            env::set_var(paths::HOMEBOY_DATA_DIR_ENV, path);
+            Self(prior)
+        }
+    }
+
+    impl Drop for DataDirGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(prior) => env::set_var(paths::HOMEBOY_DATA_DIR_ENV, prior),
+                None => env::remove_var(paths::HOMEBOY_DATA_DIR_ENV),
+            }
+        }
+    }
+
+    /// Put a superseded-root run directory on disk exactly as an older binary
+    /// would have left it: owner metadata, no pin, a dead owner PID.
+    fn seed_superseded_run(root: &Path, name: &str, state: &str) -> PathBuf {
+        let path = root.join(name);
+        fs::create_dir_all(&path).expect("superseded run dir");
+        let now = chrono::Utc::now().to_rfc3339();
+        let owner = RuntimeRunOwner {
+            schema: RUN_OWNER_SCHEMA.to_string(),
+            owner_id: uuid::Uuid::new_v4().to_string(),
+            owner_pid: u32::MAX,
+            linux_starttime_ticks: None,
+            run_id: None,
+            invocation_ids: Vec::new(),
+            state: state.to_string(),
+            created_at: now.clone(),
+            completed_at: Some(now),
+            reason: None,
+            producer: Some("legacy_producer".to_string()),
+        };
+        write_run_owner(&path, &owner).expect("superseded owner record");
+        fs::write(path.join("evidence.bin"), vec![b'x'; 64]).expect("superseded evidence");
+        path
+    }
+
+    #[test]
+    fn runtime_root_resolves_on_the_data_volume_and_names_the_config_volume_as_superseded() {
+        with_isolated_home(|home| {
+            env::remove_var(runtime_tmpdir_env());
+            let data = home.path().join("data-volume");
+            let _data_guard = DataDirGuard::set(&data);
+
+            assert_eq!(
+                runtime_root().expect("runtime root"),
+                data.join("runtime").join("tmp"),
+                "new allocations must land on the volume HOMEBOY_DATA_DIR moves"
+            );
+            assert_eq!(
+                legacy_runtime_root().expect("legacy runtime root"),
+                home.path()
+                    .join(".config")
+                    .join("homeboy")
+                    .join("runtime")
+                    .join("tmp"),
+                "the superseded root stays addressable so it can still be drained"
+            );
+        });
+    }
+
+    #[test]
+    fn runtime_tmpdir_override_outranks_the_data_volume_default() {
+        with_isolated_home(|home| {
+            let pinned = home.path().join("pinned-runtime-tmp");
+            env::set_var(runtime_tmpdir_env(), &pinned);
+            let _data_guard = DataDirGuard::set(&home.path().join("data-volume"));
+
+            assert_eq!(runtime_root().expect("runtime root"), pinned);
+        });
+    }
+
+    #[test]
+    fn an_explicit_runtime_tmpdir_scopes_the_sweep_to_that_one_root() {
+        with_isolated_home(|home| {
+            let legacy = home
+                .path()
+                .join(".config")
+                .join("homeboy")
+                .join("runtime")
+                .join("tmp");
+            fs::create_dir_all(&legacy).expect("superseded root");
+            env::set_var(runtime_tmpdir_env(), home.path().join("pinned-runtime-tmp"));
+
+            assert!(
+                superseded_runtime_roots().is_empty(),
+                "an operator-pinned root is the only root; the old resolver honored the same override"
+            );
+        });
+    }
+
+    #[test]
+    fn probing_a_superseded_root_never_creates_it() {
+        with_isolated_home(|home| {
+            env::remove_var(runtime_tmpdir_env());
+            let data = home.path().join("data-volume");
+            let _data_guard = DataDirGuard::set(&data);
+            let legacy = legacy_runtime_root().expect("legacy runtime root");
+
+            assert!(superseded_runtime_roots().is_empty());
+            let mut options = bounded_options(true, None);
+            options.managed_older_than_days = Some(0);
+            options.older_than_days = 0;
+            cleanup_runtime_tmp_bounded(options).expect("sweep with no superseded root");
+
+            assert!(
+                !legacy.exists(),
+                "the sweep acquires a lock that creates its root; it must not resurrect the config volume"
+            );
+        });
+    }
+
+    #[test]
+    fn superseded_config_root_entries_are_drained_by_the_normal_sweep() {
+        with_isolated_home(|home| {
+            env::remove_var(runtime_tmpdir_env());
+            let data = home.path().join("data-volume");
+            let _data_guard = DataDirGuard::set(&data);
+
+            let legacy = legacy_runtime_root().expect("legacy runtime root");
+            fs::create_dir_all(&legacy).expect("superseded root");
+            let stranded = seed_superseded_run(&legacy, "legacy-run-a-1", "succeeded");
+
+            let active = runtime_temp_dir("active-run").expect("active allocation");
+            assert!(
+                active.starts_with(&data),
+                "allocations go to the data volume only"
+            );
+
+            let mut options = bounded_options(false, None);
+            options.older_than_days = 0;
+            options.managed_older_than_days = Some(0);
+            let dry = cleanup_runtime_tmp_bounded(options).expect("dry run");
+            assert_eq!(
+                dry.runtime_tmp_root,
+                runtime_root().expect("runtime root").display().to_string(),
+                "the reported root stays the active root"
+            );
+            assert!(
+                dry.rows
+                    .iter()
+                    .any(|row| row.path == stranded.display().to_string()
+                        && row.action == "remove"),
+                "the superseded root is inspected without being asked for"
+            );
+
+            options.apply = true;
+            let applied = cleanup_runtime_tmp_bounded(options).expect("apply");
+            assert!(applied.removed_count >= 1);
+            assert!(!stranded.exists(), "superseded bytes are reclaimed");
+            assert!(
+                !legacy.exists(),
+                "a fully drained superseded root leaves nothing on the config volume"
+            );
+        });
+    }
+
+    #[test]
+    fn a_live_owner_in_the_superseded_root_is_protected_from_the_drain() {
+        with_isolated_home(|home| {
+            env::remove_var(runtime_tmpdir_env());
+            let _data_guard = DataDirGuard::set(&home.path().join("data-volume"));
+
+            let legacy = legacy_runtime_root().expect("legacy runtime root");
+            fs::create_dir_all(&legacy).expect("superseded root");
+            let held = seed_superseded_run(&legacy, "legacy-run-live-1", "succeeded");
+            let pin = pin_runtime_temp_dir(&held).expect("pin held by this process");
+
+            let mut options = bounded_options(true, None);
+            options.older_than_days = 0;
+            options.managed_older_than_days = Some(0);
+            let output = cleanup_runtime_tmp_bounded(options).expect("apply");
+
+            let row = output
+                .rows
+                .iter()
+                .find(|row| row.path == held.display().to_string())
+                .expect("held superseded row");
+            assert!(
+                row.reason.contains("pin owner PID"),
+                "the drain reuses the ownership protocol, not a blind delete: {}",
+                row.reason
+            );
+            assert!(held.exists());
+
+            drop(pin);
+            let released = cleanup_runtime_tmp_bounded(options).expect("release");
+            assert!(released.removed_count >= 1);
+            assert!(!held.exists());
+        });
     }
 
     #[test]
