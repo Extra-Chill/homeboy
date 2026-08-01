@@ -58,6 +58,32 @@ fn bench_artifact_serializes_url_fields_when_present() {
 }
 
 #[test]
+fn bench_artifact_serializes_required_durable_contract() {
+    let artifact = BenchArtifact {
+        path: Some("artifacts/run-1/diff.png".to_string()),
+        required_durable: true,
+        ..BenchArtifact::default()
+    };
+
+    assert_eq!(
+        serde_json::to_string(&artifact).unwrap(),
+        r#"{"path":"artifacts/run-1/diff.png","required_durable":true}"#
+    );
+}
+
+#[test]
+fn bench_artifact_accepts_mixed_legacy_and_durable_records() {
+    let legacy: BenchArtifact =
+        serde_json::from_str(r#"{"path":"artifacts/legacy.png"}"#).expect("legacy artifact");
+    let durable: BenchArtifact =
+        serde_json::from_str(r#"{"path":"artifacts/current.png","required_durable":true}"#)
+            .expect("durable artifact");
+
+    assert!(!legacy.required_durable);
+    assert!(durable.required_durable);
+}
+
+#[test]
 fn bench_artifact_serializes_preview_metadata_when_present() {
     let artifact = BenchArtifact {
         path: Some("artifacts/preview.json".to_string()),

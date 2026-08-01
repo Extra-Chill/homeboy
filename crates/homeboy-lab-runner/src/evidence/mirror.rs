@@ -15,7 +15,8 @@ use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::execution_contract::encode_uri_component;
 use homeboy_core::notification_route::NotificationRoute;
 use homeboy_core::observation::{
-    ArtifactPublication, ArtifactRecord, ObservationStore, RunRecord, RunStatus,
+    ArtifactPublication, ArtifactPublicationType, ArtifactRecord, ObservationStore, RunRecord,
+    RunStatus,
 };
 use homeboy_core::redaction::redact_argv_shell_display;
 use homeboy_core::runner_download_cache::RunnerDownloadIntent;
@@ -1346,6 +1347,7 @@ where
             }),
             expected_size_bytes: size_bytes,
             expected_sha256: sha256,
+            artifact_type: ArtifactPublicationType::File,
         });
         staged.push(file);
     }
@@ -1448,32 +1450,75 @@ where
         if let Some(notification_route) = notification_route {
             notification_route.insert_into_metadata(&mut run.metadata_json);
         }
-        let publications = remote_detail_artifacts(&detail, runner, &run.id)?
-            .into_iter()
-            .map(|artifact| {
-                if artifact.size_bytes.is_none()
-                    || artifact.sha256.as_deref().is_none_or(str::is_empty)
-                {
-                    return Err(Error::validation_invalid_argument(
-                        "artifact.provenance",
-                        "declared terminal artifact is missing required size_bytes or sha256 provenance",
-                        Some(artifact.id),
-                        None,
+        let mut publications = Vec::new();
+        for artifact in remote_detail_artifacts(&detail, runner, &run.id)? {
+            match artifact.artifact_type.as_str() {
+                "remote_file" => {
+                    if artifact.size_bytes.is_none()
+                        || artifact.sha256.as_deref().is_none_or(str::is_empty)
+                    {
+                        return Err(artifact_projection_error(
+                            runner,
+                            job,
+                            run_id,
+                            Error::validation_invalid_argument(
+                                "artifact.provenance",
+                                "declared terminal file artifact is missing required size_bytes or sha256 provenance",
+                                Some(artifact.id),
+                                None,
+                            ),
+                        ));
+                    }
+                    let source_path = download(&artifact.path)
+                        .map_err(|error| artifact_projection_error(runner, job, run_id, error))?;
+                    publications.push(ArtifactPublication {
+                        id: artifact.id,
+                        kind: artifact.kind,
+                        source_path,
+                        mime: artifact.mime,
+                        metadata_json: artifact.metadata_json,
+                        expected_size_bytes: artifact.size_bytes,
+                        expected_sha256: artifact.sha256,
+                        artifact_type: ArtifactPublicationType::File,
+                    });
+                }
+                "directory" => {
+                    let expected_tree_sha256 = artifact.sha256.as_deref().filter(|hash| !hash.is_empty()).ok_or_else(|| {
+                        artifact_projection_error(runner, job, run_id, Error::validation_invalid_argument(
+                            "artifact.sha256",
+                            "declared terminal directory artifact is missing its tree SHA-256",
+                            Some(artifact.id.clone()),
+                            None,
+                        ))
+                    })?;
+                    let source_path = download(&artifact.path)
+                        .map_err(|error| artifact_projection_error(runner, job, run_id, error))?;
+                    publications.push(ArtifactPublication {
+                        id: artifact.id,
+                        kind: artifact.kind,
+                        source_path,
+                        mime: None,
+                        metadata_json: artifact.metadata_json,
+                        expected_size_bytes: None,
+                        expected_sha256: Some(expected_tree_sha256.to_string()),
+                        artifact_type: ArtifactPublicationType::Directory,
+                    });
+                }
+                _ => {
+                    return Err(artifact_projection_error(
+                        runner,
+                        job,
+                        run_id,
+                        Error::validation_invalid_argument(
+                            "artifact.type",
+                            "declared terminal artifact must provide downloadable file or directory bytes, not a URL or live runner reference",
+                            Some(artifact.id),
+                            None,
+                        ),
                     ));
                 }
-                let source_path = download(&artifact.path)?;
-                Ok(ArtifactPublication {
-                    id: artifact.id,
-                    kind: artifact.kind,
-                    source_path,
-                    mime: artifact.mime,
-                    metadata_json: artifact.metadata_json,
-                    expected_size_bytes: artifact.size_bytes,
-                    expected_sha256: artifact.sha256,
-                })
-            })
-            .collect::<Result<Vec<_>>>()
-            .map_err(|error| artifact_projection_error(runner, job, run_id, error))?;
+            }
+        }
         store
             .publish_run_artifacts_atomically(&run, &publications)
             .map_err(|error| artifact_projection_error(runner, job, run_id, error))?;

@@ -10,8 +10,8 @@ pub(super) fn record_bench_observation_artifacts(
     observation: &BenchObservation,
     workflow: &mut homeboy_extension::bench::BenchRunWorkflowResult,
     run_dir: &RunDir,
-) {
-    bench::record_bench_observation_artifacts(&observation.0, workflow, run_dir);
+) -> bool {
+    bench::record_bench_observation_artifacts(&observation.0, workflow, run_dir)
 }
 
 pub(super) fn record_if_exists(observation: &BenchObservation, kind: &str, path: PathBuf) {
