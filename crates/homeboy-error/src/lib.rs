@@ -293,6 +293,34 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// Let `?` carry a real `io::Error` instead of forcing a manual stringify.
+///
+/// Routed through [`Error::from_io_error`] on purpose: that is where #11188's
+/// storage-exhaustion classification lives, and a conversion that bypassed it
+/// would silently re-collapse every `ENOSPC` back into `internal.io_error`.
+///
+/// The conversion cannot attach context — `?` has nowhere to put it — so a
+/// site that knows which file or which operation failed should still call
+/// [`Error::from_io_error`] with a context string. This impl exists so that
+/// *discarding the error entirely* (`.map_err(|_| ...)`) is never the path of
+/// least resistance again.
+impl From<std::io::Error> for Error {
+    fn from(error: std::io::Error) -> Self {
+        Self::from_io_error(&error, None)
+    }
+}
+
+/// Let `?` carry a real `serde_json::Error`.
+///
+/// Delegates to [`Error::from_json_error`], so a serialization failure that is
+/// really a failed *write* is reported as an IO failure (and classified for
+/// storage exhaustion) rather than as a JSON failure.
+impl From<serde_json::Error> for Error {
+    fn from(error: serde_json::Error) -> Self {
+        Self::from_json_error(&error, None)
+    }
+}
+
 #[derive(Debug, Serialize)]
 
 pub struct NotFoundDetails {
@@ -476,10 +504,11 @@ pub fn io_error_is_storage_exhausted(error: &std::io::Error) -> bool {
 /// Whether an already-stringified io/SQLite error reports exhausted storage.
 ///
 /// Most homeboy call sites stringify an `io::Error` before it ever reaches this
-/// crate — `Error::internal_io` takes `impl Into<String>`, and there is no
-/// `From<io::Error>` yet (#11134) — so the typed classifier above cannot see
-/// them. These markers are the stable operating-system and SQLite renderings of
-/// a filesystem that cannot accept another byte or another inode.
+/// crate — `Error::internal_io` takes `impl Into<String>`, and the typed
+/// [`From<std::io::Error>`] conversion added in #11134 only covers sites that
+/// have been migrated onto `?` — so the typed classifier above cannot see them.
+/// These markers are the stable operating-system and SQLite renderings of a
+/// filesystem that cannot accept another byte or another inode.
 pub fn message_reports_storage_exhaustion(message: &str) -> bool {
     const MARKERS: &[&str] = &[
         "no space left on device",
@@ -638,15 +667,38 @@ impl Error {
 
     /// Classify a live `io::Error`, keeping storage exhaustion distinguishable.
     ///
-    /// Deliberately *not* a `From<io::Error>` impl. Adding that conversion is
-    /// its own migration across ~1500 call sites and is tracked separately
-    /// (#11134); this constructor exists so the sites that matter can classify
-    /// today without waiting for it.
+    /// This is the contextful form. [`From<std::io::Error>`] delegates here
+    /// with `None`, so every conversion — explicit or via `?` — goes through
+    /// the same ENOSPC classification (#11188). Prefer this constructor
+    /// wherever the call site knows *what it was doing*: a bare `?` yields a
+    /// correctly coded error with no operation attached, which is enough to
+    /// act on but not enough to locate.
     pub fn from_io_error(error: &std::io::Error, context: Option<String>) -> Self {
         if io_error_is_storage_exhausted(error) {
             return Self::storage_exhausted(error.to_string(), context);
         }
         Self::internal_io(error.to_string(), context)
+    }
+
+    /// Classify a `serde_json` failure, keeping storage exhaustion visible.
+    ///
+    /// `serde_json`'s writer-side entry points (`to_writer`,
+    /// `to_writer_pretty`) wrap the underlying `io::Error` rather than
+    /// returning it, so a full filesystem reaches a caller as a
+    /// `serde_json::Error`. Reporting that as `internal.json_error` is how a
+    /// disk-full write comes to look like malformed JSON — the exact
+    /// misdirection #10603 was diagnosed through. Io-category failures are
+    /// therefore routed to [`Error::internal_io`], which carries #11188's
+    /// ENOSPC classification; only genuine syntax/data/EOF failures stay
+    /// `internal.json_error`.
+    pub fn from_json_error(error: &serde_json::Error, context: Option<String>) -> Self {
+        if error.is_io() {
+            if error.io_error_kind() == Some(std::io::ErrorKind::StorageFull) {
+                return Self::storage_exhausted(error.to_string(), context);
+            }
+            return Self::internal_io(error.to_string(), context);
+        }
+        Self::internal_json(error.to_string(), context)
     }
 
     /// Whether this error reports an out-of-capacity filesystem.
@@ -1581,6 +1633,145 @@ mod storage_exhaustion_tests {
         assert!(!details.contains_key("available_bytes"));
         assert!(!details.contains_key("reserve_inodes"));
         assert!(!details.contains_key("context"));
+    }
+}
+
+/// `?` must be able to carry a real error, and must not lose the #11188
+/// storage classification on the way through (#11134).
+#[cfg(test)]
+mod conversion_tests {
+    use super::*;
+
+    fn io_via_question_mark(error: std::io::Error) -> Result<()> {
+        Err(error)?;
+        Ok(())
+    }
+
+    fn json_via_question_mark(text: &str) -> Result<Value> {
+        Ok(serde_json::from_str(text)?)
+    }
+
+    /// A writer that fails the way a full or severed destination fails.
+    ///
+    /// Used instead of `serde_json::Error::io`, which is `#[doc(hidden)]` and
+    /// documented as "Not public API". This produces a genuine io-category
+    /// `serde_json::Error` through the same public path production code takes.
+    struct FailingWriter {
+        kind: std::io::ErrorKind,
+        message: &'static str,
+    }
+
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(self.kind, self.message))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn json_write_failure(kind: std::io::ErrorKind, message: &'static str) -> serde_json::Error {
+        serde_json::to_writer(
+            FailingWriter { kind, message },
+            &serde_json::json!({ "payload": true }),
+        )
+        .expect_err("the writer always fails")
+    }
+
+    /// The whole point: a bare `?` keeps the errno-derived text that
+    /// `.map_err(|_| ...)` throws away.
+    #[test]
+    fn the_question_mark_conversion_preserves_the_underlying_io_message() {
+        let error = io_via_question_mark(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "keyfile is not readable",
+        ))
+        .expect_err("io failure converts");
+
+        assert_eq!(error.code, ErrorCode::InternalIoError);
+        assert!(
+            error.details["error"]
+                .as_str()
+                .expect("io error text")
+                .contains("keyfile is not readable"),
+            "{:?}",
+            error.details
+        );
+    }
+
+    /// A conversion that bypassed `from_io_error` would re-collapse ENOSPC
+    /// into `internal.io_error` and undo #11188 everywhere `?` is used.
+    #[test]
+    fn the_question_mark_conversion_still_classifies_storage_exhaustion() {
+        let error = io_via_question_mark(std::io::Error::from(std::io::ErrorKind::StorageFull))
+            .expect_err("storage failure converts");
+
+        assert_eq!(error.code, ErrorCode::StorageExhausted);
+        assert!(error.is_storage_exhausted());
+        assert_eq!(error.retryable, Some(false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_raw_enospc_survives_the_question_mark_conversion() {
+        let error = io_via_question_mark(std::io::Error::from_raw_os_error(ENOSPC))
+            .expect_err("enospc converts");
+
+        assert!(error.is_storage_exhausted());
+    }
+
+    #[test]
+    fn a_json_syntax_failure_converts_to_a_json_error() {
+        let error = json_via_question_mark("{ not json").expect_err("syntax failure converts");
+
+        assert_eq!(error.code, ErrorCode::InternalJsonError);
+        assert!(!error.details["error"]
+            .as_str()
+            .expect("json error text")
+            .is_empty());
+    }
+
+    /// `serde_json::to_writer` on a full disk returns a `serde_json::Error`
+    /// wrapping the `io::Error`. Calling that "JSON error" is how a disk-full
+    /// deploy gets misread as malformed payload.
+    #[test]
+    fn a_json_error_wrapping_a_full_disk_is_reported_as_storage_exhaustion() {
+        let wrapped =
+            json_write_failure(std::io::ErrorKind::StorageFull, "no space left on device");
+
+        assert!(wrapped.is_io(), "expected an io-category json error");
+        let error = Error::from(wrapped);
+
+        assert_eq!(error.code, ErrorCode::StorageExhausted);
+        assert!(error.is_storage_exhausted());
+    }
+
+    /// An io-category `serde_json::Error` is a failed write, not bad JSON.
+    #[test]
+    fn a_json_error_wrapping_an_ordinary_io_failure_is_reported_as_an_io_error() {
+        let wrapped = json_write_failure(std::io::ErrorKind::BrokenPipe, "provider closed stdin");
+
+        let error = Error::from_json_error(&wrapped, Some("write provider input".to_string()));
+
+        assert_eq!(error.code, ErrorCode::InternalIoError);
+        assert_eq!(error.details["context"], "write provider input");
+        assert!(error.details["error"]
+            .as_str()
+            .expect("io error text")
+            .contains("provider closed stdin"));
+    }
+
+    /// `?` cannot attach context, so the contextful constructors must stay the
+    /// preferred form for sites that know which operation failed.
+    #[test]
+    fn the_contextful_constructor_records_what_the_caller_was_doing() {
+        let error = Error::from_io_error(
+            &std::io::Error::from(std::io::ErrorKind::NotFound),
+            Some("read deployment provider policy".to_string()),
+        );
+
+        assert_eq!(error.details["context"], "read deployment provider policy");
     }
 }
 

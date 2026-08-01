@@ -433,7 +433,7 @@ pub(super) fn run_lint_stage(
         // fixers and skips its own validation pass (the engine validates
         // separately via the diagnose phase). Auto-fixing lives exclusively
         // under `homeboy refactor` — there is no other entry point.
-        let fix_output = (|| {
+        let fix_output = (|| -> std::result::Result<(), Error> {
             for route in &fix_routes {
                 let route_glob = lint_scope_glob(&root_str, &route.files);
                 build_lint_runner(route_glob.as_deref(), route.step.as_deref())?

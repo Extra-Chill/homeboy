@@ -97,7 +97,7 @@ pub fn register_current_run_artifact(
                 .as_ref()
                 .map(|context| (context.run_id.clone(), context.manifest_path.clone()))
         })
-        .map(Ok)
+        .map(Ok::<_, Error>)
         .unwrap_or_else(|| {
             Ok((
                 required_env(homeboy_core::observation::ACTIVE_RUN_ID_ENV)?,

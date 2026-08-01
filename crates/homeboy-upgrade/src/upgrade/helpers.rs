@@ -206,7 +206,7 @@ pub fn run_upgrade_with_method(
                 // Validate before the release gate and any extension or runner
                 // work. A dirty source tree is never an acceptable controller.
                 prepare_source_workspace_for_upgrade(source_path)?;
-                Ok(source_upgrade_decision(
+                Ok::<_, Error>(source_upgrade_decision(
                     &target_version,
                     &target_identity,
                     source_path,
