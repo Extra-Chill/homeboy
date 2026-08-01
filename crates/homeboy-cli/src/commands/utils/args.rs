@@ -1219,6 +1219,168 @@ impl LintSniffArgs {
 }
 
 // ============================================================================
+// PresentationArgs: --format + --detail
+// ============================================================================
+
+/// How a command should render its result.
+///
+/// `--json` means three unrelated things across the CLI today (#11138) and
+/// this enum owns only the first of them — the *output format* sense:
+///
+/// 1. **Output format** (a bool): `bench --json`, `runs show --json`,
+///    `runs proof --json`, `runs dossier --json`.
+/// 2. **A JSON request body** (a string): `api http --json '<body>'`.
+/// 3. **A bulk input spec** (a string): `git --json`, `deploy --json`,
+///    `build --json`, and `DynamicSetArgs --json` — *"JSON input spec for
+///    bulk operations. Use `-` for stdin"*.
+///
+/// Senses 2 and 3 are inputs, not presentation, so they are deliberately
+/// out of this group's scope. Renaming the input-spec flag to `--spec`
+/// with `--json` kept as an alias is the natural follow-up, but it is a
+/// separate change: `--json` there takes a value, so it cannot be folded
+/// into a presentation flag without removing a spelling.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputFormat {
+    /// Let the command pick its documented default presentation.
+    #[default]
+    Auto,
+    /// Structured JSON envelope.
+    Json,
+    /// Rendered markdown.
+    Markdown,
+    /// Plain human-readable text.
+    Text,
+}
+
+/// How much of the result to render.
+///
+/// The CLI currently spells this eight different ways (#11138):
+/// `--json-summary` (audit, lint, test, bench, trace), `--summary`
+/// (review — and lint declares *both*), `--full` (status, plus agent-task
+/// in six places), `--compact` (runner), `--format` (report, in six
+/// declarations across three different `value_parser` sets), the
+/// `--report markdown` / `--report pr-comment` pair, and the global
+/// `--output <PATH>`.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DetailLevel {
+    /// Compact machine-readable summary.
+    Summary,
+    /// The command's documented default detail.
+    #[default]
+    Full,
+}
+
+/// The canonical presentation vocabulary: `--format` + `--detail`.
+///
+/// This group names the contract once so new commands have one obvious
+/// spelling to reach for. It is deliberately **additive**: no existing
+/// `--json` / `--json-summary` / `--summary` / `--full` / `--compact`
+/// flag is removed or re-pointed by introducing it.
+///
+/// Folding the existing flags into this group cannot be done with clap
+/// aliases, which is why it is not attempted here. An alias must have the
+/// same arity as the flag it aliases, and every current spelling is a
+/// *boolean* while `--format` and `--detail` take values. Making
+/// `--json` an alias of `--format` would change its arity, and dropping
+/// the boolean would remove a spelling that CI wrappers and operator
+/// scripts depend on. Migration therefore has to be per-command and
+/// staged, not mechanical.
+#[derive(Args, Debug, Clone, Default)]
+pub struct PresentationArgs {
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Auto)]
+    pub format: OutputFormat,
+
+    /// How much of the result to render.
+    #[arg(long, value_enum, default_value_t = DetailLevel::Full)]
+    pub detail: DetailLevel,
+}
+
+impl PresentationArgs {
+    /// True when the caller explicitly asked for JSON.
+    pub fn is_json(&self) -> bool {
+        matches!(self.format, OutputFormat::Json)
+    }
+
+    /// True when the caller explicitly asked for markdown.
+    pub fn is_markdown(&self) -> bool {
+        matches!(self.format, OutputFormat::Markdown)
+    }
+
+    /// True when the caller asked for the compact summary.
+    pub fn is_summary(&self) -> bool {
+        matches!(self.detail, DetailLevel::Summary)
+    }
+
+    /// True when the command should pick its own default presentation.
+    pub fn is_auto_format(&self) -> bool {
+        matches!(self.format, OutputFormat::Auto)
+    }
+}
+
+#[cfg(test)]
+mod presentation_args_tests {
+    use super::{DetailLevel, OutputFormat, PresentationArgs};
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct PresentationCli {
+        #[command(flatten)]
+        presentation: PresentationArgs,
+    }
+
+    fn parse(args: &[&str]) -> PresentationArgs {
+        PresentationCli::try_parse_from(args)
+            .expect("presentation args should parse")
+            .presentation
+    }
+
+    #[test]
+    fn defaults_are_auto_and_full() {
+        let args = parse(&["rendered"]);
+        assert_eq!(args.format, OutputFormat::Auto);
+        assert_eq!(args.detail, DetailLevel::Full);
+        assert!(args.is_auto_format());
+        assert!(!args.is_summary());
+    }
+
+    #[test]
+    fn every_documented_format_value_parses() {
+        for (flag, expected) in [
+            ("auto", OutputFormat::Auto),
+            ("json", OutputFormat::Json),
+            ("markdown", OutputFormat::Markdown),
+            ("text", OutputFormat::Text),
+        ] {
+            assert_eq!(parse(&["rendered", "--format", flag]).format, expected);
+        }
+    }
+
+    #[test]
+    fn every_documented_detail_value_parses() {
+        assert!(parse(&["rendered", "--detail", "summary"]).is_summary());
+        assert!(!parse(&["rendered", "--detail", "full"]).is_summary());
+    }
+
+    #[test]
+    fn unknown_values_are_rejected() {
+        assert!(PresentationCli::try_parse_from(["rendered", "--format", "yaml"]).is_err());
+        assert!(PresentationCli::try_parse_from(["rendered", "--detail", "verbose"]).is_err());
+    }
+
+    #[test]
+    fn format_predicates_are_mutually_exclusive() {
+        let json = parse(&["rendered", "--format=json"]);
+        assert!(json.is_json());
+        assert!(!json.is_markdown());
+
+        let markdown = parse(&["rendered", "--format=markdown"]);
+        assert!(markdown.is_markdown());
+        assert!(!markdown.is_json());
+    }
+}
+
+// ============================================================================
 // Mutation vocabulary: MutationArgs / WriteModeArgs / DryRunArgs
 // ============================================================================
 //

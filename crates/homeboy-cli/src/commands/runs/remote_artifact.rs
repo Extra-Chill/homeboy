@@ -29,7 +29,6 @@ use super::types::{
 };
 use super::CmdResult;
 use crate::commands::cleanup::RUNNER_DOWNLOADS_METADATA;
-use crate::commands::utils::args::MutationArgs;
 
 pub fn get(artifact: ArtifactRecord, output: Option<PathBuf>) -> CmdResult<RunsOutput> {
     let download = runs_service::download_remote_artifact(artifact, output)?;
@@ -521,6 +520,8 @@ mod tests {
 
     use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
     use homeboy::test_support::with_isolated_home;
+
+    use crate::commands::utils::args::MutationArgs;
 
     use super::*;
 
