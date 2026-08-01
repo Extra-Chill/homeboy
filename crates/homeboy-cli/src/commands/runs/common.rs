@@ -76,55 +76,13 @@ pub fn since_threshold(raw: &str) -> homeboy::core::Result<String> {
     Ok((chrono::Utc::now() - chrono_duration).to_rfc3339())
 }
 
-/// Parse a duration string with units (s, m, h, d).
+/// Parse a duration string for the `--since` family of flags.
 ///
-/// Mirrors the parser in `bundle.rs`. Kept here so the gh-actions / query /
-/// drift commands can share the same surface without re-implementing it.
+/// The unit table lives in `commands::utils::watch` so every duration-taking
+/// flag in the CLI accepts the same units; this only names the field the error
+/// is attributed to.
 pub fn parse_duration(raw: &str) -> homeboy::core::Result<Duration> {
-    let trimmed = raw.trim();
-    let split = trimmed
-        .find(|ch: char| !ch.is_ascii_digit())
-        .unwrap_or(trimmed.len());
-    let (amount, unit) = trimmed.split_at(split);
-    if amount.is_empty() || unit.is_empty() || !unit.chars().all(|ch| ch.is_ascii_alphabetic()) {
-        return Err(Error::validation_invalid_argument(
-            "since",
-            "expected duration like 30m, 24h, or 7d",
-            Some(raw.to_string()),
-            None,
-        ));
-    }
-    let amount = amount.parse::<u64>().map_err(|_| {
-        Error::validation_invalid_argument(
-            "since",
-            "duration amount must be a positive integer",
-            Some(raw.to_string()),
-            None,
-        )
-    })?;
-    if amount == 0 {
-        return Err(Error::validation_invalid_argument(
-            "since",
-            "duration amount must be greater than zero",
-            Some(raw.to_string()),
-            None,
-        ));
-    }
-    let seconds = match unit {
-        "s" | "sec" | "secs" | "second" | "seconds" => amount,
-        "m" | "min" | "mins" | "minute" | "minutes" => amount * 60,
-        "h" | "hr" | "hrs" | "hour" | "hours" => amount * 60 * 60,
-        "d" | "day" | "days" => amount * 60 * 60 * 24,
-        _ => {
-            return Err(Error::validation_invalid_argument(
-                "since",
-                "duration unit must be one of s, m, h, or d",
-                Some(raw.to_string()),
-                None,
-            ))
-        }
-    };
-    Ok(Duration::from_secs(seconds))
+    crate::commands::utils::watch::parse_duration("since", raw)
 }
 
 /// Compile a JSONPath expression. Returns a structured validation error on

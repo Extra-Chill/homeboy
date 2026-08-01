@@ -55,6 +55,102 @@ pub struct WatchConfig {
     pub timeout: Option<Duration>,
 }
 
+/// Every duration unit any homeboy flag accepts, and what one of it is worth.
+///
+/// Four commands had grown their own copy of this table with three different
+/// unit sets, so `triage --timeout 7d` errored while `runs watch --timeout 7d`
+/// worked, and `activity --duration 500ms` errored while `observe --duration
+/// 500ms` did not. This is the union of all four: every command now accepts
+/// every unit.
+const DURATION_UNITS: &[(&str, u64)] = &[
+    ("ms", 1),
+    ("s", 1_000),
+    ("sec", 1_000),
+    ("secs", 1_000),
+    ("second", 1_000),
+    ("seconds", 1_000),
+    ("m", 60 * 1_000),
+    ("min", 60 * 1_000),
+    ("mins", 60 * 1_000),
+    ("minute", 60 * 1_000),
+    ("minutes", 60 * 1_000),
+    ("h", 60 * 60 * 1_000),
+    ("hr", 60 * 60 * 1_000),
+    ("hrs", 60 * 60 * 1_000),
+    ("hour", 60 * 60 * 1_000),
+    ("hours", 60 * 60 * 1_000),
+    ("d", 24 * 60 * 60 * 1_000),
+    ("day", 24 * 60 * 60 * 1_000),
+    ("days", 24 * 60 * 60 * 1_000),
+];
+
+/// Human-readable list of accepted units, for `--help` and error messages.
+pub const DURATION_UNITS_HINT: &str = "ms, s, m, h, or d";
+
+/// Parse a duration like `500ms`, `30s`, `5m`, `2h`, or `7d`.
+///
+/// Returns the plain message on failure; [`parse_duration`] wraps it into a
+/// structured argument error and [`parse_duration_arg`] hands it to clap.
+///
+/// A bare number with no unit is rejected, as it was by all four parsers this
+/// replaces -- `--timeout 30` is ambiguous and always was an error.
+fn parse_duration_parts(raw: &str) -> Result<Duration, String> {
+    let trimmed = raw.trim();
+    let split = trimmed
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(trimmed.len());
+    let (amount, unit) = trimmed.split_at(split);
+
+    if amount.is_empty() || unit.is_empty() {
+        return Err(format!(
+            "expected duration like 500ms, 30s, 5m, 2h, or 7d (unit required: {DURATION_UNITS_HINT})"
+        ));
+    }
+
+    let amount = amount
+        .parse::<u64>()
+        .map_err(|_| "duration amount must be a positive integer".to_string())?;
+
+    // Preserved from three of the four parsers. `activity` was the one that
+    // lacked it, so `activity --interval 0s` used to spin with no delay.
+    if amount == 0 {
+        return Err("duration amount must be greater than zero".to_string());
+    }
+
+    let millis_per_unit = DURATION_UNITS
+        .iter()
+        .find(|(name, _)| *name == unit)
+        .map(|(_, millis)| *millis)
+        .ok_or_else(|| format!("duration unit must be one of {DURATION_UNITS_HINT}"))?;
+
+    // The parsers this replaces multiplied unchecked, so `9999999999999999999d`
+    // panicked in debug builds. Report it instead.
+    amount
+        .checked_mul(millis_per_unit)
+        .map(Duration::from_millis)
+        .ok_or_else(|| "duration is too large".to_string())
+}
+
+/// Parse a duration into a structured argument error attributed to `field`.
+///
+/// `field` is the name the user typed (`since`, `duration`, `--timeout`) so the
+/// error points at the flag that was wrong.
+pub fn parse_duration(field: &str, raw: &str) -> homeboy::core::Result<Duration> {
+    parse_duration_parts(raw).map_err(|message| {
+        homeboy::core::Error::validation_invalid_argument(
+            field,
+            message,
+            Some(raw.to_string()),
+            None,
+        )
+    })
+}
+
+/// Duration parser for clap `value_parser` attributes.
+pub fn parse_duration_arg(raw: &str) -> Result<Duration, String> {
+    parse_duration_parts(raw)
+}
+
 /// Why the loop returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WatchConclusion {
@@ -124,6 +220,136 @@ where
         }
 
         sleep(config.interval);
+    }
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::*;
+
+    /// The full accepted grid. Every one of these must work on *every* command
+    /// that takes a duration -- that is the point of the consolidation.
+    const ACCEPTED: &[(&str, u64)] = &[
+        ("1ms", 1),
+        ("500ms", 500),
+        ("1s", 1_000),
+        ("30s", 30_000),
+        ("30sec", 30_000),
+        ("30secs", 30_000),
+        ("30second", 30_000),
+        ("30seconds", 30_000),
+        ("5m", 300_000),
+        ("5min", 300_000),
+        ("5mins", 300_000),
+        ("5minute", 300_000),
+        ("5minutes", 300_000),
+        ("2h", 7_200_000),
+        ("2hr", 7_200_000),
+        ("2hrs", 7_200_000),
+        ("2hour", 7_200_000),
+        ("2hours", 7_200_000),
+        ("7d", 604_800_000),
+        ("7day", 604_800_000),
+        ("7days", 604_800_000),
+        // Surrounding whitespace was tolerated by three of the four parsers.
+        ("  10m  ", 600_000),
+    ];
+
+    #[test]
+    fn every_unit_parses_to_the_same_value_everywhere() {
+        for (raw, expected_millis) in ACCEPTED {
+            assert_eq!(
+                parse_duration_arg(raw),
+                Ok(Duration::from_millis(*expected_millis)),
+                "{raw} should parse to {expected_millis}ms"
+            );
+        }
+    }
+
+    /// The regressions this consolidation fixes. Before it, `triage` rejected
+    /// `d` and `ms`, and `activity`/`runs` rejected `ms`.
+    #[test]
+    fn units_that_used_to_be_rejected_per_command_now_parse() {
+        assert_eq!(
+            parse_duration("--timeout", "7d").expect("triage now accepts days"),
+            Duration::from_secs(7 * 24 * 60 * 60)
+        );
+        assert_eq!(
+            parse_duration("duration", "500ms").expect("activity now accepts millis"),
+            Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn zero_is_rejected_for_every_unit() {
+        for unit in ["ms", "s", "m", "h", "d"] {
+            let raw = format!("0{unit}");
+            assert_eq!(
+                parse_duration_arg(&raw),
+                Err("duration amount must be greater than zero".to_string()),
+                "0{unit} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_number_is_rejected_because_the_unit_is_ambiguous() {
+        for raw in ["30", "0", ""] {
+            assert!(parse_duration_arg(raw).is_err(), "{raw:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn unknown_units_are_rejected_with_the_full_unit_list() {
+        let error = parse_duration_arg("5w").expect_err("weeks are not a unit");
+        assert!(error.contains(DURATION_UNITS_HINT), "unexpected: {error}");
+        assert!(parse_duration_arg("5 s").is_err());
+        assert!(parse_duration_arg("-5s").is_err());
+        assert!(parse_duration_arg("1.5h").is_err());
+    }
+
+    /// The parsers this replaced multiplied unchecked and panicked in debug.
+    #[test]
+    fn an_overflowing_duration_is_an_error_not_a_panic() {
+        assert_eq!(
+            parse_duration_arg("99999999999999999999999d"),
+            Err("duration amount must be a positive integer".to_string()),
+        );
+        assert_eq!(
+            parse_duration_arg(&format!("{}d", u64::MAX)),
+            Err("duration is too large".to_string()),
+        );
+    }
+
+    #[test]
+    fn the_structured_error_is_attributed_to_the_field_that_was_wrong() {
+        let error = parse_duration("--timeout", "5w").expect_err("weeks are not a unit");
+        assert_eq!(
+            error.code,
+            homeboy::core::ErrorCode::ValidationInvalidArgument
+        );
+        assert!(
+            error.message.contains("--timeout"),
+            "unexpected: {}",
+            error.message
+        );
+        // The offending value is carried structurally, not only in the message.
+        assert_eq!(error.details["id"], serde_json::json!("5w"));
+        assert_eq!(error.details["field"], serde_json::json!("--timeout"));
+    }
+
+    /// Guards the table itself: a unit added to `DURATION_UNITS` with a bad
+    /// multiplier is caught here rather than in whichever command hits it.
+    #[test]
+    fn the_unit_table_is_internally_consistent() {
+        for (name, millis) in DURATION_UNITS {
+            assert!(*millis > 0, "{name} must have a positive multiplier");
+            assert_eq!(
+                parse_duration_arg(&format!("1{name}")),
+                Ok(Duration::from_millis(*millis)),
+                "1{name} must equal its table entry"
+            );
+        }
     }
 }
 

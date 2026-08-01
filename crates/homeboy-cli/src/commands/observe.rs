@@ -253,25 +253,13 @@ fn observe_command(args: &ObserveArgs) -> String {
     parts.join(" ")
 }
 
+/// clap `value_parser` for `observe`'s duration flags.
+///
+/// Kept under this name so the `#[arg(value_parser = parse_duration)]`
+/// declarations stay untouched; the unit table is the shared one in
+/// `commands::utils::watch`, which adds `d` and the long unit spellings here.
 fn parse_duration(raw: &str) -> Result<Duration, String> {
-    let split = raw
-        .trim()
-        .find(|c: char| !c.is_ascii_digit())
-        .ok_or_else(|| "expected duration like 500ms, 30s, 5m, or 1h".to_string())?;
-    let (amount, unit) = raw.trim().split_at(split);
-    let amount = amount
-        .parse::<u64>()
-        .map_err(|_| "duration amount must be a positive integer".to_string())?;
-    if amount == 0 {
-        return Err("duration amount must be greater than zero".to_string());
-    }
-    match unit {
-        "ms" => Ok(Duration::from_millis(amount)),
-        "s" => Ok(Duration::from_secs(amount)),
-        "m" => Ok(Duration::from_secs(amount * 60)),
-        "h" => Ok(Duration::from_secs(amount * 60 * 60)),
-        _ => Err("duration unit must be one of ms, s, m, or h".to_string()),
-    }
+    crate::commands::utils::watch::parse_duration_arg(raw)
 }
 
 fn format_duration(duration: Duration) -> String {

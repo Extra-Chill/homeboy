@@ -244,42 +244,13 @@ pub fn run(args: TriageArgs) -> CmdResult<TriageCommandOutput> {
     ))
 }
 
+/// Parse `triage --timeout` / `--interval`.
+///
+/// Delegates to the shared unit table in `commands::utils::watch`, which is why
+/// `--timeout 7d` and `--interval 500ms` now work here as they already did on
+/// `runs watch` and `observe`.
 fn parse_watch_duration(name: &str, raw: &str) -> Result<std::time::Duration, Error> {
-    let trimmed = raw.trim();
-    let split = trimmed
-        .find(|ch: char| !ch.is_ascii_digit())
-        .unwrap_or(trimmed.len());
-    let (amount, unit) = trimmed.split_at(split);
-    let amount = amount.parse::<u64>().map_err(|_| {
-        Error::validation_invalid_argument(
-            format!("--{name}"),
-            "expected duration like 30s, 5m, or 1h",
-            Some(raw.to_string()),
-            None,
-        )
-    })?;
-    if amount == 0 {
-        return Err(Error::validation_invalid_argument(
-            format!("--{name}"),
-            "duration amount must be greater than zero",
-            Some(raw.to_string()),
-            None,
-        ));
-    }
-    let seconds = match unit {
-        "s" | "sec" | "secs" | "second" | "seconds" => amount,
-        "m" | "min" | "mins" | "minute" | "minutes" => amount * 60,
-        "h" | "hr" | "hrs" | "hour" | "hours" => amount * 60 * 60,
-        _ => {
-            return Err(Error::validation_invalid_argument(
-                format!("--{name}"),
-                "duration unit must be one of s, m, or h",
-                Some(raw.to_string()),
-                None,
-            ))
-        }
-    };
-    Ok(std::time::Duration::from_secs(seconds))
+    crate::commands::utils::watch::parse_duration(&format!("--{name}"), raw)
 }
 
 fn resolve_component_target(
