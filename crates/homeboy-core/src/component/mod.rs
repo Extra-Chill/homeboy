@@ -65,8 +65,8 @@ pub use resolution::{
 };
 pub use scope::{resolve_component_scope, EffectiveScope, ScopeCommand};
 pub use versioning::{
-    normalize_version_pattern, parse_version_targets, validate_version_pattern,
-    validate_version_target_conflict,
+    normalize_version_pattern, parse_capability_extensions, parse_version_targets,
+    validate_version_pattern, validate_version_target_conflict,
 };
 
 #[cfg(test)]

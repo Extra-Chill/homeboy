@@ -131,39 +131,71 @@ pub fn extension_guidance_hints(
     ]
 }
 
-fn capability_ambiguous_error(
-    component: &Component,
-    capability: ExtensionCapability,
-    matching: &[String],
-) -> Error {
-    let capability_name = capability.label();
+/// Ownership surface for `remote_path` auto-resolution.
+pub const REMOTE_PATH_SURFACE: &str = "remote_path";
+/// Ownership surface for `deploy.since_tag` placeholder rewriting.
+pub const SINCE_TAG_SURFACE: &str = "since_tag";
+/// Ownership surface for `provides.file_extensions` (fingerprint / refactor /
+/// audit file-type dispatch).
+pub const FILE_EXTENSIONS_SURFACE: &str = "provides.file_extensions";
+
+/// Ambiguity error for a contested ownership surface.
+///
+/// The hint must be a *runnable command*, not advice. Before #11120 this said
+/// "Configure explicit {capability} extension ownership before running this
+/// command", which named neither the config key (`capability_extensions`) nor
+/// any way to set it — while the validation errors a few dozen lines below
+/// correctly reported `capability_extensions.{label}`. A caller who hit the
+/// ambiguity had no discoverable route forward, because `--capability-extension`
+/// did not exist either. Both halves are fixed together: the flag exists now, so
+/// the hint names it with the surface and a concrete candidate filled in.
+fn ownership_ambiguous_error(component: &Component, surface: &str, matching: &[String]) -> Error {
+    let first = matching
+        .first()
+        .map(String::as_str)
+        .unwrap_or("<extension_id>");
+
     Error::validation_invalid_argument(
         "extension",
         format!(
-            "Component '{}' has multiple linked extensions with {} support: {}",
+            "Component '{}' has multiple linked extensions providing '{}': {}",
             component.id,
-            capability_name,
+            surface,
             matching.join(", ")
         ),
         None,
-        None,
+        Some(
+            matching
+                .iter()
+                .map(|candidate| {
+                    format!(
+                        "homeboy component set {} --capability-extension {}={}",
+                        component.id, surface, candidate
+                    )
+                })
+                .collect(),
+        ),
     )
     .with_hint(format!(
-        "Configure explicit {} extension ownership before running this command",
-        capability_name
+        "Pick the owning extension: homeboy component set {} --capability-extension {}={}",
+        component.id, surface, first
     ))
+}
+
+fn explicit_surface_extension<'a>(component: &'a Component, surface: &str) -> Option<&'a str> {
+    component
+        .capability_extensions
+        .get(surface)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|extension_id| !extension_id.is_empty())
 }
 
 fn explicit_capability_extension(
     component: &Component,
     capability: ExtensionCapability,
 ) -> Option<&str> {
-    component
-        .capability_extensions
-        .get(capability.label())
-        .map(String::as_str)
-        .map(str::trim)
-        .filter(|extension_id| !extension_id.is_empty())
+    explicit_surface_extension(component, capability.label())
 }
 
 pub fn extract_component_extension_settings(
@@ -295,7 +327,38 @@ pub(crate) fn disambiguate_capability_owner(
     capability: ExtensionCapability,
     candidates: &[String],
 ) -> Result<String> {
-    if let Some(explicit) = explicit_capability_extension(component, capability) {
+    resolve_owner(component, capability.label(), candidates)
+}
+
+/// Pick the owning extension for an arbitrary contested *surface*.
+///
+/// This is [`disambiguate_capability_owner`] with the seven-variant
+/// [`ExtensionCapability`] enum lifted off the front, so surfaces that have no
+/// enum variant — `remote_path`, `since_tag`, `provides.file_extensions` — can
+/// share the one ownership rule instead of inventing a seventh contradictory
+/// one (#11119). `Component.capability_extensions` is already
+/// `HashMap<String, String>` with arbitrary string keys, so an entry like
+/// `capability_extensions."remote_path"` needs no schema change.
+///
+/// The rule, unchanged:
+///
+/// 1. explicit `capability_extensions.<surface>` selection, when it names one
+///    of the candidates;
+/// 2. `composition.includes` primacy — when exactly one candidate composes all
+///    the others (WordPress declares `includes: ["nodejs"]`), it owns the
+///    surface;
+/// 3. otherwise the ambiguity is genuine → [`ownership_ambiguous_error`], which
+///    carries a runnable `homeboy component set --capability-extension` command.
+///
+/// `candidates` must be deterministically ordered — callers build them from a
+/// `BTreeMap`/`BTreeSet`, never from `Component.extensions` (a `HashMap` with
+/// `RandomState`, whose iteration order differs every process).
+pub fn resolve_owner(
+    component: &Component,
+    surface: &str,
+    candidates: &[String],
+) -> Result<String> {
+    if let Some(explicit) = explicit_surface_extension(component, surface) {
         if let Some(selected) = candidates.iter().find(|id| id.as_str() == explicit) {
             return Ok(selected.clone());
         }
@@ -305,9 +368,7 @@ pub(crate) fn disambiguate_capability_owner(
         return Ok(primary);
     }
 
-    Err(capability_ambiguous_error(
-        component, capability, candidates,
-    ))
+    Err(ownership_ambiguous_error(component, surface, candidates))
 }
 
 /// If exactly one of the ambiguous extensions composes all of the others via its

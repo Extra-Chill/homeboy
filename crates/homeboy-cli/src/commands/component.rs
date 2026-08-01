@@ -96,6 +96,18 @@ enum ComponentCommand {
         /// Extension(s) this component uses (e.g., a runtime/framework extension id). Repeatable.
         #[arg(long = "extension", value_name = "EXTENSION")]
         extensions: Vec<String>,
+
+        /// Owning extension for a contested capability, as
+        /// "<capability>=<extension>". Repeatable.
+        ///
+        /// Resolves the ambiguity reported when several linked extensions
+        /// provide the same thing. Accepts the capability labels (build, lint,
+        /// test, bench, fuzz, trace, deps) and the non-capability ownership
+        /// surfaces (remote_path, since_tag, provides.file_extensions).
+        ///
+        /// Example: --capability-extension build=wordpress
+        #[arg(long = "capability-extension", value_name = "CAPABILITY=EXTENSION")]
+        capability_extensions: Vec<String>,
     },
     /// Delete a component configuration
     Delete {
@@ -314,6 +326,7 @@ pub fn run(args: ComponentArgs) -> CmdResult<ComponentOutput> {
             changelog_target,
             version_targets,
             extensions,
+            capability_extensions,
         } => set(
             args,
             ComponentSetFlags {
@@ -325,6 +338,7 @@ pub fn run(args: ComponentArgs) -> CmdResult<ComponentOutput> {
             },
             version_targets,
             extensions,
+            capability_extensions,
         ),
         ComponentCommand::Delete { id } => delete(&id),
         ComponentCommand::Rename { id, new_id } => rename(&id, &new_id),
@@ -588,13 +602,19 @@ fn set(
     flags: ComponentSetFlags,
     version_targets: Vec<String>,
     extensions: Vec<String>,
+    capability_extensions: Vec<String>,
 ) -> CmdResult<ComponentOutput> {
     // Check if there's any input at all
     let has_dynamic = args.json_spec()?.is_some();
-    if !has_dynamic && !flags.has_any() && version_targets.is_empty() && extensions.is_empty() {
+    if !has_dynamic
+        && !flags.has_any()
+        && version_targets.is_empty()
+        && extensions.is_empty()
+        && capability_extensions.is_empty()
+    {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "spec",
-            "Provide a dedicated flag (e.g., --local-path), --json '<object>', --base64 <encoded-json>, --version-target, or --extension",
+            "Provide a dedicated flag (e.g., --local-path), --json '<object>', --base64 <encoded-json>, --version-target, --extension, or --capability-extension",
             None,
             Some(vec![
                 "Arbitrary field updates must use --json or --base64.".to_string(),
@@ -637,6 +657,26 @@ fn set(
                 "extensions".to_string(),
                 serde_json::Value::Object(extension_map),
             );
+        }
+    }
+
+    // Support --capability-extension. This is the runnable command the
+    // ownership-ambiguity error now points at (#11120), so it must land in the
+    // same `capability_extensions` map that `resolve_owner` reads.
+    if !capability_extensions.is_empty() {
+        let parsed = component::parse_capability_extensions(&capability_extensions)?;
+        if let serde_json::Value::Object(ref mut obj) = merged {
+            obj.insert(
+                "capability_extensions".to_string(),
+                serde_json::json!(parsed),
+            );
+        } else {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "spec",
+                "Merged spec must be a JSON object",
+                None,
+                None,
+            ));
         }
     }
 
