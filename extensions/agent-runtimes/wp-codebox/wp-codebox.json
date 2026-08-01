@@ -227,6 +227,18 @@
         ],
         "display": "node {{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs"
       },
+      "readiness_invocation": {
+        "schema": "homeboy/command-invocation/v1",
+        "argv": [
+          "node",
+          "{{runtime_path}}/scripts/agent/homeboy-codebox-provider-readiness.cjs"
+        ],
+        "env_allowlist": [
+          "HOMEBOY_WP_CODEBOX_CORE_MODULE",
+          "WP_CODEBOX_CORE_MODULE"
+        ],
+        "display": "node {{runtime_path}}/scripts/agent/homeboy-codebox-provider-readiness.cjs"
+      },
       "cli": {
         "reserved_selector_hints": ["opencode", "codex", "claude-code"],
         "default_ai_disclosure": "OpenCode"

@@ -195,6 +195,7 @@ function providerContract(options = {}) {
     backend: WP_CODEBOX_BACKEND,
     runtime_id: options.runtimeId || options.runtime_id || runtimeManifest().id || 'wp-codebox',
     invocation: runtimeCommandInvocation(options),
+    readiness_invocation: runtimeReadinessInvocation(options),
     ...agentTaskProviderContractFields(),
     secret_env_requirements: options.secretEnvRequirements || runtimeSecretEnvRequirements(),
     capabilities: normalizeArray(options.capabilities || PROVIDER_CAPABILITIES),
@@ -231,6 +232,10 @@ function runtimeExecutorManifest() {
 
 function runtimeCommandInvocation(options = {}) {
   return firstObject(options.invocation, runtimeExecutorManifest().invocation);
+}
+
+function runtimeReadinessInvocation(options = {}) {
+  return firstObject(options.readinessInvocation, options.readiness_invocation, runtimeExecutorManifest().readiness_invocation);
 }
 
 function runtimeProviderCapabilities() {
