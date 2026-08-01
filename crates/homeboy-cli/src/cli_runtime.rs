@@ -64,7 +64,7 @@ enum StartupFastPath {
 /// rendering help inline is why the root-help tests could only assert against a
 /// builder the binary never called.
 enum StartupFastPathOutput {
-    Help(Box<Command>),
+    Help(String),
     Version(String),
     Identity(serde_json::Value),
 }
@@ -78,7 +78,14 @@ fn startup_fast_path_output(args: &[String]) -> Option<StartupFastPathOutput> {
         // Rendered help never displays readiness, so probing it was pure cost
         // on the hottest command in the CLI (#10616).
         StartupFastPath::Help => {
-            StartupFastPathOutput::Help(Box::new(CliRuntime::new().build_augmented_command()))
+            let error = CliRuntime::new()
+                .build_augmented_command()
+                .try_get_matches_from(args)
+                .expect_err("an explicit help flag must stop argument parsing");
+            if error.kind() != clap::error::ErrorKind::DisplayHelp {
+                return None;
+            }
+            StartupFastPathOutput::Help(error.to_string())
         }
         StartupFastPath::Version => {
             StartupFastPathOutput::Version(upgrade::current_build_version())
@@ -92,10 +99,7 @@ fn startup_fast_path_output(args: &[String]) -> Option<StartupFastPathOutput> {
 
 pub fn run_startup_fast_path(args: &[String]) -> Option<std::process::ExitCode> {
     match startup_fast_path_output(args)? {
-        StartupFastPathOutput::Help(mut command) => {
-            command.print_help().expect("Failed to print help");
-            println!();
-        }
+        StartupFastPathOutput::Help(help) => print!("{help}"),
         StartupFastPathOutput::Version(version) => println!("{version}"),
         StartupFastPathOutput::Identity(identity) => {
             output_runtime::emit_json_result(Ok(identity), None, 0);
@@ -369,10 +373,12 @@ impl CliRuntime {
         }
         // Deferred records outlive their worker. Startup restarts the singleton
         // so expired claims recover without another deferral request.
-        if !matches!(
-            normalized.get(1..3),
-            Some([command, subcommand]) if command == "deferred-workload" && subcommand == "worker"
-        ) {
+        if command_capability == CommandCapability::Mutation
+            && !matches!(
+                normalized.get(1..3),
+                Some([command, subcommand]) if command == "deferred-workload" && subcommand == "worker"
+            )
+        {
             let _ = crate::commands::deferred_workload::restart_worker_if_pending();
         }
 
@@ -996,7 +1002,9 @@ fn startup_fast_path(args: &[String]) -> Option<StartupFastPath> {
     }
 
     match args {
-        [_, flag] if flag == "--help" || flag == "-h" => Some(StartupFastPath::Help),
+        [_, rest @ ..] if rest.iter().any(|arg| arg == "--help" || arg == "-h") => {
+            Some(StartupFastPath::Help)
+        }
         [_, flag] if flag == "--version" || flag == "-V" => Some(StartupFastPath::Version),
         [_, command, subcommand] if command == "self" && subcommand == "identity" => {
             Some(StartupFastPath::Identity)
@@ -2024,7 +2032,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_fast_path_only_matches_root_help_and_version_flags() {
+    fn startup_fast_path_matches_explicit_help_at_every_command_depth() {
         assert_eq!(
             startup_fast_path(&argv(&["homeboy", "--help"])),
             Some(StartupFastPath::Help)
@@ -2043,31 +2051,35 @@ mod tests {
         );
         assert_eq!(
             startup_fast_path(&argv(&["homeboy", "status", "--help"])),
-            None
+            Some(StartupFastPath::Help)
         );
         assert_eq!(
-            startup_fast_path(&argv(&["homeboy", "sample-cli", "--help"])),
-            None
+            startup_fast_path(&argv(&["homeboy", "agent-task", "cook", "--help"])),
+            Some(StartupFastPath::Help)
         );
     }
 
-    /// Only root help pays for extension discovery. `<subcommand> --help`,
-    /// `help <subcommand>` and every other argv leave the fast path before any
-    /// discovery happens, so routing root help through the augmented command
-    /// cannot regress their startup cost.
+    /// Explicit help is rendered before runtime registration, config loading,
+    /// controller consultation, or deferred-worker recovery. Clap still decides
+    /// whether the flag is actually help rather than an option value.
     #[test]
-    fn subcommand_help_paths_stay_off_the_startup_fast_path() {
+    fn explicit_subcommand_help_uses_the_startup_fast_path() {
         for values in [
             &["homeboy", "status", "--help"][..],
             &["homeboy", "status", "-h"][..],
-            &["homeboy", "help", "status"][..],
             &["homeboy", "extension", "list", "--help"][..],
+            &["homeboy", "agent-task", "cook", "--help"][..],
         ] {
             assert!(
-                startup_fast_path_output(&argv(values)).is_none(),
-                "{values:?} should be parsed normally, not fast-pathed"
+                matches!(
+                    startup_fast_path_output(&argv(values)),
+                    Some(StartupFastPathOutput::Help(_))
+                ),
+                "{values:?} should render before runtime initialization"
             );
         }
+
+        assert!(startup_fast_path_output(&argv(&["homeboy", "help", "status"])).is_none());
     }
 
     #[test]
@@ -2113,7 +2125,7 @@ mod tests {
     /// these tests fail if root help ever regresses to the static command.
     fn root_help_for(argv_values: &[&str]) -> String {
         match startup_fast_path_output(&argv(argv_values)) {
-            Some(StartupFastPathOutput::Help(mut command)) => command.render_help().to_string(),
+            Some(StartupFastPathOutput::Help(help)) => help,
             _ => panic!("{argv_values:?} should resolve to the root-help startup fast path"),
         }
     }

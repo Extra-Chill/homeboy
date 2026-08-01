@@ -3,7 +3,7 @@ use fs4::fs_std::FileExt;
 use homeboy::core::deferred_workload;
 use serde::Serialize;
 use std::collections::BTreeSet;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
@@ -92,6 +92,12 @@ pub fn ensure_worker() -> homeboy::core::Result<()> {
             "--startup-token",
             &startup_token,
         ]);
+        // A detached worker must not keep an invoking client's capture pipes
+        // open after the foreground command exits.
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;

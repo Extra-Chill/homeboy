@@ -37,8 +37,9 @@ pub fn classify(args: &[String]) -> CommandCapability {
         {
             CommandCapability::ReadOnly
         }
+        [command, ..] if command == "activity" => CommandCapability::ReadOnly,
         [command, rest @ ..]
-            if matches!(command.as_str(), "activity" | "project" | "rig" | "server")
+            if matches!(command.as_str(), "project" | "rig" | "server")
                 && matches!(rest.first().map(String::as_str), None | Some("list")) =>
         {
             CommandCapability::ReadOnly
@@ -93,6 +94,9 @@ mod tests {
         for command in [
             args(&["homeboy", "activity"]),
             args(&["homeboy", "activity", "list"]),
+            args(&["homeboy", "activity", "list", "--limit", "1"]),
+            args(&["homeboy", "activity", "show", "run-1"]),
+            args(&["homeboy", "activity", "watch", "run-1"]),
             args(&["homeboy", "project", "list"]),
             args(&["homeboy", "rig", "list"]),
             args(&["homeboy", "server", "list"]),

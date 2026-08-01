@@ -1,11 +1,11 @@
 //! Activity reporting — aggregates in-flight and recent work from observation
-//! runs, agent-task records, daemon jobs, and runner sessions into a single
+//! runs, agent-task records, and daemon jobs into a single
 //! deduplicated report, and resolves individual items by id.
 //!
 //! The data model lives in [`model`], multi-source dedup/reconciliation in
 //! [`collector`], shared leaf helpers in [`action_helpers`], and each source
 //! adapter in its own submodule (`observation`, `daemon_jobs`,
-//! `runner_sessions`, `agent_task_provider`). This root retains only report
+//! `agent_task_provider`). This root retains only report
 //! assembly and id resolution (#9794).
 
 use std::collections::BTreeSet;
@@ -22,7 +22,6 @@ mod model;
 
 mod daemon_jobs;
 mod observation;
-mod runner_sessions;
 
 pub use model::*;
 
@@ -45,12 +44,12 @@ pub fn activity_report(scope: ActivityScope, limit: usize) -> Result<ActivityRep
     observation::collect(&mut collector, limit)?;
     // Items and record health come from one pass over the durable agent-task
     // records. Reading them separately walked the corpus twice (#10308).
-    let (agent_task_items, agent_task_record_health) = agent_task_provider::agent_task_activity()?;
+    let (agent_task_items, agent_task_record_health) =
+        agent_task_provider::agent_task_activity(limit)?;
     for item in agent_task_items {
         collector.insert(item);
     }
     daemon_jobs::collect(&mut collector)?;
-    runner_sessions::collect(&mut collector);
     let mut report = report_from_items(collector.items(scope, limit), "activity");
     report.agent_task_record_health = agent_task_record_health;
     Ok(report)
@@ -62,7 +61,7 @@ pub fn activity_report(scope: ActivityScope, limit: usize) -> Result<ActivityRep
 /// `activity show`/`watch` are called with a concrete id (an observation run id
 /// or a daemon/runner job UUID). Building the entire activity report just to
 /// find one item enumerated every observation, agent-task record, daemon job,
-/// runner session, and record-health probe — which timed out for active Lab
+/// and record-health probe — which timed out for active Lab
 /// jobs (#9762). This probes the cheap indexed lookups first; only when none
 /// resolve does it fall back to `resolve_item` over the bounded full report.
 ///

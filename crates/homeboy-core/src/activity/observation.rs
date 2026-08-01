@@ -11,7 +11,7 @@ use crate::Result;
 /// full corpus. Matches the persisted run id directly (indexed `get_run`),
 /// so `activity show <run-id>` returns immediately for a known run (#9762).
 pub(super) fn probe_by_id(id: &str) -> Result<Option<ActivityItem>> {
-    let store = ObservationStore::open_initialized()?;
+    let store = ObservationStore::open_readonly()?;
     match store.get_run(id)? {
         Some(run) => Ok(Some(item_from_run(&store, run)?)),
         None => Ok(None),
@@ -19,7 +19,7 @@ pub(super) fn probe_by_id(id: &str) -> Result<Option<ActivityItem>> {
 }
 
 pub(super) fn collect(collector: &mut ActivityCollector, limit: usize) -> Result<()> {
-    let store = ObservationStore::open_initialized()?;
+    let store = ObservationStore::open_readonly()?;
     let mut records = store.list_runs(RunListFilter {
         limit: Some(limit as i64),
         ..Default::default()
@@ -32,7 +32,7 @@ pub(super) fn collect(collector: &mut ActivityCollector, limit: usize) -> Result
     // always included before the canonical report applies its final limit.
     records.extend(
         store
-            .list_active_runs()?
+            .list_active_runs_bounded(limit as i64)?
             .into_iter()
             .filter(|record| !listed_ids.contains(&record.id)),
     );

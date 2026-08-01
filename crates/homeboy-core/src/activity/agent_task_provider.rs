@@ -34,13 +34,13 @@ pub trait ActivityAgentTaskProvider: Send + Sync {
     /// durable records. Asking for them separately made the activity report
     /// walk the corpus twice (#10308). The health summary is serialized as JSON
     /// so core does not depend on the agent-task health type.
-    fn agent_task_activity(&self) -> Result<(Vec<ActivityItem>, Value)>;
+    fn agent_task_activity(&self, limit: usize) -> Result<(Vec<ActivityItem>, Value)>;
 }
 
 struct NoopProvider;
 
 impl ActivityAgentTaskProvider for NoopProvider {
-    fn agent_task_activity(&self) -> Result<(Vec<ActivityItem>, Value)> {
+    fn agent_task_activity(&self, _limit: usize) -> Result<(Vec<ActivityItem>, Value)> {
         Ok((Vec::new(), Value::Null))
     }
 }
@@ -65,6 +65,6 @@ pub(crate) fn probe_by_id(id: &str) -> Result<Option<ActivityItem>> {
 /// The agent-task activity items and record-health summary via the registered
 /// provider (or no items and an empty summary when the agent-task subsystem is
 /// absent).
-pub(crate) fn agent_task_activity() -> Result<(Vec<ActivityItem>, Value)> {
-    with_provider(|p| p.agent_task_activity())
+pub(crate) fn agent_task_activity(limit: usize) -> Result<(Vec<ActivityItem>, Value)> {
+    with_provider(|p| p.agent_task_activity(limit))
 }
