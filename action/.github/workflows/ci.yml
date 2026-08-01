@@ -457,6 +457,13 @@ jobs:
           path: differential-phase
           if-no-files-found: warn
 
+      # The action deliberately continues through publication so reconciliation
+      # receives the terminal evidence, but the candidate check itself must
+      # still report that same terminal failure before a PR can be merged.
+      - name: Fail candidate phase when terminal evidence is not pass
+        if: always() && steps.phase.outcome == 'failure'
+        run: exit 1
+
   baseline:
     name: Baseline ${{ matrix.title }}
     needs: [binary, plan]

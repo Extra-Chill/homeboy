@@ -15,7 +15,8 @@ if ! grep -q 'name: Candidate \${{ matrix.title }}' "${ROOT_DIR}/.github/workflo
   || [ "$(grep -c "HOMEBOY_TEST_TIMEOUT_SECONDS: \${{ inputs.test-timeout-seconds || env.HOMEBOY_TEST_TIMEOUT_SECONDS || '1500' }}" "${ROOT_DIR}/action.yml")" -ne 3 ] \
   || ! grep -q "if: steps.resolve-commands.outputs.has-test == 'true'" "${ROOT_DIR}/action.yml" \
   || ! grep -q '^      cleanup-timeout-seconds:' "${ROOT_DIR}/.github/workflows/ci.yml" \
-  || ! grep -q '^          cleanup-timeout-seconds: \${{ inputs.cleanup-timeout-seconds }}' "${ROOT_DIR}/.github/workflows/ci.yml"; then
+  || ! grep -q '^          cleanup-timeout-seconds: \${{ inputs.cleanup-timeout-seconds }}' "${ROOT_DIR}/.github/workflows/ci.yml" \
+  || ! grep -A2 'name: Fail candidate phase when terminal evidence is not pass' "${ROOT_DIR}/.github/workflows/ci.yml" | grep -q "if: always() && steps.phase.outcome == 'failure'"; then
   printf 'FAIL: reusable CI Test job does not pass its exact matrix command to the action\n'
   exit 1
 fi
