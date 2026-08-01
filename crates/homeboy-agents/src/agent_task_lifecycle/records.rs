@@ -275,6 +275,10 @@ pub struct AgentTaskCandidateAdoptionAttempt {
     /// adoption can legitimately be non-green when remediation was blocked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation_status_command: Option<String>,
 }
 
 impl AgentTaskCandidateAdoptionAttempt {

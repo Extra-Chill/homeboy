@@ -340,6 +340,39 @@ fn candidate_adoption_gate_heartbeats_are_durable() {
     });
 }
 
+#[test]
+fn cook_alias_status_projects_active_adoption_remediation() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-adoption-remediation-status";
+        let source_run_id = "cook-adoption-remediation-status-attempt-1";
+        let remediation_run_id = "cook-adoption-remediation-status-attempt-2";
+        let plan = test_plan();
+        submit_plan(&plan, Some(source_run_id)).expect("source run");
+        submit_plan(&plan, Some(remediation_run_id)).expect("remediation run");
+        record_cook_attempt(cook_id, 1, source_run_id).expect("source attempt");
+        record_cook_attempt(cook_id, 2, remediation_run_id).expect("remediation attempt");
+        start_candidate_adoption(source_run_id, "candidate", "model", "cargo test")
+            .expect("active adoption");
+
+        checkpoint_candidate_adoption_remediation(source_run_id, remediation_run_id)
+            .expect("remediation checkpoint");
+
+        let projected = status(cook_id).expect("Cook alias status");
+        assert_eq!(projected.adoption_run_id.as_deref(), Some(source_run_id));
+        let adoption = projected.candidate_adoption.expect("projected adoption");
+        assert_eq!(adoption.state, "verification_running");
+        assert_eq!(adoption.phase, "provider_remediation");
+        assert_eq!(
+            adoption.remediation_run_id.as_deref(),
+            Some(remediation_run_id)
+        );
+        assert_eq!(
+            adoption.remediation_status_command.as_deref(),
+            Some("homeboy agent-task status cook-adoption-remediation-status-attempt-2 --full")
+        );
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn candidate_adoption_reconciles_and_cancels_an_orphaned_gate_group() {

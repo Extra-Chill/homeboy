@@ -1464,6 +1464,14 @@ where
         // Refresh the durable execution attestation before this plan can be
         // persisted or handed to a local or detached provider.
         bind_dispatch_workspace_attestations(&mut follow_up_plan)?;
+        agent_task_lifecycle::submit_plan(&follow_up_plan, Some(&next_run_id))?;
+        agent_task_lifecycle::record_cook_attempt(cook_id, next_attempt, &next_run_id)?;
+        if budget_scope == CookFollowUpBudgetScope::CandidateAdoptionReview {
+            agent_task_lifecycle::checkpoint_candidate_adoption_remediation(
+                source_run_id,
+                &next_run_id,
+            )?;
+        }
         if let Some(dispatcher) = &options.attempt_dispatcher {
             // A detached dispatcher may return before any executor-side
             // lifecycle write, so a controller crash after the runner accepts
@@ -1475,7 +1483,6 @@ where
             // Persist the exact materialized plan first so a continuation resumes
             // this baseline-bound workspace contract, and so the run record the
             // claim is written onto exists.
-            agent_task_lifecycle::submit_plan(&follow_up_plan, Some(&next_run_id))?;
             let operation_key = retry_dispatch_operation_key(&next_run_id);
             match agent_task_lifecycle::claim_cook_operation(
                 &next_run_id,
@@ -1514,7 +1521,9 @@ where
     // The generated ID is random by design. Link the execution only after its
     // materialized plan is durable, so a resumed controller selects this exact
     // run without replacing its baseline-bound workspace contract.
-    agent_task_lifecycle::record_cook_attempt(cook_id, next_attempt, &next_run_id)?;
+    if !attempt_needs_execution(&next_run_id) {
+        agent_task_lifecycle::record_cook_attempt(cook_id, next_attempt, &next_run_id)?;
+    }
     if review_form_only {
         // A form-only retry deliberately makes no code changes. Carry the
         // already-authenticated candidate forward so its finalization path can
