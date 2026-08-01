@@ -378,9 +378,15 @@ pub(super) fn read_retry_successors(source_run_id: &str) -> Result<Vec<AgentTask
 
 pub(super) fn read_records_with_health(
 ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
+    read_records_with_health_bounded(1000)
+}
+
+pub(super) fn read_records_with_health_bounded(
+    limit: usize,
+) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
     let mut health = super::AgentTaskRecordHealthSummary::healthy();
     let mut records = Vec::new();
-    for run in observation_runs()? {
+    for run in observation_runs_bounded(limit)? {
         match super::health::diagnose_run(&run) {
             Ok(record) => {
                 health.healthy += 1;
@@ -393,10 +399,14 @@ pub(super) fn read_records_with_health(
 }
 
 pub(super) fn observation_runs() -> Result<Vec<RunRecord>> {
-    let store = ObservationStore::open_initialized()?;
+    observation_runs_bounded(1000)
+}
+
+fn observation_runs_bounded(limit: usize) -> Result<Vec<RunRecord>> {
+    let store = ObservationStore::open_readonly()?;
     let filter = RunListFilter {
         kind: Some("agent-task".to_string()),
-        limit: Some(1000),
+        limit: Some(i64::try_from(limit.clamp(1, 1000)).expect("bounded record limit")),
         ..Default::default()
     };
     store.list_runs(filter)

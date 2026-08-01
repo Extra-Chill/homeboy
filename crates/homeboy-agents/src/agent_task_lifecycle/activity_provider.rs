@@ -40,11 +40,11 @@ impl ActivityAgentTaskProvider for AgentTaskActivityProvider {
             .map(item_from_agent_task))
     }
 
-    /// One pass over the durable records yields both the projected items and
-    /// the health summary for the same read, through the single-pass
-    /// `list_records_with_health` (#10308).
-    fn agent_task_activity(&self) -> Result<(Vec<ActivityItem>, Value)> {
-        let (records, health) = agent_task_lifecycle::list_records_with_health()?;
+    /// One bounded pass over the durable records yields both the projected
+    /// items and health summary. Activity is an observational surface, so it
+    /// must not reconcile runs, acquire lifecycle locks, or contact runners.
+    fn agent_task_activity(&self, limit: usize) -> Result<(Vec<ActivityItem>, Value)> {
+        let (records, health) = agent_task_lifecycle::read_records_with_health_bounded(limit)?;
         let items = records.into_iter().map(item_from_agent_task).collect();
         let health = serde_json::to_value(health).map_err(|error| {
             homeboy_core::Error::internal_json(
@@ -127,9 +127,10 @@ fn item_from_agent_task(record: AgentTaskRunRecord) -> ActivityItem {
             &record.run_id,
             runner_id.as_deref(),
             state,
-            load_controller_plan(&record.run_id)
-                .as_ref()
-                .is_ok_and(|plan| plan_has_retry_materialization_identity(plan)),
+            is_failure(state)
+                && load_controller_plan(&record.run_id)
+                    .as_ref()
+                    .is_ok_and(|plan| plan_has_retry_materialization_identity(plan)),
         ),
     }
 }
@@ -249,12 +250,18 @@ mod tests {
         with_isolated_home(|_| {
             register();
             let run_id = seed_record("run-report-health");
+            let before = agent_task_lifecycle::exact_record(&run_id).expect("record before list");
 
             let report = homeboy_core::activity::activity_report(ActivityScope::All, 50)
                 .expect("activity report");
 
             assert!(report.items.iter().any(|item| item.id == run_id));
             assert_eq!(report.agent_task_record_health["healthy"], 1);
+            assert_eq!(
+                agent_task_lifecycle::exact_record(&run_id).expect("record after list"),
+                before,
+                "activity list must not reconcile or rewrite lifecycle state"
+            );
 
             let shown = homeboy_core::activity::show_activity(&run_id).expect("show activity");
 

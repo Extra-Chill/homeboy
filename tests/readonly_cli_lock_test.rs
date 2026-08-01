@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let repository = create_repository(home.path());
+        homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("initialize observation store");
         let promotion_namespace = home.path().join("nested-promotion-gate-data");
         let _promotion_namespace = TestPromotionNamespace::new(&promotion_namespace);
         let git_before = git_metadata_snapshot(&repository);
@@ -22,6 +24,9 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
         for args in [
             vec!["--version"],
             vec!["--help"],
+            vec!["activity", "--help"],
+            vec!["agent-task", "cook", "--help"],
+            vec!["activity"],
             vec!["self", "identity"],
             vec!["self", "status"],
             vec!["status"],

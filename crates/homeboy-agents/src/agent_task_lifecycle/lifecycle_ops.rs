@@ -1833,7 +1833,13 @@ pub fn list_records_with_health() -> Result<(Vec<AgentTaskRunRecord>, AgentTaskR
 /// cannot delay access to controller-owned state.
 pub fn read_records_with_health() -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)>
 {
-    let (mut records, health) = store::read_records_with_health()?;
+    read_records_with_health_bounded(1000)
+}
+
+pub fn read_records_with_health_bounded(
+    limit: usize,
+) -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)> {
+    let (mut records, health) = store::read_records_with_health_bounded(limit)?;
     records.sort_by(|left, right| {
         right
             .updated_at

@@ -402,6 +402,11 @@ impl ObservationStore {
     /// List every currently running run so callers can retain active work when
     /// applying a separate display limit to recent history.
     pub fn list_active_runs(&self) -> Result<Vec<RunRecord>> {
+        self.list_active_runs_bounded(i64::MAX)
+    }
+
+    /// List the newest active runs without scanning an unbounded stale corpus.
+    pub fn list_active_runs_bounded(&self, limit: i64) -> Result<Vec<RunRecord>> {
         let mut statement = self
             .connection
             .prepare(
@@ -411,11 +416,15 @@ impl ObservationStore {
                 FROM runs
                 WHERE status = ?1
                 ORDER BY started_at DESC, id DESC
+                LIMIT ?2
                 "#,
             )
             .map_err(sqlite_error("prepare list active run records"))?;
         let rows = statement
-            .query_map([RunStatus::Running.as_str()], row_to_run_record)
+            .query_map(
+                params![RunStatus::Running.as_str(), limit.max(1)],
+                row_to_run_record,
+            )
             .map_err(sqlite_error("list active run records"))?;
 
         collect_rows(rows, "collect active run records")
