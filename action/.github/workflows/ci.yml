@@ -383,7 +383,7 @@ jobs:
         uses: actions/create-github-app-token@v3
         continue-on-error: true
         with:
-          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          client-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
       - id: phase
@@ -600,7 +600,7 @@ jobs:
         uses: actions/create-github-app-token@v3
         continue-on-error: true
         with:
-          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          client-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
       - name: Post reconciled PR comment
@@ -647,7 +647,7 @@ jobs:
         uses: actions/create-github-app-token@v3
         continue-on-error: true
         with:
-          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          client-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
       - name: Evaluate PR policy after reconciled quality gates
         shell: bash
