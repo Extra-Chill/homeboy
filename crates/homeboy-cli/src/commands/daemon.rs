@@ -35,6 +35,28 @@ enum DaemonCommand {
         #[arg(long)]
         replacement_operation_id: Option<String>,
     },
+    /// Resolve and run the right daemon recovery from the current status report
+    ///
+    /// Reads `homeboy daemon status` once, matches its stale reason code, and
+    /// fills every argument the resolved recovery needs from that report. The
+    /// explicit subcommands below stay available as escape hatches for the
+    /// cases this cannot resolve.
+    Recover {
+        /// Print the resolved plan without running it. This is the default.
+        #[arg(long)]
+        dry_run: bool,
+        /// Run the resolved plan.
+        #[arg(long, conflicts_with = "dry_run")]
+        yes: bool,
+        /// Required only when the resolved plan reconciles PID-less durable
+        /// jobs. Unverifiable by design, so it is never supplied automatically:
+        /// the daemon died before persisting any child identity, leaving no PID
+        /// for anything in process to check.
+        #[arg(long)]
+        confirm_workload_processes_absent: bool,
+        #[arg(long, default_value = daemon::DEFAULT_ADDR)]
+        addr: String,
+    },
     /// Explicitly replace one proven-dead daemon lease and reconcile its durable jobs
     AdoptOrphan {
         /// Exact lease ID reported by `homeboy daemon status`
@@ -207,6 +229,7 @@ pub struct DaemonArtifactGetArgs {
 pub enum DaemonOutput {
     Start(DaemonStartResult),
     EnsureRunning(DaemonStartResult),
+    Recover(DaemonRecoverOutput),
     AdoptOrphan(DaemonOrphanAdoptionResult),
     ReconcileDeadLeaseOrphans(DaemonExactOrphanRecoveryResult),
     RecoverMissingChildIdentity(homeboy::core::api_jobs::Job),
@@ -217,6 +240,32 @@ pub enum DaemonOutput {
     Status(DaemonStatus),
     BrokerConfig(BrokerConfig),
     ArtifactGet(DaemonArtifactGetOutput),
+}
+
+/// The resolved recovery, and what was done about it.
+///
+/// `plan` is the whole point: every argument in it was filled from the status
+/// read in this same invocation, so an operator never transcribes a lease id, a
+/// PID, an endpoint, or a `/proc` start-tick value between two commands.
+#[derive(Debug, Serialize)]
+pub struct DaemonRecoverOutput {
+    pub command: &'static str,
+    /// `false` for a dry run, which is the default.
+    pub executed: bool,
+    pub fresh: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_reason_code: Option<daemon::DaemonStaleReasonCode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_id: Option<String>,
+    pub active_jobs: usize,
+    pub plan: daemon::recovery_actions::DaemonRecoveryPlan,
+    /// The steps actually run, in order. Empty on a dry run.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub applied_steps: Vec<String>,
+    /// Why execution stopped short, when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_on: Option<String>,
+    pub next_command: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -247,6 +296,18 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             )?),
             0,
         )),
+        DaemonCommand::Recover {
+            dry_run,
+            yes,
+            confirm_workload_processes_absent,
+            addr,
+        } => recover(
+            // Dry run is the default: an unasked-for recovery is a mutation of
+            // the daemon that owns the caller's durable jobs.
+            !yes || dry_run,
+            confirm_workload_processes_absent,
+            &addr,
+        ),
         DaemonCommand::AdoptOrphan {
             lease_id,
             // Deprecated no-op: adoption proves PID death itself, under the lock.
@@ -394,6 +455,168 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
         )),
         DaemonCommand::ArtifactGet(args) => artifact_get(args),
     }
+}
+
+/// Resolve the recovery for the local daemon and either print it or run it.
+///
+/// One `read_status()` read supplies every argument. Dispatch is on the typed
+/// step code, never on the rendered command string (#11105).
+fn recover(
+    dry_run: bool,
+    confirm_workload_processes_absent: bool,
+    addr: &str,
+) -> CmdResult<DaemonOutput> {
+    use daemon::recovery_actions as actions;
+
+    let status = daemon::read_status()?;
+    let plan = actions::plan_recovery(&status);
+    let lease_id = status.freshness.lease_id.clone();
+    let job_ids: Vec<Uuid> = status
+        .active_job_recovery_evidence
+        .iter()
+        .map(|evidence| evidence.job_id)
+        .collect();
+
+    let mut output = DaemonRecoverOutput {
+        command: "daemon.recover",
+        executed: false,
+        fresh: status.fresh,
+        stale_reason_code: status.freshness.stale_reason_code,
+        lease_id: lease_id.clone(),
+        active_jobs: status.freshness.active_jobs,
+        applied_steps: Vec::new(),
+        blocked_on: None,
+        next_command: String::new(),
+        plan,
+    };
+
+    if output.plan.steps.is_empty() {
+        output.next_command = "homeboy daemon status".to_string();
+        return Ok((DaemonOutput::Recover(output), 0));
+    }
+    if !output.plan.executable {
+        // A read-only diagnosis, or evidence that authorizes nothing. The plan
+        // and its reason are the answer; running it would be a guess.
+        output.blocked_on = Some(output.plan.reason.clone());
+        output.next_command = rendered_plan(&output.plan);
+        return Ok((DaemonOutput::Recover(output), 0));
+    }
+
+    // Confirmations an operator has to make are surfaced, never synthesized.
+    let missing = unmet_confirmations(&output.plan, confirm_workload_processes_absent);
+    if !missing.is_empty() {
+        output.blocked_on = Some(format!(
+            "this recovery requires operator attestation that no report can supply: {}",
+            missing
+                .iter()
+                .map(|confirmation| format!("--{confirmation}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        output.next_command = format!(
+            "{} --{}",
+            rendered_plan(&output.plan),
+            actions::CONFIRM_WORKLOAD_PROCESSES_ABSENT
+        );
+        return Ok((DaemonOutput::Recover(output), 0));
+    }
+
+    if dry_run {
+        output.next_command = "homeboy daemon recover --yes".to_string();
+        return Ok((DaemonOutput::Recover(output), 0));
+    }
+
+    for step in &output.plan.steps {
+        match step.code.as_str() {
+            // A lease-bound stop refuses to kill a daemon other than the exact
+            // one the report described, which is why the lease is carried here
+            // rather than left to a bare `homeboy daemon stop`.
+            code if code == actions::DAEMON_STOP => match lease_id.as_deref() {
+                Some(lease_id) => {
+                    daemon::stop_for_lease(lease_id)?;
+                }
+                None => {
+                    daemon::stop()?;
+                }
+            },
+            code if code == actions::DAEMON_START => {
+                daemon::start_background(addr)?;
+            }
+            code if code == actions::DAEMON_ADOPT_ORPHAN => {
+                let lease_id = lease_id.as_deref().ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "lease_id",
+                        "the status report named an orphan adoption but carried no lease id",
+                        None,
+                        None,
+                    )
+                })?;
+                daemon::adopt_orphaned_lease(lease_id, &[], addr)?;
+            }
+            code if code == actions::DAEMON_RECONCILE_LEASELESS_ORPHANS => {
+                daemon::reconcile_leaseless_orphans(addr, None)?;
+            }
+            code if code == actions::DAEMON_RECONCILE_DEAD_LEASE_ORPHANS => {
+                let lease_id = lease_id.as_deref().ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "lease_id",
+                        "the status report named a dead-lease reconciliation but carried no lease id",
+                        None,
+                        None,
+                    )
+                })?;
+                daemon::reconcile_dead_lease_orphans(
+                    lease_id,
+                    &job_ids,
+                    confirm_workload_processes_absent,
+                    addr,
+                )?;
+            }
+            code => {
+                return Err(Error::validation_invalid_argument(
+                    "recovery_step",
+                    format!("resolved recovery step `{code}` has no dispatcher"),
+                    Some(code.to_string()),
+                    Some(vec![
+                        "Run `homeboy daemon status` and use the explicit recovery subcommand for this case.".to_string(),
+                    ]),
+                ));
+            }
+        }
+        output.applied_steps.push(step.code.clone());
+    }
+
+    output.executed = true;
+    output.next_command = "homeboy daemon status".to_string();
+    Ok((DaemonOutput::Recover(output), 0))
+}
+
+/// Attestations the resolved plan needs and the operator has not made.
+///
+/// The dispatcher fills arguments from the report; it does not fill in claims
+/// about the world. `--confirm-workload-processes-absent` is the one input on
+/// this surface that no report can contain — `core/daemon/control.rs` documents
+/// why — so it is reported back as a blocker rather than assumed.
+fn unmet_confirmations(
+    plan: &daemon::recovery_actions::DaemonRecoveryPlan,
+    confirm_workload_processes_absent: bool,
+) -> Vec<String> {
+    plan.required_confirmations
+        .iter()
+        .filter(|confirmation| {
+            confirmation.as_str() != daemon::recovery_actions::CONFIRM_WORKLOAD_PROCESSES_ABSENT
+                || !confirm_workload_processes_absent
+        })
+        .cloned()
+        .collect()
+}
+
+fn rendered_plan(plan: &daemon::recovery_actions::DaemonRecoveryPlan) -> String {
+    plan.steps
+        .iter()
+        .map(|step| step.command.as_str())
+        .collect::<Vec<_>>()
+        .join(" && ")
 }
 
 fn legacy_child_recovery_migration_error() -> Error {
@@ -745,6 +968,105 @@ mod tests {
         assert!(
             declared.iter().any(|option| option == "--confirm-no-daemon-owner"),
             "--confirm-no-daemon-owner must render as a bare long option or controllers refuse remote lease-less recovery; declared={declared:?} help={help}"
+        );
+    }
+
+    /// #11105: five recovery subcommands existed and nothing chose between
+    /// them. The dispatcher parses with no arguments at all — every value it
+    /// needs comes from the status report it reads.
+    #[test]
+    fn the_recovery_dispatcher_needs_no_transcribed_arguments() {
+        assert!(Cli::try_parse_from(["homeboy", "daemon", "recover"]).is_ok());
+        assert!(Cli::try_parse_from(["homeboy", "daemon", "recover", "--dry-run"]).is_ok());
+        assert!(Cli::try_parse_from(["homeboy", "daemon", "recover", "--yes"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["homeboy", "daemon", "recover", "--yes", "--dry-run"]).is_err(),
+            "a dry run and an execution are not the same request"
+        );
+    }
+
+    /// Dry run is the default. Recovery mutates the daemon that owns the
+    /// caller's durable jobs, so it may not happen because someone ran the
+    /// obvious command to find out what it would do.
+    #[test]
+    fn recovery_is_a_dry_run_unless_execution_is_asked_for() {
+        with_isolated_home(|_| {
+            let cli = Cli::try_parse_from(["homeboy", "daemon", "recover"])
+                .expect("the dispatcher parses bare");
+            let Commands::Daemon(args) = cli.command else {
+                panic!("expected daemon command");
+            };
+
+            let (output, exit_code) = run(args).expect("an isolated home still resolves a plan");
+
+            assert_eq!(exit_code, 0);
+            let DaemonOutput::Recover(output) = output else {
+                panic!("expected recovery output");
+            };
+            assert!(!output.executed, "a bare recover must not mutate anything");
+            assert_eq!(output.command, "daemon.recover");
+        });
+    }
+
+    /// The one confirmation on this surface that is not ceremony must stay
+    /// operator-supplied. `core/daemon/control.rs` documents why: the daemon
+    /// died before persisting any child identity, so nothing in process can
+    /// observe whether the workloads are still running. A dispatcher that
+    /// filled it in from a report would be fabricating evidence.
+    #[test]
+    fn the_dispatcher_never_synthesizes_the_workload_attestation() {
+        use daemon::recovery_actions as actions;
+
+        let job_ids = [Uuid::nil()];
+        let plan = actions::DaemonRecoveryPlan {
+            steps: vec![daemon::DaemonRepairStep::executable(
+                actions::DAEMON_RECONCILE_DEAD_LEASE_ORPHANS,
+                actions::reconcile_dead_lease_orphans("lease-dead", &job_ids),
+            )],
+            reason: "dead lease with PID-less durable jobs".to_string(),
+            required_confirmations: vec![actions::CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string()],
+            executable: true,
+        };
+
+        assert_eq!(
+            unmet_confirmations(&plan, false),
+            vec![actions::CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string()],
+            "a plan needing the attestation must block until the operator makes it"
+        );
+        assert!(
+            unmet_confirmations(&plan, true).is_empty(),
+            "the operator must still be able to supply it"
+        );
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "daemon",
+            "recover",
+            "--yes",
+            "--confirm-workload-processes-absent",
+        ])
+        .is_ok());
+    }
+
+    /// Every value the dispatcher fills comes from the report. A restart plan
+    /// needs no attestation, so it must not be gated behind one.
+    #[test]
+    fn a_plan_needing_no_attestation_is_not_gated_on_one() {
+        use daemon::recovery_actions as actions;
+
+        let plan = actions::DaemonRecoveryPlan {
+            steps: vec![
+                daemon::DaemonRepairStep::executable(actions::DAEMON_STOP, actions::stop()),
+                daemon::DaemonRepairStep::executable(actions::DAEMON_START, actions::start()),
+            ],
+            reason: "version mismatch".to_string(),
+            required_confirmations: Vec::new(),
+            executable: true,
+        };
+
+        assert!(unmet_confirmations(&plan, false).is_empty());
+        assert_eq!(
+            rendered_plan(&plan),
+            "homeboy daemon stop && homeboy daemon start"
         );
     }
 

@@ -14,7 +14,43 @@ homeboy daemon <COMMAND>
 - `serve` — run the daemon in the foreground
 - `stop` — gracefully stop the background daemon recorded in the state file
 - `status` — show daemon state, active-job recovery evidence, and selected local address
+- `recover` — resolve and run the right recovery from the current status report
 - `broker-config` — render a deployable reverse-runner broker service recipe
+
+## Recovery dispatch
+
+`homeboy daemon status` already computes the repair its own evidence
+authorizes and reports it as `freshness.repair_plan`. `homeboy daemon recover`
+is the dispatcher for that plan: it reads status once, resolves the matching
+recovery, and **fills every argument from the report it just read**. Nothing is
+transcribed by hand between two commands.
+
+```sh
+homeboy daemon recover            # resolve and print the plan (default)
+homeboy daemon recover --yes      # resolve and run it
+```
+
+Dry run is the default because recovery mutates the daemon that owns the
+caller's durable jobs. The output carries the resolved `plan` (each step with
+its code, its rendered command, and its argv), the `stale_reason_code` it
+matched, and `next_command`.
+
+A report the evidence authorizes nothing for does not produce an empty plan. It
+produces the read-only `daemon_diagnose` step and `blocked_on`, stating in the
+evidence's own words why no mutation was resolved.
+
+The explicit subcommands below remain available as escape hatches for cases the
+dispatcher cannot resolve — notably `recover-missing-lease-state` and
+`recover-missing-child-identity`, whose required values (a recorded endpoint, a
+`/proc` child start-tick) are precisely the ones that no longer exist in any
+report by the time they are needed.
+
+`--confirm-workload-processes-absent` is never supplied automatically. When the
+resolved plan is a dead-lease reconciliation, `recover` reports it under
+`blocked_on` and refuses to execute until the operator passes it. See the
+reasoning in the dead-lease recovery section below: the attestation is
+unverifiable in process by construction, so a dispatcher supplying it would be
+fabricating evidence.
 
 ## Local HTTP API
 
