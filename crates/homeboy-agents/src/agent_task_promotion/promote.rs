@@ -1492,6 +1492,7 @@ fn run_promotion_gates(
     worktree_path: &Path,
     expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
 ) -> Result<PromotionGateRun> {
+    homeboy_core::repository_integrity::verify_tracked_symlink_portability(worktree_path, "HEAD")?;
     if options.dry_run
         || (options.gates.verify.is_empty() && options.gates.private_verify.is_empty())
     {

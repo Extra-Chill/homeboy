@@ -38,7 +38,11 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
     }
 
     fn validate_candidate(&mut self, options: &AgentTaskPrFinalizationOptions) -> Result<()> {
-        validate_real_candidate_fingerprint(options)
+        validate_real_candidate_fingerprint(options)?;
+        homeboy_core::repository_integrity::verify_tracked_symlink_portability(
+            std::path::Path::new(&options.path),
+            "HEAD",
+        )
     }
 
     fn current_branch(&mut self, path: &str) -> Result<String> {
