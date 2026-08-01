@@ -32,7 +32,8 @@ use homeboy::refactor::plan::{collect_refactor_sources, lint_refactor_request, L
 
 use super::source_command::{resolve_ci_job_for_command, resolve_source_context};
 use super::utils::args::{
-    BaselineArgs, ExtensionOverrideArgs, LintSniffArgs, PositionalComponentArgs, SettingArgs,
+    BaselineArgs, ChangedScopeArgs, ExtensionOverrideArgs, LintSniffArgs, PositionalComponentArgs,
+    SettingArgs,
 };
 use super::utils::response::actionable_metadata_value_for_run_ref;
 use super::CmdResult;
@@ -59,22 +60,17 @@ pub struct LintArgs {
     #[arg(long)]
     pub glob: Option<String>,
 
-    /// Lint modified files in the working tree (file-scoped, not hunk-scoped)
-    #[arg(long, conflicts_with = "changed_since")]
-    pub changed_only: bool,
-
-    /// Lint only files changed since a git ref (branch, tag, or SHA) — CI-friendly
-    #[arg(long, conflicts_with = "changed_only")]
-    pub changed_since: Option<String>,
-
-    #[arg(skip)]
-    pub precomputed_changed_files: Option<Vec<String>>,
+    // Changed-file scoping. Shared changed-scope group (#11140) — one
+    // declaration for `--changed-since`, `--changed-only`, the
+    // caller-injected changeset, and the hidden Lab handoff payload. The
+    // `--changed-since`/`--changed-only` conflict is owned by the group, so
+    // the two hand-written `conflicts_with` attributes that used to point at
+    // each other are gone.
+    #[command(flatten)]
+    pub changed: ChangedScopeArgs,
 
     #[arg(skip)]
     pub force_main_workflow: bool,
-
-    #[arg(long, hide = true, value_name = "JSON")]
-    pub lab_changed_files_json: Option<String>,
 
     /// Run using env from a single extension-declared CI lint job.
     #[arg(long, value_name = "ID", conflicts_with = "fix")]
@@ -112,8 +108,7 @@ pub struct LintArgs {
 impl LintArgs {
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
         if self.is_full_workspace_run()
-            || self.changed_since.is_some()
-            || self.changed_only
+            || self.changed.is_scoped()
             || self.file.is_some()
             || self.glob.is_some()
         {
@@ -132,10 +127,7 @@ impl LintArgs {
     }
 
     pub fn is_full_workspace_run(&self) -> bool {
-        self.changed_since.is_none()
-            && !self.changed_only
-            && self.file.is_none()
-            && self.glob.is_none()
+        self.changed.is_full_scope() && self.file.is_none() && self.glob.is_none()
     }
 
     pub(crate) fn should_use_self_check_dispatch(&self) -> bool {
@@ -153,8 +145,6 @@ impl LintArgs {
             && !self.baseline_args.baseline
             && !self.baseline_args.ignore_baseline
             && !self.baseline_args.ratchet
-            && self.precomputed_changed_files.is_none()
-            && self.lab_changed_files_json.is_none()
     }
 
     /// Positional component id targeted by this run, if any (the
@@ -267,9 +257,9 @@ pub fn run(args: LintArgs) -> CmdResult<LintCommandOutput> {
             summary: args.summary,
             file: args.file.clone(),
             glob: args.glob.clone(),
-            changed_only: args.changed_only,
-            changed_since: args.changed_since.clone(),
-            precomputed_changed_files: changed_files_from_args(&args)?,
+            changed_only: args.changed.changed_only,
+            changed_since: args.changed.changed_since().map(str::to_string),
+            precomputed_changed_files: args.changed.resolve()?,
             sniff_filters: args.sniff_filters.to_lint_sniff_filters(),
             category: args.category.clone(),
             ci_env: ci_profile::ci_job_env(ci_job.as_ref()),
@@ -309,27 +299,6 @@ fn attach_lint_actionable(output: &mut LintCommandOutput, run_id: Option<String>
             "homeboy-lint",
         ));
     }
-}
-
-fn changed_files_from_args(args: &LintArgs) -> homeboy::core::Result<Option<Vec<String>>> {
-    if args.precomputed_changed_files.is_some() {
-        return Ok(args.precomputed_changed_files.clone());
-    }
-    args.lab_changed_files_json
-        .as_deref()
-        .map(parse_lab_changed_files_json)
-        .transpose()
-}
-
-fn parse_lab_changed_files_json(raw: &str) -> homeboy::core::Result<Vec<String>> {
-    serde_json::from_str(raw).map_err(|error| {
-        homeboy::core::Error::validation_invalid_argument(
-            "lab_changed_files_json",
-            format!("invalid Lab changed-file payload: {error}"),
-            None,
-            None,
-        )
-    })
 }
 
 struct LintObservationAdapter {
@@ -464,12 +433,12 @@ fn lint_command_label(component_id: &str, args: &LintArgs) -> String {
         parts.push("--glob".to_string());
         parts.push(glob.clone());
     }
-    if args.changed_only {
+    if args.changed.changed_only {
         parts.push("--changed-only".to_string());
     }
-    if let Some(changed_since) = &args.changed_since {
+    if let Some(changed_since) = args.changed.changed_since() {
         parts.push("--changed-since".to_string());
-        parts.push(changed_since.clone());
+        parts.push(changed_since.to_string());
     }
     if args.force {
         parts.push("--force".to_string());
@@ -493,7 +462,7 @@ fn run_fix(
     component_label: String,
     settings: Vec<(String, serde_json::Value)>,
 ) -> CmdResult<LintCommandOutput> {
-    let selected_files = if args.changed_only {
+    let selected_files = if args.changed.changed_only {
         let changes = git::get_uncommitted_changes(&ctx.component.local_path)?;
         let mut files = Vec::new();
         files.extend(changes.staged);
@@ -519,7 +488,7 @@ fn run_fix(
         lint_options,
         true,
     );
-    request.changed_since = args.changed_since.clone();
+    request.changed_since = args.changed.changed_since().map(str::to_string);
     request.force = args.force;
 
     let run = collect_refactor_sources(request)?;
@@ -560,7 +529,7 @@ mod tests {
         .expect("lint should parse --extension override");
 
         assert_eq!(cli.lint.extension_override.extensions, vec!["fixture-lint"]);
-        assert_eq!(cli.lint.changed_since.as_deref(), Some("origin/main"));
+        assert_eq!(cli.lint.changed.changed_since(), Some("origin/main"));
     }
 
     #[test]

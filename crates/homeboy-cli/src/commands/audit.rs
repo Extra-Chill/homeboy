@@ -12,7 +12,7 @@ use homeboy::core::observation::{
 
 use super::source_command::resolve_source_context;
 use super::utils::args::{
-    BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
+    BaselineArgs, ChangedSinceArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
 };
 use super::utils::response::actionable_metadata_value_for_run_ref;
 use super::CmdResult;
@@ -49,12 +49,17 @@ pub struct AuditArgs {
     #[command(flatten)]
     pub baseline_args: BaselineArgs,
 
-    /// Only audit files changed since a git ref (branch, tag, or SHA).
-    #[arg(long)]
-    pub changed_since: Option<String>,
-
-    #[arg(skip)]
-    pub precomputed_changed_files: Option<Vec<String>>,
+    // Only audit files changed since a git ref. Shared changed-scope group
+    // (#11140) — the same declaration `lint`, `test`, `build`, `review`, and
+    // `refactor` flatten.
+    //
+    // NOTE (divergence, unchanged): `lab_contract()` below makes
+    // `audit --changed-since` local-only, while `lint --changed-since` stays
+    // a Lab-portable release gate. Both now read the identical field, so the
+    // asymmetry is a visible policy choice rather than a side effect of two
+    // independent flag declarations.
+    #[command(flatten)]
+    pub changed: ChangedSinceArgs,
 
     // The `--summary` alias keeps one compact-output convention working across
     // the `review` umbrella and every phase subcommand. `review/mod.rs` already
@@ -72,7 +77,7 @@ pub struct AuditArgs {
 
 impl AuditArgs {
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
-        if self.changed_since.is_some() {
+        if self.changed.changed_since.is_some() {
             return Some(LabCommandContract::local_only(
                 AUDIT_LAB_LABEL,
                 AUDIT_CHANGED_SINCE_LAB_UNSUPPORTED_REASON,
@@ -152,8 +157,8 @@ pub fn run(args: AuditArgs) -> CmdResult<AuditCommandOutput> {
             ignore_baseline: args.baseline_args.ignore_baseline,
             ratchet: args.baseline_args.ratchet,
         },
-        changed_since: args.changed_since,
-        precomputed_changed_files: args.precomputed_changed_files,
+        changed_since: args.changed.changed_since,
+        precomputed_changed_files: args.changed.precomputed_changed_files,
         json_summary: args.json_summary,
         include_fixability: args.fixability,
     });
@@ -300,7 +305,7 @@ fn audit_observation_command(component_id: &str, args: &AuditArgs) -> String {
     for extension in &args.extension_override.extensions {
         parts.push(format!("--extension={extension}"));
     }
-    if let Some(changed_since) = &args.changed_since {
+    if let Some(changed_since) = args.changed.changed_since() {
         parts.push(format!("--changed-since={changed_since}"));
     }
     if args.json_summary {
@@ -325,7 +330,7 @@ fn audit_observation_initial_metadata(source_path: &str, args: &AuditArgs) -> se
             "ignore_baseline": args.baseline_args.ignore_baseline,
             "ratchet": args.baseline_args.ratchet,
         },
-        "changed_since": args.changed_since,
+        "changed_since": args.changed.changed_since,
         "json_summary": args.json_summary,
         "fixability": args.fixability,
     })
@@ -554,8 +559,10 @@ mod tests {
                 ignore_baseline: false,
                 ratchet: false,
             },
-            changed_since: Some("origin/main".to_string()),
-            precomputed_changed_files: None,
+            changed: ChangedSinceArgs {
+                changed_since: Some("origin/main".to_string()),
+                precomputed_changed_files: None,
+            },
             json_summary: true,
             fixability: false,
         }
@@ -713,7 +720,7 @@ mod tests {
         .expect("audit should parse --extension override");
 
         assert_eq!(cli.audit.extension_override.extensions, vec!["rust"]);
-        assert_eq!(cli.audit.changed_since.as_deref(), Some("origin/main"));
+        assert_eq!(cli.audit.changed.changed_since(), Some("origin/main"));
         assert_eq!(cli.audit.profile, "pr");
     }
 
@@ -973,8 +980,7 @@ mod tests {
                     ignore_baseline: true,
                     ratchet: false,
                 },
-                changed_since: None,
-                precomputed_changed_files: None,
+                changed: ChangedSinceArgs::default(),
                 json_summary: false,
                 fixability: false,
             };

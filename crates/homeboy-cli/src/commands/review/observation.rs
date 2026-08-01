@@ -147,10 +147,10 @@ fn review_observation_command(component_id: &str, args: &ReviewArgs) -> String {
         "review".to_string(),
         component_id.to_string(),
     ];
-    if let Some(changed_since) = args.changed_since.as_ref() {
+    if let Some(changed_since) = args.changed.changed_since() {
         parts.push(format!("--changed-since={changed_since}"));
     }
-    if args.changed_only {
+    if args.changed.changed_only {
         parts.push("--changed-only".to_string());
     }
     if args.summary {
@@ -172,8 +172,8 @@ pub(super) fn review_observation_initial_metadata(
         "schema": "homeboy/review-observation/v1",
         "component_label": component_label,
         "scope": scope,
-        "changed_since": args.changed_since,
-        "changed_only": args.changed_only,
+        "changed_since": args.changed.changed_since(),
+        "changed_only": args.changed.changed_only,
         "summary": args.summary,
         "ci_profile": args.ci_profile,
         "report": args.report,
@@ -245,7 +245,8 @@ fn stage_run_id<T: serde::Serialize>(output: &T) -> Option<String> {
 mod tests {
     use super::*;
     use crate::commands::utils::args::{
-        BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs,
+        BaselineArgs, ChangedScopeArgs, ChangedSinceArgs, ExtensionOverrideArgs,
+        LabChangedScopeArgs, PositionalComponentArgs,
     };
     use homeboy_review::review::{build_artifact, ReviewSummary};
 
@@ -258,15 +259,22 @@ mod tests {
                 path: None,
             },
             extension_override: ExtensionOverrideArgs::default(),
-            changed_since: Some("origin/main".to_string()),
-            changed_only: false,
+            changed: ChangedScopeArgs {
+                lab: LabChangedScopeArgs {
+                    since: ChangedSinceArgs {
+                        changed_since: Some("origin/main".to_string()),
+                        precomputed_changed_files: None,
+                    },
+                    lab_changed_files_json: None,
+                },
+                changed_only: false,
+            },
             summary: true,
             ci_profile: None,
             audit_profile: None,
             report: Some("pr-comment".to_string()),
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
-            lab_changed_files_json: None,
         }
     }
 

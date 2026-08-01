@@ -1,7 +1,8 @@
 use homeboy::commands::lint::{run as run_lint, LintArgs};
 use homeboy::commands::test::{run as run_test, TestArgs};
 use homeboy::commands::utils::args::{
-    BaselineArgs, ExtensionOverrideArgs, LintSniffArgs, PositionalComponentArgs, SettingArgs,
+    BaselineArgs, ChangedScopeArgs, ExtensionOverrideArgs, LabChangedScopeArgs, LintSniffArgs,
+    PositionalComponentArgs, SettingArgs,
 };
 use std::fs;
 use std::path::Path;
@@ -40,11 +41,8 @@ fn lint_args(root: &Path) -> LintArgs {
         summary: false,
         file: None,
         glob: None,
-        changed_only: false,
-        changed_since: None,
-        precomputed_changed_files: None,
+        changed: ChangedScopeArgs::default(),
         force_main_workflow: false,
-        lab_changed_files_json: None,
         ci_job: None,
         sniff_filters: LintSniffArgs::default(),
         category: None,
@@ -68,9 +66,7 @@ fn test_args(root: &Path) -> TestArgs {
         drift: false,
         write: false,
         since: "HEAD~10".to_string(),
-        changed_since: None,
-        precomputed_changed_files: None,
-        lab_changed_files_json: None,
+        changed: LabChangedScopeArgs::default(),
         ci_job: None,
         setting_args: SettingArgs::default(),
         args: Vec::new(),

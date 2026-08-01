@@ -28,8 +28,8 @@ use std::path::{Component, Path, PathBuf};
 
 use super::source_command::{resolve_ci_job_for_command, resolve_source_context};
 use super::utils::args::{
-    filter_passthrough_args, BaselineArgs, ExtensionOverrideArgs, PassthroughCommand,
-    PositionalComponentArgs, SettingArgs,
+    filter_passthrough_args, BaselineArgs, ExtensionOverrideArgs, LabChangedScopeArgs,
+    PassthroughCommand, PositionalComponentArgs, SettingArgs,
 };
 use super::utils::response::actionable_metadata_value_for_run_ref;
 use super::CmdResult;
@@ -76,15 +76,12 @@ pub struct TestArgs {
     #[arg(long, value_name = "REF", default_value = "HEAD~10")]
     pub since: String,
 
-    /// Limit test execution to files changed since this git ref (PR impact scope)
-    #[arg(long, value_name = "REF")]
-    pub changed_since: Option<String>,
-
-    #[arg(skip)]
-    pub precomputed_changed_files: Option<Vec<String>>,
-
-    #[arg(long, hide = true, value_name = "JSON")]
-    pub lab_changed_files_json: Option<String>,
+    // Limit test execution to files changed since a git ref (PR impact
+    // scope). Shared changed-scope group (#11140) — one declaration for
+    // `--changed-since`, the caller-injected changeset, and the hidden Lab
+    // handoff payload.
+    #[command(flatten)]
+    pub changed: LabChangedScopeArgs,
 
     /// Run using env and passthrough args from a single extension-declared CI test job.
     #[arg(long, value_name = "ID", conflicts_with = "drift")]
@@ -128,9 +125,7 @@ impl TestArgs {
             && !self.analyze
             && !self.drift
             && !self.write
-            && self.changed_since.is_none()
-            && self.precomputed_changed_files.is_none()
-            && self.lab_changed_files_json.is_none()
+            && !self.changed.is_scoped()
             && self.ci_job.is_none()
             && cli_passthrough_args.is_empty()
             && !self.setting_args.has_overrides()
@@ -274,8 +269,8 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
                 ignore_baseline: args.baseline_args.ignore_baseline,
                 ratchet: args.baseline_args.ratchet,
             },
-            changed_since: args.changed_since.clone(),
-            precomputed_changed_files: changed_files_from_args(&args)?,
+            changed_since: args.changed.changed_since().map(str::to_string),
+            precomputed_changed_files: args.changed.resolve()?,
             json_summary: args.json_summary,
             restore_checkout: args.restore_checkout,
             ci_env: test_runner_ci_env(ci_job.as_ref())
@@ -334,27 +329,6 @@ fn attach_test_actionable(output: &mut TestCommandOutput, run_id: Option<String>
             "homeboy-test",
         ));
     }
-}
-
-fn changed_files_from_args(args: &TestArgs) -> homeboy::core::Result<Option<Vec<String>>> {
-    if args.precomputed_changed_files.is_some() {
-        return Ok(args.precomputed_changed_files.clone());
-    }
-    args.lab_changed_files_json
-        .as_deref()
-        .map(parse_lab_changed_files_json)
-        .transpose()
-}
-
-fn parse_lab_changed_files_json(raw: &str) -> homeboy::core::Result<Vec<String>> {
-    serde_json::from_str(raw).map_err(|error| {
-        homeboy::core::Error::validation_invalid_argument(
-            "lab_changed_files_json",
-            format!("invalid Lab changed-file payload: {error}"),
-            None,
-            None,
-        )
-    })
 }
 
 fn ci_job_passthrough_args(job: Option<&CiResolvedJob>) -> Vec<String> {
@@ -1078,7 +1052,7 @@ fn test_observation_command(component_id: &str, args: &TestArgs) -> String {
     if args.drift {
         parts.push("--drift".to_string());
     }
-    if let Some(changed_since) = &args.changed_since {
+    if let Some(changed_since) = args.changed.changed_since() {
         parts.push(format!("--changed-since={changed_since}"));
     }
     if args.json_summary {
@@ -1110,7 +1084,7 @@ fn test_observation_initial_metadata(
             "ignore_baseline": args.baseline_args.ignore_baseline,
             "ratchet": args.baseline_args.ratchet,
         },
-        "changed_since": args.changed_since,
+        "changed_since": args.changed.changed_since(),
         "since": args.since,
         "json_summary": args.json_summary,
         "passthrough_args": filter_homeboy_flags(&args.args),
@@ -1981,7 +1955,7 @@ mod tests {
         .expect("test should parse --extension override");
 
         assert_eq!(cli.test.extension_override.extensions, vec!["fixture-test"]);
-        assert_eq!(cli.test.changed_since.as_deref(), Some("origin/main"));
+        assert_eq!(cli.test.changed.changed_since(), Some("origin/main"));
     }
 
     #[test]

@@ -919,6 +919,269 @@ pub struct BaselineArgs {
 }
 
 // ============================================================================
+// ChangedSinceArgs / LabChangedScopeArgs / ChangedScopeArgs: changed-file scope
+// ============================================================================
+
+/// The `--changed-since` scope contract, declared once.
+///
+/// Six commands (`audit`, `lint`, `test`, `build`, `review`, `refactor`)
+/// each declared this flag independently, with three different doc comments,
+/// two different `value_name`s, and — in `lint`/`review` — hand-written
+/// `conflicts_with` pairs pointing at each other (#11140). The
+/// `#[arg(skip)] precomputed_changed_files` escape hatch that lets a caller
+/// (`review`, the Lab handoff) inject an already-computed changeset was
+/// repeated three times verbatim, and two byte-identical
+/// `changed_files_from_args` helpers lived in `lint.rs` and `test.rs`.
+///
+/// The group is layered rather than flat so that flattening it never *adds*
+/// a flag to a command that did not already accept it:
+///
+/// - [`ChangedSinceArgs`] — `--changed-since` plus the skip escape hatch.
+///   Flattened by `audit`, `build`, `refactor`.
+/// - [`LabChangedScopeArgs`] — adds the hidden `--lab-changed-files-json`
+///   handoff payload. Flattened by `test`.
+/// - [`ChangedScopeArgs`] — adds `--changed-only` working-tree scoping.
+///   Flattened by `lint` and `review`.
+///
+/// ## Known divergence (surfaced, deliberately not changed)
+///
+/// `audit --changed-since` disables Lab offload entirely (see
+/// `AUDIT_CHANGED_SINCE_LAB_UNSUPPORTED_REASON` in `commands/audit.rs`) while
+/// `lint --changed-since` treats the same scoping as a Lab-portable release
+/// gate. Both spellings resolve to the identical field on the same shared
+/// group now, so the divergence lives entirely in each command's
+/// `lab_contract()` where it is visible. Whether audit's carve-out is still
+/// warranted is a behavior decision for a separate issue — this group only
+/// makes the asymmetry legible.
+#[derive(Args, Debug, Clone, Default)]
+pub struct ChangedSinceArgs {
+    /// Only operate on files changed since this git ref (branch, tag, or SHA).
+    #[arg(long, value_name = "REF")]
+    pub changed_since: Option<String>,
+
+    /// Caller-injected changeset. Not a CLI surface — `review` and the Lab
+    /// handoff populate this so a downstream phase reuses one `git diff`
+    /// instead of recomputing it per stage.
+    #[arg(skip)]
+    pub precomputed_changed_files: Option<Vec<String>>,
+}
+
+impl ChangedSinceArgs {
+    /// The requested git base ref, if any.
+    pub fn changed_since(&self) -> Option<&str> {
+        self.changed_since.as_deref()
+    }
+
+    /// True when the run is scoped to a changed-file set.
+    pub fn is_scoped(&self) -> bool {
+        self.changed_since.is_some() || self.precomputed_changed_files.is_some()
+    }
+
+    /// Resolve the effective changed-file list for this run.
+    ///
+    /// A caller-injected changeset always wins; there is no Lab payload at
+    /// this layer.
+    pub fn resolve(&self) -> homeboy::core::Result<Option<Vec<String>>> {
+        Ok(self.precomputed_changed_files.clone())
+    }
+}
+
+/// [`ChangedSinceArgs`] plus the hidden Lab changed-file handoff payload.
+#[derive(Args, Debug, Clone, Default)]
+pub struct LabChangedScopeArgs {
+    #[command(flatten)]
+    pub since: ChangedSinceArgs,
+
+    /// Serialized changed-file list handed across the Lab boundary.
+    #[arg(long, hide = true, value_name = "JSON")]
+    pub lab_changed_files_json: Option<String>,
+}
+
+impl LabChangedScopeArgs {
+    /// The requested git base ref, if any.
+    pub fn changed_since(&self) -> Option<&str> {
+        self.since.changed_since()
+    }
+
+    /// True when the run is scoped to a changed-file set.
+    pub fn is_scoped(&self) -> bool {
+        self.since.is_scoped() || self.lab_changed_files_json.is_some()
+    }
+
+    /// Resolve the effective changed-file list for this run.
+    ///
+    /// Precedence: caller-injected changeset, then the Lab handoff payload.
+    /// This replaces the two byte-identical `changed_files_from_args`
+    /// helpers that lived in `lint.rs` and `test.rs`.
+    pub fn resolve(&self) -> homeboy::core::Result<Option<Vec<String>>> {
+        if self.since.precomputed_changed_files.is_some() {
+            return Ok(self.since.precomputed_changed_files.clone());
+        }
+        self.lab_changed_files_json
+            .as_deref()
+            .map(parse_lab_changed_files_json)
+            .transpose()
+    }
+}
+
+/// [`LabChangedScopeArgs`] plus working-tree (`--changed-only`) scoping.
+#[derive(Args, Debug, Clone, Default)]
+pub struct ChangedScopeArgs {
+    #[command(flatten)]
+    pub lab: LabChangedScopeArgs,
+
+    /// Operate only on files modified in the working tree
+    /// (staged, unstaged, untracked). File-scoped, not hunk-scoped.
+    #[arg(long, conflicts_with = "changed_since")]
+    pub changed_only: bool,
+}
+
+impl ChangedScopeArgs {
+    /// The requested git base ref, if any.
+    pub fn changed_since(&self) -> Option<&str> {
+        self.lab.changed_since()
+    }
+
+    /// True when the run is scoped to a changed-file set by any mechanism.
+    pub fn is_scoped(&self) -> bool {
+        self.lab.is_scoped() || self.changed_only
+    }
+
+    /// True when nothing narrowed the run — the full component is in scope.
+    pub fn is_full_scope(&self) -> bool {
+        !self.is_scoped()
+    }
+
+    /// Resolve the effective changed-file list for this run.
+    pub fn resolve(&self) -> homeboy::core::Result<Option<Vec<String>>> {
+        self.lab.resolve()
+    }
+}
+
+/// Parse a Lab changed-file handoff payload.
+///
+/// Previously copied verbatim into `lint.rs`, `test.rs`, and
+/// `review/mod.rs`.
+pub fn parse_lab_changed_files_json(raw: &str) -> homeboy::core::Result<Vec<String>> {
+    serde_json::from_str(raw).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "lab_changed_files_json",
+            format!("invalid Lab changed-file payload: {error}"),
+            None,
+            None,
+        )
+    })
+}
+
+#[cfg(test)]
+mod changed_scope_tests {
+    use super::{ChangedScopeArgs, ChangedSinceArgs, LabChangedScopeArgs};
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct SinceCli {
+        #[command(flatten)]
+        changed: ChangedSinceArgs,
+    }
+
+    #[derive(Parser)]
+    struct LabCli {
+        #[command(flatten)]
+        changed: LabChangedScopeArgs,
+    }
+
+    #[derive(Parser)]
+    struct ScopeCli {
+        #[command(flatten)]
+        changed: ChangedScopeArgs,
+    }
+
+    #[test]
+    fn changed_since_parses_split_and_inline_forms() {
+        let split = SinceCli::try_parse_from(["scoped", "--changed-since", "origin/main"])
+            .expect("split form parses");
+        assert_eq!(split.changed.changed_since(), Some("origin/main"));
+
+        let inline = SinceCli::try_parse_from(["scoped", "--changed-since=origin/main"])
+            .expect("inline form parses");
+        assert_eq!(inline.changed.changed_since(), Some("origin/main"));
+    }
+
+    #[test]
+    fn base_group_exposes_no_extra_flags() {
+        assert!(SinceCli::try_parse_from(["scoped", "--changed-only"]).is_err());
+        assert!(SinceCli::try_parse_from(["scoped", "--lab-changed-files-json", "[]"]).is_err());
+    }
+
+    #[test]
+    fn lab_group_exposes_the_hidden_payload_but_not_changed_only() {
+        assert!(LabCli::try_parse_from(["scoped", "--lab-changed-files-json", "[]"]).is_ok());
+        assert!(LabCli::try_parse_from(["scoped", "--changed-only"]).is_err());
+    }
+
+    #[test]
+    fn changed_since_and_changed_only_conflict_in_both_orders() {
+        assert!(
+            ScopeCli::try_parse_from(["scoped", "--changed-since", "main", "--changed-only"])
+                .is_err()
+        );
+        assert!(
+            ScopeCli::try_parse_from(["scoped", "--changed-only", "--changed-since", "main"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn resolve_prefers_precomputed_over_lab_payload() {
+        let mut args = LabChangedScopeArgs {
+            lab_changed_files_json: Some(r#"["from-lab.rs"]"#.to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            args.resolve().expect("lab payload resolves"),
+            Some(vec!["from-lab.rs".to_string()])
+        );
+
+        args.since.precomputed_changed_files = Some(vec!["injected.rs".to_string()]);
+        assert_eq!(
+            args.resolve().expect("precomputed wins"),
+            Some(vec!["injected.rs".to_string()])
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_a_malformed_lab_payload() {
+        let args = LabChangedScopeArgs {
+            lab_changed_files_json: Some("not-json".to_string()),
+            ..Default::default()
+        };
+        let error = args.resolve().expect_err("malformed payload should fail");
+        assert_eq!(
+            error.code,
+            homeboy::core::ErrorCode::ValidationInvalidArgument
+        );
+    }
+
+    #[test]
+    fn scope_predicates_track_every_narrowing_mechanism() {
+        let full = ChangedScopeArgs::default();
+        assert!(full.is_full_scope());
+        assert!(!full.is_scoped());
+
+        let changed_only = ChangedScopeArgs {
+            changed_only: true,
+            ..Default::default()
+        };
+        assert!(changed_only.is_scoped());
+        assert!(!changed_only.is_full_scope());
+
+        let mut since = ChangedScopeArgs::default();
+        since.lab.since.changed_since = Some("origin/main".to_string());
+        assert!(since.is_scoped());
+    }
+}
+
+// ============================================================================
 // LintSniffArgs: --errors-only + --sniffs + --exclude-sniffs
 // ============================================================================
 
