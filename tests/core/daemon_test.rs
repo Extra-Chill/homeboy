@@ -1762,6 +1762,22 @@ fn local_freshness_report_carries_the_same_evidence_fields_as_the_remote_produce
 }
 
 #[test]
+fn dead_lease_conflict_suppresses_the_adoption_command_until_candidate_attribution_clears() {
+    let candidate = DaemonProcessCandidate {
+        pid: 4242,
+        executable: "/tmp/homeboy".to_string(),
+        cmdline: "HOME=/tmp/home homeboy daemon serve --addr 127.0.0.1:0".to_string(),
+        bind_endpoint: Some("127.0.0.1:0".to_string()),
+        durable_store_path: Some("/tmp/home/.config/homeboy/daemon/jobs.json".to_string()),
+        build_identity: None,
+        ownership: DaemonProcessOwnership::Ambiguous,
+    };
+
+    assert!(has_conflicting_process_candidates(&[candidate]));
+    assert!(!has_conflicting_process_candidates(&[]));
+}
+
+#[test]
 fn local_freshness_report_plans_explicit_reconciliation_for_a_restartable_lease() {
     let _home = HomeGuard::new();
     let state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");

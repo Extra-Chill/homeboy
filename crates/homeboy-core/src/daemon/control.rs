@@ -258,12 +258,16 @@ fn parse_daemon_process_candidate(
     let durable_store_path = state_dir
         .map(|state_dir| Path::new(state_dir).join("jobs.json"))
         .or_else(|| home.map(|home| Path::new(home).join(".config/homeboy/daemon/jobs.json")));
+    // A command-line fragment alone cannot attribute a process to this daemon
+    // store. In particular, shells and test runners can carry `daemon serve` in
+    // their arguments while owning no Homeboy state at all.
+    let durable_store_path = durable_store_path?;
     let executable_matches = current_exe.is_some_and(|current| {
         Path::new(&executable).canonicalize().ok().as_deref() == Some(current)
     });
-    let ownership = match durable_store_path.as_deref() {
-        Some(store) if store != jobs_path => DaemonProcessOwnership::Unrelated,
-        Some(_) if executable_matches => DaemonProcessOwnership::Owning,
+    let ownership = match durable_store_path.as_path() {
+        store if store != jobs_path => DaemonProcessOwnership::Unrelated,
+        _ if executable_matches => DaemonProcessOwnership::Owning,
         _ => DaemonProcessOwnership::Ambiguous,
     };
     Some(DaemonProcessCandidate {
@@ -271,7 +275,7 @@ fn parse_daemon_process_candidate(
         executable: executable.clone(),
         cmdline: normalize_cmdline(&cmdline),
         bind_endpoint,
-        durable_store_path: durable_store_path.map(|path| path.display().to_string()),
+        durable_store_path: Some(durable_store_path.display().to_string()),
         build_identity: executable_matches.then_some("current_executable".to_string()),
         ownership,
     })
@@ -1467,6 +1471,12 @@ where
             None,
         )
     })?;
+    // A free owner lock excludes a serving daemon, but it does not identify a
+    // foreground `daemon serve` candidate that failed before taking that lock.
+    // Reject that stale-candidate split view before reconciling jobs so retrying
+    // the status-provided command cannot mutate durable evidence and then fail
+    // during replacement startup.
+    refuse_unleased_process_conflict()?;
     // Revalidate after taking the lifecycle-critical lock: a PID can be reused
     // between status inspection and exact orphan adoption.
     if !pid_is_proven_dead(state.pid, &pid_is_running) {

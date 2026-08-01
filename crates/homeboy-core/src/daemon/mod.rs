@@ -940,14 +940,14 @@ pub fn read_status() -> Result<DaemonStatus> {
     let active_jobs = active_job_recovery_evidence.len();
     let process_candidates = control::daemon_process_candidates(&jobs_path)?;
     let mut freshness = freshness_report_from_validation(&validation, active_jobs);
-    let candidate_conflict = validation.stale_reason_code
-        == Some(DaemonStaleReasonCode::LeaseMissing)
-        && process_candidates.iter().any(|candidate| {
-            matches!(
-                candidate.ownership,
-                DaemonProcessOwnership::Owning | DaemonProcessOwnership::Ambiguous
-            )
-        });
+    // A dead lease proves only its recorded PID is gone. It cannot authorize a
+    // replacement while another foreground candidate might still own this store.
+    // In particular, offering adoption here would lead it to the same candidate
+    // preflight and leave the dead lease in place on every retry.
+    let candidate_conflict = matches!(
+        validation.stale_reason_code,
+        Some(DaemonStaleReasonCode::LeaseMissing | DaemonStaleReasonCode::PidDead)
+    ) && has_conflicting_process_candidates(&process_candidates);
     let stale_reason = if candidate_conflict {
         let evidence = process_candidates
             .iter()
@@ -971,10 +971,8 @@ pub fn read_status() -> Result<DaemonStatus> {
             evidence.join(", ")
         );
         freshness.ownership_evidence = Some(message.clone());
-        freshness.repair_plan = vec![DaemonRepairStep {
-            code: "daemon_conflicting_owner_inspect".to_string(),
-            command: "homeboy daemon status".to_string(),
-        }];
+        freshness.adoption_command = None;
+        freshness.repair_plan.clear();
         Some(message)
     } else {
         validation.stale_reason.clone()
@@ -994,6 +992,15 @@ pub fn read_status() -> Result<DaemonStatus> {
             .then(read_termination_evidence)
             .transpose()?
             .flatten(),
+    })
+}
+
+fn has_conflicting_process_candidates(candidates: &[DaemonProcessCandidate]) -> bool {
+    candidates.iter().any(|candidate| {
+        matches!(
+            candidate.ownership,
+            DaemonProcessOwnership::Owning | DaemonProcessOwnership::Ambiguous
+        )
     })
 }
 
