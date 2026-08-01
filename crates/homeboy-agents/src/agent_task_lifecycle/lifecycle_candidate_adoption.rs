@@ -185,6 +185,8 @@ pub fn start_candidate_adoption_with_policy(
             terminal_error: None,
             completed_at: None,
             result: None,
+            remediation_run_id: None,
+            remediation_status_command: None,
         });
         record.updated_at = Some(now);
         true
@@ -217,6 +219,33 @@ pub fn start_candidate_adoption_with_policy(
         ));
     }
     Ok(record)
+}
+
+pub fn checkpoint_candidate_adoption_remediation(
+    run_id: &str,
+    remediation_run_id: &str,
+) -> Result<()> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let Some(attempt) = record.candidate_adoption.as_mut() else {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "candidate adoption remediation requires an active adoption",
+            Some(run_id.to_string()),
+            None,
+        ));
+    };
+    let now = now_timestamp();
+    attempt.state = "verification_running".to_string();
+    attempt.phase = "provider_remediation".to_string();
+    attempt.active_gate = "provider remediation".to_string();
+    attempt.updated_at = now.clone();
+    attempt.heartbeat_at = now;
+    attempt.remediation_run_id = Some(remediation_run_id.to_string());
+    attempt.remediation_status_command = Some(format!(
+        "homeboy agent-task status {remediation_run_id} --full"
+    ));
+    store::write_record(&record)?;
+    Ok(())
 }
 
 pub fn start_candidate_adoption_gate(
