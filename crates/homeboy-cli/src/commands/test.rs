@@ -811,6 +811,7 @@ fn enrich_test_result_from_persisted_artifacts(
             .as_ref()
             .and_then(homeboy::core::observation::homeboy_findings_from_test_analysis_input);
     }
+    extension_test::finalize_test_result_after_artifact_hydration(workflow);
     let mut summary = build_test_summary(
         workflow.test_counts.as_ref(),
         workflow.analysis.as_ref(),
@@ -1359,6 +1360,7 @@ mod tests {
                 status: "failed".to_string(),
                 component: "homeboy".to_string(),
                 exit_code: 1,
+                runner_exit_code: None,
                 test_counts: None,
                 test_durations: None,
                 findings: None,
@@ -1448,6 +1450,7 @@ mod tests {
                 status: "failed".to_string(),
                 component: "homeboy".to_string(),
                 exit_code: 1,
+                runner_exit_code: None,
                 test_counts: None,
                 test_durations: None,
                 findings: None,
@@ -1538,6 +1541,7 @@ mod tests {
                     status: "failed".to_string(),
                     component: "homeboy".to_string(),
                     exit_code: 101,
+                    runner_exit_code: None,
                     test_counts: Some(TestCounts::new(0, 0, 0, 0)),
                     test_durations: None,
                     findings: None,
@@ -1615,6 +1619,7 @@ mod tests {
                 status: "failed".to_string(),
                 component: "homeboy".to_string(),
                 exit_code: 1,
+                runner_exit_code: None,
                 test_counts: None,
                 test_durations: None,
                 findings: None,
@@ -1733,6 +1738,79 @@ mod tests {
     }
 
     #[test]
+    fn delayed_passing_counts_only_pass_when_the_runner_succeeded() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let args = sample_args();
+
+            for (runner_exit_code, expected_status, expected_exit_code) in
+                [(0, "passed", 0), (7, "failed", 7)]
+            {
+                let run_dir = RunDir::create().expect("run dir");
+                let files = run_dir.path().join("files");
+                fs::create_dir(&files).expect("artifact files dir");
+                fs::write(
+                    files.join("test-results.json"),
+                    br#"{"total":3,"passed":3,"failed":0,"skipped":0}"#,
+                )
+                .expect("result bytes");
+                let observation =
+                    start_test_observation("homeboy", home.path(), &args, "test", Some(&run_dir))
+                        .expect("observation");
+                let mut workflow = extension_test::TestRunWorkflowResult {
+                    status: "failed".to_string(),
+                    component: "homeboy".to_string(),
+                    // The successful runner has a stale derived no-counts gate
+                    // exit; the failed runner retains its genuine exit.
+                    exit_code: if runner_exit_code == 0 {
+                        1
+                    } else {
+                        runner_exit_code
+                    },
+                    runner_exit_code: Some(runner_exit_code),
+                    test_counts: None,
+                    test_durations: None,
+                    findings: None,
+                    failure_analysis_input: None,
+                    coverage: None,
+                    baseline_comparison: None,
+                    analysis: None,
+                    autofix: None,
+                    hints: None,
+                    test_scope: None,
+                    summary: None,
+                    raw_output: None,
+                    extension_phase_timings: vec![homeboy_extension::ExtensionPhaseTiming {
+                        name: "provider-test".to_string(),
+                        duration_ms: 1,
+                        status: Some("completed".to_string()),
+                        message: None,
+                        artifacts: vec![serde_json::json!({
+                            "ref": "artifact://files/test-results.json"
+                        })],
+                        metadata: Default::default(),
+                    }],
+                };
+
+                persist_declared_test_artifacts(&observation, &mut workflow)
+                    .expect("persist delayed result artifact");
+
+                assert_eq!(workflow.status, expected_status);
+                assert_eq!(workflow.exit_code, expected_exit_code);
+                assert_eq!(
+                    workflow.test_counts.as_ref().map(|counts| counts.passed),
+                    Some(3)
+                );
+                assert_eq!(
+                    workflow.summary.as_ref().map(|summary| summary.exit_code),
+                    Some(expected_exit_code)
+                );
+                run_dir.cleanup();
+            }
+        });
+    }
+
+    #[test]
     fn test_artifact_locator_requires_a_normal_relative_path() {
         for locator in [
             "artifact://files/../escape.log",
@@ -1754,6 +1832,7 @@ mod tests {
             status: "failed".to_string(),
             component: "fixture".to_string(),
             exit_code: 1,
+            runner_exit_code: None,
             test_counts: None,
             test_durations: None,
             findings: None,
@@ -1841,6 +1920,7 @@ mod tests {
                     status: "failed".to_string(),
                     component: "homeboy".to_string(),
                     exit_code: 143,
+                    runner_exit_code: None,
                     test_counts: None,
                     test_durations: None,
                     findings: None,
