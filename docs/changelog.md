@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.327.0] - 2026-08-01
+
+### Added
+- activate the layer_ownership architecture gate
+
+### Changed
+- fail the build when a provider registry is never wired
+
+### Fixed
+- Fix adoption remediation observability
+- run workspace shell programs under a pipefail-capable interpreter
+- stop discarding declared harvest_excludes on config load
+- make the response envelope one contract, not two
+- Fix durable cleanup submission response
+- gate declared test secrets before dependency hydration
+- decode controller job responses
+
 ## [0.326.1] - 2026-07-31
 
 ### Changed
