@@ -1251,6 +1251,7 @@ fn cleanup_block_reason(
     if !resource.ephemeral {
         match git_safety_path(resource, path) {
             Some(path) if recovered_workspace_matches(resource, &path) => {}
+            Some(path) if promoted_attempt_workspace_matches(resource, &path) => {}
             Some(path) if git_dirty_or_unpushed(&path) => {
                 return Ok(Some("git checkout has dirty or unpushed state".to_string()));
             }
@@ -1438,6 +1439,114 @@ fn git_dirty_or_unpushed(path: &Path) -> bool {
     )
     .map(|count| count.trim() != "0")
     .unwrap_or(true)
+}
+
+/// A promoted provider attempt may remain intentionally staged so the harvested
+/// patch is recoverable. It is removable only when the durable applied-promotion
+/// record authenticates that exact patch and no committed or extra worktree state
+/// has appeared since harvesting.
+fn promoted_attempt_workspace_matches(
+    resource: &ControllerScratchResource,
+    workspace: &Path,
+) -> bool {
+    let Ok(record) = crate::agent_task_lifecycle::exact_record(&resource.run_id) else {
+        return false;
+    };
+    let Some(promotion) = record
+        .metadata
+        .get("latest_promotion")
+        .cloned()
+        .and_then(|value| {
+            serde_json::from_value::<crate::agent_task_promotion::AgentTaskPromotionReport>(value)
+                .ok()
+        })
+    else {
+        return false;
+    };
+    if promotion.status != crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+        || promotion.source.run_id.as_deref() != Some(resource.run_id.as_str())
+        || promotion.source.task_id != resource.task_id
+        || promotion.patch_artifact.kind != "patch"
+    {
+        return false;
+    }
+    let Some(artifact) = resource
+        .terminal_evidence
+        .as_ref()
+        .and_then(|evidence| evidence.pointer("/outcome/artifacts"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|artifacts| {
+            artifacts.iter().find(|artifact| {
+                artifact.get("id").and_then(serde_json::Value::as_str)
+                    == Some(promotion.patch_artifact.id.as_str())
+                    && artifact.get("kind").and_then(serde_json::Value::as_str) == Some("patch")
+            })
+        })
+    else {
+        return false;
+    };
+    let Some(base) = artifact
+        .pointer("/metadata/base_ref")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Some(artifact_path) = artifact.get("path").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let Some(artifact_sha256) = artifact.get("sha256").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    if artifact_path != promotion.patch_artifact.path
+        || promotion.patch_artifact.sha256.as_deref() != Some(artifact_sha256)
+    {
+        return false;
+    }
+    let Ok(patch) = fs::read(artifact_path) else {
+        return false;
+    };
+    if sha256(&patch) != artifact_sha256 {
+        return false;
+    }
+    workspace_matches_staged_patch(workspace, base, &patch)
+}
+
+fn workspace_matches_staged_patch(workspace: &Path, base: &str, patch: &[u8]) -> bool {
+    let Ok(head) = git::run_git(workspace, &["rev-parse", "HEAD"], "git rev-parse HEAD") else {
+        return false;
+    };
+    if head.trim() != base {
+        return false;
+    }
+    let Ok(status) = git::run_git(
+        workspace,
+        &["status", "--porcelain=v1", "--ignored"],
+        "git status",
+    ) else {
+        return false;
+    };
+    // Harvest stages the complete candidate. Any worktree-side, untracked, or
+    // ignored path is therefore outside the authenticated patch.
+    if status.lines().any(|line| {
+        line.starts_with("??") || line.starts_with("!!") || line.as_bytes().get(1) != Some(&b' ')
+    }) {
+        return false;
+    }
+    git::run_git(
+        workspace,
+        &[
+            "diff",
+            "--cached",
+            "--binary",
+            "--full-index",
+            "--find-renames",
+            "HEAD",
+            "--",
+            ".",
+        ],
+        "git diff cached",
+    )
+    .is_ok_and(|current| current.as_bytes() == patch)
 }
 
 fn git_safety_path(resource: &ControllerScratchResource, path: &Path) -> Option<PathBuf> {
@@ -3257,6 +3366,65 @@ mod tests {
         assert!(
             attempt_worktree_commits_are_preserved(&worktree, &source),
             "an anchoring branch makes the same commit preserved"
+        );
+    }
+
+    #[test]
+    fn staged_patch_proof_rejects_extra_files_and_commits() {
+        let root = tempfile::tempdir().expect("root");
+        let lease = root.path().join("lease");
+        let (_source, worktree) = attempt_worktree(root.path(), &lease);
+        let base = git::run_git(&worktree, &["rev-parse", "HEAD"], "git rev-parse HEAD")
+            .expect("base")
+            .trim()
+            .to_string();
+        fs::write(
+            worktree.join("generated.rs"),
+            "pub const GENERATED: bool = true;\n",
+        )
+        .expect("candidate");
+        run_git(&worktree, &["add", "generated.rs"]);
+        let patch = git::run_git(
+            &worktree,
+            &[
+                "diff",
+                "--cached",
+                "--binary",
+                "--full-index",
+                "--find-renames",
+                "HEAD",
+                "--",
+                ".",
+            ],
+            "git diff cached",
+        )
+        .expect("candidate patch")
+        .into_bytes();
+
+        assert!(
+            workspace_matches_staged_patch(&worktree, &base, &patch),
+            "the harvested staged candidate must match exactly"
+        );
+
+        fs::write(worktree.join("untracked.txt"), "not in the patch\n").expect("extra file");
+        assert!(
+            !workspace_matches_staged_patch(&worktree, &base, &patch),
+            "an untracked file is unrelated state and must retain the worktree"
+        );
+        fs::remove_file(worktree.join("untracked.txt")).expect("remove extra file");
+
+        fs::create_dir_all(worktree.join("vendor/package")).expect("vendor tree");
+        fs::write(worktree.join("vendor/package/index.js"), "generated\n").expect("vendor file");
+        assert!(
+            !workspace_matches_staged_patch(&worktree, &base, &patch),
+            "an untracked dependency tree is outside the authenticated patch"
+        );
+        fs::remove_dir_all(worktree.join("vendor")).expect("remove vendor tree");
+
+        run_git(&worktree, &["commit", "-m", "provider commit"]);
+        assert!(
+            !workspace_matches_staged_patch(&worktree, &base, &patch),
+            "a provider commit must remain recoverable even when its diff matches"
         );
     }
 
