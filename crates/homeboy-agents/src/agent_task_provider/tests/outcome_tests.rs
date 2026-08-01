@@ -313,7 +313,7 @@ fn homeboy_local_artifact_normalization_measures_empty_nonempty_and_unavailable_
         artifact: Some(empty),
         metadata: Value::Null,
     }];
-    normalize_homeboy_local_artifact_sizes(&mut empty_outcome, root.path(), &provenance);
+    normalize_homeboy_local_artifact_sizes(&mut empty_outcome, root.path(), &provenance, None);
 
     assert_eq!(empty_outcome.status, AgentTaskOutcomeStatus::NoOp);
     assert_eq!(empty_outcome.artifacts[0].size_bytes, Some(0));
@@ -330,7 +330,7 @@ fn homeboy_local_artifact_normalization_measures_empty_nonempty_and_unavailable_
     nonempty_outcome.status = AgentTaskOutcomeStatus::Succeeded;
     nonempty_outcome.failure_classification = None;
     nonempty_outcome.artifacts = vec![nonempty];
-    normalize_homeboy_local_artifact_sizes(&mut nonempty_outcome, root.path(), &provenance);
+    normalize_homeboy_local_artifact_sizes(&mut nonempty_outcome, root.path(), &provenance, None);
     assert_eq!(nonempty_outcome.status, AgentTaskOutcomeStatus::Succeeded);
     assert!(nonempty_outcome.artifacts[0].size_bytes.unwrap_or_default() > 0);
 
@@ -338,7 +338,12 @@ fn homeboy_local_artifact_normalization_measures_empty_nonempty_and_unavailable_
     unavailable_outcome.status = AgentTaskOutcomeStatus::Succeeded;
     unavailable_outcome.failure_classification = None;
     unavailable_outcome.artifacts = vec![unavailable];
-    normalize_homeboy_local_artifact_sizes(&mut unavailable_outcome, root.path(), &provenance);
+    normalize_homeboy_local_artifact_sizes(
+        &mut unavailable_outcome,
+        root.path(),
+        &provenance,
+        None,
+    );
     assert_eq!(
         unavailable_outcome.status,
         AgentTaskOutcomeStatus::Succeeded
@@ -386,7 +391,7 @@ fn empty_patch_with_substantive_evidence_is_flagged_for_review_not_noop() {
     outcome.status = AgentTaskOutcomeStatus::Succeeded;
     outcome.failure_classification = None;
     outcome.artifacts = vec![empty_patch, transcript];
-    normalize_homeboy_local_artifact_sizes(&mut outcome, root.path(), &provenance);
+    normalize_homeboy_local_artifact_sizes(&mut outcome, root.path(), &provenance, None);
 
     assert_eq!(
         outcome.status,
@@ -400,6 +405,108 @@ fn empty_patch_with_substantive_evidence_is_flagged_for_review_not_noop() {
         .as_deref()
         .unwrap_or_default()
         .contains("needs review"));
+}
+
+#[test]
+fn revision_bound_no_change_verdict_accepts_substantive_review_only_for_clean_checkout() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let artifacts = tempfile::tempdir().expect("artifact root");
+    for args in [
+        ["init"].as_slice(),
+        ["config", "user.email", "homeboy@example.test"].as_slice(),
+        ["config", "user.name", "Homeboy Test"].as_slice(),
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(workspace.path())
+            .status()
+            .expect("run git")
+            .success());
+    }
+    fs::write(workspace.path().join("reviewed.rs"), "reviewed\n").expect("source");
+    assert!(std::process::Command::new("git")
+        .args(["add", "reviewed.rs"])
+        .current_dir(workspace.path())
+        .status()
+        .expect("stage source")
+        .success());
+    assert!(std::process::Command::new("git")
+        .args(["commit", "-m", "review base"])
+        .current_dir(workspace.path())
+        .status()
+        .expect("commit source")
+        .success());
+    let revision = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(workspace.path())
+            .output()
+            .expect("read revision")
+            .stdout,
+    )
+    .expect("UTF-8 revision")
+    .trim()
+    .to_string();
+    let empty_patch_path = artifacts.path().join("review.patch");
+    let transcript_path = artifacts.path().join("review.md");
+    fs::write(&empty_patch_path, "").expect("empty patch");
+    fs::write(&transcript_path, "No findings.\n".repeat(1024)).expect("large transcript");
+    let provenance = AgentTaskArtifactsPathProvenance {
+        owner: "homeboy".to_string(),
+        locality: "runner".to_string(),
+        plan_id: "plan".to_string(),
+        run_id: None,
+        task_id: "review".to_string(),
+        attempt: 1,
+    };
+    let mut patch = fixture_artifact("patch", "patch", &empty_patch_path, Some("text/x-patch"));
+    patch.size_bytes = None;
+    let mut transcript = fixture_artifact(
+        "transcript",
+        "transcript",
+        &transcript_path,
+        Some("text/markdown"),
+    );
+    transcript.size_bytes = None;
+    let mut outcome = failed_outcome_with_run_result(json!({
+        "status": "succeeded",
+        "intentional_no_change": {
+            "schema": "homeboy/intentional-no-change/v1",
+            "verdict": "no_change",
+            "inspected_revision": revision,
+        }
+    }));
+    outcome.status = AgentTaskOutcomeStatus::Succeeded;
+    outcome.failure_classification = None;
+    outcome.artifacts = vec![patch, transcript];
+
+    normalize_homeboy_local_artifact_sizes(
+        &mut outcome,
+        artifacts.path(),
+        &provenance,
+        Some(workspace.path()),
+    );
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+    assert!(outcome
+        .summary
+        .as_deref()
+        .unwrap_or_default()
+        .contains("intentional no-change"));
+
+    fs::write(workspace.path().join("uncaptured.rs"), "must recover\n").expect("untracked source");
+    normalize_homeboy_local_artifact_sizes(
+        &mut outcome,
+        artifacts.path(),
+        &provenance,
+        Some(workspace.path()),
+    );
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+    assert!(outcome
+        .summary
+        .as_deref()
+        .unwrap_or_default()
+        .contains("checkout changed"));
 }
 
 #[test]

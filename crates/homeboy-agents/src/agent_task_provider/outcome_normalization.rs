@@ -39,6 +39,7 @@ pub(super) fn normalize_homeboy_local_artifact_sizes(
     outcome: &mut AgentTaskOutcome,
     artifact_root: &std::path::Path,
     provenance: &AgentTaskArtifactsPathProvenance,
+    workspace_root: Option<&std::path::Path>,
 ) {
     if provenance.owner != "homeboy" || provenance.locality != "runner" {
         return;
@@ -63,23 +64,124 @@ pub(super) fn normalize_homeboy_local_artifact_sizes(
     }
 
     if outcome.status == AgentTaskOutcomeStatus::Succeeded && has_known_empty_change_set(outcome) {
-        if has_substantive_non_change_evidence(outcome) {
-            // An empty change artifact next to substantive work evidence
-            // (a transcript, report, log, or other content-bearing artifact)
-            // is not a clean "nothing happened" — it is a patch-capture
-            // failure that would otherwise silently discard real changes,
-            // including committed ones (#7719). Surface it for controller
-            // review/salvage instead of collapsing it to NoOp.
-            outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
-            outcome.summary = Some(
+        match intentional_no_change_verdict(outcome, workspace_root) {
+            IntentionalNoChangeVerdict::Verified => {
+                // Preserve Succeeded so promotion follows the empty-patch gate
+                // path and records a verified no-op rather than attempting a
+                // candidate recovery.
+                outcome.summary = Some(
+                    "provider declared an intentional no-change review verdict bound to the verified workspace revision"
+                        .to_string(),
+                );
+            }
+            IntentionalNoChangeVerdict::Invalid(message) => {
+                outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
+                outcome.summary = Some(message);
+            }
+            IntentionalNoChangeVerdict::Absent if has_substantive_non_change_evidence(outcome) => {
+                // An empty change artifact next to substantive work evidence
+                // (a transcript, report, log, or other content-bearing artifact)
+                // is not a clean "nothing happened" — it is a patch-capture
+                // failure that would otherwise silently discard real changes,
+                // including committed ones (#7719). Surface it for controller
+                // review/salvage instead of collapsing it to NoOp.
+                outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
+                outcome.summary = Some(
                 "provider reported success with an empty change artifact but produced substantive work evidence; the patch may have failed to capture real changes and needs review"
                     .to_string(),
             );
-        } else {
-            outcome.status = AgentTaskOutcomeStatus::NoOp;
-            outcome.summary = Some("provider produced an empty change artifact".to_string());
+            }
+            IntentionalNoChangeVerdict::Absent => {
+                outcome.status = AgentTaskOutcomeStatus::NoOp;
+                outcome.summary = Some("provider produced an empty change artifact".to_string());
+            }
         }
     }
+}
+
+const INTENTIONAL_NO_CHANGE_SCHEMA: &str = "homeboy/intentional-no-change/v1";
+
+enum IntentionalNoChangeVerdict {
+    Absent,
+    Verified,
+    Invalid(String),
+}
+
+#[derive(serde::Deserialize)]
+struct IntentionalNoChangeDeclaration {
+    schema: String,
+    verdict: String,
+    inspected_revision: String,
+}
+
+/// A provider may declare a no-change review only through this versioned result
+/// field. Homeboy, rather than the provider, verifies the declared revision and
+/// the complete checkout state before allowing transcript evidence to be a
+/// successful no-op.
+fn intentional_no_change_verdict(
+    outcome: &AgentTaskOutcome,
+    workspace_root: Option<&std::path::Path>,
+) -> IntentionalNoChangeVerdict {
+    let Some(verdict) = outcome
+        .outputs
+        .get("provider_run_result")
+        .and_then(|result| result.get("intentional_no_change"))
+    else {
+        return IntentionalNoChangeVerdict::Absent;
+    };
+    let Ok(declaration) = serde_json::from_value::<IntentionalNoChangeDeclaration>(verdict.clone())
+    else {
+        return IntentionalNoChangeVerdict::Invalid(
+            "provider declared an intentional no-change verdict without a valid schema, no_change verdict, and inspected workspace revision; changes require recovery review"
+                .to_string(),
+        );
+    };
+    if declaration.schema != INTENTIONAL_NO_CHANGE_SCHEMA
+        || declaration.verdict != "no_change"
+        || declaration.inspected_revision.trim().is_empty()
+    {
+        return IntentionalNoChangeVerdict::Invalid(
+            "provider declared an invalid intentional no-change verdict; changes require recovery review"
+                .to_string(),
+        );
+    }
+    let Some(workspace_root) = workspace_root else {
+        return IntentionalNoChangeVerdict::Invalid(
+            "provider declared an intentional no-change verdict but Homeboy has no workspace checkout to verify; changes require recovery review"
+                .to_string(),
+        );
+    };
+    let head = git_output(workspace_root, &["rev-parse", "HEAD"]);
+    if head.as_deref() != Some(declaration.inspected_revision.as_str()) {
+        return IntentionalNoChangeVerdict::Invalid(
+            "provider declared an intentional no-change verdict for a revision that does not match the workspace checkout; changes require recovery review"
+                .to_string(),
+        );
+    }
+    if git_output(
+        workspace_root,
+        &["status", "--porcelain", "--untracked-files=all"],
+    )
+    .is_none_or(|status| !status.is_empty())
+    {
+        return IntentionalNoChangeVerdict::Invalid(
+            "provider declared an intentional no-change verdict but the workspace checkout changed; changes require recovery review"
+                .to_string(),
+        );
+    }
+    IntentionalNoChangeVerdict::Verified
+}
+
+fn git_output(workspace_root: &std::path::Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(workspace_root)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Evidence that the executor did real work even though its change artifact is

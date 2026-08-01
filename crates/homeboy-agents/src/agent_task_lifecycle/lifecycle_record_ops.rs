@@ -235,7 +235,8 @@ fn provider_executions_for_task(
                 Some("running") => ProviderRuntimeState::Running,
                 Some("succeeded") => ProviderRuntimeState::Succeeded,
                 Some("cancelled") => ProviderRuntimeState::Cancelled,
-                Some("timed_out") | Some("candidate_recoverable") => ProviderRuntimeState::TimedOut,
+                Some("timed_out") => ProviderRuntimeState::TimedOut,
+                Some("candidate_recoverable") => ProviderRuntimeState::Failed,
                 _ => ProviderRuntimeState::Failed,
             };
             Some(ProviderRuntimeLifecycle {
@@ -305,7 +306,7 @@ pub(crate) fn provider_runtime_state_for_task_state(
         }
         Some(AgentTaskState::Running) => ProviderRuntimeState::Running,
         Some(AgentTaskState::Succeeded) => ProviderRuntimeState::Succeeded,
-        Some(AgentTaskState::CandidateRecoverable) => ProviderRuntimeState::TimedOut,
+        Some(AgentTaskState::CandidateRecoverable) => ProviderRuntimeState::Failed,
         Some(AgentTaskState::Failed) => ProviderRuntimeState::Failed,
         Some(AgentTaskState::Cancelled) => ProviderRuntimeState::Cancelled,
         Some(AgentTaskState::TimedOut) => ProviderRuntimeState::TimedOut,
