@@ -3,6 +3,22 @@ use std::path::{Component, Path, PathBuf};
 
 use super::*;
 
+/// Every table that declares `FOREIGN KEY(run_id) REFERENCES runs(id)`.
+///
+/// A run row must never be deleted while a row that references it survives.
+/// With `PRAGMA foreign_keys` on (#11129) that is enforced rather than merely
+/// intended, so a delete path that forgets a table now fails loudly instead of
+/// leaving orphans behind. The list is asserted against the live schema in
+/// `store_test`, so adding a sixth child table without adding it here breaks a
+/// test rather than a database.
+pub(crate) const RUN_OWNED_CHILD_TABLES: [&str; 5] = [
+    "artifacts",
+    "findings",
+    "triage_items",
+    "trace_spans",
+    "trace_runs",
+];
+
 pub(crate) fn validate_required(field: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         return Err(Error::validation_invalid_argument(

@@ -391,8 +391,14 @@ impl ObservationStore {
         if !owned {
             return Ok(());
         }
-        tx.execute("DELETE FROM artifacts WHERE run_id = ?1", [run_id])
-            .map_err(sqlite_error("delete synthetic run artifacts"))?;
+        // Every run-owned table, not just artifacts. This path used to clear
+        // artifacts alone, which silently orphaned any other child row; with
+        // foreign keys enforced (#11129) it would instead fail the parent
+        // delete outright.
+        for table in RUN_OWNED_CHILD_TABLES {
+            tx.execute(&format!("DELETE FROM {table} WHERE run_id = ?1"), [run_id])
+                .map_err(sqlite_error(format!("delete synthetic run {table}")))?;
+        }
         tx.execute("DELETE FROM runs WHERE id = ?1", [run_id])
             .map_err(sqlite_error("delete synthetic run"))?;
         tx.commit()

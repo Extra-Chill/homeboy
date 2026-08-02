@@ -1420,3 +1420,143 @@ mod notification_delivery_marker_tests {
         });
     }
 }
+
+/// #11129: the schema has declared `FOREIGN KEY(run_id) REFERENCES runs(id)` on
+/// every child table since it was created, but SQLite enforces foreign keys per
+/// connection and defaults them off, and the pragma was never set anywhere in
+/// the repository. These tests hold the invariant to the database rather than
+/// to the comment.
+mod referential_integrity_tests {
+    use super::*;
+    use crate::observation::store::RUN_OWNED_CHILD_TABLES;
+
+    #[test]
+    fn an_initialized_store_enforces_the_declared_foreign_keys() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+
+            assert!(
+                crate::observation::store::schema::foreign_keys_enforced(&store.connection)
+                    .expect("read enforcement"),
+                "an initialized store must enforce the foreign keys it declares"
+            );
+        });
+    }
+
+    /// The invariant made observable: a run cannot be dropped out from under a
+    /// row that references it. Before the pragma this delete silently
+    /// succeeded and left an `artifacts` row pointing at a path whose bytes
+    /// retention had already reclaimed.
+    #[test]
+    fn a_run_cannot_be_deleted_while_a_child_row_still_references_it() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let run = store
+                .start_run(sample_run("trace", "homeboy"))
+                .expect("start run");
+            let artifact_path = home.path().join("trace-results.json");
+            std::fs::write(&artifact_path, b"{}").expect("write artifact");
+            store
+                .record_artifact(&run.id, "trace-results", &artifact_path)
+                .expect("record artifact");
+
+            let orphaning = store
+                .connection
+                .execute("DELETE FROM runs WHERE id = ?1", [&run.id]);
+
+            assert!(
+                orphaning.is_err(),
+                "deleting a referenced run must be refused, not silently orphan its artifact"
+            );
+            assert_eq!(
+                store.list_artifacts(&run.id).expect("list artifacts").len(),
+                1
+            );
+        });
+    }
+
+    /// The delete paths enumerate child tables by hand. If a sixth child table
+    /// is added and not enumerated, enforcement turns the omission into a hard
+    /// failure at retention time -- on an operator's machine. This asserts the
+    /// list against the live schema so the omission fails here instead.
+    #[test]
+    fn every_table_referencing_runs_is_covered_by_the_delete_paths() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+
+            let mut referencing: Vec<String> = {
+                let mut statement = store
+                    .connection
+                    .prepare(
+                        "SELECT name FROM sqlite_master \
+                         WHERE type = 'table' AND sql LIKE '%REFERENCES runs(id)%'",
+                    )
+                    .expect("prepare schema scan");
+                let rows = statement
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .expect("scan schema");
+                rows.map(|row| row.expect("read table name")).collect()
+            };
+            referencing.sort();
+            let mut covered: Vec<String> = RUN_OWNED_CHILD_TABLES
+                .iter()
+                .map(|table| (*table).to_string())
+                .collect();
+            covered.sort();
+
+            assert_eq!(
+                referencing, covered,
+                "every table that references runs(id) must be deleted before its run"
+            );
+        });
+    }
+
+    /// Retention deletes children first and the parent last. With enforcement
+    /// on, getting that order wrong is no longer a latent orphan -- it is an
+    /// error -- so the happy path is worth pinning.
+    #[test]
+    fn terminal_retention_deletes_a_run_and_its_children_in_a_safe_order() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let mut store = ObservationStore::open_initialized().expect("init store");
+            let run = store
+                .start_run(sample_run("trace", "homeboy"))
+                .expect("start run");
+            let artifact_path = home.path().join("trace-results.json");
+            std::fs::write(&artifact_path, b"{}").expect("write artifact");
+            store
+                .record_artifact(&run.id, "trace-results", &artifact_path)
+                .expect("record artifact");
+            store
+                .record_finding(&NewFindingRecord {
+                    run_id: run.id.clone(),
+                    tool: "clippy".to_string(),
+                    rule: None,
+                    file: None,
+                    line: None,
+                    severity: None,
+                    fingerprint: None,
+                    message: "finding".to_string(),
+                    fixable: None,
+                    metadata_json: serde_json::json!({}),
+                })
+                .expect("record finding");
+            store
+                .finish_run(&run.id, RunStatus::Pass, None)
+                .expect("finish run");
+
+            store
+                .delete_terminal_runs(std::slice::from_ref(&run.id))
+                .expect("terminal retention must not be refused by the constraint");
+
+            assert!(store.get_run(&run.id).expect("get run").is_none());
+            assert!(store
+                .list_artifacts(&run.id)
+                .expect("list artifacts")
+                .is_empty());
+        });
+    }
+}

@@ -213,6 +213,36 @@ const MIGRATIONS: &[Migration] = &[
         version: 12,
         sql: "",
     },
+    Migration {
+        version: 13,
+        sql: r#"
+        -- Every child table has declared FOREIGN KEY(run_id) REFERENCES runs(id)
+        -- since it was created, but SQLite enforces foreign keys per connection
+        -- and defaults them off, and the pragma was never set. The schema
+        -- documented an invariant the database did not hold: deleting a run
+        -- left its children behind, and an orphaned `artifacts` row keeps
+        -- pointing at a path whose bytes retention has already reclaimed.
+        --
+        -- Enforcement only applies to statements issued after it is enabled, so
+        -- rows that accumulated while it was off would survive indefinitely and
+        -- keep contradicting the constraint. Reap them once, here, so the
+        -- pragma is turned on against a database that actually satisfies it.
+        --
+        -- NOT EXISTS rather than NOT IN: `runs.id` is a TEXT primary key, which
+        -- SQLite permits to be NULL, and a single NULL would make every NOT IN
+        -- comparison NULL and silently reap nothing.
+        DELETE FROM artifacts
+            WHERE NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = artifacts.run_id);
+        DELETE FROM findings
+            WHERE NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = findings.run_id);
+        DELETE FROM triage_items
+            WHERE NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = triage_items.run_id);
+        DELETE FROM trace_spans
+            WHERE NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = trace_spans.run_id);
+        DELETE FROM trace_runs
+            WHERE NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = trace_runs.run_id);
+        "#,
+    },
 ];
 
 /// The schema version a freshly initialized store lands on.
@@ -343,7 +373,44 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
     for warning in apply_journal_pragmas(&connection) {
         warn_pragma_once(&warning);
     }
+    enforce_foreign_keys(&connection)?;
     Ok(connection)
+}
+
+/// Turn on the referential integrity this schema has always declared.
+///
+/// Unlike the journal pragmas above this is not best effort. `journal_mode`
+/// can lose a race for the writer lock and degrade to different concurrency
+/// behaviour; `foreign_keys` is pure per-connection state that cannot contend,
+/// so a failure here means the connection is about to write under a
+/// constraint set the schema claims and the database does not enforce. That is
+/// the exact condition #11129 describes and it must not be recoverable by
+/// carrying on.
+///
+/// The value is read back rather than assumed. `PRAGMA foreign_keys` is a
+/// documented no-op inside a transaction and reports no error when it is
+/// ignored, so "the statement succeeded" is not evidence the setting took.
+fn enforce_foreign_keys(connection: &Connection) -> Result<()> {
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .map_err(sqlite_error("enable observation store foreign keys"))?;
+    if !foreign_keys_enforced(connection)? {
+        return Err(crate::Error::internal_unexpected(
+            "observation store could not enable PRAGMA foreign_keys, so the FOREIGN KEY(run_id) \
+             REFERENCES runs(id) constraints this schema declares would not be enforced and \
+             deleting a run would orphan its artifacts, findings, triage items and trace rows",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn foreign_keys_enforced(connection: &Connection) -> Result<bool> {
+    let enforced: i64 = connection
+        .query_row("PRAGMA foreign_keys;", [], |row| row.get(0))
+        .map_err(sqlite_error(
+            "read observation store foreign key enforcement",
+        ))?;
+    Ok(enforced == 1)
 }
 
 /// Apply the concurrency pragmas, returning a warning per pragma that did not
@@ -705,7 +772,154 @@ mod tests {
         );
     }
 
+    /// The pragma is the whole point of #11129: without it every
+    /// `FOREIGN KEY(run_id) REFERENCES runs(id)` in this schema is decorative,
+    /// because SQLite enforces foreign keys per connection and defaults them
+    /// off. A real open has to leave the connection enforcing them.
+    #[test]
+    fn a_real_open_enforces_the_foreign_keys_the_schema_declares() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let connection =
+            open_connection(&directory.path().join("observations.sqlite")).expect("open");
+
+        assert!(
+            foreign_keys_enforced(&connection).expect("read enforcement"),
+            "the schema declares foreign keys, so the connection must enforce them"
+        );
+    }
+
+    /// Rows that accumulated while enforcement was off are invisible to the
+    /// pragma -- it only constrains statements issued after it is enabled -- so
+    /// they would contradict the constraint forever. Migration 13 reaps them.
+    #[test]
+    fn migration_13_reaps_rows_orphaned_while_enforcement_was_off() {
+        let connection = schema_through_migration(12);
+        seed_owned_and_orphaned_children(&connection);
+
+        apply_migrations(&connection).unwrap();
+
+        for table in [
+            "artifacts",
+            "findings",
+            "triage_items",
+            "trace_spans",
+            "trace_runs",
+        ] {
+            let surviving: Vec<String> = surviving_run_ids(&connection, table);
+            assert_eq!(
+                surviving,
+                vec!["live".to_string()],
+                "{table} must keep its owned row and lose its orphan"
+            );
+        }
+    }
+
+    /// A `NULL` id is legal in a TEXT primary key, and one of them turns every
+    /// `run_id NOT IN (SELECT id FROM runs)` comparison into NULL -- reaping
+    /// nothing, silently. The migration uses NOT EXISTS for exactly this.
+    #[test]
+    fn a_null_run_id_does_not_disarm_the_orphan_reap() {
+        let connection = schema_through_migration(12);
+        seed_owned_and_orphaned_children(&connection);
+        connection
+            .execute_batch(
+                "INSERT INTO runs(id, kind, started_at, status) \
+                 VALUES (NULL, 'test', 'now', 'pass');",
+            )
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM artifacts \
+                     WHERE run_id NOT IN (SELECT id FROM runs)",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0,
+            "the NOT IN formulation must be shown to be disarmed by the NULL"
+        );
+
+        apply_migrations(&connection).unwrap();
+
+        assert_eq!(surviving_run_ids(&connection, "artifacts"), vec!["live"]);
+    }
+
+    /// Owned rows are not collateral. The reap is scoped to rows whose parent
+    /// is genuinely absent.
+    #[test]
+    fn the_orphan_reap_leaves_owned_rows_untouched() {
+        let connection = schema_through_migration(12);
+        seed_owned_and_orphaned_children(&connection);
+
+        apply_migrations(&connection).unwrap();
+
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM runs", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "the reap must not touch the runs table"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT id FROM artifacts", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "artifact-live"
+        );
+    }
+
+    fn seed_owned_and_orphaned_children(connection: &Connection) {
+        connection
+            .execute_batch(
+                r#"
+                INSERT INTO runs(id, kind, started_at, status)
+                    VALUES ('live', 'test', 'now', 'pass');
+
+                INSERT INTO artifacts(id, run_id, kind, path, created_at)
+                    VALUES ('artifact-live', 'live', 'log', '/live', 'now'),
+                           ('artifact-orphan', 'reaped', 'log', '/orphan', 'now');
+
+                INSERT INTO findings(id, run_id, tool, message, created_at)
+                    VALUES ('finding-live', 'live', 'clippy', 'kept', 'now'),
+                           ('finding-orphan', 'reaped', 'clippy', 'orphaned', 'now');
+
+                INSERT INTO triage_items(
+                    id, run_id, provider, repo_owner, repo_name, item_type, number,
+                    state, title, url, observed_at)
+                    VALUES ('triage-live', 'live', 'github', 'o', 'r', 'issue', 1,
+                            'open', 't', 'u', 'now'),
+                           ('triage-orphan', 'reaped', 'github', 'o', 'r', 'issue', 2,
+                            'open', 't', 'u', 'now');
+
+                INSERT INTO trace_spans(id, run_id, span_id, status)
+                    VALUES ('span-live', 'live', 's1', 'pass'),
+                           ('span-orphan', 'reaped', 's2', 'pass');
+
+                INSERT INTO trace_runs(run_id, component_id, scenario_id, status)
+                    VALUES ('live', 'c', 'sc', 'pass'),
+                           ('reaped', 'c', 'sc', 'pass');
+                "#,
+            )
+            .unwrap();
+    }
+
+    fn surviving_run_ids(connection: &Connection, table: &str) -> Vec<String> {
+        let mut statement = connection
+            .prepare(&format!("SELECT run_id FROM {table} ORDER BY run_id"))
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap();
+        rows.map(|row| row.unwrap()).collect()
+    }
+
     fn schema_through_migration_11() -> Connection {
+        schema_through_migration(11)
+    }
+
+    fn schema_through_migration(max_version: i64) -> Connection {
         let mut connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
@@ -720,7 +934,7 @@ mod tests {
 
         for migration in MIGRATIONS
             .iter()
-            .filter(|migration| migration.version <= 11)
+            .filter(|migration| migration.version <= max_version)
         {
             let tx = connection.transaction().unwrap();
             apply_migration_sql(&tx, migration).unwrap();

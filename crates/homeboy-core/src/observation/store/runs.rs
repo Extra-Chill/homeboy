@@ -461,13 +461,7 @@ impl ObservationStore {
             .transaction()
             .map_err(sqlite_error("begin terminal run retention"))?;
         for id in ids {
-            for table in [
-                "artifacts",
-                "findings",
-                "triage_items",
-                "trace_spans",
-                "trace_runs",
-            ] {
+            for table in RUN_OWNED_CHILD_TABLES {
                 tx.execute(&format!("DELETE FROM {table} WHERE run_id = ?1"), [id])
                     .map_err(sqlite_error(format!("delete terminal run {table}")))?;
             }
