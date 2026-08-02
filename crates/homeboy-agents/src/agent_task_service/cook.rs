@@ -200,6 +200,7 @@ fn claim_pre_artifact_interruption_retry(
                 if recorded_attempt == Some(u64::from(next_attempt))
                     && recorded_run_id == Some(next_run_id.as_str())
                 {
+                    materialize_cook_attempt(cook_id, &next_run_id, plan)?;
                     return Ok(Some((next_attempt, next_run_id)));
                 }
             }

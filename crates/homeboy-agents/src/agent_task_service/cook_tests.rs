@@ -467,6 +467,65 @@ fn pre_artifact_interruption_claim_is_restart_and_concurrent_controller_idempote
 }
 
 #[test]
+fn pre_artifact_interruption_repairs_completed_claim_missing_successor_record() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut options = batch_cook_options(
+            "cook-pre-artifact-completed-claim",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.max_attempts = 2;
+        let run_id = options.initial_run_id.clone();
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&run_id)).unwrap();
+        agent_task_lifecycle::cancel_run(&run_id, Some("controller interrupted")).unwrap();
+
+        let next_attempt = 2;
+        let next_run_id = agent_task_lifecycle::cook_attempt_run_id(&options.cook_id, next_attempt);
+        super::super::record_recipe_attempt(
+            &options.cook_id,
+            next_attempt,
+            &next_run_id,
+            &options.initial_plan,
+        )
+        .unwrap();
+        let operation_key = pre_artifact_interruption_operation_key(&run_id);
+        assert_eq!(
+            agent_task_lifecycle::claim_cook_operation(
+                &run_id,
+                &operation_key,
+                PRE_ARTIFACT_INTERRUPTION_CLAIM_LEASE,
+            )
+            .unwrap(),
+            agent_task_lifecycle::ClaimOutcome::Acquired
+        );
+        agent_task_lifecycle::complete_cook_operation(
+            &run_id,
+            &operation_key,
+            serde_json::json!({
+                "next_attempt": next_attempt,
+                "next_run_id": next_run_id,
+            }),
+        )
+        .unwrap();
+        assert!(!agent_task_lifecycle::run_record_exists(&next_run_id).unwrap());
+
+        let repaired = claim_pre_artifact_interruption_retry(
+            &options.cook_id,
+            1,
+            &run_id,
+            &options.initial_plan,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(repaired, (next_attempt, next_run_id.clone()));
+        assert!(agent_task_lifecycle::run_record_exists(&next_run_id).unwrap());
+        let index = agent_task_lifecycle::cook_index(&options.cook_id).unwrap();
+        assert_eq!(index.latest_run_id, next_run_id);
+    });
+}
+
+#[test]
 fn cook_service_retry_uses_the_same_passed_context_after_ambient_mutation() {
     let _env_lock = homeboy_core::test_support::env_lock();
     let prior = std::env::var_os(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
