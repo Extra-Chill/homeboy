@@ -154,6 +154,7 @@ pub struct WorktreeProviderHandle {
     pub handle: String,
     pub path: String,
     pub branch: String,
+    pub task_url: Option<String>,
     pub safety: WorktreeProviderHandleSafety,
 }
 
@@ -360,6 +361,58 @@ pub fn resolve_apply_enabled_worktree_provider_from_config(
         gate_feedback_baseline,
         None,
     )
+}
+
+/// Find the sole apply-enabled provider worktree owned by a tracker URL.
+/// Providers must map `task_url` to participate, preserving existing provider
+/// configurations that only support handle-based lookup.
+pub fn find_apply_enabled_worktree_provider_by_task_url_from_config(
+    task_url: &str,
+    config: &HomeboyConfig,
+) -> Result<Option<WorktreeProviderResolution>> {
+    let mut matches = Vec::new();
+    for (provider_id, provider) in &config.worktree_providers {
+        if !provider.enabled
+            || !provider.apply_enabled
+            || provider
+                .list_result_mapping
+                .as_ref()
+                .and_then(|mapping| mapping.task_url.as_ref())
+                .is_none()
+        {
+            continue;
+        }
+        let Some(command) = provider.commands.list.as_ref() else {
+            continue;
+        };
+        for worktree in run_provider_list_command(provider_id, provider, command)? {
+            if worktree.task_url.as_deref() == Some(task_url) {
+                validate_provider_handle(provider_id, &worktree, None, None)?;
+                matches.push(WorktreeProviderResolution {
+                    provider_id: provider_id.clone(),
+                    worktree,
+                });
+            }
+        }
+    }
+    matches.sort_by(|left, right| left.worktree.handle.cmp(&right.worktree.handle));
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        _ => Err(Error::validation_invalid_argument(
+            "task_url",
+            format!(
+                "multiple active apply-enabled worktrees are owned by `{task_url}`: {}",
+                matches
+                    .iter()
+                    .map(|resolution| resolution.worktree.handle.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Some(task_url.to_string()),
+            None,
+        )),
+    }
 }
 
 /// A clean immutable candidate may be its own destination before Homeboy's
@@ -1197,6 +1250,12 @@ fn map_provider_list_result(
                 handle: required_string(provider_id, index, "handle", &mapping.handle, item)?,
                 path: required_string(provider_id, index, "path", &mapping.path, item)?,
                 branch: required_string(provider_id, index, "branch", &mapping.branch, item)?,
+                task_url: mapping
+                    .task_url
+                    .as_deref()
+                    .map(|path| optional_string(provider_id, index, "task_url", path, item))
+                    .transpose()?
+                    .flatten(),
                 // Safety flags are advisory hints a provider raises to BLOCK an
                 // unsafe destination (dirty/unpushed/primary => refuse). A
                 // provider that does not report one is making no claim of
@@ -1231,6 +1290,26 @@ fn required_string(
         .as_str()
         .map(ToString::to_string)
         .ok_or_else(|| mapping_error(provider_id, field, path, "must resolve to a string"))
+}
+
+/// Task ownership is optional per row even when a provider supports exposing
+/// it. A provider list can legitimately include unmanaged worktrees.
+fn optional_string(
+    provider_id: &str,
+    index: usize,
+    field: &str,
+    path: &str,
+    item: &Value,
+) -> Result<Option<String>> {
+    match optional_jsonpath_value(provider_id, &format!("items[{index}].{field}"), path, item)? {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(|value| Some(value.to_string()))
+            .ok_or_else(|| {
+                mapping_error(provider_id, field, path, "must resolve to a string or null")
+            }),
+    }
 }
 
 fn required_bool(
@@ -2293,6 +2372,7 @@ mod tests {
                 handle: "fixture@release".to_string(),
                 path: temp.path().display().to_string(),
                 branch: "main".to_string(),
+                task_url: None,
                 safety: WorktreeProviderHandleSafety {
                     dirty: false,
                     unpushed: false,
@@ -2448,6 +2528,7 @@ mod tests {
                     dirty: "$.safety.dirty".to_string(),
                     unpushed: "$.safety.unpushed".to_string(),
                     primary: "$.safety.primary".to_string(),
+                    task_url: None,
                 }),
             },
         );
@@ -2537,6 +2618,7 @@ mod tests {
                     dirty: "$.safety.dirty".to_string(),
                     unpushed: "$.safety.unpushed".to_string(),
                     primary: "$.safety.primary".to_string(),
+                    task_url: None,
                 }),
             },
         );
@@ -3354,6 +3436,7 @@ mod tests {
             handle: "fixture@cook-target".to_string(),
             path: workspace.path().display().to_string(),
             branch: "cook-target".to_string(),
+            task_url: None,
             safety: WorktreeProviderHandleSafety {
                 dirty: true,
                 unpushed: false,
@@ -3507,6 +3590,7 @@ mod tests {
                     dirty: "$.state.dirty".to_string(),
                     unpushed: "$.state.unpushed".to_string(),
                     primary: "$.state.primary".to_string(),
+                    task_url: None,
                 },
             ),
             (
@@ -3522,6 +3606,7 @@ mod tests {
                     dirty: "$.dirty".to_string(),
                     unpushed: "$.unpushed".to_string(),
                     primary: "$.primary".to_string(),
+                    task_url: None,
                 },
             ),
         ];
@@ -3535,6 +3620,69 @@ mod tests {
             .expect("configured envelope resolves");
             assert_eq!(handle.path, workspace.path().display().to_string());
         }
+    }
+
+    #[test]
+    fn finds_one_task_owned_worktree_and_rejects_ambiguous_ownership() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "issue-42");
+        let task_url = "https://github.com/example/project/issues/42";
+        let mapping = WorktreeProviderListResultMapping {
+            items: "$.worktrees".to_string(),
+            handle: "$.handle".to_string(),
+            path: "$.path".to_string(),
+            branch: "$.branch".to_string(),
+            dirty: "$.safety.dirty".to_string(),
+            unpushed: "$.safety.unpushed".to_string(),
+            primary: "$.safety.primary".to_string(),
+            task_url: Some("$.task_url".to_string()),
+        };
+        let item = |handle: &str| {
+            json!({
+                "handle": handle,
+                "path": workspace.path(),
+                "branch": "issue-42",
+                "task_url": task_url,
+                "safety": { "dirty": false, "unpushed": false, "primary": false }
+            })
+        };
+        let mut provider = list_provider(
+            fake_list_provider_script(
+                json!({ "worktrees": [item("project@fix-issue-42-project")] }),
+            ),
+            mapping.clone(),
+        );
+        provider.apply_enabled = true;
+        let config = config_with_provider(provider);
+        let found = find_apply_enabled_worktree_provider_by_task_url_from_config(task_url, &config)
+            .expect("task lookup")
+            .expect("task worktree");
+        assert_eq!(found.worktree.handle, "project@fix-issue-42-project");
+
+        let mapped = map_provider_list_result(
+            "fixture",
+            &mapping,
+            &json!({ "worktrees": [
+                { "handle": "project@unowned", "path": workspace.path(), "branch": "issue-42", "task_url": null, "safety": { "dirty": false, "unpushed": false, "primary": false } },
+                { "handle": "project@legacy", "path": workspace.path(), "branch": "issue-42", "safety": { "dirty": false, "unpushed": false, "primary": false } }
+            ] }),
+        )
+        .expect("mixed task ownership maps");
+        assert!(mapped.iter().all(|worktree| worktree.task_url.is_none()));
+
+        let mut provider = list_provider(
+            fake_list_provider_script(
+                json!({ "worktrees": [item("project@first"), item("project@second")] }),
+            ),
+            mapping,
+        );
+        provider.apply_enabled = true;
+        let error = find_apply_enabled_worktree_provider_by_task_url_from_config(
+            task_url,
+            &config_with_provider(provider),
+        )
+        .expect_err("duplicate ownership must be explicit");
+        assert!(error.message.contains("project@first, project@second"));
     }
 
     #[test]
@@ -3558,6 +3706,7 @@ mod tests {
                 dirty: "$.dirty".to_string(),
                 unpushed: "$.unpushed".to_string(),
                 primary: "$.primary".to_string(),
+                task_url: None,
             };
             *match field {
                 "items" => &mut mapping.items,
@@ -3792,6 +3941,7 @@ mod tests {
             dirty: "$.safety.dirty".to_string(),
             unpushed: "$.safety.unpushed".to_string(),
             primary: "$.safety.primary".to_string(),
+            task_url: None,
         }
     }
 

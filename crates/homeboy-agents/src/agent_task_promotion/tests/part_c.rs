@@ -203,6 +203,7 @@ fn configured_command_provider_is_resolved_lazily_with_provenance() {
                 dirty: "$.safety.dirty".to_string(),
                 unpushed: "$.safety.unpushed".to_string(),
                 primary: "$.safety.primary".to_string(),
+                task_url: None,
             }),
         },
     );
@@ -304,6 +305,7 @@ fn configured_provider_accepts_only_the_unpushed_immutable_candidate_destination
                 dirty: "$.safety.dirty".to_string(),
                 unpushed: "$.safety.unpushed".to_string(),
                 primary: "$.safety.primary".to_string(),
+                task_url: None,
             }),
         },
     );

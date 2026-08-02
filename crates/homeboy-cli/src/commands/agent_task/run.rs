@@ -80,6 +80,7 @@ fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value
 }
 
 pub(crate) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
+    let args = resolve_cook_destination(args)?;
     validate_cook_request(&args)?;
     run_cook_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
 }
@@ -250,12 +251,13 @@ fn cook_report_with_continuation(mut value: Value) -> Value {
 /// Converge a Cook promotion destination before compiling a task plan. This is
 /// controller-owned so local and Lab dispatch use the same managed checkout.
 pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::core::Result<Value> {
-    let direct_path = Path::new(&args.to_worktree);
+    let to_worktree = args
+        .to_worktree
+        .as_deref()
+        .expect("Cook destination is resolved before provisioning");
+    let direct_path = Path::new(to_worktree);
     if direct_path.is_dir() {
-        homeboy::core::worktree_providers::validate_task_worktree_root(
-            direct_path,
-            &args.to_worktree,
-        )?;
+        homeboy::core::worktree_providers::validate_task_worktree_root(direct_path, to_worktree)?;
         let path = std::fs::canonicalize(direct_path).map_err(|error| {
             homeboy::core::Error::internal_io(
                 error.to_string(),
@@ -265,13 +267,11 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
         return Ok(serde_json::json!({
             "action": "existing",
             "kind": "direct_task_worktree",
-            "handle": args.to_worktree,
+            "handle": to_worktree,
             "path": path,
         }));
     }
-    if let Some(record) =
-        homeboy::core::worktree::resolve_workspace_ref_if_present(&args.to_worktree)?
-    {
+    if let Some(record) = homeboy::core::worktree::resolve_workspace_ref_if_present(to_worktree)? {
         if record.state() != &homeboy::core::worktree::TaskWorktreeState::Active {
             return Err(homeboy::core::Error::validation_invalid_argument(
                 "to_worktree",
@@ -279,27 +279,27 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
                     "Homeboy workspace `{}` is no longer active",
                     record.handle()
                 ),
-                Some(args.to_worktree.clone()),
+                Some(to_worktree.to_string()),
                 None,
             ));
         }
         let path = PathBuf::from(record.path());
-        homeboy::core::worktree_providers::validate_task_worktree_root(&path, &args.to_worktree)?;
+        homeboy::core::worktree_providers::validate_task_worktree_root(&path, to_worktree)?;
         return Ok(
-            serde_json::json!({ "action": "existing", "kind": record.source_kind(), "handle": args.to_worktree, "path": path }),
+            serde_json::json!({ "action": "existing", "kind": record.source_kind(), "handle": to_worktree, "path": path }),
         );
     }
 
     let config = defaults::load_config();
     match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
-        &args.to_worktree,
+        to_worktree,
         &config,
         None,
     ) {
         Ok(resolution) => {
             homeboy::core::worktree_providers::validate_task_worktree_root(
                 Path::new(&resolution.worktree.path),
-                &args.to_worktree,
+                to_worktree,
             )?;
             return Ok(
                 serde_json::json!({ "action": "existing", "kind": "provider", "provider": resolution.provider_id, "handle": resolution.worktree.handle, "path": resolution.worktree.path, "branch": resolution.worktree.branch }),
@@ -332,7 +332,7 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
     })?;
     provision_apply_enabled_worktree_provider_from_config(
         &WorktreeProviderCreateIntent {
-            handle: args.to_worktree.clone(),
+            handle: to_worktree.to_string(),
             repo,
             base: args.base.clone(),
             head,
@@ -350,6 +350,95 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             "branch": provision.resolution.worktree.branch,
         })
     })
+}
+
+pub(crate) fn resolve_cook_destination(
+    mut args: AgentTaskCookArgs,
+) -> homeboy::core::Result<AgentTaskCookArgs> {
+    if args.to_worktree.is_some() {
+        return Ok(args);
+    }
+    let repo = args.dispatch.repo.as_deref().ok_or_else(|| {
+        homeboy::core::Error::validation_missing_argument(vec![
+            "--repo <repo> is required when --to-worktree is omitted".to_string(),
+        ])
+    })?;
+    let task_url = args.dispatch.task_url.as_deref().ok_or_else(|| {
+        homeboy::core::Error::validation_missing_argument(vec![
+            "--task-url <url> is required when --to-worktree is omitted".to_string(),
+        ])
+    })?;
+    let config = defaults::load_config();
+    // DMC's provider mapping currently exposes safety and handle metadata but
+    // not task ownership. In that mode the canonical handle is still resolved
+    // first; its ensure operation must reject a different task-owned worktree.
+    args.to_worktree = Some(match homeboy::core::worktree_providers::find_apply_enabled_worktree_provider_by_task_url_from_config(task_url, &config) {
+        Ok(Some(resolution)) => resolution.worktree.handle,
+        Ok(None) => format!("{repo}@{}", slugify_cook_branch(&derived_cook_branch(task_url)?)),
+        Err(mut error) => {
+            if let Some(handles) = error.message.strip_prefix(&format!("multiple active apply-enabled worktrees are owned by `{task_url}`: ")) {
+                error.details["recovery"] = serde_json::json!(handles.split(", ").map(|handle| format!("homeboy agent-task cook --to-worktree {handle}")).collect::<Vec<_>>());
+            }
+            return Err(error);
+        }
+    });
+    if args.head.is_none() {
+        args.head = Some(derived_cook_branch(task_url)?);
+    }
+    Ok(args)
+}
+
+fn derived_cook_branch(task_url: &str) -> homeboy::core::Result<String> {
+    let issue = task_url
+        .trim()
+        .split(|character| matches!(character, '?' | '#'))
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('/');
+    let Some((repository, number)) = issue.rsplit_once("/issues/") else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "task_url",
+            "--task-url must be a GitHub issue URL when --to-worktree is omitted",
+            Some(task_url.to_string()),
+            None,
+        ));
+    };
+    let number = number.split('/').next().unwrap_or_default();
+    if number.is_empty() || !number.chars().all(|character| character.is_ascii_digit()) {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "task_url",
+            "--task-url must end in a numeric GitHub issue number when --to-worktree is omitted",
+            Some(task_url.to_string()),
+            None,
+        ));
+    }
+    let mut segments = repository.trim_end_matches('/').rsplit('/');
+    let repo = segments.next().unwrap_or_default();
+    let owner = segments.next().unwrap_or_default();
+    if owner.is_empty() || repo.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "task_url",
+            "--task-url must include a GitHub owner and repo when --to-worktree is omitted",
+            Some(task_url.to_string()),
+            None,
+        ));
+    }
+    Ok(format!("fix/issue-{number}-{}", slugify_cook_branch(repo)))
+}
+
+fn slugify_cook_branch(value: &str) -> String {
+    let mut slug = String::new();
+    let mut last_dash = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            slug.push('-');
+            last_dash = true;
+        }
+    }
+    slug.trim_matches('-').to_string()
 }
 
 pub(crate) fn record_cook_provision(plan: &mut AgentTaskPlan, provision: Value) {
@@ -507,6 +596,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
+    let args = resolve_cook_destination(args)?;
     validate_cook_request_with_provenance(&args, provenance)?;
     // Deterministic gates exist to make *publication* safe: a green gate is the
     // proof a cook may commit, push, and open a PR. A `--no-finalize` cook does
@@ -618,7 +708,7 @@ where
             cook_id,
             initial_run_id: run_id,
             initial_plan,
-            to_worktree: args.to_worktree,
+            to_worktree: args.to_worktree.expect("Cook destination is resolved"),
             source_worktree_path,
             provider_command: args.provider_command,
             provider_invocation: (!args.provider_argv.is_empty()).then(|| CommandInvocation {
@@ -807,7 +897,7 @@ pub(crate) fn compile_cook_plan(
         // after provider execution. Keep the compiled task durable and let
         // promotion report its established controlled policy failure.
         Err(error)
-            if request.workspace.as_deref() == Some(args.to_worktree.as_str())
+            if request.workspace.as_deref() == args.to_worktree.as_deref()
                 && error.message.contains(
                     "neither an existing directory nor a resolvable managed worktree handle",
                 ) =>

@@ -111,6 +111,7 @@ fn adopted_workspace_wins_over_a_rejecting_configured_provider() {
                     dirty: "$.safety.dirty".to_string(),
                     unpushed: "$.safety.unpushed".to_string(),
                     primary: "$.safety.primary".to_string(),
+                    task_url: None,
                 }),
             },
         );

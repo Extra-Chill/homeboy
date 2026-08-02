@@ -442,6 +442,10 @@ pub struct WorktreeProviderListResultMapping {
     pub dirty: String,
     pub unpushed: String,
     pub primary: String,
+    /// Optional task/issue URL recorded for the managed worktree. This lets
+    /// callers safely reuse an existing destination by its tracker ownership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

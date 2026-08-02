@@ -200,7 +200,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                 attempt_run_id: Some("cook-missing-provider-attempt-1-controller".to_string()),
                 attempt_plan: None,
                 goal: Some("cook fixture".to_string()),
-                to_worktree: target.display().to_string(),
+                to_worktree: Some(target.display().to_string()),
                 provider_command: None,
                 provider_argv: vec![
                     "sh".to_string(),
@@ -505,6 +505,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                         dirty: "$.safety.dirty".to_string(),
                         unpushed: "$.safety.unpushed".to_string(),
                         primary: "$.safety.primary".to_string(),
+                        task_url: None,
                     },
                 ),
             },
@@ -570,7 +571,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 attempt_run_id: None,
                 attempt_plan: None,
                 goal: None,
-                to_worktree: "fixture@promoted".to_string(),
+                to_worktree: Some("fixture@promoted".to_string()),
                 provider_command: None,
                 provider_argv: vec!["sh".to_string(), provider.display().to_string()],
                 gates: VerifyGateArgs {

@@ -5971,6 +5971,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
                         dirty: "$.safety.dirty".to_string(),
                         unpushed: "$.safety.unpushed".to_string(),
                         primary: "$.safety.primary".to_string(),
+                        task_url: None,
                     },
                 ),
             },

@@ -135,6 +135,7 @@ mod lab_source_path_tests {
                         dirty: "$.safety.dirty".to_string(),
                         unpushed: "$.safety.unpushed".to_string(),
                         primary: "$.safety.primary".to_string(),
+                        task_url: None,
                     }),
                 },
             );

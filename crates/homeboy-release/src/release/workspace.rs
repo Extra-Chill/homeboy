@@ -628,6 +628,7 @@ mod tests {
                     handle: "release-fixture".to_string(),
                     path: "/workspace".to_string(),
                     branch: "main".to_string(),
+                    task_url: None,
                     safety: WorktreeProviderHandleSafety {
                         dirty: false,
                         unpushed: false,
@@ -723,6 +724,7 @@ mod tests {
                             dirty: "$.safety.dirty".to_string(),
                             unpushed: "$.safety.unpushed".to_string(),
                             primary: "$.safety.primary".to_string(),
+                            task_url: None,
                         },
                     ),
                 },
