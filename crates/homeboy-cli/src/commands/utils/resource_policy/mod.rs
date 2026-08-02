@@ -1410,6 +1410,40 @@ mod tests {
     }
 
     #[test]
+    fn hot_lab_or_local_requires_admission_before_local_fallback() {
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
+        let placement = crate::cli_surface::Placement::LabOrLocal;
+        let disconnected = LabRunnerReadiness {
+            state: crate::runner::runners::LabRunnerReadinessState::Disconnected,
+            selected_runner_id: None,
+            available_runner_ids: Vec::new(),
+            reasons: vec!["runner is disconnected".to_string()],
+            remediation_commands: vec!["homeboy runner connect homeboy-lab".to_string()],
+        };
+        let warning = evaluate_with_runner_hint(
+            lab_supported_hot("agent-task cook/run-plan/retry --run"),
+            &resources(ResourceRecommendation::Hot),
+            Some(&disconnected),
+        )
+        .expect("hot controller warns");
+
+        let error = non_interactive_preflight_error(
+            &warning,
+            placement.is_explicit_local_override(),
+            false,
+            None,
+            false,
+        )
+        .expect("hot lab-or-local must stop before routing can dispatch a provider");
+
+        assert!(error.message.contains("homeboy runner connect homeboy-lab"));
+        assert!(error
+            .message
+            .contains("explicit, authorized `--placement local` override"));
+    }
+
+    #[test]
     fn runner_hosted_exec_does_not_fail_non_interactive_preflight() {
         let _lock = env_lock();
         let _guard = EnvVarGuard::set(crate::runner::RUNNER_HOSTED_EXEC_ENV, "1");

@@ -1412,7 +1412,7 @@ fn preflight_hot_command(
                     } else {
                         warning.as_ref()
                     },
-                    matches!(cli.placement, crate::cli_surface::Placement::Local),
+                    cli.placement.is_explicit_local_override(),
                     lab_readiness.as_ref(),
                     runner_hosted,
                 );
@@ -1427,7 +1427,7 @@ fn preflight_hot_command(
             if let Some(warning) = warning.as_ref() {
                 if let Some(err) = resource_policy::non_interactive_preflight_error(
                     warning,
-                    !matches!(cli.placement, crate::cli_surface::Placement::Auto) || runner_hosted,
+                    cli.placement.is_explicit_local_override() || runner_hosted,
                     is_interactive_shell(),
                     resource_policy::rerun_command(
                         hot_command,
