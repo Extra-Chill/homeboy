@@ -344,6 +344,33 @@ fn incomplete_empty_executor_result_fails_when_retries_are_unavailable() {
 }
 
 #[test]
+fn policy_denial_is_terminal_even_when_retry_policy_matches_every_failure() {
+    let mut denied = outcome("policy-denied".to_string(), AgentTaskOutcomeStatus::Failed);
+    denied.failure_classification = Some(AgentTaskFailureClassification::PolicyDenied);
+
+    assert!(!AgentTaskScheduleSupport::should_retry(
+        &denied,
+        1,
+        2,
+        3,
+        3,
+        None,
+        0,
+        &[],
+    ));
+    assert!(!AgentTaskScheduleSupport::should_retry(
+        &denied,
+        1,
+        2,
+        3,
+        3,
+        None,
+        0,
+        &[AgentTaskFailureClassification::PolicyDenied],
+    ));
+}
+
+#[test]
 fn incomplete_nested_outputs_provider_result_is_detected() {
     // Mirrors a provider wrapper shape: the provider claims
     // top-level success/completed, but `outputs.completed` is false, the reply

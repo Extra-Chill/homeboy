@@ -1421,6 +1421,7 @@ impl AgentTaskScheduleSupport {
             && retry_budget_total
                 .map(|budget| retry_budget_used < budget)
                 .unwrap_or(true)
+            && outcome.failure_classification != Some(AgentTaskFailureClassification::PolicyDenied)
             && (retryable_failure_classifications.is_empty()
                 || outcome
                     .failure_classification
