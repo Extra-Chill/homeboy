@@ -59,7 +59,19 @@ struct AutomaticRetentionControllerOutput {
     cleanup: Value,
 }
 
-const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 7] = [
+/// Categories the unattended retention pass sweeps.
+///
+/// Four categories are deliberately outside unattended scope and each records
+/// why in [`AUTOMATIC_RETENTION_OUT_OF_SCOPE`]. Two more were outside it by
+/// omission rather than by decision: `remote-lab-workspaces` and
+/// `runner-binary-caches` accumulate on remote hosts an operator rarely
+/// inspects, which is precisely where nothing reclaims them by hand (#11131).
+/// Both are cursor-paginated and bounded -- workspace pruning by
+/// `RUNNER_WORKSPACE_APPLY_PASSES` and a page limit, cache pruning by a single
+/// age-floored pass -- so they fit the pass's wall-clock budget, and every
+/// category runs through `isolate_cleanup_category`, so a disconnected or
+/// failing runner degrades that one category instead of the sweep.
+const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 9] = [
     CleanupCategoryArg::WorktreeProviders,
     CleanupCategoryArg::TerminalRuns,
     CleanupCategoryArg::PersistedRunArtifacts,
@@ -67,6 +79,35 @@ const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 7] = [
     CleanupCategoryArg::RuntimeTmp,
     CleanupCategoryArg::ControllerScratch,
     CleanupCategoryArg::ControllerRuntimes,
+    CleanupCategoryArg::RemoteLabWorkspaces,
+    CleanupCategoryArg::RunnerBinaryCaches,
+];
+
+/// Categories held out of the unattended pass on purpose, with the reason.
+///
+/// Written down so the difference between "decided against" and "forgotten" is
+/// visible. `runner-downloads` and `task-worktrees` can hold live inputs a
+/// running job still needs; `shared-cargo-targets` is reclaimed by its own
+/// separately budgeted pass (`run_automatic_cargo_retention`) and must not
+/// enter the aggregate sweep. `repo-artifacts` is likewise driven separately,
+/// by `run_automatic_artifact_retention` over registered workspace roots.
+const AUTOMATIC_RETENTION_OUT_OF_SCOPE: [(CleanupCategoryArg, &str); 4] = [
+    (
+        CleanupCategoryArg::RunnerDownloads,
+        "may hold inputs a running job still needs",
+    ),
+    (
+        CleanupCategoryArg::TaskWorktrees,
+        "may hold uncommitted operator work",
+    ),
+    (
+        CleanupCategoryArg::SharedCargoTargets,
+        "reclaimed by its own budgeted cargo retention pass",
+    ),
+    (
+        CleanupCategoryArg::RepoArtifacts,
+        "reclaimed by automatic artifact retention over registered roots",
+    ),
 ];
 
 pub fn run(args: CleanupArgs) -> CmdResult<Value> {
@@ -3648,6 +3689,74 @@ mod tests {
                 "missing reclaim command for {category}"
             );
         }
+    }
+
+    /// Every declared category is either swept unattended or held out with a
+    /// written reason. The set was 7 of 13, and the four it omitted were not
+    /// all deliberate: `remote-lab-workspaces` and `runner-binary-caches` were
+    /// simply never added, on remote hosts nobody inspects (#11131). A
+    /// partition test is what makes "forgotten" impossible to reach again --
+    /// adding a fourteenth category without deciding its unattended status now
+    /// fails here.
+    #[test]
+    fn every_cleanup_category_is_either_swept_unattended_or_held_out_with_a_reason() {
+        use clap::ValueEnum;
+
+        let mut decided: Vec<CleanupCategoryArg> = AUTOMATIC_RETENTION_CATEGORIES.to_vec();
+        for (category, reason) in AUTOMATIC_RETENTION_OUT_OF_SCOPE {
+            assert!(
+                !reason.trim().is_empty(),
+                "{category:?} must say why it is held out"
+            );
+            assert!(
+                !decided.contains(&category),
+                "{category:?} cannot be both swept and held out"
+            );
+            decided.push(category);
+        }
+
+        for category in CleanupCategoryArg::value_variants() {
+            assert!(
+                decided.contains(category),
+                "{category:?} has no unattended-retention decision recorded"
+            );
+        }
+        assert_eq!(decided.len(), CleanupCategoryArg::value_variants().len());
+    }
+
+    /// The two categories #11131 names. They are remote, bounded, and were
+    /// missing by omission rather than by decision.
+    #[test]
+    fn unattended_retention_reaches_the_remote_categories_nobody_inspects() {
+        assert!(AUTOMATIC_RETENTION_CATEGORIES.contains(&CleanupCategoryArg::RemoteLabWorkspaces));
+        assert!(AUTOMATIC_RETENTION_CATEGORIES.contains(&CleanupCategoryArg::RunnerBinaryCaches));
+    }
+
+    /// Both remote categories stay inside the pass's wall-clock budget:
+    /// workspace pruning is cursor-paginated with a bounded pass count and a
+    /// page limit, and both are age-floored by the shared runner floor.
+    #[test]
+    fn the_remote_retention_categories_are_bounded_before_they_are_automatic() {
+        let policy = cleanup::cleanup_policy_from_retention(
+            &defaults::RetentionConfig::default(),
+            CleanupPolicyOverrides::default(),
+        )
+        .expect("resolve policy");
+
+        assert_eq!(
+            CleanupPolicy::runner_workspace_passes(true),
+            cleanup::RUNNER_WORKSPACE_APPLY_PASSES
+        );
+        assert!(policy.runner_workspace_page_limit > 0);
+        assert!(policy.runner_min_age_hours > 0);
+    }
+
+    /// Inputs a running job may still need, and uncommitted operator work, are
+    /// never reclaimed without an operator asking.
+    #[test]
+    fn unattended_retention_never_reaches_live_inputs_or_operator_work() {
+        assert!(!AUTOMATIC_RETENTION_CATEGORIES.contains(&CleanupCategoryArg::RunnerDownloads));
+        assert!(!AUTOMATIC_RETENTION_CATEGORIES.contains(&CleanupCategoryArg::TaskWorktrees));
     }
 
     #[test]
