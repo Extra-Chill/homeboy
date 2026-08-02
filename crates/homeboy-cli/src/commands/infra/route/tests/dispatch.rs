@@ -3152,6 +3152,59 @@ fn lab_or_local_placement_still_falls_back_without_a_runner() {
     );
 }
 
+#[test]
+fn cold_lab_or_local_records_an_admitted_local_fallback() {
+    let source = tempfile::tempdir().expect("source workspace");
+    let cli = Cli::parse_from([
+        "homeboy",
+        "--placement",
+        "lab-or-local",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "fixture@wave",
+        "--verify",
+        "true",
+        "--prompt",
+        "fall back locally when admitted",
+    ]);
+
+    let decision = placement_decision(&cli, None, "cook-provider-attempt", Some(source.path()))
+        .expect("cold controller may select local fallback");
+
+    assert!(decision.permits_local_execution());
+    assert!(decision.fallback.local_allowed);
+    assert!(!decision.override_authorization.authorized);
+}
+
+#[test]
+fn explicit_local_placement_records_audited_override_authorization() {
+    let source = tempfile::tempdir().expect("source workspace");
+    let cli = Cli::parse_from([
+        "homeboy",
+        "--placement",
+        "local",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "fixture@wave",
+        "--verify",
+        "true",
+        "--prompt",
+        "run locally with operator authorization",
+    ]);
+
+    let decision = placement_decision(&cli, None, "cook-provider-attempt", Some(source.path()))
+        .expect("explicit local placement resolves");
+
+    assert!(decision.permits_local_execution());
+    assert!(decision.override_authorization.authorized);
+    assert_eq!(
+        decision.override_authorization.authority.as_deref(),
+        Some("operator --placement local")
+    );
+}
+
 /// Batch fanout is the documented one-command path for a wave, so it resolves
 /// Lab placement through the same contract as a single cook.
 #[test]

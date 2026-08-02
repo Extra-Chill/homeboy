@@ -31,6 +31,13 @@ impl Default for Placement {
 }
 
 impl Placement {
+    /// Explicit operator authorization to execute on the controller despite
+    /// resource admission. This is distinct from permitting a local fallback
+    /// after a Lab attempt.
+    pub const fn is_explicit_local_override(self) -> bool {
+        matches!(self, Self::Local)
+    }
+
     /// Explicitly permit controller execution when an intended Lab offload
     /// cannot proceed. `Auto` retains the existing default routing behavior.
     pub const fn allows_local_fallback(self) -> bool {
@@ -97,6 +104,22 @@ mod tests {
                 placement.allows_local_fallback(),
                 allows_fallback,
                 "{placement:?} allows_local_fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn only_local_is_an_explicit_controller_override() {
+        for (placement, explicit_local_override) in [
+            (Placement::Auto, false),
+            (Placement::Local, true),
+            (Placement::Lab, false),
+            (Placement::LabOrLocal, false),
+        ] {
+            assert_eq!(
+                placement.is_explicit_local_override(),
+                explicit_local_override,
+                "{placement:?} explicit local override"
             );
         }
     }
