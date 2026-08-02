@@ -483,9 +483,23 @@ function opencodeSuccessOutcome(context) {
 	const structured = structuredOpenCodeOutputs(context);
 	const evidence = collectOpenCodeArtifacts(context, structured);
 	const emptyPatch = evidence.artifacts?.some((artifact) => artifact.name === 'patch' && artifact.bytes === 0);
+	const missingRequiredOutputs = structured.missingRequiredOutputs || [];
+	const intentionalNoChange = structured.outputs && missingRequiredOutputs.length === 0 && emptyPatch && context.initialRevision?.revision
+		? {
+			schema: 'homeboy/intentional-no-change/v1',
+			verdict: 'no_change',
+			inspected_revision: context.initialRevision.revision,
+		}
+		: null;
 	return withPolicyDeniedOutcome(context, {
-		status: structured.outputs && emptyPatch ? 'no_op' : 'succeeded',
-		summary: structured.outputs && emptyPatch
+		status: missingRequiredOutputs.length > 0 ? 'failed' : 'succeeded',
+		...(missingRequiredOutputs.length > 0 ? {
+			failure_classification: 'provider',
+			failure_code: 'agent_task.opencode_required_outputs_missing',
+		} : {}),
+		summary: missingRequiredOutputs.length > 0
+			? `OpenCode completed without required structured output(s): ${missingRequiredOutputs.join(', ')}.`
+			: intentionalNoChange
 			? 'OpenCode completed without workspace changes.'
 			: 'OpenCode completed successfully.',
 		diagnostics: [
@@ -497,7 +511,17 @@ function opencodeSuccessOutcome(context) {
 			opencode_session: sessionMetadata(context),
 			opencode_progress: progressMetadata(context),
 		},
-		...(structured.outputs ? { outputs: structured.outputs } : {}),
+		...(structured.outputs || intentionalNoChange ? {
+			outputs: {
+				...(structured.outputs || {}),
+				...(intentionalNoChange ? {
+					opencode_run_result: {
+						status: 'succeeded',
+						intentional_no_change: intentionalNoChange,
+					},
+				} : {}),
+			},
+		} : {}),
 		...evidence,
 	});
 }
@@ -533,10 +557,15 @@ function structuredOpenCodeOutputs(context = {}) {
 		const missing = declarations.filter((declaration) => declaration.required && !Object.hasOwn(outputs, declaration.name));
 		return {
 			...(Object.keys(outputs).length > 0 ? { outputs } : {}),
+			missingRequiredOutputs: missing.map((declaration) => declaration.name),
 			diagnostics: outputDiagnostics(missing, oversized),
 		};
 	}
-	return { diagnostics: outputDiagnostics(declarations.filter((declaration) => declaration.required), []) };
+	const missing = declarations.filter((declaration) => declaration.required);
+	return {
+		missingRequiredOutputs: missing.map((declaration) => declaration.name),
+		diagnostics: outputDiagnostics(missing, []),
+	};
 }
 
 function declaredOutputValues(envelope, declarations) {
@@ -650,9 +679,6 @@ function opencodeFailureOutcome(context) {
 }
 
 function withPolicyDeniedOutcome(context = {}, terminal = {}) {
-	if (terminal.status === 'succeeded') {
-		return terminal;
-	}
 	const denial = detectOpenCodePolicyDenial(context);
 	if (!denial) {
 		return terminal;
@@ -693,7 +719,25 @@ function detectOpenCodePolicyDenial(context = {}) {
 	if (!OPENCODE_PERMISSION_DENIED_PATTERN.test(text)) {
 		return null;
 	}
+	if (spawnResult.status === 0 && openCodeCompletedAfterPolicyDenial(text)) {
+		return null;
+	}
 	return sanitizeDeniedToolCall(extractDeniedToolCall(text));
+}
+
+function openCodeCompletedAfterPolicyDenial(text = '') {
+	const lines = String(text).split(/\r?\n/).filter((line) => line.trim() !== '');
+	const deniedIndex = lines.findLastIndex((line) => OPENCODE_PERMISSION_DENIED_PATTERN.test(line));
+	return lines.slice(deniedIndex + 1).some((line) => {
+		try {
+			const value = JSON.parse(line);
+			return openCodeTextParts(value).some((event) => (
+				event.text !== '' && !OPENCODE_PERMISSION_DENIED_PATTERN.test(event.text)
+			));
+		} catch {
+			return false;
+		}
+	});
 }
 
 function extractDeniedToolCall(text = '') {
@@ -818,10 +862,18 @@ function collectOpenCodeArtifacts(context = {}, structured = {}) {
 		captureErrors.push({ artifact: 'patch', message: patchCapture.error });
 	}
 	const patch = patchCapture.content;
-	const policyDenial = spawnResult.status === 0 ? null : detectOpenCodePolicyDenial(context);
+	const policyDenial = detectOpenCodePolicyDenial(context);
+	const missingRequiredOutputs = structured.missingRequiredOutputs || [];
+	const intentionalNoChange = structured.outputs && missingRequiredOutputs.length === 0 && patch === '' && context.initialRevision?.revision
+		? {
+			schema: 'homeboy/intentional-no-change/v1',
+			verdict: 'no_change',
+			inspected_revision: context.initialRevision.revision,
+		}
+		: null;
 	const resultStatus = policyDenial
 		? 'failed'
-		: (spawnResult.status === 0 ? (structured.outputs && patch === '' ? 'no_op' : 'succeeded') : 'failed');
+		: (spawnResult.status === 0 && missingRequiredOutputs.length === 0 ? 'succeeded' : 'failed');
 	const resultEnvelope = JSON.stringify({
 		schema: 'homeboy/opencode-agent-result/v1',
 		task_id: request.task_id,
@@ -831,6 +883,11 @@ function collectOpenCodeArtifacts(context = {}, structured = {}) {
 			failure_code: 'agent_task.opencode_policy_denied',
 			denied_tool_call: policyDenial,
 		} : {}),
+		...(!policyDenial && missingRequiredOutputs.length > 0 ? {
+			failure_classification: 'provider',
+			failure_code: 'agent_task.opencode_required_outputs_missing',
+		} : {}),
+		...(intentionalNoChange ? { intentional_no_change: intentionalNoChange } : {}),
 		exit_code: spawnResult.status,
 		command: context.commandSpec?.command,
 		args: Array.isArray(context.commandSpec?.args) ? context.commandSpec.args : [],
@@ -838,7 +895,17 @@ function collectOpenCodeArtifacts(context = {}, structured = {}) {
 			patch: patch !== '',
 			transcript: transcript !== '',
 		},
-		...(structured.outputs ? { outputs: structured.outputs } : {}),
+		...(structured.outputs || intentionalNoChange ? {
+			outputs: {
+				...(structured.outputs || {}),
+				...(intentionalNoChange ? {
+					opencode_run_result: {
+						status: 'succeeded',
+						intentional_no_change: intentionalNoChange,
+					},
+				} : {}),
+			},
+		} : {}),
 		opencode_session: sessionMetadata(context),
 		opencode_progress: progressMetadata(context),
 	}, null, 2);

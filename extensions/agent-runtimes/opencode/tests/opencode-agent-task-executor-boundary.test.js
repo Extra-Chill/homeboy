@@ -760,7 +760,10 @@ process.stdout.write(JSON.stringify({
     state: { error: 'The user rejected permission to use this specific tool call.' }
   }]
 }) + '\\n');
-process.stdout.write(JSON.stringify({ type: 'message', text: 'Completed after the denied tool call.' }) + '\\n');
+process.stdout.write(JSON.stringify({
+  type: 'text',
+  part: { type: 'text', text: 'Completed after the denied tool call.', metadata: { openai: { phase: 'final_answer' } } }
+}) + '\\n');
 process.exit(0);
 `);
 	const recoveredResult = await executeOpenCodeAgentTask({
@@ -838,6 +841,22 @@ process.exit(1);
 	assert.equal(deniedAgentResult.status, 'failed');
 	assert.equal(deniedAgentResult.failure_classification, 'policy_denied');
 	assert.deepEqual(deniedAgentResult.denied_tool_call, deniedResult.metadata.denied_tool_call);
+
+	const deniedZeroCliPath = path.join(root, 'mock-opencode-policy-denied-zero.cjs');
+	fs.writeFileSync(deniedZeroCliPath, fs.readFileSync(deniedCliPath, 'utf8').replace('process.exit(1);', 'process.exit(0);'));
+	const deniedZeroResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-policy-denied-zero',
+		workspace_path: deniedWorkspace,
+		artifacts_path: deniedArtifactDir,
+		executor: {
+			...request.executor,
+			config: { ...request.executor.config, command_args: [deniedZeroCliPath] },
+		},
+	}, { env: fixtureEnv });
+	assert.equal(deniedZeroResult.status, 'failed');
+	assert.equal(deniedZeroResult.failure_classification, 'policy_denied');
+	assert.equal(deniedZeroResult.retryable, false);
 
 	const inheritedPipeCliPath = path.join(root, 'mock-opencode-inherited-pipe.cjs');
 	fs.writeFileSync(inheritedPipeCliPath, `#!/usr/bin/env node
@@ -1069,15 +1088,16 @@ process.stdout.write(JSON.stringify({
 		},
 	}, { env: fixtureEnv });
 
-	assert.equal(reviewResult.status, 'no_op', JSON.stringify(reviewResult.diagnostics));
-	assert.deepEqual(reviewResult.outputs, {
-		review_form: {
+	assert.equal(reviewResult.status, 'succeeded', JSON.stringify(reviewResult.diagnostics));
+	assert.deepEqual(reviewResult.outputs.review_form, {
 			summary: 'Reviewed candidate; no changes required.',
 			what_changed: [],
 			compatibility: 'No compatibility impact.',
 			used_for: 'Pull request review.',
-		},
 	});
+	assert.equal(reviewResult.outputs.opencode_run_result.intentional_no_change.schema, 'homeboy/intentional-no-change/v1');
+	assert.equal(reviewResult.outputs.opencode_run_result.intentional_no_change.verdict, 'no_change');
+	assert.match(reviewResult.outputs.opencode_run_result.intentional_no_change.inspected_revision, /^[0-9a-f]{40}$/);
 	const reviewConfig = JSON.parse(fs.readFileSync(reviewCapturePath, 'utf8'));
 	// Read-only inspection is permitted within the workspace...
 	assert.equal(reviewConfig.permission.read['*'], 'allow');
@@ -1138,12 +1158,14 @@ process.stdout.write(JSON.stringify({
 		},
 	};
 	const structuredOutputResult = await executeOpenCodeAgentTask(structuredOutputRequest, { env: fixtureEnv });
-	assert.equal(structuredOutputResult.status, 'no_op', JSON.stringify(structuredOutputResult.diagnostics));
-	assert.deepEqual(structuredOutputResult.outputs, { release_notes: ['Added generic output handling.'], verification: { passed: true } });
+	assert.equal(structuredOutputResult.status, 'succeeded', JSON.stringify(structuredOutputResult.diagnostics));
+	assert.deepEqual(structuredOutputResult.outputs.release_notes, ['Added generic output handling.']);
+	assert.deepEqual(structuredOutputResult.outputs.verification, { passed: true });
+	assert.equal(structuredOutputResult.outputs.opencode_run_result.intentional_no_change.schema, 'homeboy/intentional-no-change/v1');
 	assert.equal(structuredOutputResult.metadata.opencode_session.status, 'not_discovered');
 	const structuredAgentResult = structuredOutputResult.artifacts.find((artifact) => artifact.name === 'agent_result');
 	const structuredAgentResultPayload = JSON.parse(fs.readFileSync(structuredAgentResult.path, 'utf8'));
-	assert.equal(structuredAgentResultPayload.status, 'no_op');
+	assert.equal(structuredAgentResultPayload.status, 'succeeded');
 	assert.deepEqual(structuredAgentResultPayload.outputs, structuredOutputResult.outputs);
 
 	for (const [mode, outputs, diagnosticClass] of [
@@ -1162,8 +1184,10 @@ process.stdout.write(JSON.stringify({
 				},
 			},
 		}, { env: fixtureEnv });
-		assert.equal(incompleteOutputResult.status, mode === 'malformed' ? 'no_op' : 'succeeded');
-		assert.deepEqual(incompleteOutputResult.outputs, outputs);
+		assert.equal(incompleteOutputResult.status, mode === 'malformed' ? 'succeeded' : 'failed');
+		assert.deepEqual(Object.fromEntries(
+			Object.entries(incompleteOutputResult.outputs).filter(([name]) => name !== 'opencode_run_result')
+		), outputs);
 		assert.equal(incompleteOutputResult.diagnostics.some((diagnostic) => diagnostic.class === diagnosticClass), diagnosticClass !== undefined);
 	}
 
@@ -1175,8 +1199,8 @@ process.stdout.write(JSON.stringify({
 			config: { ...structuredOutputRequest.executor.config, runtime_env: { OUTPUT_MODE: 'optional-absent' } },
 		},
 	}, { env: fixtureEnv });
-	assert.equal(optionalAbsentResult.status, 'no_op');
-	assert.deepEqual(optionalAbsentResult.outputs, { release_notes: ['Optional output omitted'] });
+	assert.equal(optionalAbsentResult.status, 'succeeded');
+	assert.deepEqual(optionalAbsentResult.outputs.release_notes, ['Optional output omitted']);
 	assert.equal(optionalAbsentResult.diagnostics.some((diagnostic) => diagnostic.class === 'opencode.required_outputs_missing'), false);
 
 	const legacyOutputResult = await executeOpenCodeAgentTask({
@@ -1187,7 +1211,7 @@ process.stdout.write(JSON.stringify({
 			config: { ...structuredOutputRequest.executor.config, runtime_env: { OUTPUT_MODE: 'legacy' } },
 		},
 	}, { env: fixtureEnv });
-	assert.deepEqual(legacyOutputResult.outputs, { release_notes: ['Legacy declaration mapping'] });
+	assert.deepEqual(legacyOutputResult.outputs.release_notes, ['Legacy declaration mapping']);
 	assert.equal(legacyOutputResult.outputs.ignored, undefined);
 } finally {
 	fs.rmSync(root, { recursive: true, force: true });
