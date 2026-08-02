@@ -11,7 +11,7 @@ use homeboy::core::notification_payload::{
 };
 use homeboy::core::notification_route::{self, NotificationRoute};
 use homeboy::core::notify::{self, NotifyEvent, NotifyOutcome};
-use homeboy::core::{Error, Result};
+use homeboy::core::Result;
 
 use super::utils::response::{
     CommandActionableMetadata, CommandAgentTaskRef, CommandJobRef, CommandNextAction,
@@ -532,43 +532,12 @@ fn notify_attachment(
     )
 }
 
+/// Parse `--interval` / `--duration` for `activity`.
+///
+/// Delegates to the shared unit table in `commands::utils::watch`, which also
+/// supplies the zero-check this parser previously lacked.
 fn parse_duration(raw: &str) -> Result<Duration> {
-    let trimmed = raw.trim();
-    let split = trimmed
-        .find(|ch: char| !ch.is_ascii_digit())
-        .unwrap_or(trimmed.len());
-    let (amount, unit) = trimmed.split_at(split);
-    if amount.is_empty() || unit.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "duration",
-            "expected duration like 2s, 30m, or 1h",
-            Some(raw.to_string()),
-            None,
-        ));
-    }
-    let amount = amount.parse::<u64>().map_err(|_| {
-        Error::validation_invalid_argument(
-            "duration",
-            "duration amount must be a positive integer",
-            Some(raw.to_string()),
-            None,
-        )
-    })?;
-    let seconds = match unit {
-        "s" | "sec" | "secs" | "second" | "seconds" => amount,
-        "m" | "min" | "mins" | "minute" | "minutes" => amount * 60,
-        "h" | "hr" | "hrs" | "hour" | "hours" => amount * 60 * 60,
-        "d" | "day" | "days" => amount * 60 * 60 * 24,
-        _ => {
-            return Err(Error::validation_invalid_argument(
-                "duration",
-                "duration unit must be s, m, h, or d",
-                Some(raw.to_string()),
-                None,
-            ))
-        }
-    };
-    Ok(Duration::from_secs(seconds))
+    crate::commands::utils::watch::parse_duration("duration", raw)
 }
 
 fn truncate(value: &str, width: usize) -> String {
@@ -691,8 +660,8 @@ mod tests {
             show(&run.id).expect("show activity");
             watch(ActivityWatchArgs {
                 id: run.id.clone(),
-                timeout: Some("0s".to_string()),
-                interval: "0s".to_string(),
+                timeout: Some("1ms".to_string()),
+                interval: "1ms".to_string(),
                 notify: false,
             })
             .expect("watch activity");

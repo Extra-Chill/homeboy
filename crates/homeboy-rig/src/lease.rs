@@ -25,7 +25,8 @@ use super::spec::{RigResourcesSpec, RigSpec};
 use super::state::now_rfc3339;
 use homeboy_core::error::{Error, Result, RigResourceConflictInfo};
 use homeboy_core::paths;
-use lock::LeaseIndexLock;
+use homeboy_engine_primitives::shell::quote_arg;
+use lock::acquire as acquire_lease_index_lock;
 
 /// On-disk lease held by one active mutating rig command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,7 +77,7 @@ pub struct ActiveRigRunLease {
 
 impl Drop for ActiveRigRunLease {
     fn drop(&mut self) {
-        let Ok(_lock) = LeaseIndexLock::acquire() else {
+        let Ok(_lock) = acquire_lease_index_lock() else {
             return;
         };
         let Ok(path) = lease_path(&self.rig_id) else {
@@ -108,7 +109,7 @@ pub fn acquire_active_run_lease_with_settings(
         return Ok(None);
     }
 
-    let _lock = LeaseIndexLock::acquire()?;
+    let _lock = acquire_lease_index_lock()?;
     fs::create_dir_all(paths::rig_leases_dir()?).map_err(|e| {
         Error::internal_unexpected(format!("Failed to create rig lease directory: {}", e))
     })?;
@@ -370,7 +371,7 @@ pub enum ReleaseLeaseOutcome {
 /// local guardrail so a new run can proceed. With `force`, the caller is
 /// asserting the holder is dead or wedged.
 pub fn release_active_run_lease(rig_id: &str, force: bool) -> Result<ReleaseLeaseOutcome> {
-    let _lock = LeaseIndexLock::acquire()?;
+    let _lock = acquire_lease_index_lock()?;
     let path = lease_path(rig_id)?;
     let Some(lease) = read_lease(&path)? else {
         return Ok(ReleaseLeaseOutcome::NoLease {
@@ -448,26 +449,15 @@ fn run_lease_diagnostic(lease: RigRunLease) -> RigRunLeaseDiagnostic {
         reclaimable_without_force,
         inspect_command: run_id.map(|run_id| format!("homeboy runs show {run_id}")),
         safe_cleanup_command: reclaimable_without_force.then(|| {
-            format!("homeboy rig release-lock {}", shell_quote(&lease.rig_id))
+            format!("homeboy rig release-lock {}", quote_arg(&lease.rig_id))
         }),
         reconcile_command: "homeboy runs resources --actionable".to_string(),
         force_release_warning: format!(
             "Do not use `homeboy rig release-lock {} --force` while pid {} is still running unless you have independently confirmed the holder is wedged and will never finish; force-release only removes the local guardrail and does not stop the holder process.",
-            shell_quote(&lease.rig_id),
+            quote_arg(&lease.rig_id),
             lease.pid
         ),
         resources: lease.resources,
-    }
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 

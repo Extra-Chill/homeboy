@@ -16,6 +16,7 @@ pub mod content_hash;
 pub mod detail_output;
 pub mod edit_op;
 pub mod edit_op_apply;
+pub mod fs_index_lock;
 pub mod git_changes;
 pub mod grammar;
 pub mod identifier;

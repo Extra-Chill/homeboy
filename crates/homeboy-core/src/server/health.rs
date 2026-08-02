@@ -4,6 +4,7 @@
 //! to collect uptime, load, disk, memory, and service health from remote servers.
 
 use super::SshClient;
+use crate::engine::shell::quote_arg;
 use crate::project::Project;
 use serde::Serialize;
 use std::time::Duration;
@@ -113,7 +114,7 @@ fn collect_server_health(client: &SshClient, services: &[String]) -> ServerHealt
             cmd_parts.push(format!(
                 "echo '{}:'$(systemctl is-active {} 2>/dev/null || echo 'unknown')",
                 svc,
-                shell_quote_service(svc)
+                quote_arg(svc)
             ));
         }
     }
@@ -137,19 +138,6 @@ fn collect_server_health(client: &SshClient, services: &[String]) -> ServerHealt
 // ============================================================================
 // Parsing
 // ============================================================================
-
-/// Quote a service name for safe use in shell commands.
-fn shell_quote_service(name: &str) -> String {
-    // Only allow alphanumeric, dash, dot, underscore, @ (systemd instance separator)
-    if name
-        .chars()
-        .all(|c| c.is_alphanumeric() || matches!(c, '-' | '.' | '_' | '@'))
-    {
-        name.to_string()
-    } else {
-        format!("'{}'", name.replace('\'', "'\\''"))
-    }
-}
 
 /// Parse the structured health output from the compound SSH command.
 fn parse_health_output(output: &str, services: &[String]) -> ServerHealth {
@@ -653,16 +641,19 @@ Mem:          3.8Gi       1.5Gi       1.0Gi       0.0Ki       1.3Gi       2.0Gi
         assert!(warnings.is_empty());
     }
 
+    /// Systemd unit names must survive `quote_arg` unquoted -- `@` is the
+    /// instance separator and `.`/`-` are ordinary in unit names, so none of
+    /// them may be treated as shell metacharacters.
     #[test]
-    fn test_shell_quote_service_safe() {
-        assert_eq!(shell_quote_service("nginx"), "nginx");
-        assert_eq!(shell_quote_service("php8.4-fpm"), "php8.4-fpm");
-        assert_eq!(shell_quote_service("user@.service"), "user@.service");
+    fn test_quote_arg_leaves_service_names_unquoted() {
+        assert_eq!(quote_arg("nginx"), "nginx");
+        assert_eq!(quote_arg("php8.4-fpm"), "php8.4-fpm");
+        assert_eq!(quote_arg("user@.service"), "user@.service");
     }
 
     #[test]
-    fn test_shell_quote_service_unsafe() {
-        let quoted = shell_quote_service("foo; rm -rf /");
+    fn test_quote_arg_quotes_unsafe_service_names() {
+        let quoted = quote_arg("foo; rm -rf /");
         assert!(quoted.starts_with('\''));
     }
 }

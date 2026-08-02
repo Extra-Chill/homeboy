@@ -100,7 +100,10 @@ fn source_upgrade_command_returns_after_same_binary_success() {
 fn source_upgrade_timeout_terminates_the_entire_child_process_group() {
     let workspace = tempfile::tempdir().expect("workspace");
     let pid_file = workspace.path().join("child.pid");
-    let command = format!("sleep 30 & echo $! > {}; wait", shell_quote_path(&pid_file));
+    let command = format!(
+        "sleep 30 & echo $! > {}; wait",
+        quote_path(&pid_file.display().to_string())
+    );
 
     let err = run_source_upgrade_command(&command, workspace.path(), Duration::from_millis(50))
         .expect_err("long-running source command times out");

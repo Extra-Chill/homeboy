@@ -110,6 +110,84 @@ fn escape_double_quoted_env_value(value: &str) -> String {
         .replace('`', "\\`")
 }
 
+/// `homeboy-error` carries a byte-for-byte duplicate of [`quote_arg`] named
+/// `posix_quote_arg`, because it sits below this crate in the dependency graph
+/// and cannot import it. That constraint is real, so the duplicate stays -- but
+/// the claim of byte-equality was previously only a comment. These tests
+/// enforce it, so the two implementations cannot drift silently.
+#[cfg(test)]
+mod error_crate_duplicate_parity_tests {
+    use super::quote_arg;
+    use homeboy_error::posix_quote_arg;
+
+    /// Every character `quote_arg` treats as a shell metacharacter, plus the
+    /// edge cases around them.
+    const PARITY_CASES: &[&str] = &[
+        "",
+        "plain",
+        "already-safe_arg.v1",
+        "/abs/path/to/file",
+        "has space",
+        "has\ttab",
+        "has\nnewline",
+        "has'single",
+        "has\"double",
+        "has\\backslash",
+        "has$dollar",
+        "has`backtick",
+        "has!bang",
+        "has*star",
+        "has?question",
+        "has[bracket",
+        "has]bracket",
+        "has(paren",
+        "has)paren",
+        "has{brace",
+        "has}brace",
+        "has<lt",
+        "has>gt",
+        "has|pipe",
+        "has&amp",
+        "has;semi",
+        "has#hash",
+        "has~tilde",
+        "'",
+        "''",
+        "a'b'c",
+        "'leading",
+        "trailing'",
+        "rm -rf / ; echo pwned",
+        "unicode-\u{e9}\u{4e2d}",
+    ];
+
+    #[test]
+    fn posix_quote_arg_is_byte_identical_to_quote_arg() {
+        for case in PARITY_CASES {
+            assert_eq!(
+                quote_arg(case),
+                posix_quote_arg(case),
+                "shell::quote_arg and homeboy_error::posix_quote_arg diverged on {case:?}"
+            );
+        }
+    }
+
+    /// Sweep the whole ASCII range so a metacharacter added to one table and
+    /// not the other is caught even if nobody remembers to extend
+    /// `PARITY_CASES`.
+    #[test]
+    fn posix_quote_arg_matches_quote_arg_across_ascii() {
+        for byte in 0u8..=127 {
+            let ch = byte as char;
+            let case = format!("a{ch}b");
+            assert_eq!(
+                quote_arg(&case),
+                posix_quote_arg(&case),
+                "shell::quote_arg and homeboy_error::posix_quote_arg diverged on ASCII {byte:#04x}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod remote_env_tests {
     use super::*;

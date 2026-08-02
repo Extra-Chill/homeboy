@@ -1,3 +1,32 @@
+//! `triage --watch`: poll a set of GitHub PRs/issues until they all reach a
+//! target state.
+//!
+//! # Why this does not use the shared `watch_loop`
+//!
+//! `homeboy-cli`'s `commands::utils::watch` owns the one bounded poll loop that
+//! `runs watch` and `activity watch` share. This loop is deliberately not a
+//! third consumer of it, for two reasons -- and both have to be fixed together,
+//! so do not attempt one without the other:
+//!
+//! 1. **Direction of the dependency.** `WatchPoller`/`watch_loop` are declared
+//!    in `homeboy-cli`, which depends on `homeboy-triage`. Implementing the
+//!    trait here would invert that. Unifying requires first relocating the loop
+//!    into a crate both can see (`homeboy-core`), which is a much larger change
+//!    than it looks: five CLI call sites import it today.
+//! 2. **The loop shapes differ in kind, not just detail.** `watch_loop` polls
+//!    *one* id and asks a stateless `is_terminal(&item)`. This polls *N* refs
+//!    and returns only when all of them have arrived, and its terminal
+//!    predicate is stateful: `state-changed` and `commit-pushed` are defined
+//!    relative to the previous poll's state (see [`watch_until_reached`]).
+//!    It also performs a side effect mid-loop (auto-merge). Generalizing
+//!    `watch_loop` to cover that means multi-id polling *and* a `&mut self`
+//!    poller, which is a redesign of the shared trait rather than an extension.
+//!
+//! What *has* been unified is the part that was drifting in a way users could
+//! see: the timeout exit code. `homeboy triage --watch` now exits
+//! `TIMEOUT_EXIT_CODE` (124) like every other watch surface, rather than the
+//! bare `1` it used to use. See `commands/triage.rs`.
+
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -7,6 +7,7 @@
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
 use homeboy_core::plan::PlanStep;
+use homeboy_engine_primitives::shell::quote_path;
 
 use super::advanced_remote;
 use super::context::load_component;
@@ -22,7 +23,7 @@ pub const RECOVERY_INCOMPLETE_EXIT_CODE: i32 = 4;
 fn publication_continuation_command(input: &ReleaseCommandInput) -> String {
     let mut command = format!("homeboy release {} --head", input.component_id);
     if let Some(path) = &input.path_override {
-        command.push_str(&format!(" --path {}", shell_quote(path)));
+        command.push_str(&format!(" --path {}", quote_path(path)));
     }
     if input.skip_checks {
         command.push_str(" --skip-checks");
@@ -42,14 +43,10 @@ fn publication_continuation_command(input: &ReleaseCommandInput) -> String {
         command.push_str(" --deploy");
     }
     if let Some(identity) = &input.git_identity {
-        command.push_str(&format!(" --git-identity {}", shell_quote(identity)));
+        command.push_str(&format!(" --git-identity {}", quote_path(identity)));
     }
     command.push_str(" --apply");
     command
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 pub(super) fn run_recover(
