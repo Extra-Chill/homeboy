@@ -399,3 +399,121 @@ fn test_parse_etime_rejects_garbage() {
     assert_eq!(parse_etime_seconds("01"), None);
     assert_eq!(parse_etime_seconds("a:b:c"), None);
 }
+
+/// #11128: rig service logs were an unbounded append -- `create(true)
+/// .append(true)`, no rotation, no TTL, and no cleanup category -- so a chatty
+/// service filled the disk and nothing reclaimed it.
+mod log_rotation {
+    use crate::service::log_rotation::{rotate_log_if_oversized, rotation_renames};
+    use crate::service::{RIG_LOG_MAX_BYTES, RIG_LOG_MAX_GENERATIONS};
+
+    fn write(path: &std::path::Path, bytes: usize) {
+        std::fs::write(path, vec![b'x'; bytes]).expect("write log");
+    }
+
+    fn read(path: &std::path::Path) -> Option<String> {
+        std::fs::read_to_string(path).ok()
+    }
+
+    #[test]
+    fn a_log_below_the_cap_is_left_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("svc.log");
+        write(&log, 8);
+
+        assert!(!rotate_log_if_oversized(&log, 16, 3).expect("rotate"));
+        assert_eq!(log.metadata().expect("metadata").len(), 8);
+        assert!(!dir.path().join("svc.log.1").exists());
+    }
+
+    #[test]
+    fn a_log_at_the_cap_rotates_to_the_first_generation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("svc.log");
+        std::fs::write(&log, b"oldest").expect("write log");
+
+        assert!(rotate_log_if_oversized(&log, 6, 3).expect("rotate"));
+
+        assert!(!log.exists(), "the live log is renamed, not copied");
+        assert_eq!(
+            read(&dir.path().join("svc.log.1")).as_deref(),
+            Some("oldest")
+        );
+    }
+
+    /// The bound is the product of size and generation count. Rotating more
+    /// times than there are generations must not accumulate files, and the
+    /// bytes that fall off the end are the oldest ones.
+    #[test]
+    fn rotation_retains_a_fixed_number_of_generations_and_drops_the_oldest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("svc.log");
+
+        for generation in 0..6 {
+            std::fs::write(&log, format!("gen-{generation}")).expect("write log");
+            assert!(rotate_log_if_oversized(&log, 1, 2).expect("rotate"));
+        }
+
+        assert_eq!(
+            read(&dir.path().join("svc.log.1")).as_deref(),
+            Some("gen-5")
+        );
+        assert_eq!(
+            read(&dir.path().join("svc.log.2")).as_deref(),
+            Some("gen-4")
+        );
+        assert!(
+            !dir.path().join("svc.log.3").exists(),
+            "a third generation would make the bound unbounded"
+        );
+    }
+
+    /// Renames run oldest-first. Newest-first would copy generation 1 over
+    /// generation 2 and lose the older bytes before they were promoted.
+    #[test]
+    fn the_rename_chain_runs_oldest_first() {
+        let renames = rotation_renames(std::path::Path::new("/logs/svc.log"), 3);
+
+        let order: Vec<String> = renames
+            .iter()
+            .map(|(from, to)| format!("{}->{}", from.display(), to.display()))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                "/logs/svc.log.2->/logs/svc.log.3".to_string(),
+                "/logs/svc.log.1->/logs/svc.log.2".to_string(),
+                "/logs/svc.log->/logs/svc.log.1".to_string(),
+            ]
+        );
+    }
+
+    /// Rotation must never invent a log for a service that has not run.
+    #[test]
+    fn a_missing_log_is_not_rotated_and_is_not_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("never-started.log");
+
+        assert!(!rotate_log_if_oversized(&log, 1, 3).expect("rotate"));
+        assert!(!log.exists());
+        assert!(!dir.path().join("never-started.log.1").exists());
+    }
+
+    /// A zero bound is a disabled bound, not a bound that deletes everything.
+    #[test]
+    fn a_zero_size_or_generation_bound_disables_rotation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("svc.log");
+        write(&log, 32);
+
+        assert!(!rotate_log_if_oversized(&log, 0, 3).expect("zero size"));
+        assert!(!rotate_log_if_oversized(&log, 1, 0).expect("zero generations"));
+        assert_eq!(log.metadata().expect("metadata").len(), 32);
+    }
+
+    #[test]
+    fn the_shipped_bounds_are_finite() {
+        assert!(RIG_LOG_MAX_BYTES > 0);
+        assert!(RIG_LOG_MAX_GENERATIONS > 0);
+    }
+}
