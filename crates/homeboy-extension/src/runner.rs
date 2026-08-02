@@ -176,8 +176,13 @@ impl ExtensionRunner {
 
     /// Set the run directory, injecting HOMEBOY_RUN_DIR and all legacy
     /// per-file env vars so extension scripts work with either pattern.
+    ///
+    /// The extension's own `structured_sidecars` declarations are applied, so a
+    /// declared non-default `path` reaches the script instead of being silently
+    /// replaced by the registry default (#11121).
     pub fn with_run_dir(mut self, run_dir: &homeboy_core::engine::run_dir::RunDir) -> Self {
-        self.env_vars.extend(run_dir.legacy_env_vars());
+        self.env_vars
+            .extend(run_dir.legacy_env_vars_for(&self.declared_structured_sidecars()));
         self.env_vars.push((
             homeboy_core::server::DELEGATED_RUN_STATUS_FILE_ENV.to_string(),
             run_dir
