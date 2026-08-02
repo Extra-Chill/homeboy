@@ -21,6 +21,39 @@ pub fn resolve_lint_command(
     crate::resolve_execution_context(component, ExtensionCapability::Lint)
 }
 
+/// The manifest key for the lint findings structured sidecar.
+pub const LINT_FINDINGS_SIDECAR: &str = "lint.findings";
+
+/// Whether the extension providing this component's lint capability declares a
+/// `lint.findings` structured sidecar.
+///
+/// This is what makes the missing-findings evidence check legitimate. That
+/// check hard-fails a lint run with an `internal.io_error` — an *infrastructure*
+/// error, not a lint result — when the sidecar file is absent. Demanding a file
+/// from an extension that never declared it produced exactly that error on
+/// runs whose lint had *passed*, which is the outage class #11123 retires.
+///
+/// An extension with no declaration has no contract to hold it to, so the check
+/// is skipped and a missing file reads as zero findings, which is what
+/// `lint::baseline::parse_findings_file` already returns for an absent file.
+///
+/// Failing to resolve or load the manifest yields `false`. By the time this is
+/// consulted the lint runner has already resolved and executed against that
+/// same manifest, so a failure here is not a real state; treating it as "no
+/// declaration" keeps a bookkeeping hiccup from being reported as a lint
+/// verdict.
+pub fn declares_lint_findings_sidecar(component: &Component) -> bool {
+    let Ok(context) = resolve_lint_command(component) else {
+        return false;
+    };
+    let Ok(manifest) = crate::load_extension(&context.extension_id) else {
+        return false;
+    };
+    crate::structured_sidecars(&manifest)
+        .iter()
+        .any(|declaration| declaration.name == LINT_FINDINGS_SIDECAR)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_lint_runner(
     component: &Component,
@@ -184,6 +217,68 @@ mod tests {
 
         let lines: Vec<String> = contents.lines().map(str::to_string).collect();
         assert_eq!(lines, changed_files);
+    }
+
+    /// The missing-findings evidence check is only legitimate against an
+    /// extension that declared `lint.findings`. Before #11123 it consulted no
+    /// declaration at all, so an extension declaring `"lint.findings": false`
+    /// — or declaring nothing — still got a hard `internal.io_error` on a
+    /// *passing* lint. (#11123)
+    #[test]
+    fn lint_findings_evidence_is_required_only_when_declared() {
+        fn write_lint_extension(home: &std::path::Path, extension_id: &str, sidecars: &str) {
+            let extension_dir = home.join(".config/homeboy/extensions").join(extension_id);
+            std::fs::create_dir_all(&extension_dir).expect("extension dir");
+            std::fs::write(
+                extension_dir.join(format!("{extension_id}.json")),
+                format!(
+                    r#"{{"name":"{extension_id}","version":"1.0.0","lint":{{"extension_script":"lint.sh"}}{sidecars}}}"#
+                ),
+            )
+            .expect("extension manifest");
+        }
+
+        fn component_for(extension_id: &str) -> Component {
+            Component {
+                id: "consumer".to_string(),
+                extensions: Some(std::collections::HashMap::from([(
+                    extension_id.to_string(),
+                    homeboy_core::component::ScopedExtensionConfig::default(),
+                )])),
+                ..Default::default()
+            }
+        }
+
+        homeboy_core::test_support::with_isolated_home(|home| {
+            write_lint_extension(
+                home.path(),
+                "declares",
+                r#","structured_sidecars":{"lint.findings":true}"#,
+            );
+            write_lint_extension(
+                home.path(),
+                "disclaims",
+                r#","structured_sidecars":{"lint.findings":false}"#,
+            );
+            write_lint_extension(home.path(), "silent", "");
+
+            assert!(
+                declares_lint_findings_sidecar(&component_for("declares")),
+                "an extension that declares the sidecar owes it on every exit path"
+            );
+            assert!(
+                !declares_lint_findings_sidecar(&component_for("disclaims")),
+                "`\"lint.findings\": false` must not be answered with a hard IO error"
+            );
+            assert!(
+                !declares_lint_findings_sidecar(&component_for("silent")),
+                "no declaration means no contract to enforce"
+            );
+            assert!(
+                !declares_lint_findings_sidecar(&component_for("missing")),
+                "an unresolvable lint capability is not an evidence verdict"
+            );
+        });
     }
 
     /// End-to-end: the manifest content equals `get_files_changed_since`, the
