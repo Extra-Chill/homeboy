@@ -811,7 +811,13 @@ pub(super) fn remote_daemon_connect_action_for_runner(
         {
             return Ok(RemoteDaemonConnectAction::ReplaceIdleStale);
         }
-        return reattach_only_if_same_lease(previous_session, daemon, runner_id, status);
+        return reattach_only_if_same_lease(
+            previous_session,
+            daemon,
+            runner_id,
+            status,
+            live_lease_expectation,
+        );
     }
 
     let healthy = status.fresh && status.reachable;
@@ -868,6 +874,7 @@ pub(super) fn remote_daemon_connect_action_for_runner(
                     status,
                     expected_identity,
                     runner_id,
+                    live_lease_expectation,
                 ));
             }
         } else if live_lease_expectation
@@ -885,6 +892,7 @@ pub(super) fn remote_daemon_connect_action_for_runner(
                 status,
                 expected_identity,
                 runner_id,
+                live_lease_expectation,
             ));
         }
         return Ok(RemoteDaemonConnectAction::Reattach);
@@ -898,6 +906,7 @@ fn reattach_only_if_same_lease(
     daemon: &RemoteDaemon,
     runner_id: &str,
     status: &RemoteDaemonStatus,
+    live_lease_expectation: Option<(&str, u32)>,
 ) -> std::result::Result<RemoteDaemonConnectAction, String> {
     let persisted_lease = previous_session
         .filter(|session| {
@@ -915,6 +924,7 @@ fn reattach_only_if_same_lease(
             status,
             "not evaluated for stale daemon",
             runner_id,
+            live_lease_expectation,
         ))
     }
 }
@@ -926,7 +936,44 @@ fn lease_reconciliation_failure(
     status: &RemoteDaemonStatus,
     expected_identity: &str,
     runner_id: &str,
+    live_lease_expectation: Option<(&str, u32)>,
 ) -> String {
+    if live_lease_expectation == daemon.lease_id.as_deref().zip(daemon.pid) {
+        let (blocker, action) = if let Some(error) = status.endpoint_probe_error.as_deref() {
+            (
+                format!("the endpoint identity/jobs probe failed: {error}"),
+                "Restore endpoint identity/jobs availability",
+            )
+        } else if daemon
+            .build_identity
+            .as_deref()
+            .is_none_or(|identity| identity.trim().is_empty())
+        {
+            (
+                "the reachable endpoint did not provide a build identity".to_string(),
+                "Restore endpoint build identity reporting",
+            )
+        } else if daemon.build_identity.as_deref().map(str::trim) != Some(expected_identity.trim())
+        {
+            (
+                format!(
+                    "live build identity `{}` does not match configured identity `{expected_identity}`",
+                    daemon.build_identity.as_deref().expect("checked above")
+                ),
+                "Use a controller configured for the live identity or restore the endpoint to the configured identity",
+            )
+        } else {
+            (
+                "the required endpoint identity proof is unavailable".to_string(),
+                "Restore the required endpoint identity proof",
+            )
+        };
+        return format!(
+            "explicit live lease adoption matched lease `{actual_lease}` and PID {}, but {blocker}; refusing to persist a session. No session state was changed. {action}, then verify it with `homeboy runner status {} --json` before retrying adoption.",
+            daemon.pid.expect("matching expectation requires PID"),
+            shell::quote_arg(runner_id),
+        );
+    }
     format!(
         "live remote daemon lease `{actual_lease}` differs from persisted session lease `{expected_lease}`; refusing to adopt or replace it because runner ownership is not proven (fresh={}, reachable={}, live identity `{}`, configured identity `{}`, endpoint probe `{}`). No session state was changed. Run `homeboy runner connect {} --adopt-live-lease {} --expected-live-pid {}` to explicitly adopt this observed lease/PID/build after revalidation. This is operator-confirmed recovery within the trusted remote SSH UID boundary; it never stops or replaces a daemon, and later lease drift fails closed. Run `homeboy runner status {} --json` to inspect it.",
         status.fresh,

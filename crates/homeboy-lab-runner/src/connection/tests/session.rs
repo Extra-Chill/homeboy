@@ -167,6 +167,47 @@ fn explicit_live_lease_adoption_accepts_an_exact_reachable_stale_daemon() {
 }
 
 #[test]
+fn explicit_live_lease_adoption_with_endpoint_timeout_reports_the_probe_blocker() {
+    let session = direct_ssh_session("lease-recorded");
+    let mut status = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
+    status.daemon.as_mut().expect("daemon").build_identity =
+        Some("homeboy test+configured".to_string());
+    status.endpoint_probe_error = Some("timed out after 2 seconds".to_string());
+
+    let error = remote_daemon::remote_daemon_connect_action_for_runner(
+        Some(&session),
+        &status,
+        "homeboy test+configured",
+        "runner-a",
+        Some(("lease-live", 4646)),
+    )
+    .expect_err("endpoint timeout must fail closed");
+
+    assert!(error.contains("endpoint identity/jobs probe failed: timed out after 2 seconds"));
+    assert!(error.contains("homeboy runner status runner-a --json"));
+    assert!(!error.contains("--adopt-live-lease lease-live --expected-live-pid 4646"));
+}
+
+#[test]
+fn explicit_live_lease_adoption_with_unavailable_identity_reports_the_identity_blocker() {
+    let session = direct_ssh_session("lease-recorded");
+    let status = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
+
+    let error = remote_daemon::remote_daemon_connect_action_for_runner(
+        Some(&session),
+        &status,
+        "homeboy test+configured",
+        "runner-a",
+        Some(("lease-live", 4646)),
+    )
+    .expect_err("unavailable identity must fail closed");
+
+    assert!(error.contains("reachable endpoint did not provide a build identity"));
+    assert!(error.contains("homeboy runner status runner-a --json"));
+    assert!(!error.contains("--adopt-live-lease lease-live --expected-live-pid 4646"));
+}
+
+#[test]
 fn stale_active_mismatched_daemon_never_reattaches_or_adopts() {
     let session = direct_ssh_session("lease-recorded");
     let mut status = remote_daemon_status_for_test(false, true, 1, "lease-live", 4646);
@@ -181,8 +222,9 @@ fn stale_active_mismatched_daemon_never_reattaches_or_adopts() {
     )
     .expect_err("stale active daemon must preserve the persisted session");
 
-    assert!(error.contains("persisted session lease `lease-recorded`"));
-    assert!(error.contains("live remote daemon lease `lease-live`"));
+    assert!(error.contains("endpoint identity/jobs probe failed: identity probe failed"));
+    assert!(error.contains("homeboy runner status runner-a --json"));
+    assert!(!error.contains("--adopt-live-lease lease-live --expected-live-pid 4646"));
 }
 
 #[test]
