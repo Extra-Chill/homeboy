@@ -31,6 +31,35 @@ cargo test --lib --features slow-tests collect_refactor_sources_audit_write_uses
 
 Use the slow tier when changing audit detector orchestration, audit fixability planning, or audit-driven refactor planning. These tests remain runnable, but they are not part of the default unit gate because they scan real fixture/checkouts and dominated local suite wall-clock time.
 
+## Process-Global Environment and Test Threads
+
+`homeboy.json` sets the Rust extension's `rust_cargo_test_threads` to `1`, so the
+gate runs `cargo test --workspace -- --test-threads=1`.
+
+This is not a performance choice, it is a correctness one. `HomeGuard`
+(`homeboy_core::test_support`) isolates a test by mutating *process-global*
+environment — `HOME`, `XDG_DATA_HOME`, `HOMEBOY_ARTIFACT_ROOT`,
+`HOMEBOY_RUNTIME_TMPDIR`, the invocation runtime directory — and restoring it on
+`Drop`. The `home_lock` mutex it holds serializes *writers*. It cannot serialize
+*readers*: any test on another thread that reads `HOME`, directly or through
+`paths::homeboy()` and friends, can observe a foreign or missing value while a
+guard's window is open. libtest shares one process across its threads, so there
+is no thread-local escape hatch. (Rust made `std::env::set_var` `unsafe` in the
+2024 edition for this reason.)
+
+One thread per test binary closes that window. Cargo already runs test binaries
+sequentially, so the cost is confined to intra-binary parallelism, and the
+guard-holding tests — the slow ones — were already serialized by the mutex.
+
+The real fix is injectable config and path roots so tests never touch
+process-global environment at all (#7505). Until that lands, do not raise this
+setting, and do not add new ad-hoc `std::env::set_var` helpers in test modules:
+use `HomeGuard`/`with_isolated_home` so the mutation is at least covered by the
+shared lock.
+
+`cargo nextest` does not need this, because it runs each test in its own
+process. It is not what CI uses today.
+
 ## Hermetic CLI Fixtures
 
 Ordinary Rust tests must use `homeboy::test_support::HermeticTestContext` for

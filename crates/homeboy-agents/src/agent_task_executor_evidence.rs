@@ -245,13 +245,39 @@ mod tests {
         }
     }
 
+    /// Scopes the process-global artifact-root override to one test.
+    ///
+    /// Two properties matter, and both exist so that a panicking `#[test]`
+    /// cannot fail an unrelated later test on something other than its own
+    /// merits:
+    ///
+    /// 1. The lock is poison-tolerant. A panic inside `test` poisons
+    ///    `ARTIFACT_ROOT_LOCK`, and a plain `.expect(...)` then reports every
+    ///    subsequent test in this module as a `PoisonError` rather than its
+    ///    real result. `homeboy_core::test_support::env_lock` already ignores
+    ///    poison for exactly this reason; match it here.
+    /// 2. The override is cleared from `Drop`, not on the straight-line return
+    ///    path. A panic used to skip the reset and leave the override pointing
+    ///    at an already-deleted `TempDir`, so the next test resolved artifacts
+    ///    under a missing directory.
     fn with_artifact_root<R>(test: impl FnOnce(&Path) -> R) -> R {
-        let _lock = ARTIFACT_ROOT_LOCK.lock().expect("artifact root lock");
+        struct ClearArtifactRootOverride;
+
+        impl Drop for ClearArtifactRootOverride {
+            fn drop(&mut self) {
+                homeboy_core::set_artifact_root_override(None);
+            }
+        }
+
+        let _lock = ARTIFACT_ROOT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let guard = tempfile::tempdir().expect("artifact root");
         homeboy_core::set_artifact_root_override(Some(guard.path().to_path_buf()));
-        let result = test(guard.path());
-        homeboy_core::set_artifact_root_override(None);
-        result
+        // Declared after `guard` so the override is cleared before the
+        // directory it points at is removed, and before the lock is released.
+        let _clear_override = ClearArtifactRootOverride;
+        test(guard.path())
     }
 
     #[test]
