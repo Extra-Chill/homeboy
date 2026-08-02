@@ -70,6 +70,19 @@ pub struct DiscoveryMarkerConfig {
 
 /// Scripts that implement extension capabilities.
 /// Each key maps a capability name to a script path relative to the extension directory.
+///
+/// Every field here must have a live consumer in core. A key with no reader is
+/// not a feature, it is a promise the manifest cannot keep: `crossref` is
+/// declared by the WordPress extension and has *never* existed on this struct,
+/// so serde has silently dropped it since the day it was added, leaving a
+/// ~185-line script and a README row wired to nothing. `topology` was the
+/// mirror image — it existed here, and nothing ever declared it — and was
+/// removed in #11124.
+///
+/// Unknown keys are dropped rather than rejected (no `deny_unknown_fields`),
+/// which is the right call for forward compatibility but means a typo or a
+/// retired key fails silently. Verifying a declaration reaches a reader is
+/// therefore a review obligation, not something the type system does here.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ScriptsConfig {
     /// Script that extracts structural fingerprints from source files.
@@ -80,10 +93,6 @@ pub struct ScriptsConfig {
     /// Receives edit instructions on stdin, outputs transformed content on stdout.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refactor: Option<String>,
-    /// Script that classifies files/artifacts for test topology auditing.
-    /// Receives `{file_path, content}` on stdin and outputs `{artifacts:[...]}` on stdout.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub topology: Option<String>,
     /// Script that formats source code after automated writes.
     /// Runs from the project root. Exit 0 on success, non-zero on failure.
     /// Formatting failure is non-fatal — it logs a warning but never rolls back.

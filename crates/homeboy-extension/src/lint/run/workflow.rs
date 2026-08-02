@@ -156,7 +156,7 @@ pub fn run_main_lint_workflow(
         let stderr_artifact = write_command_artifact(run_dir, 0, "stderr", &output.stderr)?;
         progress.finish(0, output.exit_code, stdout_artifact, stderr_artifact)?;
         let lint_findings_file = run_dir.step_file(run_dir::files::LINT_FINDINGS);
-        if !lint_findings_file.is_file() {
+        if crate::lint::declares_lint_findings_sidecar(component) && !lint_findings_file.is_file() {
             return Err(missing_findings_evidence_error(&lint_findings_file));
         }
         let lint_producers_file = run_dir.step_file(run_dir::files::LINT_PRODUCERS);
@@ -333,6 +333,10 @@ fn run_scoped_lint_runs(
     let mut extension_phase_timings = Vec::new();
     let mut evidence = Vec::new();
     let mut child_run_dirs = Vec::new();
+    // Read the declaration once, not once per scoped run: it is a property of
+    // the component's lint extension, and every run in this loop is that same
+    // extension.
+    let requires_findings_evidence = crate::lint::declares_lint_findings_sidecar(component);
     let mut progress = ValidationProgressRecorder::new(
         run_dir,
         None,
@@ -385,7 +389,7 @@ fn run_scoped_lint_runs(
         let stderr_artifact = write_command_artifact(run_dir, index, "stderr", &output.stderr)?;
         progress.finish(index, output.exit_code, stdout_artifact, stderr_artifact)?;
         let findings_file = active_run_dir.step_file(run_dir::files::LINT_FINDINGS);
-        if !findings_file.is_file() {
+        if requires_findings_evidence && !findings_file.is_file() {
             finish_scoped_lint_run_dir(scoped_run_dir.as_ref(), false);
             return Err(missing_findings_evidence_error(&findings_file));
         }
@@ -451,14 +455,24 @@ fn finish_scoped_lint_run_dirs(run_dirs: &[RunDir], success: bool) {
     }
 }
 
+/// Reported only when the extension *declared* `lint.findings` and then did not
+/// write it — i.e. it broke a contract it opted into. See
+/// [`crate::lint::declares_lint_findings_sidecar`] for why the declaration
+/// gates this at all.
 fn missing_findings_evidence_error(path: &Path) -> homeboy_core::Error {
     homeboy_core::Error::internal_io(
         format!(
-            "Lint runner did not produce required findings evidence {}",
+            "Lint runner declares the `{}` structured sidecar but did not produce it at {}",
+            crate::lint::LINT_FINDINGS_SIDECAR,
             path.display()
         ),
         Some("lint.findings.evidence".to_string()),
     )
+    .with_hint(format!(
+        "Either write the sidecar on every exit path (seed it empty for a clean pass) or drop \
+         `\"{}\"` from the extension manifest's `structured_sidecars`.",
+        crate::lint::LINT_FINDINGS_SIDECAR
+    ))
 }
 
 pub(super) fn finish_scoped_lint_run_dir(run_dir: Option<&RunDir>, success: bool) {

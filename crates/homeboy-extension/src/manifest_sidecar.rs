@@ -4,7 +4,7 @@
 //! re-exports them and provides the resolution logic that depends on core's
 //! run-dir file constants and `structured_sidecar` defaults.
 
-use homeboy_core::{engine::run_dir, structured_sidecar};
+use homeboy_core::structured_sidecar;
 
 pub use homeboy_extension_contract::sidecar_config::{
     StructuredSidecarContract, StructuredSidecarDeclaration, StructuredSidecarDetail,
@@ -45,43 +45,26 @@ pub(super) fn structured_sidecar_declaration(
     }
 }
 
+/// Default run-dir-relative path for a sidecar name.
+///
+/// `structured_sidecar::REGISTRY` is the *only* source of defaults. Until
+/// #11121 a second ~15-key table lived here as a fallback, reached only when
+/// the registry missed. Because both lookups early-returned from the registry,
+/// nine of its fifteen arms were unreachable, and the five keys it alone knew
+/// (`lint.producers`, `test.coverage`, `resource.summary`, `producer.summary`,
+/// `findings`) got a path from here but no schema version and no payload
+/// validation — the registry is what carries those. Those five moved into the
+/// registry and the table is gone.
+///
+/// An unknown name still falls back to itself, so an extension may declare a
+/// sidecar core has no contract for; it simply gets no schema version and no
+/// validation, which is the honest reading of "core does not know this key".
 fn default_structured_sidecar_path(name: &str) -> String {
-    if let Some(path) = structured_sidecar::default_path(name) {
-        return path.to_string();
-    }
-
-    match name {
-        "lint.findings" => run_dir::files::LINT_FINDINGS,
-        "lint.producers" => run_dir::files::LINT_PRODUCERS,
-        "test.results" => run_dir::files::TEST_RESULTS,
-        "test.failures" => run_dir::files::TEST_FAILURES,
-        "test.durations" => run_dir::files::TEST_DURATIONS,
-        "test.coverage" => run_dir::files::COVERAGE,
-        "bench.results" => run_dir::files::BENCH_RESULTS,
-        "fuzz.results" => run_dir::files::FUZZ_RESULTS,
-        "trace.results" => run_dir::files::TRACE_RESULTS,
-        "trace.artifacts" => "artifacts",
-        "resource.summary" => run_dir::files::RESOURCE_SUMMARY,
-        "producer.summary" => "producer-summary.json",
-        "findings" => "findings.json",
-        "annotations" => run_dir::files::ANNOTATIONS_DIR,
-        _ => name,
-    }
-    .to_string()
+    structured_sidecar::default_path(name)
+        .unwrap_or(name)
+        .to_string()
 }
 
 fn default_structured_sidecar_producer(name: &str) -> Option<String> {
-    if let Some(producer) = structured_sidecar::default_producer(name) {
-        return Some(producer.to_string());
-    }
-
-    match name {
-        "lint.findings" | "lint.producers" => Some("lint"),
-        "test.results" | "test.failures" | "test.durations" | "test.coverage" => Some("test"),
-        "bench.results" => Some("bench"),
-        "fuzz.results" => Some("fuzz"),
-        "trace.results" | "trace.artifacts" => Some("trace"),
-        _ => None,
-    }
-    .map(str::to_string)
+    structured_sidecar::default_producer(name).map(str::to_string)
 }

@@ -19,6 +19,17 @@ pub struct StructuredSidecarSchema {
     pub producer: Option<&'static str>,
     pub shape: StructuredSidecarShape,
     pub required_fields: &'static [&'static str],
+    /// Whether core seeds this sidecar with its empty default shape *before*
+    /// the extension script runs, so a clean run that legitimately has nothing
+    /// to report still leaves evidence that it measured.
+    ///
+    /// This is deliberately opt-in per key rather than "every declared
+    /// sidecar", because for several sidecars the *absence* of the file is
+    /// load-bearing: `test.results` missing is what makes the declared-parser
+    /// stdout fallback engage (`test::run`), so pre-seeding `{}` there would
+    /// silently suppress a real result path. Only sidecars whose empty shape is
+    /// indistinguishable from "ran and found nothing" may be seeded. (#11123)
+    pub seed_on_start: bool,
 }
 
 pub const REGISTRY: &[StructuredSidecarSchema] = &[
@@ -29,6 +40,19 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
         producer: Some("lint"),
         shape: StructuredSidecarShape::Array,
         required_fields: &["message"],
+        seed_on_start: true,
+    },
+    // Producer summaries travel beside the findings and share their lifecycle:
+    // a lint run that produced no findings still owes the list of tools that
+    // looked, so an empty array is the honest clean-pass value here too.
+    StructuredSidecarSchema {
+        key: "lint.producers",
+        schema_version: "v1",
+        path: run_dir::files::LINT_PRODUCERS,
+        producer: Some("lint"),
+        shape: StructuredSidecarShape::Array,
+        required_fields: &[],
+        seed_on_start: true,
     },
     StructuredSidecarSchema {
         key: "test.results",
@@ -37,6 +61,7 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
         producer: Some("test"),
         shape: StructuredSidecarShape::Object,
         required_fields: &[],
+        seed_on_start: false,
     },
     StructuredSidecarSchema {
         key: "test.failures",
@@ -45,6 +70,16 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
         producer: Some("test"),
         shape: StructuredSidecarShape::Array,
         required_fields: &[],
+        seed_on_start: false,
+    },
+    StructuredSidecarSchema {
+        key: "test.coverage",
+        schema_version: "v1",
+        path: run_dir::files::COVERAGE,
+        producer: Some("test"),
+        shape: StructuredSidecarShape::Object,
+        required_fields: &[],
+        seed_on_start: false,
     },
     // Duration is a first-class test fact, and it travels on its own key so a
     // slow suite can never be confused with a failing one. Optional inbound
@@ -58,6 +93,7 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
         producer: Some("test"),
         shape: StructuredSidecarShape::Object,
         required_fields: &[],
+        seed_on_start: false,
     },
     StructuredSidecarSchema {
         key: "bench.results",
@@ -66,6 +102,7 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
         producer: Some("bench"),
         shape: StructuredSidecarShape::Object,
         required_fields: &[],
+        seed_on_start: false,
     },
     StructuredSidecarSchema {
         key: "fuzz.results",
@@ -74,6 +111,7 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
         producer: Some("fuzz"),
         shape: StructuredSidecarShape::Object,
         required_fields: &[],
+        seed_on_start: false,
     },
     StructuredSidecarSchema {
         key: "trace.results",
@@ -82,6 +120,7 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
         producer: Some("trace"),
         shape: StructuredSidecarShape::Object,
         required_fields: &[],
+        seed_on_start: false,
     },
     StructuredSidecarSchema {
         key: "trace.artifacts",
@@ -90,6 +129,34 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
         producer: Some("trace"),
         shape: StructuredSidecarShape::Array,
         required_fields: &[],
+        seed_on_start: false,
+    },
+    StructuredSidecarSchema {
+        key: "resource.summary",
+        schema_version: "v1",
+        path: run_dir::files::RESOURCE_SUMMARY,
+        producer: None,
+        shape: StructuredSidecarShape::Object,
+        required_fields: &[],
+        seed_on_start: false,
+    },
+    StructuredSidecarSchema {
+        key: "producer.summary",
+        schema_version: "v1",
+        path: "producer-summary.json",
+        producer: None,
+        shape: StructuredSidecarShape::Array,
+        required_fields: &[],
+        seed_on_start: false,
+    },
+    StructuredSidecarSchema {
+        key: "findings",
+        schema_version: "v1",
+        path: "findings.json",
+        producer: None,
+        shape: StructuredSidecarShape::Array,
+        required_fields: &[],
+        seed_on_start: false,
     },
     StructuredSidecarSchema {
         key: "annotations",
@@ -98,6 +165,7 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
         producer: None,
         shape: StructuredSidecarShape::Array,
         required_fields: &[],
+        seed_on_start: false,
     },
 ];
 
@@ -119,6 +187,33 @@ pub fn default_producer(key: &str) -> Option<&'static str> {
 
 pub fn default_schema_version(key: &str) -> Option<&'static str> {
     schema(key).map(|entry| entry.schema_version)
+}
+
+impl StructuredSidecarSchema {
+    /// The empty payload for this sidecar's declared shape — what core seeds
+    /// before a run so a clean pass still leaves readable evidence.
+    pub fn empty_payload(&self) -> Value {
+        match self.shape {
+            StructuredSidecarShape::Array => Value::Array(Vec::new()),
+            StructuredSidecarShape::Object => Value::Object(serde_json::Map::new()),
+        }
+    }
+}
+
+/// The empty payload for a registry key's declared shape.
+///
+/// `None` for keys the registry does not know, which is the signal that core
+/// has no contract for the sidecar and therefore must not invent one.
+pub fn empty_payload(key: &str) -> Option<Value> {
+    schema(key).map(StructuredSidecarSchema::empty_payload)
+}
+
+/// Whether core seeds this sidecar with its empty shape before a run.
+///
+/// Unknown keys are never seeded: core cannot know whether the absence of an
+/// undeclared file is load-bearing to whoever reads it.
+pub fn seeds_on_start(key: &str) -> bool {
+    schema(key).is_some_and(|entry| entry.seed_on_start)
 }
 
 pub fn validate_payload(key: &str, payload: &Value) -> Result<()> {
@@ -240,6 +335,74 @@ mod tests {
             assert!(keys.contains(&key), "missing registry key {key}");
             assert_eq!(default_schema_version(key), Some("v1"));
         }
+    }
+
+    /// The five keys that used to exist only in `homeboy-extension`'s shadow
+    /// path/producer table. They resolved to a path but never to a schema
+    /// version and were never reachable by `validate_payload`, so a declaration
+    /// of any of them bought nothing. They are registry entries now. (#11121)
+    #[test]
+    fn registry_absorbed_the_extension_shadow_table_keys() {
+        for (key, path, producer) in [
+            ("lint.producers", "lint-producers.json", Some("lint")),
+            ("test.coverage", "coverage.json", Some("test")),
+            ("resource.summary", "resource-summary.json", None),
+            ("producer.summary", "producer-summary.json", None),
+            ("findings", "findings.json", None),
+        ] {
+            assert_eq!(default_path(key), Some(path), "path for {key}");
+            assert_eq!(default_producer(key), producer, "producer for {key}");
+            assert_eq!(
+                default_schema_version(key),
+                Some("v1"),
+                "shadow-table keys carried no schema version before {key}"
+            );
+            validate_payload(key, &empty_payload(key).expect("registry key"))
+                .unwrap_or_else(|err| panic!("empty payload for {key} must validate: {err}"));
+        }
+    }
+
+    #[test]
+    fn registry_keys_are_unique() {
+        let mut keys: Vec<&str> = registry().iter().map(|entry| entry.key).collect();
+        let total = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(total, keys.len(), "duplicate structured sidecar key");
+    }
+
+    #[test]
+    fn empty_payload_matches_declared_shape() {
+        for entry in registry() {
+            let empty = entry.empty_payload();
+            match entry.shape {
+                StructuredSidecarShape::Array => assert!(empty.is_array(), "{}", entry.key),
+                StructuredSidecarShape::Object => assert!(empty.is_object(), "{}", entry.key),
+            }
+        }
+        assert_eq!(empty_payload("not.a.registry.key"), None);
+    }
+
+    /// Seeding is opt-in per key, and only for keys whose empty shape reads as
+    /// "ran, found nothing". `test.results` must stay unseeded: its *absence*
+    /// is what engages the declared-parser stdout fallback. (#11123)
+    #[test]
+    fn only_clean_pass_safe_sidecars_seed_on_start() {
+        assert!(seeds_on_start("lint.findings"));
+        assert!(seeds_on_start("lint.producers"));
+
+        for key in [
+            "test.results",
+            "test.failures",
+            "test.coverage",
+            "bench.results",
+            "trace.results",
+            "annotations",
+        ] {
+            assert!(!seeds_on_start(key), "{key} must not be seeded by core");
+        }
+
+        assert!(!seeds_on_start("unknown.key"));
     }
 
     #[test]

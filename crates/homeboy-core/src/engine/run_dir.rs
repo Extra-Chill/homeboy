@@ -151,6 +151,29 @@ impl RunDir {
         super::temp::bind_run_dir_owner(&self.path, None, Some(invocation_id))
     }
 
+    /// The registry key each legacy sidecar env var carries the path for.
+    ///
+    /// This is the join between the env-var surface extension scripts actually
+    /// consume and the `structured_sidecars` declarations they publish. Only
+    /// keys present here can have a manifest-declared custom path honoured;
+    /// entries mapped to `None` are run-dir files with no sidecar contract.
+    const LEGACY_SIDECAR_ENV_KEYS: &'static [(&'static str, Option<&'static str>)] = &[
+        ("LINT_FINDINGS_FILE", Some("lint.findings")),
+        ("LINT_PRODUCERS_FILE", Some("lint.producers")),
+        ("TEST_RESULTS_FILE", Some("test.results")),
+        ("TEST_FAILURES_FILE", Some("test.failures")),
+        ("TEST_DURATIONS_FILE", Some("test.durations")),
+        ("COVERAGE_FILE", Some("test.coverage")),
+        ("FIX_RESULTS_FILE", None),
+        ("BENCH_RESULTS_FILE", Some("bench.results")),
+        ("BENCH_RESPONSIVENESS_FILE", None),
+        ("FUZZ_RESULTS_FILE", Some("fuzz.results")),
+        ("FUZZ_ARTIFACTS_DIR", None),
+        ("TRACE_RESULTS_FILE", Some("trace.results")),
+        ("PHASE_TIMINGS_FILE", None),
+        ("ANNOTATIONS_DIR", Some("annotations")),
+    ];
+
     /// Generate backward-compatible env var pairs for extension scripts.
     ///
     /// Returns `(key, value)` pairs that map the legacy product-prefixed
@@ -158,6 +181,81 @@ impl RunDir {
     /// env vars to files within this run directory. Extension scripts that
     /// still use the old vars will read/write the correct locations.
     pub fn legacy_env_vars(&self) -> Vec<(String, String)> {
+        self.legacy_env_vars_for(&[])
+    }
+
+    /// [`Self::legacy_env_vars`], with manifest-declared sidecar paths applied.
+    ///
+    /// A `structured_sidecars` entry may declare a non-default `path`. Until
+    /// #11121 that path was inert on this surface: core seeded and read the
+    /// registry default while telling the extension script, via these env vars,
+    /// to write the registry default too — so an extension that declared a
+    /// custom path had it silently ignored on every side. The declaration now
+    /// reaches the script.
+    ///
+    /// This is deliberately an *override*, not a filter. Narrowing the set to
+    /// only declared sidecars is the other half of #11121 and is not safe to do
+    /// here yet: shipped extensions consume env vars for sidecars they do not
+    /// declare (`rust` reads `COVERAGE_FILE` while declaring
+    /// `"test.coverage": false`, `wordpress` reads `ANNOTATIONS_DIR` while
+    /// declaring `"annotations": false`, and three extensions read
+    /// `FIX_RESULTS_FILE`, which has no sidecar key at all). Narrowing before
+    /// those declarations are corrected would break shipped extensions.
+    ///
+    /// Declared paths that are absolute or contain `..` are ignored — a
+    /// manifest is extension-authored config and this hands the result to a
+    /// child process as a write target.
+    pub fn legacy_env_vars_for(
+        &self,
+        declared: &[homeboy_extension_contract::sidecar_config::StructuredSidecarDeclaration],
+    ) -> Vec<(String, String)> {
+        let mut env_vars = self.default_legacy_env_vars();
+
+        for (env_suffix, sidecar_key) in Self::LEGACY_SIDECAR_ENV_KEYS {
+            let Some(sidecar_key) = sidecar_key else {
+                continue;
+            };
+            let Some(declaration) = declared
+                .iter()
+                .find(|declaration| declaration.name == *sidecar_key)
+            else {
+                continue;
+            };
+            if Some(declaration.path.as_str())
+                == crate::structured_sidecar::default_path(sidecar_key)
+            {
+                continue;
+            }
+            let Some(path) = self.contained_step_file(&declaration.path) else {
+                continue;
+            };
+
+            let name = crate::product_identity::PRODUCT_IDENTITY.env_var(env_suffix);
+            if let Some(entry) = env_vars.iter_mut().find(|(key, _)| *key == name) {
+                entry.1 = path.to_string_lossy().to_string();
+            }
+        }
+
+        env_vars
+    }
+
+    /// Join a manifest-declared relative path onto the run dir, refusing
+    /// anything that would escape it.
+    fn contained_step_file(&self, declared: &str) -> Option<PathBuf> {
+        let relative = Path::new(declared);
+        if relative.as_os_str().is_empty() || relative.is_absolute() {
+            return None;
+        }
+        if !relative
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        {
+            return None;
+        }
+        Some(self.path.join(relative))
+    }
+
+    fn default_legacy_env_vars(&self) -> Vec<(String, String)> {
         vec![
             (run_dir_env(), self.path.to_string_lossy().to_string()),
             (
@@ -362,6 +460,118 @@ mod tests {
             .iter()
             .any(|(k, _)| k == "HOMEBOY_TRACE_RESULTS_FILE"));
         run_dir.cleanup();
+    }
+
+    fn declaration(
+        name: &str,
+        path: &str,
+    ) -> homeboy_extension_contract::sidecar_config::StructuredSidecarDeclaration {
+        homeboy_extension_contract::sidecar_config::StructuredSidecarDeclaration {
+            name: name.to_string(),
+            path: path.to_string(),
+            schema_version: None,
+            producer: None,
+        }
+    }
+
+    fn value_of<'a>(env_vars: &'a [(String, String)], key: &str) -> &'a str {
+        env_vars
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
+            .unwrap_or_else(|| panic!("{key} must be exported"))
+    }
+
+    /// A `structured_sidecars` entry may declare a non-default `path`, and
+    /// until #11121 that declaration never reached the extension: core exported
+    /// the registry default regardless, so a custom path was ignored on every
+    /// side at once.
+    #[test]
+    fn declared_sidecar_path_overrides_the_default_env_var() {
+        let _guard = crate::test_support::home_env_guard();
+        let run_dir = RunDir::create().expect("should create run dir");
+
+        let env_vars =
+            run_dir.legacy_env_vars_for(&[declaration("lint.findings", "custom/findings.json")]);
+
+        assert_eq!(
+            value_of(&env_vars, "HOMEBOY_LINT_FINDINGS_FILE"),
+            run_dir
+                .step_file("custom/findings.json")
+                .to_string_lossy()
+                .as_ref()
+        );
+        // Undeclared sidecars keep their defaults: this is an override, not a
+        // filter. Narrowing the set is deferred — shipped extensions consume
+        // env vars for sidecars they do not declare.
+        assert_eq!(
+            value_of(&env_vars, "HOMEBOY_TEST_RESULTS_FILE"),
+            run_dir.step_file(files::TEST_RESULTS).to_string_lossy()
+        );
+        assert_eq!(
+            value_of(&env_vars, "HOMEBOY_COVERAGE_FILE"),
+            run_dir.step_file(files::COVERAGE).to_string_lossy()
+        );
+
+        run_dir.cleanup();
+    }
+
+    #[test]
+    fn declared_sidecar_path_matching_the_default_is_a_no_op() {
+        let _guard = crate::test_support::home_env_guard();
+        let run_dir = RunDir::create().expect("should create run dir");
+
+        let declared =
+            run_dir.legacy_env_vars_for(&[declaration("lint.findings", files::LINT_FINDINGS)]);
+
+        assert_eq!(declared, run_dir.legacy_env_vars());
+
+        run_dir.cleanup();
+    }
+
+    /// A manifest is extension-authored config and this value is handed to a
+    /// child process as a write target, so a path that would escape the run dir
+    /// is refused and the default stands.
+    #[test]
+    fn declared_sidecar_path_cannot_escape_the_run_dir() {
+        let _guard = crate::test_support::home_env_guard();
+        let run_dir = RunDir::create().expect("should create run dir");
+        let default = run_dir
+            .step_file(files::LINT_FINDINGS)
+            .to_string_lossy()
+            .to_string();
+
+        for hostile in [
+            "/etc/passwd",
+            "../escape.json",
+            "nested/../../escape.json",
+            "",
+        ] {
+            let env_vars = run_dir.legacy_env_vars_for(&[declaration("lint.findings", hostile)]);
+            assert_eq!(
+                value_of(&env_vars, "HOMEBOY_LINT_FINDINGS_FILE"),
+                default,
+                "{hostile} must not become a write target"
+            );
+        }
+
+        run_dir.cleanup();
+    }
+
+    /// Every registry key that has a legacy env var must be reachable by the
+    /// override, and every mapped key must exist in the registry — otherwise a
+    /// declaration silently goes nowhere, which is the bug being fixed.
+    #[test]
+    fn legacy_sidecar_env_key_map_agrees_with_the_registry() {
+        for (env_suffix, sidecar_key) in RunDir::LEGACY_SIDECAR_ENV_KEYS {
+            let Some(sidecar_key) = sidecar_key else {
+                continue;
+            };
+            assert!(
+                crate::structured_sidecar::schema(sidecar_key).is_some(),
+                "{env_suffix} maps to unknown sidecar key {sidecar_key}"
+            );
+        }
     }
 
     #[test]

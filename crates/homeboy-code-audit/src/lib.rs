@@ -129,7 +129,6 @@ mod tests {
             audit_detector_rules: manifest.audit_detector_rules().cloned(),
             test_mapping: manifest.test_mapping().cloned(),
             audit_ignore_claim_patterns: manifest.audit_ignore_claim_patterns().to_vec(),
-            topology_script: manifest.topology_script().map(str::to_string),
         }
     }
 

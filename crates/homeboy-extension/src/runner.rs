@@ -176,8 +176,13 @@ impl ExtensionRunner {
 
     /// Set the run directory, injecting HOMEBOY_RUN_DIR and all legacy
     /// per-file env vars so extension scripts work with either pattern.
+    ///
+    /// The extension's own `structured_sidecars` declarations are applied, so a
+    /// declared non-default `path` reaches the script instead of being silently
+    /// replaced by the registry default (#11121).
     pub fn with_run_dir(mut self, run_dir: &homeboy_core::engine::run_dir::RunDir) -> Self {
-        self.env_vars.extend(run_dir.legacy_env_vars());
+        self.env_vars
+            .extend(run_dir.legacy_env_vars_for(&self.declared_structured_sidecars()));
         self.env_vars.push((
             homeboy_core::server::DELEGATED_RUN_STATUS_FILE_ENV.to_string(),
             run_dir
@@ -306,7 +311,7 @@ impl ExtensionRunner {
         )?;
 
         if let Some(run_dir_path) = &self.run_dir_path {
-            initialize_structured_sidecars(run_dir_path, self.execution_context.capability)?;
+            initialize_structured_sidecars(run_dir_path, &self.declared_structured_sidecars())?;
         }
 
         let output = self.execute_script(
@@ -373,6 +378,19 @@ impl ExtensionRunner {
                 .transpose()?
                 .unwrap_or_default(),
         })
+    }
+
+    /// Structured sidecars the resolved extension declares in its manifest.
+    ///
+    /// A manifest that will not load yields no declarations rather than an
+    /// error: the execution context this runner holds was itself built by
+    /// loading that manifest, so a failure here means it became unreadable
+    /// mid-run, and losing the seed is a strictly better outcome than failing
+    /// the run inside sidecar bookkeeping.
+    fn declared_structured_sidecars(&self) -> Vec<crate::StructuredSidecarDeclaration> {
+        crate::load_extension(&self.execution_context.extension_id)
+            .map(|manifest| crate::structured_sidecars(&manifest))
+            .unwrap_or_default()
     }
 
     fn acquire_invocation_guard(&self) -> Result<Option<InvocationGuard>> {
@@ -639,21 +657,61 @@ fn write_structured_failure_sidecar(
     }
 }
 
+/// Seed the structured sidecars *this extension declares* with their empty
+/// shape, so a clean run that legitimately had nothing to report still leaves
+/// readable evidence that it measured.
+///
+/// Before #11123 this hardcoded `capability == Lint` and both lint filenames
+/// and never looked at `manifest.structured_sidecars` at all. That is the
+/// core half of a three-layer arrangement solving one problem: core seeded
+/// unconditionally, every extension seeded again via
+/// `homeboy_lint_findings_init`, and core then hard-failed with an
+/// `internal.io_error` if the file was still absent. None of the three
+/// consulted the declaration, so an extension honestly declaring
+/// `"lint.findings": false` was still seeded a file it never asked for and
+/// still failed the evidence gate on a *passing* lint.
+///
+/// Seeding is now driven by the declaration, and which declared keys are safe
+/// to seed is a property of `structured_sidecar::REGISTRY` rather than of this
+/// function. It is deliberately not "every declared sidecar": for some keys the
+/// *absence* of the file is load-bearing (a missing `test.results` is what
+/// engages the declared-parser stdout fallback), so only keys flagged
+/// `seed_on_start` are written here.
 fn initialize_structured_sidecars(
     run_dir_path: &Path,
-    capability: ExtensionCapability,
+    declared: &[crate::StructuredSidecarDeclaration],
 ) -> Result<()> {
-    if capability == ExtensionCapability::Lint {
-        write_json_sidecar(
-            &run_dir_path.join(run_dir::files::LINT_FINDINGS),
-            &json!([]),
-        )?;
-        write_json_sidecar(
-            &run_dir_path.join(run_dir::files::LINT_PRODUCERS),
-            &json!([]),
-        )?;
+    for declaration in declared {
+        if !homeboy_core::structured_sidecar::seeds_on_start(&declaration.name) {
+            continue;
+        }
+        let Some(empty) = homeboy_core::structured_sidecar::empty_payload(&declaration.name) else {
+            continue;
+        };
+        let Some(path) = run_dir_relative_sidecar_path(run_dir_path, &declaration.path) else {
+            continue;
+        };
+        write_json_sidecar(&path, &empty)?;
     }
     Ok(())
+}
+
+/// Resolve a manifest-declared sidecar path against the run dir, refusing
+/// anything that would escape it. A declaration is extension-authored config,
+/// and this function writes files, so an absolute path or a `..` component is
+/// dropped rather than honoured.
+fn run_dir_relative_sidecar_path(run_dir_path: &Path, declared: &str) -> Option<PathBuf> {
+    let relative = Path::new(declared);
+    if relative.as_os_str().is_empty() || relative.is_absolute() {
+        return None;
+    }
+    if !relative
+        .components()
+        .all(|component| matches!(component, PathComponent::Normal(_)))
+    {
+        return None;
+    }
+    Some(run_dir_path.join(relative))
 }
 
 fn write_lint_failure_sidecar(
@@ -1034,12 +1092,27 @@ mod tests {
         run_dir.cleanup();
     }
 
+    fn declaration(name: &str) -> crate::StructuredSidecarDeclaration {
+        crate::StructuredSidecarDeclaration {
+            name: name.to_string(),
+            path: homeboy_core::structured_sidecar::default_path(name)
+                .unwrap_or(name)
+                .to_string(),
+            schema_version: homeboy_core::structured_sidecar::default_schema_version(name)
+                .map(str::to_string),
+            producer: homeboy_core::structured_sidecar::default_producer(name).map(str::to_string),
+        }
+    }
+
     #[test]
     fn initializes_empty_lint_sidecars_for_successful_zero_finding_runs() {
         let run_dir = RunDir::create().expect("run dir");
 
-        initialize_structured_sidecars(run_dir.path(), ExtensionCapability::Lint)
-            .expect("initialize lint evidence");
+        initialize_structured_sidecars(
+            run_dir.path(),
+            &[declaration("lint.findings"), declaration("lint.producers")],
+        )
+        .expect("initialize lint evidence");
 
         let findings: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(run_dir.step_file(run_dir::files::LINT_FINDINGS))
@@ -1053,6 +1126,94 @@ mod tests {
         .expect("producers json");
         assert_eq!(findings, json!([]));
         assert_eq!(producers, json!([]));
+
+        run_dir.cleanup();
+    }
+
+    /// The declaration is what drives seeding now. An extension that does not
+    /// declare `lint.findings` is not handed one, which is the half of #11123
+    /// that stops core from manufacturing a file the manifest disclaims — and,
+    /// paired with the gate in `lint::run::workflow`, stops it from then
+    /// failing the run for that file's absence.
+    #[test]
+    fn seeds_nothing_when_the_manifest_declares_no_sidecars() {
+        let run_dir = RunDir::create().expect("run dir");
+
+        initialize_structured_sidecars(run_dir.path(), &[]).expect("initialize");
+
+        assert!(!run_dir.step_file(run_dir::files::LINT_FINDINGS).exists());
+        assert!(!run_dir.step_file(run_dir::files::LINT_PRODUCERS).exists());
+
+        run_dir.cleanup();
+    }
+
+    /// Seeding is registry-driven, not "every declared key". `test.results`
+    /// declares itself but must never be pre-seeded: `test::run` treats a
+    /// missing results file as the signal to parse counts out of the declared
+    /// parser's stdout, so an empty `{}` here would silently suppress a real
+    /// result path.
+    #[test]
+    fn does_not_seed_sidecars_whose_absence_is_load_bearing() {
+        let run_dir = RunDir::create().expect("run dir");
+
+        initialize_structured_sidecars(
+            run_dir.path(),
+            &[
+                declaration("test.results"),
+                declaration("test.failures"),
+                declaration("bench.results"),
+                declaration("trace.results"),
+            ],
+        )
+        .expect("initialize");
+
+        assert!(!run_dir.step_file(run_dir::files::TEST_RESULTS).exists());
+        assert!(!run_dir.step_file(run_dir::files::TEST_FAILURES).exists());
+        assert!(!run_dir.step_file(run_dir::files::BENCH_RESULTS).exists());
+        assert!(!run_dir.step_file(run_dir::files::TRACE_RESULTS).exists());
+
+        run_dir.cleanup();
+    }
+
+    /// A key core has no registry contract for gets no invented empty shape.
+    #[test]
+    fn ignores_declared_sidecars_the_registry_does_not_know() {
+        let run_dir = RunDir::create().expect("run dir");
+
+        initialize_structured_sidecars(run_dir.path(), &[declaration("vendor.custom")])
+            .expect("initialize");
+
+        assert!(!run_dir.path().join("vendor.custom").exists());
+
+        run_dir.cleanup();
+    }
+
+    /// A declared path is extension-authored config and this writes files, so
+    /// a traversal or absolute path is dropped rather than honoured.
+    #[test]
+    fn refuses_declared_sidecar_paths_that_escape_the_run_dir() {
+        let run_dir = RunDir::create().expect("run dir");
+
+        assert_eq!(
+            run_dir_relative_sidecar_path(run_dir.path(), "lint-findings.json"),
+            Some(run_dir.step_file(run_dir::files::LINT_FINDINGS))
+        );
+        assert_eq!(
+            run_dir_relative_sidecar_path(run_dir.path(), "nested/findings.json"),
+            Some(run_dir.path().join("nested").join("findings.json"))
+        );
+        for hostile in [
+            "",
+            "/etc/passwd",
+            "../escape.json",
+            "nested/../../escape.json",
+        ] {
+            assert_eq!(
+                run_dir_relative_sidecar_path(run_dir.path(), hostile),
+                None,
+                "{hostile} must not resolve"
+            );
+        }
 
         run_dir.cleanup();
     }
