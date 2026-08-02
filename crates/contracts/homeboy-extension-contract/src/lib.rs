@@ -112,8 +112,14 @@ pub mod test_drift;
 pub mod trace_config;
 pub mod trace_preview;
 pub mod trace_results;
+pub mod trace_spec;
 pub mod update_output;
 pub mod version;
+
+pub use trace_spec::{
+    TraceDependencySpec, TraceNativePublicPreviewSpec, TracePreviewAssetFanoutSpec,
+    TracePublicPreviewMode, TracePublicPreviewSpec,
+};
 
 pub use core_compat::{
     core_incompatible_error, evaluate_core_compatibility, installed_homeboy_version,

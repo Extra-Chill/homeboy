@@ -1,9 +1,9 @@
 //! Re-exports the typed execution-surface contract from
-//! `homeboy-execution-contract` and provides the one path-touching classifier
+//! `homeboy-artifact-ref-contract` and provides the one path-touching classifier
 //! that must reach the filesystem (`std::fs::metadata`), which cannot live in
 //! the leaf contract crate.
 
-pub use homeboy_execution_contract::execution_contract::{
+pub use homeboy_artifact_ref_contract::execution_contract::{
     artifact_store_locator_from_runner_artifact_id, decode_uri_component,
     decode_uri_component_strict, encode_uri_component, is_remote_runner_artifact_path,
     runner_artifact_store_token, ApplyChangeContract, ArtifactUriContract, ExecutionContract,

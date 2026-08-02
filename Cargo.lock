@@ -744,6 +744,7 @@ name = "homeboy-api-jobs-contract"
 version = "0.1.0"
 dependencies = [
  "homeboy-lab-contract",
+ "homeboy-lab-runner-contract",
  "homeboy-source-snapshot-contract",
  "serde",
  "serde_json",
@@ -754,6 +755,7 @@ dependencies = [
 name = "homeboy-artifact-ref-contract"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "homeboy-engine-primitives",
  "serde",
  "serde_json",
@@ -882,7 +884,6 @@ dependencies = [
  "homeboy-component-contract",
  "homeboy-engine-primitives",
  "homeboy-error",
- "homeboy-execution-contract",
  "homeboy-extension",
  "homeboy-extension-contract",
  "homeboy-finding",
@@ -895,7 +896,6 @@ dependencies = [
  "homeboy-redaction",
  "homeboy-refactor-contract",
  "homeboy-release-contract",
- "homeboy-run-lifecycle-contract",
  "homeboy-source-snapshot-contract",
  "keyring",
  "libc",
@@ -942,15 +942,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "homeboy-execution-contract"
-version = "0.1.0"
-dependencies = [
- "base64",
- "homeboy-artifact-ref-contract",
- "homeboy-engine-primitives",
-]
-
-[[package]]
 name = "homeboy-extension"
 version = "0.1.0"
 dependencies = [
@@ -964,7 +955,6 @@ dependencies = [
  "homeboy-lifecycle-contract",
  "homeboy-product-identity",
  "homeboy-refactor-contract",
- "homeboy-rig-contract",
  "libc",
  "regex",
  "reqwest",
@@ -1193,11 +1183,11 @@ dependencies = [
  "homeboy-core",
  "homeboy-engine-primitives",
  "homeboy-extension",
+ "homeboy-extension-contract",
  "homeboy-lab-runner-contract",
  "homeboy-lifecycle-contract",
  "homeboy-paths",
  "homeboy-product-identity",
- "homeboy-rig-contract",
  "homeboy-stack",
  "libc",
  "serde",
@@ -1205,21 +1195,6 @@ dependencies = [
  "sha2",
  "shellexpand",
  "tempfile",
-]
-
-[[package]]
-name = "homeboy-rig-contract"
-version = "0.1.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "homeboy-run-lifecycle-contract"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]

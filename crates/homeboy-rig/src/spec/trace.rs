@@ -1,7 +1,7 @@
 //! Trace-workload schema for rig specs — variant/profile/guardrail/experiment
 //! and public-preview tunnel declarations consumed by `homeboy trace`.
 
-pub use homeboy_rig_contract::{
+pub use homeboy_extension_contract::{
     TraceDependencySpec, TraceNativePublicPreviewSpec, TracePreviewAssetFanoutSpec,
     TracePublicPreviewMode, TracePublicPreviewSpec,
 };

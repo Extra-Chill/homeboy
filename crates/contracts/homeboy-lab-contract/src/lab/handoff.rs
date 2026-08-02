@@ -2,7 +2,7 @@
 
 use crate::path_materialization::PathMaterializationPlan;
 
-use super::workload::LabRunnerWorkloadArtifactRef;
+use super::workload::JobArtifactMetadata;
 
 pub const LAB_RUNNER_HANDOFF_ENVELOPE_SCHEMA: &str = "homeboy/runner-exec-handoff/v1";
 pub const RUN_LOCATION_INDEX_SCHEMA: &str = "homeboy/run-location-index/v1";
@@ -61,7 +61,7 @@ pub struct LabRunnerHandoffEvidence {
     pub remote_cwd: String,
     pub artifact_manifest: LabRunnerHandoffArtifactManifestRef,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifact_refs: Vec<LabRunnerWorkloadArtifactRef>,
+    pub artifact_refs: Vec<JobArtifactMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_commands: Vec<LabRunnerHandoffNextCommand>,
 }
@@ -314,17 +314,19 @@ impl LabRunnerHandoffEnvelope {
             remote_cwd: remote_cwd.clone(),
             artifact_manifest: artifact_manifest.clone(),
             artifact_refs: vec![
-                LabRunnerWorkloadArtifactRef {
+                JobArtifactMetadata {
                     id: "artifact_manifest".to_string(),
                     name: Some("runner artifact manifest".to_string()),
                     path: Some(artifact_manifest.path.clone()),
                     url: None,
+                    ..Default::default()
                 },
-                LabRunnerWorkloadArtifactRef {
+                JobArtifactMetadata {
                     id: "run_location_index".to_string(),
                     name: Some("run location index".to_string()),
                     path: Some(run_location_index_path),
                     url: None,
+                    ..Default::default()
                 },
             ],
             next_commands,

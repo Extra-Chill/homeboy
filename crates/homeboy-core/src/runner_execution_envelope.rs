@@ -9,16 +9,20 @@ use crate::lab_contract::LabRunnerWorkload;
 use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
 
-/// The one `{id, name, path, url}` artifact reference carried by runner
-/// execution records, projections, and lab workloads.
+/// The one artifact reference carried by runner execution records,
+/// projections, lab workloads, and the runner job model.
 ///
-/// This module used to define its own `RunnerExecutionArtifactRef` with exactly
-/// these four fields and exactly these serde attributes, while the same file
-/// already imported `LabRunnerWorkloadArtifactRef` for
-/// `RunnerExecutionResultRefs.artifacts`. Two names, one shape, one file.
-/// Collapsed onto the leaf-contract type in #10310; the serialized shape is
-/// unchanged.
-pub use crate::lab_contract::LabRunnerWorkloadArtifactRef;
+/// This module used to define its own `RunnerExecutionArtifactRef` with the
+/// four fields `{id, name, path, url}`, while the same file already imported
+/// `JobArtifactMetadata` for `RunnerExecutionResultRefs.artifacts`. Two names,
+/// one shape, one file. Collapsed onto the leaf-contract type in #10310.
+///
+/// #11137 then collapsed `LabRunnerWorkloadArtifactRef` -- the last remaining
+/// `{id, name, path, url}` twin, and a strict field-subset of this type -- onto
+/// it as well, which removed the lossy `job_artifact_refs` rebuild that silently
+/// dropped `mime`, `size_bytes` and `sha256`. The serialized shape is unchanged
+/// in both collapses: every extra field is `Option` + `skip_serializing_if`.
+pub use crate::lab_contract::JobArtifactMetadata;
 
 pub const RUNNER_EXECUTION_ENVELOPE_SCHEMA: &str = "homeboy/runner-execution-envelope/v1";
 pub const RUNNER_EXECUTION_RECORD_SCHEMA: &str = "homeboy/runner-execution-record/v1";
@@ -140,7 +144,7 @@ pub struct RunnerExecutionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestration_provenance: Option<OrchestrationTargetProvenance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifact_refs: Vec<LabRunnerWorkloadArtifactRef>,
+    pub artifact_refs: Vec<JobArtifactMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<RunnerExecutionNextAction>,
 }
@@ -165,7 +169,7 @@ pub struct RunnerExecutionProjection {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub materialized_paths: Vec<PathMaterializationProjection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifact_refs: Vec<LabRunnerWorkloadArtifactRef>,
+    pub artifact_refs: Vec<JobArtifactMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<RunnerExecutionNextAction>,
 }
@@ -358,7 +362,7 @@ impl RunnerExecutionRecord {
 
     pub fn with_artifact_refs(
         mut self,
-        artifact_refs: impl IntoIterator<Item = LabRunnerWorkloadArtifactRef>,
+        artifact_refs: impl IntoIterator<Item = JobArtifactMetadata>,
     ) -> Self {
         self.artifact_refs = artifact_refs.into_iter().collect();
         self
@@ -493,7 +497,7 @@ pub struct RunnerExecutionResultRefs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<LabRunnerWorkloadArtifactRef>,
+    pub artifacts: Vec<JobArtifactMetadata>,
 }
 
 impl RunnerExecutionEnvelope {
@@ -675,11 +679,12 @@ mod tests {
                 workspace_mapping_ref: Some("mapping-1".to_string()),
                 job_id: Some("job-1".to_string()),
                 mirror_run_id: None,
-                artifacts: vec![LabRunnerWorkloadArtifactRef {
+                artifacts: vec![JobArtifactMetadata {
                     id: "artifact-1".to_string(),
                     name: Some("report".to_string()),
                     path: Some("artifacts/report.json".to_string()),
                     url: None,
+                    ..Default::default()
                 }],
             },
         };
@@ -702,11 +707,12 @@ mod tests {
         let record = RunnerExecutionRecord::terminal("job-1", "lab-a", "daemon", 0)
             .with_job_id("job-1")
             .with_mirror_run_id(Some("run-1".to_string()))
-            .with_artifact_refs(vec![LabRunnerWorkloadArtifactRef {
+            .with_artifact_refs(vec![JobArtifactMetadata {
                 id: "artifact-1".to_string(),
                 name: Some("report".to_string()),
                 path: Some("artifacts/report.json".to_string()),
                 url: None,
+                ..Default::default()
             }])
             .with_path_materialization_plan(Some(PathMaterializationPlan {
                 schema: PATH_MATERIALIZATION_PLAN_SCHEMA.to_string(),
@@ -867,7 +873,7 @@ mod tests {
     }
 
     /// #10310 collapsed `RunnerExecutionArtifactRef` onto
-    /// `LabRunnerWorkloadArtifactRef`. Both were `{id, name, path, url}` with
+    /// `JobArtifactMetadata`. Both were `{id, name, path, url}` with
     /// identical serde attributes, so records written by an older binary must
     /// still deserialize and re-serialize byte-identically.
     #[test]
@@ -910,11 +916,12 @@ mod tests {
     /// field-by-field rebuild.
     #[test]
     fn workload_result_refs_and_execution_record_refs_share_one_type() {
-        let artifact = LabRunnerWorkloadArtifactRef {
+        let artifact = JobArtifactMetadata {
             id: "report".to_string(),
             name: None,
             path: Some("artifacts/summary.json".to_string()),
             url: None,
+            ..Default::default()
         };
         let result_refs = RunnerExecutionResultRefs {
             artifacts: vec![artifact.clone()],

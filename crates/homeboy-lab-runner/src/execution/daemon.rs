@@ -10,9 +10,7 @@ use crate::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_
 use homeboy_core::api_jobs::{Job, JobEvent, JobStatus, RunnerJobLifecycleMetadata};
 use homeboy_core::engine::command::CommandCaptureMetadata;
 use homeboy_core::error::{Error, ErrorCode, Result};
-use homeboy_core::lab_contract::{
-    run_location_index_path, LabRunnerWorkload, LabRunnerWorkloadArtifactRef,
-};
+use homeboy_core::lab_contract::{run_location_index_path, JobArtifactMetadata, LabRunnerWorkload};
 use homeboy_core::redaction::redact_argv;
 use homeboy_core::source_snapshot::SourceSnapshot;
 
@@ -1386,11 +1384,12 @@ pub(super) fn detached_handoff_output(
                 Some(&source_snapshot),
                 &[],
             ))
-            .with_artifact_refs([LabRunnerWorkloadArtifactRef {
+            .with_artifact_refs([JobArtifactMetadata {
                 id: "run_location_index".to_string(),
                 name: Some("run location index".to_string()),
                 path: Some(run_location_index_path),
                 url: None,
+                ..Default::default()
             }])
             .with_next_actions(runner_execution_next_actions(&runner.id, &job_id));
 

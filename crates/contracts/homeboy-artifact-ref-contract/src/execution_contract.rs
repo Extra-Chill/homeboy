@@ -1,4 +1,4 @@
-use homeboy_artifact_ref_contract::artifact_ref::{
+use crate::artifact_ref::{
     ArtifactReference, METADATA_ONLY_REF_SCHEME, RUNNER_ARTIFACT_REF_SCHEME,
 };
 

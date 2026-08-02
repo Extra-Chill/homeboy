@@ -1,9 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::api_jobs::JobArtifactMetadata;
 use crate::artifact_ref::{artifact_uri, ArtifactRef, EvidenceRef, ARTIFACT_REF_SCHEMA};
-use crate::lab_contract::LabRunnerWorkloadArtifactRef;
+use crate::lab_contract::JobArtifactMetadata;
 use crate::runner_execution_envelope::RunnerExecutionRecord;
 use homeboy_lab_runner_contract::RunnerArtifactRef;
 
@@ -116,7 +115,7 @@ impl RunOutcomeEnvelope {
     pub fn add_runner_execution_artifact_refs(
         &mut self,
         run_id: &str,
-        artifacts: impl IntoIterator<Item = LabRunnerWorkloadArtifactRef>,
+        artifacts: impl IntoIterator<Item = JobArtifactMetadata>,
     ) {
         for artifact in artifacts {
             self.push_artifact_ref(runner_execution_artifact_ref(run_id, artifact));
@@ -216,10 +215,7 @@ fn runner_artifact_ref(run_id: &str, artifact: RunnerArtifactRef) -> ArtifactRef
     )
 }
 
-fn runner_execution_artifact_ref(
-    run_id: &str,
-    artifact: LabRunnerWorkloadArtifactRef,
-) -> ArtifactRef {
+fn runner_execution_artifact_ref(run_id: &str, artifact: JobArtifactMetadata) -> ArtifactRef {
     project_artifact_ref(
         run_id,
         ArtifactProjection::from_named(artifact.id, artifact.name, artifact.path, artifact.url),
@@ -378,11 +374,12 @@ mod tests {
         let record = RunnerExecutionRecord::terminal("job-1", "lab-a", "daemon", 0)
             .with_job_id("job-1")
             .with_mirror_run_id(Some("run-1".to_string()))
-            .with_artifact_refs(vec![LabRunnerWorkloadArtifactRef {
+            .with_artifact_refs(vec![JobArtifactMetadata {
                 id: "report".to_string(),
                 name: Some("summary".to_string()),
                 path: Some("artifacts/summary.json".to_string()),
                 url: None,
+                ..Default::default()
             }]);
 
         let value = serde_json::to_value(RunOutcomeEnvelope::from_runner_execution_record(&record))
@@ -435,11 +432,12 @@ mod tests {
         );
         let execution = runner_execution_artifact_ref(
             "run-1",
-            LabRunnerWorkloadArtifactRef {
+            JobArtifactMetadata {
                 id: "execution".to_string(),
                 name: None,
                 path: None,
                 url: Some("https://example.test/execution.json".to_string()),
+                ..Default::default()
             },
         );
 

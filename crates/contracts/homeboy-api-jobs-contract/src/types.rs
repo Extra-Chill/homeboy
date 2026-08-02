@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::metadata::JobArtifactMetadata;
 use crate::metadata::RunnerJobLifecycleMetadata;
 use homeboy_lab_contract::path_materialization::PathMaterializationPlan;
+use homeboy_lab_runner_contract::RunnerLifecycleOwner;
 use homeboy_source_snapshot_contract::SourceSnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,10 +199,15 @@ impl RunnerJobSource {
         }
     }
 
-    pub fn lifecycle_owner(self) -> RunnerJobLifecycleOwner {
+    /// Which side of the exchange owns this job's lifecycle.
+    ///
+    /// Returns the canonical `RunnerLifecycleOwner` directly. A parallel
+    /// 2-variant `RunnerJobLifecycleOwner` used to live here purely to be
+    /// re-matched onto this enum at its single call site.
+    pub fn lifecycle_owner(self) -> RunnerLifecycleOwner {
         match self {
-            Self::Broker | Self::ReverseBroker => RunnerJobLifecycleOwner::Broker,
-            _ => RunnerJobLifecycleOwner::Controller,
+            Self::Broker | Self::ReverseBroker => RunnerLifecycleOwner::Broker,
+            _ => RunnerLifecycleOwner::Controller,
         }
     }
 }
@@ -210,12 +216,6 @@ impl fmt::Display for RunnerJobSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.label())
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunnerJobLifecycleOwner {
-    Broker,
-    Controller,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

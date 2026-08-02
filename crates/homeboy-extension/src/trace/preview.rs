@@ -11,7 +11,7 @@ pub use homeboy_extension_contract::trace_preview::{
     TracePreviewAssetCheck, TracePreviewAssetFanoutReport, TracePreviewAssetFanoutRequest,
     TracePreviewLogPaths, TracePreviewMetadata,
 };
-use homeboy_rig_contract::{
+use homeboy_extension_contract::{
     TraceNativePublicPreviewSpec, TracePublicPreviewMode, TracePublicPreviewSpec,
 };
 
@@ -856,7 +856,7 @@ fn asset_fanout_report(
 }
 
 fn empty_asset_fanout_report(
-    fanout: &homeboy_rig_contract::TracePreviewAssetFanoutSpec,
+    fanout: &homeboy_extension_contract::TracePreviewAssetFanoutSpec,
 ) -> TracePreviewAssetFanoutReport {
     TracePreviewAssetFanoutReport {
         schema: "homeboy/preview-asset-fanout/v1".to_string(),
@@ -927,7 +927,7 @@ fn stop_child(child: &mut Option<Child>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{first_https_origin, TracePublicPreviewSession};
-    use homeboy_rig_contract::{
+    use homeboy_extension_contract::{
         TraceNativePublicPreviewSpec, TracePreviewAssetFanoutSpec, TracePublicPreviewMode,
         TracePublicPreviewSpec,
     };
