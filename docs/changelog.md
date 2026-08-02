@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.327.4] - 2026-08-02
+
+### Changed
+- consolidate contract crates 16 -> 13 and collapse duplicate artifact-pointer shapes
+
+### Fixed
+- make policy denials terminal
+- bound the scheduler suite's spin-waits so a stall names a test
+- bound hermetic subprocess waits so a hang names a test
+- consolidate the changed-scope, mutation, and presentation vocabularies
+- collapse five duplicated primitives (shell quoting, duration parsing, fs locks, SSH transient list, triage watch exit code)
+- skip the guaranteed draft 404 (#11145); make the Lab help-visibility table testable
+- stop unbounded_output_capture and core_boundary_leak from failing open
+- verify selected binary activation
+
 ## [0.327.3] - 2026-08-01
 
 ### Fixed
