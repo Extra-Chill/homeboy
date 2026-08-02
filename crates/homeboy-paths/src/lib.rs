@@ -22,6 +22,58 @@ fn artifact_root_override() -> &'static Mutex<Option<PathBuf>> {
     OVERRIDE.get_or_init(|| Mutex::new(None))
 }
 
+fn home_root_override() -> &'static Mutex<Option<PathBuf>> {
+    static OVERRIDE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+    OVERRIDE.get_or_init(|| Mutex::new(None))
+}
+
+/// Set a process-local home-root override that outranks `$HOME`.
+///
+/// `getenv`/`setenv` are not thread-safe. A caller that mutates `HOME` while
+/// another thread resolves a path does not merely race on the *value* — the
+/// reader can observe the variable as absent mid-write, and `homeboy()` then
+/// fails with "HOME environment variable not set on Unix-like system" on a
+/// machine where `HOME` is plainly set. Rust made `std::env::set_var` unsafe in
+/// the 2024 edition for exactly this reason.
+///
+/// The hermetic test harness is the only mutator in practice: it repoints
+/// `HOME` per test so each one owns its config, data, and artifact state.
+/// Serializing those mutations behind a lock cannot fix it, because the
+/// *readers* never take that lock — including worker threads a test spawns
+/// inside itself, which is why serial execution alone left the failures in
+/// place (#7505, #10097, #9774).
+///
+/// Routing the hot resolvers through a `Mutex` replaces an unsynchronized
+/// `getenv` with a properly synchronized read, so a concurrent repoint is
+/// ordered rather than torn. Environment remains the source of truth when no
+/// override is registered, so subprocesses — which read their own environment
+/// and are configured explicitly by the harness — are unaffected.
+pub fn set_home_root_override(path: Option<PathBuf>) {
+    let mut guard = home_root_override()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = path;
+}
+
+/// Resolved home root: the process-local override when set, else `$HOME`.
+#[cfg(not(windows))]
+fn resolved_home_root() -> Result<PathBuf> {
+    let override_path = {
+        let guard = home_root_override()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.clone()
+    };
+    if let Some(path) = override_path {
+        return Ok(path);
+    }
+    env::var("HOME").map(PathBuf::from).map_err(|_| {
+        Error::internal_unexpected(
+            "HOME environment variable not set on Unix-like system".to_string(),
+        )
+    })
+}
+
 /// Set a process-local artifact root override.
 ///
 /// This is intentionally process-scoped so CLI flags can outrank environment
@@ -82,12 +134,7 @@ pub fn homeboy() -> Result<PathBuf> {
 
     #[cfg(not(windows))]
     {
-        let home = env::var("HOME").map_err(|_| {
-            Error::internal_unexpected(
-                "HOME environment variable not set on Unix-like system".to_string(),
-            )
-        })?;
-        Ok(PathBuf::from(home)
+        Ok(resolved_home_root()?
             .join(".config")
             .join(homeboy_product_identity::PRODUCT_IDENTITY.config_dirname))
     }
@@ -123,6 +170,24 @@ pub fn homeboy_data() -> Result<PathBuf> {
 
     #[cfg(not(windows))]
     {
+        // A registered override outranks `XDG_DATA_HOME` deliberately. The
+        // harness that sets it also points `XDG_DATA_HOME` at
+        // `<home>/.local/share`, so the resolved path is identical — but
+        // reading the override avoids a second unsynchronized `getenv` on the
+        // same hot path.
+        let override_home = {
+            let guard = home_root_override()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.clone()
+        };
+        if let Some(home) = override_home {
+            return Ok(home
+                .join(".local")
+                .join("share")
+                .join(homeboy_product_identity::PRODUCT_IDENTITY.data_dirname));
+        }
+
         if let Ok(xdg_data_home) = env::var("XDG_DATA_HOME") {
             if !xdg_data_home.trim().is_empty() {
                 return Ok(PathBuf::from(xdg_data_home)
@@ -130,12 +195,7 @@ pub fn homeboy_data() -> Result<PathBuf> {
             }
         }
 
-        let home = env::var("HOME").map_err(|_| {
-            Error::internal_unexpected(
-                "HOME environment variable not set on Unix-like system".to_string(),
-            )
-        })?;
-        Ok(PathBuf::from(home)
+        Ok(resolved_home_root()?
             .join(".local")
             .join("share")
             .join(homeboy_product_identity::PRODUCT_IDENTITY.data_dirname))
@@ -1145,6 +1205,85 @@ mod formatter_visibility {
                 .map(|s| s.as_str())
                 .collect::<Vec<_>>()
                 .join("\n  ")
+        );
+    }
+}
+
+#[cfg(test)]
+mod home_root_override_tests {
+    use super::*;
+
+    /// The override must beat `$HOME`, so a harness can repoint the home root
+    /// without a `setenv` that other threads race.
+    #[test]
+    fn an_override_outranks_the_environment() {
+        set_home_root_override(Some(PathBuf::from("/tmp/homeboy-override-root")));
+        let resolved = homeboy().expect("config root");
+        set_home_root_override(None);
+
+        assert!(
+            resolved.starts_with("/tmp/homeboy-override-root"),
+            "override must win over $HOME, got {}",
+            resolved.display()
+        );
+    }
+
+    /// Clearing the override must fall back to the environment rather than
+    /// stick at the last override — otherwise a dropped guard would leave every
+    /// later resolution pointing at a deleted tempdir.
+    #[test]
+    fn clearing_the_override_restores_environment_resolution() {
+        set_home_root_override(Some(PathBuf::from("/tmp/homeboy-override-root")));
+        set_home_root_override(None);
+
+        let resolved = homeboy().expect("config root");
+        assert!(
+            !resolved.starts_with("/tmp/homeboy-override-root"),
+            "cleared override must not persist, got {}",
+            resolved.display()
+        );
+    }
+
+    /// The defect this exists for: threads spawned *inside* a test read the
+    /// home root while the harness repoints it. `--test-threads=1` does not
+    /// serialize those, and `getenv`/`setenv` are not thread-safe, so the
+    /// reader could observe `HOME` as absent and fail with "HOME environment
+    /// variable not set on Unix-like system" on a host where it is plainly set.
+    ///
+    /// Reading through the override is a `Mutex` read, so a concurrent repoint
+    /// is ordered rather than torn. This asserts every reader resolves *some*
+    /// valid root — never an error — while the root is repointed underneath.
+    #[test]
+    fn concurrent_readers_never_observe_a_missing_home_root() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    let mut failures = 0usize;
+                    while !stop.load(Ordering::SeqCst) {
+                        if homeboy().is_err() || homeboy_data().is_err() {
+                            failures += 1;
+                        }
+                    }
+                    failures
+                })
+            })
+            .collect();
+
+        for i in 0..500 {
+            set_home_root_override(Some(PathBuf::from(format!("/tmp/homeboy-root-{i}"))));
+        }
+        stop.store(true, Ordering::SeqCst);
+        set_home_root_override(None);
+
+        let failures: usize = readers.into_iter().map(|h| h.join().expect("reader")).sum();
+        assert_eq!(
+            failures, 0,
+            "readers must never fail to resolve a home root while it is repointed"
         );
     }
 }
