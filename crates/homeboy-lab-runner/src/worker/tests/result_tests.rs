@@ -11,7 +11,8 @@ use homeboy_core::runner_execution_envelope::{
 };
 
 use super::super::result::{
-    durable_observation_run_details, remote_runner_result_from_exec_output,
+    durable_observation_run_details, read_inlinable_artifact_bytes,
+    remote_runner_result_from_exec_output, INLINED_ARTIFACT_CONTENT_LIMIT_BYTES,
 };
 
 #[test]
@@ -486,6 +487,103 @@ fn reverse_worker_result_mirrors_file_artifact_bytes() {
     assert_eq!(
         result.artifacts[0].content_base64.as_deref(),
         Some("d29ya2VyIGFydGlmYWN0IGJ5dGVz")
+    );
+}
+
+/// A body at the cap is still inlined: the cap is a ceiling, not a margin.
+#[test]
+fn an_artifact_at_the_inline_cap_is_still_mirrored() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("at-cap.bin");
+    std::fs::write(
+        &path,
+        vec![b'a'; INLINED_ARTIFACT_CONTENT_LIMIT_BYTES as usize],
+    )
+    .expect("write artifact");
+
+    let content = read_inlinable_artifact_bytes(&path).expect("a body at the cap must be inlined");
+    assert_eq!(content.len() as u64, INLINED_ARTIFACT_CONTENT_LIMIT_BYTES);
+}
+
+/// One byte past the cap and the body is not read into memory at all. This is
+/// the OOM guard: the old code called `fs::read` on every file artifact, so a
+/// multi-gigabyte capture log became `len + 1.33 * len` resident before it was
+/// even serialized (#11130).
+#[test]
+fn an_artifact_over_the_inline_cap_is_never_read_into_memory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("over-cap.bin");
+    std::fs::write(
+        &path,
+        vec![b'a'; INLINED_ARTIFACT_CONTENT_LIMIT_BYTES as usize + 1],
+    )
+    .expect("write artifact");
+
+    assert!(
+        read_inlinable_artifact_bytes(&path).is_none(),
+        "a body past the cap must not be inlined"
+    );
+}
+
+/// An elided artifact still has to describe itself. `content_base64` is the
+/// only field that goes away; the canonical `runner-artifact://` path and the
+/// size stay, so a consumer can decide to fetch the bytes on demand.
+#[test]
+fn an_elided_artifact_keeps_its_size_and_fetchable_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact_path = dir.path().join("huge.log");
+    let size = INLINED_ARTIFACT_CONTENT_LIMIT_BYTES + 1;
+    std::fs::write(&artifact_path, vec![b'a'; size as usize]).expect("write artifact");
+
+    let result = remote_runner_result_from_exec_output(
+        RunnerExecOutput {
+            variant: "exec",
+            command: "runner.exec",
+            runner_id: "lab".to_string(),
+            dry_run: false,
+            mode: RunnerExecMode::Local,
+            argv: vec!["sh".to_string(), "-c".to_string(), "true".to_string()],
+            remote_cwd: dir.path().display().to_string(),
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            source_snapshot: None,
+            job: None,
+            runner_job: None,
+            job_id: Some("broker-job-1".to_string()),
+            job_events: None,
+            mirror_run_id: None,
+            patch: None,
+            mutation_artifacts: None,
+            artifacts: vec![JobArtifactMetadata {
+                id: "huge".to_string(),
+                name: Some("huge.log".to_string()),
+                path: Some("huge.log".to_string()),
+                url: None,
+                mime: Some("text/plain".to_string()),
+                size_bytes: None,
+                sha256: None,
+                content_base64: None,
+                metadata: None,
+            }],
+            promoted_outputs: Vec::new(),
+            structured_summaries: Vec::new(),
+            metrics: None,
+            capture: None,
+            execution_record: None,
+            runner_result: None,
+            handoff: None,
+            diagnostics: None,
+        },
+        0,
+        None,
+    );
+
+    assert_eq!(result.artifacts[0].content_base64, None);
+    assert_eq!(result.artifacts[0].size_bytes, Some(size));
+    assert_eq!(
+        result.artifacts[0].path.as_deref(),
+        Some("runner-artifact://lab/broker-job-1/huge")
     );
 }
 

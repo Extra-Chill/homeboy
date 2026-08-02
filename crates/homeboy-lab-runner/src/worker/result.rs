@@ -247,6 +247,18 @@ pub(super) fn durable_observation_run_details(
         .collect()
 }
 
+/// Largest artifact body this worker will inline into a job-result payload.
+///
+/// Inlining costs `len` for the read plus roughly `1.33 * len` for the base64
+/// encoding, and the encoded copy is then serialized into the result JSON,
+/// which is persisted by the broker and transported over the wire. Reading an
+/// unbounded file here turned a large captured log into multi-gigabyte
+/// resident memory on the runner (#11130). Anything above this cap keeps
+/// `content_base64: None` and is fetched on demand through the existing
+/// `runner-artifact://` transport, which every mirrored artifact already
+/// carries as its canonical path.
+pub(super) const INLINED_ARTIFACT_CONTENT_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
+
 fn mirror_file_artifact_content(
     artifacts: Vec<JobArtifactMetadata>,
     remote_cwd: &str,
@@ -266,7 +278,13 @@ fn mirror_file_artifact_content(
                     }
                 }) {
                     if path.is_file() {
-                        if let Ok(content) = std::fs::read(&path) {
+                        // Size is recorded whether or not the body is inlined:
+                        // an elided artifact still has to describe itself so a
+                        // consumer can decide to fetch it.
+                        if let Some(size) = file_size_bytes(&path) {
+                            artifact.size_bytes = artifact.size_bytes.or(Some(size));
+                        }
+                        if let Some(content) = read_inlinable_artifact_bytes(&path) {
                             artifact.size_bytes = artifact
                                 .size_bytes
                                 .or_else(|| u64::try_from(content.len()).ok());
@@ -279,6 +297,31 @@ fn mirror_file_artifact_content(
             artifact
         })
         .collect()
+}
+
+fn file_size_bytes(path: &std::path::Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|metadata| metadata.len())
+}
+
+/// Read `path` only if its body fits the inline cap.
+///
+/// Deliberately reads through a bounded `take` rather than checking
+/// `metadata().len()` and then calling `fs::read`. A stat-then-read would let
+/// a file that is still being appended to grow past the cap between the two
+/// calls, which is exactly the shape of the artifacts this cap exists to
+/// bound: live capture logs. Peak allocation here is the cap plus one byte.
+pub(super) fn read_inlinable_artifact_bytes(path: &std::path::Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut content = Vec::new();
+    file.take(INLINED_ARTIFACT_CONTENT_LIMIT_BYTES.saturating_add(1))
+        .read_to_end(&mut content)
+        .ok()?;
+    if content.len() as u64 > INLINED_ARTIFACT_CONTENT_LIMIT_BYTES {
+        return None;
+    }
+    Some(content)
 }
 
 pub(super) fn cancelled_output(
