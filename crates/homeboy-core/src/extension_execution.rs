@@ -285,20 +285,125 @@ fn resolve_extension_for_capability_if_available(
         return Ok(Some(extension_id.to_string()));
     }
 
-    let mut matching = Vec::new();
-
-    for extension_id in extensions.keys() {
-        let manifest = load_extension(extension_id)?;
-        if capability.has_manifest_support(&manifest) {
-            matching.push(extension_id.clone());
-        }
-    }
+    let (mut matching, load_failures) = survey_linked_extensions(extensions.keys(), capability);
 
     match matching.len() {
-        0 => Ok(None),
+        // Nothing advertises the capability. If every manifest loaded, that is
+        // an honest "not provided". If one did not, the answer is unknown
+        // rather than no, and the operator needs the name of the file to fix.
+        0 if load_failures.is_empty() => Ok(None),
+        0 => Err(unreadable_manifest_error(
+            component,
+            capability,
+            &load_failures,
+        )),
         1 => Ok(Some(matching.remove(0))),
         _ => disambiguate_capability_owner(component, capability, &matching).map(Some),
     }
+}
+
+/// A linked extension whose manifest would not load, kept beside the survey so
+/// a failure can be reported *if and only if* it turns out to matter.
+struct ExtensionLoadFailure {
+    extension_id: String,
+    error: Error,
+}
+
+/// Partition a component's linked extensions into those that advertise
+/// `capability` and those whose manifest would not load at all.
+///
+/// Before #11122 this was a `for` loop that did `load_extension(id)?`, so a
+/// single malformed manifest failed the whole resolution: a broken `wordpress`
+/// manifest made `nodejs`'s lint capability unresolvable, even though nodejs
+/// was intact and was the one being asked for. The sibling artifact resolver
+/// forty lines away already tolerated exactly this
+/// (`let Ok(manifest) = ... else { continue; }`); the two now agree.
+///
+/// This is not a hypothetical shape. `deny_unknown_fields` appears ~70 times
+/// across the manifest contract, so retiring a key in one nested struct is
+/// enough to make an older published manifest undeserializable — which is
+/// precisely why `ProvidesConfig` had the attribute removed.
+///
+/// Both outputs are sorted. Callers iterate `Component.extensions`, a `HashMap`
+/// whose order differs every process, and both the ambiguity error and the
+/// load-failure error list names.
+fn survey_linked_extensions<'a>(
+    extension_ids: impl Iterator<Item = &'a String>,
+    capability: ExtensionCapability,
+) -> (Vec<String>, Vec<ExtensionLoadFailure>) {
+    let mut matching = Vec::new();
+    let mut load_failures = Vec::new();
+
+    for extension_id in extension_ids {
+        match load_extension(extension_id) {
+            Ok(manifest) => {
+                if capability.has_manifest_support(&manifest) {
+                    matching.push(extension_id.clone());
+                }
+            }
+            Err(error) => load_failures.push(ExtensionLoadFailure {
+                extension_id: extension_id.clone(),
+                error,
+            }),
+        }
+    }
+
+    matching.sort();
+    load_failures.sort_by(|left, right| left.extension_id.cmp(&right.extension_id));
+    (matching, load_failures)
+}
+
+/// Reported only when a capability could not be satisfied *and* at least one
+/// linked manifest was unreadable — i.e. the unreadable manifest is a candidate
+/// explanation for the miss rather than unrelated collateral.
+fn unreadable_manifest_error(
+    component: &Component,
+    capability: ExtensionCapability,
+    load_failures: &[ExtensionLoadFailure],
+) -> Error {
+    let names = load_failures
+        .iter()
+        .map(|failure| failure.extension_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut err = Error::validation_invalid_argument(
+        "extension",
+        format!(
+            "Component '{}' has no linked extensions that provide {} support, and {} \
+             manifest(s) could not be read: {}",
+            component.id,
+            capability.label(),
+            load_failures.len(),
+            names
+        ),
+        None,
+        Some(
+            load_failures
+                .iter()
+                .map(|failure| {
+                    format!(
+                        "Extension '{}' failed to load: {}",
+                        failure.extension_id, failure.error.message
+                    )
+                })
+                .collect(),
+        ),
+    );
+
+    err = err.with_hint(format!(
+        "Repair or reinstall the named extension(s): homeboy extension install {}",
+        load_failures
+            .first()
+            .map(|failure| failure.extension_id.as_str())
+            .unwrap_or("<extension_id>")
+    ));
+
+    for hint in extension_guidance_hints(component, Some(capability)) {
+        err = err.with_hint(hint);
+    }
+
+    err
 }
 
 /// Pick the owning extension when several linked extensions provide the same
@@ -377,7 +482,11 @@ pub fn resolve_owner(
 fn composition_primary_extension(matching: &[String]) -> Result<Option<String>> {
     let mut primary: Option<String> = None;
     for candidate in matching {
-        let manifest = load_extension(candidate)?;
+        // A candidate that will not load cannot claim primacy, but it must not
+        // take the other candidates' claims down with it either (#11122).
+        let Ok(manifest) = load_extension(candidate) else {
+            continue;
+        };
         let Some(composition) = manifest.composition.as_ref() else {
             continue;
         };
@@ -416,12 +525,14 @@ pub fn has_linked_extension_for_capability(
         return Ok(true);
     }
 
-    for extension_id in extensions.keys() {
-        if capability.has_manifest_support(&load_extension(extension_id)?) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    // An unreadable sibling manifest does not get to answer this question for
+    // the extensions that *are* readable (#11122). A probe that finds a
+    // provider is `true` regardless; only a probe that finds none has to decide
+    // what an unreadable manifest means, and "no provider" is the honest answer
+    // for an optional capability — the caller that goes on to actually run it
+    // gets the named load failure from `resolve_extension_for_capability`.
+    let (matching, _) = survey_linked_extensions(extensions.keys(), capability);
+    Ok(!matching.is_empty())
 }
 
 pub fn resolve_execution_context(
@@ -651,6 +762,134 @@ mod tests {
             assert_eq!(
                 resolve_extension_for_capability(&component, ExtensionCapability::Deps).unwrap(),
                 "nodejs"
+            );
+        });
+    }
+
+    fn write_unreadable_extension_manifest(home: &Path, extension_id: &str) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(extension_id);
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        std::fs::write(
+            extension_dir.join(format!("{extension_id}.json")),
+            // A nested manifest struct carrying a key no current release
+            // accepts. `StructuredSidecarDetail` is `deny_unknown_fields` and
+            // sits behind an `untagged` enum, so one retired key here fails the
+            // entire manifest — which is exactly what retiring a key does to an
+            // already-published manifest, and why `ProvidesConfig` had the
+            // attribute removed.
+            format!(
+                r#"{{"name":"{extension_id}","version":"1.0.0","deps":{{"extension_script":"deps.sh"}},"structured_sidecars":{{"lint.findings":{{"enabled":true,"retired_key_from_an_older_release":true}}}}}}"#
+            ),
+        )
+        .expect("extension manifest");
+
+        // Pin the fixture's premise where it is cheap to read: if this manifest
+        // ever becomes loadable, every test below would pass vacuously.
+        assert!(
+            load_extension(extension_id).is_err(),
+            "fixture must be an unreadable manifest"
+        );
+    }
+
+    /// One malformed manifest used to black out every linked extension: the
+    /// resolution loop did `load_extension(id)?`, so a broken `wordpress` made
+    /// `nodejs`'s capability unresolvable even though nodejs was intact.
+    /// (#11122)
+    #[test]
+    fn broken_sibling_manifest_does_not_black_out_a_working_extension() {
+        crate::test_support::with_isolated_home(|home| {
+            write_unreadable_extension_manifest(home.path(), "wordpress");
+            write_extension_manifest(home.path(), "nodejs", "deps");
+
+            let component = component_with_extensions(&["wordpress", "nodejs"]);
+
+            assert_eq!(
+                resolve_extension_for_capability(&component, ExtensionCapability::Deps)
+                    .expect("an intact extension must still resolve"),
+                "nodejs"
+            );
+            assert!(
+                has_linked_extension_for_capability(&component, ExtensionCapability::Deps)
+                    .expect("probe must not fail on a broken sibling")
+            );
+        });
+    }
+
+    /// The failure is surfaced — with the offending extension named — only when
+    /// the capability cannot be satisfied without it.
+    #[test]
+    fn unreadable_manifest_is_reported_when_it_is_the_only_candidate() {
+        crate::test_support::with_isolated_home(|home| {
+            write_unreadable_extension_manifest(home.path(), "wordpress");
+
+            let component = component_with_extensions(&["wordpress"]);
+            let err = resolve_extension_for_capability(&component, ExtensionCapability::Deps)
+                .expect_err("an unreadable sole provider is not a silent absence");
+
+            assert!(
+                err.message.contains("wordpress"),
+                "the failing extension must be named: {}",
+                err.message
+            );
+            assert!(
+                err.message.contains("could not be read"),
+                "a load failure must not be reported as 'no provider configured': {}",
+                err.message
+            );
+        });
+    }
+
+    /// A broken manifest that is irrelevant to the requested capability stays
+    /// irrelevant: this is still an honest "no provider", not a load error.
+    #[test]
+    fn unreadable_manifest_does_not_mask_a_genuine_capability_miss() {
+        crate::test_support::with_isolated_home(|home| {
+            write_extension_manifest(home.path(), "nodejs", "deps");
+
+            let component = component_with_extensions(&["nodejs"]);
+            let err = resolve_extension_for_capability(&component, ExtensionCapability::Bench)
+                .expect_err("nodejs provides deps, not bench");
+
+            assert!(
+                err.message.contains("no linked extensions that provide"),
+                "{}",
+                err.message
+            );
+            assert!(
+                !err.message.contains("could not be read"),
+                "{}",
+                err.message
+            );
+        });
+    }
+
+    /// `Component.extensions` is a `HashMap`, so an unsorted survey would list
+    /// candidates in a different order every process and make both the
+    /// ambiguity error and the load-failure error nondeterministic.
+    #[test]
+    fn survey_orders_candidates_and_failures_deterministically() {
+        crate::test_support::with_isolated_home(|home| {
+            for extension_id in ["zulu", "alpha", "mike"] {
+                write_extension_manifest(home.path(), extension_id, "deps");
+            }
+            for extension_id in ["yankee", "bravo"] {
+                write_unreadable_extension_manifest(home.path(), extension_id);
+            }
+
+            let ids: Vec<String> = ["zulu", "alpha", "mike", "yankee", "bravo"]
+                .iter()
+                .map(|id| (*id).to_string())
+                .collect();
+            let (matching, failures) =
+                survey_linked_extensions(ids.iter(), ExtensionCapability::Deps);
+
+            assert_eq!(matching, vec!["alpha", "mike", "zulu"]);
+            assert_eq!(
+                failures
+                    .iter()
+                    .map(|failure| failure.extension_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["bravo", "yankee"]
             );
         });
     }
