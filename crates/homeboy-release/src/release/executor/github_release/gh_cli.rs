@@ -582,40 +582,58 @@ pub(crate) fn github_release_upload_timeout() -> Duration {
         .unwrap_or_else(|| Duration::from_secs(DEFAULT_GITHUB_RELEASE_UPLOAD_TIMEOUT_SECS))
 }
 
+/// Resolve release metadata for `tag`.
+///
+/// `expect_draft` states what the caller already knows about the release. The
+/// readback after `gh release create --draft` KNOWS the release is a draft, and
+/// `releases/tags/{tag}` 404s for drafts by design (see below), so attempting
+/// that endpoint there is a guaranteed-failing round trip whose only lasting
+/// effect is putting an expected, irrelevant 404 at the front of any composed
+/// error message (#11145). Callers that do not know the publication state --
+/// the retry boundary reading a pre-existing release, the post-upload
+/// verification -- pass `false` and keep the tag lookup as the fast path.
 pub(crate) fn gh_release_metadata(
     github: &GitHubRepo,
     config: &GithubConfig,
     tag: &str,
     repo_flag: &str,
+    expect_draft: bool,
 ) -> Result<GitHubReleaseMetadata, GitHubReleaseMetadataError> {
     // `gh release view --json` uses GraphQL, whose release asset shape omits
     // the REST digest field. Recovery authority requires that digest, including
     // for drafts, so read the REST API directly.
     let endpoint = format!("repos/{repo_flag}/releases/tags/{tag}");
-    let output = run_gh_command(
-        gh_command(github, config, &["api", &endpoint]),
-        github_release_upload_timeout(),
-    );
-    if !output.timed_out && output.exit_code == Some(0) {
-        return serde_json::from_str(&output.stdout).map_err(|error| GitHubReleaseMetadataError {
-            message: format!("GitHub REST release metadata was invalid: {error}"),
-            diagnostics: vec![gh_failure_diagnostic(
-                "gh api release metadata",
-                &endpoint,
-                &output,
-            )],
-        });
-    }
-    if output.timed_out {
-        return Err(GitHubReleaseMetadataError {
-            message: gh_failure_detail("gh api release metadata", &output),
-            diagnostics: vec![gh_failure_diagnostic(
-                "gh api release metadata",
-                &endpoint,
-                &output,
-            )],
-        });
-    }
+    let by_tag = if expect_draft {
+        None
+    } else {
+        let output = run_gh_command(
+            gh_command(github, config, &["api", &endpoint]),
+            github_release_upload_timeout(),
+        );
+        if !output.timed_out && output.exit_code == Some(0) {
+            return serde_json::from_str(&output.stdout).map_err(|error| {
+                GitHubReleaseMetadataError {
+                    message: format!("GitHub REST release metadata was invalid: {error}"),
+                    diagnostics: vec![gh_failure_diagnostic(
+                        "gh api release metadata",
+                        &endpoint,
+                        &output,
+                    )],
+                }
+            });
+        }
+        if output.timed_out {
+            return Err(GitHubReleaseMetadataError {
+                message: gh_failure_detail("gh api release metadata", &output),
+                diagnostics: vec![gh_failure_diagnostic(
+                    "gh api release metadata",
+                    &endpoint,
+                    &output,
+                )],
+            });
+        }
+        Some(output)
+    };
 
     // `releases/tags/{tag}` resolves published releases only -- GitHub returns
     // 404 for a draft, because a draft has no tag association on that endpoint.
@@ -648,7 +666,13 @@ pub(crate) fn gh_release_metadata(
         Ok(metadata) => Ok(metadata),
         Err(by_id_error) => {
             gh_draft_release_metadata(github, config, tag, repo_flag).map_err(|draft_error| {
-                metadata_fallback_error(&endpoint, &output, by_id_error.join(draft_error))
+                let resolved = by_id_error.join(draft_error);
+                // When the tag lookup was skipped there is no 404 to report,
+                // and the by-id/list failures ARE the whole story (#11145).
+                match by_tag.as_ref() {
+                    Some(output) => metadata_fallback_error(&endpoint, output, resolved),
+                    None => resolved,
+                }
             })
         }
     }
@@ -732,22 +756,31 @@ fn gh_release_metadata_by_id(
     })
 }
 
+/// Compose the tag-lookup failure with the failures that actually explain a
+/// stranded release.
+///
+/// Both survive (#10441), but the ORDER matters: `releases/tags/{tag}` returns
+/// 404 for every draft by design, so leading with it put an expected,
+/// irrelevant "exited with status 1" in front of the real cause on every
+/// failure an operator ever had to read (#11145). The causal failures lead; the
+/// tag lookup trails, annotated as the expected outcome it usually is.
+/// Diagnostics are ordered to match the message.
 fn metadata_fallback_error(
     endpoint: &str,
     output: &GhCommandOutput,
     draft_error: GitHubReleaseMetadataError,
 ) -> GitHubReleaseMetadataError {
-    let mut diagnostics = vec![gh_failure_diagnostic(
+    let mut diagnostics = draft_error.diagnostics;
+    diagnostics.push(gh_failure_diagnostic(
         "gh api release metadata",
         endpoint,
         output,
-    )];
-    diagnostics.extend(draft_error.diagnostics);
+    ));
     GitHubReleaseMetadataError {
         message: format!(
-            "{}; the draft fallback also failed: {}",
-            gh_failure_detail("gh api release metadata", output),
-            draft_error.message
+            "{}; the release lookup by tag also failed (expected for a draft): {}",
+            draft_error.message,
+            gh_failure_detail("gh api release metadata", output)
         ),
         diagnostics,
     }
@@ -1926,10 +1959,103 @@ mod tests {
 
         let error = metadata_fallback_error("repos/example/repo/releases/tags/v1", &primary, draft);
 
-        assert!(error.message.contains("draft fallback also failed"));
+        assert!(error
+            .message
+            .contains("gh api releases list exited with status 1"));
+        assert!(error
+            .message
+            .contains("the release lookup by tag also failed"));
         assert_eq!(error.diagnostics.len(), 2);
-        assert_eq!(error.diagnostics[0].http_status, Some(404));
-        assert_eq!(error.diagnostics[1].http_status, Some(403));
+        // #11145: the causal failure leads; the by-design 404 trails.
+        assert_eq!(error.diagnostics[0].http_status, Some(403));
+        assert_eq!(error.diagnostics[1].http_status, Some(404));
+    }
+
+    /// #11145: a 404 that is expected must not be the first thing an operator
+    /// reads.
+    ///
+    /// `releases/tags/{tag}` returns 404 for every draft by design, so the
+    /// composed message led with "gh api release metadata exited with status 1"
+    /// on every failure this error type has ever described -- burying the cause
+    /// that actually stranded the release behind a line that carries no
+    /// information at all.
+    #[test]
+    fn the_composed_message_leads_with_the_cause_not_the_by_design_404() {
+        let primary = failed_output("", "HTTP 404: Not Found", Some(1), false);
+        let draft = GitHubReleaseMetadataError {
+            message: "gh release view databaseId exited with status 1".to_string(),
+            diagnostics: Vec::new(),
+        };
+
+        let error = metadata_fallback_error("repos/example/repo/releases/tags/v1", &primary, draft);
+
+        let cause = error
+            .message
+            .find("gh release view databaseId")
+            .expect("the causal failure must survive");
+        let expected_404 = error
+            .message
+            .find("the release lookup by tag also failed")
+            .expect("the tag lookup failure must survive");
+        assert!(
+            cause < expected_404,
+            "operator diagnosis reads top-down; the cause must precede the expected 404: {}",
+            error.message
+        );
+    }
+
+    /// #11145: the post-create readback knows the release is a draft, so it
+    /// must not pay a round trip to an endpoint that 404s for drafts by design.
+    ///
+    /// Asserted structurally because the alternative is a live `gh` call. The
+    /// tag endpoint may only be built inside the `expect_draft` guard.
+    #[test]
+    fn an_expected_draft_skips_the_tag_endpoint_that_404s_by_design() {
+        let source = include_str!("gh_cli.rs");
+        let body = source
+            .split("pub(crate) fn gh_release_metadata(")
+            .nth(1)
+            .expect("gh_release_metadata should exist");
+        let signature_end = body.find(')').expect("the signature must terminate");
+        assert!(
+            body[..signature_end].contains("expect_draft: bool"),
+            "callers must be able to state that the release is a draft"
+        );
+
+        let guard = body
+            .find("if expect_draft {")
+            .expect("the tag lookup must be gated on what the caller knows");
+        let tag_request = body
+            .find("&[\"api\", &endpoint]")
+            .expect("the tag lookup must still exist for callers that need it");
+        assert!(
+            guard < tag_request,
+            "the tag lookup must sit inside the expect_draft guard, not before it"
+        );
+    }
+
+    /// #11145: the readback after `gh release create --draft` is the one call
+    /// site that KNOWS it is reading a draft. If it ever reverts to `false` the
+    /// guaranteed 404 comes straight back, silently -- the release still
+    /// resolves via the id lookup, so nothing fails, it just costs a round trip
+    /// and corrupts every error message on that path.
+    #[test]
+    fn the_post_create_readback_declares_that_it_expects_a_draft() {
+        let source = include_str!("run.rs");
+        let after_create = source
+            .split("\"--draft\",")
+            .nth(1)
+            .expect("the create call must still pass --draft");
+        let readback = after_create
+            .find("gh_release_metadata(")
+            .expect("the create path must read the release back");
+        let call = &after_create[readback..];
+        let call_end = call.find(')').expect("the call must terminate");
+        assert!(
+            call[..call_end].contains("true"),
+            "the post-create readback must pass expect_draft: true, got: {}",
+            &call[..call_end]
+        );
     }
 
     #[test]

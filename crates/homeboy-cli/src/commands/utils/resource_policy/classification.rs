@@ -6,6 +6,35 @@
 //! `hot_command` composes them to short-circuit commands that are controller-
 //! local coordination, planning-only, read-only, or lightweight registry
 //! management, and to recognize the Lab-offloadable fanout coordinator.
+//!
+//! ## Why this is not a `CommandPathSafetySpec` lookup
+//!
+//! #11141 proposed folding this table into the command registry as a
+//! per-resolved-path `resource_behavior`, alongside the Lab help-visibility
+//! table (converted) and `command_capability` (see that module's note).
+//!
+//! It does not fit. `CommandPathSafetySpec` keys on a command PATH; seven rows
+//! here key on parsed ARGUMENT VALUES at a single path, and flip classification
+//! across the admission boundary when they do:
+//!
+//! - `cook --queue-only` — `LocalControl`, otherwise `AdmittedWorkload`
+//! - `retry --run` — `AdmittedWorkload`, otherwise `LocalControl`
+//! - `active --reconcile` — `AdmittedWorkload`, otherwise `BoundedMetadataRead`
+//! - `reconcile --apply` — `AdmittedWorkload`, otherwise `BoundedMetadataRead`
+//! - `loop define --resume` — `AdmittedWorkload`, otherwise `LocalControl`
+//! - `controller from-spec --resume` — `AdmittedWorkload`, otherwise
+//!   `LocalControl`
+//! - `fanout cook-batch --dry-run` — `is_plan_only_command` below
+//!
+//! `path_safety` resolves one entry per path, so each of these pairs would
+//! collapse to a single behavior. Choosing either side is a real incident:
+//! collapsing to `AdmittedWorkload` puts controller-local bookkeeping behind
+//! warm/hot refusal (the #9428 failure), and collapsing to `LocalControl`
+//! refuses a validated batch a ready runner could serve (the #9375 failure).
+//!
+//! The Lab help-visibility table WAS convertible because help visibility is
+//! genuinely per-path. This one is per-invocation. Folding it into the registry
+//! needs the registry to gain an argument-predicate axis first.
 
 use crate::cli_surface::Commands;
 use crate::commands::agent_task;
