@@ -520,7 +520,11 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
     };
 
     let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
-    if args.manual_finalization && args.preflight && report.status == "validated" {
+    if should_persist_manual_preflight_intent(
+        args.preflight,
+        &report.status,
+        report.manual_finalization,
+    ) {
         agent_task_service::persist_manual_finalization_intent(&handoff_run_id, &report)?;
     }
     value["handoff"] = finalization_handoff(
@@ -530,6 +534,14 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
     );
 
     Ok((value, exit_code))
+}
+
+fn should_persist_manual_preflight_intent(
+    preflight: bool,
+    status: &str,
+    manual_finalization: bool,
+) -> bool {
+    preflight && status == "validated" && manual_finalization
 }
 
 fn validate_finalize_inputs(args: &FinalizePrArgs) -> homeboy::core::Result<()> {
@@ -2174,6 +2186,20 @@ mod tests {
             handoff["next_actions"][0],
             "PR was not opened; inspect finalization status and git/PR errors"
         );
+    }
+
+    #[test]
+    fn durable_run_manual_preflight_does_not_persist_manual_intent() {
+        assert!(!should_persist_manual_preflight_intent(
+            true,
+            "validated",
+            false,
+        ));
+        assert!(should_persist_manual_preflight_intent(
+            true,
+            "validated",
+            true,
+        ));
     }
 
     fn provider_fixture(id: &str, backend: &str) -> AgentTaskExecutorProvider {

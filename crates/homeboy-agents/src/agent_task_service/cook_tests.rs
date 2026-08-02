@@ -6947,6 +6947,49 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
 }
 
 #[test]
+fn recovered_cook_finalization_uses_latest_resumed_gate_contract() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-8307";
+        let run_id = "cook-8307-attempt-2";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = run_id.to_string();
+        options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        options.gates = VerifyGateOptions {
+            verify: vec!["cargo test stale-original-contract".to_string()],
+            private_verify: vec!["private stale gate".to_string()],
+            ..Default::default()
+        };
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).expect("submit run");
+        seed_review_form_aggregate(run_id, &options.initial_plan);
+
+        let mut resumed = promotion(run_id);
+        resumed.deterministic_gates[0].command = vec![
+            "sh".to_string(),
+            "-lc".to_string(),
+            "cargo test resumed-gate-contract".to_string(),
+        ];
+        resumed.gate_results[0].name = "cargo test resumed-gate-contract".to_string();
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(resumed).unwrap())
+            .expect("record latest applied promotion");
+
+        let report =
+            recover_cook_pr_with_backend(cook_id, Vec::new(), true, &mut CaptureBackend::default())
+                .expect("recovered preflight");
+        assert_eq!(
+            report["review_dossier"]["how_to_test"][0]["command"],
+            "cargo test resumed-gate-contract"
+        );
+        assert_eq!(
+            report["verification"]["targeted_checks_run"],
+            serde_json::json!(["cargo test resumed-gate-contract"])
+        );
+        assert!(!report.to_string().contains("stale-original-contract"));
+        assert!(!report.to_string().contains("private stale gate"));
+    });
+}
+
+#[test]
 fn cook_rejects_test_claim_without_matching_durable_gate() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "cook-8058-mismatch";

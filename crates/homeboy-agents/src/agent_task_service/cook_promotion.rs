@@ -1182,6 +1182,11 @@ pub(crate) fn cook_finalization_options(
         })?;
     let mut review_dossier = cook_review_dossier(options, promotion, successful_run_id)?;
     review_dossier.overrides = overrides;
+    let targeted_checks_run = review_dossier
+        .how_to_test
+        .iter()
+        .map(|step| step.command.clone())
+        .collect();
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
         run_id: successful_run_id.to_string(),
@@ -1204,7 +1209,7 @@ pub(crate) fn cook_finalization_options(
             ai_model: options.ai_model.clone(),
             source_relationship: AgentTaskPrSourceRelationship::default(),
             verification: AgentTaskPrVerification {
-                targeted_checks_run: options.gates.verify.clone(),
+                targeted_checks_run,
                 targeted_checks_unavailable: None,
                 ci_expected: vec!["Homeboy CI after push".to_string()],
                 manual_reviewer_check: None,
@@ -1842,34 +1847,31 @@ fn cook_review_dossier(
         })
         .unwrap_or("No single-line task objective was retained in durable task evidence.");
     let adoption = promotion.provenance.get("adoption").is_some();
-    let how_to_test = options
-        .gates
-        .verify
+    let how_to_test = verification_promotion
+        .deterministic_gates
         .iter()
-        .map(|command| {
-            let matched = verification_promotion.has_visible_passed_gate_for_command(command);
-            if !matched {
-                return Err(Error::validation_invalid_argument(
-                    "verification",
-                    "Cook cannot publish a test command without matching successful visible durable gate evidence",
-                    Some(command.clone()),
-                    None,
-                ));
-            }
-            if !crate::agent_task_review_dossier::reviewer_runnable_command(command) {
-                return Err(Error::validation_invalid_argument(
-                    "verification",
-                    "Cook cannot publish a test command containing an operator-only reference",
-                    Some(command.clone()),
-                    None,
-                ));
-            }
-            Ok(AgentTaskReviewTestStep {
+        .filter_map(|gate| {
+            let [shell, flag, command] = gate.command.as_slice() else {
+                return None;
+            };
+            (shell == "sh"
+                && flag == "-lc"
+                && verification_promotion.has_visible_passed_gate_for_command(command)
+                && crate::agent_task_review_dossier::reviewer_runnable_command(command))
+            .then(|| AgentTaskReviewTestStep {
                 command: command.clone(),
                 expected: "passes as recorded by Cook's deterministic gate".to_string(),
             })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Vec<_>>();
+    if how_to_test.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "verification",
+            "Cook cannot publish a test command without matching successful visible durable gate evidence bound to the promoted candidate",
+            None,
+            None,
+        ));
+    }
 
     // A form-only follow-up owns reviewer metadata, not the candidate it carries
     // forward. Resolve the persisted Cook lineage so that follow-up prose cannot
