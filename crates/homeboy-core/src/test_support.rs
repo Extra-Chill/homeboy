@@ -2,8 +2,9 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
@@ -160,6 +161,215 @@ impl Default for HermeticTestContext {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Overrides [`DEFAULT_HERMETIC_SUBPROCESS_BUDGET`] for hosts that are slower
+/// than the budget assumes. It bounds a *stuck* child, not a slow one, so the
+/// default is deliberately far above any healthy invocation.
+pub const HERMETIC_SUBPROCESS_BUDGET_ENV: &str = "HOMEBOY_TEST_SUBPROCESS_BUDGET_SECS";
+
+/// Per-invocation ceiling for a hermetic subprocess.
+///
+/// The slowest healthy invocation in this suite is a cold controller-runtime
+/// pin — a hash, a copy, and a re-exec of a multi-hundred-megabyte unoptimized
+/// binary — which costs single-digit seconds even on a contended runner. Three
+/// minutes is generous enough that crossing it means *blocked*, not *slow*.
+const DEFAULT_HERMETIC_SUBPROCESS_BUDGET: Duration = Duration::from_secs(180);
+
+/// Cadence at which a still-running child reports liveness evidence. The
+/// libtest harness warns at 60s, so a 30s heartbeat guarantees at least one
+/// diagnostic snapshot lands before a human reads that warning.
+const HERMETIC_SUBPROCESS_HEARTBEAT: Duration = Duration::from_secs(30);
+
+/// Run a hermetic subprocess to completion under a bounded wait.
+///
+/// `Command::output` waits on pipe EOF with no ceiling: a child that blocks —
+/// or that exits while a background descendant retains the inherited pipes —
+/// hangs the test thread forever. libtest cannot interrupt a blocked thread, so
+/// the whole gate dies on its outer timeout with `failed: 0` and no test name.
+/// A 25-minute CI failure that names nothing is indistinguishable from a build
+/// break, which is how the same hang survived two fix attempts (#10687).
+///
+/// This kills the child's process tree once the budget elapses and panics with
+/// the evidence needed to tell those cases apart: elapsed time, argv, pid,
+/// whether the child produced *any* output before the kill, and the last
+/// observed process-tree state. The failure is then attributed to one named
+/// test, and every other test in the binary still runs and still reports.
+///
+/// Prefer this over `Command::output`/`wait_with_output` in every subprocess
+/// test; it is the test-side counterpart of the `unbounded_output_capture`
+/// audit rule.
+pub fn bounded_output(mut command: Command) -> Output {
+    let argv = rendered_argv(&command);
+    let budget = hermetic_subprocess_budget();
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Isolate the process group so a stuck child's descendants are reachable
+    // for termination; without it a background grandchild keeps the pipes open
+    // and the capture-reader join strands even after the root dies.
+    crate::engine::command::isolate_process_tree(&mut command);
+
+    let started = Instant::now();
+    let mut child = command
+        .spawn()
+        .unwrap_or_else(|error| panic!("spawn hermetic subprocess `{argv}`: {error}"));
+    let pid = child.id();
+
+    let last_snapshot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let supervised = {
+        let last_snapshot = Arc::clone(&last_snapshot);
+        let argv = argv.clone();
+        crate::engine::command::wait_with_bounded_output_supervised(
+            &mut child,
+            crate::engine::command::DEFAULT_CAPTURE_LIMIT_BYTES,
+            budget,
+            HERMETIC_SUBPROCESS_HEARTBEAT,
+            || false,
+            move |elapsed, tail| {
+                let snapshot = process_tree_snapshot(pid);
+                eprintln!(
+                    "hermetic subprocess pid {pid} still running after {:.1}s (budget {:.0}s): {argv}\n  output so far: {}\n  process tree:\n{snapshot}",
+                    elapsed.as_secs_f64(),
+                    budget.as_secs_f64(),
+                    if tail.trim().is_empty() {
+                        "<none>".to_string()
+                    } else {
+                        tail.trim().to_string()
+                    },
+                );
+                *last_snapshot
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(snapshot);
+                Ok(())
+            },
+        )
+    }
+    .unwrap_or_else(|error| panic!("supervise hermetic subprocess `{argv}` (pid {pid}): {error}"));
+
+    let elapsed = started.elapsed();
+    if supervised.termination == crate::engine::command::SupervisedCommandTermination::Completed {
+        return supervised.output.into_output();
+    }
+
+    let output = supervised.output;
+    let snapshot = last_snapshot
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+        .unwrap_or_else(|| "    (no heartbeat snapshot was taken)".to_string());
+    let produced_output =
+        output.capture.stdout.bytes_seen > 0 || output.capture.stderr.bytes_seen > 0;
+    panic!(
+        "hermetic subprocess did not finish within its {:.0}s budget (terminated: {:?})\n\
+         \x20 argv:      {argv}\n\
+         \x20 pid:       {pid}\n\
+         \x20 elapsed:   {:.1}s\n\
+         \x20 budget:    {:.0}s (override with {HERMETIC_SUBPROCESS_BUDGET_ENV})\n\
+         \x20 stdout:    {} bytes seen, {} retained, truncated={}\n\
+         \x20 stderr:    {} bytes seen, {} retained, truncated={}\n\
+         \x20 verdict:   {}\n\
+         \x20 last observed process tree:\n{snapshot}\n\
+         --- stdout ---\n{}\n--- stderr ---\n{}",
+        budget.as_secs_f64(),
+        supervised.termination,
+        elapsed.as_secs_f64(),
+        budget.as_secs_f64(),
+        output.capture.stdout.bytes_seen,
+        output.capture.stdout.bytes_retained,
+        output.capture.stdout.truncated,
+        output.capture.stderr.bytes_seen,
+        output.capture.stderr.bytes_retained,
+        output.capture.stderr.truncated,
+        if produced_output {
+            "the child DID produce output before the kill, so it reached its own logic and blocked (or exited) afterwards"
+        } else {
+            "the child produced NO output at all, so it blocked before reaching any code that writes to its own streams"
+        },
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+fn hermetic_subprocess_budget() -> Duration {
+    std::env::var(HERMETIC_SUBPROCESS_BUDGET_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_HERMETIC_SUBPROCESS_BUDGET)
+}
+
+fn rendered_argv(command: &Command) -> String {
+    let mut parts = vec![command.get_program().to_string_lossy().into_owned()];
+    parts.extend(
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned()),
+    );
+    crate::engine::shell::quote_args(&parts)
+}
+
+/// Report the root process and its direct children as seen by the kernel.
+///
+/// Deliberately shallow and read-only: state plus wait channel is enough to
+/// separate "blocked on I/O", "spinning", and "already a zombie whose pipes a
+/// descendant still holds" without building a process-forensics framework.
+#[cfg(target_os = "linux")]
+fn process_tree_snapshot(root: u32) -> String {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return "    (/proc unavailable)".to_string();
+    };
+    let mut lines = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        // The `comm` field is parenthesized and may contain spaces, so parse
+        // the fixed fields from after its closing parenthesis.
+        let Some((command, rest)) = stat
+            .find('(')
+            .and_then(|open| stat.rfind(')').map(|close| (open, close)))
+            .filter(|(open, close)| open < close)
+            .map(|(open, close)| (&stat[open + 1..close], &stat[close + 1..]))
+        else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let state = fields.next().unwrap_or("?");
+        let parent = fields
+            .next()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
+        if pid != root && parent != root {
+            continue;
+        }
+        let wchan = fs::read_to_string(format!("/proc/{pid}/wchan")).unwrap_or_default();
+        let wchan = wchan.trim();
+        lines.push(format!(
+            "    pid {pid} ppid {parent} state {state} comm {command} wchan {}",
+            if wchan.is_empty() { "-" } else { wchan }
+        ));
+    }
+    if lines.is_empty() {
+        "    (no live /proc entry for the child or its children)".to_string()
+    } else {
+        lines.sort();
+        lines.join("\n")
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_tree_snapshot(_root: u32) -> String {
+    "    (process-tree snapshot is only collected on Linux)".to_string()
 }
 
 pub struct HomeGuard {
