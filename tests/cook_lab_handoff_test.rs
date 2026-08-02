@@ -1,6 +1,6 @@
 use std::process::Output;
 
-use homeboy_core::test_support::{HermeticTestContext, TestBinary};
+use homeboy_core::test_support::{bounded_output, HermeticTestContext, TestBinary};
 
 /// Run the fixture binary through the shared hermetic harness.
 ///
@@ -13,13 +13,21 @@ use homeboy_core::test_support::{HermeticTestContext, TestBinary};
 /// leaves that leak open (#10717, #10718). These cases run with a default
 /// operator context; the transport variables are injected explicitly only by
 /// the case that asserts they cannot change a validation outcome (#10917).
+///
+/// `controller_runtime_command` adds the controller-runtime pins on top of that
+/// contract. Every `agent-task cook` invocation is sealed into an immutable
+/// controller runtime by `delegate_agent_task_cook_to_pinned_runtime` *before*
+/// routing reaches validation, so a case that survives clap pays a cold pin —
+/// hash, 666 MB copy, re-exec — against a fresh `HOME`. The pins are immutable
+/// and content-addressed, so sharing them costs no isolation (#10687, #11185).
+///
+/// `bounded_output` replaces `Command::output`, which waits on pipe EOF with no
+/// ceiling and cannot be interrupted by libtest (#10687).
 fn homeboy(args: &[&str]) -> Output {
     let context = HermeticTestContext::new();
-    context
-        .command(TestBinary::HomeboyFixture)
-        .args(args)
-        .output()
-        .expect("run homeboy")
+    let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    command.args(args);
+    bounded_output(command)
 }
 
 #[test]
@@ -29,7 +37,7 @@ fn cook_handoff_subprocesses_do_not_inherit_controller_transport() {
     // above `run_split_placement_cook` swallows every rejection this file
     // asserts, and the suite hangs instead of failing (#10917).
     let context = HermeticTestContext::new();
-    let command = context.command(TestBinary::HomeboyFixture);
+    let command = context.controller_runtime_command(TestBinary::HomeboyFixture);
     let removed_env = command
         .get_envs()
         .filter_map(|(key, value)| value.is_none().then(|| key.to_string_lossy().into_owned()))
@@ -55,17 +63,19 @@ fn contradictory_cook_arguments_survive_controller_transport_context() {
     // Before #10917 this context sent both invocations past validation into
     // real worktree and provider work, where they blocked indefinitely instead
     // of failing fast.
+    // #11185 moved this case onto the shared controller-runtime pins; #11191
+    // reverted it while rebasing an unrelated broker fixture, restoring a cold
+    // 666 MB pin per invocation on a gate that was already at its ceiling.
     let cook = |args: &[&str]| {
         let context = HermeticTestContext::new();
-        context
-            .command(TestBinary::HomeboyFixture)
+        let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+        command
             .env(
                 homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV,
                 r#"{"runner_id":"homeboy-lab"}"#,
             )
-            .args(args)
-            .output()
-            .expect("run homeboy")
+            .args(args);
+        bounded_output(command)
     };
 
     let detach = cook(&[

@@ -706,7 +706,24 @@ fn delegate_agent_task_cook_to_pinned_runtime(
                 Some("resolve current controller executable".to_string()),
             )
         })?;
-        if current == std::path::PathBuf::from(expected) {
+        // This comparison is the only thing standing between the re-exec below
+        // and unbounded recursion, so it must compare file identity rather than
+        // path spelling. `current_exe` resolves through `/proc/self/exe` (or the
+        // platform equivalent) and is fully canonical; the pinned path is
+        // composed from the data store root and can retain symlinked components
+        // — a symlinked `$TMPDIR`, `/tmp` -> `/private/tmp`, a bind-mounted CI
+        // workspace. A verbatim mismatch there makes the pinned runtime fail to
+        // recognize itself and seal-and-re-exec again, forever.
+        let expected = std::path::PathBuf::from(expected);
+        let is_pinned_runtime = current == expected
+            || match (
+                std::fs::canonicalize(&current),
+                std::fs::canonicalize(&expected),
+            ) {
+                (Ok(current), Ok(expected)) => current == expected,
+                _ => false,
+            };
+        if is_pinned_runtime {
             return Ok(None);
         }
     }
