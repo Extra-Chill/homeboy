@@ -50,35 +50,35 @@ pub fn run(args: FileArgs) -> CmdResult<FileCommandOutput> {
         FileCommand::Write {
             project_id,
             path,
-            apply,
+            mutation,
         } => {
-            let (out, code) = write(&project_id, &path, apply)?;
+            let (out, code) = write(&project_id, &path, mutation.is_apply())?;
             Ok((FileCommandOutput::Standard(out), code))
         }
         FileCommand::Mkdir {
             project_id,
             path,
-            apply,
+            mutation,
         } => {
-            let (out, code) = mkdir(&project_id, &path, apply)?;
+            let (out, code) = mkdir(&project_id, &path, mutation.is_apply())?;
             Ok((FileCommandOutput::Standard(out), code))
         }
         FileCommand::Delete {
             project_id,
             path,
             recursive,
-            apply,
+            mutation,
         } => {
-            let (out, code) = delete(&project_id, &path, recursive, apply)?;
+            let (out, code) = delete(&project_id, &path, recursive, mutation.is_apply())?;
             Ok((FileCommandOutput::Standard(out), code))
         }
         FileCommand::Rename {
             project_id,
             old_path,
             new_path,
-            apply,
+            mutation,
         } => {
-            let (out, code) = rename(&project_id, &old_path, &new_path, apply)?;
+            let (out, code) = rename(&project_id, &old_path, &new_path, mutation.is_apply())?;
             Ok((FileCommandOutput::Standard(out), code))
         }
         FileCommand::Find {

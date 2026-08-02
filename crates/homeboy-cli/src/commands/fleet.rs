@@ -9,6 +9,7 @@ use homeboy::core::plan::HomeboyPlan;
 use homeboy::core::project::Project;
 use homeboy::core::EntityCrudOutput;
 
+use super::utils::args::MutationArgs;
 use super::{adapter, CmdResult, DynamicSetArgs};
 use crate::command_contract::{CommandJsonFamily, CommandOutputFileMode, LabCommandContract};
 
@@ -23,12 +24,12 @@ pub struct FleetArgs {
 impl FleetArgs {
     pub fn is_hot_resource_command(&self) -> bool {
         matches!(
-            self.command,
+            &self.command,
             FleetCommand::Exec {
                 check: false,
-                apply: true,
+                mutation,
                 ..
-            }
+            } if mutation.is_apply()
         )
     }
 }
@@ -128,9 +129,10 @@ enum FleetCommand {
         #[arg(long)]
         check: bool,
 
-        /// Confirm the command should execute over SSH on every project in the fleet
-        #[arg(long)]
-        apply: bool,
+        // Confirm the command should execute over SSH on every project in
+        // the fleet. Shared plan-default mutation group (#11139).
+        #[command(flatten)]
+        mutation: MutationArgs,
 
         /// Override the SSH user for this execution (instead of each server's configured user)
         #[arg(long)]
@@ -190,9 +192,9 @@ pub fn run(args: FleetArgs) -> CmdResult<FleetOutput> {
             id,
             command,
             check,
-            apply,
+            mutation,
             user,
-        } => exec(&id, command, check, apply, user),
+        } => exec(&id, command, check, mutation.is_apply(), user),
     }
 }
 

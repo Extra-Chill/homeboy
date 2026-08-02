@@ -19,6 +19,7 @@ use homeboy::issues::{
 };
 
 use super::parse_key_val;
+use super::utils::args::MutationArgs;
 use super::CmdResult;
 
 #[derive(Args, Clone)]
@@ -89,9 +90,10 @@ pub(crate) enum IssuesCommand {
         #[arg(long, default_value_t = 200)]
         list_limit: usize,
 
-        /// Actually perform the reconcile actions. Default is dry-run.
-        #[arg(long)]
-        apply: bool,
+        // Actually perform the reconcile actions. Default is dry-run.
+        // Shared plan-default mutation group (#11139).
+        #[command(flatten)]
+        mutation: MutationArgs,
 
         /// Workspace path to discover the component from a portable
         /// homeboy.json (CI runners, ad-hoc clones).
@@ -133,9 +135,10 @@ pub(crate) enum IssuesCommand {
         #[arg(long, default_value_t = 200)]
         list_limit: usize,
 
-        /// Actually perform the reconcile actions. Default is dry-run.
-        #[arg(long)]
-        apply: bool,
+        // Actually perform the reconcile actions. Default is dry-run.
+        // Shared plan-default mutation group (#11139).
+        #[command(flatten)]
+        mutation: MutationArgs,
 
         /// Workspace path to discover the component from a portable
         /// homeboy.json (CI runners, ad-hoc clones).
@@ -262,7 +265,7 @@ pub fn run(args: IssuesArgs) -> CmdResult<IssuesCommandOutput> {
             run_url,
             no_refresh_closed,
             list_limit,
-            apply,
+            mutation,
             path,
         } => {
             let (output, exit) = run_reconcile_command(ReconcileCommandRequest {
@@ -272,7 +275,7 @@ pub fn run(args: IssuesArgs) -> CmdResult<IssuesCommandOutput> {
                 run_url,
                 no_refresh_closed,
                 list_limit,
-                apply,
+                apply: mutation.is_apply(),
                 path,
             })?;
             Ok((IssuesCommandOutput::Reconcile(output), exit))
@@ -284,7 +287,7 @@ pub fn run(args: IssuesArgs) -> CmdResult<IssuesCommandOutput> {
             run_url,
             no_refresh_closed,
             list_limit,
-            apply,
+            mutation,
             path,
         } => {
             let output = run_reconcile_run(
@@ -294,7 +297,7 @@ pub fn run(args: IssuesArgs) -> CmdResult<IssuesCommandOutput> {
                 run_url,
                 no_refresh_closed,
                 list_limit,
-                apply,
+                mutation.is_apply(),
                 path,
             )?;
             let exit = if output.totals.failures > 0 { 1 } else { 0 };

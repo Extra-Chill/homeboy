@@ -15,6 +15,7 @@ use homeboy::core::worktree::{
 
 use crate::command_contract::{LabCommandContract, WORKTREE_CLEANUP_LAB_LABEL};
 
+use super::utils::args::MutationArgs;
 use super::CmdResult;
 
 #[derive(Args)]
@@ -115,15 +116,15 @@ enum WorktreeCommand {
     },
     /// Remove cleanup-eligible task worktrees after safety checks
     Cleanup {
-        /// Remove planned worktrees and artifacts after safety checks. Without this flag, only reports the plan.
-        #[arg(long, conflicts_with = "dry_run")]
-        apply: bool,
+        // Remove planned worktrees and artifacts after safety checks.
+        // Without --apply, only reports the plan; --dry-run names that
+        // default explicitly. This pair is the precedent the shared
+        // plan-default mutation group was modeled on (#11139).
+        #[command(flatten)]
+        mutation: MutationArgs,
         /// Allow dirty/unpushed worktree removal; hard gates still apply
         #[arg(long)]
         force: bool,
-        /// Deprecated plan-only alias retained for one release; bare cleanup also reports the plan.
-        #[arg(long, conflicts_with = "apply")]
-        dry_run: bool,
         /// Also remove declared rebuildable artifacts from the Homeboy checkout that built this binary.
         #[arg(long)]
         cleanup_artifacts: bool,
@@ -264,13 +265,14 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             allow_unmerged_branch,
         })?),
         WorktreeCommand::Cleanup {
-            apply,
+            mutation,
             force,
-            dry_run: deprecated_dry_run,
             cleanup_artifacts,
             cleanup_branches,
             allow_unmerged_branches,
         } => {
+            let apply = mutation.is_apply();
+            let deprecated_dry_run = mutation.dry_run;
             let dry_run = cleanup_is_dry_run(apply);
             let worktrees = worktree::cleanup(WorktreeCleanupOptions {
                 force,
@@ -339,8 +341,7 @@ mod tests {
             panic!("expected worktree command");
         };
         let WorktreeCommand::Cleanup {
-            apply,
-            dry_run,
+            mutation,
             cleanup_artifacts,
             ..
         } = args.command
@@ -348,9 +349,9 @@ mod tests {
             panic!("expected worktree cleanup command");
         };
 
-        assert!(!apply);
-        assert!(!dry_run);
-        assert!(cleanup_is_dry_run(apply));
+        assert!(!mutation.apply);
+        assert!(!mutation.dry_run);
+        assert!(cleanup_is_dry_run(mutation.is_apply()));
         assert!(!cleanup_artifacts);
     }
 
@@ -368,7 +369,7 @@ mod tests {
             panic!("expected worktree command");
         };
         let WorktreeCommand::Cleanup {
-            apply,
+            mutation,
             cleanup_artifacts,
             ..
         } = args.command
@@ -376,8 +377,8 @@ mod tests {
             panic!("expected worktree cleanup command");
         };
 
-        assert!(apply);
-        assert!(!cleanup_is_dry_run(apply));
+        assert!(mutation.apply);
+        assert!(!cleanup_is_dry_run(mutation.is_apply()));
         assert!(cleanup_artifacts);
     }
 
@@ -388,13 +389,13 @@ mod tests {
         let Commands::Worktree(args) = cli.command else {
             panic!("expected worktree command");
         };
-        let WorktreeCommand::Cleanup { apply, dry_run, .. } = args.command else {
+        let WorktreeCommand::Cleanup { mutation, .. } = args.command else {
             panic!("expected worktree cleanup command");
         };
 
-        assert!(!apply);
-        assert!(dry_run);
-        assert!(cleanup_is_dry_run(apply));
+        assert!(!mutation.apply);
+        assert!(mutation.dry_run);
+        assert!(cleanup_is_dry_run(mutation.is_apply()));
     }
 
     #[test]
@@ -404,11 +405,11 @@ mod tests {
         let Commands::Worktree(args) = cli.command else {
             panic!("expected worktree command");
         };
-        let WorktreeCommand::Cleanup { dry_run, .. } = args.command else {
+        let WorktreeCommand::Cleanup { mutation, .. } = args.command else {
             panic!("expected worktree cleanup command");
         };
 
-        assert_eq!(dry_run.then_some("--dry-run"), Some("--dry-run"));
+        assert_eq!(mutation.dry_run.then_some("--dry-run"), Some("--dry-run"));
     }
 
     #[test]

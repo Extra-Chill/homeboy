@@ -1,6 +1,8 @@
 use clap::{Args, Subcommand};
 use serde::{Serialize, Serializer};
 
+use super::utils::args::MutationArgs;
+
 use homeboy::core::db::{self, DbResult, DbTunnelResult};
 use homeboy::core::engine::text;
 use homeboy::core::observation::store::{self, ObservationDbStatus};
@@ -68,9 +70,10 @@ enum DbCommand {
     DeleteRow {
         /// Project ID
         project_id: String,
-        /// Apply the destructive mutation. Without this flag, prints a plan only.
-        #[arg(long)]
-        apply: bool,
+        // Apply the destructive mutation. Without this flag, prints a plan
+        // only. Shared plan-default mutation group (#11139).
+        #[command(flatten)]
+        mutation: MutationArgs,
         /// Table name and row ID
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
@@ -79,9 +82,10 @@ enum DbCommand {
     DropTable {
         /// Project ID
         project_id: String,
-        /// Apply the destructive mutation. Without this flag, prints a plan only.
-        #[arg(long)]
-        apply: bool,
+        // Apply the destructive mutation. Without this flag, prints a plan
+        // only. Shared plan-default mutation group (#11139).
+        #[command(flatten)]
+        mutation: MutationArgs,
         /// Table name
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
@@ -174,14 +178,14 @@ pub fn run(args: DbArgs) -> CmdResult<DbOutput> {
         ),
         DbCommand::DeleteRow {
             project_id,
-            apply,
+            mutation,
             args,
-        } => delete_row(&project_id, &args, apply),
+        } => delete_row(&project_id, &args, mutation.is_apply()),
         DbCommand::DropTable {
             project_id,
-            apply,
+            mutation,
             args,
-        } => drop_table(&project_id, &args, apply),
+        } => drop_table(&project_id, &args, mutation.is_apply()),
         DbCommand::Tunnel {
             project_id,
             local_port,

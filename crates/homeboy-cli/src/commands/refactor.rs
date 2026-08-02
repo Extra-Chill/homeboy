@@ -9,7 +9,8 @@ use serde::Serialize;
 use std::collections::HashSet;
 
 use super::utils::args::{
-    BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs, WriteModeArgs,
+    BaselineArgs, ChangedSinceArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
+    WriteModeArgs,
 };
 use crate::commands::CmdResult;
 
@@ -42,9 +43,10 @@ pub struct RefactorArgs {
     #[arg(long = "all")]
     all: bool,
 
-    /// Only include files changed since a git ref (branch, tag, or SHA)
-    #[arg(long)]
-    changed_since: Option<String>,
+    // Only include files changed since a git ref. Shared changed-scope
+    // group (#11140).
+    #[command(flatten)]
+    changed: ChangedSinceArgs,
 
     /// Restrict audit-generated fixes to these fix kinds (repeatable)
     #[arg(long = "only", value_name = "kind")]
@@ -314,7 +316,7 @@ pub fn run(args: RefactorArgs) -> CmdResult<RefactorOutput> {
             &args.extension_override.extensions,
             &args.from,
             args.all,
-            args.changed_since.as_deref(),
+            args.changed.changed_since(),
             &args.only,
             &args.exclude,
             &args.setting_args.setting,

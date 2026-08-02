@@ -72,26 +72,50 @@ pub struct ReportOutput {
     pub report_compare: Option<ReportCompareReport>,
 }
 
+/// The markdown format value every `report` subcommand compares against.
+pub const MARKDOWN_FORMAT: &str = "markdown";
+
+impl ReportCommand {
+    /// The `--format` value this subcommand was invoked with.
+    ///
+    /// Every `report` subcommand declares its own `--format`, so the
+    /// markdown check used to be written out six times — once per variant —
+    /// in `is_markdown_mode` (#11138). Reading the value through one
+    /// accessor means a seventh subcommand only has to be added here.
+    ///
+    /// The six declarations still carry three *different* `value_parser`
+    /// sets, which this deliberately does not reconcile:
+    ///
+    /// - `failure-digest`, `performance-digest`: `["markdown"]`
+    /// - `bench-coverage`, `browser-evidence-compare`, `compare`:
+    ///   `["markdown", "json"]`
+    /// - `matrix-artifacts`: **no `value_parser` at all**, so it accepts
+    ///   any string and silently falls through to the JSON envelope for
+    ///   anything that is not exactly `markdown`.
+    ///
+    /// Narrowing `matrix-artifacts` would reject values it accepts today,
+    /// and widening the two markdown-only reports would accept values they
+    /// reject today. Both are behavior changes, so they are left for a
+    /// separate issue.
+    pub fn format(&self) -> &str {
+        match self {
+            ReportCommand::FailureDigest(args) => &args.format,
+            ReportCommand::PerformanceDigest(args) => &args.format,
+            ReportCommand::BenchCoverage(args) => &args.format,
+            ReportCommand::BrowserEvidenceCompare(args) => &args.format,
+            ReportCommand::MatrixArtifacts(args) => &args.format,
+            ReportCommand::Compare(args) => &args.format,
+        }
+    }
+
+    /// True when this invocation renders markdown directly.
+    pub fn is_markdown(&self) -> bool {
+        self.format() == MARKDOWN_FORMAT
+    }
+}
+
 pub fn is_markdown_mode(args: &ReportArgs) -> bool {
-    matches!(
-        &args.command,
-        ReportCommand::FailureDigest(failure_args) if failure_args.format == "markdown"
-    ) || matches!(
-        &args.command,
-        ReportCommand::PerformanceDigest(performance_args) if performance_args.format == "markdown"
-    ) || matches!(
-        &args.command,
-        ReportCommand::BenchCoverage(coverage_args) if coverage_args.format == "markdown"
-    ) || matches!(
-        &args.command,
-        ReportCommand::BrowserEvidenceCompare(compare_args) if compare_args.format == "markdown"
-    ) || matches!(
-        &args.command,
-        ReportCommand::MatrixArtifacts(matrix_args) if matrix_args.format == "markdown"
-    ) || matches!(
-        &args.command,
-        ReportCommand::Compare(compare_args) if compare_args.format == "markdown"
-    )
+    args.command.is_markdown()
 }
 
 pub fn run_markdown(args: ReportArgs) -> CmdResult<String> {

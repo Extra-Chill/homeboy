@@ -32,7 +32,10 @@ use serde_json::Value;
 use std::path::Path;
 
 use super::parse_key_val;
-use super::utils::args::{BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs};
+use super::utils::args::{
+    BaselineArgs, ChangedScopeArgs, ChangedSinceArgs, ExtensionOverrideArgs, LabChangedScopeArgs,
+    PositionalComponentArgs,
+};
 use super::utils::response::actionable_metadata_value_for_run_ref;
 use super::{audit, audit_baseline, build, ci, lint, test, CmdResult};
 use crate::command_contract::{LabCommandContract, REVIEW_LAB_LABEL};
@@ -57,17 +60,16 @@ pub struct ReviewArgs {
     #[command(flatten)]
     pub extension_override: ExtensionOverrideArgs,
 
-    /// Run audit + lint + test only against files changed since this git ref
-    /// (branch, tag, or SHA). CI-friendly — mirrors the per-stage flag.
-    #[arg(long, value_name = "REF", conflicts_with = "changed_only")]
-    pub changed_since: Option<String>,
-
-    /// Run only against files modified in the working tree
-    /// (staged, unstaged, untracked). Only the lint stage scopes natively;
-    /// audit and test run on the full component with a hint noting the
-    /// limitation. Use `--changed-since` for full umbrella scoping.
-    #[arg(long, conflicts_with = "changed_since")]
-    pub changed_only: bool,
+    // Changed-file scoping for the whole umbrella. Shared changed-scope
+    // group (#11140) — the identical declaration each phase subcommand
+    // flattens, so `review --changed-since` and `review lint --changed-since`
+    // can no longer drift apart.
+    //
+    // Only the lint stage scopes `--changed-only` natively; audit and test
+    // run on the full component with a hint noting the limitation. Use
+    // `--changed-since` for full umbrella scoping.
+    #[command(flatten)]
+    pub changed: ChangedScopeArgs,
 
     /// Show compact summary instead of full per-stage output
     #[arg(long)]
@@ -95,9 +97,6 @@ pub struct ReviewArgs {
 
     #[command(flatten)]
     pub baseline_args: BaselineArgs,
-
-    #[arg(long, hide = true, value_name = "JSON")]
-    pub lab_changed_files_json: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -162,11 +161,13 @@ impl ReviewArgs {
     pub(crate) fn lab_changed_scope_component_args(&self) -> Option<&PositionalComponentArgs> {
         match self.command.as_ref() {
             Some(ReviewCommand::Lint(args))
-                if args.changed_only && args.changed_since.is_none() =>
+                if args.changed.changed_only && args.changed.changed_since().is_none() =>
             {
                 Some(&args.comp)
             }
-            None if self.changed_only && self.changed_since.is_none() => Some(&self.comp),
+            None if self.changed.changed_only && self.changed.changed_since().is_none() => {
+                Some(&self.comp)
+            }
             _ => None,
         }
     }
@@ -192,7 +193,7 @@ impl ReviewArgs {
                 )),
             };
         }
-        if self.changed_since.is_some() || self.changed_only {
+        if self.changed.changed_since().is_some() || self.changed.changed_only {
             Some(LabCommandContract::local_only(
                 REVIEW_LAB_LABEL,
                 REVIEW_SCOPED_LAB_UNSUPPORTED_REASON,
@@ -373,7 +374,7 @@ pub fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
     let quality_plan = build_quality_plan(QualityPlanOptions::review(&component_label));
 
     if let Some(0) = changed_file_count {
-        let scope_label = if let Some(ref r) = args.changed_since {
+        let scope_label = if let Some(r) = args.changed.changed_since() {
             format!("since {}", r)
         } else {
             "in working tree".to_string()
@@ -400,7 +401,7 @@ pub fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
                 )),
                 observation: observation_metadata,
                 scope: scope.clone(),
-                changed_since: args.changed_since.clone(),
+                changed_since: args.changed.changed_since().map(str::to_string),
                 changed_file_count: Some(0),
                 head_ref: review::git_ref(&source_path, "HEAD").unwrap_or_default(),
                 hints: vec![message],
@@ -549,7 +550,7 @@ pub fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
         }
     };
 
-    if args.changed_only {
+    if args.changed.changed_only {
         top_hints.push(
             "--changed-only scopes lint only; audit and test ran on the full component".to_string(),
         );
@@ -562,7 +563,7 @@ pub fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
             plan: quality_plan,
             observation: observation_metadata,
             scope,
-            changed_since: args.changed_since.clone(),
+            changed_since: args.changed.changed_since().map(str::to_string),
             changed_file_count,
             head_ref: review::git_ref(&source_path, "HEAD").unwrap_or_default(),
             hints: top_hints,
@@ -663,16 +664,18 @@ fn manual_release_owned_mutations(
         return Vec::new();
     };
     let baseline = args
-        .changed_since
-        .as_deref()
-        .or(args.changed_only.then_some("HEAD"));
+        .changed
+        .changed_since()
+        .or(args.changed.changed_only.then_some("HEAD"));
     let Some(baseline) = baseline else {
         return Vec::new();
     };
 
     let mutations = changed_files
         .iter()
-        .filter_map(|file| version_mutation_at(source_path, baseline, file, args.changed_only))
+        .filter_map(|file| {
+            version_mutation_at(source_path, baseline, file, args.changed.changed_only)
+        })
         .collect::<Vec<_>>();
     version::detect_manual_release_owned_mutations(component, &mutations, None)
 }
@@ -724,9 +727,9 @@ fn preflight_review_scope(
     args: &ReviewArgs,
     source_path: &str,
 ) -> homeboy::core::Result<ReviewExecutionContext> {
-    let scope = if args.changed_since.is_some() {
+    let scope = if args.changed.changed_since().is_some() {
         "changed-since"
-    } else if args.changed_only {
+    } else if args.changed.changed_only {
         "changed-only"
     } else {
         "full"
@@ -736,12 +739,9 @@ fn preflight_review_scope(
     // Probe once at the umbrella level so review can short-circuit before
     // extension setup, include a stable changed-file count in its artifact,
     // and pass the same resolved scope to each internal stage.
-    let precomputed_changed_files = match (&args.changed_since, args.changed_only) {
-        _ if args.lab_changed_files_json.is_some() => args
-            .lab_changed_files_json
-            .as_deref()
-            .map(parse_lab_changed_files_json)
-            .transpose()?,
+    let precomputed_changed_files = match (args.changed.changed_since(), args.changed.changed_only)
+    {
+        _ if args.changed.lab.lab_changed_files_json.is_some() => args.changed.resolve()?,
         (Some(git_ref), _) => Some(git::get_files_changed_since(source_path, git_ref)?),
         (_, true) => Some(git::get_dirty_files(source_path)?),
         _ => None,
@@ -803,9 +803,9 @@ pub fn write_artifact_to_file(
 }
 
 fn scope_flag_suffix(args: &ReviewArgs, include_changed_only: bool) -> String {
-    if let Some(ref r) = args.changed_since {
+    if let Some(r) = args.changed.changed_since() {
         format!(" --changed-since={}", r)
-    } else if args.changed_only && include_changed_only {
+    } else if args.changed.changed_only && include_changed_only {
         " --changed-only".to_string()
     } else {
         String::new()
@@ -824,10 +824,12 @@ fn build_audit_args(
         exclude: Vec::new(),
         profile: selected_audit_profile(args, review_context),
         baseline_args: args.baseline_args.clone(),
-        changed_since: args.changed_since.clone(),
-        precomputed_changed_files: review_context
-            .precomputed_changed_files()
-            .map(<[String]>::to_vec),
+        changed: ChangedSinceArgs {
+            changed_since: args.changed.changed_since().map(str::to_string),
+            precomputed_changed_files: review_context
+                .precomputed_changed_files()
+                .map(<[String]>::to_vec),
+        },
         json_summary: args.summary,
         fixability: false,
     }
@@ -835,7 +837,9 @@ fn build_audit_args(
 
 fn selected_audit_profile(args: &ReviewArgs, review_context: &ReviewExecutionContext) -> String {
     args.audit_profile.clone().unwrap_or_else(|| {
-        if args.changed_since.is_some() || review_context.precomputed_changed_files().is_some() {
+        if args.changed.changed_since().is_some()
+            || review_context.precomputed_changed_files().is_some()
+        {
             "pr".to_string()
         } else {
             "full".to_string()
@@ -849,11 +853,18 @@ fn build_lint_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -
         summary: args.summary,
         file: None,
         glob: None,
-        changed_only: args.changed_only,
-        changed_since: args.changed_since.clone(),
-        precomputed_changed_files: review_context
-            .precomputed_changed_files()
-            .map(<[String]>::to_vec),
+        changed: ChangedScopeArgs {
+            lab: LabChangedScopeArgs {
+                since: ChangedSinceArgs {
+                    changed_since: args.changed.changed_since().map(str::to_string),
+                    precomputed_changed_files: review_context
+                        .precomputed_changed_files()
+                        .map(<[String]>::to_vec),
+                },
+                lab_changed_files_json: None,
+            },
+            changed_only: args.changed.changed_only,
+        },
         force_main_workflow: true,
         ci_job: None,
         sniff_filters: Default::default(),
@@ -863,7 +874,6 @@ fn build_lint_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -
         extension_override: args.extension_override.clone(),
         setting_args: Default::default(),
         baseline_args: args.baseline_args.clone(),
-        lab_changed_files_json: None,
         json_summary: args.summary,
     }
 }
@@ -880,28 +890,21 @@ fn build_test_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -
         drift: false,
         write: false,
         since: "HEAD~10".to_string(),
-        changed_since: args.changed_since.clone(),
-        precomputed_changed_files: review_context
-            .precomputed_changed_files()
-            .map(<[String]>::to_vec),
+        changed: LabChangedScopeArgs {
+            since: ChangedSinceArgs {
+                changed_since: args.changed.changed_since().map(str::to_string),
+                precomputed_changed_files: review_context
+                    .precomputed_changed_files()
+                    .map(<[String]>::to_vec),
+            },
+            lab_changed_files_json: None,
+        },
         ci_job: None,
         setting_args: Default::default(),
         args: Vec::new(),
-        lab_changed_files_json: None,
         json_summary: args.summary,
         restore_checkout: true,
     }
-}
-
-fn parse_lab_changed_files_json(raw: &str) -> homeboy::core::Result<Vec<String>> {
-    serde_json::from_str(raw).map_err(|error| {
-        homeboy::core::Error::validation_invalid_argument(
-            "lab_changed_files_json",
-            format!("invalid Lab changed-file payload: {error}"),
-            None,
-            None,
-        )
-    })
 }
 
 fn audit_finding_count(output: &AuditCommandOutput) -> usize {
@@ -994,8 +997,8 @@ mod tests {
     fn parses_changed_since() {
         let cli = TestCli::try_parse_from(["test", "my-comp", "--changed-since", "trunk"])
             .expect("should parse");
-        assert_eq!(cli.review.changed_since.as_deref(), Some("trunk"));
-        assert!(!cli.review.changed_only);
+        assert_eq!(cli.review.changed.changed_since(), Some("trunk"));
+        assert!(!cli.review.changed.changed_only);
         assert_eq!(cli.review.comp.component.as_deref(), Some("my-comp"));
     }
 
@@ -1015,14 +1018,14 @@ mod tests {
             cli.review.extension_override.extensions,
             vec!["fixture-review"]
         );
-        assert_eq!(cli.review.changed_since.as_deref(), Some("origin/main"));
+        assert_eq!(cli.review.changed.changed_since(), Some("origin/main"));
     }
 
     #[test]
     fn parses_changed_only() {
         let cli = TestCli::try_parse_from(["test", "--changed-only"]).expect("should parse");
-        assert!(cli.review.changed_only);
-        assert!(cli.review.changed_since.is_none());
+        assert!(cli.review.changed.changed_only);
+        assert!(cli.review.changed.changed_since().is_none());
     }
 
     #[test]
@@ -1191,15 +1194,22 @@ mod tests {
                 path: None,
             },
             extension_override: ExtensionOverrideArgs::default(),
-            changed_since: Some("trunk".to_string()),
-            changed_only: false,
+            changed: ChangedScopeArgs {
+                lab: LabChangedScopeArgs {
+                    since: ChangedSinceArgs {
+                        changed_since: Some("trunk".to_string()),
+                        precomputed_changed_files: None,
+                    },
+                    lab_changed_files_json: None,
+                },
+                changed_only: false,
+            },
             summary: false,
             ci_profile: None,
             audit_profile: None,
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
-            lab_changed_files_json: None,
         };
         assert_eq!(scope_flag_suffix(&args, true), " --changed-since=trunk");
         assert_eq!(scope_flag_suffix(&args, false), " --changed-since=trunk");
@@ -1215,15 +1225,22 @@ mod tests {
                 path: None,
             },
             extension_override: ExtensionOverrideArgs::default(),
-            changed_since: None,
-            changed_only: true,
+            changed: ChangedScopeArgs {
+                lab: LabChangedScopeArgs {
+                    since: ChangedSinceArgs {
+                        changed_since: None,
+                        precomputed_changed_files: None,
+                    },
+                    lab_changed_files_json: None,
+                },
+                changed_only: true,
+            },
             summary: false,
             ci_profile: None,
             audit_profile: None,
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
-            lab_changed_files_json: None,
         };
         assert_eq!(scope_flag_suffix(&args, true), " --changed-only");
         // audit/test do not support --changed-only, so the suffix is empty
@@ -1241,15 +1258,22 @@ mod tests {
                 path: None,
             },
             extension_override: ExtensionOverrideArgs::default(),
-            changed_since: None,
-            changed_only: false,
+            changed: ChangedScopeArgs {
+                lab: LabChangedScopeArgs {
+                    since: ChangedSinceArgs {
+                        changed_since: None,
+                        precomputed_changed_files: None,
+                    },
+                    lab_changed_files_json: None,
+                },
+                changed_only: false,
+            },
             summary: false,
             ci_profile: None,
             audit_profile: None,
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
-            lab_changed_files_json: None,
         };
         assert_eq!(scope_flag_suffix(&args, true), "");
         assert_eq!(scope_flag_suffix(&args, false), "");
@@ -1258,7 +1282,7 @@ mod tests {
     #[test]
     fn changed_since_review_uses_pr_audit_profile() {
         let mut args = review_args_fixture();
-        args.changed_since = Some("origin/main".to_string());
+        args.changed.lab.since.changed_since = Some("origin/main".to_string());
         let review_context = ReviewExecutionContext {
             scope: "changed since origin/main".to_string(),
             changed_file_count: Some(1),
@@ -1283,7 +1307,7 @@ mod tests {
     #[test]
     fn scoped_review_lint_args_do_not_use_self_check_dispatch() {
         let mut args = review_args_fixture();
-        args.changed_since = Some("origin/main".to_string());
+        args.changed.lab.since.changed_since = Some("origin/main".to_string());
         let review_context = ReviewExecutionContext {
             scope: "changed-since".to_string(),
             changed_file_count: Some(1),
@@ -1292,9 +1316,14 @@ mod tests {
 
         let lint_args = build_lint_args(&args, &review_context);
 
-        assert_eq!(lint_args.changed_since.as_deref(), Some("origin/main"));
+        assert_eq!(lint_args.changed.changed_since(), Some("origin/main"));
         assert_eq!(
-            lint_args.precomputed_changed_files.as_deref(),
+            lint_args
+                .changed
+                .lab
+                .since
+                .precomputed_changed_files
+                .as_deref(),
             Some(&["src/lib.rs".to_string()][..])
         );
         assert!(
@@ -1357,7 +1386,7 @@ mod tests {
     #[test]
     fn review_audit_profile_override_takes_precedence() {
         let mut args = review_args_fixture();
-        args.changed_since = Some("origin/main".to_string());
+        args.changed.lab.since.changed_since = Some("origin/main".to_string());
         args.audit_profile = Some("architecture".to_string());
         let review_context = ReviewExecutionContext {
             scope: "changed since origin/main".to_string(),
@@ -1402,15 +1431,22 @@ mod tests {
                 path: None,
             },
             extension_override: ExtensionOverrideArgs::default(),
-            changed_since: None,
-            changed_only: false,
+            changed: ChangedScopeArgs {
+                lab: LabChangedScopeArgs {
+                    since: ChangedSinceArgs {
+                        changed_since: None,
+                        precomputed_changed_files: None,
+                    },
+                    lab_changed_files_json: None,
+                },
+                changed_only: false,
+            },
             summary: false,
             ci_profile: None,
             audit_profile: None,
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
-            lab_changed_files_json: None,
         }
     }
 }

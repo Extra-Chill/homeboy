@@ -6,7 +6,7 @@ use homeboy::core::scope::{self, Scope};
 use homeboy_extension::build;
 use homeboy_extension::ExtensionCapability;
 
-use crate::commands::utils::args::ScopeArgs;
+use crate::commands::utils::args::{ChangedSinceArgs, ScopeArgs};
 use crate::commands::utils::resolve::resolve_project_components;
 use crate::commands::CmdResult;
 
@@ -34,9 +34,12 @@ pub struct BuildArgs {
     #[command(flatten)]
     pub scope: ScopeArgs,
 
-    /// Ask the build provider to resolve the build scope from files changed since this git ref
-    #[arg(long)]
-    pub changed_since: Option<String>,
+    // Ask the build provider to resolve the build scope from files changed
+    // since a git ref. Declared once in the shared changed-scope group so
+    // `build --changed-since` cannot drift from the other five commands
+    // that speak the same contract (#11140).
+    #[command(flatten)]
+    pub changed: ChangedSinceArgs,
 }
 
 pub fn run(args: BuildArgs) -> CmdResult<build::BuildResult> {
@@ -46,7 +49,7 @@ pub fn run(args: BuildArgs) -> CmdResult<build::BuildResult> {
     // component records through the same changed-since runner with the same
     // `--changed-since` argument, so funnel them through one helper.
     let run_components = |components: &[component::Component]| {
-        build::run_components_with_changed_since(components, args.changed_since.as_deref())
+        build::run_components_with_changed_since(components, args.changed.changed_since())
     };
 
     // JSON takes precedence
@@ -77,7 +80,7 @@ pub fn run(args: BuildArgs) -> CmdResult<build::BuildResult> {
         ))?;
         return build::run_component_with_changed_since(
             &ctx.component,
-            args.changed_since.as_deref(),
+            args.changed.changed_since(),
         );
     }
 
@@ -175,9 +178,9 @@ pub fn run(args: BuildArgs) -> CmdResult<build::BuildResult> {
 
     // Single target_id: treat as component ID
     if let Some(ref path) = args.scope.path {
-        build::run_with_path_changed_since(target_id, path, args.changed_since.as_deref())
+        build::run_with_path_changed_since(target_id, path, args.changed.changed_since())
     } else {
-        build::run_changed_since(target_id, args.changed_since.as_deref())
+        build::run_changed_since(target_id, args.changed.changed_since())
     }
 }
 
@@ -230,7 +233,7 @@ mod tests {
         assert_eq!(json.json.as_deref(), Some(r#"{"componentIds":["a"]}"#));
 
         let changed = parse(&["build", "my-comp", "--changed-since", "origin/main"]);
-        assert_eq!(changed.changed_since.as_deref(), Some("origin/main"));
+        assert_eq!(changed.changed.changed_since(), Some("origin/main"));
 
         let cwd = parse(&["build"]);
         assert!(cwd.target_id.is_none());

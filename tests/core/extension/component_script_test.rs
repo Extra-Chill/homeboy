@@ -6,7 +6,7 @@ use std::process::Command;
 
 use crate::commands::test::{run as run_test, TestArgs};
 use crate::commands::utils::args::{
-    BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
+    BaselineArgs, ExtensionOverrideArgs, LabChangedScopeArgs, PositionalComponentArgs, SettingArgs,
 };
 use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
 use homeboy_core::engine::run_dir::RunDir;
@@ -36,9 +36,7 @@ fn test_command_args(root: &Path) -> TestArgs {
         drift: false,
         write: false,
         since: "HEAD~10".to_string(),
-        changed_since: None,
-        precomputed_changed_files: None,
-        lab_changed_files_json: None,
+        changed: LabChangedScopeArgs::default(),
         ci_job: None,
         setting_args: SettingArgs::default(),
         args: Vec::new(),
@@ -588,8 +586,8 @@ fn changed_wordpress_php_smoke_test_executes_with_generic_result_adapter() {
         init_git_repo(dir.path());
 
         let mut args = test_command_args(dir.path());
-        args.changed_since = Some("HEAD".to_string());
-        args.precomputed_changed_files = Some(vec![
+        args.changed.since.changed_since = Some("HEAD".to_string());
+        args.changed.since.precomputed_changed_files = Some(vec![
             "src/patterns.php".to_string(),
             "tests/patterns/patterns-ability-smoke.php".to_string(),
         ]);
@@ -669,8 +667,8 @@ fn changed_nested_extension_js_smokes_use_component_relative_exclusive_route() {
         init_git_repo(repo.path());
 
         let mut args = test_command_args(&extension_root);
-        args.changed_since = Some("HEAD".to_string());
-        args.precomputed_changed_files = Some(vec![
+        args.changed.since.changed_since = Some("HEAD".to_string());
+        args.changed.since.precomputed_changed_files = Some(vec![
             "wordpress/tests/wp-codebox-database-service-smoke.mjs".to_string(),
             "wordpress/tests/wp-codebox-phpunit-aggregate-smoke.mjs".to_string(),
             "wordpress/tests/wp-codebox-phpunit-multisite-smoke.mjs".to_string(),
@@ -734,8 +732,9 @@ fn successful_selected_test_without_result_evidence_fails_closed() {
             .expect("extension script should be executable");
 
         let mut args = test_command_args(dir.path());
-        args.changed_since = Some("origin/main".to_string());
-        args.precomputed_changed_files = Some(vec!["tests/generic-smoke.php".to_string()]);
+        args.changed.since.changed_since = Some("origin/main".to_string());
+        args.changed.since.precomputed_changed_files =
+            Some(vec!["tests/generic-smoke.php".to_string()]);
         let (output, exit_code) = run_test(args).expect("extension test should run");
 
         assert_eq!(exit_code, 1);

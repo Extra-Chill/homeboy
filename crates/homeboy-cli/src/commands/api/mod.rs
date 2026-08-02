@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 use homeboy::core::server::api;
 
+use super::utils::args::MutationArgs;
 use super::CmdResult;
 
 pub mod auth;
@@ -31,9 +32,10 @@ pub(crate) enum ApiCommand {
         project_id: String,
         /// API endpoint
         endpoint: String,
-        /// Confirm the mutating request should be sent.
-        #[arg(long)]
-        apply: bool,
+        // Confirm the mutating request should be sent. Shared plan-default
+        // mutation group (#11139) — `--apply` sends, bare plans.
+        #[command(flatten)]
+        mutation: MutationArgs,
         /// JSON body
         #[arg(long)]
         body: Option<String>,
@@ -47,9 +49,10 @@ pub(crate) enum ApiCommand {
         project_id: String,
         /// API endpoint
         endpoint: String,
-        /// Confirm the mutating request should be sent.
-        #[arg(long)]
-        apply: bool,
+        // Confirm the mutating request should be sent. Shared plan-default
+        // mutation group (#11139) — `--apply` sends, bare plans.
+        #[command(flatten)]
+        mutation: MutationArgs,
         /// JSON body
         #[arg(long)]
         body: Option<String>,
@@ -63,9 +66,10 @@ pub(crate) enum ApiCommand {
         project_id: String,
         /// API endpoint
         endpoint: String,
-        /// Confirm the mutating request should be sent.
-        #[arg(long)]
-        apply: bool,
+        // Confirm the mutating request should be sent. Shared plan-default
+        // mutation group (#11139) — `--apply` sends, bare plans.
+        #[command(flatten)]
+        mutation: MutationArgs,
         /// JSON body
         #[arg(long)]
         body: Option<String>,
@@ -79,9 +83,10 @@ pub(crate) enum ApiCommand {
         project_id: String,
         /// API endpoint
         endpoint: String,
-        /// Confirm the mutating request should be sent.
-        #[arg(long)]
-        apply: bool,
+        // Confirm the mutating request should be sent. Shared plan-default
+        // mutation group (#11139) — `--apply` sends, bare plans.
+        #[command(flatten)]
+        mutation: MutationArgs,
     },
 }
 
@@ -116,11 +121,11 @@ fn run_project(args: ApiArgs) -> CmdResult<api::ApiOutput> {
 }
 
 pub(crate) fn require_apply_for_mutation(args: &ApiArgs) -> homeboy::core::Result<()> {
-    let Some((command, endpoint, apply)) = mutating_command(&args.command) else {
+    let Some((command, endpoint, mutation)) = mutating_command(&args.command) else {
         return Ok(());
     };
 
-    if *apply {
+    if mutation.is_apply() {
         return Ok(());
     }
 
@@ -138,21 +143,21 @@ pub(crate) fn require_apply_for_mutation(args: &ApiArgs) -> homeboy::core::Resul
     ))
 }
 
-fn mutating_command(command: &ApiCommand) -> Option<(&'static str, &str, &bool)> {
+fn mutating_command(command: &ApiCommand) -> Option<(&'static str, &str, &MutationArgs)> {
     match command {
         ApiCommand::Auth(_) | ApiCommand::Http(_) | ApiCommand::Get { .. } => None,
         ApiCommand::Post {
-            endpoint, apply, ..
-        } => Some(("post", endpoint, apply)),
+            endpoint, mutation, ..
+        } => Some(("post", endpoint, mutation)),
         ApiCommand::Put {
-            endpoint, apply, ..
-        } => Some(("put", endpoint, apply)),
+            endpoint, mutation, ..
+        } => Some(("put", endpoint, mutation)),
         ApiCommand::Patch {
-            endpoint, apply, ..
-        } => Some(("patch", endpoint, apply)),
+            endpoint, mutation, ..
+        } => Some(("patch", endpoint, mutation)),
         ApiCommand::Delete {
-            endpoint, apply, ..
-        } => Some(("delete", endpoint, apply)),
+            endpoint, mutation, ..
+        } => Some(("delete", endpoint, mutation)),
     }
 }
 
@@ -176,7 +181,7 @@ fn build_api_json(args: &ApiArgs) -> String {
         ApiCommand::Post {
             project_id,
             endpoint,
-            apply: _,
+            mutation: _,
             body,
             form,
         } => (
@@ -189,7 +194,7 @@ fn build_api_json(args: &ApiArgs) -> String {
         ApiCommand::Put {
             project_id,
             endpoint,
-            apply: _,
+            mutation: _,
             body,
             form,
         } => (
@@ -202,7 +207,7 @@ fn build_api_json(args: &ApiArgs) -> String {
         ApiCommand::Patch {
             project_id,
             endpoint,
-            apply: _,
+            mutation: _,
             body,
             form,
         } => (
@@ -215,7 +220,7 @@ fn build_api_json(args: &ApiArgs) -> String {
         ApiCommand::Delete {
             project_id,
             endpoint,
-            apply: _,
+            mutation: _,
         } => (project_id, "DELETE", endpoint.clone(), None, "json"),
         ApiCommand::Auth(_) | ApiCommand::Http(_) => {
             unreachable!("nested API commands are routed before project API input construction")

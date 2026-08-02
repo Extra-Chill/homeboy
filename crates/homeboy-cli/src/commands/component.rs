@@ -7,6 +7,7 @@ use homeboy::core::component::{self, Component};
 use homeboy::core::project::{self, Project};
 use homeboy::core::EntityCrudOutput;
 
+use super::utils::args::MutationArgs;
 use super::{CmdResult, DynamicSetArgs};
 
 mod env;
@@ -170,9 +171,10 @@ enum ComponentCommand {
     Reconcile {
         /// Component ID
         id: String,
-        /// Apply a safe discovered repair instead of reporting only
-        #[arg(long)]
-        apply: bool,
+        // Apply a safe discovered repair instead of reporting only.
+        // Shared plan-default mutation group (#11139).
+        #[command(flatten)]
+        mutation: MutationArgs,
     },
     /// Report or remove declared reconstructable artifacts for a component
     Artifacts {
@@ -181,9 +183,10 @@ enum ComponentCommand {
         /// Discover component from a directory's homeboy.json instead of the registry
         #[arg(long)]
         path: Option<String>,
-        /// Remove reported artifact paths instead of dry-run reporting only
-        #[arg(long)]
-        apply: bool,
+        // Remove reported artifact paths instead of dry-run reporting only.
+        // Shared plan-default mutation group (#11139).
+        #[command(flatten)]
+        mutation: MutationArgs,
     },
 }
 
@@ -357,9 +360,9 @@ pub fn run(args: ComponentArgs) -> CmdResult<ComponentOutput> {
             source.as_deref(),
             skip_dependencies,
         ),
-        ComponentCommand::Reconcile { id, apply } => reconcile(&id, apply),
-        ComponentCommand::Artifacts { id, path, apply } => {
-            artifacts(id.as_deref(), path.as_deref(), apply)
+        ComponentCommand::Reconcile { id, mutation } => reconcile(&id, mutation.is_apply()),
+        ComponentCommand::Artifacts { id, path, mutation } => {
+            artifacts(id.as_deref(), path.as_deref(), mutation.is_apply())
         }
     }
 }

@@ -919,6 +919,269 @@ pub struct BaselineArgs {
 }
 
 // ============================================================================
+// ChangedSinceArgs / LabChangedScopeArgs / ChangedScopeArgs: changed-file scope
+// ============================================================================
+
+/// The `--changed-since` scope contract, declared once.
+///
+/// Six commands (`audit`, `lint`, `test`, `build`, `review`, `refactor`)
+/// each declared this flag independently, with three different doc comments,
+/// two different `value_name`s, and — in `lint`/`review` — hand-written
+/// `conflicts_with` pairs pointing at each other (#11140). The
+/// `#[arg(skip)] precomputed_changed_files` escape hatch that lets a caller
+/// (`review`, the Lab handoff) inject an already-computed changeset was
+/// repeated three times verbatim, and two byte-identical
+/// `changed_files_from_args` helpers lived in `lint.rs` and `test.rs`.
+///
+/// The group is layered rather than flat so that flattening it never *adds*
+/// a flag to a command that did not already accept it:
+///
+/// - [`ChangedSinceArgs`] — `--changed-since` plus the skip escape hatch.
+///   Flattened by `audit`, `build`, `refactor`.
+/// - [`LabChangedScopeArgs`] — adds the hidden `--lab-changed-files-json`
+///   handoff payload. Flattened by `test`.
+/// - [`ChangedScopeArgs`] — adds `--changed-only` working-tree scoping.
+///   Flattened by `lint` and `review`.
+///
+/// ## Known divergence (surfaced, deliberately not changed)
+///
+/// `audit --changed-since` disables Lab offload entirely (see
+/// `AUDIT_CHANGED_SINCE_LAB_UNSUPPORTED_REASON` in `commands/audit.rs`) while
+/// `lint --changed-since` treats the same scoping as a Lab-portable release
+/// gate. Both spellings resolve to the identical field on the same shared
+/// group now, so the divergence lives entirely in each command's
+/// `lab_contract()` where it is visible. Whether audit's carve-out is still
+/// warranted is a behavior decision for a separate issue — this group only
+/// makes the asymmetry legible.
+#[derive(Args, Debug, Clone, Default)]
+pub struct ChangedSinceArgs {
+    /// Only operate on files changed since this git ref (branch, tag, or SHA).
+    #[arg(long, value_name = "REF")]
+    pub changed_since: Option<String>,
+
+    /// Caller-injected changeset. Not a CLI surface — `review` and the Lab
+    /// handoff populate this so a downstream phase reuses one `git diff`
+    /// instead of recomputing it per stage.
+    #[arg(skip)]
+    pub precomputed_changed_files: Option<Vec<String>>,
+}
+
+impl ChangedSinceArgs {
+    /// The requested git base ref, if any.
+    pub fn changed_since(&self) -> Option<&str> {
+        self.changed_since.as_deref()
+    }
+
+    /// True when the run is scoped to a changed-file set.
+    pub fn is_scoped(&self) -> bool {
+        self.changed_since.is_some() || self.precomputed_changed_files.is_some()
+    }
+
+    /// Resolve the effective changed-file list for this run.
+    ///
+    /// A caller-injected changeset always wins; there is no Lab payload at
+    /// this layer.
+    pub fn resolve(&self) -> homeboy::core::Result<Option<Vec<String>>> {
+        Ok(self.precomputed_changed_files.clone())
+    }
+}
+
+/// [`ChangedSinceArgs`] plus the hidden Lab changed-file handoff payload.
+#[derive(Args, Debug, Clone, Default)]
+pub struct LabChangedScopeArgs {
+    #[command(flatten)]
+    pub since: ChangedSinceArgs,
+
+    /// Serialized changed-file list handed across the Lab boundary.
+    #[arg(long, hide = true, value_name = "JSON")]
+    pub lab_changed_files_json: Option<String>,
+}
+
+impl LabChangedScopeArgs {
+    /// The requested git base ref, if any.
+    pub fn changed_since(&self) -> Option<&str> {
+        self.since.changed_since()
+    }
+
+    /// True when the run is scoped to a changed-file set.
+    pub fn is_scoped(&self) -> bool {
+        self.since.is_scoped() || self.lab_changed_files_json.is_some()
+    }
+
+    /// Resolve the effective changed-file list for this run.
+    ///
+    /// Precedence: caller-injected changeset, then the Lab handoff payload.
+    /// This replaces the two byte-identical `changed_files_from_args`
+    /// helpers that lived in `lint.rs` and `test.rs`.
+    pub fn resolve(&self) -> homeboy::core::Result<Option<Vec<String>>> {
+        if self.since.precomputed_changed_files.is_some() {
+            return Ok(self.since.precomputed_changed_files.clone());
+        }
+        self.lab_changed_files_json
+            .as_deref()
+            .map(parse_lab_changed_files_json)
+            .transpose()
+    }
+}
+
+/// [`LabChangedScopeArgs`] plus working-tree (`--changed-only`) scoping.
+#[derive(Args, Debug, Clone, Default)]
+pub struct ChangedScopeArgs {
+    #[command(flatten)]
+    pub lab: LabChangedScopeArgs,
+
+    /// Operate only on files modified in the working tree
+    /// (staged, unstaged, untracked). File-scoped, not hunk-scoped.
+    #[arg(long, conflicts_with = "changed_since")]
+    pub changed_only: bool,
+}
+
+impl ChangedScopeArgs {
+    /// The requested git base ref, if any.
+    pub fn changed_since(&self) -> Option<&str> {
+        self.lab.changed_since()
+    }
+
+    /// True when the run is scoped to a changed-file set by any mechanism.
+    pub fn is_scoped(&self) -> bool {
+        self.lab.is_scoped() || self.changed_only
+    }
+
+    /// True when nothing narrowed the run — the full component is in scope.
+    pub fn is_full_scope(&self) -> bool {
+        !self.is_scoped()
+    }
+
+    /// Resolve the effective changed-file list for this run.
+    pub fn resolve(&self) -> homeboy::core::Result<Option<Vec<String>>> {
+        self.lab.resolve()
+    }
+}
+
+/// Parse a Lab changed-file handoff payload.
+///
+/// Previously copied verbatim into `lint.rs`, `test.rs`, and
+/// `review/mod.rs`.
+pub fn parse_lab_changed_files_json(raw: &str) -> homeboy::core::Result<Vec<String>> {
+    serde_json::from_str(raw).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "lab_changed_files_json",
+            format!("invalid Lab changed-file payload: {error}"),
+            None,
+            None,
+        )
+    })
+}
+
+#[cfg(test)]
+mod changed_scope_tests {
+    use super::{ChangedScopeArgs, ChangedSinceArgs, LabChangedScopeArgs};
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct SinceCli {
+        #[command(flatten)]
+        changed: ChangedSinceArgs,
+    }
+
+    #[derive(Parser)]
+    struct LabCli {
+        #[command(flatten)]
+        changed: LabChangedScopeArgs,
+    }
+
+    #[derive(Parser)]
+    struct ScopeCli {
+        #[command(flatten)]
+        changed: ChangedScopeArgs,
+    }
+
+    #[test]
+    fn changed_since_parses_split_and_inline_forms() {
+        let split = SinceCli::try_parse_from(["scoped", "--changed-since", "origin/main"])
+            .expect("split form parses");
+        assert_eq!(split.changed.changed_since(), Some("origin/main"));
+
+        let inline = SinceCli::try_parse_from(["scoped", "--changed-since=origin/main"])
+            .expect("inline form parses");
+        assert_eq!(inline.changed.changed_since(), Some("origin/main"));
+    }
+
+    #[test]
+    fn base_group_exposes_no_extra_flags() {
+        assert!(SinceCli::try_parse_from(["scoped", "--changed-only"]).is_err());
+        assert!(SinceCli::try_parse_from(["scoped", "--lab-changed-files-json", "[]"]).is_err());
+    }
+
+    #[test]
+    fn lab_group_exposes_the_hidden_payload_but_not_changed_only() {
+        assert!(LabCli::try_parse_from(["scoped", "--lab-changed-files-json", "[]"]).is_ok());
+        assert!(LabCli::try_parse_from(["scoped", "--changed-only"]).is_err());
+    }
+
+    #[test]
+    fn changed_since_and_changed_only_conflict_in_both_orders() {
+        assert!(
+            ScopeCli::try_parse_from(["scoped", "--changed-since", "main", "--changed-only"])
+                .is_err()
+        );
+        assert!(
+            ScopeCli::try_parse_from(["scoped", "--changed-only", "--changed-since", "main"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn resolve_prefers_precomputed_over_lab_payload() {
+        let mut args = LabChangedScopeArgs {
+            lab_changed_files_json: Some(r#"["from-lab.rs"]"#.to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            args.resolve().expect("lab payload resolves"),
+            Some(vec!["from-lab.rs".to_string()])
+        );
+
+        args.since.precomputed_changed_files = Some(vec!["injected.rs".to_string()]);
+        assert_eq!(
+            args.resolve().expect("precomputed wins"),
+            Some(vec!["injected.rs".to_string()])
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_a_malformed_lab_payload() {
+        let args = LabChangedScopeArgs {
+            lab_changed_files_json: Some("not-json".to_string()),
+            ..Default::default()
+        };
+        let error = args.resolve().expect_err("malformed payload should fail");
+        assert_eq!(
+            error.code,
+            homeboy::core::ErrorCode::ValidationInvalidArgument
+        );
+    }
+
+    #[test]
+    fn scope_predicates_track_every_narrowing_mechanism() {
+        let full = ChangedScopeArgs::default();
+        assert!(full.is_full_scope());
+        assert!(!full.is_scoped());
+
+        let changed_only = ChangedScopeArgs {
+            changed_only: true,
+            ..Default::default()
+        };
+        assert!(changed_only.is_scoped());
+        assert!(!changed_only.is_full_scope());
+
+        let mut since = ChangedScopeArgs::default();
+        since.lab.since.changed_since = Some("origin/main".to_string());
+        assert!(since.is_scoped());
+    }
+}
+
+// ============================================================================
 // LintSniffArgs: --errors-only + --sniffs + --exclude-sniffs
 // ============================================================================
 
@@ -956,23 +1219,381 @@ impl LintSniffArgs {
 }
 
 // ============================================================================
-// WriteModeArgs: --write (dry-run by default)
+// PresentationArgs: --format + --detail
 // ============================================================================
 
+/// How a command should render its result.
+///
+/// `--json` means three unrelated things across the CLI today (#11138) and
+/// this enum owns only the first of them — the *output format* sense:
+///
+/// 1. **Output format** (a bool): `bench --json`, `runs show --json`,
+///    `runs proof --json`, `runs dossier --json`.
+/// 2. **A JSON request body** (a string): `api http --json '<body>'`.
+/// 3. **A bulk input spec** (a string): `git --json`, `deploy --json`,
+///    `build --json`, and `DynamicSetArgs --json` — *"JSON input spec for
+///    bulk operations. Use `-` for stdin"*.
+///
+/// Senses 2 and 3 are inputs, not presentation, so they are deliberately
+/// out of this group's scope. Renaming the input-spec flag to `--spec`
+/// with `--json` kept as an alias is the natural follow-up, but it is a
+/// separate change: `--json` there takes a value, so it cannot be folded
+/// into a presentation flag without removing a spelling.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputFormat {
+    /// Let the command pick its documented default presentation.
+    #[default]
+    Auto,
+    /// Structured JSON envelope.
+    Json,
+    /// Rendered markdown.
+    Markdown,
+    /// Plain human-readable text.
+    Text,
+}
+
+/// How much of the result to render.
+///
+/// The CLI currently spells this eight different ways (#11138):
+/// `--json-summary` (audit, lint, test, bench, trace), `--summary`
+/// (review — and lint declares *both*), `--full` (status, plus agent-task
+/// in six places), `--compact` (runner), `--format` (report, in six
+/// declarations across three different `value_parser` sets), the
+/// `--report markdown` / `--report pr-comment` pair, and the global
+/// `--output <PATH>`.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DetailLevel {
+    /// Compact machine-readable summary.
+    Summary,
+    /// The command's documented default detail.
+    #[default]
+    Full,
+}
+
+/// The canonical presentation vocabulary: `--format` + `--detail`.
+///
+/// This group names the contract once so new commands have one obvious
+/// spelling to reach for. It is deliberately **additive**: no existing
+/// `--json` / `--json-summary` / `--summary` / `--full` / `--compact`
+/// flag is removed or re-pointed by introducing it.
+///
+/// Folding the existing flags into this group cannot be done with clap
+/// aliases, which is why it is not attempted here. An alias must have the
+/// same arity as the flag it aliases, and every current spelling is a
+/// *boolean* while `--format` and `--detail` take values. Making
+/// `--json` an alias of `--format` would change its arity, and dropping
+/// the boolean would remove a spelling that CI wrappers and operator
+/// scripts depend on. Migration therefore has to be per-command and
+/// staged, not mechanical.
+#[derive(Args, Debug, Clone, Default)]
+pub struct PresentationArgs {
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Auto)]
+    pub format: OutputFormat,
+
+    /// How much of the result to render.
+    #[arg(long, value_enum, default_value_t = DetailLevel::Full)]
+    pub detail: DetailLevel,
+}
+
+impl PresentationArgs {
+    /// True when the caller explicitly asked for JSON.
+    pub fn is_json(&self) -> bool {
+        matches!(self.format, OutputFormat::Json)
+    }
+
+    /// True when the caller explicitly asked for markdown.
+    pub fn is_markdown(&self) -> bool {
+        matches!(self.format, OutputFormat::Markdown)
+    }
+
+    /// True when the caller asked for the compact summary.
+    pub fn is_summary(&self) -> bool {
+        matches!(self.detail, DetailLevel::Summary)
+    }
+
+    /// True when the command should pick its own default presentation.
+    pub fn is_auto_format(&self) -> bool {
+        matches!(self.format, OutputFormat::Auto)
+    }
+}
+
+#[cfg(test)]
+mod presentation_args_tests {
+    use super::{DetailLevel, OutputFormat, PresentationArgs};
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct PresentationCli {
+        #[command(flatten)]
+        presentation: PresentationArgs,
+    }
+
+    fn parse(args: &[&str]) -> PresentationArgs {
+        PresentationCli::try_parse_from(args)
+            .expect("presentation args should parse")
+            .presentation
+    }
+
+    #[test]
+    fn defaults_are_auto_and_full() {
+        let args = parse(&["rendered"]);
+        assert_eq!(args.format, OutputFormat::Auto);
+        assert_eq!(args.detail, DetailLevel::Full);
+        assert!(args.is_auto_format());
+        assert!(!args.is_summary());
+    }
+
+    #[test]
+    fn every_documented_format_value_parses() {
+        for (flag, expected) in [
+            ("auto", OutputFormat::Auto),
+            ("json", OutputFormat::Json),
+            ("markdown", OutputFormat::Markdown),
+            ("text", OutputFormat::Text),
+        ] {
+            assert_eq!(parse(&["rendered", "--format", flag]).format, expected);
+        }
+    }
+
+    #[test]
+    fn every_documented_detail_value_parses() {
+        assert!(parse(&["rendered", "--detail", "summary"]).is_summary());
+        assert!(!parse(&["rendered", "--detail", "full"]).is_summary());
+    }
+
+    #[test]
+    fn unknown_values_are_rejected() {
+        assert!(PresentationCli::try_parse_from(["rendered", "--format", "yaml"]).is_err());
+        assert!(PresentationCli::try_parse_from(["rendered", "--detail", "verbose"]).is_err());
+    }
+
+    #[test]
+    fn format_predicates_are_mutually_exclusive() {
+        let json = parse(&["rendered", "--format=json"]);
+        assert!(json.is_json());
+        assert!(!json.is_markdown());
+
+        let markdown = parse(&["rendered", "--format=markdown"]);
+        assert!(markdown.is_markdown());
+        assert!(!markdown.is_json());
+    }
+}
+
+// ============================================================================
+// Mutation vocabulary: MutationArgs / WriteModeArgs / DryRunArgs
+// ============================================================================
+//
+// Homeboy speaks three different mutation vocabularies, and the *default
+// polarity* is unknowable without reading each command (#11139):
+//
+//   --apply     the default is PLAN;    passing the flag EXECUTES.
+//   --write     the default is PLAN;    passing the flag EXECUTES.
+//   --dry-run   the default is EXECUTE; passing the flag PREVIEWS.
+//
+// This governs destructive operations, so the polarity of any single
+// command is deliberately NOT changed here. [`MutationArgs`] gives the
+// plan-default family one declaration and one predicate; the other two
+// groups keep their existing meaning and are documented so the asymmetry
+// is legible rather than implicit.
+//
+// Commands that carry BOTH vocabularies at once are the sharpest edge and
+// are intentionally left alone by this group: `deploy` (`--dry-run`
+// previews, `--apply` confirms dangerous modes), `release` (a flattened
+// `DryRunArgs` *and* its own `--apply`), `harvest`, and the `agent-task`
+// reconcile args. Folding those into one group cannot be done without
+// deciding a polarity, which is a behavior change.
+
+/// Which side of the plan/execute boundary a run lands on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationMode {
+    /// Report the plan; mutate nothing.
+    Plan,
+    /// Execute the mutation.
+    Apply,
+}
+
+/// The plan-default mutation switch: `--apply` executes, bare is a plan.
+///
+/// Modeled directly on `worktree cleanup`, which already declares exactly
+/// this pair — `--apply` to execute plus a `--dry-run` that conflicts with
+/// it and names the plan-only default.
+///
+/// `--dry-run` here is **not** an inverting alias of `--apply`. It is an
+/// explicit spelling of the default the command already had, so an
+/// operator script written against the `--dry-run` vocabulary keeps
+/// meaning "do not mutate" on an `--apply`-style command instead of
+/// failing with `unexpected argument`. Adding it cannot flip a default:
+/// the only field that authorizes a mutation is still `apply`.
+#[derive(Args, Debug, Clone, Default)]
+pub struct MutationArgs {
+    /// Execute the mutation. Without this flag the command reports a plan only.
+    #[arg(long)]
+    pub apply: bool,
+
+    /// Explicitly request the plan-only default. Never mutates.
+    #[arg(long, conflicts_with = "apply")]
+    pub dry_run: bool,
+}
+
+impl MutationArgs {
+    /// True when the operator authorized the mutation.
+    pub fn is_apply(&self) -> bool {
+        self.apply
+    }
+
+    /// True when this run must not mutate anything.
+    ///
+    /// The plan-only default means this is simply `!apply`; `--dry-run`
+    /// makes that default explicit rather than adding a second way to
+    /// suppress a mutation.
+    pub fn is_dry_run(&self) -> bool {
+        !self.apply
+    }
+
+    /// The resolved plan/execute mode.
+    pub fn mode(&self) -> MutationMode {
+        if self.apply {
+            MutationMode::Apply
+        } else {
+            MutationMode::Plan
+        }
+    }
+}
+
+impl From<bool> for MutationArgs {
+    /// Build the group from a bare `apply` bool, for call sites that still
+    /// thread the primitive through helper functions.
+    fn from(apply: bool) -> Self {
+        Self {
+            apply,
+            dry_run: !apply,
+        }
+    }
+}
+
+/// Plan-default mutation switch spelled `--write`.
+///
+/// Same polarity as [`MutationArgs`] under a different name. Consumer:
+/// `refactor`.
 #[derive(Args, Debug, Clone, Default)]
 pub struct WriteModeArgs {
     #[arg(long)]
     pub write: bool,
 }
 
-// ============================================================================
-// DryRunArgs: --dry-run (execute by default)
-// ============================================================================
+impl WriteModeArgs {
+    /// True when the operator authorized the mutation.
+    pub fn is_apply(&self) -> bool {
+        self.write
+    }
 
+    /// The resolved plan/execute mode.
+    pub fn mode(&self) -> MutationMode {
+        if self.write {
+            MutationMode::Apply
+        } else {
+            MutationMode::Plan
+        }
+    }
+}
+
+/// Execute-default mutation switch: bare executes, `--dry-run` previews.
+///
+/// **Opposite polarity to [`MutationArgs`] and [`WriteModeArgs`].** This is
+/// the group whose default actually mutates, which is why it is not merged
+/// into `MutationArgs` — doing so would silently repolarize every consumer.
+/// Consumer: `release`.
 #[derive(Args, Debug, Clone, Default)]
 pub struct DryRunArgs {
     #[arg(long)]
     pub dry_run: bool,
+}
+
+impl DryRunArgs {
+    /// True when this run must not mutate anything.
+    pub fn is_dry_run(&self) -> bool {
+        self.dry_run
+    }
+
+    /// The resolved plan/execute mode.
+    pub fn mode(&self) -> MutationMode {
+        if self.dry_run {
+            MutationMode::Plan
+        } else {
+            MutationMode::Apply
+        }
+    }
+}
+
+#[cfg(test)]
+mod mutation_args_tests {
+    use super::{DryRunArgs, MutationArgs, MutationMode, WriteModeArgs};
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct MutationCli {
+        #[command(flatten)]
+        mutation: MutationArgs,
+    }
+
+    fn parse(args: &[&str]) -> MutationArgs {
+        MutationCli::try_parse_from(args)
+            .expect("mutation args should parse")
+            .mutation
+    }
+
+    #[test]
+    fn bare_invocation_plans() {
+        let args = parse(&["mutating"]);
+        assert!(!args.is_apply());
+        assert!(args.is_dry_run());
+        assert_eq!(args.mode(), MutationMode::Plan);
+    }
+
+    #[test]
+    fn apply_executes() {
+        let args = parse(&["mutating", "--apply"]);
+        assert!(args.is_apply());
+        assert!(!args.is_dry_run());
+        assert_eq!(args.mode(), MutationMode::Apply);
+    }
+
+    #[test]
+    fn dry_run_is_the_default_spelled_out_and_never_executes() {
+        let args = parse(&["mutating", "--dry-run"]);
+        assert!(!args.is_apply());
+        assert!(args.is_dry_run());
+        assert_eq!(args.mode(), MutationMode::Plan);
+        assert_eq!(args.mode(), parse(&["mutating"]).mode());
+    }
+
+    #[test]
+    fn apply_and_dry_run_cannot_be_combined() {
+        assert!(MutationCli::try_parse_from(["mutating", "--apply", "--dry-run"]).is_err());
+        assert!(MutationCli::try_parse_from(["mutating", "--dry-run", "--apply"]).is_err());
+    }
+
+    #[test]
+    fn write_mode_shares_the_plan_default_polarity() {
+        assert_eq!(WriteModeArgs::default().mode(), MutationMode::Plan);
+        assert_eq!(WriteModeArgs { write: true }.mode(), MutationMode::Apply);
+    }
+
+    #[test]
+    fn dry_run_args_has_the_opposite_polarity() {
+        // The invariant this whole group exists to make visible: a bare
+        // DryRunArgs command MUTATES, while a bare MutationArgs command
+        // does not. Nothing in this change reconciles the two.
+        assert_eq!(DryRunArgs::default().mode(), MutationMode::Apply);
+        assert_eq!(MutationArgs::default().mode(), MutationMode::Plan);
+    }
+
+    #[test]
+    fn from_bool_round_trips_helper_threaded_apply_flags() {
+        assert_eq!(MutationArgs::from(true).mode(), MutationMode::Apply);
+        assert_eq!(MutationArgs::from(false).mode(), MutationMode::Plan);
+    }
 }
 
 // ============================================================================

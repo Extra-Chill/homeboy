@@ -2,6 +2,7 @@ use clap::{Args, Subcommand};
 use homeboy::core::controller_runtime::ControllerRuntimeRetentionOverrides;
 use serde::Serialize;
 
+use crate::commands::utils::args::MutationArgs;
 use crate::commands::CmdResult;
 
 #[derive(Args)]
@@ -34,9 +35,10 @@ enum RuntimeCommand {
     PromotionTakeover,
     /// Plan or apply pruning for unreferenced immutable controller runtimes.
     ControllerPrune {
-        /// Delete pins not retained by nonterminal durable runs or the active generation.
-        #[arg(long)]
-        apply: bool,
+        // Delete pins not retained by nonterminal durable runs or the active
+        // generation. Shared plan-default mutation group (#11139).
+        #[command(flatten)]
+        mutation: MutationArgs,
 
         /// Purge every unreferenced pin, ignoring the configured controller
         /// runtime retention window. Destructive: prefer the configured window.
@@ -121,9 +123,9 @@ pub fn run(args: RuntimeArgs) -> CmdResult<RuntimeOutput> {
         } => refresh_runtime_package(&runtime_id, &source, revision.as_deref()),
         RuntimeCommand::PromotionTakeover => promotion_takeover(),
         RuntimeCommand::ControllerPrune {
-            apply,
+            mutation,
             ignore_retention,
-        } => controller_prune(apply, ignore_retention),
+        } => controller_prune(mutation.is_apply(), ignore_retention),
     }
 }
 
