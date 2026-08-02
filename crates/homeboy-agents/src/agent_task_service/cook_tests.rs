@@ -459,6 +459,9 @@ fn pre_artifact_interruption_claim_is_restart_and_concurrent_controller_idempote
         let recipe = super::super::load_recipe(&options.cook_id).unwrap();
         assert_eq!(recipe.attempts.len(), 2);
         assert_eq!(recipe.attempts[1].run_id, resumed.1);
+        assert!(agent_task_lifecycle::run_record_exists(&resumed.1).unwrap());
+        let index = agent_task_lifecycle::cook_index(&options.cook_id).unwrap();
+        assert_eq!(index.latest_run_id, resumed.1);
         assert!(agent_task_lifecycle::read_aggregate(&run_id).is_err());
     });
 }

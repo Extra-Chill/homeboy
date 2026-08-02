@@ -178,8 +178,11 @@ fn claim_pre_artifact_interruption_retry(
         PRE_ARTIFACT_INTERRUPTION_CLAIM_LEASE,
     )? {
         agent_task_lifecycle::ClaimOutcome::Acquired => {
-            let next_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt);
+            let next_run_id = recipe_next_attempt()?.unwrap_or_else(|| {
+                agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt)
+            });
             super::record_recipe_attempt(cook_id, next_attempt, &next_run_id, plan)?;
+            materialize_cook_attempt(cook_id, &next_run_id, plan)?;
             agent_task_lifecycle::complete_cook_operation(
                 run_id,
                 &operation_key,
