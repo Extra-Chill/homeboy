@@ -566,9 +566,9 @@ pub(super) mod concurrency_tests {
         let started = Instant::now();
         let aggregate = scheduler.run(plan);
         assert!(started.elapsed() < Duration::from_secs(2));
-        while !finished.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_millis(2));
-        }
+        wait_until("the late-mutating executor to finish", || {
+            finished.load(Ordering::SeqCst)
+        });
         let scratch_root = scratch_roots.lock().expect("scratch roots")[0].clone();
         let run_id = scratch_root
             .ancestors()

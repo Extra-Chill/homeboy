@@ -119,3 +119,33 @@ impl AgentTaskExecutorAdapter for GenericChildRunExecutor {
         }
     }
 }
+
+/// Spin until `ready` reports true, or panic naming the condition.
+///
+/// These suites coordinate with executor threads through atomics, and the
+/// obvious spelling — `while !flag.load(..) { sleep(..) }` — has no exit. When
+/// the executor never reaches the state the test is waiting for, the loop
+/// spins until the 1500s CI budget kills the entire test phase, which reports
+/// `exit 124` with `failed: 0` and no test name. Every gate on every pull
+/// request then says the same uninformative thing, and the suite that actually
+/// broke is invisible (#10687).
+///
+/// Bounding the wait converts that into one named failing test, which is the
+/// same contract `bounded_output` gives hermetic subprocesses (#11234).
+pub(super) fn wait_until(label: &str, ready: impl Fn() -> bool) {
+    // Generous: these waits gate on real thread scheduling and git fixtures,
+    // so the budget only has to be short enough to beat the CI phase timeout.
+    const BUDGET: Duration = Duration::from_secs(60);
+    const POLL: Duration = Duration::from_millis(2);
+
+    let started = Instant::now();
+    while !ready() {
+        assert!(
+            started.elapsed() < BUDGET,
+            "timed out after {:?} waiting for {label}; the scheduler never reached this state, \
+             so the condition is either unreachable or slower than the budget",
+            started.elapsed()
+        );
+        thread::sleep(POLL);
+    }
+}

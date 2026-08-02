@@ -41,9 +41,9 @@ mod cancellation_tests {
         let worker_token = token.clone();
 
         let handle = thread::spawn(move || scheduler.run_with_cancellation(plan, worker_token));
-        while running.load(Ordering::SeqCst) == 0 {
-            thread::sleep(Duration::from_millis(1));
-        }
+        wait_until("the first task to start running", || {
+            running.load(Ordering::SeqCst) != 0
+        });
         token.cancel();
         let aggregate = handle.join().expect("scheduler thread");
 
