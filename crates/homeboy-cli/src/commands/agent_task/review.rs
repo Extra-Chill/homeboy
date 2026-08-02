@@ -503,6 +503,7 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         evidence,
         ai_used_for: args.ai_used_for,
         review_dossier,
+        composed_ai_model_disclosure: false,
         review_profile,
         manual_finalization: args.manual_finalization,
         expected_candidate_sha: None,
