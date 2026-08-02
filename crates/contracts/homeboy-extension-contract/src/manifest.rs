@@ -174,7 +174,21 @@ pub struct ExtensionManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub composition: Option<CompositionConfig>,
 
-    // Extensibility: preserve unknown fields for external consumers (GUI, workflows)
+    /// Unknown top-level manifest keys, preserved rather than rejected so an
+    /// extension published against a newer or older core still deserializes.
+    ///
+    /// This is a *forward-compatibility buffer*, not an extension point. Core
+    /// reads exactly two keys out of it — `deployment_providers`
+    /// (`manifest::deployment_providers`) and the legacy camelCase `sourceUrl`
+    /// (`lifecycle::source_metadata`) — and nothing else in here has a reader.
+    ///
+    /// Landing anything else here makes it inert *silently*, which is how
+    /// shipped manifests accumulated `dependency_materialization_recipes` (51
+    /// lines), `required_output_declarations` (26 lines), `testing`, and `docs`:
+    /// all parse, all survive a round-trip, none are ever consulted by anything
+    /// in this workspace. A key that core is meant to act on belongs on a typed
+    /// field, where its absence of a reader is a compile-time fact rather than
+    /// something a grep has to discover. (#11124)
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
 
@@ -542,11 +556,6 @@ impl ExtensionManifest {
     /// Get the refactor script path (relative to extension dir), if configured.
     pub fn refactor_script(&self) -> Option<&str> {
         self.scripts.as_ref().and_then(|s| s.refactor.as_deref())
-    }
-
-    /// Get the topology script path (relative to extension dir), if configured.
-    pub fn topology_script(&self) -> Option<&str> {
-        self.scripts.as_ref().and_then(|s| s.topology.as_deref())
     }
 
     /// Get the format script path (relative to extension dir), if configured.

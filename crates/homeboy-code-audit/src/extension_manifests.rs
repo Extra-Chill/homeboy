@@ -2,7 +2,7 @@
 //!
 //! The audit engine needs a little data from installed extension manifests —
 //! provided file extensions, the audit detector rules, test-mapping config,
-//! doc-claim ignore patterns, the topology script, and the extension path. It
+//! doc-claim ignore patterns, and the extension path. It
 //! used to reach that by calling `homeboy_extension::{load_extension,
 //! load_all_extensions}` directly, which coupled `code_audit` to the
 //! `extension` feature layer and blocked extracting audit into its own crate.
@@ -36,8 +36,6 @@ pub struct AuditExtensionManifest {
     pub test_mapping: Option<TestMappingConfig>,
     /// Prose doc-claim patterns the extension asks doc-drift to ignore.
     pub audit_ignore_claim_patterns: Vec<String>,
-    /// Relative path to the extension's test-topology script, if any.
-    pub topology_script: Option<String>,
 }
 
 /// The manifest-access contract the audit engine depends on. Implemented by the
