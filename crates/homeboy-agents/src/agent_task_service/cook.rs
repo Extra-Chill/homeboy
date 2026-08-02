@@ -2008,7 +2008,7 @@ where
     // The recipe alone is resumable input, not a status-addressable run. Publish
     // the run identity only after initial materialization and a lifecycle read
     // prove status/log recovery resolves for this exact attempt.
-    let materialized_run = agent_task_lifecycle::status(&options.initial_run_id)?;
+    let materialized_run = agent_task_lifecycle::exact_record(&options.initial_run_id)?;
     if materialized_run.run_id != options.initial_run_id {
         return Err(Error::internal_unexpected(
             "materialized Cook lifecycle record does not match its initial run id",

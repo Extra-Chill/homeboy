@@ -2779,7 +2779,9 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
             ],
         );
         let cook_id = "cook-repair-recipe-only-retry";
-        let first_run_id = "cook-repair-recipe-only-retry-attempt-1";
+        // The initial run may share the stable Cook ID. Once the successor is
+        // indexed, alias-aware status resolves to that successor instead.
+        let first_run_id = cook_id;
         let stranded_run_id = "cook-repair-recipe-only-retry-attempt-2-stranded";
         let dispatches = Arc::new(AtomicUsize::new(0));
         let mut options = batch_cook_options(
