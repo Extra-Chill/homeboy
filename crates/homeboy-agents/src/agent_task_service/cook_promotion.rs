@@ -1180,7 +1180,8 @@ pub(crate) fn cook_finalization_options(
                 None,
             )
         })?;
-    let mut review_dossier = cook_review_dossier(options, promotion, successful_run_id)?;
+    let (mut review_dossier, composed_ai_model_disclosure) =
+        cook_review_dossier(options, promotion, successful_run_id)?;
     review_dossier.overrides = overrides;
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
@@ -1218,6 +1219,7 @@ pub(crate) fn cook_finalization_options(
         },
         ai_used_for: options.ai_used_for.clone(),
         review_dossier,
+        composed_ai_model_disclosure,
         review_profile: resolve_review_profile(&path)?,
         manual_finalization: false,
         expected_candidate_sha: None,
@@ -1727,6 +1729,7 @@ fn manual_finalization_options(
         evidence: report.evidence,
         ai_used_for: report.review_dossier.ai_assistance.used_for.clone(),
         review_dossier: report.review_dossier,
+        composed_ai_model_disclosure: false,
         review_profile: resolve_review_profile(&path)?,
         manual_finalization: true,
         expected_candidate_sha,
@@ -1801,7 +1804,7 @@ fn cook_review_dossier(
     options: &AgentTaskCookServiceOptions,
     promotion: &AgentTaskPromotionReport,
     successful_run_id: &str,
-) -> Result<AgentTaskReviewDossier> {
+) -> Result<(AgentTaskReviewDossier, bool)> {
     // A form-only run owns reviewer metadata but carries forward the durable
     // gate proof while its authenticated source owns candidate scope.
     let terminal_promotion = promotion;
@@ -1881,7 +1884,7 @@ fn cook_review_dossier(
         successful_run_id,
         &terminal_form,
     )?;
-    Ok(AgentTaskReviewDossier {
+    Ok((AgentTaskReviewDossier {
         schema: "homeboy/agent-task-review-dossier/v1".to_string(),
         summary: lineage.summary,
         what_changed: lineage.what_changed,
@@ -1928,7 +1931,7 @@ fn cook_review_dossier(
         },
         source_relationships: Vec::new(),
         overrides: Vec::new(),
-    })
+    }, lineage.composed_model_disclosure))
 }
 
 struct CookAiLineage {
@@ -1938,6 +1941,7 @@ struct CookAiLineage {
     tool: String,
     model: String,
     used_for: String,
+    composed_model_disclosure: bool,
 }
 
 struct CookAttemptExecution {
@@ -1948,8 +1952,19 @@ struct CookAttemptExecution {
     review_form_only: bool,
 }
 
+struct CookContribution {
+    run_id: String,
+    execution: CookAttemptExecution,
+}
+
+struct CookContributionSource {
+    run_id: String,
+    task_id: String,
+    patch_sha256: String,
+}
+
 fn selected_outcome_for_attempt(run_id: &str) -> Result<crate::agent_task::AgentTaskOutcome> {
-    let aggregate = agent_task_lifecycle::read_aggregate(run_id)?;
+    let aggregate = agent_task_lifecycle::read_attempt_aggregate(run_id)?;
     aggregate
         .selected_outcome()
         .cloned()
@@ -2025,6 +2040,216 @@ fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
     })
 }
 
+fn cook_contribution_source(run_id: &str) -> Result<Option<CookContributionSource>> {
+    let plan = agent_task_lifecycle::load_plan(run_id)?;
+    let outcome = selected_outcome_for_attempt(run_id)?;
+    let task = plan
+        .tasks
+        .iter()
+        .find(|task| task.task_id == outcome.task_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "Cook lineage outcome does not match a task in its durable execution plan",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    let provenance = &task.inputs["cook_loop"]["artifact_provenance"];
+    if provenance.is_null() {
+        return Ok(None);
+    }
+    let source = CookContributionSource {
+        run_id: provenance["source_run_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        task_id: provenance["source_task_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        patch_sha256: provenance["source_patch_artifact_sha256"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    };
+    if source.run_id.is_empty() || source.task_id.is_empty() || source.patch_sha256.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "cook_loop.artifact_provenance",
+            "Cook contribution source binding is incomplete",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    Ok(Some(source))
+}
+
+fn exact_promotion_for_contribution(run_id: &str) -> Result<AgentTaskPromotionReport> {
+    let record = agent_task_lifecycle::exact_record(run_id)?;
+    let value = record.metadata.get("latest_promotion").ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "latest_promotion",
+            "Cook contribution source has no persisted promotion",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let promotion: AgentTaskPromotionReport =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            Error::validation_invalid_argument(
+                "latest_promotion",
+                format!("persisted Cook contribution promotion is invalid: {error}"),
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    if promotion.source.run_id.as_deref() != Some(run_id) {
+        return Err(Error::validation_invalid_argument(
+            "latest_promotion.source.run_id",
+            "persisted Cook contribution promotion belongs to another attempt",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    Ok(promotion)
+}
+
+fn substantive_contribution_chain(
+    attempts: &[super::AgentTaskCookRecipeAttempt],
+    terminal_run_id: &str,
+) -> Result<Vec<CookContribution>> {
+    let positions = attempts
+        .iter()
+        .enumerate()
+        .map(|(index, attempt)| (attempt.run_id.as_str(), index))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut contributions = Vec::new();
+    let mut current_run_id = terminal_run_id.to_string();
+    let mut visited = std::collections::BTreeSet::new();
+    loop {
+        if !visited.insert(current_run_id.clone()) {
+            return Err(Error::validation_invalid_argument(
+                "cook_loop.artifact_provenance",
+                "Cook contribution lineage contains a cycle",
+                Some(current_run_id),
+                None,
+            ));
+        }
+        let current_position =
+            positions
+                .get(current_run_id.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "cook_recipe.attempts",
+                        "Cook contribution is absent from the persisted recipe",
+                        Some(current_run_id.clone()),
+                        None,
+                    )
+                })?;
+        let execution = cook_attempt_execution(&current_run_id)?;
+        if execution.review_form_only {
+            return Err(Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "metadata-only review-form attempts cannot contribute implementation patches",
+                Some(current_run_id),
+                None,
+            ));
+        }
+        let source = cook_contribution_source(&current_run_id)?;
+        contributions.push(CookContribution {
+            run_id: current_run_id.clone(),
+            execution,
+        });
+        let Some(source) = source else {
+            break;
+        };
+        let source_position = positions
+            .get(source.run_id.as_str())
+            .copied()
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "cook_loop.artifact_provenance.source_run_id",
+                    "Cook contribution source is absent from the persisted recipe",
+                    Some(source.run_id.clone()),
+                    None,
+                )
+            })?;
+        if source_position >= current_position {
+            return Err(Error::validation_invalid_argument(
+                "cook_loop.artifact_provenance.source_run_id",
+                "Cook contribution source must precede its consumer",
+                Some(source.run_id),
+                None,
+            ));
+        }
+        let source_promotion = exact_promotion_for_contribution(&source.run_id)?;
+        if !source_promotion.status.patch_promoted()
+            || source_promotion.source.task_id.as_str() != source.task_id.as_str()
+            || source_promotion.patch_artifact.sha256.as_deref()
+                != Some(source.patch_sha256.as_str())
+        {
+            return Err(Error::validation_invalid_argument(
+                "cook_loop.artifact_provenance",
+                "Cook contribution source binding does not match its persisted promotion",
+                Some(source.run_id),
+                None,
+            ));
+        }
+        current_run_id = source.run_id;
+    }
+    contributions.reverse();
+    Ok(contributions)
+}
+
+fn substantive_lineage(
+    contributions: Vec<CookContribution>,
+    terminal_form: &crate::agent_task_review_dossier::AiFilledReviewForm,
+) -> Result<CookAiLineage> {
+    let Some(terminal) = contributions.last() else {
+        return Err(Error::internal_unexpected(
+            "substantive Cook lineage has no authenticated contribution",
+        ));
+    };
+    if contributions.len() == 1 {
+        let model = required_execution_model(&terminal.execution, &terminal.run_id)?;
+        return Ok(CookAiLineage {
+            summary: terminal_form.summary.clone(),
+            what_changed: terminal_form.what_changed.clone(),
+            compatibility: terminal_form.compatibility.clone(),
+            tool: crate::agent_task_review_dossier::homeboy_tool_disclosure(
+                &terminal.execution.tool,
+            ),
+            model,
+            used_for: terminal_form.used_for.clone(),
+            composed_model_disclosure: false,
+        });
+    }
+    let mut tools = Vec::new();
+    let mut models = Vec::new();
+    let mut roles = Vec::new();
+    for (index, contribution) in contributions.iter().enumerate() {
+        let role = format!("Implementation {}", index + 1);
+        let tool =
+            crate::agent_task_review_dossier::homeboy_tool_disclosure(&contribution.execution.tool);
+        let model = required_execution_model(&contribution.execution, &contribution.run_id)?;
+        tools.push(format!("{role}: {tool}"));
+        models.push(format!("{role}: {model}"));
+        roles.push(format!(
+            "{role}: {tool} authored an authenticated contribution retained in the delivered candidate."
+        ));
+    }
+    Ok(CookAiLineage {
+        summary: terminal_form.summary.clone(),
+        what_changed: terminal_form.what_changed.clone(),
+        compatibility: terminal_form.compatibility.clone(),
+        tool: tools.join("; "),
+        model: models.join("; "),
+        used_for: roles.join(" "),
+        composed_model_disclosure: true,
+    })
+}
+
 fn required_execution_model(execution: &CookAttemptExecution, run_id: &str) -> Result<String> {
     execution.model.clone().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -2057,30 +2282,14 @@ fn cook_ai_lineage(
         ));
     };
     attempts.truncate(terminal_index + 1);
-    // Preserve the byte-for-byte single-attempt output. Multi-attempt form-only
-    // recovery instead makes each authenticated role visible to reviewers.
-    if terminal_index == 0 {
-        let execution = cook_attempt_execution(successful_run_id)?;
-        let model = required_execution_model(&execution, successful_run_id)?;
-        return Ok(CookAiLineage {
-            summary: terminal_form.summary.clone(),
-            what_changed: terminal_form.what_changed.clone(),
-            compatibility: terminal_form.compatibility.clone(),
-            tool: crate::agent_task_review_dossier::homeboy_tool_disclosure(&execution.tool),
-            model,
-            used_for: terminal_form.used_for.clone(),
-        });
-    }
     let terminal = cook_attempt_execution(successful_run_id)?;
-    let terminal_model = required_execution_model(&terminal, successful_run_id)?;
     if !terminal.review_form_only {
-        return Err(Error::validation_invalid_argument(
-            "cook_recipe.attempts",
-            "multi-attempt Cook finalization only composes role disclosures for a metadata-only review-form follow-up",
-            Some(successful_run_id.to_string()),
-            None,
-        ));
+        return substantive_lineage(
+            substantive_contribution_chain(&attempts, successful_run_id)?,
+            terminal_form,
+        );
     }
+    let terminal_model = required_execution_model(&terminal, successful_run_id)?;
     let source_run_id = promotion
         .provenance
         .pointer("/cook_follow_up/source_run_id")
@@ -2166,6 +2375,7 @@ fn cook_ai_lineage(
         tool,
         model,
         used_for,
+        composed_model_disclosure: true,
     })
 }
 

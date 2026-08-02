@@ -2136,6 +2136,7 @@ fn options() -> AgentTaskPrFinalizationOptions {
             source_relationships: Vec::new(),
             overrides: Vec::new(),
         },
+        composed_ai_model_disclosure: false,
         review_profile: crate::agent_task_review_dossier::default_profile(),
         manual_finalization: true,
         expected_candidate_sha: None,

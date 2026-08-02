@@ -110,7 +110,9 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
                 None,
             ));
         }
-        if eligibility == DurablePublicationEligibility::ProviderRun && !review_form_only_follow_up
+        if eligibility == DurablePublicationEligibility::ProviderRun
+            && !review_form_only_follow_up
+            && !options.composed_ai_model_disclosure
         {
             options.review_dossier.ai_assistance.model = durable_model(&lifecycle)?;
         }
