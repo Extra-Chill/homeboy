@@ -148,16 +148,11 @@ pub fn run(
         request.service_id.as_deref(),
         request.preview_public_url.as_deref(),
     )?;
-    let artifacts_dir = request
-        .artifacts_dir_override
-        .clone()
-        .or_else(|| config.command.artifacts_dir.clone())
-        .unwrap_or_else(|| {
-            homeboy_core::artifacts::root()
-                .unwrap_or_else(|_| std::env::temp_dir().join("homeboy-artifacts"))
-                .join("preview-consumer")
-                .join(safe_artifact_slug(&config.id))
-        });
+    let artifacts_dir = resolve_artifacts_dir(
+        request.artifacts_dir_override.clone(),
+        config.command.artifacts_dir.clone(),
+        &config.id,
+    )?;
     std::fs::create_dir_all(&artifacts_dir).map_err(|err| {
         homeboy_core::Error::internal_io(
             err.to_string(),
@@ -462,6 +457,30 @@ fn parse_prefixed_line(output: &str, prefix: &str) -> Option<String> {
             .filter(|value| !value.is_empty())
             .map(str::to_string)
     })
+}
+
+/// Resolve where a preview consumer writes its artifacts.
+///
+/// An explicit override wins, then the configured directory, then the artifact
+/// root. This deliberately has no fallback beyond that. It used to end in
+/// `homeboy_core::artifacts::root().unwrap_or_else(|_| std::env::temp_dir()
+/// .join("homeboy-artifacts"))`, which discarded the reason a configured
+/// artifact root could not be resolved and wrote the consumer's bytes to a
+/// path with no owner record, no pin, and no cleanup category -- invisible to
+/// `cleanup --include runtime-tmp` and to every other reaper, so nothing ever
+/// removed them (#11128). If the artifact root cannot be resolved, that is the
+/// error to report, not a directory to invent.
+pub(crate) fn resolve_artifacts_dir(
+    override_dir: Option<PathBuf>,
+    configured_dir: Option<PathBuf>,
+    consumer_id: &str,
+) -> homeboy_core::Result<PathBuf> {
+    if let Some(directory) = override_dir.or(configured_dir) {
+        return Ok(directory);
+    }
+    Ok(homeboy_core::artifacts::root()?
+        .join("preview-consumer")
+        .join(safe_artifact_slug(consumer_id)))
 }
 
 /// Build a filesystem-safe artifact slug from a consumer id.

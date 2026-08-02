@@ -20,6 +20,101 @@
 use super::spec::{DiscoverSpec, RigSpec};
 use homeboy_core::error::Result;
 
+/// Size at which a supervised service log is rotated.
+///
+/// Rig service logs were an unbounded append: `OpenOptions::create(true)
+/// .append(true)` with no rotation, no TTL, and no cleanup category, so a
+/// chatty service filled the disk and nothing reclaimed it (#11128). The other
+/// runtime byte producers carry a size and a count bound
+/// (`runtime_run_max_bytes` / `runtime_run_max_count`); this is the same shape.
+pub const RIG_LOG_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Rotated generations retained beside the live log.
+///
+/// The bound that matters is the product: at most
+/// `RIG_LOG_MAX_BYTES * (RIG_LOG_MAX_GENERATIONS + 1)` per service, plus
+/// whatever the live process appends before its next start.
+pub const RIG_LOG_MAX_GENERATIONS: usize = 3;
+
+/// Size-bounded rotation for supervised service logs.
+///
+/// Unix-only for the same reason the rest of the supervisor is: on other
+/// platforms `start` refuses outright, so there is no log to bound.
+#[cfg(unix)]
+pub(crate) mod log_rotation {
+    use std::path::{Path, PathBuf};
+
+    /// The rotated path for `generation` of `path` (`service.log` -> `service.log.1`).
+    pub(crate) fn rotated_log_path(path: &Path, generation: usize) -> PathBuf {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(format!(".{generation}"));
+        PathBuf::from(name)
+    }
+
+    /// The rename chain for one rotation, oldest first.
+    ///
+    /// Ordered oldest-first because each rename overwrites its destination: doing
+    /// it newest-first would clobber generation 2 with generation 1 and lose the
+    /// older bytes.
+    pub(crate) fn rotation_renames(path: &Path, generations: usize) -> Vec<(PathBuf, PathBuf)> {
+        let mut renames: Vec<(PathBuf, PathBuf)> = (1..generations)
+            .rev()
+            .map(|generation| {
+                (
+                    rotated_log_path(path, generation),
+                    rotated_log_path(path, generation + 1),
+                )
+            })
+            .collect();
+        if generations > 0 {
+            renames.push((path.to_path_buf(), rotated_log_path(path, 1)));
+        }
+        renames
+    }
+
+    /// Rotate `path` when it has reached `max_bytes`, returning whether it did.
+    ///
+    /// Called from `start`, which is the only moment the supervisor holds the log
+    /// before handing its descriptor to a child. A running service keeps writing
+    /// through the descriptor it already inherited, so its current log is not
+    /// truncated underneath it; the bound applies across restarts. Rotating a live
+    /// log would need the supervisor to own the pipe rather than pass the file
+    /// through, which is a larger change than the unbounded growth warrants.
+    ///
+    /// The only bytes removed are the generation that falls off the end of a
+    /// fixed-length chain of files this module exclusively names and writes.
+    pub(crate) fn rotate_log_if_oversized(
+        path: &Path,
+        max_bytes: u64,
+        generations: usize,
+    ) -> std::io::Result<bool> {
+        if generations == 0 || max_bytes == 0 {
+            return Ok(false);
+        }
+        match std::fs::metadata(path) {
+            Ok(metadata) if metadata.len() >= max_bytes => {}
+            // A log that does not exist yet, or is not a regular file, is not this
+            // function's to rotate. Nothing here should invent a log.
+            _ => return Ok(false),
+        }
+
+        let expired = rotated_log_path(path, generations);
+        match std::fs::remove_file(&expired) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        for (from, to) in rotation_renames(path, generations) {
+            match std::fs::rename(&from, &to) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(true)
+    }
+}
+
 /// Live status of a service as seen at probe time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceStatus {
@@ -356,6 +451,21 @@ mod platform {
     }
 
     fn open_log(path: &PathBuf) -> Result<File> {
+        // Bound the log before the child inherits its descriptor. A rotation
+        // failure is not a reason to refuse to start a service, but it is a
+        // reason to say so: silence here is how the growth went unnoticed.
+        match super::log_rotation::rotate_log_if_oversized(
+            path,
+            super::RIG_LOG_MAX_BYTES,
+            super::RIG_LOG_MAX_GENERATIONS,
+        ) {
+            Ok(_) => {}
+            Err(error) => eprintln!(
+                "Warning: could not rotate rig service log {}: {error}. \
+                 The log keeps growing without a bound.",
+                path.display()
+            ),
+        }
         OpenOptions::new()
             .create(true)
             .append(true)
