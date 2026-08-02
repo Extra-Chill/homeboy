@@ -306,6 +306,49 @@ mod tests {
         };
         assert!(error.to_string().contains("cannot be used with"));
     }
+
+    #[test]
+    fn cook_accepts_issue_backed_destination_derivation_and_explicit_override() {
+        let derived = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the issue",
+            "--repo",
+            "homeboy",
+            "--task-url",
+            "https://github.com/Extra-Chill/homeboy/issues/11225",
+            "--no-finalize",
+        ])
+        .expect("issue-backed Cook parses without an explicit destination");
+        let crate::cli_surface::Commands::AgentTask(agent_task) = derived.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Cook(derived) = agent_task.command else {
+            panic!("Cook command");
+        };
+        assert_eq!(derived.to_worktree, None);
+
+        let explicit = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the issue",
+            "--to-worktree",
+            "homeboy@existing",
+            "--no-finalize",
+        ])
+        .expect("explicit Cook destination parses");
+        let crate::cli_surface::Commands::AgentTask(agent_task) = explicit.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Cook(explicit) = agent_task.command else {
+            panic!("Cook command");
+        };
+        assert_eq!(explicit.to_worktree.as_deref(), Some("homeboy@existing"));
+    }
 }
 
 #[derive(Args, Debug, Clone)]
@@ -326,11 +369,10 @@ pub struct AgentTaskCookArgs {
     #[arg(long, value_name = "TEXT")]
     pub goal: Option<String>,
     /// Workspace handle the cook edits, verifies, and finalizes into (e.g.
-    /// `repo@branch-slug`). Existing destinations are reused. A missing managed
-    /// destination is created through its configured provider when --repo,
-    /// --base, --head, and --task-url declare explicit intent.
+    /// `repo@branch-slug`). When omitted, --repo plus --task-url derives an
+    /// issue-owned destination through the configured workspace provider.
     #[arg(long, value_name = "HANDLE")]
-    pub to_worktree: String,
+    pub to_worktree: Option<String>,
     #[arg(
         long,
         value_name = "COMMAND",

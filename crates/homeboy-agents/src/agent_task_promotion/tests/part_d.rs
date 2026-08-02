@@ -199,6 +199,7 @@ fn lookup_only_configured_provider_cannot_construct_a_promotion_adapter() {
                 dirty: "$.safety.dirty".to_string(),
                 unpushed: "$.safety.unpushed".to_string(),
                 primary: "$.safety.primary".to_string(),
+                task_url: None,
             }),
         },
     );

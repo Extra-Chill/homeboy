@@ -2388,6 +2388,7 @@ fn cook_to_worktree_provider_workspace_survives_failed_attempt_and_lab_retry() {
                         dirty: "$.safety.dirty".to_string(),
                         unpushed: "$.safety.unpushed".to_string(),
                         primary: "$.safety.primary".to_string(),
+                        task_url: None,
                     },
                 ),
             },

@@ -41,6 +41,63 @@ fn cook_args_from_cli(args: Vec<String>) -> AgentTaskCookArgs {
 }
 
 #[test]
+fn cook_derives_issue_destination_and_preserves_explicit_override() {
+    with_isolated_home(|_| {
+        let derived = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the issue".to_string(),
+            "--repo".to_string(),
+            "homeboy".to_string(),
+            "--task-url".to_string(),
+            "https://github.com/Extra-Chill/homeboy/issues/11225".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("derive Cook destination");
+        assert_eq!(
+            derived.to_worktree.as_deref(),
+            Some("homeboy@fix-issue-11225-homeboy")
+        );
+        assert_eq!(derived.head.as_deref(), Some("fix/issue-11225-homeboy"));
+
+        let suffixed = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the issue".to_string(),
+            "--repo".to_string(),
+            "homeboy".to_string(),
+            "--task-url".to_string(),
+            "https://github.com/Extra-Chill/homeboy/issues/11225?source=cook#details".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("derive Cook destination from suffixed issue URL");
+        assert_eq!(suffixed.to_worktree, derived.to_worktree);
+        assert_eq!(suffixed.head, derived.head);
+
+        let explicit = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the issue".to_string(),
+            "--to-worktree".to_string(),
+            "homeboy@caller-selected".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("preserve explicit destination");
+        assert_eq!(
+            explicit.to_worktree.as_deref(),
+            Some("homeboy@caller-selected")
+        );
+        assert_eq!(explicit.head, None);
+    });
+}
+
+#[test]
 fn cook_rejects_queue_only_before_creating_a_durable_recipe() {
     with_isolated_home(|_| {
         let cli = Cli::parse_from([
@@ -314,6 +371,7 @@ fn invalid_cook_inputs_do_not_mutate_a_configured_provider_destination() {
                         dirty: "$.safety.dirty".to_string(),
                         unpushed: "$.safety.unpushed".to_string(),
                         primary: "$.safety.primary".to_string(),
+                        task_url: None,
                     },
                 ),
             },
@@ -417,6 +475,7 @@ fn cook_resolves_existing_provider_destination_without_creation_metadata() {
                         dirty: "$.safety.dirty".to_string(),
                         unpushed: "$.safety.unpushed".to_string(),
                         primary: "$.safety.primary".to_string(),
+                        task_url: None,
                     },
                 ),
             },
@@ -488,6 +547,7 @@ fn cook_does_not_collapse_provider_lookup_failures_into_missing_destination_meta
                         dirty: "$.safety.dirty".to_string(),
                         unpushed: "$.safety.unpushed".to_string(),
                         primary: "$.safety.primary".to_string(),
+                        task_url: None,
                     },
                 ),
             },
