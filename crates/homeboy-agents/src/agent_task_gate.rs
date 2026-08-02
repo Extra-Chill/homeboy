@@ -1129,6 +1129,20 @@ fn selected_gate_environment(
     policy: &AgentTaskGateEnvironmentPolicy,
     runtime_tmpdir: Option<&Path>,
 ) -> Result<SelectedGateEnvironment> {
+    let canonical_runtime_tmpdir = runtime_tmpdir
+        .map(|path| {
+            fs::canonicalize(path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!(
+                        "canonicalize isolated gate temp directory {}",
+                        path.display()
+                    )),
+                )
+            })
+        })
+        .transpose()?;
+    let runtime_tmpdir = canonical_runtime_tmpdir.as_deref();
     let mut report = AgentTaskGateEnvironment {
         mode: policy.mode,
         ..AgentTaskGateEnvironment::default()
@@ -1704,7 +1718,12 @@ mod tests {
         )
         .expect("gate report");
 
-        let expected = scratch.path().display().to_string();
+        let expected = scratch
+            .path()
+            .canonicalize()
+            .expect("canonical scratch")
+            .display()
+            .to_string();
         assert_eq!(report.stdout, format!("{expected}:{expected}:{expected}"));
     }
 
@@ -2081,6 +2100,10 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let runtime_tmpdir = tempfile::tempdir().expect("runtime tmpdir");
         let bin = tempfile::tempdir().expect("bin");
+        let canonical_runtime_tmpdir = runtime_tmpdir
+            .path()
+            .canonicalize()
+            .expect("canonical runtime tmpdir");
 
         // Fails unless every temp-dir variable points at the invocation temp
         // dir. An unset variable compares as empty and exits non-zero too.
@@ -2089,7 +2112,7 @@ mod tests {
             &tool,
             format!(
                 "#!/bin/sh\n[ \"$TMPDIR\" = '{dir}' ] || exit 3\n[ \"$TEMP\" = '{dir}' ] || exit 4\n[ \"$TMP\" = '{dir}' ] || exit 5\nexit 0\n",
-                dir = runtime_tmpdir.path().display()
+                dir = canonical_runtime_tmpdir.display()
             ),
         )
         .expect("tool");
@@ -2118,13 +2141,51 @@ mod tests {
         )
         .expect("gate environment");
 
-        let expected = runtime_tmpdir.path().display().to_string();
+        let expected = runtime_tmpdir
+            .path()
+            .canonicalize()
+            .expect("canonical runtime tmpdir")
+            .display()
+            .to_string();
         for name in TMPDIR_ENV_VARS {
             assert_eq!(
                 selected.values.get(*name),
                 Some(&expected),
                 "{name} must resolve to the invocation temp dir"
             );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gate_environment_resolves_symlinked_invocation_tmpdir() {
+        let runtime_tmpdir = tempfile::tempdir().expect("runtime tmpdir");
+        let alias_root = tempfile::tempdir().expect("alias root");
+        let alias = alias_root.path().join("runtime-tmp-alias");
+        std::os::unix::fs::symlink(runtime_tmpdir.path(), &alias).expect("runtime temp alias");
+
+        let selected =
+            selected_gate_environment(&AgentTaskGateEnvironmentPolicy::default(), Some(&alias))
+                .expect("gate environment");
+        let expected_root = runtime_tmpdir
+            .path()
+            .canonicalize()
+            .expect("canonical temp root");
+
+        for name in TMPDIR_ENV_VARS {
+            assert_eq!(
+                selected.values.get(*name).map(PathBuf::from),
+                Some(expected_root.clone()),
+                "{name} must resolve past the invocation temp alias"
+            );
+        }
+        for variable in &selected.report.sanitized {
+            let path = PathBuf::from(&variable.value);
+            assert!(path.starts_with(&expected_root));
+            assert!(!fs::symlink_metadata(path)
+                .expect("isolated path metadata")
+                .file_type()
+                .is_symlink());
         }
     }
 }
