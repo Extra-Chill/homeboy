@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.327.6] - 2026-08-02
+
+### Fixed
+- make structured-sidecar and manifest declarations load-bearing
+- artifact hygiene — enforce the FK invariant, cap inlined artifacts, widen unattended retention, bound rig logs
+- gate hot local fallback
+- derive issue-owned worktrees
+
 ## [0.327.5] - 2026-08-02
 
 ### Fixed
