@@ -3230,6 +3230,7 @@ fi
             secret_env: vec!["AI_PROVIDER_OPENAI_CODEX_TOKEN".to_string()],
             provider_config: Some(r#"{"runtime":"opencode"}"#.to_string()),
             gates: super::super::args::VerifyGateArgs {
+                gate_package_artifacts: Vec::new(),
                 verify: vec!["cargo test --lib".to_string()],
                 private_verify: Vec::new(),
                 private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
