@@ -44,7 +44,11 @@ pub(super) fn status(
         // Count the draining generations before optionally dropping the expanded
         // ledger, so the summary's count is accurate whether or not the caller
         // asked for the full list.
-        let admission_summary = Some(report.admission_summary(generation_inventory.len()));
+        let admission_summary =
+            Some(report.admission_summary_with_generations(
+                &generation_inventory,
+                generation_inventory.len(),
+            ));
         // By default the expanded per-generation ledger is omitted — the summary
         // already carries the count, and on a long-lived runner the full
         // inventory runs to thousands of lines that make old ownership look like
@@ -185,7 +189,10 @@ pub(super) fn reconcile(id: &str) -> CmdResult<RunnerOutput> {
             command: "runner.reconcile".to_string(),
             id: Some(id.to_string()),
             extra: RunnerExtra {
-                admission_summary: Some(report.admission_summary(generation_inventory.len())),
+                admission_summary: Some(report.admission_summary_with_generations(
+                    &generation_inventory,
+                    generation_inventory.len(),
+                )),
                 connection: Some(RunnerConnectionOutput::Status(report.clone())),
                 generation_inventory,
                 operator_hints: runner_status_operator_hints(&report),

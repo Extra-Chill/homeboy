@@ -410,6 +410,8 @@ fn connect_with_orphan_adoption_and_live_lease(
     let mut previous_session =
         super::generation_store::admission_session(runner_id, previous_session.as_ref())?
             .or(previous_session);
+    let admission_fence =
+        super::generation_store::admission_fence(runner_id, previous_session.as_ref())?;
     let mut pending_replacement = super::generation_store::pending_replacement(runner_id)?;
     let mut replacement_operation_id = None;
     if let Some(pending) = pending_replacement.as_ref() {
@@ -766,6 +768,7 @@ fn connect_with_orphan_adoption_and_live_lease(
             confirmed_no_pid_job_ids,
             live_lease_expectation,
             Some(&replacement_operation_id),
+            admission_fence.as_ref(),
         )
         .map(|daemon| daemon),
     };

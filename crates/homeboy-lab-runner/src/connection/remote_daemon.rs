@@ -612,6 +612,7 @@ pub(super) fn ensure_remote_daemon(
     confirmed_no_pid_job_ids: &[uuid::Uuid],
     live_lease_expectation: Option<(&str, u32)>,
     replacement_operation_id: Option<&str>,
+    admission_fence: Option<&crate::generation_store::AdmissionFence>,
 ) -> std::result::Result<RemoteDaemon, String> {
     let mut status = remote_daemon_status(client, homeboy)?;
     probe_remote_daemon_endpoint(client, &mut status);
@@ -636,13 +637,15 @@ pub(super) fn ensure_remote_daemon(
     // carries an executable repair plan, and a plan naming a command that does
     // not exist is worse than no plan at all (#10302).
     let inspected_freshness = remote_daemon_recovery_freshness_from_status(runner_id, &status);
-    match remote_daemon_connect_action_for_runner(
+    let action = remote_daemon_connect_action_for_runner(
         previous_session,
         &status,
         configured_identity,
         runner_id,
         live_lease_expectation,
-    )? {
+    )?;
+    let action = fence_generation_admission(action, admission_fence, runner_id)?;
+    match action {
         RemoteDaemonConnectAction::Reattach => {
             let mut daemon = status.daemon.ok_or_else(|| {
                 "remote daemon reattach selected without a daemon lease".to_string()
@@ -679,6 +682,23 @@ pub(super) fn ensure_remote_daemon(
             );
         }
     }
+}
+
+pub(super) fn fence_generation_admission(
+    action: RemoteDaemonConnectAction,
+    fence: Option<&crate::generation_store::AdmissionFence>,
+    runner_id: &str,
+) -> std::result::Result<RemoteDaemonConnectAction, String> {
+    let Some(fence) = fence else {
+        return Ok(action);
+    };
+    if action == RemoteDaemonConnectAction::Reattach {
+        return Ok(action);
+    }
+    Err(format!(
+        "runner `{runner_id}` generation `{}` has {} unresolved active job(s); refusing to create or replace an admission daemon. Reattach the live generation when available, or run `homeboy runner reconcile {runner_id}` after terminal job evidence is available",
+        fence.generation, fence.active_job_count,
+    ))
 }
 
 fn journal_ensure_running_replay(

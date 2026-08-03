@@ -11,6 +11,12 @@ use homeboy_core::server::SshClient;
 use crate::rolling_generation::RollingResultOwnerRetirement;
 use crate::{RollingGenerations, RunnerDaemonGenerationStatus, RunnerSession};
 
+#[derive(Debug, Clone)]
+pub(crate) struct AdmissionFence {
+    pub generation: String,
+    pub active_job_count: usize,
+}
+
 /// The durable generation registry is scoped to one runner. Keep this wrapper
 /// at the state-store boundary so rolling ownership remains reusable in memory.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -382,6 +388,25 @@ pub(crate) fn admission_session(
             .generations
             .get(&generations.admission_owner)
             .map(|generation| generation.endpoint.clone())
+    }))
+}
+
+/// A nonzero persisted count remains an admission fence until that generation
+/// authoritatively reports terminal work. A reconnect may restore a tunnel to
+/// a live daemon, but cannot create or replace an admission generation past it.
+pub(crate) fn admission_fence(
+    runner_id: &str,
+    legacy: Option<&RunnerSession>,
+) -> Result<Option<AdmissionFence>> {
+    Ok(read(runner_id, legacy)?.and_then(|generations| {
+        generations
+            .generations
+            .iter()
+            .find(|(_, entry)| entry.active_jobs > 0)
+            .map(|(generation, entry)| AdmissionFence {
+                generation: generation.clone(),
+                active_job_count: entry.active_jobs,
+            })
     }))
 }
 
