@@ -75,6 +75,16 @@ function concretePath(candidate) {
 	}
 }
 
+function resolvedOpenCodeAgent(opencode, cwd, configContent) {
+	const result = spawnSync(opencode, ['debug', 'agent', 'build', '--pure'], {
+		cwd,
+		encoding: 'utf8',
+		env: { ...process.env, OPENCODE_CONFIG_CONTENT: configContent },
+	});
+	assert.equal(result.status, 0, result.stderr);
+	return JSON.parse(result.stdout);
+}
+
 (async () => {
 const provider = providerContract();
 const policyToolSets = {
@@ -459,6 +469,17 @@ process.exit(0);
 			externalDirectoryAction(generatedConfig, 'build', path.join(root, 'controller-scratch', 'unrelated-attempt', '*')),
 			'deny'
 		);
+		if (permissionWorkspace.label === 'controller-scratch') {
+			const opencode = spawnSync('opencode', ['--version'], { encoding: 'utf8' });
+			if (opencode.status === 0) {
+				const resolvedAgent = resolvedOpenCodeAgent(opencode.spawnfile || 'opencode', concreteWorkspace, JSON.stringify(generatedConfig));
+				const externalDirectoryRules = resolvedAgent.permission.filter((rule) => rule.permission === 'external_directory');
+				// OpenCode asks for this parent-directory glob, not the calling tool's glob.
+				const exactAttemptRequest = path.join(concreteAttemptRoot, '*');
+				assert.equal(externalDirectoryRules.findLast((rule) => rule.pattern === exactAttemptRequest)?.action, 'allow');
+				assert.equal(externalDirectoryRules.findLast((rule) => rule.pattern === path.join(root, 'controller-scratch', 'unrelated-attempt', '*'))?.action || 'deny', 'deny');
+			}
+		}
 	}
 
 	const scratchAttempts = [
@@ -796,6 +817,7 @@ process.exit(0);
 
 	const deniedCliPath = path.join(root, 'mock-opencode-policy-denied.cjs');
 	fs.writeFileSync(deniedCliPath, `#!/usr/bin/env node
+process.stderr.write('permission requested: external_directory (${path.join(deniedWorkspace, '*')}); auto-rejecting\\n');
 process.stdout.write(JSON.stringify({
   type: 'message',
   timestamp: '2026-07-03T15:12:00.000Z',
@@ -828,13 +850,16 @@ process.exit(1);
 	assert.equal(deniedResult.failure_category, 'task.policy_denied');
 	assert.equal(deniedResult.retryable, false);
 	assert.equal(deniedResult.metadata.missing_declared_artifacts, undefined);
-	assert.deepEqual(deniedResult.artifacts.map((artifact) => artifact.name).sort(), ['agent_result', 'opencode-runtime-stdout', 'patch', 'progress_events', 'transcript']);
+	assert.deepEqual(deniedResult.artifacts.map((artifact) => artifact.name).sort(), ['agent_result', 'opencode-runtime-stderr', 'opencode-runtime-stdout', 'patch', 'progress_events', 'transcript']);
 	assert.deepEqual(deniedResult.metadata.denied_tool_call, {
 		tool: 'bash',
 		command: 'cd /tmp && git clone https://example.invalid/private.git',
 		timestamp: '2026-07-03T15:12:00.000Z',
+		permission: 'external_directory',
+		path: path.join(deniedWorkspace, '*'),
 	});
 	assert.equal(deniedResult.diagnostics.some((diagnostic) => diagnostic.class === 'opencode.policy_denied'), true);
+	assert.match(deniedResult.diagnostics.find((diagnostic) => diagnostic.class === 'opencode.policy_denied').message, /external_directory/);
 	assert.match(fs.readFileSync(deniedResult.artifacts.find((artifact) => artifact.name === 'transcript').path, 'utf8'), /rejected permission/);
 	assert.equal(fs.readFileSync(deniedResult.artifacts.find((artifact) => artifact.name === 'patch').path, 'utf8'), '');
 	const deniedAgentResult = JSON.parse(fs.readFileSync(deniedResult.artifacts.find((artifact) => artifact.name === 'agent_result').path, 'utf8'));

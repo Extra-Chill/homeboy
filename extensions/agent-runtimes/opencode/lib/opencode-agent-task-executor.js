@@ -706,7 +706,11 @@ function withPolicyDeniedOutcome(context = {}, terminal = {}) {
 }
 
 function deniedToolCallSummary(denial = {}) {
-	const details = [denial.tool, denial.command].filter(Boolean).join(': ');
+	const details = [
+		denial.tool,
+		denial.permission && denial.path ? `${denial.permission}: ${denial.path}` : denial.permission,
+		denial.command,
+	].filter(Boolean).join(': ');
 	return details ? `OpenCode permission policy denied tool call ${details}.` : 'OpenCode permission policy denied a tool call.';
 }
 
@@ -741,17 +745,23 @@ function openCodeCompletedAfterPolicyDenial(text = '') {
 }
 
 function extractDeniedToolCall(text = '') {
+	const externalDirectory = String(text).match(/permission requested:\s*([\w-]+)\s*\(([^)]+)\)/i);
+	const requestedPermission = externalDirectory ? {
+		permission: externalDirectory[1],
+		path: externalDirectory[2],
+	} : {};
 	const parsed = parseJsonObjectsFromText(text);
 	for (const value of parsed) {
 		const found = findDeniedToolCall(value);
 		if (found) {
-			return found;
+			return { ...found, ...requestedPermission };
 		}
 	}
 	return {
 		tool: firstRegexCapture(text, /"(?:tool|name)"\s*:\s*"([^"]+)"/),
 		command: firstRegexCapture(text, /"command"\s*:\s*"([^"]+)"/),
 		timestamp: firstRegexCapture(text, /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/),
+		...requestedPermission,
 	};
 }
 
@@ -805,6 +815,8 @@ function sanitizeDeniedToolCall(value = {}) {
 		tool: stringValue(value.tool),
 		command: stringValue(value.command),
 		timestamp: stringValue(value.timestamp),
+		permission: stringValue(value.permission),
+		path: stringValue(value.path),
 	}).filter(([, entry]) => entry));
 }
 
