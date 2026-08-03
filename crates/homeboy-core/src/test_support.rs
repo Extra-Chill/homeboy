@@ -372,6 +372,32 @@ fn process_tree_snapshot(_root: u32) -> String {
     "    (process-tree snapshot is only collected on Linux)".to_string()
 }
 
+/// Isolates one test's Homeboy state: config, data, artifact, runtime, and
+/// invocation roots.
+///
+/// # Concurrency contract
+///
+/// This guard repoints `HOME` for the whole process, which is not thread-safe:
+/// `getenv`/`setenv` race, so a reader landing mid-write can observe `HOME` as
+/// *absent* and fail with "HOME environment variable not set on Unix-like
+/// system" on a host where it is plainly set.
+///
+/// `home_lock()` is held for this guard's entire lifetime, but that only
+/// serializes **writers**. Readers never take it — including worker threads a
+/// test spawns inside itself, which is why running the suite with
+/// `--test-threads=1` did not stop the failures: serializing test *functions*
+/// does nothing for threads *within* a test.
+///
+/// The hot resolvers therefore do not read the environment at all. `new()`
+/// registers a process-local override via `paths::set_home_root_override`, and
+/// `paths::homeboy()`, `paths::homeboy_data()`, and the invocation runtime root
+/// read it under a `Mutex` so a concurrent repoint is ordered rather than torn
+/// (#7505, #11266). `set_var("HOME", ..)` is retained alongside it for readers
+/// that still consult `HOME` directly and for subprocesses.
+///
+/// `Drop` clears the override **before** restoring the environment, so no
+/// window exists where the override still names a tempdir it is about to
+/// delete.
 pub struct HomeGuard {
     prior: Option<String>,
     prior_xdg_data_home: Option<String>,
