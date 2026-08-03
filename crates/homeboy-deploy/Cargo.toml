@@ -1,0 +1,33 @@
+[package]
+name = "homeboy-deploy"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Deploy subsystem for homeboy: build components and ship them to targets. Sits below homeboy-release — release depends on deploy, never the reverse. Shared version/changelog/tag-naming primitives live in homeboy-version."
+publish = false
+
+[lib]
+name = "homeboy_deploy"
+path = "src/lib.rs"
+
+[dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
+homeboy-version = { version = "0.1.0", path = "../homeboy-version" }
+homeboy-paths = { version = "0.1.0", path = "../homeboy-paths" }
+homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
+homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }
+homeboy-release-contract = { version = "0.1.0", path = "../contracts/homeboy-release-contract" }
+homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1.11"
+chrono = "0.4"
+semver = "1.0"
+sha2 = "0.10.9"
+glob = "0.3"
+glob-match = "0.2"
+uuid = { version = "1.11", features = ["v4", "v5", "serde"] }
+tempfile = "3.14"
+
+[dev-dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }

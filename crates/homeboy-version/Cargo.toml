@@ -1,0 +1,25 @@
+[package]
+name = "homeboy-version"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Shared version + changelog + release-tag-naming primitives for homeboy. Reading a component's version, parsing/normalizing version patterns, changelog section mechanics, and resolving the release tag namespace are needed by BOTH deploy and release. Keeping them here is what makes homeboy-deploy and homeboy-release an acyclic pair instead of one 61k-line crate."
+publish = false
+
+[lib]
+name = "homeboy_version"
+path = "src/lib.rs"
+
+[dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
+homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }
+homeboy-release-contract = { version = "0.1.0", path = "../contracts/homeboy-release-contract" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1.11"
+chrono = "0.4"
+semver = "1.0"
+
+[dev-dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }
+tempfile = "3.14"
