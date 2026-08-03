@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.10.8] - 2026-08-03
+
+### Fixed
+- drop actions: read, which disabled CI in every consumer
+
 ## [2.10.7] - 2026-08-01
 
 ### Fixed
