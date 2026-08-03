@@ -13,7 +13,8 @@ use super::super::cook_promotion::{
     finalize_or_load_cook_pr_with_backend, moving_base_recovery_for_run,
     moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
     persist_manual_finalization_intent, persist_manual_finalization_receipt,
-    persisted_promotion_for_attempt, record_replacement_gate_proof, recover_cook_pr_with_backend,
+    persisted_promotion_for_attempt, prepare_manual_finalization_identity,
+    record_replacement_gate_proof, recover_cook_pr_with_backend,
     recover_moving_base_cook_candidate, refreshed_moving_base_recovery, selected_candidate_task_id,
     CookReportInput, MovingBaseCookRecovery,
 };
@@ -6860,6 +6861,48 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
             );
         }
         assert!(backend.committed && backend.pushed && backend.created);
+    });
+}
+
+#[test]
+fn manual_finalization_identity_resolves_cook_and_failed_attempt_or_reserves_fresh_id() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-11334";
+        let attempt_id = "cook-11334-attempt-1";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = attempt_id.to_string();
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(attempt_id))
+            .expect("submit attempt");
+        agent_task_lifecycle::record_pre_execution_failure(
+            attempt_id,
+            &options.initial_plan,
+            "test",
+            &homeboy_core::Error::invalid_argument("test", "failed Cook attempt"),
+        )
+        .expect("fail attempt");
+
+        assert_eq!(
+            prepare_manual_finalization_identity(cook_id).expect("Cook ID resolves"),
+            attempt_id
+        );
+        assert_eq!(
+            prepare_manual_finalization_identity(attempt_id).expect("failed attempt resolves"),
+            attempt_id
+        );
+
+        let fresh_id = "manual-11334";
+        assert_eq!(
+            prepare_manual_finalization_identity(fresh_id).expect("fresh ID reserves a record"),
+            fresh_id
+        );
+        let fresh = agent_task_lifecycle::status(fresh_id).expect("reserved finalization record");
+        assert_eq!(fresh.metadata["manual_finalization_identity"], true);
+        assert_eq!(
+            prepare_manual_finalization_identity(fresh_id)
+                .expect("reserved identity remains reusable"),
+            fresh_id
+        );
     });
 }
 

@@ -60,16 +60,11 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     backend: &mut B,
     publish: bool,
 ) -> Result<AgentTaskPrFinalizationReport> {
-    // A run id that resolves to durable state is never a manual escape hatch.
-    // Preserve manual mode only for work that has no Homeboy run record.
-    if options.manual_finalization
-        && crate::agent_task_lifecycle::persisted_status(&options.run_id).is_ok()
-    {
-        options.manual_finalization = false;
-    }
     let mut durable_changed_files = Vec::new();
-    let mut durable_acceptance = None;
-    if !options.manual_finalization {
+    let durable_acceptance;
+    if options.manual_finalization {
+        durable_acceptance = validate_manual_finalization_policy(&options.run_id)?;
+    } else {
         let lifecycle = backend.hydrate_run(&options.run_id)?;
         let gate_proof = backend.hydrate_gate_proof(&options.run_id)?;
         let review_form_only_follow_up =
@@ -208,6 +203,9 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             .then(left.url.cmp(&right.url))
     });
     options.review_dossier.evidence.dedup();
+    options
+        .review_dossier
+        .validate_preflight_fields(&options.review_profile)?;
     options.review_dossier.validate(&options.review_profile)?;
     // A review-form-only adoption follow-up can supply a `used_for` claiming no
     // code was changed, but the finalized candidate here has AI-authored changed
@@ -372,6 +370,27 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         Some(binding),
         durable_acceptance,
     ))
+}
+
+/// Manual finalization deliberately has no promotion lineage. It still cannot
+/// replace an acceptance decision that the durable run's policy requires.
+fn validate_manual_finalization_policy(
+    run_id: &str,
+) -> Result<Option<crate::agent_task_lifecycle::AgentTaskAcceptanceRecord>> {
+    let record = match crate::agent_task_lifecycle::persisted_status(run_id) {
+        Ok(record) => record,
+        Err(error) if error.message.contains("agent-task run record not found") => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if record.metadata.get("acceptance_requirement").is_some() || record.acceptance.is_some() {
+        return Err(Error::validation_invalid_argument(
+            "acceptance",
+            "awaiting_acceptance: manual finalization cannot replace a required durable acceptance decision; record acceptance for the corrected candidate first",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    Ok(None)
 }
 
 fn validate_durable_acceptance(

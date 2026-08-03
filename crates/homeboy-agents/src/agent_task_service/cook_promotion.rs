@@ -1392,6 +1392,69 @@ pub fn persist_manual_finalization_intent(
     )
 }
 
+/// Resolve the sole durable identity contract for explicit manual publication.
+/// A Cook ID selects its newest attempt, which must be failed; an exact existing
+/// ID must also be a failed attempt. An unused ID is reserved as a durable
+/// manual-finalization record so validated intent and publication receipt have
+/// an audit home.
+pub fn prepare_manual_finalization_identity(requested_id: &str) -> Result<String> {
+    if super::cook_recipe::recipe_exists(requested_id)? {
+        let recipe = super::cook_recipe::load_recipe(requested_id)?;
+        let run_id = recipe
+            .attempts
+            .last()
+            .map(|attempt| attempt.run_id.clone())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "run_id",
+                    "manual finalization Cook identity has no durable attempts",
+                    Some(requested_id.to_string()),
+                    None,
+                )
+            })?;
+        return require_manual_finalization_run(&run_id);
+    }
+
+    if crate::agent_task_lifecycle::run_record_exists(requested_id)? {
+        return require_manual_finalization_run(requested_id);
+    }
+
+    let plan = crate::agent_task_scheduler::AgentTaskPlan::new(
+        format!("manual-finalization-{requested_id}"),
+        Vec::new(),
+    );
+    crate::agent_task_lifecycle::submit_plan(&plan, Some(requested_id))?;
+    crate::agent_task_lifecycle::record_metadata_value(
+        requested_id,
+        "manual_finalization_identity",
+        serde_json::json!(true),
+    )?;
+    crate::agent_task_lifecycle::record_metadata_value(
+        requested_id,
+        "manual_finalization_identity_version",
+        serde_json::json!(1),
+    )?;
+    Ok(requested_id.to_string())
+}
+
+fn require_manual_finalization_run(run_id: &str) -> Result<String> {
+    let record = crate::agent_task_lifecycle::persisted_status(run_id)?;
+    if record.metadata["manual_finalization_identity"] == true {
+        return Ok(run_id.to_string());
+    }
+    if record.lifecycle.execution.state
+        != homeboy_core::run_lifecycle_record::RunExecutionState::Failed
+    {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "manual finalization accepts an existing failed attempt or an unused ID for a new durable manual-finalization record",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    Ok(run_id.to_string())
+}
+
 /// Persist only a controller-published manual receipt bound to its preflight dossier.
 pub fn persist_manual_finalization_receipt(
     run_id: &str,

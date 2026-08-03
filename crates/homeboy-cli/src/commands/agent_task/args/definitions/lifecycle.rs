@@ -342,6 +342,7 @@ pub struct FinalizePrArgs {
     /// Validate the complete hydrated dossier and candidate without publishing.
     #[arg(long)]
     pub preflight: bool,
+    /// Publish corrected, independently verified work without a promotion lineage. The ID must identify a failed attempt (a Cook ID resolves to its newest attempt, which must be failed), or be unused so Homeboy can reserve a durable manual-finalization record for its intent and receipt.
     #[arg(long)]
     pub manual_finalization: bool,
 }
