@@ -44,6 +44,17 @@ fn replacement_operation_path(runner_id: &str) -> Result<PathBuf> {
         .join("replacement-operation.json"))
 }
 
+fn admission_reservation_path(runner_id: &str) -> Result<PathBuf> {
+    Ok(paths::runner_sessions_dir()?
+        .join(runner_id)
+        .join("admission-mutation-reservation.json"))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AdmissionReservation {
+    operation_id: String,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ReplacementOperation {
     runner_id: String,
@@ -391,16 +402,19 @@ pub(crate) fn admission_session(
     }))
 }
 
-/// Serialize a daemon-creating or replacement mutation with job admission.
-/// The callback runs while the registry lock is held, so a concurrent
-/// `record_job` cannot make a previously idle generation active after the
-/// final fence observation and before the remote mutation begins.
+/// Reserve daemon mutation under the registry lock, then release it for remote
+/// I/O. Job admission observes the durable reservation and fails closed until
+/// the mutation completes or its reservation is cleared.
 pub(crate) fn with_admission_fence<T>(
     runner_id: &str,
     legacy: Option<&RunnerSession>,
     operation: impl FnOnce(Option<&AdmissionFence>) -> Result<T>,
 ) -> Result<T> {
-    with_registry_lock(runner_id, || {
+    let (reservation, fence) = with_registry_lock(runner_id, || {
+        let reservation = AdmissionReservation {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+        };
+        write_durable_json(&admission_reservation_path(runner_id)?, &reservation)?;
         let generations = read_locked(runner_id, legacy)?;
         let fence = generations.as_ref().and_then(|generations| {
             generations
@@ -412,8 +426,26 @@ pub(crate) fn with_admission_fence<T>(
                     active_job_count: entry.active_jobs,
                 })
         });
-        operation(fence.as_ref())
-    })
+        Ok((reservation, fence))
+    })?;
+    let result = operation(fence.as_ref());
+    with_registry_lock(runner_id, || {
+        let path = admission_reservation_path(runner_id)?;
+        if path.exists()
+            && serde_json::from_slice::<AdmissionReservation>(&std::fs::read(&path).map_err(
+                |error| {
+                    Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+                },
+            )?)
+            .ok()
+            .is_some_and(|current| current.operation_id == reservation.operation_id)
+        {
+            std::fs::remove_file(path)
+                .map_err(|error| Error::internal_io(error.to_string(), None))?;
+        }
+        Ok(())
+    })?;
+    result
 }
 
 /// A recovery-created daemon is durable before a controller can authenticate
@@ -1204,6 +1236,14 @@ fn reconcile_with(
 
 pub(crate) fn record_job(runner_id: &str, session: &RunnerSession, job_id: &str) -> Result<()> {
     with_registry_lock(runner_id, || {
+        if admission_reservation_path(runner_id)?.exists() {
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                "runner daemon mutation reservation is active; retry job admission after reconnect completes",
+                Some(runner_id.to_string()),
+                None,
+            ));
+        }
         let mut generations = read_locked(runner_id, Some(session))?.unwrap_or_else(|| {
             RollingGenerations::new(legacy_generation(session), session.clone())
         });

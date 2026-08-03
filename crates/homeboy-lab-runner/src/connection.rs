@@ -789,7 +789,7 @@ fn connect_with_orphan_adoption_and_live_lease(
                     live_lease_expectation,
                     Some(&replacement_operation_id),
                     admission_fence,
-                    true,
+                    false,
                 )
                 .map_err(Error::internal_unexpected)
             },

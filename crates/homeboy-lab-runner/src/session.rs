@@ -699,12 +699,10 @@ impl RunnerStatusReport {
             .iter()
             .find(|generation| !generation.admission_owner && generation.active_job_count > 0)
             .map(|generation| generation.generation.clone());
-        let unresolved_generation_jobs = generations
-            .iter()
-            .filter(|generation| !generation.admission_owner)
-            .map(|generation| generation.active_job_count)
-            .sum::<usize>();
-        let active_job_count = self.active_job_count + unresolved_generation_jobs;
+        // `connection::status` already includes unresolved draining ownership
+        // in this headline field. Reusing it avoids counting the same ledger
+        // entries once here and once in the connection projection.
+        let active_job_count = self.active_job_count;
         // A persisted session proves neither current daemon liveness nor its
         // active-job count. Admission and rotation remain fail-closed until a
         // current job view is available.
@@ -896,6 +894,7 @@ mod status_serialization_tests {
     fn admission_summary_fresh_idle_accepts_and_is_safe_to_rotate() {
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
+        report.active_job_count = 2;
         let summary = report.admission_summary(0);
         assert!(summary.connected);
         assert!(summary.daemon_fresh);
@@ -1051,6 +1050,7 @@ mod status_serialization_tests {
     fn admission_summary_keeps_unresolved_draining_generation_work_visible() {
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
+        report.active_job_count = 2;
         let generations = vec![
             RunnerDaemonGenerationStatus {
                 generation: "lease-active".to_string(),
