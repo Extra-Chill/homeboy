@@ -38,12 +38,11 @@ pub struct StatusArgs {
     pub since_cursor: Option<u64>,
     #[arg(long, conflicts_with = "bridge")]
     pub full: bool,
-    /// Answer from durable controller state only, without reaching the runner.
+    /// Compatibility alias for durable-local inspection.
     ///
-    /// Read-only inspection must stay usable while a Lab runner is wedged
-    /// (#10418). A controller-local run is always answered locally; this flag
-    /// extends that to runner-backed runs, returning a partial result labelled
-    /// with `runner_probe.skipped_reason` instead of blocking on the runner.
+    /// Status always reads the durable controller record and never waits for
+    /// runner or provider reconciliation. This retains compatibility with
+    /// earlier invocations; use `agent-task reconcile` for an explicit refresh.
     #[arg(long = "no-runner-probe", conflicts_with = "bridge")]
     pub no_runner_probe: bool,
 }

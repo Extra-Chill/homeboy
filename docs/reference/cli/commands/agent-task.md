@@ -307,6 +307,13 @@ homeboy agent-task status [OPTIONS] <RUN_ID>
 
 _This command declares no clap help text, so no description can be generated for it._
 
+`status`, `diagnose`, and `logs` are durable-local inspection commands. They read
+the controller record and local aggregate without runner or provider reconciliation,
+so their latency is bounded by local file reads and payload projection. Use
+`homeboy agent-task reconcile <RUN_ID> --dry-run` for an explicit authoritative
+runner refresh. Large repeated evidence is represented by a SHA-256 digest rather
+than copied into inspection output.
+
 | Argument | Required | Description |
 | --- | --- | --- |
 | `<RUN_ID>` | yes | _no help text_ |
@@ -316,7 +323,7 @@ _This command declares no clap help text, so no description can be generated for
 | `--bridge` | flag | _no help text_ |
 | `--since-cursor` | `<CURSOR>` | _no help text_ |
 | `--full` | flag | _no help text_ |
-| `--no-runner-probe` | flag | Answer from durable controller state only, without reaching the runner |
+| `--no-runner-probe` | flag | Compatibility alias for durable-local inspection |
 
 ## `homeboy agent-task list`
 
@@ -395,6 +402,9 @@ homeboy agent-task logs [OPTIONS] <RUN_ID>
 ```
 
 _This command declares no clap help text, so no description can be generated for it._
+
+This durable-local inspection shares the bounded-latency contract of `status` and
+`diagnose`; it never waits for a runner or provider reconciliation.
 
 | Argument | Required | Description |
 | --- | --- | --- |

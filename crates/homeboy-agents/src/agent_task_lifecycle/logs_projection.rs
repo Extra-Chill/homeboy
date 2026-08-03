@@ -12,9 +12,9 @@ pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
 }
 
 pub fn logs_with_raw(run_id: &str, include_raw: bool) -> Result<AgentTaskRunLog> {
-    // Status reconciliation fetches the live daemon snapshot for a bound Lab
-    // child, making executor progress visible before the child is terminal.
-    let record = status(run_id)?;
+    // Logs are terminal inspection, not runner reconciliation. The durable
+    // record remains readable when a runner is unavailable or wedged.
+    let record = persisted_status(run_id)?;
     let run_id = record.run_id.clone();
     let (events, artifact_refs, raw_events) = match store::read_aggregate(&run_id) {
         Ok(aggregate) => {
