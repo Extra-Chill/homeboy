@@ -154,6 +154,7 @@ fn scan_blocks(fp: &FileFingerprint, profile: &EffectiveDetectorProfile) -> Vec<
                 reference
             ),
             kind: AuditFinding::UpstreamWorkaround,
+                    line: None,
         });
     }
     findings
@@ -222,6 +223,7 @@ fn scan_version_guards(fp: &FileFingerprint, profile: &EffectiveDetectorProfile)
                     constant, version, version
                 ),
                 kind: AuditFinding::UpstreamWorkaround,
+                            line: None,
             });
         }
     }

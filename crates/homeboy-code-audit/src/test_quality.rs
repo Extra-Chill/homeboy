@@ -95,6 +95,7 @@ fn detect_vacuous_tests(file: &str, content: &str) -> Vec<Finding> {
                 test.name
             ),
             kind: AuditFinding::VacuousTest,
+                    line: None,
         })
         .collect::<Vec<_>>();
 
@@ -119,6 +120,7 @@ fn detect_vacuous_tests(file: &str, content: &str) -> Vec<Finding> {
                 "Delete the placeholder or replace it with a behavior test that calls product code"
                     .to_string(),
             kind: AuditFinding::VacuousTest,
+            line: None,
         })
     }));
 
@@ -246,6 +248,7 @@ fn detect_duplicate_test_names(file: &str, tests: &[TestFunction]) -> Vec<Findin
                     test.name
                 ),
                 kind: AuditFinding::VacuousTest,
+                line: Some(test.line as u32),
             });
         }
     }
@@ -303,6 +306,7 @@ fn detect_redundant_test_wrappers(file: &str, tests: &[TestFunction]) -> Vec<Fin
                     test.name, target
                 ),
                 kind: AuditFinding::RedundantTestWrapper,
+                            line: Some(test.line as u32),
             })
         })
         .collect()
@@ -343,6 +347,7 @@ fn detect_unused_product_imports(
                 import.symbol
             ),
             kind: AuditFinding::VacuousTest,
+            line: None,
         })
         .collect()
 }
@@ -619,6 +624,7 @@ fn detect_ignored_without_reason(file: &str, content: &str) -> Vec<Finding> {
                 "Use `#[ignore = \"<why it is skipped / when it should run>\"]` so the skip is self-documenting"
                     .to_string(),
             kind: AuditFinding::IgnoredTestWithoutReason,
+            line: Some(index as u32 + 1),
         })
         .collect()
 }
@@ -793,6 +799,7 @@ fn detect_inconsistent_env_guards(
                     var
                 ),
                 kind: AuditFinding::DuplicateFunction,
+                            line: None,
             });
         }
     }

@@ -131,6 +131,7 @@ pub(crate) fn analyze_test_coverage(
                             test_path
                         ),
                         kind: AuditFinding::MissingTestFile,
+                        line: None,
                     });
                 }
                 continue; // No tests at all — skip method-level checks
@@ -211,6 +212,7 @@ pub(crate) fn analyze_test_coverage(
                             config.method_prefix, method, method
                         ),
                         kind: AuditFinding::MissingTestMethod,
+                        line: None,
                     });
                 }
             }
@@ -271,6 +273,7 @@ pub(crate) fn analyze_test_coverage(
                         description: format!("No test file found (expected '{}')", test_path),
                         suggestion: format!("Create test file '{}'", test_path),
                         kind: AuditFinding::MissingTestFile,
+                        line: None,
                     });
                 }
                 continue; // No test file — skip method-level checks
@@ -329,6 +332,7 @@ pub(crate) fn analyze_test_coverage(
                                 config.method_prefix, method, test_file_label
                             ),
                             kind: AuditFinding::MissingTestMethod,
+                            line: None,
                         });
                     }
                 }
@@ -416,6 +420,7 @@ pub(crate) fn analyze_test_coverage(
                             correct_test_path
                         ),
                         kind: AuditFinding::OrphanedTest,
+                        line: None,
                     });
                 } else if !references_multiple_source_symbols(test_fp, &source_symbol_names) {
                     // Truly orphaned — no source found anywhere
@@ -430,6 +435,7 @@ pub(crate) fn analyze_test_coverage(
                         suggestion: "Remove the orphaned test or create the source file"
                             .to_string(),
                         kind: AuditFinding::OrphanedTest,
+                        line: None,
                     });
                 }
             }
@@ -657,6 +663,7 @@ fn find_orphaned_test_methods(
                 test_method
             ),
             kind: AuditFinding::OrphanedTest,
+            line: None,
         });
     }
 }

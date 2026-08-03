@@ -122,6 +122,7 @@ fn detect_direct_aggregate_construction(fingerprints: &[&FileFingerprint]) -> Ve
                 type_name
             ),
             kind: AuditFinding::DirectAggregateConstruction,
+                    line: None,
         });
     }
 

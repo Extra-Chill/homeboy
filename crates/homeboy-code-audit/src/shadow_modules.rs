@@ -176,6 +176,7 @@ fn detect_shadow_modules(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
                     first, second
                 ),
                 kind: AuditFinding::ShadowModule,
+                line: None,
             });
 
             findings.push(Finding {
@@ -195,6 +196,7 @@ fn detect_shadow_modules(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
                     first
                 ),
                 kind: AuditFinding::ShadowModule,
+                line: None,
             });
         }
     }

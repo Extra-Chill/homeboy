@@ -31,6 +31,7 @@ fn warnings_to_findings(warnings: Vec<AuditCompilerWarning>) -> Vec<Finding> {
             suggestion: warning
                 .suggestion
                 .unwrap_or_else(|| format!("Address compiler warning: {}", warning.code)),
+            line: None,
         })
         .collect()
 }

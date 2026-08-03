@@ -240,6 +240,7 @@ fn finding_for(rule: &ConfigKeyUsageRule, key: &str, evidence: &KeyEvidence) -> 
         ),
         suggestion: "Either consume the key in production code or remove the stale write/accessor path".to_string(),
         kind: AuditFinding::WriteOnlyConfigKey,
+            line: None,
     })
 }
 

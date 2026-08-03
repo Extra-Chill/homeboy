@@ -61,5 +61,6 @@ pub fn make_finding(severity: Severity) -> Finding {
         description: "Test finding".to_string(),
         suggestion: "Fix it".to_string(),
         kind: AuditFinding::MissingMethod,
+        line: None,
     }
 }

@@ -84,6 +84,7 @@ fn scan_file(fp: &FileFingerprint, config: &RedirectValidationConfig) -> Vec<Fin
                         value.variable
                     ),
                     kind: AuditFinding::RedirectValidation,
+                                    line: Some(line_number as u32),
                 });
             }
         }

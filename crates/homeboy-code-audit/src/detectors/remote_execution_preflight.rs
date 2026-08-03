@@ -174,6 +174,7 @@ fn finding(fp: &FileFingerprint, convention: &str, description: &str, suggestion
         description: description.to_string(),
         suggestion: suggestion.to_string(),
         kind: AuditFinding::RemoteExecutionPreflight,
+        line: None,
     }
 }
 

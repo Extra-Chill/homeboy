@@ -165,6 +165,7 @@ fn collect_findings(
             description,
             suggestion,
             kind: AuditFinding::DeprecationAge,
+            line: None,
         });
     }
 }

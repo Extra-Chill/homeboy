@@ -217,6 +217,7 @@ fn find_rule_findings(
                     rule.authoritative_method_id
                 ),
                 kind: AuditFinding::LossyPolicyProjection,
+                            line: None,
             });
         }
     }

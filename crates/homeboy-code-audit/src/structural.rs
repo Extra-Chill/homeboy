@@ -101,6 +101,7 @@ pub(crate) fn analyze_snapshot(root: &Path, snapshot: &CodebaseSnapshot) -> Vec<
                 ),
                 suggestion,
                 kind: AuditFinding::GodFile,
+                line: None,
             });
         }
 
@@ -116,6 +117,7 @@ pub(crate) fn analyze_snapshot(root: &Path, snapshot: &CodebaseSnapshot) -> Vec<
                 ),
                 suggestion: "Review whether the top-level items represent multiple responsibilities before extracting focused modules".to_string(),
                 kind: AuditFinding::HighItemCount,
+                            line: None,
             });
         }
     }
@@ -138,6 +140,7 @@ pub(crate) fn analyze_snapshot(root: &Path, snapshot: &CodebaseSnapshot) -> Vec<
                 "Review whether the directory contains multiple discoverable subdomains before adding subdirectories"
                     .to_string(),
             kind: AuditFinding::DirectorySprawl,
+                    line: None,
         });
     }
 

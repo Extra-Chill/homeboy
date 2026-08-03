@@ -93,6 +93,7 @@ fn detect_parallel_runner_setup(fingerprints: &[&FileFingerprint]) -> Vec<Findin
             ),
             suggestion: "Extract a runner descriptor or shared builder that owns context resolution, environment construction, artifact setup, execution, result mapping, and error mapping for this contract.".to_string(),
             kind: AuditFinding::ParallelRunnerSetup,
+                    line: None,
         });
     }
 

@@ -256,6 +256,7 @@ pub(crate) fn analyze_dead_code_with_config(
                     suggestion: "Remove the dead function or make it public if used externally"
                         .to_string(),
                     kind: AuditFinding::OrphanedInternal,
+                    line: None,
                 });
             }
         }
@@ -310,6 +311,7 @@ fn dead_code_finding(
         description,
         suggestion,
         kind,
+        line: None,
     }
 }
 

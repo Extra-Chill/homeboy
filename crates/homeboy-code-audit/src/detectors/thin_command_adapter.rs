@@ -251,6 +251,7 @@ fn build_finding(
              into a core service this module delegates to."
                 .to_string(),
         kind: AuditFinding::ThinCommandAdapterViolation,
+        line: None,
     }
 }
 

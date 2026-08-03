@@ -692,6 +692,7 @@ mod tests {
                 .to_string(),
             suggestion: "Validate".to_string(),
             kind: AuditFinding::LegacyComment,
+            line: None,
         });
 
         let mut fixes = Vec::new();
@@ -733,6 +734,7 @@ mod tests {
             description: "Potential legacy/stale comment on line 4: legacy: old path".to_string(),
             suggestion: "Validate".to_string(),
             kind: AuditFinding::LegacyComment,
+            line: None,
         });
 
         let mut fixes = Vec::new();
@@ -754,6 +756,7 @@ mod tests {
             description: "Comment marker 'TODO' found on line 42: implement caching".to_string(),
             suggestion: "Resolve".to_string(),
             kind: AuditFinding::TodoMarker,
+            line: None,
         });
 
         let mut fixes = Vec::new();
@@ -775,6 +778,7 @@ mod tests {
             description: "Something on line 10".to_string(),
             suggestion: "".to_string(),
             kind: AuditFinding::MissingMethod,
+            line: None,
         });
 
         let mut fixes = Vec::new();

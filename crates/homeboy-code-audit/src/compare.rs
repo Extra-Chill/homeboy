@@ -86,6 +86,7 @@ mod tests {
             description: "Existing finding".to_string(),
             suggestion: String::new(),
             kind: AuditFinding::NamingMismatch,
+            line: None,
         };
         let f2 = f1.clone();
         assert_eq!(finding_fingerprint(&f1), finding_fingerprint(&f2));
@@ -100,6 +101,7 @@ mod tests {
             description: "File has 1,024 lines (threshold: 1,000)".to_string(),
             suggestion: String::new(),
             kind: AuditFinding::GodFile,
+            line: None,
         };
         let f2 = Finding {
             description: "File has 1,111 lines (threshold: 1,000)".to_string(),
@@ -129,6 +131,7 @@ mod tests {
             description: "File has 1,024 lines (threshold: 1,000)".to_string(),
             suggestion: String::new(),
             kind: AuditFinding::GodFile,
+            line: None,
         };
         let different_kind = Finding {
             kind: AuditFinding::HighItemCount,
@@ -158,6 +161,7 @@ mod tests {
             description: "Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 248 in behavioral context `detect_patterns`".to_string(),
             suggestion: String::new(),
             kind: AuditFinding::CoreBoundaryLeak,
+                    line: None,
         };
         let f2 = Finding {
             description: "Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 275 in behavioral context `detect_patterns`".to_string(),
@@ -184,6 +188,7 @@ mod tests {
             description: "Existing finding".to_string(),
             suggestion: String::new(),
             kind: AuditFinding::NamingMismatch,
+            line: None,
         };
         let new = Finding {
             convention: "duplication".to_string(),
@@ -192,6 +197,7 @@ mod tests {
             description: "Duplicate function `foo`".to_string(),
             suggestion: String::new(),
             kind: AuditFinding::DuplicateFunction,
+            line: None,
         };
 
         let baseline_set: std::collections::HashSet<String> =
@@ -216,6 +222,7 @@ mod tests {
                 description: "Warning finding".to_string(),
                 suggestion: "Fix it".to_string(),
                 kind: AuditFinding::MissingMethod,
+                line: None,
             },
             Finding {
                 convention: "Test".to_string(),
@@ -224,6 +231,7 @@ mod tests {
                 description: "Info finding".to_string(),
                 suggestion: "Investigate".to_string(),
                 kind: AuditFinding::MissingImport,
+                line: None,
             },
         ]);
 
@@ -248,6 +256,7 @@ mod tests {
             description: "Warning finding".to_string(),
             suggestion: "Fix it".to_string(),
             kind: AuditFinding::MissingMethod,
+            line: None,
         }]);
         assert_eq!(
             score_delta(&result, &result, AuditConvergenceScoring::default()),
@@ -265,6 +274,7 @@ mod tests {
                 description: "Warning finding".to_string(),
                 suggestion: "Fix it".to_string(),
                 kind: AuditFinding::MissingMethod,
+                line: None,
             },
             Finding {
                 convention: "Test".to_string(),
@@ -273,6 +283,7 @@ mod tests {
                 description: "Info finding".to_string(),
                 suggestion: "Investigate".to_string(),
                 kind: AuditFinding::MissingImport,
+                line: None,
             },
         ]);
         let after = mk_result_with_findings(vec![Finding {
@@ -282,6 +293,7 @@ mod tests {
             description: "Info finding".to_string(),
             suggestion: "Investigate".to_string(),
             kind: AuditFinding::MissingImport,
+            line: None,
         }]);
 
         assert_eq!(
