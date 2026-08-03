@@ -631,7 +631,7 @@ fn follow_up_instructions(
     };
 
     format!(
-        "Continue the Homeboy cook loop from the current candidate worktree state.\n\nDeterministic gates failed after Homeboy applied the previous candidate patch. Produce a focused follow-up patch that makes the failed gates pass while preserving the candidate intent. {priority}\n\nFailed gates:\n{gate_list}\n\nChanged files in the candidate patch: {changed_files}\n\nUse the structured `inputs.cook_loop` evidence as the primary context. Return an updated patch artifact and concise summary of the fix."
+        "Continue the Homeboy cook loop from the current candidate worktree state.\n\nDeterministic gates failed after Homeboy applied the previous candidate patch. Produce a focused follow-up patch that makes the failed gates pass while preserving the candidate intent. {priority}\n\nFailed gates:\n{gate_list}\n\nChanged files in the candidate patch: {changed_files}\n\nThe structured `inputs.cook_loop` object already contains the gate evidence and current diff. Inspect repository files relative to the current workspace root, then return an updated patch artifact and concise summary of the fix."
     )
 }
 
@@ -869,6 +869,43 @@ mod tests {
             "homeboy://agent-task/run/run-3676"
         );
         assert_eq!(request.workspace.mode, AgentTaskWorkspaceMode::Existing);
+    }
+
+    #[test]
+    fn red_gate_preserves_executor_provider_configuration() {
+        let mut source = source_request();
+        source.executor.model = Some("provider/model".to_string());
+        source.executor.config = json!({
+            "client_context": { "conversation_id": "distinct-context" },
+            "provider_plugin_paths": ["/provider/plugin"],
+            "runtime_env": { "OPENCODE_CONFIG_CONTENT": "distinct-policy" },
+            "runtime_overlays": [{ "source": "/runtime/overlay" }],
+            "workspace_root": "/source/workspace",
+        });
+
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source.clone(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::GateFailed,
+                vec![failed_gate()],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-provider-policy".to_string()),
+            current_diff: "diff --git a/src/lib.rs b/src/lib.rs".to_string(),
+            require_review_form: false,
+            review_form: None,
+            metadata: Value::Null,
+        });
+
+        let request = report.follow_up_request.expect("follow-up request");
+        assert_eq!(request.executor, source.executor);
+        assert!(request
+            .instructions
+            .contains("already contains the gate evidence and current diff"));
+        assert!(request
+            .instructions
+            .contains("relative to the current workspace root"));
     }
 
     #[test]
