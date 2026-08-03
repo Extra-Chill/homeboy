@@ -1831,6 +1831,7 @@ fn run_promotion_gate(
         &options.gates.gate_environment,
         &options.gates.required_toolchains(),
         Some(&runtime_tmpdir.context().tmp_dir),
+        options.gates.gate_timeout(),
     ) {
         // This runs before provider verification. A missing destination tool is
         // setup evidence, not candidate blame or provider-budget consumption.

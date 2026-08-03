@@ -30,6 +30,7 @@ const XDG_ENV_VARS: &[&str] = &[
 /// Temp-dir variables pinned to the invocation temp dir so every gate process
 /// — preflight probes included — shares one temporary root.
 const TMPDIR_ENV_VARS: &[&str] = &["TMPDIR", "TEMP", "TMP"];
+const GATE_TOOLCHAIN_CAPTURE_LIMIT_BYTES: usize = 64 * 1024;
 
 pub type AgentTaskGateVisibility = HomeboyGateVisibility;
 pub type AgentTaskGateRevealPolicy = HomeboyGateRevealPolicy;
@@ -1282,42 +1283,139 @@ pub(crate) fn preflight_gate_toolchains(
     policy: &AgentTaskGateEnvironmentPolicy,
     requirements: &[AgentTaskGateToolchainRequirement],
     runtime_tmpdir: Option<&Path>,
+    timeout: Duration,
 ) -> Result<()> {
     let selected_environment = selected_gate_environment(policy, runtime_tmpdir)?;
+    // The deadline covers declared probe execution. Controller scheduling before
+    // the first child starts cannot make an otherwise successful probe fail.
+    let mut started = None;
     for requirement in requirements {
+        let elapsed = started.map(|started: std::time::Instant| started.elapsed());
+        let remaining = timeout.saturating_sub(elapsed.unwrap_or_default());
+        if started.is_some() && remaining.is_zero() {
+            return Err(toolchain_preflight_error(
+                requirement,
+                elapsed.expect("started preflight deadline"),
+                timeout,
+                Duration::ZERO,
+                None,
+                true,
+                "the total gate verification deadline was exhausted before this probe started",
+            ));
+        }
         let mut process = Command::new(&requirement.command);
         process
             .args(&requirement.probe_arguments)
             .current_dir(cwd)
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         selected_environment.apply(&mut process);
-        let output = process.output().map_err(|error| {
-            Error::validation_invalid_argument(
-                "gate_toolchains",
-                format!(
-                    "gate toolchain preflight could not resolve or initialize `{}`: {error}",
-                    requirement.command
-                ),
-                Some(requirement.command.clone()),
-                Some(vec!["Declare the required toolchain environment with --gate-env-from NAME=SOURCE[/suffix], then retry Cook.".to_string()]),
+        homeboy_core::engine::command::isolate_process_tree(&mut process);
+        let mut child = process.spawn().map_err(|error| {
+            toolchain_preflight_error(
+                requirement,
+                elapsed.unwrap_or_default(),
+                timeout,
+                remaining,
+                None,
+                false,
+                &format!("could not resolve or initialize the executable: {error}"),
             )
         })?;
-        if !output.status.success() {
-            return Err(Error::validation_invalid_argument(
-                "gate_toolchains",
+        let started = *started.get_or_insert_with(std::time::Instant::now);
+        let elapsed = started.elapsed();
+        let remaining = timeout.saturating_sub(elapsed);
+        let supervised = homeboy_core::engine::command::wait_with_bounded_output_supervised(
+            &mut child,
+            GATE_TOOLCHAIN_CAPTURE_LIMIT_BYTES,
+            remaining,
+            remaining,
+            || false,
+            |_, _| Ok(()),
+        )
+        .map_err(|error| {
+            toolchain_preflight_error(
+                requirement,
+                started.elapsed(),
+                timeout,
+                remaining,
+                None,
+                false,
+                &format!("could not collect bounded probe output: {error}"),
+            )
+        })?;
+        let timed_out = supervised.termination
+            == homeboy_core::engine::command::SupervisedCommandTermination::TimedOut;
+        let output = supervised.output;
+        if timed_out || !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let reason = if timed_out {
+                "the probe exceeded its remaining gate verification deadline".to_string()
+            } else {
                 format!(
-                    "gate toolchain preflight could not initialize `{}` (exit {}): {}",
-                    requirement.command,
+                    "the probe exited {}: {}",
                     output.status.code().unwrap_or(1),
-                    text_tail(&String::from_utf8_lossy(&output.stderr), 5),
-                ),
-                Some(requirement.command.clone()),
-                Some(vec!["Declare the required toolchain environment with --gate-env-from NAME=SOURCE[/suffix], then retry Cook.".to_string()]),
+                    text_tail(&stderr, 5),
+                )
+            };
+            return Err(toolchain_preflight_error(
+                requirement,
+                started.elapsed(),
+                timeout,
+                remaining,
+                Some(&output),
+                timed_out,
+                &reason,
             ));
         }
     }
     Ok(())
+}
+
+fn toolchain_preflight_error(
+    requirement: &AgentTaskGateToolchainRequirement,
+    elapsed: Duration,
+    timeout: Duration,
+    probe_timeout: Duration,
+    output: Option<&homeboy_core::engine::command::BoundedCommandOutput>,
+    timed_out: bool,
+    reason: &str,
+) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "gate_toolchains",
+        format!(
+            "gate toolchain preflight failed for `{}` after {} ms (deadline {} ms): {reason}",
+            requirement.command,
+            elapsed.as_millis(),
+            timeout.as_millis(),
+        ),
+        Some(requirement.command.clone()),
+        Some(vec!["Declare the required toolchain environment with --gate-env-from NAME=SOURCE[/suffix], then retry Cook.".to_string()]),
+    );
+    error.retryable = Some(true);
+    error.details["toolchain_preflight"] = json!({
+        "command": requirement.command,
+        "arguments": requirement.probe_arguments,
+        "elapsed_ms": elapsed.as_millis(),
+        "timeout_ms": timeout.as_millis(),
+        "probe_timeout_ms": probe_timeout.as_millis(),
+        "timed_out": timed_out,
+        "capture_limit_bytes": GATE_TOOLCHAIN_CAPTURE_LIMIT_BYTES,
+        "stdout": output.map(|output| json!({
+            "tail": String::from_utf8_lossy(&output.stdout),
+            "bytes_seen": output.capture.stdout.bytes_seen,
+            "bytes_retained": output.capture.stdout.bytes_retained,
+            "truncated": output.capture.stdout.truncated,
+        })),
+        "stderr": output.map(|output| json!({
+            "tail": String::from_utf8_lossy(&output.stderr),
+            "bytes_seen": output.capture.stderr.bytes_seen,
+            "bytes_retained": output.capture.stderr.bytes_retained,
+            "truncated": output.capture.stderr.truncated,
+        })),
+        "remediation": "Declare the required toolchain environment with --gate-env-from NAME=SOURCE[/suffix], then retry Cook.",
+    });
+    error
 }
 
 fn set_isolated_environment_variable(
@@ -2075,6 +2173,7 @@ mod tests {
                 probe_arguments: vec!["--version".to_string()],
             }],
             None,
+            Duration::from_secs(10),
         );
 
         match prior_home {
@@ -2112,6 +2211,7 @@ mod tests {
                 probe_arguments: vec!["initialize".to_string()],
             }],
             None,
+            Duration::from_secs(10),
         )
         .expect_err("unusable declared toolchain fails preflight");
 
@@ -2160,8 +2260,192 @@ mod tests {
                 probe_arguments: vec!["initialize".to_string()],
             }],
             Some(runtime_tmpdir.path()),
+            Duration::from_secs(10),
         )
         .expect("preflight probes run in the invocation temp dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn toolchain_preflight_times_out_and_reaps_descendants() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let bin = tempfile::tempdir().expect("bin");
+        let pid_file = workspace.path().join("descendant.pid");
+        let tool = bin.path().join("hung-tool");
+        fs::write(
+            &tool,
+            format!(
+                "#!/bin/sh\n/bin/sleep 30 &\necho $! > '{}'\nwait\n",
+                pid_file.display()
+            ),
+        )
+        .expect("tool");
+        let mut permissions = fs::metadata(&tool).expect("tool metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&tool, permissions).expect("tool executable");
+
+        let started = std::time::Instant::now();
+        let error = preflight_gate_toolchains(
+            workspace.path(),
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[AgentTaskGateToolchainRequirement {
+                command: tool.display().to_string(),
+                probe_arguments: Vec::new(),
+            }],
+            None,
+            Duration::from_millis(500),
+        )
+        .expect_err("hung toolchain probe must time out");
+
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(error.retryable, Some(true));
+        assert_eq!(
+            error.details["toolchain_preflight"]["timed_out"], true,
+            "{:#}",
+            error.details
+        );
+        assert_eq!(error.details["toolchain_preflight"]["timeout_ms"], 500);
+        let descendant_pid = fs::read_to_string(pid_file)
+            .expect("descendant pid")
+            .trim()
+            .parse::<libc::pid_t>()
+            .expect("numeric descendant pid");
+        assert_ne!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn toolchain_preflight_honors_a_100ms_limit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let tool = workspace.path().join("hung-tool");
+        fs::write(&tool, "#!/bin/sh\n/bin/sleep 30\n").expect("tool");
+        let mut permissions = fs::metadata(&tool).expect("tool metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&tool, permissions).expect("tool executable");
+
+        let started = std::time::Instant::now();
+        let error = preflight_gate_toolchains(
+            workspace.path(),
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[AgentTaskGateToolchainRequirement {
+                command: tool.display().to_string(),
+                probe_arguments: Vec::new(),
+            }],
+            None,
+            Duration::from_millis(100),
+        )
+        .expect_err("hung toolchain probe must time out");
+
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(error.details["toolchain_preflight"]["timed_out"], true);
+        assert_eq!(error.details["toolchain_preflight"]["timeout_ms"], 100);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn toolchain_preflight_shares_one_total_deadline_across_probes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let bin = tempfile::tempdir().expect("bin");
+        let first = bin.path().join("first-tool");
+        let second = bin.path().join("second-tool");
+        fs::write(&first, "#!/bin/sh\n/bin/sleep 0.1\n").expect("first tool");
+        fs::write(&second, "#!/bin/sh\n/bin/sleep 0.05\nexit 7\n").expect("second tool");
+        for tool in [&first, &second] {
+            let mut permissions = fs::metadata(tool).expect("tool metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(tool, permissions).expect("tool executable");
+        }
+
+        let started = std::time::Instant::now();
+        let error = preflight_gate_toolchains(
+            workspace.path(),
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[
+                AgentTaskGateToolchainRequirement {
+                    command: first.display().to_string(),
+                    probe_arguments: Vec::new(),
+                },
+                AgentTaskGateToolchainRequirement {
+                    command: second.display().to_string(),
+                    probe_arguments: Vec::new(),
+                },
+            ],
+            None,
+            Duration::from_secs(10),
+        )
+        .expect_err("second probe must consume only the first probe's remaining deadline");
+
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(error.details["toolchain_preflight"]["timed_out"], false);
+        assert_eq!(
+            error.details["toolchain_preflight"]["command"],
+            second.display().to_string()
+        );
+        assert!(
+            error.details["toolchain_preflight"]["probe_timeout_ms"]
+                .as_u64()
+                .expect("per-probe timeout")
+                < 10_000
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn toolchain_preflight_bounds_output_and_reports_capture_metadata() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let bin = tempfile::tempdir().expect("bin");
+        let tool = bin.path().join("noisy-tool");
+        fs::write(
+            &tool,
+            "#!/bin/sh\nyes stdout | head -c 70000\nyes stderr | head -c 70000 >&2\nexit 7\n",
+        )
+        .expect("tool");
+        let mut permissions = fs::metadata(&tool).expect("tool metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&tool, permissions).expect("tool executable");
+
+        let error = preflight_gate_toolchains(
+            workspace.path(),
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[AgentTaskGateToolchainRequirement {
+                command: tool.display().to_string(),
+                probe_arguments: Vec::new(),
+            }],
+            None,
+            Duration::from_secs(10),
+        )
+        .expect_err("noisy failed probe must return diagnostics");
+
+        let diagnostics = &error.details["toolchain_preflight"];
+        assert_eq!(diagnostics["capture_limit_bytes"], 65_536);
+        assert_eq!(diagnostics["stdout"]["bytes_seen"], 70_000);
+        assert_eq!(diagnostics["stderr"]["bytes_seen"], 70_000);
+        assert_eq!(diagnostics["stdout"]["bytes_retained"], 65_536);
+        assert_eq!(diagnostics["stderr"]["bytes_retained"], 65_536);
+        assert_eq!(diagnostics["stdout"]["truncated"], true);
+        assert_eq!(diagnostics["stderr"]["truncated"], true);
+        assert_eq!(
+            diagnostics["stdout"]["tail"]
+                .as_str()
+                .expect("stdout tail")
+                .len(),
+            65_536
+        );
+        assert_eq!(
+            diagnostics["stderr"]["tail"]
+                .as_str()
+                .expect("stderr tail")
+                .len(),
+            65_536
+        );
     }
 
     #[test]
