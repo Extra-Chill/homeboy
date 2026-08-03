@@ -30,6 +30,33 @@ fn first_connect_routes_to_idempotent_ensure_start_when_no_daemon_exists() {
 }
 
 #[test]
+fn unresolved_generation_fence_allows_reattach_but_rejects_new_admission() {
+    let fence = crate::generation_store::AdmissionFence {
+        generation: "lease-active".to_string(),
+        active_job_count: 2,
+    };
+
+    assert_eq!(
+        remote_daemon::fence_generation_admission(
+            RemoteDaemonConnectAction::Reattach,
+            Some(&fence),
+            "homeboy-lab",
+        )
+        .expect("live generation remains reconnectable"),
+        RemoteDaemonConnectAction::Reattach
+    );
+    let error = remote_daemon::fence_generation_admission(
+        RemoteDaemonConnectAction::Start,
+        Some(&fence),
+        "homeboy-lab",
+    )
+    .expect_err("two unresolved jobs block a new generation");
+    assert!(error.contains("generation `lease-active`"));
+    assert!(error.contains("2 unresolved active job(s)"));
+    assert!(error.contains("homeboy runner reconcile homeboy-lab"));
+}
+
+#[test]
 fn missing_daemon_state_with_active_jobs_refuses_ensure_running() {
     let status = RemoteDaemonStatus {
         daemon: None,

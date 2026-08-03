@@ -489,7 +489,14 @@ fn connect_with_orphan_adoption_and_live_lease(
             } else {
                 command
             };
-            let output = client.execute_with_timeout(&command, REMOTE_LEASELESS_RECOVERY_TIMEOUT);
+            let output = fenced_remote_mutation(
+                runner_id,
+                previous_session.as_ref(),
+                "replay_replacement_operation",
+                &client,
+                &command,
+                REMOTE_LEASELESS_RECOVERY_TIMEOUT,
+            );
             if !output.success {
                 return Ok(failed_connect(
                     runner_id,
@@ -608,7 +615,14 @@ fn connect_with_orphan_adoption_and_live_lease(
                 "state-loss",
                 &command,
             )?;
-            let recovery = client.execute_with_timeout(&command, REMOTE_LEASELESS_RECOVERY_TIMEOUT);
+            let recovery = fenced_remote_mutation(
+                runner_id,
+                previous_session.as_ref(),
+                "recover_missing_lease_state",
+                &client,
+                &command,
+                REMOTE_LEASELESS_RECOVERY_TIMEOUT,
+            );
             if !recovery.success {
                 return Ok(failed_connect(
                     runner_id,
@@ -678,7 +692,14 @@ fn connect_with_orphan_adoption_and_live_lease(
                         child_resource: None,
                     };
                 }
-                client.execute_with_timeout(&command, REMOTE_LEASELESS_RECOVERY_TIMEOUT)
+                fenced_remote_mutation(
+                    runner_id,
+                    previous_session.as_ref(),
+                    "reconcile_leaseless_orphans",
+                    &client,
+                    &command,
+                    REMOTE_LEASELESS_RECOVERY_TIMEOUT,
+                )
             },
         );
         let (contract, recovery) = match recovery {
@@ -751,18 +772,28 @@ fn connect_with_orphan_adoption_and_live_lease(
         // Normal reconnects must inspect the live daemon first: a reachable,
         // compatible generation reattaches, while an idle stale generation
         // follows ReplaceIdleStale instead of bypassing its fenced lifecycle.
-        None => ensure_remote_daemon(
-            &client,
-            homeboy,
+        None => super::generation_store::with_admission_fence(
             runner_id,
             previous_session.as_ref(),
-            &configured_build_identity,
-            orphan_lease_id,
-            confirmed_no_pid_job_ids,
-            live_lease_expectation,
-            Some(&replacement_operation_id),
+            "ensure_remote_daemon",
+            |admission_fence| {
+                ensure_remote_daemon(
+                    &client,
+                    homeboy,
+                    runner_id,
+                    previous_session.as_ref(),
+                    &configured_build_identity,
+                    orphan_lease_id,
+                    confirmed_no_pid_job_ids,
+                    live_lease_expectation,
+                    Some(&replacement_operation_id),
+                    admission_fence,
+                    false,
+                )
+                .map_err(Error::internal_unexpected)
+            },
         )
-        .map(|daemon| daemon),
+        .map_err(|error| error.message),
     };
     let Ok(daemon) = daemon else {
         let (mut report, exit_code) = failed_connect_after_recovery(
@@ -1270,6 +1301,45 @@ fn remote_state_loss_recovery_command(
     )
 }
 
+fn fenced_remote_mutation(
+    runner_id: &str,
+    previous_session: Option<&RunnerSession>,
+    operation_name: &str,
+    client: &SshClient,
+    command: &str,
+    timeout: Duration,
+) -> homeboy_core::server::CommandOutput {
+    match super::generation_store::with_admission_fence(
+        runner_id,
+        previous_session,
+        operation_name,
+        |fence| {
+            if let Some(fence) = fence {
+                return Err(Error::validation_invalid_argument(
+                    "reconnect",
+                    format!(
+                        "runner `{runner_id}` generation `{}` has {} unresolved active job(s); refusing daemon recovery before terminal job evidence is available",
+                        fence.generation, fence.active_job_count,
+                    ),
+                    Some(runner_id.to_string()),
+                    None,
+                ));
+            }
+            Ok(client.execute_with_timeout(command, timeout))
+        },
+    ) {
+        Ok(output) => output,
+        Err(error) => homeboy_core::server::CommandOutput {
+            success: false,
+            stdout: String::new(),
+            stderr: error.message,
+            exit_code: 1,
+            timed_out: false,
+            child_resource: None,
+        },
+    }
+}
+
 pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerConnectReport, i32)> {
     if options.runner_id.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -1464,7 +1534,17 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     {
         freshness.active_jobs = active_jobs;
     }
-    let active_job_count = direct_daemon_active_jobs.unwrap_or(active_jobs.len());
+    let selected_active_job_count = direct_daemon_active_jobs.unwrap_or(active_jobs.len());
+    // A connected admission daemon is not the only generation that can own
+    // mutable work. Keep the full status headline consistent with the
+    // admission summary by retaining unresolved draining ownership too.
+    let unresolved_generation_jobs =
+        super::generation_store::status_projection(runner_id, session.as_ref())?
+            .into_iter()
+            .filter(|generation| !generation.admission_owner)
+            .map(|generation| generation.active_job_count)
+            .sum::<usize>();
+    let active_job_count = selected_active_job_count + unresolved_generation_jobs;
     let active_job_error = match (active_job_error, direct_daemon_active_jobs) {
         (Some(error), _) => Some(error),
         (None, Some(authoritative_count)) if authoritative_count != active_jobs.len() => {

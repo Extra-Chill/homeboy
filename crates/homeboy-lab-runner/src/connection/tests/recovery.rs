@@ -292,6 +292,78 @@ fn reads_remote_active_job_count_from_daemon_freshness() {
     assert_eq!(remote_daemon_active_jobs(&status), 2);
 }
 
+/// A lost controller tunnel must not turn durable active work into permission
+/// to start another daemon generation.
+#[cfg(unix)]
+#[test]
+fn connect_fences_two_active_jobs_before_starting_a_new_daemon_generation() {
+    test_support::with_isolated_home(|home| {
+        let daemon = home.path().join("remote-homeboy");
+        let ensure_running = home.path().join("ensure-running");
+        std::fs::write(
+            &daemon,
+            format!(
+                r#"#!/bin/sh
+case "$1 $2" in
+  "self identity")
+    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test"}}}}'
+    ;;
+  "daemon status")
+    printf '%s\n' '{{"success":true,"data":{{"running":false,"fresh":false,"reachable":false,"freshness":{{"active_jobs":0}}}}}}'
+    ;;
+  "daemon ensure-running")
+    : > "{}"
+    ;;
+esac
+"#,
+                ensure_running.display()
+            ),
+        )
+        .expect("write remote Homeboy shim");
+        let mut permissions = std::fs::metadata(&daemon).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&daemon, permissions).expect("make shim executable");
+        server::create(
+            &serde_json::json!({ "id": "homeboy-lab", "host": "localhost", "user": "test" })
+                .to_string(),
+            false,
+        )
+        .expect("create local server");
+        crate::create(
+            &serde_json::json!({
+                "id": "homeboy-lab",
+                "kind": "ssh",
+                "homeboy_path": daemon,
+            })
+            .to_string(),
+            false,
+        )
+        .expect("create runner");
+        let active = direct_ssh_session("lease-active");
+        crate::generation_store::record_job("homeboy-lab", &active, "job-a")
+            .expect("record first active job");
+        crate::generation_store::record_job("homeboy-lab", &active, "job-b")
+            .expect("record second active job");
+
+        let (report, exit_code) = connect("homeboy-lab").expect("connect result");
+
+        assert_eq!(exit_code, 20);
+        assert!(!report.connected);
+        assert!(report
+            .failure_message
+            .as_deref()
+            .is_some_and(|message| message.contains("2 unresolved active job(s)")));
+        assert!(
+            !ensure_running.exists(),
+            "active generation fence must prevent daemon ensure-running"
+        );
+        let generations = crate::generation_store::status_projection("homeboy-lab", Some(&active))
+            .expect("generation projection");
+        assert_eq!(generations.len(), 1);
+        assert_eq!(generations[0].active_job_count, 2);
+    });
+}
+
 #[test]
 fn reattaches_active_daemon_without_changing_lease_or_pid() {
     let session = direct_ssh_session("lease-active");
@@ -2031,6 +2103,8 @@ fn idle_stale_replacement_uses_actual_endpoint_envelopes_and_reprobes_the_new_ow
                 &[],
                 None,
                 None,
+                None,
+                false,
             )
             .expect("replacement succeeds");
             assert_eq!(daemon.lease_id.as_deref(), Some("lease-new"));
@@ -2061,6 +2135,8 @@ fn idle_stale_replacement_refuses_a_post_stop_owner_or_identity_change() {
                 &[],
                 None,
                 None,
+                None,
+                false,
             )
             .expect_err("concurrent stale daemon is refused");
             assert!(error.contains("ownership changed"));
@@ -2085,6 +2161,8 @@ fn idle_stale_replacement_refuses_a_post_stop_identity_change() {
                 &[],
                 None,
                 None,
+                None,
+                false,
             )
             .expect_err("stale replacement identity is refused");
             assert!(error.contains("does not match configured runner binary"));
