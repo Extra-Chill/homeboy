@@ -1535,6 +1535,9 @@ pub fn status_with_options(
     if project_persisted_terminal_runner_events(&mut record)? {
         record = store::read_record(&resolved_run_id)?;
     }
+    if super::cancellation::reconcile_controller_job_cancellation(&mut record)? {
+        store::write_record(&record)?;
+    }
     if !record.state.is_terminal() {
         let controller_plan = store::read_controller_plan(&record.run_id)?;
         let controller_plan_path = store::controller_plan_path(&record.run_id)?

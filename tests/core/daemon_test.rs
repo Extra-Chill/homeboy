@@ -786,6 +786,88 @@ fn generic_cancel_rejects_running_controller_work_without_touching_its_driver() 
 }
 
 #[test]
+fn cancelling_running_controller_job_acknowledges_before_blocked_shutdown_finishes() {
+    let _home = HomeGuard::new();
+    let path = crate::paths::daemon_jobs_file().expect("jobs path");
+    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (cancellation_release, cancellation_rx) = mpsc::channel();
+    controller_job_driver::register_controller_job_driver(Arc::new(BlockingControllerDriver {
+        job_type: "test.bounded-cancellation",
+        started: started_tx,
+        release: Arc::new(Mutex::new(release_rx)),
+        cancellation_release,
+        executions: Arc::new(AtomicUsize::new(0)),
+        cancellations: Arc::new(AtomicUsize::new(0)),
+    }))
+    .expect("register bounded cancellation driver");
+    let submitted = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.bounded-cancellation", "version": 1, "idempotency_key": "bounded-cancel", "request": {}
+        })),
+        &store,
+    );
+    let job_id = uuid::Uuid::parse_str(
+        submitted.body["body"]["job"]["id"]
+            .as_str()
+            .expect("job id"),
+    )
+    .expect("valid job id");
+    assert_eq!(
+        route_with_body(
+            "POST",
+            &format!("/controller/jobs/{job_id}/start"),
+            None,
+            &store
+        )
+        .status_code,
+        200
+    );
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("driver started");
+
+    let started = Instant::now();
+    let acknowledgement = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{job_id}/cancel"),
+        Some(serde_json::json!({ "reason": "observing client disappeared" })),
+        &store,
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(acknowledgement.status_code, 200);
+    assert_eq!(
+        acknowledgement.body["body"]["cancellation"]["accepted"],
+        true
+    );
+    assert_eq!(
+        acknowledgement.body["body"]["cancellation"]["phase"],
+        "requested"
+    );
+    assert_eq!(
+        store.get(job_id).expect("pending job").status,
+        JobStatus::Running
+    );
+
+    release_tx
+        .send(())
+        .expect("release blocked provider shutdown");
+    cancellation_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("driver cancellation released provider work");
+    for _ in 0..200 {
+        if store.get(job_id).expect("job").status == JobStatus::Cancelled {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("controller job did not reconcile to cancelled after provider shutdown");
+}
+
+#[test]
 fn controller_terminal_persistence_retries_the_result_without_reexecuting_after_restart() {
     let _home = HomeGuard::new();
     let path = crate::paths::daemon_jobs_file().expect("jobs path");
@@ -1053,7 +1135,14 @@ fn controller_job_cancel_failure_is_diagnostic_and_non_cancelled() {
         None,
         &store,
     );
-    assert_eq!(cancelled.status_code, 400);
+    assert_eq!(cancelled.status_code, 200);
+    assert_eq!(cancelled.body["body"]["cancellation"]["accepted"], true);
+    for _ in 0..200 {
+        if store.get(job_id).expect("job").status == JobStatus::Failed {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert_eq!(store.get(job_id).expect("job").status, JobStatus::Failed);
     assert!(store.events(job_id).expect("events").iter().any(|event| {
         event
