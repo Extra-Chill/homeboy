@@ -2,6 +2,59 @@ use super::super::*;
 use types::RunnerDoctorStatus;
 
 #[test]
+fn healthy_session_health_probe_is_observational() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("addr");
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut buffer = [0; 4096];
+        std::io::Read::read(&mut stream, &mut buffer).expect("read request");
+        let body =
+            r#"{"success":true,"data":{"freshness":{"lease_id":"lease-doctor"},"pid":4242}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(), body
+        );
+        std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write response");
+    });
+    let session = RunnerSession {
+        runner_id: "homeboy-lab".to_string(),
+        mode: RunnerTunnelMode::DirectSsh,
+        role: homeboy::runner::runners::RunnerSessionRole::Controller,
+        server_id: Some("lab".to_string()),
+        controller_id: Some("controller".to_string()),
+        broker_url: None,
+        remote_daemon_address: Some("127.0.0.1:4000".to_string()),
+        local_port: Some(addr.port()),
+        local_url: Some(format!("http://{addr}")),
+        tunnel_pid: Some(1234),
+        remote_daemon_pid: Some(4242),
+        remote_daemon_lease_id: Some("lease-doctor".to_string()),
+        homeboy_version: "test".to_string(),
+        homeboy_build_identity: Some("homeboy test+doctor".to_string()),
+        connected_at: "2026-08-03T00:00:00Z".to_string(),
+        worker_identity: None,
+        worker_pid: None,
+        last_seen_at: None,
+        leaseless_recovery_evidence: None,
+    };
+    let before = serde_json::to_value(&session).expect("session snapshot");
+
+    let checks = probes::connected_daemon_health_checks_with_timeout(
+        "homeboy-lab",
+        &session,
+        std::time::Duration::from_secs(1),
+    );
+
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].status, RunnerDoctorStatus::Ok);
+    assert_eq!(
+        serde_json::to_value(&session).expect("session after"),
+        before
+    );
+}
+
+#[test]
 fn daemon_exec_probe_reports_structured_failure() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
     let addr = listener.local_addr().expect("addr");

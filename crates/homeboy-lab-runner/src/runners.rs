@@ -27,11 +27,11 @@ pub use crate::{
     BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
 };
 pub use crate::{
-    connect_reverse, disconnect, disconnect_local_recovery, download_remote_artifact,
-    evaluate_lab_runner_capabilities_for_runner, exec, execute_lab_offload,
-    hydrate_prepared_workspace_source_snapshot, is_remote_runner_artifact_path,
-    is_reportable_artifact_evidence_path, is_retrievable_runner_artifact,
-    lab_offload_changed_since_ref, lab_offload_metadata,
+    connect_reverse, diagnostic_status, disconnect, disconnect_local_recovery,
+    download_remote_artifact, evaluate_lab_runner_capabilities_for_runner, exec,
+    execute_lab_offload, hydrate_prepared_workspace_source_snapshot,
+    is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
+    is_retrievable_runner_artifact, lab_offload_changed_since_ref, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping, lab_runner_readiness, list_workspaces,
     mirror_connected_runner_run, mirrored_runner_job_identity, persisted_status,
     persisted_statuses, plan_homeboy_binary_refresh, plan_managed_runner_source_sync,

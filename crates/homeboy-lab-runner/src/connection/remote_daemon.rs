@@ -599,6 +599,7 @@ pub(super) enum RemoteDaemonConnectAction {
     Reattach,
     Start,
     ReplaceIdleStale,
+    ReplaceUnhealthyExactOwner,
 }
 
 pub(super) fn ensure_remote_daemon(
@@ -654,7 +655,8 @@ pub(super) fn ensure_remote_daemon(
             journal_ensure_running_replay(runner_id, homeboy, replacement_operation_id)?;
             return remote_daemon_ensure_running(client, homeboy, replacement_operation_id);
         }
-        RemoteDaemonConnectAction::ReplaceIdleStale => {
+        RemoteDaemonConnectAction::ReplaceIdleStale
+        | RemoteDaemonConnectAction::ReplaceUnhealthyExactOwner => {
             // Prove idempotent replacement support before stopping A. Otherwise
             // a controller response loss could leave no recoverable owner.
             negotiate_ensure_running_operation_id(client, homeboy, replacement_operation_id)?;
@@ -779,6 +781,37 @@ pub(super) fn remote_daemon_connect_action_for_runner(
     if parse_loopback_daemon_addr(&daemon.address).is_err() {
         return Err(format!(
             "reachable remote daemon did not report a loopback address; refusing to replace or persist a session{}",
+            active_job_recovery_guidance(status.active_jobs)
+        ));
+    }
+    if let Some(endpoint_error) = status.endpoint_probe_error.as_deref() {
+        let exact_owner = previous_session.is_some_and(|session| {
+            session.mode == RunnerTunnelMode::DirectSsh
+                && session.role == RunnerSessionRole::Controller
+                && session.remote_daemon_lease_id.as_deref() == daemon.lease_id.as_deref()
+                && session.remote_daemon_pid == daemon.pid
+                && session.remote_daemon_address.as_deref() == Some(daemon.address.as_str())
+                && session.homeboy_build_identity.as_deref().map(str::trim)
+                    == Some(expected_identity.trim())
+        });
+        if exact_owner && status.fresh && status.active_jobs == 0 {
+            return Ok(RemoteDaemonConnectAction::ReplaceUnhealthyExactOwner);
+        }
+        if live_lease_expectation == daemon.lease_id.as_deref().zip(daemon.pid) {
+            return Err(lease_reconciliation_failure(
+                previous_session
+                    .and_then(|session| session.remote_daemon_lease_id.as_deref())
+                    .unwrap_or("none or corrupt"),
+                daemon.lease_id.as_deref().expect("checked above"),
+                daemon,
+                status,
+                expected_identity,
+                runner_id,
+                live_lease_expectation,
+            ));
+        }
+        return Err(format!(
+            "remote daemon listener is unhealthy ({endpoint_error}); refusing replacement because exact lease/PID/address/build ownership with authoritatively zero active jobs was not proven{}",
             active_job_recovery_guidance(status.active_jobs)
         ));
     }
@@ -1414,7 +1447,7 @@ pub(super) fn remote_daemon_force_stop(
     lease_id: &str,
 ) -> std::result::Result<(), String> {
     let command = format!(
-        "{} daemon stop --force --lease-id {}",
+        "{} daemon stop --lease-id {}",
         shell::quote_arg(homeboy),
         shell::quote_arg(lease_id),
     );

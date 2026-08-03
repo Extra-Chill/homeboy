@@ -8,28 +8,32 @@ pub fn report(
     client: &SshClient,
     options: &RunnerDoctorOptions,
 ) -> RunnerDoctorOutput {
+    let _probe_limits = client.scoped_probe_limits(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(60),
+        "runner doctor",
+    );
+    let persisted_status = runner::diagnostic_status(runner_id).ok();
     if options.scope == RunnerDoctorScope::LabOffload {
-        match runner::status(runner_id) {
-            Ok(status) if !status.connected => {
-                return disconnected_report(runner_id, runner, server, status.daemon_freshness);
+        match persisted_status.as_ref() {
+            Some(status) if !status.connected => {
+                return disconnected_report(
+                    runner_id,
+                    runner,
+                    server,
+                    status.daemon_freshness.clone(),
+                );
             }
-            Err(_) => {
+            None => {
                 return disconnected_report(runner_id, runner, server, None);
             }
-            Ok(_) => {}
+            Some(_) => {}
         }
     }
     let workspace_root = runner
         .workspace_root
         .clone()
         .unwrap_or_else(|| ".".to_string());
-    let _probe_limits = (options.scope == RunnerDoctorScope::LabOffload).then(|| {
-        client.scoped_probe_limits(
-            std::time::Duration::from_secs(5),
-            std::time::Duration::from_secs(60),
-            "runner doctor",
-        )
-    });
     let artifact_root = default_artifact_root(client);
     let mut checks = Vec::new();
     let mut tools = BTreeMap::new();
@@ -224,11 +228,13 @@ pub fn report(
         .remaining_probe_budget()
         .unwrap_or(std::time::Duration::from_secs(5))
         .min(std::time::Duration::from_secs(5));
-    let daemon_checks = probes::connected_daemon_exec_checks_with_timeout(
-        runner_id,
-        &workspace_root,
-        daemon_timeout,
-    );
+    let daemon_checks = persisted_status
+        .as_ref()
+        .and_then(|status| status.session.as_ref())
+        .map(|session| {
+            probes::connected_daemon_health_checks_with_timeout(runner_id, session, daemon_timeout)
+        })
+        .unwrap_or_default();
     let daemon_timed_out = daemon_checks.iter().any(|check| {
         matches!(
             check.details.get("reason_code").map(String::as_str),

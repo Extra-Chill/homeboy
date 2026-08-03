@@ -146,7 +146,10 @@ homeboy runner doctor <runner-id> --scope lab-offload
 homeboy runner doctor <runner-id> --scope lab-offload --repair
 ```
 
-Diagnoses a local or configured SSH runner without mutating it. Use `local`,
+Diagnoses a local or configured SSH runner without mutating it. A connected
+session is read once from controller state and checked through a bounded
+`/health` request; doctor does not reconcile generations, create an exec job,
+replace the session, or tear down its tunnel. Use `local`,
 `localhost`, or `self` to inspect this machine without creating a runner record.
 The JSON payload uses `command: "runner.doctor"` and includes `runner_id`,
 `status`, `capabilities`, and warning/error details when a capability probe fails.
@@ -160,7 +163,7 @@ operator lifecycle actions. They do not currently expose dry-run contracts; use
 
 Use `--scope lab-offload` before serious Lab evidence runs. It adds checks for
 the configured runner Homeboy command, bare `homeboy` PATH resolution, preferred
-runner binaries, connected daemon exec readiness, and Sample Runtime runner-path
+runner binaries, connected daemon health readiness, and Sample Runtime runner-path
 freshness signals. When Homeboy can identify a safe exact recovery command, the
 check includes that remediation instead of leaving the operator to infer it from
 logs.
@@ -209,6 +212,12 @@ Without it, the JSON output includes follow-up `disconnect`, `connect`, and
 status` also reports controller, configured executable, active daemon version,
 build identity, drift signals, and refresh commands under
 `selected_lab_runner.runner_homeboy`.
+
+Reconnect rollback restores the exact previously selected binary and publishes
+its session. If any rollback phase fails, Homeboy retains
+`runner-sessions/<runner-id>/refresh-partial.json`; the error names that path and
+one `refresh-homeboy --select <previous-path> --reconnect` continuation command.
+Do not delete the receipt as a recovery step.
 
 When a configured SSH runner is disconnected, `refresh-homeboy` automatically
 uses its configured SSH server transport to run the same managed build/select
@@ -380,6 +389,15 @@ can use the daemon session instead of ad-hoc SSH command execution. The JSON
 payload uses `command: "runner.connect"` and reports connection state such as
 the runner ID, tunnel endpoint, daemon endpoint, and persisted session metadata.
 
+Reconnect distinguishes a healthy endpoint from a lost local tunnel, a live
+exact-owner PID whose recorded listener no longer answers, a dead PID with a
+retained lease, and an endpoint whose lease/PID identity differs from the
+controller record. Only the exact lease, PID, loopback address, configured build,
+and authoritatively zero durable jobs permit automatic unhealthy-listener
+replacement. The lease-bound stop rechecks the startup ownership token and job
+store before every signal. Active work, PID/lease drift, and ambiguous listener
+ownership remain fail-closed.
+
 When a controller session was lost while a remote daemon lease is dead and its
 durable jobs remain, inspect the remote `homeboy daemon status` first. Recovery
 requires the explicit exact-lease form shown above. It verifies the recorded PID
@@ -404,6 +422,12 @@ If replacement startup fails, the receipt retains the reconciled evidence and th
 same exact lease, PID, and endpoint inputs resume only replacement startup on
 retry. Different replay inputs fail closed, and a zero-active-job invocation
 without a matching receipt remains invalid.
+
+Every daemon returned by a replacement operation is journaled before tunnel
+health and endpoint identity checks. A retry authenticates and publishes those
+exact coordinates. If the recorded PID has died, a newer lease has superseded
+it, or the exact idle replacement listener is unhealthy, the stale journal is
+retired under the runner lock so it cannot pin a dead endpoint.
 
 When `daemon status` reports `stale_reason_code: lease_missing`, active jobs,
 and unavailable recovery evidence, run the explicit daemon reconciliation on the

@@ -76,6 +76,7 @@ pub fn run(args: DeferredWorkloadArgs) -> CmdResult<serde_json::Value> {
 }
 
 pub fn ensure_worker() -> homeboy::core::Result<()> {
+    let _start_lock = deferred_workload::acquire_worker_start_lock()?;
     ensure_worker_with(deferred_workload::worker_is_live, || {
         let executable = std::env::current_exe().map_err(|error| {
             homeboy::core::Error::internal_io(
@@ -115,6 +116,27 @@ pub fn ensure_worker() -> homeboy::core::Result<()> {
                 Some("spawn deferred workload worker".to_string()),
             )
         })?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if deferred_workload::worker_status()?
+                .as_ref()
+                .is_some_and(deferred_workload::worker_is_live)
+            {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        if deferred_workload::records()?.iter().any(|record| {
+            matches!(
+                record.state,
+                deferred_workload::DeferredWorkloadState::Deferred
+                    | deferred_workload::DeferredWorkloadState::Claimed
+            )
+        }) {
+            return Err(homeboy::core::Error::internal_unexpected(
+                "deferred workload worker did not publish live ownership within 5 seconds",
+            ));
+        }
         Ok(())
     })
 }
@@ -158,6 +180,7 @@ fn run_worker(startup_token: &str) -> homeboy::core::Result<()> {
     };
     std::env::set_var("HOMEBOY_DEFERRED_WORKLOAD_OWNER", startup_token);
     let owner = startup_token.to_string();
+    deferred_workload::write_worker_status(&owner, "starting", "probing runner readiness")?;
     deferred_workload::append_worker_log(format!("worker started owner={owner}"))?;
     run_worker_while_holding_lock(
         &lock,

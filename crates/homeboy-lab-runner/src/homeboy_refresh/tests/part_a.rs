@@ -1314,6 +1314,53 @@ fn rollback_failure_keeps_the_primary_refresh_error() {
 }
 
 #[test]
+fn rollback_failure_persists_one_exact_previous_binary_continuation() {
+    test_support::with_isolated_home(|_| {
+        let error = durable_refresh_partial_error(
+            Error::internal_unexpected("rollback reconnect failed"),
+            "lab runner",
+            Some("/stable builds/homeboy"),
+            true,
+        );
+        let path = error.details["partial_state_path"]
+            .as_str()
+            .expect("partial state path");
+        let state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).expect("durable partial state"))
+                .expect("partial state JSON");
+
+        assert_eq!(state["status"], "rollback_incomplete");
+        assert_eq!(state["previous_binary_path"], "/stable builds/homeboy");
+        assert_eq!(
+            state["continuation_command"],
+            "homeboy runner refresh-homeboy 'lab runner' --select '/stable builds/homeboy' --reconnect --force"
+        );
+        assert_eq!(
+            error.details["continuation_command"],
+            state["continuation_command"]
+        );
+    });
+}
+
+#[test]
+fn successful_rollback_does_not_publish_partial_state() {
+    test_support::with_isolated_home(|_| {
+        let primary = rollback_refresh_error_with::<(), _>(
+            Error::internal_unexpected("candidate connect failed"),
+            || Ok(()),
+        )
+        .expect_err("primary failure remains visible");
+        let error =
+            durable_refresh_partial_error_if_needed(primary, "lab", Some("/stable/homeboy"), false);
+
+        assert!(error.details.get("partial_state").is_none());
+        assert!(!refresh_partial_state_path("lab")
+            .expect("partial path")
+            .exists());
+    });
+}
+
+#[test]
 fn default_target_dir_is_ref_scoped() {
     assert_eq!(
         default_target_dir("/runner/ws/", "origin/main"),

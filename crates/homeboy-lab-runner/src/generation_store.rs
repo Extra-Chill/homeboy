@@ -48,7 +48,10 @@ struct ReplacementOperation {
     kind: Option<String>,
 }
 
-fn write_durable_json<T: serde::Serialize>(path: &std::path::Path, value: &T) -> Result<()> {
+pub(crate) fn write_durable_json<T: serde::Serialize>(
+    path: &std::path::Path,
+    value: &T,
+) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| Error::internal_unexpected("journal has no parent"))?;
@@ -480,6 +483,36 @@ pub(crate) fn record_replacement_operation_replay(
 pub(crate) fn record_pending_replacement(runner_id: &str, session: &RunnerSession) -> Result<()> {
     with_registry_lock(runner_id, || {
         write_durable_json(&pending_replacement_path(runner_id)?, session)
+    })
+}
+
+/// Retire an interrupted replacement only after the caller has re-probed the
+/// remote lease and proved that these recorded coordinates are no longer a
+/// publishable daemon. A later attempt receives a new operation identity.
+pub(crate) fn retire_pending_replacement(runner_id: &str) -> Result<String> {
+    with_registry_lock(runner_id, || {
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        // Publish the successor receipt before releasing the old coordinates.
+        // A crash can therefore leave both records, but never neither record.
+        write_durable_json(
+            &replacement_operation_path(runner_id)?,
+            &ReplacementOperation {
+                runner_id: runner_id.to_string(),
+                operation_id: operation_id.clone(),
+                replay_command: None,
+                kind: None,
+            },
+        )?;
+        let pending_path = pending_replacement_path(runner_id)?;
+        if pending_path.exists() {
+            std::fs::remove_file(&pending_path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("remove {}", pending_path.display())),
+                )
+            })?;
+        }
+        Ok(operation_id)
     })
 }
 
@@ -1449,6 +1482,32 @@ mod tests {
             last_seen_at: None,
             leaseless_recovery_evidence: None,
         }
+    }
+
+    #[test]
+    fn retiring_an_unpublishable_replacement_releases_its_endpoint_and_operation_identity() {
+        test_support::with_isolated_home(|_| {
+            let first_operation = replacement_operation("runner-a").expect("operation");
+            record_replacement_operation_replay("runner-a", "ensure-running", "replay")
+                .expect("replay journal");
+            record_pending_replacement("runner-a", &session("lease-dead", "127.0.0.1", None))
+                .expect("pending coordinates");
+
+            let next_operation =
+                retire_pending_replacement("runner-a").expect("retire dead pending replacement");
+
+            assert!(pending_replacement("runner-a")
+                .expect("read pending")
+                .is_none());
+            assert!(replacement_operation_replay("runner-a")
+                .expect("read replay")
+                .is_none());
+            assert_ne!(next_operation, first_operation);
+            assert_eq!(
+                replacement_operation("runner-a").expect("new operation"),
+                next_operation
+            );
+        });
     }
 
     #[derive(Default)]

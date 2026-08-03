@@ -643,6 +643,14 @@ pub fn refresh_homeboy_binary(
                     previous_homeboy_path.as_deref(),
                 )
                 .map(|_| ())
+            })
+            .map_err(|error| {
+                durable_refresh_partial_error_if_needed(
+                    error,
+                    &plan.runner_id,
+                    previous_homeboy_path.as_deref(),
+                    options.force,
+                )
             });
         }
         let (report, connect_exit_code) = match connect_with_orphan_adoption(
@@ -688,7 +696,15 @@ pub fn refresh_homeboy_binary(
                         }
                         Ok(())
                     },
-                );
+                )
+                .map_err(|error| {
+                    durable_refresh_partial_error_if_needed(
+                        error,
+                        &plan.runner_id,
+                        previous_homeboy_path.as_deref(),
+                        options.force,
+                    )
+                });
             }
         };
         let daemon_identity_verification = (connect_exit_code == 0)
@@ -707,7 +723,12 @@ pub fn refresh_homeboy_binary(
                 previous_homeboy_path.as_deref(),
                 options.force,
             ) {
-                return Err(reconnect_rollback_error(&report, rollback_error));
+                return Err(reconnect_rollback_error(
+                    &report,
+                    rollback_error,
+                    previous_homeboy_path.as_deref(),
+                    options.force,
+                ));
             }
             return Ok((
                 HomeboyBinaryRefreshOutput {
@@ -757,7 +778,12 @@ pub fn refresh_homeboy_binary(
                     previous_homeboy_path.as_deref(),
                     options.force,
                 ) {
-                    return Err(reconnect_rollback_error(&report, rollback_error));
+                    return Err(reconnect_rollback_error(
+                        &report,
+                        rollback_error,
+                        previous_homeboy_path.as_deref(),
+                        options.force,
+                    ));
                 }
                 return Ok((
                     HomeboyBinaryRefreshOutput {
@@ -791,6 +817,9 @@ pub fn refresh_homeboy_binary(
         interrupted_job_ids = Vec::new();
     }
 
+    if daemon_refreshed {
+        clear_refresh_partial_state(&plan.runner_id)?;
+    }
     Ok((
         HomeboyBinaryRefreshOutput {
             variant: "refresh_homeboy",
@@ -1936,7 +1965,12 @@ where
     Err(primary_error)
 }
 
-fn reconnect_rollback_error(report: &super::RunnerConnectReport, rollback_error: Error) -> Error {
+fn reconnect_rollback_error(
+    report: &super::RunnerConnectReport,
+    rollback_error: Error,
+    previous_homeboy_path: Option<&str>,
+    force: bool,
+) -> Error {
     let primary_error = Error::validation_invalid_argument(
         "reconnect",
         report
@@ -1957,7 +1991,81 @@ fn reconnect_rollback_error(report: &super::RunnerConnectReport, rollback_error:
         "message": rollback_error.message,
         "details": rollback_error.details,
     });
+    durable_refresh_partial_error(error, &report.runner_id, previous_homeboy_path, force)
+}
+
+fn durable_refresh_partial_error(
+    mut error: Error,
+    runner_id: &str,
+    previous_homeboy_path: Option<&str>,
+    force: bool,
+) -> Error {
+    let previous = previous_homeboy_path.unwrap_or("homeboy");
+    let continuation_command = format!(
+        "homeboy runner refresh-homeboy {} --select {} --reconnect{}",
+        quote_arg(runner_id),
+        quote_arg(previous),
+        if force { " --force" } else { "" },
+    );
+    let state = serde_json::json!({
+        "schema": "homeboy/runner-refresh-partial/v1",
+        "runner_id": runner_id,
+        "status": "rollback_incomplete",
+        "previous_binary_path": previous,
+        "continuation_command": continuation_command,
+        "recorded_at": chrono::Utc::now().to_rfc3339(),
+    });
+    let path = refresh_partial_state_path(runner_id);
+    match path.and_then(|path| {
+        super::generation_store::write_durable_json(&path, &state)?;
+        Ok(path)
+    }) {
+        Ok(path) => {
+            error.details["partial_state"] = state;
+            error.details["partial_state_path"] =
+                serde_json::Value::String(path.display().to_string());
+            error.details["continuation_command"] = serde_json::Value::String(continuation_command);
+        }
+        Err(write_error) => {
+            error.message = format!(
+                "{}; additionally failed to persist rollback continuation state: {}",
+                error.message, write_error.message
+            );
+        }
+    }
     error
+}
+
+fn refresh_partial_state_path(runner_id: &str) -> Result<PathBuf> {
+    Ok(homeboy_core::paths::runner_sessions_dir()?
+        .join(homeboy_core::paths::sanitize_path_segment(runner_id))
+        .join("refresh-partial.json"))
+}
+
+fn clear_refresh_partial_state(runner_id: &str) -> Result<()> {
+    let path = refresh_partial_state_path(runner_id)?;
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("remove {}", path.display())),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn durable_refresh_partial_error_if_needed(
+    error: Error,
+    runner_id: &str,
+    previous_homeboy_path: Option<&str>,
+    force: bool,
+) -> Error {
+    if error.details.get("rollback_error").is_some() {
+        durable_refresh_partial_error(error, runner_id, previous_homeboy_path, force)
+    } else {
+        error
+    }
 }
 
 fn error_context(error: &Error) -> String {
