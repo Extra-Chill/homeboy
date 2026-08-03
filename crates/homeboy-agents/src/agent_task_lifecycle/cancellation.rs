@@ -132,36 +132,46 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
         return Ok(record);
     }
 
-    // Staging is controller-local work, not a runner child. Its terminal
-    // confirmation is required before this parent can become Cancelled.
+    // Staging is controller-local work, not a runner child. Persist the request
+    // and its owner before asking the daemon to stop it; provider shutdown can
+    // take arbitrarily long after the observing CLI has gone away.
     let controller_cancelled = if let Some(controller_job_id) = record
         .metadata
         .get("lab_staging_controller_job_id")
         .and_then(serde_json::Value::as_str)
         .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
     {
+        let cancellation_reason = reason.unwrap_or("agent-task cancellation requested");
+        let metadata = record.ensure_metadata_object();
+        metadata.insert(
+            "controller_job_cancellation".to_string(),
+            json!({
+                "controller_job_id": controller_job_id,
+                "phase": "requesting",
+                "reason": cancellation_reason,
+                "requested_at": now_timestamp(),
+            }),
+        );
+        store::write_record(&record)?;
         // The controller owns every child admitted during staging, including the
         // final runner job. Never bypass it merely because that child identity
         // was already projected onto the parent.
         let controller_job = homeboy_core::daemon::LocalControllerJobClient::connect()?
-            .cancel_and_wait(
-                controller_job_id,
-                reason.unwrap_or("agent-task cancellation requested"),
-            )?;
+            .cancel(&controller_job_id, cancellation_reason)?;
         let metadata = record.ensure_metadata_object();
         metadata.insert(
             "controller_job_cancellation".to_string(),
             json!({
                 "controller_job_id": controller_job.id,
                 "status": controller_job.status,
-                "confirmed": true,
+                "phase": if controller_job.status == homeboy_core::api_jobs::JobStatus::Cancelled { "cancelled" } else { "requested" },
+                "reason": cancellation_reason,
+                "requested_at": now_timestamp(),
             }),
         );
         store::write_record(&record)?;
-        // The controller cancellation projects owned child state. Re-read once
-        // after its terminal confirmation before finalizing this parent.
-        record = store::read_record(&record.run_id)?;
-        if record.state.is_terminal() {
+        if controller_job.status != homeboy_core::api_jobs::JobStatus::Cancelled {
             return Ok(record);
         }
         true
@@ -308,6 +318,88 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
         homeboy_core::controller_runtime::cancel_admission(&record.run_id)?;
     }
     Ok(record)
+}
+
+/// Reconcile an asynchronously cancelled controller-owned staging job. This is
+/// read-side so a CLI that observed only the acknowledgement still converges the
+/// durable cook record after the provider exits.
+pub(super) fn reconcile_controller_job_cancellation(
+    record: &mut AgentTaskRunRecord,
+) -> Result<bool> {
+    let Some(cancellation) = record
+        .metadata
+        .get("controller_job_cancellation")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(false);
+    };
+    if cancellation
+        .get("phase")
+        .and_then(serde_json::Value::as_str)
+        != Some("requested")
+    {
+        return Ok(false);
+    }
+    let Some(job_id) = cancellation
+        .get("controller_job_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+    else {
+        return Ok(false);
+    };
+
+    let job = match homeboy_core::daemon::LocalControllerJobClient::connect()
+        .and_then(|client| client.status(job_id))
+    {
+        Ok(job) => job,
+        Err(error) => {
+            record.ensure_metadata_object().insert(
+                "controller_job_cancellation_status_error".to_string(),
+                json!({ "checked_at": now_timestamp(), "error": error.message }),
+            );
+            return Ok(true);
+        }
+    };
+    let metadata = record.ensure_metadata_object();
+    metadata.remove("controller_job_cancellation_status_error");
+    if job.status != homeboy_core::api_jobs::JobStatus::Cancelled {
+        metadata.insert(
+            "controller_job_cancellation".to_string(),
+            json!({
+                "controller_job_id": job.id,
+                "status": job.status,
+                "phase": "requested",
+                "last_checked_at": now_timestamp(),
+            }),
+        );
+        return Ok(true);
+    }
+
+    let cancelled_at = now_timestamp();
+    set_run_state(record, AgentTaskRunState::Cancelled);
+    for task in &mut record.tasks {
+        if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
+            task.state = AgentTaskState::Cancelled;
+        }
+    }
+    let metadata = record.ensure_metadata_object();
+    terminalize_running_provider_executions(metadata, &cancelled_at);
+    metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
+    metadata.insert(
+        "controller_job_cancellation".to_string(),
+        json!({
+            "controller_job_id": job.id,
+            "status": job.status,
+            "phase": "cancelled",
+            "confirmed_at": now_timestamp(),
+        }),
+    );
+    metadata.remove(METADATA_KEY_STALE_RUNNING);
+    metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
+    record.updated_at = Some(now_timestamp());
+    crate::controller_scratch::finalize_run(&record.run_id)?;
+    homeboy_core::controller_runtime::cancel_admission(&record.run_id)?;
+    Ok(true)
 }
 
 /// Outcome of attempting live cancellation of a running run's provider process

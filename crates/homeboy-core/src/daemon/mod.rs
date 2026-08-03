@@ -184,9 +184,9 @@ impl LocalControllerJobClient {
         })
     }
 
-    /// Requests cancellation and returns only after the daemon confirms the
-    /// owned controller work reached `Cancelled`.
-    pub fn cancel_and_wait(&self, job_id: &str, reason: &str) -> Result<crate::api_jobs::Job> {
+    /// Persist a cancellation request and return the daemon's current job
+    /// projection. The controller continues provider shutdown asynchronously.
+    pub fn cancel(&self, job_id: &str, reason: &str) -> Result<crate::api_jobs::Job> {
         let response = self
             .client
             .post(format!("{}/controller/jobs/{job_id}/cancel", self.endpoint))
@@ -208,7 +208,7 @@ impl LocalControllerJobClient {
             || value.get("success").and_then(serde_json::Value::as_bool) != Some(true)
         {
             return Err(Error::internal_unexpected(format!(
-                "local controller job `{job_id}` cancellation was not confirmed: {value}"
+                "local controller job `{job_id}` cancellation was not accepted: {value}"
             )));
         }
         let job: crate::api_jobs::Job =
@@ -221,12 +221,6 @@ impl LocalControllerJobClient {
                     Some("parse local controller job".to_string()),
                 )
             })?;
-        if job.status != JobStatus::Cancelled {
-            return Err(Error::internal_unexpected(format!(
-                "local controller job `{job_id}` remains {} after cancellation",
-                job.status.daemon_status_label()
-            )));
-        }
         Ok(job)
     }
 
@@ -2819,52 +2813,13 @@ fn cancel_controller_job(
     {
         let _ = runtime.cancel.send(());
     }
-    if job.status == JobStatus::Cancelled {
-        return Ok(json!({ "job": job }));
-    }
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let job = job_store.get(job_id)?;
-        match job.status {
-            JobStatus::Cancelled => return Ok(json!({ "job": job })),
-            JobStatus::Failed => {
-                return Err(Error::validation_invalid_argument(
-                    "job_id",
-                    "controller job cancellation failed; inspect the durable job events",
-                    Some(job_id.to_string()),
-                    None,
-                ));
-            }
-            JobStatus::Succeeded => {
-                return Err(Error::validation_invalid_argument(
-                    "job_id",
-                    "controller job completed before cancellation could stop it",
-                    Some(job_id.to_string()),
-                    None,
-                ));
-            }
-            JobStatus::Queued | JobStatus::Running if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            JobStatus::Queued | JobStatus::Running => {
-                let _ = job_store.append_event(
-                    job_id,
-                    crate::api_jobs::JobEventKind::Error,
-                    Some(
-                        "controller job cancellation did not complete before the daemon timeout"
-                            .to_string(),
-                    ),
-                    Some(json!({ "phase": "cancellation_timeout" })),
-                );
-                return Err(Error::validation_invalid_argument(
-                    "job_id",
-                    "controller job cancellation is still pending; inspect the durable job events",
-                    Some(job_id.to_string()),
-                    None,
-                ));
-            }
-        }
-    }
+    Ok(json!({
+        "job": job,
+        "cancellation": {
+            "accepted": true,
+            "phase": if job.status == JobStatus::Cancelled { "cancelled" } else { "requested" },
+        },
+    }))
 }
 
 fn controller_job_id_from_path(path: &str, suffix: &str) -> Result<Uuid> {
