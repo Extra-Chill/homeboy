@@ -280,9 +280,9 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
         let latest_attempt_run_id = selection["latest_attempt_run_id"].as_str();
         if latest_attempt_run_id.is_some_and(|latest| latest != record.run_id) {
             if let Ok(latest) = agent_task_lifecycle::status(latest_attempt_run_id.unwrap()) {
-                let review_form = completed_run_aggregate_source(&latest.run_id)
+                let review_form = super::status::completed_run_aggregate(&latest.run_id)
                     .transpose()?
-                    .and_then(|(aggregate, _)| {
+                    .and_then(|aggregate| {
                         aggregate
                             .selected_outcome()
                             .or_else(|| {
