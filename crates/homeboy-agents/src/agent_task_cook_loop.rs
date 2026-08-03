@@ -432,6 +432,7 @@ fn build_follow_up_request(
         .root
         .clone()
         .or_else(|| worktree_root_hint(&options.promotion_report));
+    request.policy.grant_workspace_read_tool();
     request.metadata = json!({
         "cook_loop": {
             "kind": "deterministic-gate-feedback",
@@ -516,6 +517,7 @@ fn build_review_form_follow_up_request(
         .root
         .clone()
         .or_else(|| worktree_root_hint(&options.promotion_report));
+    request.policy.grant_workspace_read_tool();
     request.executor.required_capabilities = vec!["structured_outcome".to_string()];
     request.policy.write = "none".to_string();
     request.policy.apply = "none".to_string();
@@ -892,7 +894,7 @@ mod tests {
     use super::*;
     use crate::agent_task::{
         AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
-        AGENT_TASK_REQUEST_SCHEMA,
+        AgentToolExecutionLocation, AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::agent_task_gate::{AgentTaskGateEnvironment, AgentTaskGateFailureEvidence};
     use crate::agent_task_promotion::{
@@ -937,6 +939,12 @@ mod tests {
             "homeboy://agent-task/run/run-3676"
         );
         assert_eq!(request.workspace.mode, AgentTaskWorkspaceMode::Existing);
+        assert!(request.policy.permits_workspace_read_tool());
+        assert_eq!(
+            request.policy.tools.execution_location_for("read"),
+            AgentToolExecutionLocation::Runner
+        );
+        assert_eq!(request.policy.write, "artifacts_only");
     }
 
     #[test]
@@ -1584,6 +1592,7 @@ mod tests {
         );
         assert_eq!(request.policy.write, "none");
         assert_eq!(request.policy.apply, "none");
+        assert!(request.policy.permits_workspace_read_tool());
     }
 
     #[test]
