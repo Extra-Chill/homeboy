@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.27] - 2026-08-03
+
+### Fixed
+- stabilize phpstan scoped smoke
+
 ## [3.34.26] - 2026-08-03
 
 ### Fixed
