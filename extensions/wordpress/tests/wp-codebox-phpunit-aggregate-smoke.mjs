@@ -21,7 +21,31 @@ await mkdir(dependency);
 await mkdir(dataMachine);
 await mkdir(conflictingDataMachine, { recursive: true });
 await writeFile(path.join(component, 'component.php'), '<?php /* Plugin Name: Component */\n');
-await writeFile(path.join(component, 'tests', 'bootstrap.php'), '<?php require_once __DIR__ . "/../component.php";\n');
+await writeFile(path.join(component, 'tests', 'bootstrap.php'), `<?php
+if (class_exists('WP_Post', false)) {
+    throw new RuntimeException('WordPress was loaded before the project bootstrap');
+}
+if (!class_exists('WP_Post', false)) {
+    class WP_Post {}
+}
+if (!function_exists('add_action')) {
+    function add_action() { return true; }
+}
+`);
+await mkdir(path.join(component, 'tests', 'nested'));
+await writeFile(path.join(component, 'tests', 'FirstTest.php'), `<?php
+use PHPUnit\\Framework\\TestCase;
+final class FirstTest extends TestCase {
+    public function test_project_stub_is_loaded(): void { $this->assertInstanceOf(WP_Post::class, new WP_Post()); }
+}
+`);
+await writeFile(path.join(component, 'tests', 'nested', 'SecondTest.php'), `<?php
+use PHPUnit\\Framework\\TestCase;
+final class SecondTest extends TestCase {
+    public function test_nested_xml_test_is_discovered(): void { $this->assertTrue(add_action()); }
+}
+`);
+await writeFile(path.join(component, 'tests', 'override.php'), '<?php require_once __DIR__ . "/bootstrap.php";\n');
 await writeFile(path.join(component, 'phpunit.xml.dist'), '<phpunit bootstrap="tests/bootstrap.php"><testsuites><testsuite name="suite"><directory>tests</directory></testsuite></testsuites></phpunit>\n');
 await writeFile(path.join(dependency, 'dependency.php'), '<?php /* Plugin Name: Dependency */\n');
 await writeFile(path.join(dataMachine, 'data-machine.php'), '<?php /* Plugin Name: Data Machine */\n');
@@ -50,6 +74,10 @@ process.exitCode = fixture.exitCode || 0;
 await chmod(cli, 0o755);
 
 try {
+  const nativeSuite = spawnSync(path.join(extension, 'vendor', 'bin', 'phpunit'), ['--configuration', path.join(component, 'phpunit.xml.dist')], { encoding: 'utf8' });
+  assert.equal(nativeSuite.status, 0, nativeSuite.stderr || nativeSuite.stdout);
+  assert.match(nativeSuite.stdout, /OK \(2 tests, 2 assertions\)/);
+
   const unknownSidecar = { schema: 'wp-codebox/test-results/v1', status: 'unknown', summary: { total: 0, passed: 0, failed: 0, skipped: 0 } };
   const tenPassingSidecar = { schema: 'wp-codebox/test-results/v1', status: 'passed', summary: { total: 10, passed: 10, failed: 0, skipped: 0 }, suites: [], rawLogReferences: [] };
   const passedSidecar = { schema: 'wp-codebox/test-results/v1', status: 'passed', summary: { total: 3, passed: 3, failed: 0, skipped: 0 }, suites: [], rawLogReferences: [] };
@@ -68,10 +96,16 @@ try {
     { name: 'missing-sidecar', fixture: { output: green }, status: 1, artifactStatus: 'unknown', expected: { total: 3, passed: 3, failed: 0, skipped: 0 } },
     { name: 'malformed-pointer', fixture: { pointer: 'malformed', output: green }, status: 1, artifactStatus: 'unknown', expected: { total: 3, passed: 3, failed: 0, skipped: 0 } },
     { name: 'errors-and-failures', fixture: { sidecar: unknownSidecar, output: failures, exitCode: 2 }, status: 2, artifactStatus: 'failed', expected: { total: 281, passed: 135, failed: 146, skipped: 0 } },
-    { name: 'managed-passed', fixture: { sidecar: passedSidecar }, status: 0, artifactStatus: 'passed', expected: { total: 3, passed: 3, failed: 0, skipped: 0 } },
+    { name: 'managed-passed', fixture: { sidecar: passedSidecar }, settings: { wp_codebox_phpunit_bootstrap_mode: 'managed' }, status: 0, artifactStatus: 'passed', expected: { total: 3, passed: 3, failed: 0, skipped: 0 } },
+    { name: 'project-bootstrap-from-xml', fixture: { sidecar: passedSidecar }, settings: { wp_codebox_phpunit_bootstrap_mode: 'project' }, status: 0, artifactStatus: 'passed', expected: { total: 3, passed: 3, failed: 0, skipped: 0 } },
+    { name: 'project-bootstrap-override', fixture: { sidecar: passedSidecar }, settings: { wp_codebox_phpunit_bootstrap_mode: 'project', wp_codebox_phpunit_project_bootstrap: 'tests/override.php' }, status: 0, artifactStatus: 'passed', expected: { total: 3, passed: 3, failed: 0, skipped: 0 }, projectBootstrap: 'tests/override.php' },
+    { name: 'auto-without-bootstrap', fixture: { sidecar: passedSidecar }, status: 0, artifactStatus: 'passed', expected: { total: 3, passed: 3, failed: 0, skipped: 0 }, noBootstrap: true, bootstrapMode: 'managed' },
     { name: 'crash', fixture: { crash: true, output: failures, exitCode: 2 }, status: 2, artifactStatus: 'failed', expected: { total: 281, passed: 135, failed: 146, skipped: 0 } },
   ];
   for (const testCase of testCases) {
+    await writeFile(path.join(component, 'phpunit.xml.dist'), testCase.noBootstrap
+      ? '<phpunit><testsuites><testsuite name="suite"><directory>tests</directory></testsuite></testsuites></phpunit>\n'
+      : '<phpunit bootstrap="tests/bootstrap.php"><testsuites><testsuite name="suite"><directory>tests</directory></testsuite></testsuites></phpunit>\n');
     const artifacts = path.join(root, `${testCase.name}-artifacts`);
     const results = path.join(root, `${testCase.name}-results.json`);
     const invocationArtifacts = path.join(root, `${testCase.name}-invocation-artifacts`);
@@ -101,7 +135,10 @@ try {
     const provenance = JSON.parse(await readFile(path.join(runArtifact, 'wp-codebox-phpunit-provenance.json'), 'utf8'));
     assert.equal(options.extra_plugins[1].activate, true);
     assert.equal(options.phpunitXml, '/wordpress/wp-content/plugins/component/phpunit.xml.dist');
-    assert.equal(profile.phpunit.environment, 'standalone-php');
+    assert.equal(options.autoloadFile, '/wp-codebox-vendor/autoload.php');
+    assert.equal(options.bootstrapMode, testCase.bootstrapMode || (testCase.settings?.wp_codebox_phpunit_bootstrap_mode === 'managed' ? 'managed' : 'project'));
+    assert.equal(options.projectBootstrap || '', testCase.projectBootstrap || '');
+    assert.equal(profile.phpunit.environment, testCase.noBootstrap ? 'wordpress-integration' : 'standalone-php');
     assert.deepEqual(provenance.source_refs, [
       { slug: 'component', source: component, source_subpath: null },
       { slug: 'dependency', source: dependency },

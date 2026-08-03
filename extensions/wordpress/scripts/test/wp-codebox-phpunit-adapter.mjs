@@ -23,6 +23,7 @@ const root = settings.wp_codebox_source_root || componentPath;
 const subpath = settings.wp_codebox_source_subpath || undefined;
 const pluginSourceDirectory = subpath ? path.join(root, subpath) : root;
 const phpunitProfile = await resolvePhpunitProfile(settings, pluginSourceDirectory, slug);
+const phpunitBootstrap = resolvePhpunitBootstrap(settings, phpunitProfile);
 const topology = await resolveWordPressTopology(settings, pluginSourceDirectory);
 const databaseService = resolveDatabaseService(settings, process.env);
 requireDatabaseServiceCapability(databaseService);
@@ -54,8 +55,9 @@ const options = clean({
   phpunitArgs: process.argv.slice(2),
   env: settings.bench_env,
   wpConfigDefines: settings.wp_config_defines,
-  bootstrapMode: settings.wp_codebox_phpunit_bootstrap_mode,
-  projectBootstrap: settings.wp_codebox_phpunit_project_bootstrap,
+  autoloadFile: '/wp-codebox-vendor/autoload.php',
+  bootstrapMode: phpunitBootstrap.mode,
+  projectBootstrap: phpunitBootstrap.projectBootstrap,
   multisite: topology.multisite,
   preloadFiles: settings.wp_codebox_phpunit_preload_files,
   mounts: [...canonicalMounts(settings.wp_codebox_phpunit_mounts), { source: harnessSource, target: '/wp-codebox-vendor', mode: 'readonly' }],
@@ -912,10 +914,11 @@ async function resolvePhpunitProfile(configuration, pluginDirectory, pluginSlug)
   const testRoot = configuration.wp_codebox_phpunit_test_root || `${sandboxRoot}/tests`;
   const cwd = configuration.wp_codebox_phpunit_cwd || sandboxRoot;
   let environment = 'wordpress-integration';
+  let bootstrap = '';
   if (hostConfig) {
     try {
       const xml = await readFile(hostConfig, 'utf8');
-      const bootstrap = xml.match(/\bbootstrap\s*=\s*["']([^"']+)["']/i)?.[1];
+      bootstrap = xml.match(/\bbootstrap\s*=\s*["']([^"']+)["']/i)?.[1] || '';
       if (bootstrap) {
         const bootstrapPath = path.resolve(path.dirname(hostConfig), bootstrap);
         const source = await readFile(bootstrapPath, 'utf8').catch(() => '');
@@ -923,14 +926,31 @@ async function resolvePhpunitProfile(configuration, pluginDirectory, pluginSlug)
       }
     } catch {}
   }
-  return { config, testRoot, cwd, environment, hostConfig };
+  return { config, testRoot, cwd, environment, hostConfig, bootstrap };
+}
+function resolvePhpunitBootstrap(configuration, profile) {
+  const requestedMode = configuration.wp_codebox_phpunit_bootstrap_mode || 'auto';
+  if (!['auto', 'managed', 'project'].includes(requestedMode)) {
+    throw new Error(`Unsupported WP Codebox PHPUnit bootstrap mode: ${requestedMode}`);
+  }
+  let mode = requestedMode;
+  if (requestedMode === 'auto') {
+    mode = profile.bootstrap ? 'project' : 'managed';
+  }
+  const override = typeof configuration.wp_codebox_phpunit_project_bootstrap === 'string'
+    ? configuration.wp_codebox_phpunit_project_bootstrap.trim()
+    : '';
+  return {
+    mode,
+    projectBootstrap: mode === 'project' ? override : '',
+  };
 }
 async function persistRecipeEvidence(artifactDirectory, recipeOptions, generatedRecipePath, profile, resolvedDependencies) {
   const sourceRefs = [{ slug, source: root, source_subpath: subpath || null }, ...resolvedDependencies.map((dependency) => ({ slug: dependency.slug, source: dependency.source }))];
   await Promise.all([
     copyFile(generatedRecipePath, path.join(artifactDirectory, 'wp-codebox-phpunit-recipe.json')),
     writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-recipe-options.json'), `${JSON.stringify(recipeOptions, null, 2)}\n`),
-    writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-profile.json'), `${JSON.stringify({ wordpress: { topology }, phpunit: { config: profile.config, cwd: profile.cwd, test_root: profile.testRoot, environment: profile.environment, bootstrap_mode: recipeOptions.bootstrapMode, passthrough_args: recipeOptions.phpunitArgs, extra_mounts: recipeOptions.mounts } }, null, 2)}\n`),
+    writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-profile.json'), `${JSON.stringify({ wordpress: { topology }, phpunit: { config: profile.config, cwd: profile.cwd, test_root: profile.testRoot, environment: profile.environment, bootstrap_mode: recipeOptions.bootstrapMode, project_bootstrap: recipeOptions.projectBootstrap || null, passthrough_args: recipeOptions.phpunitArgs, extra_mounts: recipeOptions.mounts } }, null, 2)}\n`),
     writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-provenance.json'), `${JSON.stringify({ source_refs: sourceRefs, wp_codebox: { cli_bin: process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox', resolved_cli_path: process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox', command: [process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox'] } }, null, 2)}\n`),
   ]);
 }
