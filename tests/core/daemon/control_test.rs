@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::{mpsc, Arc, Barrier, Mutex};
@@ -10,6 +11,7 @@ use super::{
     fetch_artifact_to_path, observe_startup_lease,
     reconcile_dead_lease_and_ensure_running_with_operations,
     reconcile_leaseless_orphan_store_with_operations,
+    terminate_token_owned_startup_process_with_operations,
 };
 use crate::api_jobs::{JobEventKind, JobStatus, JobStore};
 use crate::build_identity::BuildIdentity;
@@ -17,6 +19,7 @@ use crate::daemon::{
     DaemonFreshnessReport, DaemonRuntimeSnapshot, DaemonStaleReasonCode, DaemonState, DaemonStatus,
     DaemonTerminationClassification, DaemonTerminationEvidence,
 };
+use crate::process::{SIGNAL_KILL, SIGNAL_TERMINATE};
 use crate::test_support::with_isolated_home;
 
 #[cfg(unix)]
@@ -1466,6 +1469,79 @@ fn startup_observation_waits_for_delayed_token_without_provider_work() {
     .expect("observe delayed startup")
     .expect("matching delayed token is ready");
     assert_eq!(result.lease_id, "lease-new");
+}
+
+#[test]
+fn startup_cleanup_bounds_signals_and_revalidates_ownership_before_sigkill() {
+    let pid = 4343;
+    let token = "attempt-token";
+
+    let mut cooperative_signals = Vec::new();
+    let signal = terminate_token_owned_startup_process_with_operations(
+        pid,
+        token,
+        Duration::from_millis(1),
+        |_, _| Ok(true),
+        |_, signal| {
+            cooperative_signals.push(signal);
+            Ok(())
+        },
+        |_, _| true,
+    )
+    .expect("cooperative cleanup");
+    assert_eq!(signal, "SIGTERM");
+    assert_eq!(cooperative_signals, vec![SIGNAL_TERMINATE]);
+
+    let mut escalation_ownership = VecDeque::from([true, true]);
+    let mut escalation_waits = VecDeque::from([false, true]);
+    let mut escalation_signals = Vec::new();
+    let signal = terminate_token_owned_startup_process_with_operations(
+        pid,
+        token,
+        Duration::from_millis(1),
+        |_, _| Ok(escalation_ownership.pop_front().expect("ownership probe")),
+        |_, signal| {
+            escalation_signals.push(signal);
+            Ok(())
+        },
+        |_, _| escalation_waits.pop_front().expect("exit probe"),
+    )
+    .expect("escalated cleanup");
+    assert_eq!(signal, "SIGKILL");
+    assert_eq!(escalation_signals, vec![SIGNAL_TERMINATE, SIGNAL_KILL]);
+
+    let mut lost_ownership = VecDeque::from([true, false]);
+    let mut lost_signals = Vec::new();
+    let error = terminate_token_owned_startup_process_with_operations(
+        pid,
+        token,
+        Duration::from_millis(1),
+        |_, _| Ok(lost_ownership.pop_front().expect("ownership probe")),
+        |_, signal| {
+            lost_signals.push(signal);
+            Ok(())
+        },
+        |_, _| false,
+    )
+    .expect_err("ownership loss must refuse SIGKILL");
+    assert!(error
+        .to_string()
+        .contains("lost daemon startup-token ownership"));
+    assert_eq!(lost_signals, vec![SIGNAL_TERMINATE]);
+
+    let mut survival_waits = VecDeque::from([false, false]);
+    let error = terminate_token_owned_startup_process_with_operations(
+        pid,
+        token,
+        Duration::from_millis(1),
+        |_, _| Ok(true),
+        |_, _| Ok(()),
+        |_, _| survival_waits.pop_front().expect("exit probe"),
+    )
+    .expect_err("SIGKILL survival must fail");
+    assert!(error
+        .to_string()
+        .contains("survived bounded SIGTERM-to-SIGKILL escalation"));
 }
 
 #[test]

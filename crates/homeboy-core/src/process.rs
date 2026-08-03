@@ -466,30 +466,6 @@ fn environment_contains_assignment(environment: &[u8], expected: &[u8]) -> bool 
         .any(|entry| entry == expected)
 }
 
-/// Send SIGTERM to a recorded PID and prove it exited within `timeout`.
-/// Platform-specific signaling stays in this process abstraction so lifecycle
-/// callers do not need to issue ad hoc shell commands.
-pub(crate) fn terminate_pid_with_sigterm_and_wait(pid: u32, timeout: Duration) -> Result<()> {
-    if pid == 0 || pid > i32::MAX as u32 {
-        return Err(Error::validation_invalid_argument(
-            "pid",
-            "recorded process PID is invalid",
-            Some(pid.to_string()),
-            None,
-        ));
-    }
-
-    signal_pid(pid, libc::SIGTERM)?;
-    if wait_for_pid_exit(pid, timeout) {
-        Ok(())
-    } else {
-        Err(Error::internal_unexpected(format!(
-            "process {pid} remained alive for {}ms after SIGTERM",
-            timeout.as_millis()
-        )))
-    }
-}
-
 /// Deliver one Unix signal to an exact PID. Ownership validation belongs to the
 /// caller because persisted protocol tokens are product-level evidence.
 pub(crate) fn signal_pid(pid: u32, signal: libc::c_int) -> Result<()> {

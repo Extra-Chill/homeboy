@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::execution_contract::encode_uri_component;
 use crate::process::{
-    pid_has_ownership_token, pid_is_running, terminate_pid_with_sigterm_and_wait,
+    pid_has_ownership_token, pid_is_running, signal_pid, wait_for_pid_exit, SIGNAL_KILL,
+    SIGNAL_TERMINATE,
 };
 
 use super::{
@@ -2138,9 +2139,12 @@ fn cleanup_startup_attempt(pid: u32, startup_token: &str) -> Result<Vec<String>>
             super::remove_lease_if_identity_matches(&state_path, &identity)?;
             cleanup.push(format!("removed stale token lease for pid {}", state.pid));
         } else if pid_has_ownership_token(state.pid, DAEMON_STARTUP_TOKEN_ENV, startup_token)? {
-            terminate_pid_with_sigterm_and_wait(state.pid, super::FORCE_STOP_WAIT)?;
+            let signal = terminate_token_owned_startup_process(state.pid, startup_token)?;
             super::remove_lease_if_identity_matches(&state_path, &identity)?;
-            cleanup.push(format!("terminated token-owned daemon pid {}", state.pid));
+            cleanup.push(format!(
+                "terminated token-owned daemon pid {} with {signal}",
+                state.pid
+            ));
         } else {
             cleanup.push(format!(
                 "retained lease for pid {} because its token ownership could not be proven",
@@ -2150,10 +2154,71 @@ fn cleanup_startup_attempt(pid: u32, startup_token: &str) -> Result<Vec<String>>
     }
     if pid_is_running(pid) && pid_has_ownership_token(pid, DAEMON_STARTUP_TOKEN_ENV, startup_token)?
     {
-        terminate_pid_with_sigterm_and_wait(pid, super::FORCE_STOP_WAIT)?;
-        cleanup.push(format!("terminated token-owned launcher pid {pid}"));
+        let signal = terminate_token_owned_startup_process(pid, startup_token)?;
+        cleanup.push(format!(
+            "terminated token-owned launcher pid {pid} with {signal}"
+        ));
     }
     Ok(cleanup)
+}
+
+fn terminate_token_owned_startup_process(pid: u32, startup_token: &str) -> Result<&'static str> {
+    terminate_token_owned_startup_process_with_operations(
+        pid,
+        startup_token,
+        super::FORCE_STOP_WAIT,
+        |pid, token| pid_has_ownership_token(pid, DAEMON_STARTUP_TOKEN_ENV, token),
+        signal_pid,
+        wait_for_pid_exit,
+    )
+}
+
+fn terminate_token_owned_startup_process_with_operations<Owns, Signal, Wait>(
+    pid: u32,
+    startup_token: &str,
+    timeout: Duration,
+    mut owns_token: Owns,
+    mut signal: Signal,
+    mut wait_for_exit: Wait,
+) -> Result<&'static str>
+where
+    Owns: FnMut(u32, &str) -> Result<bool>,
+    Signal: FnMut(u32, libc::c_int) -> Result<()>,
+    Wait: FnMut(u32, Duration) -> bool,
+{
+    if !owns_token(pid, startup_token)? {
+        return Err(Error::validation_invalid_argument(
+            "daemon_startup_cleanup",
+            format!("process {pid} no longer owns the daemon startup token"),
+            Some(pid.to_string()),
+            None,
+        ));
+    }
+
+    signal(pid, SIGNAL_TERMINATE)?;
+    if wait_for_exit(pid, timeout) {
+        return Ok("SIGTERM");
+    }
+
+    if !owns_token(pid, startup_token)? {
+        return Err(Error::validation_invalid_argument(
+            "daemon_startup_cleanup",
+            format!(
+                "process {pid} lost daemon startup-token ownership before SIGKILL; refusing to signal"
+            ),
+            Some(pid.to_string()),
+            None,
+        ));
+    }
+
+    signal(pid, SIGNAL_KILL)?;
+    if wait_for_exit(pid, timeout) {
+        Ok("SIGKILL")
+    } else {
+        Err(Error::internal_unexpected(format!(
+            "startup process {pid} survived bounded SIGTERM-to-SIGKILL escalation"
+        )))
+    }
 }
 
 fn startup_timeout_error(
