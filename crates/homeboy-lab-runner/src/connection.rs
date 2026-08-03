@@ -1687,7 +1687,14 @@ fn reconnect_job_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
         remote_daemon_lease_id: daemon.lease_id,
         ..owner
     };
-    remember_owned_tunnel(&session);
+    if let Err(error) = remember_owned_tunnel(&session) {
+        // This PID came directly from the tunnel operation, so it is ours even
+        // when the OS cannot provide a durable start identity for it.
+        if let Some(pid) = session.tunnel_pid {
+            terminate_pid(pid);
+        }
+        return Err(error);
+    }
     Ok(session)
 }
 
@@ -1712,26 +1719,54 @@ pub(crate) fn reconnect_job_owner_for_polling(
     let generation = owner.remote_daemon_lease_id.clone().ok_or_else(|| {
         Error::internal_unexpected("job-owning daemon generation has no lease ID")
     })?;
-    super::generation_store::with_generation_recovery_lock(runner_id, &generation, || {
-        let legacy = read_session_or_live_peer(runner_id)?;
-        if let Some(session) =
-            super::generation_store::job_session(runner_id, job_id, legacy.as_ref())?
-        {
-            if session_is_live(&session) {
+    reconnect_generation_for_polling_with(
+        runner_id,
+        &generation,
+        || {
+            let legacy = read_session_or_live_peer(runner_id)?;
+            super::generation_store::job_session(runner_id, job_id, legacy.as_ref())
+        },
+        session_is_live,
+        || reconnect_job_owner(runner_id, job_id),
+        |session| super::generation_store::record_reconnected_job_owner(runner_id, session, job_id),
+        close_reconnected_job_log_owner,
+    )
+}
+
+/// Run the durable recovery transaction while holding the owning generation's
+/// lock. The operation boundary keeps the coordination policy testable without
+/// opening SSH tunnels in unit tests.
+fn reconnect_generation_for_polling_with<Session, IsLive, Reconnect, Persist, Close>(
+    runner_id: &str,
+    generation: &str,
+    session_for_job: Session,
+    is_live: IsLive,
+    reconnect: Reconnect,
+    persist: Persist,
+    close: Close,
+) -> Result<RunnerSession>
+where
+    Session: Fn() -> Result<Option<RunnerSession>>,
+    IsLive: Fn(&RunnerSession) -> bool,
+    Reconnect: Fn() -> Result<RunnerSession>,
+    Persist: Fn(&RunnerSession) -> Result<RunnerSession>,
+    Close: Fn(&RunnerSession),
+{
+    super::generation_store::with_generation_recovery_lock(runner_id, generation, || {
+        if let Some(session) = session_for_job()? {
+            if is_live(&session) {
                 return Ok(session);
             }
         }
-        let session = reconnect_job_owner(runner_id, job_id)?;
-        let replaced = match super::generation_store::record_reconnected_job_owner(
-            runner_id, &session, job_id,
-        ) {
+        let session = reconnect()?;
+        let replaced = match persist(&session) {
             Ok(replaced) => replaced,
             Err(error) => {
-                close_reconnected_job_log_owner(&session);
+                close(&session);
                 return Err(error);
             }
         };
-        close_reconnected_job_log_owner(&replaced);
+        close(&replaced);
         Ok(session)
     })
 }
@@ -1743,19 +1778,22 @@ fn owned_tunnels() -> &'static Mutex<HashMap<u32, homeboy_core::process::Process
     OWNED_TUNNELS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn remember_owned_tunnel(session: &RunnerSession) {
+fn remember_owned_tunnel(session: &RunnerSession) -> Result<()> {
     let Some(pid) = session.tunnel_pid else {
-        return;
+        return Ok(());
     };
-    if let Some(identity) = homeboy_core::process::process_start_identity(pid)
-        .ok()
-        .flatten()
-    {
-        owned_tunnels()
-            .lock()
-            .expect("owned tunnel registry lock")
-            .insert(pid, identity);
-    }
+    let identity = homeboy_core::process::process_start_identity(pid)
+        .map_err(|error| {
+            Error::internal_unexpected(format!("capture tunnel process identity: {error}"))
+        })?
+        .ok_or_else(|| {
+            Error::internal_unexpected("new tunnel exited before its process identity was captured")
+        })?;
+    owned_tunnels()
+        .lock()
+        .expect("owned tunnel registry lock")
+        .insert(pid, identity);
+    Ok(())
 }
 
 fn terminate_tunnel_if_owned(session: &RunnerSession) {
@@ -1766,14 +1804,26 @@ fn terminate_tunnel_if_owned(session: &RunnerSession) {
         .lock()
         .expect("owned tunnel registry lock")
         .remove(&pid);
-    if identity.is_some()
-        && identity.as_ref()
-            == homeboy_core::process::process_start_identity(pid)
-                .ok()
-                .flatten()
-                .as_ref()
-    {
-        terminate_pid(pid);
+    terminate_tunnel_with_identity(
+        pid,
+        identity.as_ref(),
+        homeboy_core::process::process_start_identity,
+        terminate_pid,
+    );
+}
+
+fn terminate_tunnel_with_identity<Inspect, Terminate>(
+    pid: u32,
+    expected_identity: Option<&homeboy_core::process::ProcessStartIdentity>,
+    inspect: Inspect,
+    terminate: Terminate,
+) where
+    Inspect:
+        Fn(u32) -> std::result::Result<Option<homeboy_core::process::ProcessStartIdentity>, String>,
+    Terminate: Fn(u32),
+{
+    if expected_identity == inspect(pid).ok().flatten().as_ref() {
+        terminate(pid);
     }
 }
 

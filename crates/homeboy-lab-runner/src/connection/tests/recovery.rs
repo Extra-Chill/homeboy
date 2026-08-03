@@ -10,6 +10,215 @@ use std::sync::{
 };
 
 use super::*;
+use homeboy_core::test_support;
+
+#[cfg(unix)]
+struct FakeRecoveryOperations {
+    jobs: std::sync::Mutex<HashMap<String, RunnerSession>>,
+    reconnects: AtomicUsize,
+    closed: std::sync::Mutex<Vec<u32>>,
+    fail_persist: bool,
+}
+
+#[cfg(unix)]
+impl FakeRecoveryOperations {
+    fn new(jobs: impl IntoIterator<Item = (String, RunnerSession)>) -> Arc<Self> {
+        Arc::new(Self {
+            jobs: std::sync::Mutex::new(jobs.into_iter().collect()),
+            reconnects: AtomicUsize::new(0),
+            closed: std::sync::Mutex::new(Vec::new()),
+            fail_persist: false,
+        })
+    }
+
+    fn recover(
+        self: &Arc<Self>,
+        runner_id: &str,
+        generation: &str,
+        job_id: &str,
+    ) -> Result<RunnerSession> {
+        let operations = Arc::clone(self);
+        let job_id = job_id.to_string();
+        reconnect_generation_for_polling_with(
+            runner_id,
+            generation,
+            || Ok(operations.jobs.lock().expect("jobs").get(&job_id).cloned()),
+            |session| session.local_url.as_deref() == Some("http://live"),
+            || {
+                let mut session = operations
+                    .jobs
+                    .lock()
+                    .expect("jobs")
+                    .get(&job_id)
+                    .cloned()
+                    .expect("durable job");
+                let sequence = operations.reconnects.fetch_add(1, Ordering::SeqCst);
+                session.local_url = Some("http://live".to_string());
+                session.tunnel_pid = Some(80_000 + sequence as u32);
+                Ok(session)
+            },
+            |session| {
+                if operations.fail_persist {
+                    return Err(Error::internal_unexpected("persist failed"));
+                }
+                let mut jobs = operations.jobs.lock().expect("jobs");
+                let replaced = jobs.get(&job_id).cloned().expect("durable job");
+                let lease = session.remote_daemon_lease_id.clone();
+                for persisted in jobs.values_mut() {
+                    if persisted.remote_daemon_lease_id == lease {
+                        *persisted = session.clone();
+                    }
+                }
+                Ok(replaced)
+            },
+            |session| {
+                if let Some(pid) = session.tunnel_pid {
+                    operations.closed.lock().expect("closed").push(pid);
+                }
+            },
+        )
+    }
+}
+
+#[cfg(unix)]
+fn stale_recovery_session(lease: &str, pid: u32) -> RunnerSession {
+    let mut session = direct_ssh_session(lease);
+    session.local_url = Some("http://stale".to_string());
+    session.tunnel_pid = Some(pid);
+    session
+}
+
+#[cfg(unix)]
+#[test]
+fn generation_recovery_deduplicates_two_jobs_to_one_physical_tunnel() {
+    test_support::with_isolated_home(|_| {
+        let operations = FakeRecoveryOperations::new([
+            ("job-a".to_string(), stale_recovery_session("lease-a", 101)),
+            ("job-b".to_string(), stale_recovery_session("lease-a", 102)),
+        ]);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let workers = ["job-a", "job-b"].map(|job_id| {
+            let operations = Arc::clone(&operations);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                operations
+                    .recover("runner-a", "lease-a", job_id)
+                    .expect("recover")
+            })
+        });
+        barrier.wait();
+        let recovered = workers.map(|worker| worker.join().expect("worker"));
+
+        assert_eq!(operations.reconnects.load(Ordering::SeqCst), 1);
+        assert_eq!(recovered[0].tunnel_pid, recovered[1].tunnel_pid);
+        let closed = operations.closed.lock().expect("closed");
+        assert_eq!(closed.len(), 1, "only the replaced tunnel is retired");
+        assert!(matches!(closed.as_slice(), [101] | [102]));
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn generation_recovery_serializes_same_job_contention() {
+    test_support::with_isolated_home(|_| {
+        let operations = FakeRecoveryOperations::new([(
+            "job-a".to_string(),
+            stale_recovery_session("lease-a", 101),
+        )]);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let workers = (0..2)
+            .map(|_| {
+                let operations = Arc::clone(&operations);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    operations
+                        .recover("runner-a", "lease-a", "job-a")
+                        .expect("recover")
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        for worker in workers {
+            worker.join().expect("worker");
+        }
+
+        assert_eq!(operations.reconnects.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn generation_recovery_allows_different_generations_to_progress() {
+    test_support::with_isolated_home(|_| {
+        let operations = FakeRecoveryOperations::new([
+            ("job-a".to_string(), stale_recovery_session("lease-a", 101)),
+            ("job-b".to_string(), stale_recovery_session("lease-b", 102)),
+        ]);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let workers = [("lease-a", "job-a"), ("lease-b", "job-b")].map(|(generation, job_id)| {
+            let operations = Arc::clone(&operations);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                operations
+                    .recover("runner-a", generation, job_id)
+                    .expect("recover")
+            })
+        });
+        barrier.wait();
+        for worker in workers {
+            worker.join().expect("worker");
+        }
+
+        assert_eq!(operations.reconnects.load(Ordering::SeqCst), 2);
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_recovery_persistence_closes_only_the_new_tunnel() {
+    test_support::with_isolated_home(|_| {
+        let operations = Arc::new(FakeRecoveryOperations {
+            jobs: std::sync::Mutex::new(HashMap::from([(
+                "job-a".to_string(),
+                stale_recovery_session("lease-a", 101),
+            )])),
+            reconnects: AtomicUsize::new(0),
+            closed: std::sync::Mutex::new(Vec::new()),
+            fail_persist: true,
+        });
+
+        assert!(operations.recover("runner-a", "lease-a", "job-a").is_err());
+        assert_eq!(
+            operations.closed.lock().expect("closed").as_slice(),
+            [80_000]
+        );
+    });
+}
+
+#[test]
+fn pid_reuse_never_signals_a_temporary_tunnel() {
+    let expected = homeboy_core::process::ProcessStartIdentity::Macos {
+        start_seconds: 1,
+        start_microseconds: 2,
+    };
+    let reused = homeboy_core::process::ProcessStartIdentity::Macos {
+        start_seconds: 3,
+        start_microseconds: 4,
+    };
+    let signaled = std::cell::Cell::new(false);
+
+    terminate_tunnel_with_identity(
+        42,
+        Some(&expected),
+        |_| Ok(Some(reused.clone())),
+        |_| signaled.set(true),
+    );
+
+    assert!(!signaled.get(), "a reused PID must never be signaled");
+}
 
 #[test]
 fn rejects_non_loopback_remote_daemon_address() {
