@@ -91,6 +91,13 @@ pub struct DeferredWorkloadWorkerStatus {
     pub detail: String,
 }
 
+/// The exclusive worker ownership guard. The directory file is deliberately
+/// retained for the complete worker lifetime: advisory locks belong to its
+/// inode, not to the pathname used to open it.
+pub struct DeferredWorkloadWorkerLock {
+    _root: File,
+}
+
 pub fn defer(input: DeferredWorkloadInput) -> Result<DeferredWorkload> {
     if input
         .job_overrides
@@ -289,16 +296,40 @@ pub fn records() -> Result<Vec<DeferredWorkload>> {
     read_store(&store_path()?)
 }
 
-pub fn worker_lock() -> Result<File> {
-    let path = store_path()?.with_extension("worker.lock");
-    OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(&path)
-        .map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("open {}", path.display())))
-        })
+pub fn try_acquire_worker_lock() -> Result<Option<DeferredWorkloadWorkerLock>> {
+    let root = crate::paths::homeboy()?;
+    fs::create_dir_all(&root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create deferred workload root {}", root.display())),
+        )
+    })?;
+    let root = fs::canonicalize(&root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "canonicalize deferred workload root {}",
+                root.display()
+            )),
+        )
+    })?;
+    let file = File::open(&root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("open deferred workload root {}", root.display())),
+        )
+    })?;
+    match file.try_lock_exclusive() {
+        Ok(true) => Ok(Some(DeferredWorkloadWorkerLock { _root: file })),
+        Ok(false) => Ok(None),
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "acquire deferred workload worker lock {}",
+                root.display()
+            )),
+        )),
+    }
 }
 
 pub fn worker_status() -> Result<Option<DeferredWorkloadWorkerStatus>> {
@@ -321,12 +352,11 @@ pub fn worker_is_live(status: &DeferredWorkloadWorkerStatus) -> bool {
     if status.owner_token.is_empty() {
         return false;
     }
-    let Ok(lock) = worker_lock() else {
+    let Ok(lock) = try_acquire_worker_lock() else {
         return false;
     };
     // A status file is advisory. The singleton lock is the authority.
-    if lock.try_lock_exclusive().is_ok() {
-        let _ = lock.unlock();
+    if lock.is_some() {
         return false;
     }
     worker_identity_is_live(
@@ -537,6 +567,9 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     fn input() -> DeferredWorkloadInput {
         DeferredWorkloadInput {
@@ -700,6 +733,108 @@ mod tests {
             |_, _| crate::process::ProcessIdentityState::IdentityMismatch,
             |_, _| true,
         ));
+    }
+
+    #[test]
+    fn worker_lock_survives_replacement_of_the_legacy_adjacent_lock_file() {
+        crate::test_support::with_isolated_home(|_| {
+            let owner = try_acquire_worker_lock()
+                .expect("acquire worker lock")
+                .expect("first worker owns lock");
+            let legacy_lock = store_path()
+                .expect("store path")
+                .with_extension("worker.lock");
+            std::fs::write(&legacy_lock, b"old lock inode").expect("write old lock file");
+            let replacement = legacy_lock.with_extension("replacement");
+            std::fs::write(&replacement, b"replacement lock inode")
+                .expect("write replacement lock file");
+            std::fs::rename(&replacement, &legacy_lock).expect("replace legacy lock file");
+
+            assert!(
+                try_acquire_worker_lock()
+                    .expect("check competing worker")
+                    .is_none(),
+                "replacing the old lock pathname must not create a second owner"
+            );
+            drop(owner);
+        });
+    }
+
+    #[test]
+    fn worker_lock_contenders_reach_readiness_once_across_processes() {
+        let child_id = std::env::var("HOMEBOY_WORKER_LOCK_TEST_CHILD").ok();
+        if let Some(child_id) = child_id {
+            let root =
+                PathBuf::from(std::env::var("HOMEBOY_WORKER_LOCK_TEST_ROOT").expect("test root"));
+            std::fs::write(root.join(format!("ready-{child_id}")), b"ready")
+                .expect("announce child readiness");
+            while !root.join("start").exists() {
+                thread::sleep(Duration::from_millis(5));
+            }
+            if let Some(_owner) = try_acquire_worker_lock().expect("acquire worker lock") {
+                std::fs::write(root.join(format!("readiness-{child_id}")), b"polled")
+                    .expect("record readiness polling");
+                thread::sleep(Duration::from_millis(250));
+            } else {
+                std::fs::write(root.join(format!("exited-{child_id}")), b"lost")
+                    .expect("record losing contender");
+            }
+            return;
+        }
+
+        let temp = tempfile::tempdir().expect("temporary root");
+        let home = temp.path().join("home");
+        let marker_root = temp.path().join("markers");
+        std::fs::create_dir_all(&marker_root).expect("create marker root");
+        let test_name = "deferred_workload::tests::worker_lock_contenders_reach_readiness_once_across_processes";
+        let mut children = Vec::new();
+        for child_id in 0..8 {
+            children.push(
+                Command::new(std::env::current_exe().expect("test executable"))
+                    .args(["--exact", test_name, "--nocapture"])
+                    .env("HOME", &home)
+                    .env("HOMEBOY_WORKER_LOCK_TEST_ROOT", &marker_root)
+                    .env("HOMEBOY_WORKER_LOCK_TEST_CHILD", child_id.to_string())
+                    .spawn()
+                    .expect("spawn worker contender"),
+            );
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while std::fs::read_dir(&marker_root)
+            .expect("read marker root")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("ready-"))
+            .count()
+            < children.len()
+        {
+            assert!(Instant::now() < deadline, "worker contenders did not start");
+            thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(marker_root.join("start"), b"start").expect("release contenders");
+        for mut child in children {
+            assert!(child.wait().expect("wait for contender").success());
+        }
+        let entries = std::fs::read_dir(&marker_root)
+            .expect("read marker root")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|name| name.starts_with("readiness-"))
+                .count(),
+            1,
+            "only the owner may reach readiness polling"
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|name| name.starts_with("exited-"))
+                .count(),
+            7,
+            "every losing contender exits before readiness polling"
+        );
     }
 
     #[test]

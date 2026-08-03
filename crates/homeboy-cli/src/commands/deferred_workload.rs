@@ -1,5 +1,4 @@
 use clap::{Args, Subcommand};
-use fs4::fs_std::FileExt;
 use homeboy::core::deferred_workload;
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -154,14 +153,14 @@ fn restart_worker_if_pending_with(
 }
 
 fn run_worker(startup_token: &str) -> homeboy::core::Result<()> {
-    let lock = deferred_workload::worker_lock()?;
-    if lock.try_lock_exclusive().is_err() {
+    let Some(lock) = deferred_workload::try_acquire_worker_lock()? else {
         return Ok(());
-    }
+    };
     std::env::set_var("HOMEBOY_DEFERRED_WORKLOAD_OWNER", startup_token);
     let owner = startup_token.to_string();
     deferred_workload::append_worker_log(format!("worker started owner={owner}"))?;
-    run_worker_with(
+    run_worker_while_holding_lock(
+        &lock,
         &owner,
         || {
             let readiness = crate::runner::runners::lab_runner_readiness()?;
@@ -184,6 +183,21 @@ fn run_worker(startup_token: &str) -> homeboy::core::Result<()> {
         deferred_workload_now_ms,
         thread::sleep,
     )
+}
+
+fn run_worker_while_holding_lock(
+    _lock: &deferred_workload::DeferredWorkloadWorkerLock,
+    owner: &str,
+    readiness: impl FnMut() -> homeboy::core::Result<Option<RunnerCapabilityInventory>>,
+    dispatch: impl FnMut(
+        &deferred_workload::DeferredWorkload,
+        &str,
+        &str,
+    ) -> homeboy::core::Result<bool>,
+    now: impl Fn() -> u64,
+    sleep: impl FnMut(Duration),
+) -> homeboy::core::Result<()> {
+    run_worker_with(owner, readiness, dispatch, now, sleep)
 }
 
 pub(crate) fn run_worker_with(
