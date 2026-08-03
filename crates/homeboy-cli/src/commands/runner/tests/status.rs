@@ -160,6 +160,55 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
 }
 
 #[test]
+fn direct_runner_status_exposes_the_explicit_generation_reconcile_command() {
+    let report = RunnerStatusReport {
+        runner_id: "homeboy-lab".to_string(),
+        connected: true,
+        state: runner::RunnerSessionState::Connected,
+        session: Some(RunnerSession {
+            runner_id: "homeboy-lab".to_string(),
+            mode: RunnerTunnelMode::DirectSsh,
+            role: runner::RunnerSessionRole::Controller,
+            server_id: Some("lab".to_string()),
+            controller_id: Some("controller".to_string()),
+            broker_url: None,
+            remote_daemon_address: Some("127.0.0.1:4000".to_string()),
+            local_port: Some(4000),
+            local_url: Some("http://127.0.0.1:4000".to_string()),
+            tunnel_pid: Some(42),
+            remote_daemon_pid: Some(43),
+            remote_daemon_lease_id: Some("lease-active".to_string()),
+            homeboy_version: "test".to_string(),
+            homeboy_build_identity: None,
+            connected_at: "2026-08-03T00:00:00Z".to_string(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+            leaseless_recovery_evidence: None,
+        }),
+        stale_daemon: None,
+        daemon_freshness: None,
+        active_jobs: Vec::new(),
+        active_runner_jobs: Vec::new(),
+        stale_runner_jobs: Vec::new(),
+        active_job_count: 0,
+        stale_runner_job_count: 0,
+        active_job_state: RunnerActiveJobState::Available,
+        active_job_source: RunnerActiveJobSource::DirectDaemon.into(),
+        active_job_error: None,
+        active_job_recovery_evidence: None,
+        session_path: "test".to_string(),
+    };
+
+    assert!(runner_status_operator_commands(&report)
+        .iter()
+        .any(|command| {
+            command.scope == "generation_reconcile"
+                && command.command == "homeboy runner reconcile homeboy-lab"
+        }));
+}
+
+#[test]
 fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
     let mut report = RunnerStatusReport {
         runner_id: "homeboy-lab".to_string(),

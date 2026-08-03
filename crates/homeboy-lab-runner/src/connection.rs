@@ -1398,27 +1398,11 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     // must be reported as disconnected rather than triggering tunnel recovery.
     // Recovery can wait on shared control-plane state and may open a tunnel, so
     // it belongs to explicit connect/admission operations instead.
-    let mut session = read_session_or_live_peer(runner_id)?;
+    let session = read_session_or_live_peer(runner_id)?;
     let state = session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
-    reconcile_session_metadata_with_observed_daemon(&runner, &mut session, connected)?;
-    // A dead controller tunnel must be reattached or reported as disconnected
-    // before polling every draining local projection.
-    if connected {
-        if let Ok(Some((_, _, client))) = remote_daemon::resolve_ssh_runner(&runner) {
-            super::generation_store::reconcile_with_ssh(runner_id, session.as_ref(), &client)?;
-        } else {
-            super::generation_store::reconcile(runner_id, session.as_ref())?;
-        }
-    }
     let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected)?;
     let local_daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?;
-    // A direct tunnel health response proves this session is safe for new
-    // admission. Keep active jobs on prior generations, but make status and
-    // Cook agree on this freshly verified endpoint.
-    if let (Some(session), Some(_)) = (session.as_ref(), local_daemon_freshness.as_ref()) {
-        super::generation_store::reconcile_admission_session(runner_id, session)?;
-    }
     let mut daemon_freshness =
         local_daemon_freshness.or_else(|| remote_daemon_recovery_freshness(runner_id, &runner));
     let active_job_source = session.as_ref().and_then(active_runner_job_source);
@@ -1477,14 +1461,6 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
             None,
         )
     };
-    let (active_jobs, stale_jobs, direct_daemon_active_jobs, active_job_recovery_evidence) =
-        reconcile_terminal_phantom_activity(
-            runner_id,
-            session.as_ref(),
-            active_jobs,
-            stale_jobs,
-            direct_daemon_active_jobs,
-        );
     if let (Some(freshness), Some(active_jobs)) =
         (daemon_freshness.as_mut(), direct_daemon_active_jobs)
     {
@@ -1522,9 +1498,34 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
         active_job_state,
         active_job_source,
         active_job_error,
-        active_job_recovery_evidence,
+        active_job_recovery_evidence: None,
         session_path: session_path.display().to_string(),
     })
+}
+
+/// Apply the bounded reconciliation that status intentionally only projects.
+/// This is an explicit lifecycle command because it may persist observations,
+/// promote admission, stop a drained daemon, and terminate its local tunnel.
+pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
+    let runner = load(runner_id)?;
+    let mut report = status(runner_id)?;
+    if !report.connected {
+        return Ok(report);
+    }
+
+    reconcile_session_metadata_with_observed_daemon(&runner, &mut report.session, true)?;
+    // Terminal-job settlement was formerly coupled to status. Keep it under
+    // this explicit lifecycle owner so status remains safe to parallelize.
+    reconcile_terminal_jobs(runner_id)?;
+    if let Ok(Some((_, _, client))) = remote_daemon::resolve_ssh_runner(&runner) {
+        super::generation_store::reconcile_with_ssh(runner_id, report.session.as_ref(), &client)?;
+    } else {
+        super::generation_store::reconcile(runner_id, report.session.as_ref())?;
+    }
+    if let (Some(session), Some(_)) = (report.session.as_ref(), report.daemon_freshness.as_ref()) {
+        super::generation_store::reconcile_admission_session(runner_id, session)?;
+    }
+    status(runner_id)
 }
 
 /// Return the persisted controller-side session projection without reconnecting,
@@ -2870,6 +2871,33 @@ mod indexed_inspection_tests {
         assert!(!body.contains("recover_dead_direct_tunnel"));
         assert!(!body.contains("connect("));
         assert!(!body.contains("SshClient"));
+    }
+}
+
+#[cfg(test)]
+mod status_read_purity_tests {
+    #[test]
+    fn status_has_no_lifecycle_mutation_path() {
+        let source = include_str!("connection.rs");
+        let start = source.find("pub fn status(").expect("status exists");
+        let end = start
+            + source[start..]
+                .find("pub fn reconcile_status(")
+                .expect("explicit reconciliation follows status");
+        let status = &source[start..end];
+
+        for mutation in [
+            "reconcile_session_metadata_with_observed_daemon",
+            "generation_store::reconcile",
+            "generation_store::reconcile_admission_session",
+            "write_session(",
+            "adopt",
+        ] {
+            assert!(
+                !status.contains(mutation),
+                "status must not invoke lifecycle mutation `{mutation}`"
+            );
+        }
     }
 }
 

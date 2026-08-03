@@ -40,7 +40,7 @@ pub use crate::{
     prepare_git_lab_offload_changed_since, prepare_lab_runner_capability,
     promote_runner_exec_artifact_dirs, promote_runner_exec_artifacts,
     promote_runner_exec_summaries, promoted_output, prune_homeboy_binary_cache, prune_workspaces,
-    pull_workspace, refresh_homeboy_binary, refresh_mirrored_daemon_evidence,
+    pull_workspace, reconcile_status, refresh_homeboy_binary, refresh_mirrored_daemon_evidence,
     reportable_artifact_evidence_path, resolve_default_lab_runner, run_reverse_worker,
     runner_artifact_store_token, runner_dev_sync, runner_exec_failure_error,
     runner_exec_structured_summary, runner_generation_inventory,

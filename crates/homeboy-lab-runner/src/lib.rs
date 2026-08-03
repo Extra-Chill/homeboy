@@ -148,9 +148,10 @@ pub(crate) use connection::disconnect_with_force;
 pub use connection::{
     close_reconnected_job_log_owner, connect, connect_reverse, connect_with_live_lease_adoption,
     connect_with_orphan_adoption, diagnostic_status, disconnect, disconnect_local_recovery,
-    persisted_status, persisted_statuses, reconcile_terminal_jobs, reconnect_job_log_owner,
-    reverse_broker_artifact, reverse_broker_artifact_content, reverse_broker_reconcile,
-    runner_artifact_content, status, statuses, statuses_indexed, submit_reverse_broker_job,
+    persisted_status, persisted_statuses, reconcile_status, reconcile_terminal_jobs,
+    reconnect_job_log_owner, reverse_broker_artifact, reverse_broker_artifact_content,
+    reverse_broker_reconcile, runner_artifact_content, status, statuses, statuses_indexed,
+    submit_reverse_broker_job,
 };
 pub(crate) use connection::{
     configured_runner_homeboy_build_identity, local_live_session, status_for_admission,

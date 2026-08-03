@@ -170,6 +170,7 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             generations,
             full,
         } => map_registry(status_mod::status(id.as_deref(), generations, full)),
+        RunnerCommand::Reconcile { id } => map_registry(status_mod::reconcile(&id)),
         RunnerCommand::Disconnect { id, local_recovery } => {
             map_registry(registry::disconnect(&id, local_recovery))
         }
