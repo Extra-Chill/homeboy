@@ -8,6 +8,7 @@
 //! no I/O — which is why they lift cleanly out of the cook orchestration file.
 
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskExecutionBudget, AgentTaskState};
+use homeboy_core::{Error, Result};
 
 use super::cook_pre_execution::provider_rotation_attempts;
 
@@ -28,6 +29,87 @@ impl ExecutionBudgetUsage {
             .provider_rotations
             .saturating_add(other.provider_rotations);
     }
+}
+
+/// The provider-backed portion of a Cook's retry policy. Cook attempts are
+/// orchestration slots; every remediation that reaches a provider also needs a
+/// total execution slot and, for gate and review-form fixes, a same-provider
+/// retry slot. Provider rotation is not a substitute for a form-only retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectiveCookBudget {
+    pub requested_attempts: u32,
+    pub provider_executions: u32,
+    pub same_provider_remediations: u32,
+    pub provider_rotations: u32,
+}
+
+pub fn effective_cook_budget(
+    max_attempts: u32,
+    budget: &AgentTaskExecutionBudget,
+) -> EffectiveCookBudget {
+    EffectiveCookBudget {
+        requested_attempts: max_attempts.max(1),
+        provider_executions: budget.max_provider_executions,
+        same_provider_remediations: budget.max_same_provider_retries,
+        provider_rotations: budget.max_provider_rotations,
+    }
+}
+
+/// Reject a Cook whose advertised attempt allowance cannot support its
+/// provider-backed remediation contract. This runs before a recipe is written,
+/// preserving immutable-recipe compatibility while preventing expensive work
+/// that could never reach its configured retry allowance.
+pub fn validate_effective_cook_budget(
+    max_attempts: u32,
+    budget: &AgentTaskExecutionBudget,
+) -> Result<EffectiveCookBudget> {
+    let effective = effective_cook_budget(max_attempts, budget);
+    let required_remediations = effective.requested_attempts.saturating_sub(1);
+    let correction = format!(
+        "Start a new Cook with `--max-attempts {} --max-provider-executions {} --max-same-provider-retries {}`.",
+        effective.requested_attempts,
+        effective.requested_attempts,
+        required_remediations,
+    );
+
+    if effective.provider_executions < effective.requested_attempts {
+        return Err(Error::validation_invalid_argument(
+            "max-provider-executions",
+            format!(
+                "Cook requests {} attempts but --max-provider-executions {} can fund only {} provider-backed attempt(s). Effective budget: attempts={}, provider_executions={}, same_provider_remediations={}, provider_rotations={}. {}",
+                effective.requested_attempts,
+                effective.provider_executions,
+                effective.provider_executions,
+                effective.requested_attempts,
+                effective.provider_executions,
+                effective.same_provider_remediations,
+                effective.provider_rotations,
+                correction,
+            ),
+            None,
+            Some(vec![correction]),
+        ));
+    }
+    if effective.same_provider_remediations < required_remediations {
+        return Err(Error::validation_invalid_argument(
+            "max-same-provider-retries",
+            format!(
+                "Cook requests {} attempts but --max-same-provider-retries {} cannot fund {} same-provider remediation(s). Gate fixes and required review-form retries preserve the successful provider identity; --max-provider-rotations {} cannot replace them. Effective budget: attempts={}, provider_executions={}, same_provider_remediations={}, provider_rotations={}. {}",
+                effective.requested_attempts,
+                effective.same_provider_remediations,
+                required_remediations,
+                effective.provider_rotations,
+                effective.requested_attempts,
+                effective.provider_executions,
+                effective.same_provider_remediations,
+                effective.provider_rotations,
+                correction,
+            ),
+            None,
+            Some(vec![correction]),
+        ));
+    }
+    Ok(effective)
 }
 
 pub(crate) fn execution_budget_usage(aggregate: &AgentTaskAggregate) -> ExecutionBudgetUsage {

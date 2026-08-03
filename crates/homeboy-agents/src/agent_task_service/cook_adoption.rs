@@ -656,8 +656,11 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                     status: "execution_budget_exhausted",
                     attempts: vec![attempt],
                     finalization: None,
-                    stop_reason: Some(format!(
-                        "provider execution stopped because {reason} was exhausted"
+                    stop_reason: Some(super::cook::exhausted_budget_guidance(
+                        options.max_attempts,
+                        &budget,
+                        &reason,
+                        true,
                     )),
                     exit_code: 1,
                     invocation_latest_run_id: Some(record.run_id.as_str()),

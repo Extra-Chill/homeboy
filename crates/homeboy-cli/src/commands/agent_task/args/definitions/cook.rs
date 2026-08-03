@@ -278,6 +278,47 @@ mod tests {
     }
 
     #[test]
+    fn cook_cli_preflight_explains_the_default_provider_budget_conflict() {
+        let cli = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--max-attempts",
+            "3",
+            "--no-finalize",
+            "--prompt",
+            "test",
+            "--to-worktree",
+            "repo@branch",
+        ])
+        .expect("parse Cook with the default provider budget");
+        let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Cook(cook) = agent_task.command else {
+            panic!("Cook command");
+        };
+        let budget = homeboy::agents::agent_task_scheduler::AgentTaskExecutionBudget::new(
+            cook.dispatch.core.attempts,
+            cook.dispatch.core.same_provider_retries,
+            cook.dispatch.core.provider_rotations,
+        );
+
+        let error = homeboy::agents::agent_task_service::validate_effective_cook_budget(
+            cook.max_attempts,
+            &budget,
+        )
+        .expect_err("default provider budget must not silently discard Cook retries");
+        assert!(
+            error
+                .message
+                .contains("--max-provider-executions 3 --max-same-provider-retries 2"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
     fn cook_help_advertises_one_prompt_source_not_wave_inputs() {
         let help = rendered_cook_help();
         assert!(help.contains("--prompt"), "{help}");
@@ -388,9 +429,11 @@ pub struct AgentTaskCookArgs {
     pub provider_argv: Vec<String>,
     #[command(flatten)]
     pub gates: VerifyGateArgs,
-    /// Maximum cook attempts before giving up. Each attempt re-runs the agent
-    /// and gates; a later attempt can recover from a transient failure
-    /// (default 3).
+    /// Maximum Cook attempts before giving up. Each attempt re-runs the agent
+    /// and gates; a later attempt can recover from a transient failure. Set
+    /// --max-provider-executions to at least this value and
+    /// --max-same-provider-retries to at least one less so gate and required
+    /// review-form remediation remain possible (default 3).
     #[arg(long = "max-attempts", default_value_t = 3, value_name = "N")]
     pub max_attempts: u32,
     /// Stop after the work is verified but before opening the pull request,

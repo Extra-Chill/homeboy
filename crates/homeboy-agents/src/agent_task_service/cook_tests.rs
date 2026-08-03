@@ -4669,6 +4669,16 @@ fn repeated_provider_discovery_failures_exhaust_the_adoption_review_allowance() 
             )
             .expect("budget exhaustion is a durable Cook result");
         assert_eq!(exhausted.value.status, "execution_budget_exhausted");
+        assert!(
+            exhausted
+                .value
+                .stop_reason
+                .as_deref()
+                .is_some_and(|reason| reason
+                    .contains("--max-provider-executions 2 --max-same-provider-retries 1")),
+            "form-only remediation exhaustion must provide a copyable correction: {:#?}",
+            exhausted.value.stop_reason
+        );
         assert_eq!(dispatcher.dispatches.load(Ordering::SeqCst), 2);
         let recipe = super::super::load_recipe(&fixture.cook_id).unwrap();
         assert_eq!(recipe.attempts.len(), 3);

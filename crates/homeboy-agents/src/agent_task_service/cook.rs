@@ -27,7 +27,8 @@ use super::cook_baseline::{
     CookFollowUpBaseline, DerivedCookBaselineCapability,
 };
 use super::cook_budget::{
-    budget_remaining, execution_budget_usage, reserve_remediation_budget, ExecutionBudgetUsage,
+    budget_remaining, execution_budget_usage, reserve_remediation_budget,
+    validate_effective_cook_budget, ExecutionBudgetUsage,
 };
 use super::cook_pre_execution::{
     materialize_cook_attempt, materialize_initial_cook_attempt, pre_execution_failure_details,
@@ -1665,6 +1666,29 @@ fn cook_status_is_terminal(status: &str) -> bool {
     !matches!(status, "queued" | "running" | "in_flight")
 }
 
+pub(crate) fn exhausted_budget_guidance(
+    max_attempts: u32,
+    budget: &AgentTaskExecutionBudget,
+    reason: &str,
+    review_form_only: bool,
+) -> String {
+    let remediation = if review_form_only {
+        "review-form remediation"
+    } else {
+        "gate or provider remediation"
+    };
+    format!(
+        "Cook stopped during {remediation} because {reason} was exhausted. Configured budget: --max-attempts {}, --max-provider-executions {}, --max-same-provider-retries {}, --max-provider-rotations {}. Start a new Cook with `--max-attempts {} --max-provider-executions {} --max-same-provider-retries {}`; rotations cannot fund same-provider gate or review-form retries.",
+        max_attempts,
+        budget.max_provider_executions,
+        budget.max_same_provider_retries,
+        budget.max_provider_rotations,
+        max_attempts,
+        max_attempts,
+        max_attempts.saturating_sub(1),
+    )
+}
+
 fn run_cook_with_boundaries_observed<E, S>(
     options: AgentTaskCookServiceOptions,
     executor: E,
@@ -1814,6 +1838,16 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
+    // Validate new Cooks before provider discovery, workspace staging, recipe
+    // persistence, or a detached handoff can spend provider work. Historical
+    // immutable recipes retain their persisted behavior and receive actionable
+    // exhaustion guidance if their legacy budget reaches remediation.
+    if !super::recipe_exists(&options.cook_id)? {
+        validate_effective_cook_budget(
+            options.max_attempts,
+            &options.initial_plan.options.execution_budget,
+        )?;
+    }
     project_initial_finalizing_review_form_contract(&mut options);
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
@@ -2819,6 +2853,8 @@ where
                     .as_ref()
                     .expect("budget is initialized from the loaded attempt plan");
                 let budget_scope = follow_up_budget_scope(&source_request, &follow_up_request);
+                let review_form_only =
+                    follow_up_request.inputs["cook_loop"]["review_form_required"] == true;
                 match dispatch_cook_follow_up(
                     &options,
                     executor.clone(),
@@ -2844,8 +2880,11 @@ where
                             status: "execution_budget_exhausted",
                             attempts,
                             finalization: None,
-                            stop_reason: Some(format!(
-                                "provider execution stopped because {reason} was exhausted"
+                            stop_reason: Some(exhausted_budget_guidance(
+                                max_attempts,
+                                budget_limit,
+                                &reason,
+                                review_form_only,
                             )),
                             exit_code: 1,
                             invocation_latest_run_id: Some(&run_id),
