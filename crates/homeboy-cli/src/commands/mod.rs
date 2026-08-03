@@ -230,6 +230,7 @@ pub mod bench;
 pub(crate) mod bench_summary;
 pub mod build;
 pub mod ci;
+pub(crate) mod ci_failure_log_triage;
 pub mod cleanup;
 pub mod component;
 pub mod config;

@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::path::PathBuf;
 
-use homeboy::core::ci_failure_log_triage::{self, CiFailureTriageOutput, CiFailureTriageRequest};
+use super::ci_failure_log_triage::{self, CiFailureTriageOutput, CiFailureTriageRequest};
 use homeboy::core::ci_gate::{
     self, DifferentialGateDecision, DifferentialGateInput, DifferentialGateSide,
 };
