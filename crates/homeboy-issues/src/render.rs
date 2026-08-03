@@ -475,23 +475,38 @@ fn render_normalized_findings_body(
 }
 
 fn render_normalized_finding_line(out: &mut String, finding: &HomeboyFinding) {
-    let label = finding
-        .fingerprint
-        .as_deref()
-        .or(finding.rule.as_deref())
-        .or(finding.location.file.as_deref())
-        .unwrap_or(&finding.tool);
-    let _ = write!(out, "- `{}` — {}", label, finding.message);
-    if let Some(file) = finding.location.file.as_deref() {
-        if label != file {
-            let _ = write!(out, " (`{}", file);
-            if let Some(line) = finding.location.line {
-                let _ = write!(out, ":{}", line);
-            }
-            let _ = write!(out, "`)");
-        }
-    }
-    out.push('\n');
+    let label = finding_display_label(finding);
+    let _ = writeln!(out, "- `{}` — {}", label, finding.message);
+}
+
+/// Human-facing label for one rendered finding bullet.
+///
+/// Location wins over identity. A fingerprint is a dedup key, not a label:
+/// producers are free to compose it from the file, rule, and the whole
+/// normalized message (the audit contract does exactly that), so rendering it
+/// verbatim repeats the file and the message that already follow on the same
+/// line — and any backtick inside it breaks the surrounding code span. Fall
+/// back to the fingerprint only when there is no location and no rule to
+/// identify the finding by.
+fn finding_display_label(finding: &HomeboyFinding) -> String {
+    let label = match finding.location.file.as_deref() {
+        Some(file) => match finding.location.line {
+            Some(line) => format!("{}:{}", file, line),
+            None => file.to_string(),
+        },
+        None => finding
+            .rule
+            .as_deref()
+            .or(finding.fingerprint.as_deref())
+            .unwrap_or(&finding.tool)
+            .to_string(),
+    };
+    sanitize_inline_code(&label)
+}
+
+/// Strip backticks so the label cannot terminate its own code span.
+fn sanitize_inline_code(value: &str) -> String {
+    value.replace('`', "")
 }
 
 fn render_test_cluster_body(

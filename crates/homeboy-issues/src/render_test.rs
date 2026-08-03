@@ -160,7 +160,11 @@ fn renders_normalized_lint_findings() {
     assert!(group.body.contains("1 lint finding(s) in this category."));
     assert!(group
         .body
-        .contains("- `lint-1` — trailing whitespace (`src/lib.rs:12`)"));
+        .contains("- `src/lib.rs:12` — trailing whitespace"));
+    assert!(
+        !group.body.contains("lint-1"),
+        "the fingerprint is a dedup key, not a display label"
+    );
 }
 
 #[test]
@@ -309,7 +313,7 @@ fn renders_normalized_test_findings() {
     assert!(group.body.contains("1 test finding(s) in this category."));
     assert!(group
         .body
-        .contains("- `test-1` — expected 200, got 500 (`tests/http.rs:44`)"));
+        .contains("- `tests/http.rs:44` — expected 200, got 500"));
 }
 
 #[test]
@@ -458,4 +462,91 @@ fn normalized_audit_findings_render_fixability_tiers() {
     assert!(group.body.contains("Total fixable: 5"));
     assert!(group.body.contains("Automated: 3"));
     assert!(group.body.contains("Manual-only: 2"));
+}
+
+#[test]
+fn normalized_finding_bullets_do_not_repeat_the_fingerprint() {
+    // Regression for the `core-agnostic-source` issue bodies: the audit
+    // contract composes its fingerprint as
+    // `file:kind:convention:normalized_message`, so rendering the fingerprint
+    // as the bullet label repeated the file and the whole message on the same
+    // line — and the backticks the message carries terminated the label's own
+    // code span, garbling every bullet after it.
+    let file = "crates/homeboy-agents/src/artifacts.rs";
+    let message = "Core boundary leak (core-agnostic-source) configured ecosystem term \
+                   `node` appears at line 148 in behavioral context `collect_artifacts`";
+    let fingerprint = format!(
+        "{}:core_boundary_leak:core_boundary_leak:core-agnostic-source:{}",
+        file,
+        message.replace("line 148", "line <line>")
+    );
+    let output = json!({
+        "data": {
+            "passed": false,
+            "status": "failed",
+            "findings": [
+                {
+                    "tool": "audit",
+                    "rule": "core_boundary_leak",
+                    "category": "core_boundary_leak:core-agnostic-source",
+                    "message": message,
+                    "fingerprint": fingerprint,
+                    "file": file
+                }
+            ]
+        }
+    });
+
+    let rendered =
+        build_findings_from_native_output("audit", output, &IssueRenderContext::default()).unwrap();
+    let group = rendered
+        .groups
+        .get("core_boundary_leak:core-agnostic-source")
+        .unwrap();
+    let bullet = group
+        .body
+        .lines()
+        .find(|line| line.starts_with("- `"))
+        .expect("a finding bullet is rendered");
+
+    assert_eq!(bullet, format!("- `{}` — {}", file, message));
+    assert_eq!(
+        bullet.matches(file).count(),
+        1,
+        "the file must appear once per bullet"
+    );
+    assert_eq!(
+        bullet.matches("behavioral context").count(),
+        1,
+        "the message must appear once per bullet"
+    );
+    assert!(
+        !bullet.contains("<line>"),
+        "the fingerprint's line placeholder must not leak into the body"
+    );
+}
+
+#[test]
+fn normalized_finding_label_strips_backticks() {
+    // A label that carries a backtick would close its own code span.
+    let output = json!({
+        "data": {
+            "passed": false,
+            "status": "failed",
+            "findings": [
+                {
+                    "tool": "lint",
+                    "category": "style",
+                    "message": "bad quoting",
+                    "fingerprint": "weird`fingerprint"
+                }
+            ]
+        }
+    });
+
+    let rendered =
+        build_findings_from_native_output("lint", output, &IssueRenderContext::default()).unwrap();
+    let group = rendered.groups.get("style").unwrap();
+
+    assert!(group.body.contains("- `weirdfingerprint` — bad quoting"));
 }
