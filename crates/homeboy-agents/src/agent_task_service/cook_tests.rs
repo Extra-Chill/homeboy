@@ -13,7 +13,7 @@ use super::super::cook_promotion::{
     finalize_or_load_cook_pr_with_backend, moving_base_recovery_for_run,
     moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
     persist_manual_finalization_intent, persist_manual_finalization_receipt,
-    persisted_promotion_for_attempt, recover_cook_pr_with_backend,
+    persisted_promotion_for_attempt, record_replacement_gate_proof, recover_cook_pr_with_backend,
     recover_moving_base_cook_candidate, refreshed_moving_base_recovery, selected_candidate_task_id,
     CookReportInput, MovingBaseCookRecovery,
 };
@@ -7054,6 +7054,158 @@ fn recovered_cook_finalization_uses_latest_resumed_gate_contract() {
         );
         assert!(!report.to_string().contains("stale-original-contract"));
         assert!(!report.to_string().contains("private stale gate"));
+    });
+}
+
+#[test]
+fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_republishing() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-11290";
+        let run_id = "cook-11290-attempt-1";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = run_id.to_string();
+        options.head = Some("fix/8058".to_string());
+        options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).expect("submit run");
+        seed_review_form_aggregate(run_id, &options.initial_plan);
+
+        let mut failed = promotion(run_id);
+        failed.status = crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed;
+        failed.deterministic_gates[0].status = crate::agent_task_gate::AgentTaskGateStatus::Failed;
+        failed.deterministic_gates[0].exit_code = 1;
+        failed.deterministic_gates[0].stderr = "rustup infrastructure failure".to_string();
+        failed.provenance["candidate"] = serde_json::json!({"kind": "git", "fingerprint": {"head": "candidate", "tree": "candidate-tree", "sha256": "candidate-sha"}});
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&failed).unwrap())
+            .expect("record immutable failed evidence");
+
+        let mut replacement = failed.clone();
+        replacement.status = crate::agent_task_promotion::AgentTaskPromotionStatus::Applied;
+        replacement.deterministic_gates[0].status =
+            crate::agent_task_gate::AgentTaskGateStatus::Succeeded;
+        replacement.deterministic_gates[0].exit_code = 0;
+        replacement.deterministic_gates[0].stderr.clear();
+        replacement.command_evidence = vec![
+            crate::agent_task_promotion::AgentTaskPromotionCommandReport {
+                command: vec![
+                    "sh".to_string(),
+                    "-lc".to_string(),
+                    "cargo test --locked agent_task_promotion --lib".to_string(),
+                ],
+                exit_code: 0,
+                stdout: "passed".to_string(),
+                stderr: String::new(),
+                capture: Default::default(),
+            },
+        ];
+        let error = record_replacement_gate_proof(run_id, replacement.clone(), None)
+            .expect_err("external proof requires operator authorization");
+        assert!(error.message.contains("explicit operator authorization"));
+
+        let mut drifted = replacement.clone();
+        drifted.verified_base.as_mut().unwrap().sha = "other-base".to_string();
+        let error = record_replacement_gate_proof(
+            run_id,
+            drifted,
+            Some("Chris approved external proof".to_string()),
+        )
+        .expect_err("base drift is refused");
+        assert!(error.message.contains("drifted"));
+
+        let mut mismatched_evidence = replacement.clone();
+        mismatched_evidence.command_evidence[0].command = vec![
+            "sh".to_string(),
+            "-lc".to_string(),
+            "cargo test unrelated".to_string(),
+        ];
+        let error = record_replacement_gate_proof(
+            run_id,
+            mismatched_evidence,
+            Some("Chris approved external proof".to_string()),
+        )
+        .expect_err("each gate needs matching command evidence");
+        assert!(error
+            .message
+            .contains("matching zero-exit command evidence"));
+
+        let replacement_for_replay = replacement.clone();
+        record_replacement_gate_proof(
+            run_id,
+            replacement,
+            Some("Chris approved external proof".to_string()),
+        )
+        .expect("record bound green replacement proof");
+        let replay = record_replacement_gate_proof(
+            run_id,
+            replacement_for_replay,
+            Some("Chris approved external proof".to_string()),
+        )
+        .expect("identical proof replay is idempotent");
+        assert_eq!(
+            replay.status,
+            crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+        );
+        let record = agent_task_lifecycle::status(run_id).expect("read durable evidence");
+        assert_eq!(record.metadata["promotions"].as_array().unwrap().len(), 2);
+        let original_history = &record.metadata["promotions"][0];
+        assert!(original_history["deterministic_gates"][0]["stderr"]
+            .as_str()
+            .unwrap()
+            .contains("rustup infrastructure failure"));
+        let original_reference = &record.metadata["latest_promotion"]["provenance"]
+            ["replacement_gate_proof"]["original_history"];
+        assert_eq!(original_reference["run_id"], run_id);
+        assert_eq!(original_reference["metadata_key"], "promotions");
+        assert_eq!(original_reference["index"], 0);
+        assert_eq!(original_reference["status"], "gate_failed");
+        assert_eq!(original_reference["deterministic_gate_count"], 1);
+        assert_eq!(
+            original_reference["sha256"],
+            homeboy_engine_primitives::content_hash::sha256_hex(
+                &homeboy_core::engine::canonical_json::canonical_json_bytes(original_history)
+                    .expect("serialize original history")
+            )
+        );
+        assert!(
+            record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]
+                .get("original")
+                .is_none()
+        );
+        assert_eq!(
+            record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]
+                ["environment_policy"][0]["environment"]["mode"],
+            "inherit"
+        );
+
+        let mut backend = CaptureBackend::default();
+        let published = recover_cook_pr_with_backend(cook_id, Vec::new(), false, &mut backend)
+            .expect("replacement proof finalizes existing candidate");
+        assert_eq!(published["status"], "review_ready");
+        assert!(backend.created);
+        assert!(backend
+            .body
+            .contains("cargo test --locked agent_task_promotion --lib"));
+        for evidence in [
+            "Original infrastructure-invalid verification retained",
+            "Replacement candidate-bound verification",
+            "Explicit operator authorization for external replacement proof was recorded.",
+        ] {
+            assert!(
+                backend.body.contains(evidence),
+                "missing dossier evidence: {evidence}; body: {}",
+                backend.body
+            );
+        }
+        assert!(!backend.body.contains("Chris approved external proof"));
+        let mut repeated = CaptureBackend::default();
+        assert_eq!(
+            recover_cook_pr_with_backend(cook_id, Vec::new(), false, &mut repeated).unwrap(),
+            published
+        );
+        assert!(
+            !repeated.created,
+            "finalization receipt preserves exactly-once publication"
+        );
     });
 }
 

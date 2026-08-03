@@ -68,7 +68,8 @@ pub(super) fn agent_task_resource_behavior(
         | agent_task::AgentTaskCommand::Contract(_)
         | agent_task::AgentTaskCommand::CompileLoop(_)
         | agent_task::AgentTaskCommand::Auth(_)
-        | agent_task::AgentTaskCommand::Accept(_) => AgentTaskResourceBehavior::LocalControl,
+        | agent_task::AgentTaskCommand::Accept(_)
+        | agent_task::AgentTaskCommand::RecordReplacementGateProof(_) => AgentTaskResourceBehavior::LocalControl,
         agent_task::AgentTaskCommand::Cook(cook) if cook.dispatch.core.queue_only => {
             AgentTaskResourceBehavior::LocalControl
         }

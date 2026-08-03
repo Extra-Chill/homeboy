@@ -39,9 +39,10 @@ pub use args::{
     AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs, CancelArgs,
     CompileLoopArgs, ContractArgs, ContractFormat, CookContinueArgs, DiagnoseArgs, EvidenceArgs,
     FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs, PromoteArgs,
-    PromotionProviderArgs, ProvidersArgs, ReconcileRecordsArgs, ReplayProviderBoundaryArgs,
-    RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs,
-    RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
+    PromotionProviderArgs, ProvidersArgs, ReconcileRecordsArgs, RecordReplacementGateProofArgs,
+    ReplayProviderBoundaryArgs, RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs,
+    ReviewArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs,
+    VerifyGateArgs,
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
@@ -173,6 +174,9 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             run::promotion_provider(provider_args)
         }
         AgentTaskCommand::FinalizePr(finalize_args) => review::finalize_pull_request(finalize_args),
+        AgentTaskCommand::RecordReplacementGateProof(args) => {
+            review::record_replacement_gate_proof(args)
+        }
         AgentTaskCommand::Accept(args) => {
             let verdict = if args.verdict == "accepted" {
                 homeboy::agents::agent_tasks::lifecycle::AgentTaskAcceptanceVerdict::Accepted

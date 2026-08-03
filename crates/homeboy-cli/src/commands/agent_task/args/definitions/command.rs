@@ -12,8 +12,8 @@ use super::cook::{AgentTaskCookArgs, AgentTaskLoopArgs, PromotionProviderArgs};
 use super::fanout::AgentTaskFanoutArgs;
 use super::lifecycle::{
     AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs, LogsArgs,
-    PromoteArgs, ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs, RunArgs, RunPlanArgs,
-    RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs,
+    PromoteArgs, RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs,
+    RunArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs,
 };
 
 pub use super::super::auth::{
@@ -103,6 +103,8 @@ pub enum AgentTaskCommand {
     #[command(hide = true)]
     PromotionProvider(PromotionProviderArgs),
     FinalizePr(FinalizePrArgs),
+    /// Attach authorized candidate-bound replacement gate proof after an infrastructure gate failure.
+    RecordReplacementGateProof(RecordReplacementGateProofArgs),
     /// Record an independent, durable acceptance verdict for a candidate.
     Accept(AcceptArgs),
     GateFeedback(GateFeedbackArgs),

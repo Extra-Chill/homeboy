@@ -1948,6 +1948,33 @@ fn retry_force_alias_parses_as_force() {
 }
 
 #[test]
+fn replacement_gate_proof_command_requires_typed_proof_and_operator_authorization() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "record-replacement-gate-proof",
+        "cook-11290-attempt-1",
+        "--promotion",
+        "@replacement.json",
+        "--authorize-external-proof",
+        "Chris approved durable evidence",
+    ])
+    .expect("replacement proof command parses");
+    let Commands::AgentTask(args) = cli.command else {
+        panic!("agent-task command");
+    };
+    let AgentTaskCommand::RecordReplacementGateProof(args) = args.command else {
+        panic!("replacement proof command");
+    };
+    assert_eq!(args.run_id, "cook-11290-attempt-1");
+    assert_eq!(args.promotion, "@replacement.json");
+    assert_eq!(
+        args.authorize_external_proof.as_deref(),
+        Some("Chris approved durable evidence")
+    );
+}
+
+#[test]
 fn resume_command_executes_existing_run() {
     with_temp_home(|| {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-resume-cli")).expect("submitted");

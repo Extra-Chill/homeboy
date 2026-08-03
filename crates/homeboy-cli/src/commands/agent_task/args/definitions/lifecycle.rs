@@ -346,6 +346,17 @@ pub struct FinalizePrArgs {
     pub manual_finalization: bool,
 }
 #[derive(Args, Debug)]
+pub struct RecordReplacementGateProofArgs {
+    /// Durable Cook attempt whose applied candidate has infrastructure-invalid gates.
+    pub run_id: String,
+    /// Complete typed promotion report from the replacement gate executor: inline JSON, `@FILE`, or `-`.
+    #[arg(long, value_name = "JSON|@FILE|-")]
+    pub promotion: String,
+    /// Explicit operator authorization for externally produced proof.
+    #[arg(long, value_name = "TEXT")]
+    pub authorize_external_proof: Option<String>,
+}
+#[derive(Args, Debug)]
 pub struct GateFeedbackArgs {
     /// Promotion report as a JSON spec: inline JSON, `@FILE` to read a file, or
     /// `-` to read stdin. A bare path is NOT accepted — use
