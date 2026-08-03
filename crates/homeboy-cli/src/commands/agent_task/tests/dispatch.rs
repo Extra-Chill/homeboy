@@ -98,6 +98,28 @@ fn cook_derives_issue_destination_and_preserves_explicit_override() {
 }
 
 #[test]
+fn cook_provisioning_rejects_an_unresolved_destination_without_panicking() {
+    with_isolated_home(|_| {
+        let args = cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the issue".to_string(),
+            "--no-finalize".to_string(),
+        ]);
+
+        let error = super::super::run::provision_cook_destination(&args)
+            .expect_err("an unresolved destination must fail closed");
+
+        assert_eq!(
+            error.details["args"][0],
+            "--to-worktree is required before provisioning a Cook destination"
+        );
+    });
+}
+
+#[test]
 fn cook_rejects_queue_only_before_creating_a_durable_recipe() {
     with_isolated_home(|_| {
         let cli = Cli::parse_from([
