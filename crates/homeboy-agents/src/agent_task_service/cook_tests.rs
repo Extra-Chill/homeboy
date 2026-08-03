@@ -5188,6 +5188,59 @@ fn cook_index_serialization_remains_compatible_with_indexes_without_a_candidate_
     assert!(serialized.get("latest_substantive_candidate").is_none());
 }
 
+/// Terminality must survive a status this binary has never seen.
+///
+/// The previous implementation inferred it from the status string, so a Cook
+/// reporting an unrecognized status — which is reachable, because several
+/// exits pass `finalization["status"]` straight through and fall back to
+/// `"unknown"` — was classified by whichever way that inference happened to
+/// guess. The declared disposition is what the orchestrator's completion
+/// depends on, so it must not consult the vocabulary at all.
+#[test]
+fn terminality_is_declared_by_the_exit_not_read_from_the_status_string() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-disposition-authority";
+        let unrecognized = "some_status_from_a_newer_binary";
+
+        let terminal = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: unrecognized,
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 1,
+            invocation_latest_run_id: None,
+        });
+        assert!(terminal.value.disposition.is_terminal());
+        assert_eq!(terminal.value.disposition.phase(), "terminal");
+        // The unrecognized status is reported verbatim, never rewritten.
+        assert_eq!(terminal.value.status, unrecognized);
+
+        // The one exit that hands work to a durable owner stays non-terminal,
+        // so no completion is announced while that owner is still working.
+        let in_flight = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "in_flight",
+            disposition: CookDisposition::InFlight,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: Some("provider attempt accepted by the runner daemon".to_string()),
+            exit_code: 0,
+            invocation_latest_run_id: None,
+        });
+        assert!(!in_flight.value.disposition.is_terminal());
+        assert_eq!(in_flight.value.disposition.phase(), "in_flight");
+
+        // Consumers reading the serialized report get the same answer without
+        // having to pattern-match the open status vocabulary.
+        let serialized = serde_json::to_value(&terminal.value).expect("serialize cook report");
+        assert_eq!(serialized["disposition"], "terminal");
+        let serialized = serde_json::to_value(&in_flight.value).expect("serialize cook report");
+        assert_eq!(serialized["disposition"], "in_flight");
+    });
+}
+
 #[test]
 fn cook_report_emits_selected_candidate_provenance_without_redefining_latest_run_id() {
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -5226,6 +5279,7 @@ fn cook_report_emits_selected_candidate_provenance_without_redefining_latest_run
         let report = cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "completed",
+            disposition: CookDisposition::Terminal,
             attempts: Vec::new(),
             finalization: None,
             stop_reason: None,
@@ -5340,6 +5394,7 @@ fn resume_promoted_patch_guidance_keeps_the_exhausted_zero_byte_attempt_as_lates
         let report = cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "execution_budget_exhausted",
+            disposition: CookDisposition::Terminal,
             attempts: Vec::new(),
             finalization: None,
             stop_reason: Some(
@@ -5394,6 +5449,7 @@ fn resume_promoted_patch_guidance_keeps_the_exhausted_zero_byte_attempt_as_lates
         let unproven = cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "execution_budget_exhausted",
+            disposition: CookDisposition::Terminal,
             attempts: Vec::new(),
             finalization: None,
             stop_reason: None,
@@ -8112,6 +8168,7 @@ fn cook_report_latest_run_id_prefers_invocation_over_stale_cook_index() {
         let report = cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "execution_budget_exhausted",
+            disposition: CookDisposition::Terminal,
             attempts: vec![AgentTaskCookAttemptReport {
                 attempt: 2,
                 run_id: fresh_run_id.clone(),
@@ -8265,6 +8322,7 @@ fn selected_candidate_provenance_flags_cross_invocation_selection() {
         let cross_invocation = cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "completed",
+            disposition: CookDisposition::Terminal,
             attempts: Vec::new(),
             finalization: None,
             stop_reason: None,
@@ -8284,6 +8342,7 @@ fn selected_candidate_provenance_flags_cross_invocation_selection() {
         let in_invocation = cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "completed",
+            disposition: CookDisposition::Terminal,
             attempts: Vec::new(),
             finalization: None,
             stop_reason: None,
@@ -8327,6 +8386,7 @@ fn post_materialization_failure_families_expose_only_durable_identity_and_legal_
             let report = cook_report(CookReportInput {
                 cook_id: cook_id.to_string(),
                 status,
+                disposition: CookDisposition::Terminal,
                 attempts: Vec::new(),
                 finalization: None,
                 stop_reason: Some(
@@ -8508,6 +8568,7 @@ fn cook_report_invocation_run_ids_populated_for_policy_failure() {
         let report = cook_report(CookReportInput {
             cook_id: "cook-test".to_string(),
             status: "policy_failure",
+            disposition: CookDisposition::Terminal,
             attempts: vec![AgentTaskCookAttemptReport {
                 attempt: 1,
                 run_id: fresh_run_id.clone(),

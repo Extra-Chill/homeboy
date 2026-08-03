@@ -17,6 +17,7 @@ use serde_json::Value;
 use crate::agent_task::AgentTaskExecutor;
 use crate::agent_task_lifecycle;
 use crate::agent_task_scheduler::AgentTaskPlan;
+use homeboy_core::cook_status::CookDisposition;
 use homeboy_core::{Error, Result};
 
 use super::cook::{
@@ -172,6 +173,7 @@ pub(crate) fn pre_execution_failure_report(
     let mut report = cook_report(CookReportInput {
         cook_id,
         status: "pre_execution_failure",
+        disposition: CookDisposition::Terminal,
         attempts,
         finalization: None,
         stop_reason: Some(format!(

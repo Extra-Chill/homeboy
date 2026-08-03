@@ -27,6 +27,7 @@ use crate::agent_task_promotion::{
     promote_with_checkpoint, AgentTaskPromotionOptions, AgentTaskPromotionReport,
 };
 use crate::agent_task_provider::ExtensionProviderAgentTaskExecutor;
+use homeboy_core::cook_status::CookDisposition;
 use homeboy_core::{Error, Result};
 
 use super::cook::{
@@ -331,6 +332,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
             return Ok(cook_report(CookReportInput {
                 cook_id: cook_id.to_string(),
                 status: &result.status,
+                disposition: CookDisposition::Terminal,
                 attempts: vec![AgentTaskCookAttemptReport {
                     attempt: 1,
                     run_id: record.run_id.clone(),
@@ -375,6 +377,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         return Ok(cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: &status,
+            disposition: CookDisposition::Terminal,
             attempts: vec![AgentTaskCookAttemptReport {
                 attempt: 1,
                 run_id: record.run_id.clone(),
@@ -572,6 +575,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
             let report = cook_report(CookReportInput {
                 cook_id: cook_id.to_string(),
                 status: "policy_failure",
+                disposition: CookDisposition::Terminal,
                 attempts: vec![attempt],
                 finalization: None,
                 stop_reason: Some(
@@ -657,6 +661,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                 let report = cook_report(CookReportInput {
                     cook_id: cook_id.to_string(),
                     status: "execution_budget_exhausted",
+                    disposition: CookDisposition::Terminal,
                     attempts: vec![attempt],
                     finalization: None,
                     stop_reason: Some(super::cook::exhausted_budget_guidance(
@@ -679,6 +684,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                 let report = cook_report(CookReportInput {
                     cook_id: cook_id.to_string(),
                     status: "policy_failure",
+                    disposition: CookDisposition::Terminal,
                     attempts: vec![attempt],
                     finalization: None,
                     stop_reason: Some(reason.clone()),
@@ -699,6 +705,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         return Ok(cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "gate_failed",
+            disposition: CookDisposition::Terminal,
             attempts: vec![attempt],
             finalization: None,
             stop_reason: Some(
@@ -713,6 +720,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         return Ok(cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "green_no_finalize",
+            disposition: CookDisposition::Terminal,
             attempts: vec![attempt],
             finalization: None,
             stop_reason: Some(
@@ -753,6 +761,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
     Ok(cook_report(CookReportInput {
         cook_id: cook_id.to_string(),
         status: &status,
+        disposition: CookDisposition::Terminal,
         attempts: vec![attempt],
         finalization: Some(finalization),
         stop_reason: None,

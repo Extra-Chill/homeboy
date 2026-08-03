@@ -12,6 +12,7 @@
 use serde_json::Value;
 use std::path::PathBuf;
 
+use homeboy_core::cook_status::{CookDisposition, CookStatus};
 use homeboy_core::engine::canonical_json::canonical_json_bytes;
 use homeboy_engine_primitives::content_hash;
 
@@ -644,6 +645,7 @@ pub(crate) fn moving_base_recovery_report(
     let mut report = cook_report(CookReportInput {
         cook_id,
         status: "candidate_recoverable",
+        disposition: CookDisposition::Terminal,
         attempts,
         finalization: None,
         stop_reason,
@@ -2407,6 +2409,12 @@ fn review_form_for_finalization(
 pub(crate) struct CookReportInput<'a> {
     pub cook_id: String,
     pub status: &'a str,
+    /// Whether this exit handed the work to a durable owner or stopped.
+    ///
+    /// Required, and deliberately not defaulted: this is the fact the
+    /// orchestrator's completion depends on, and the exit building the report
+    /// is the only place that knows it.
+    pub disposition: CookDisposition,
     pub attempts: Vec<AgentTaskCookAttemptReport>,
     pub finalization: Option<Value>,
     pub stop_reason: Option<String>,
@@ -2421,12 +2429,21 @@ pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<Agen
     let CookReportInput {
         cook_id,
         status,
+        disposition,
         attempts,
         finalization,
         stop_reason,
         exit_code,
         invocation_latest_run_id,
     } = input;
+    // Defense in depth, not a second source of truth: `disposition` remains
+    // authoritative in release builds. This only catches an exit whose
+    // declared disposition contradicts the status it reports, which is a
+    // producer bug rather than a condition to recover from.
+    debug_assert!(
+        !CookStatus::from_status(status).is_in_flight() || disposition == CookDisposition::InFlight,
+        "cook exit reported in-flight status {status:?} but declared {disposition:?}"
+    );
     let history_run_ids = agent_task_lifecycle::cook_index(&cook_id)
         .map(|index| {
             index
@@ -2485,6 +2502,7 @@ pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<Agen
             history_run_ids,
             invocation_run_ids,
             status: status.to_string(),
+            disposition,
             attempts,
             finalization,
             selected_candidate,

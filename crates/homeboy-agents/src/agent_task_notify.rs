@@ -316,6 +316,9 @@ mod tests {
             history_run_ids: Vec::new(),
             invocation_run_ids: Vec::new(),
             status: status.to_string(),
+            // These tests all build terminal payloads; the notification only
+            // fires for a terminal disposition in the first place.
+            disposition: homeboy_core::cook_status::CookDisposition::Terminal,
             attempts: Vec::new(),
             finalization,
             selected_candidate: None,
