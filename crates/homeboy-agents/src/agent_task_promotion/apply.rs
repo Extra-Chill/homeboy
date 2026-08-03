@@ -370,6 +370,7 @@ pub(crate) trait AgentTaskPromotionWorkspaceProvider {
         reveal_policy: AgentTaskGateRevealPolicy,
         _runtime_tmpdir: &Path,
         _gate_environment: &crate::agent_task_gate::AgentTaskGateEnvironmentPolicy,
+        _package_artifacts: &[crate::agent_task_gate::AgentTaskGatePackageArtifactRequirement],
     ) -> Result<AgentTaskGateReport> {
         self.verify(cwd, index, command, visibility, reveal_policy)
     }
@@ -582,6 +583,7 @@ impl AgentTaskPromotionWorkspaceProvider for ExternalPromotionWorkspaceProvider 
         reveal_policy: AgentTaskGateRevealPolicy,
         runtime_tmpdir: &Path,
         gate_environment: &crate::agent_task_gate::AgentTaskGateEnvironmentPolicy,
+        package_artifacts: &[crate::agent_task_gate::AgentTaskGatePackageArtifactRequirement],
     ) -> Result<AgentTaskGateReport> {
         crate::agent_task_gate::run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
             cwd,
@@ -591,6 +593,7 @@ impl AgentTaskPromotionWorkspaceProvider for ExternalPromotionWorkspaceProvider 
             reveal_policy,
             Some(runtime_tmpdir),
             gate_environment,
+            package_artifacts,
         )
     }
 }

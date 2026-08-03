@@ -1830,6 +1830,7 @@ fn run_promotion_gate(
         worktree_path,
         &options.gates.gate_environment,
         &options.gates.required_toolchains(),
+        &options.gates.gate_package_artifacts,
         Some(&runtime_tmpdir.context().tmp_dir),
         options.gates.gate_timeout(),
     ) {
@@ -1850,6 +1851,7 @@ fn run_promotion_gate(
             Some(&runtime_tmpdir.context().tmp_dir),
             Some(supervision),
             &options.gates.gate_environment,
+            &options.gates.gate_package_artifacts,
         )
     } else {
         provider.verify_with_runtime_tmpdir(
@@ -1860,6 +1862,7 @@ fn run_promotion_gate(
             reveal_policy,
             &runtime_tmpdir.context().tmp_dir,
             &options.gates.gate_environment,
+            &options.gates.gate_package_artifacts,
         )
     };
     let mut result = result;
