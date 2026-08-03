@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.28] - 2026-08-03
+
+### Fixed
+- ignore generated lint artifacts
+
 ## [3.34.27] - 2026-08-03
 
 ### Fixed
