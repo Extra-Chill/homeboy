@@ -776,6 +776,13 @@ pub fn persisted_status(run_id: &str) -> Result<AgentTaskRunRecord> {
     agent_task_lifecycle::persisted_status(run_id)
 }
 
+/// Resolve the durable substantive candidate for a logical Cook reader.
+pub fn select_cook_candidate(
+    cook_id: &str,
+) -> Result<agent_task_lifecycle::AgentTaskCookCandidateSelection> {
+    agent_task_lifecycle::select_cook_candidate(cook_id)
+}
+
 pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRunStatus> {
     agent_task_lifecycle::run_status(run_id, since_cursor)
 }

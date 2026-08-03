@@ -178,15 +178,17 @@ impl TryFrom<FinalizePrEvidenceArgs> for AgentTaskPrEvidence {
 }
 
 pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
-    let record = agent_task_lifecycle::status(&args.run_id)?;
+    let target = super::status::resolve_cook_reader_target(&args.run_id)?;
+    let run_id = &target.run_id;
+    let record = agent_task_lifecycle::status(run_id)?;
     // A review that names a target worktree is preparing a promotion handoff.
     // Materialize recovered runner artifacts before rendering its command.
     if args.to_worktree.is_some() {
         agent_task_lifecycle::materialize_recovered_patch_artifact(&record.run_id, None, None)?;
     }
-    let log = agent_task_lifecycle::logs(&args.run_id)?;
-    let artifacts = agent_task_lifecycle::artifacts(&args.run_id)?;
-    let aggregate_source = completed_run_aggregate_source(&args.run_id).transpose()?;
+    let log = agent_task_lifecycle::logs(run_id)?;
+    let artifacts = agent_task_lifecycle::artifacts(run_id)?;
+    let aggregate_source = completed_run_aggregate_source(run_id).transpose()?;
     let aggregate = aggregate_source
         .as_ref()
         .map(|(aggregate, _path)| aggregate);
@@ -249,8 +251,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
         args.to_worktree.as_deref(),
     );
 
-    Ok((
-        serde_json::json!({
+    let mut value = serde_json::json!({
             "schema": "homeboy/agent-task-review/v1",
             "run_id": record.run_id,
             "state": record.state,
@@ -270,9 +271,35 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
                 "authoritative": "homeboy-agent-task-lifecycle",
                 "chat_state_required": false
             }
-        }),
-        0,
-    ))
+    });
+    if let Some(selection) = target.selection {
+        let latest_attempt_run_id = selection["latest_attempt_run_id"].as_str();
+        if latest_attempt_run_id.is_some_and(|latest| latest != record.run_id) {
+            if let Ok(latest) = agent_task_lifecycle::status(latest_attempt_run_id.unwrap()) {
+                let review_form = completed_run_aggregate_source(&latest.run_id)
+                    .transpose()?
+                    .and_then(|(aggregate, _)| {
+                        aggregate
+                            .selected_outcome()
+                            .or_else(|| {
+                                (aggregate.outcomes.len() == 1)
+                                    .then(|| aggregate.outcomes.first())
+                                    .flatten()
+                            })
+                            .and_then(|outcome| outcome.outputs.get("review_form"))
+                            .cloned()
+                    });
+                value["contributing_attempt"] = serde_json::json!({
+                    "run_id": latest.run_id,
+                    "review_form": review_form,
+                    "verification": latest.metadata.get("latest_promotion"),
+                });
+            }
+        }
+        value["candidate_selection"] = selection;
+    }
+    super::status::bound_full_reader_payload(&mut value);
+    Ok((value, 0))
 }
 
 pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {

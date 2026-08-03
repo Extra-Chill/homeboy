@@ -41,23 +41,55 @@ const COMPACT_TASK_LIMIT: usize = 12;
 const COMPACT_TEXT_LIMIT: usize = 512;
 const FULL_TEXT_LIMIT: usize = 4 * 1024;
 
-pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
-    if args.bridge {
-        let bridge_status = agent_task_service::run_status(&args.run_id, args.since_cursor)?;
-        return Ok((
-            serde_json::to_value(bridge_status).unwrap_or(Value::Null),
-            0,
+/// Cook IDs are logical candidate readers. Exact attempt IDs remain immutable
+/// attempt readers, even when a newer Cook attempt produced no patch.
+pub(super) struct CookReaderTarget {
+    pub(super) run_id: String,
+    pub(super) selection: Option<Value>,
+}
+
+pub(super) fn resolve_cook_reader_target(
+    run_or_cook_id: &str,
+) -> homeboy::core::Result<CookReaderTarget> {
+    if !agent_task_lifecycle::cook_index_exists(run_or_cook_id)? {
+        return Ok(CookReaderTarget {
+            run_id: run_or_cook_id.to_string(),
+            selection: None,
+        });
+    }
+    let selection = agent_task_service_direct::select_cook_candidate(run_or_cook_id)?;
+    if selection.incomplete || selection.run_id.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "cook_id",
+            "candidate selection is incomplete after its bounded recovery window",
+            Some(run_or_cook_id.to_string()),
+            None,
         ));
     }
+    Ok(CookReaderTarget {
+        run_id: selection.run_id.clone(),
+        selection: Some(serde_json::to_value(selection).unwrap_or(Value::Null)),
+    })
+}
 
+pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
+    let target = resolve_cook_reader_target(&args.run_id)?;
+    if args.bridge {
+        let bridge_status = agent_task_service::run_status(&target.run_id, args.since_cursor)?;
+        let mut value = serde_json::to_value(bridge_status).unwrap_or(Value::Null);
+        if let Some(selection) = target.selection {
+            value["candidate_selection"] = selection;
+        }
+        return Ok((value, 0));
+    }
+
+    let run_id = &target.run_id;
     // Terminal inspection is a durable-local read. Reconciliation has its own
     // explicit command so an unavailable runner cannot hold status hostage.
-    let record = match agent_task_service_direct::persisted_status(&args.run_id) {
+    let record = match agent_task_service_direct::persisted_status(run_id) {
         Ok(record) => record,
         Err(error) if is_missing_agent_task_run_metadata_error(&error) => {
-            if let Some(remediation) =
-                agent_task_service::offloaded_status_remediation(&args.run_id)?
-            {
+            if let Some(remediation) = agent_task_service::offloaded_status_remediation(run_id)? {
                 return Ok((remediation, 1));
             }
             return Err(error);
@@ -71,7 +103,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
         },
     ));
     // A future durable budget is incompatible, not an absent optional preview.
-    if let Err(error) = agent_task_lifecycle::load_plan(&args.run_id) {
+    if let Err(error) = agent_task_lifecycle::load_plan(run_id) {
         if error
             .message
             .contains("unsupported agent-task execution budget version")
@@ -109,20 +141,26 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
             }
         }
     }
-    enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
-    attach_transport_proxy_recovery_guidance(&mut value, &args.run_id);
+    enrich_with_diagnostic_summary(&mut value, run_id)?;
+    attach_transport_proxy_recovery_guidance(&mut value, run_id);
+    if let Some(selection) = target.selection.as_ref() {
+        value["candidate_selection"] = selection.clone();
+    }
     if args.full {
-        let aggregate = completed_run_aggregate(&args.run_id).and_then(Result::ok);
-        attach_full_status_candidate(&mut value, aggregate.as_ref(), &args.run_id);
+        let aggregate = completed_run_aggregate(run_id).and_then(Result::ok);
+        attach_full_status_candidate(&mut value, aggregate.as_ref(), run_id);
         bound_full_reader_payload(&mut value);
         attach_runner_probe(&mut value, &runner_probe);
-        attach_agent_task_status_actionable(&mut value, &args.run_id);
+        attach_agent_task_status_actionable(&mut value, run_id);
         return Ok((value, 0));
     }
-    let summary = compact_status_summary(&value, &args.run_id);
+    let summary = compact_status_summary(&value, run_id);
     let mut summary = summary;
+    if let Some(selection) = target.selection {
+        summary["candidate_selection"] = selection;
+    }
     attach_runner_probe(&mut summary, &runner_probe);
-    attach_agent_task_status_actionable(&mut summary, &args.run_id);
+    attach_agent_task_status_actionable(&mut summary, run_id);
     Ok((summary, 0))
 }
 
@@ -244,7 +282,7 @@ mod runner_probe_tests {
 
 /// Full recovery output remains a local reader: retain a stable digest for a
 /// large value instead of repeating multi-attempt patches in every projection.
-fn bound_full_reader_payload(value: &mut Value) {
+pub(super) fn bound_full_reader_payload(value: &mut Value) {
     match value {
         Value::String(text) if text.len() > FULL_TEXT_LIMIT => {
             let digest = content_hash::sha256_hex(text.as_bytes());
@@ -667,10 +705,12 @@ pub(super) fn artifacts(args: StatusArgs) -> CmdResult<Value> {
 }
 
 pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
-    let artifacts = agent_task_service::artifacts(&args.run_id)?;
-    let aggregate = completed_run_aggregate(&args.run_id).transpose()?;
+    let target = resolve_cook_reader_target(&args.run_id)?;
+    let run_id = &target.run_id;
+    let artifacts = agent_task_service::artifacts(run_id)?;
+    let aggregate = completed_run_aggregate(run_id).transpose()?;
     let failed_tasks = failed_task_statuses(aggregate.as_ref());
-    let plan = agent_task_lifecycle::load_plan(&args.run_id).ok();
+    let plan = agent_task_lifecycle::load_plan(run_id).ok();
 
     let mut hydrated = Vec::new();
     let mut total = 0;
@@ -706,7 +746,7 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
             continue;
         }
         hydrated.push(agent_task_service::hydrate_evidence_ref(
-            &args.run_id,
+            run_id,
             &evidence_ref,
             task_id.as_deref(),
             plan.as_ref(),
@@ -716,7 +756,7 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
 
     let mut value = serde_json::to_value(AgentTaskEvidenceReport {
         schema: "homeboy/agent-task-evidence/v1",
-        run_id: args.run_id.clone(),
+        run_id: run_id.clone(),
         filters: AgentTaskEvidenceFilters {
             kind: args.kind,
             task: args.task,
@@ -727,6 +767,9 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
         evidence: hydrated,
     })
     .unwrap_or(Value::Null);
+    if let Some(selection) = target.selection {
+        value["candidate_selection"] = selection;
+    }
     if !args.full {
         attach_collection_budget(
             &mut value,
@@ -745,10 +788,12 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
 }
 
 pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
+    let target = resolve_cook_reader_target(&args.run_id)?;
+    let run_id = &target.run_id;
     // Keep diagnosis within the same durable-local inspection contract as
     // status and logs; reconciliation is explicitly requested separately.
-    let record = agent_task_service_direct::persisted_status(&args.run_id)?;
-    let aggregate = completed_run_aggregate(&args.run_id).transpose()?;
+    let record = agent_task_service_direct::persisted_status(run_id)?;
+    let aggregate = completed_run_aggregate(run_id).transpose()?;
     let mut hydrated_evidence = Vec::new();
     let mut total_hydrated_evidence = 0;
     let mut nested_reasons = Vec::new();
@@ -793,7 +838,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         .as_ref()
         .map(causal_chain_from_aggregate)
         .unwrap_or_default();
-    let next_commands = diagnose_next_commands(&args.run_id);
+    let next_commands = diagnose_next_commands(run_id);
 
     let mut value = json!({
         "schema": "homeboy/agent-task-diagnose/v1",
@@ -806,17 +851,17 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         "hydrated_evidence_total": total_hydrated_evidence,
         "next_commands": next_commands,
     });
+    if let Some(selection) = target.selection {
+        value["candidate_selection"] = selection;
+    }
     if !args.full {
         attach_collection_budget(
             &mut value,
             "hydrated_evidence",
-            &format!(
-                "homeboy agent-task diagnose {} --full",
-                quote_arg(&args.run_id)
-            ),
+            &format!("homeboy agent-task diagnose {} --full", quote_arg(run_id)),
             &format!(
                 "homeboy agent-task diagnose {} --full --output <path>",
-                quote_arg(&args.run_id)
+                quote_arg(run_id)
             ),
         );
     }
