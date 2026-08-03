@@ -599,6 +599,7 @@ where
 {
     let args = resolve_cook_destination(args)?;
     validate_cook_request_with_provenance(&args, provenance)?;
+    let no_progress = args.no_progress;
     // Deterministic gates exist to make *publication* safe: a green gate is the
     // proof a cook may commit, push, and open a PR. A `--no-finalize` cook does
     // none of those, so a gate is not meaningful there — read-only/exploratory
@@ -628,8 +629,10 @@ where
         .unwrap_or_else(|| format!("agent-task-{}", uuid::Uuid::new_v4()));
     dispatch_args.run_id = Some(run_id.clone());
     let cook_id = requested_cook_id.clone().unwrap_or_else(|| run_id.clone());
-    if let Some(progress) = progress {
-        progress("preparing", None, None)?;
+    if !no_progress {
+        if let Some(progress) = progress {
+            progress("preparing", None, None)?;
+        }
     }
     let (run_id, mut initial_plan) = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
         let run_id = dispatch_args.run_id.clone().ok_or_else(|| {
@@ -700,6 +703,9 @@ where
         .and_then(|task| task.executor.model())
         .map(str::to_string);
     let durable_observer = |phase: &str, cook_id: &str, run_id: &str| {
+        if no_progress && phase != "durable_identity" {
+            return Ok(());
+        }
         progress
             .map(|progress| progress(phase, Some(cook_id), Some(run_id)))
             .unwrap_or(Ok(()))

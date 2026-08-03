@@ -6,6 +6,7 @@
 
 use serde::Serialize;
 use serde_json::Value;
+use std::sync::{Arc, Mutex};
 
 use super::CmdResult;
 
@@ -54,13 +55,15 @@ pub fn run(args: AgentTaskArgs) -> CmdResult<Value> {
     // interrupted mid-cook otherwise has no way to answer "what did I just
     // start?" (#10419).
     let announced_identity = std::sync::atomic::AtomicBool::new(false);
+    let no_progress = matches!(&args.command, AgentTaskCommand::Cook(cook) if cook.no_progress);
+    let reporter = CookProgressReporter::new(no_progress);
     let progress = |phase: &str, cook_id: Option<&str>, run_id: Option<&str>| {
         if let Some(run_id) = run_id {
             if !announced_identity.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 run::announce_durable_cook_identity(cook_id, run_id);
             }
         }
-        emit_cook_progress(phase, cook_id, run_id);
+        reporter.report(phase, cook_id, run_id);
         Ok(())
     };
     run_with_cook_progress(args, Some(&progress))
@@ -80,19 +83,90 @@ fn cook_progress_message(phase: &str, cook_id: Option<&str>, run_id: Option<&str
     }
 }
 
-/// Non-TTY callers need durable recovery coordinates in their captured stderr,
-/// not transient terminal-only status. TTY output stays compact.
-pub(crate) fn emit_cook_progress(phase: &str, cook_id: Option<&str>, run_id: Option<&str>) {
-    if crate::commands::utils::tty::is_stdout_tty() {
-        let identity = match (cook_id, run_id) {
-            (_, Some(run_id)) => format!(" [{run_id}]"),
-            (Some(cook_id), None) => format!(" [{cook_id}]"),
-            (None, None) => String::new(),
-        };
-        crate::commands::utils::tty::status(&format!("cook: {phase}{identity}"));
-    } else {
-        eprintln!("{}", cook_progress_message(phase, cook_id, run_id));
+const MAX_MACHINE_PROGRESS_LINES: usize = 12;
+
+#[derive(Debug, Default)]
+struct CookProgressState {
+    pointer_emitted: bool,
+    emitted_lines: usize,
+    heartbeat_count: usize,
+    last_phase: Option<String>,
+}
+
+/// Bounds foreground Cook progress independently from durable lifecycle events.
+/// Durable status and evidence remain lossless in the final command envelope.
+#[derive(Clone, Debug)]
+pub(crate) struct CookProgressReporter {
+    no_progress: bool,
+    state: Arc<Mutex<CookProgressState>>,
+}
+
+impl CookProgressReporter {
+    pub(crate) fn new(no_progress: bool) -> Self {
+        Self {
+            no_progress,
+            state: Arc::new(Mutex::new(CookProgressState::default())),
+        }
     }
+
+    pub(crate) fn report(&self, phase: &str, cook_id: Option<&str>, run_id: Option<&str>) {
+        if self.no_progress {
+            return;
+        }
+        if crate::commands::utils::tty::is_stdout_tty() {
+            crate::commands::utils::tty::status(&format!(
+                "cook: {phase}{}",
+                run_id
+                    .map(|run_id| format!(" [{run_id}]"))
+                    .or_else(|| cook_id.map(|cook_id| format!(" [{cook_id}]")))
+                    .unwrap_or_default()
+            ));
+            return;
+        }
+
+        let mut state = self.state.lock().expect("cook progress state");
+        if let Some(message) = next_machine_progress_message(&mut state, phase, cook_id, run_id) {
+            eprintln!("{message}");
+        }
+    }
+}
+
+fn next_machine_progress_message(
+    state: &mut CookProgressState,
+    phase: &str,
+    cook_id: Option<&str>,
+    run_id: Option<&str>,
+) -> Option<String> {
+    if state.emitted_lines >= MAX_MACHINE_PROGRESS_LINES {
+        return None;
+    }
+    let identity = run_id
+        .map(|run_id| format!(" [{run_id}]"))
+        .or_else(|| cook_id.map(|cook_id| format!(" [{cook_id}]")))
+        .unwrap_or_default();
+    if phase == "heartbeat" {
+        state.heartbeat_count += 1;
+        if !matches!(state.heartbeat_count, 1 | 4 | 8) {
+            return None;
+        }
+        state.emitted_lines += 1;
+        return Some(format!(
+            "Cook heartbeat{identity}: still running (liveness sample {}).",
+            state.heartbeat_count
+        ));
+    }
+    state.heartbeat_count = 0;
+    let message = if !state.pointer_emitted && run_id.is_some() {
+        state.pointer_emitted = true;
+        cook_progress_message(phase, cook_id, run_id)
+    } else if state.last_phase.as_deref() != Some(phase) {
+        format!("Cook {phase}{identity}.")
+    } else {
+        return None;
+    };
+    state.last_phase = Some(phase.to_string());
+    state.emitted_lines += 1;
+    Some(message)
 }
 
 pub(crate) fn run_with_cook_progress(
@@ -213,7 +287,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
 
 #[cfg(test)]
 mod progress_tests {
-    use super::cook_progress_message;
+    use super::{cook_progress_message, next_machine_progress_message, CookProgressState};
 
     #[test]
     fn non_tty_cook_progress_includes_durable_reconnect_commands() {
@@ -222,6 +296,24 @@ mod progress_tests {
         let message = cook_progress_message("provider_ready", None, Some("run-123"));
         assert!(message.contains("agent-task status run-123"));
         assert!(message.contains("agent-task evidence run-123 --full"));
+    }
+
+    #[test]
+    fn long_unchanged_phase_has_bounded_machine_liveness_output() {
+        let mut state = CookProgressState::default();
+        let mut messages = Vec::new();
+        for _ in 0..100 {
+            if let Some(message) =
+                next_machine_progress_message(&mut state, "heartbeat", None, Some("run-123"))
+            {
+                messages.push(message);
+            }
+        }
+
+        assert_eq!(messages.len(), 3, "heartbeats must not scale with polls");
+        assert!(messages
+            .iter()
+            .all(|message| message.contains("still running")));
     }
 }
 
