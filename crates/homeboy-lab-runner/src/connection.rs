@@ -1695,32 +1695,48 @@ pub(crate) fn reconnect_job_owner_for_polling(
     runner_id: &str,
     job_id: &str,
 ) -> Result<RunnerSession> {
-    let _lease = homeboy_core::runtime_promotion::acquire_waiting_for_compatible(
-        "runner durable job tunnel recovery",
-        format!("{runner_id}:{job_id}"),
-        DIRECT_TUNNEL_RECOVERY_WAIT,
-        super::lab_selection::emit_runtime_promotion_wait,
-    )?;
-    let legacy = read_session_or_live_peer(runner_id)?;
-    if let Some(session) = super::generation_store::job_session(runner_id, job_id, legacy.as_ref())?
-    {
-        if session_is_live(&session) {
-            return Ok(session);
-        }
-    }
-    let session = reconnect_job_owner(runner_id, job_id)?;
-    let replaced =
-        match super::generation_store::record_reconnected_job_owner(runner_id, &session, job_id) {
-            Ok(replaced) => replaced,
-            Err(error) => {
-                close_reconnected_job_log_owner(&session);
-                return Err(error);
+    super::generation_store::with_job_recovery_lock(runner_id, job_id, || {
+        let legacy = read_session_or_live_peer(runner_id)?;
+        if let Some(session) =
+            super::generation_store::job_session(runner_id, job_id, legacy.as_ref())?
+        {
+            if session_is_live(&session) {
+                return Ok(session);
             }
-        };
-    if replaced.tunnel_pid != session.tunnel_pid {
-        close_reconnected_job_log_owner(&replaced);
+        }
+        let session = reconnect_job_owner(runner_id, job_id)?;
+        let tunnel_identity = session.tunnel_pid.and_then(|pid| {
+            homeboy_core::process::process_start_identity(pid)
+                .ok()
+                .flatten()
+        });
+        if let Err(error) =
+            super::generation_store::record_reconnected_job_owner(runner_id, &session, job_id)
+        {
+            terminate_tunnel_if_owned(&session, tunnel_identity.as_ref());
+            return Err(error);
+        }
+        // Historical session records contain only a PID. Never signal an
+        // unproven PID because it may now identify an unrelated process.
+        Ok(session)
+    })
+}
+
+fn terminate_tunnel_if_owned(
+    session: &RunnerSession,
+    expected_identity: Option<&homeboy_core::process::ProcessStartIdentity>,
+) {
+    let Some((pid, expected_identity)) = session.tunnel_pid.zip(expected_identity) else {
+        return;
+    };
+    if homeboy_core::process::process_start_identity(pid)
+        .ok()
+        .flatten()
+        .as_ref()
+        == Some(expected_identity)
+    {
+        terminate_pid(pid);
     }
-    Ok(session)
 }
 
 /// Reopen a temporary tunnel to the durable generation which owns `job_id`.

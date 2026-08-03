@@ -26,6 +26,21 @@ fn path(runner_id: &str) -> Result<PathBuf> {
         .join("generations.json"))
 }
 
+fn recovery_lock_path(runner_id: &str, job_id: &str) -> Result<PathBuf> {
+    let job = job_id
+        .chars()
+        .map(|character| {
+            character
+                .is_ascii_alphanumeric()
+                .then_some(character)
+                .unwrap_or('_')
+        })
+        .collect::<String>();
+    Ok(paths::runner_sessions_dir()?
+        .join(runner_id)
+        .join(format!("recovery-{job}.lock")))
+}
+
 fn pending_replacement_path(runner_id: &str) -> Result<PathBuf> {
     Ok(paths::runner_sessions_dir()?
         .join(runner_id)
@@ -106,10 +121,13 @@ pub(crate) fn write_durable_json<T: serde::Serialize>(
 
 /// Serialize read-modify-write registry updates independently for each runner.
 /// A status reconciliation and `/exec` acceptance can arrive concurrently.
-fn with_registry_lock<T>(runner_id: &str, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+fn with_lock<T>(
+    lock_path: PathBuf,
+    runner_id: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
     const LOCK_RETRY: Duration = Duration::from_millis(25);
-    let lock_path = path(runner_id)?.with_extension("lock");
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             Error::internal_io(
@@ -167,6 +185,22 @@ fn with_registry_lock<T>(runner_id: &str, operation: impl FnOnce() -> Result<T>)
         let _ = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) };
     }
     result
+}
+
+fn with_registry_lock<T>(runner_id: &str, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    with_lock(
+        path(runner_id)?.with_extension("lock"),
+        runner_id,
+        operation,
+    )
+}
+
+pub(crate) fn with_job_recovery_lock<T>(
+    runner_id: &str,
+    job_id: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    with_lock(recovery_lock_path(runner_id, job_id)?, runner_id, operation)
 }
 
 fn legacy_generation(session: &RunnerSession) -> String {
