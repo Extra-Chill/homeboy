@@ -3242,6 +3242,7 @@ fi
                 gate_environment: Vec::new(),
                 gate_environment_preserve: Vec::new(),
                 gate_toolchains: Vec::new(),
+                gate_package_artifacts: Vec::new(),
                 isolate_gate_home: true,
                 isolate_gate_xdg: true,
             },
