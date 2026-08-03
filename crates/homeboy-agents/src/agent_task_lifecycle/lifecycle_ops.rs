@@ -512,10 +512,32 @@ where
     F: FnOnce(&str) -> Result<A>,
     A: RuntimeAdmissionEvidence,
 {
+    let mut normalized_plan = plan.clone();
+    if normalized_plan.workspace_identity.is_none() {
+        normalized_plan.workspace_identity = identity_for_plan(&normalized_plan)?;
+    }
     let run_id = requested_run_id
         .map(sanitize_run_id)
         .unwrap_or_else(default_run_id);
-    let plan_path = store::write_plan(&run_id, plan)?;
+    if let Some(identity) = normalized_plan.workspace_identity.clone() {
+        normalized_plan.workspace_owner_lease =
+            Some(register_local_workspace_owner(identity, &run_id)?);
+        normalized_plan.workspace_lifecycle_revision = normalized_plan
+            .workspace_owner_lease
+            .as_ref()
+            .expect("registered owner lease")
+            .lifecycle_revision;
+    }
+    let plan = &normalized_plan;
+    let plan_path = match store::write_plan(&run_id, plan) {
+        Ok(path) => path,
+        Err(error) => {
+            if let Some(lease) = plan.workspace_owner_lease.as_ref() {
+                let _ = release_local_workspace_owner(lease);
+            }
+            return Err(error);
+        }
+    };
 
     let mut metadata = json!({
         "task_count": plan.tasks.len(),
@@ -590,6 +612,10 @@ where
         candidate_adoption: None,
         adoption_run_id: None,
         acceptance: None,
+        workspace_identity: plan.workspace_identity.clone(),
+        workspace_lifecycle_revision: plan.workspace_lifecycle_revision,
+        workspace_owner_lease: plan.workspace_owner_lease.clone(),
+        workspace_claim: None,
         metadata,
     };
     let mut preserved_controller_runtime = None;
@@ -643,7 +669,15 @@ where
                 record.lab_handoff = existing.lab_handoff;
             }
         }
+        // A replay of the same run retains its fenced ownership. A different
+        // claim is never silently substituted after ownership was established.
+        if existing.workspace_identity == record.workspace_identity
+            && existing.workspace_lifecycle_revision == record.workspace_lifecycle_revision
+        {
+            record.workspace_owner_lease = existing.workspace_owner_lease;
+        }
     }
+    require_record_workspace_owner(&record)?;
     store::write_record(&record)?;
 
     // The queue is durable independently of this foreground controller. Status
@@ -1057,6 +1091,7 @@ pub fn reserve_provider_execution(
     attempt: u32,
 ) -> Result<ProviderExecutionReservation> {
     let run_id = sanitize_run_id(run_id);
+    require_record_workspace_owner(&store::read_record(&run_id)?)?;
     let execution_key = format!("{}:{attempt}", task.task_id);
     let mut reservation = ProviderExecutionReservation::AlreadyReserved;
     store::mutate_record(&run_id, |record| {
@@ -2339,6 +2374,25 @@ pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
     let run_id = record.run_id.clone();
     let aggregate = snapshot.aggregate;
     let latest_executor_evidence = record.latest_executor_evidence.as_ref();
+    let mut evidence_refs = aggregate_evidence_refs(aggregate.as_ref(), latest_executor_evidence);
+    if aggregate.is_none()
+        && (record.metadata.get("kind").and_then(Value::as_str)
+            == Some("lab_offload_pre_dispatch_failure")
+            || record
+                .tasks
+                .iter()
+                .any(|task| task.task_id == "agent-task-predispatch"))
+    {
+        evidence_refs.insert(
+            0,
+            AgentTaskEvidenceRef {
+                kind: "lab-offload-pre-dispatch-failure".to_string(),
+                uri: format!("homeboy://agent-task/run/{run_id}/logs"),
+                label: Some("Lab offload pre-dispatch failure".to_string()),
+            },
+        );
+        dedup_evidence_refs(&mut evidence_refs);
+    }
     Ok(AgentTaskRunArtifacts {
         schema: schemas::RUN_ARTIFACTS.to_string(),
         run_id,
@@ -2347,7 +2401,7 @@ pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
             .map(crate::agent_task_artifacts::reviewer_facing_aggregate)
             .map(|aggregate| aggregate_artifacts(Some(&aggregate)))
             .unwrap_or_default(),
-        evidence_refs: aggregate_evidence_refs(aggregate.as_ref(), latest_executor_evidence),
+        evidence_refs,
     })
 }
 

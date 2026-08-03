@@ -44,6 +44,8 @@ pub(crate) struct AdmissionReservation {
     pub(crate) token: String,
     pub(crate) expires_at_ms: u64,
     pub(crate) created: bool,
+    /// Exact direct-daemon authority registered before this reservation commit.
+    pub(crate) workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -56,6 +58,8 @@ pub struct JobStore {
     terminal_write_failures: Arc<AtomicU64>,
     #[cfg(test)]
     durable_write_failures: Arc<AtomicU64>,
+    #[cfg(test)]
+    durable_write_skips: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +166,12 @@ pub(crate) struct LocalRunnerJob {
     pub(crate) command: Vec<String>,
     pub(crate) cwd: Option<String>,
     pub(crate) lifecycle: Option<super::remote_runner::RunnerJobLifecycleMetadata>,
+    /// Reconciliation claims remain reverse-broker-only authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
+    /// Exact direct-daemon authority required to execute this queued job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -338,11 +348,17 @@ impl JobStore {
         };
         #[cfg(test)]
         if self
-            .durable_write_failures
+            .durable_write_skips
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                 remaining.checked_sub(1)
             })
-            .is_ok()
+            .is_err()
+            && self
+                .durable_write_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
         {
             return Err(Error::internal_io(
                 "injected durable store write failure",
@@ -548,6 +564,8 @@ impl JobStore {
             terminal_write_failures: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             durable_write_failures: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            durable_write_skips: Arc::new(AtomicU64::new(0)),
         };
 
         store.durable_transaction(|inner| {
@@ -707,6 +725,8 @@ impl JobStore {
             terminal_write_failures: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             durable_write_failures: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            durable_write_skips: Arc::new(AtomicU64::new(0)),
         };
         store.durable_transaction(|_| Ok(()))?;
         Ok(store)
@@ -808,6 +828,8 @@ impl JobStore {
         metadata: Value,
         idempotency_key: &str,
         now: u64,
+        workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
+        workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
     ) -> Result<AdmissionReservation> {
         self.durable_transaction(|inner| {
             if let Some(stored) = inner
@@ -826,6 +848,32 @@ impl JobStore {
                         None,
                     ));
                 }
+                if stored
+                    .local_runner
+                    .as_ref()
+                    .and_then(|runner| runner.workspace_claim_binding.as_ref())
+                    != workspace_claim_binding.as_ref()
+                {
+                    return Err(Error::validation_invalid_argument(
+                        "workspace_claim_binding",
+                        "admission idempotency key belongs to a differently bound reservation",
+                        Some(idempotency_key.to_string()),
+                        None,
+                    ));
+                }
+                if stored
+                    .local_runner
+                    .as_ref()
+                    .and_then(|runner| runner.workspace_owner_lease.as_ref())
+                    != workspace_owner_lease.as_ref()
+                {
+                    return Err(Error::validation_invalid_argument(
+                        "workspace_owner_lease",
+                        "admission idempotency key belongs to a differently leased reservation",
+                        Some(idempotency_key.to_string()),
+                        None,
+                    ));
+                }
                 let lease = stored.admission_lease.as_mut().ok_or_else(|| {
                     Error::internal_unexpected("active admission reservation is missing its lease")
                 })?;
@@ -837,10 +885,21 @@ impl JobStore {
                     token: lease.token.clone(),
                     expires_at_ms: lease.expires_at_ms,
                     created: false,
+                    workspace_owner_lease: stored
+                        .local_runner
+                        .as_ref()
+                        .and_then(|runner| runner.workspace_owner_lease.clone()),
                 };
                 return Ok(reservation);
             }
-            self.create_admission_inner(inner, metadata, Some(idempotency_key.to_string()), now)
+            self.create_admission_inner(
+                inner,
+                metadata,
+                Some(idempotency_key.to_string()),
+                now,
+                workspace_claim_binding,
+                workspace_owner_lease,
+            )
         })
     }
 
@@ -848,8 +907,19 @@ impl JobStore {
         &self,
         metadata: Value,
         now: u64,
+        workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
+        workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
     ) -> Result<AdmissionReservation> {
-        self.durable_transaction(|inner| self.create_admission_inner(inner, metadata, None, now))
+        self.durable_transaction(|inner| {
+            self.create_admission_inner(
+                inner,
+                metadata,
+                None,
+                now,
+                workspace_claim_binding,
+                workspace_owner_lease,
+            )
+        })
     }
 
     /// Legacy, tokenless admission used only by pre-lease protocol clients
@@ -875,6 +945,8 @@ impl JobStore {
         metadata: Value,
         idempotency_key: Option<String>,
         now: u64,
+        workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
+        workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
     ) -> Result<AdmissionReservation> {
         let (job, created) = self.create_or_reuse_active_local_runner_job_inner(
             inner,
@@ -882,7 +954,14 @@ impl JobStore {
             None,
             Some(metadata),
             None,
-            None,
+            Some(LocalRunnerJob {
+                runner_id: "admission".to_string(),
+                command: Vec::new(),
+                cwd: None,
+                lifecycle: None,
+                workspace_claim_binding,
+                workspace_owner_lease: workspace_owner_lease.clone(),
+            }),
             idempotency_key.clone(),
         )?;
         let stored = inner.jobs.get_mut(&job.id).expect("admission exists");
@@ -906,6 +985,7 @@ impl JobStore {
                 token,
                 expires_at_ms,
                 created: false,
+                workspace_owner_lease,
             };
             return Ok(reservation);
         }
@@ -920,6 +1000,7 @@ impl JobStore {
             token: lease.token,
             expires_at_ms: lease.expires_at_ms,
             created,
+            workspace_owner_lease,
         })
     }
 
@@ -946,8 +1027,161 @@ impl JobStore {
                 token,
                 expires_at_ms,
                 created: false,
+                workspace_owner_lease: stored
+                    .local_runner
+                    .as_ref()
+                    .and_then(|runner| runner.workspace_owner_lease.clone()),
             };
             Ok(reservation)
+        })
+    }
+
+    /// Commit an admission renewal and its exact direct workspace authority in
+    /// one durable-store transaction. The daemon renews the owner lease first;
+    /// callers must retain the returned lease as the only valid cleanup token.
+    pub(crate) fn renew_admission_with_workspace_owner_lease_at(
+        &self,
+        job_id: Uuid,
+        token: &str,
+        expected_owner_lease: Option<&crate::workspace_claim::WorkspaceOwnerLease>,
+        renewed_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
+        now: u64,
+    ) -> Result<AdmissionReservation> {
+        self.durable_transaction(|inner| {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            let current_owner_lease = stored.local_runner.as_ref().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "job_id",
+                    "job is not an admission reservation",
+                    Some(job_id.to_string()),
+                    None,
+                )
+            })?;
+            if current_owner_lease.workspace_owner_lease.as_ref() != expected_owner_lease {
+                return Err(Error::validation_invalid_argument(
+                    "workspace_owner_lease",
+                    "admission renewal lease does not match the durable reservation",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            let (reservation_token, expires_at_ms) = {
+                let lease = Self::admission_lease_for_live_job(stored, token, now)?;
+                lease.expires_at_ms = now.saturating_add(ADMISSION_RESERVATION_LEASE_MS);
+                lease.renewals = lease.renewals.saturating_add(1);
+                (lease.token.clone(), lease.expires_at_ms)
+            };
+            stored.job.updated_at_ms = now;
+            stored
+                .local_runner
+                .as_mut()
+                .expect("admission local runner was checked")
+                .workspace_owner_lease = renewed_owner_lease.clone();
+            Ok(AdmissionReservation {
+                job: stored.job.clone(),
+                token: reservation_token,
+                expires_at_ms,
+                created: false,
+                workspace_owner_lease: renewed_owner_lease,
+            })
+        })
+    }
+
+    /// Check the exact live admission capability and owner lease before an
+    /// authority renewal. The replacement transaction below repeats this check
+    /// as its CAS predicate because another request may win in the meantime.
+    pub(crate) fn authorize_admission_renewal_with_workspace_owner_lease_at(
+        &self,
+        job_id: Uuid,
+        token: &str,
+        expected_owner_lease: Option<&crate::workspace_claim::WorkspaceOwnerLease>,
+        now: u64,
+    ) -> Result<()> {
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = inner
+            .jobs
+            .get_mut(&job_id)
+            .ok_or_else(|| job_not_found(job_id))?;
+        let current_owner_lease = stored.local_runner.as_ref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "job_id",
+                "job is not an admission reservation",
+                Some(job_id.to_string()),
+                None,
+            )
+        })?;
+        if current_owner_lease.workspace_owner_lease.as_ref() != expected_owner_lease {
+            return Err(Error::validation_invalid_argument(
+                "workspace_owner_lease",
+                "admission renewal lease does not match the durable reservation",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        Self::admission_lease_for_live_job(stored, token, now)?;
+        Ok(())
+    }
+
+    /// Fail closed when authority renewal succeeded but its replacement lease
+    /// could not be durably recorded. The expected lease keeps a concurrent
+    /// successful renewal from being overwritten or terminalized.
+    pub(crate) fn fail_admission_renewal_after_owner_replacement_failure(
+        &self,
+        job_id: Uuid,
+        token: &str,
+        expected_owner_lease: Option<&crate::workspace_claim::WorkspaceOwnerLease>,
+        error: &Error,
+        now: u64,
+    ) -> Result<()> {
+        self.durable_transaction(|inner| {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            let current_owner_lease = stored.local_runner.as_ref().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "job_id",
+                    "job is not an admission reservation",
+                    Some(job_id.to_string()),
+                    None,
+                )
+            })?;
+            if current_owner_lease.workspace_owner_lease.as_ref() != expected_owner_lease {
+                return Err(Error::validation_invalid_argument(
+                    "workspace_owner_lease",
+                    "admission renewal lease no longer matches the durable reservation",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            Self::admission_lease_for_live_job(stored, token, now)?;
+            stored
+                .local_runner
+                .as_mut()
+                .expect("admission local runner was checked")
+                .workspace_owner_lease = None;
+            Self::append_event_already_locked(
+                self,
+                inner,
+                job_id,
+                JobEventKind::Error,
+                Some("workspace owner lease renewal could not be persisted".to_string()),
+                Some(serde_json::json!({
+                    "schema": "homeboy/workspace-owner-lease-renewal-failure/v1",
+                    "error_code": error.code.as_str(),
+                    "error": error.to_string(),
+                })),
+            )?;
+            let stored = inner.jobs.get_mut(&job_id).expect("admission job exists");
+            stored.job.status = JobStatus::Failed;
+            stored.job.updated_at_ms = now;
+            stored.job.finished_at_ms = Some(now);
+            stored.job.stale_reason =
+                Some("workspace owner lease renewal could not be persisted".to_string());
+            Ok(())
         })
     }
 
@@ -991,6 +1225,52 @@ impl JobStore {
             .get(&job_id)
             .ok_or_else(|| job_not_found(job_id))?;
         Ok(stored.admission_lease.is_some())
+    }
+
+    pub(crate) fn admission_workspace_claim_binding(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<crate::workspace_claim::WorkspaceClaimBinding>> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = inner
+            .jobs
+            .get(&job_id)
+            .ok_or_else(|| job_not_found(job_id))?;
+        if stored.job.operation != "runner.admission" {
+            return Err(Error::validation_invalid_argument(
+                "job_id",
+                "job is not an admission reservation",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        Ok(stored
+            .local_runner
+            .as_ref()
+            .and_then(|runner| runner.workspace_claim_binding.clone()))
+    }
+
+    pub(crate) fn admission_workspace_owner_lease(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<crate::workspace_claim::WorkspaceOwnerLease>> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = inner
+            .jobs
+            .get(&job_id)
+            .ok_or_else(|| job_not_found(job_id))?;
+        if stored.job.operation != "runner.admission" {
+            return Err(Error::validation_invalid_argument(
+                "job_id",
+                "job is not an admission reservation",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        Ok(stored
+            .local_runner
+            .as_ref()
+            .and_then(|runner| runner.workspace_owner_lease.clone()))
     }
 
     pub(crate) fn reconcile_expired_admissions_at(&self, now: u64) -> Result<Vec<Uuid>> {
@@ -1063,6 +1343,7 @@ impl JobStore {
         admission_idempotency_key: Option<String>,
     ) -> Result<(Job, bool)> {
         let now = timestamp_ms();
+        let operation = operation.into();
         let runner_job_projection = metadata
             .as_ref()
             .and_then(|metadata| metadata.get("runner_job_projection"))
@@ -1075,7 +1356,7 @@ impl JobStore {
             .filter(|run_id| !run_id.trim().is_empty());
         let job = Job {
             id: Uuid::new_v4(),
-            operation: operation.into(),
+            operation: operation.clone(),
             status: JobStatus::Queued,
             created_at_ms: now,
             updated_at_ms: now,
@@ -1128,7 +1409,9 @@ impl JobStore {
                 return Ok((existing, false));
             }
         }
-        let consumes_admission = local_runner.is_some();
+        // Admissions carry LocalRunnerJob solely to persist direct workspace
+        // authority. Only a real runner execution consumes an admission.
+        let consumes_admission = local_runner.is_some() && operation != "runner.admission";
         inner.jobs.insert(
             job.id,
             StoredJob {
@@ -1294,6 +1577,11 @@ impl JobStore {
     #[cfg(test)]
     pub(crate) fn fail_next_durable_writes(&self, count: u64) {
         self.durable_write_failures.store(count, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn skip_next_durable_writes(&self, count: u64) {
+        self.durable_write_skips.store(count, Ordering::SeqCst);
     }
 
     pub(crate) fn controller_job_state(&self, job_id: Uuid) -> Result<ControllerJobState> {
@@ -1975,14 +2263,50 @@ impl JobStore {
         T: Serialize + Send + 'static,
         F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
     {
-        let (job, created) = self.create_or_reuse_active_local_runner_job(
+        self.try_run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
             operation,
             source_snapshot,
             metadata,
             path_materialization_plan,
-            Some(local_runner.clone()),
+            local_runner,
             admission_idempotency_key,
-        );
+            capacity,
+            run,
+        )
+        .expect("local runner queue admission must persist")
+    }
+
+    /// Fallible variant used by the daemon request boundary so a failed durable
+    /// queue commit can roll back a just-registered workspace owner.
+    pub(crate) fn try_run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner<
+        T,
+        F,
+    >(
+        &self,
+        operation: impl Into<String>,
+        source_snapshot: Option<SourceSnapshot>,
+        metadata: Option<Value>,
+        path_materialization_plan: Option<PathMaterializationPlan>,
+        local_runner: LocalRunnerJob,
+        admission_idempotency_key: Option<String>,
+        capacity: usize,
+        run: F,
+    ) -> Result<JobRunner>
+    where
+        T: Serialize + Send + 'static,
+        F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
+    {
+        let (job, created) = self.durable_transaction(|inner| {
+            self.create_or_reuse_active_local_runner_job_inner(
+                inner,
+                operation,
+                source_snapshot,
+                metadata,
+                path_materialization_plan,
+                Some(local_runner.clone()),
+                admission_idempotency_key,
+            )
+        })?;
         let job_id = job.id;
         // An idempotent resubmission reused an already-enqueued job that already
         // has its own worker. Do not spawn a second worker for it — return a
@@ -1990,7 +2314,7 @@ impl JobStore {
         // `JobRunner` contract is preserved.
         if !created {
             let handle = thread::spawn(|| {});
-            return JobRunner { job_id, handle };
+            return Ok(JobRunner { job_id, handle });
         }
         let handle_store = self.clone();
         let worker_store = self.clone();
@@ -2046,7 +2370,7 @@ impl JobStore {
                 }
             }
         });
-        JobRunner { job_id, handle }
+        Ok(JobRunner { job_id, handle })
     }
 
     fn run_background_with_start_policy<T, F>(
@@ -2102,7 +2426,7 @@ impl JobStore {
         message: impl Into<String>,
     ) -> Result<Job> {
         let message = message.into();
-        self.durable_transaction(|inner| {
+        let terminal_owner_lease = self.durable_transaction(|inner| {
             let stored = inner
                 .jobs
                 .get_mut(&job_id)
@@ -2111,7 +2435,11 @@ impl JobStore {
             // It is a no-op so callers receive the authoritative terminal job without
             // adding a duplicate cancellation event.
             if stored.job.status == JobStatus::Cancelled && next_status == JobStatus::Cancelled {
-                return Ok(stored.job.clone());
+                let owner_lease = stored
+                    .local_runner
+                    .as_ref()
+                    .and_then(|runner| runner.workspace_owner_lease.clone());
+                return Ok((stored.job.clone(), owner_lease));
             }
             if next_status == JobStatus::Succeeded
                 && stored
@@ -2150,11 +2478,122 @@ impl JobStore {
                 Some(message),
                 Some(serde_json::json!({ "status": next_status })),
             )?;
-            inner
+            let job = inner
                 .jobs
                 .get(&job_id)
                 .map(|stored| stored.job.clone())
-                .ok_or_else(|| job_not_found(job_id))
+                .ok_or_else(|| job_not_found(job_id))?;
+            let owner_lease = next_status
+                .is_terminal()
+                .then(|| {
+                    inner.jobs.get(&job_id).and_then(|stored| {
+                        stored
+                            .local_runner
+                            .as_ref()
+                            .and_then(|runner| runner.workspace_owner_lease.clone())
+                    })
+                })
+                .flatten();
+            Ok((job, owner_lease))
+        })?;
+        // The terminal job is already durable. Cleanup is intentionally best
+        // effort so an authority-store I/O failure cannot hide its outcome.
+        if let Some(lease) = terminal_owner_lease.1 {
+            if let Ok(root) = crate::paths::homeboy_data() {
+                if let Err(error) = crate::workspace_claim::WorkspaceClaimStore::new(
+                    root.join("daemon-workspace-claims"),
+                )
+                .release_owner(&lease, timestamp_ms())
+                {
+                    let _ = self.record_workspace_owner_cleanup_failure(job_id, &error);
+                }
+            }
+        }
+        Ok(terminal_owner_lease.0)
+    }
+
+    /// Exact direct-owner leases attached to terminal records. Keeping them
+    /// durable makes restart cleanup idempotent and auditable.
+    pub(crate) fn terminal_workspace_owner_leases(
+        &self,
+    ) -> Vec<(Uuid, crate::workspace_claim::WorkspaceOwnerLease)> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        inner
+            .jobs
+            .values()
+            .filter(|stored| stored.job.status.is_terminal())
+            .filter_map(|stored| {
+                stored
+                    .local_runner
+                    .as_ref()
+                    .and_then(|runner| runner.workspace_owner_lease.clone())
+                    .map(|lease| (stored.job.id, lease))
+            })
+            .collect()
+    }
+
+    /// A release failure is evidence on the terminal job, never a replacement
+    /// for that job's already-durable outcome.
+    pub(crate) fn record_workspace_owner_cleanup_failure(
+        &self,
+        job_id: Uuid,
+        error: &Error,
+    ) -> Result<()> {
+        self.append_terminal_evidence(
+            job_id,
+            JobEventKind::Progress,
+            Some("workspace owner lease cleanup failed".to_string()),
+            Some(serde_json::json!({
+                "schema": "homeboy/workspace-owner-lease-cleanup/v1",
+                "outcome_preserved": true,
+                "error": error.to_string(),
+                "error_code": error.code.as_str(),
+            })),
+        )
+        .map(|_| ())
+    }
+
+    /// Replace a direct job's exact owner token in the same durable record that
+    /// terminal cleanup reads. Authority renewal without this write is unsafe:
+    /// a restart would otherwise retain only a stale epoch.
+    pub(crate) fn replace_local_runner_workspace_owner_lease(
+        &self,
+        job_id: Uuid,
+        expected: &crate::workspace_claim::WorkspaceOwnerLease,
+        renewed: crate::workspace_claim::WorkspaceOwnerLease,
+    ) -> Result<()> {
+        self.durable_transaction(|inner| {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            if stored.job.status.is_terminal() {
+                return Err(Error::validation_invalid_argument(
+                    "workspace_owner_lease",
+                    "cannot renew workspace authority for a terminal job",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            let local = stored.local_runner.as_mut().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "workspace_owner_lease",
+                    "job has no direct workspace owner lease",
+                    Some(job_id.to_string()),
+                    None,
+                )
+            })?;
+            if local.workspace_owner_lease.as_ref() != Some(expected) {
+                return Err(Error::validation_invalid_argument(
+                    "workspace_owner_lease",
+                    "renewed workspace authority no longer matches the durable job lease",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            local.workspace_owner_lease = Some(renewed);
+            stored.job.updated_at_ms = timestamp_ms();
+            Ok(())
         })
     }
 
@@ -2556,6 +2995,45 @@ impl JobStore {
 }
 
 impl JobStore {
+    /// Append durable evidence after a terminal outcome without changing that
+    /// outcome. This is intentionally narrower than `append_event`: terminal
+    /// jobs otherwise reject mutable progress and stream events.
+    fn append_terminal_evidence(
+        &self,
+        job_id: Uuid,
+        kind: JobEventKind,
+        message: Option<String>,
+        data: Option<Value>,
+    ) -> Result<JobEvent> {
+        self.durable_transaction(|inner| {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            if !stored.job.status.is_terminal() {
+                return Err(Error::validation_invalid_argument(
+                    "status",
+                    "terminal evidence requires a terminal job",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            let event = JobEvent {
+                sequence: self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1,
+                job_id,
+                kind,
+                timestamp_ms: timestamp_ms(),
+                message,
+                data,
+            };
+            stored.events.push(event.clone());
+            apply_event_retention(&mut stored.events, self.event_retention_limit());
+            stored.job.event_count = stored.events.len();
+            stored.job.updated_at_ms = event.timestamp_ms;
+            Ok(event)
+        })
+    }
+
     pub(super) fn append_event_already_locked(
         &self,
         inner: &mut JobStoreInner,

@@ -1955,6 +1955,10 @@ fn malformed_typed_pending_handoff_is_health_malformed_and_unreconciled() {
                 acceptance_deadline_at: None,
                 accepted_at: None,
                 expired_at: None,
+                workspace_identity: None,
+                workspace_lifecycle_revision: 0,
+                workspace_owner_lease: None,
+                workspace_claim: None,
             });
         })
         .expect_err("validated test rewrite rejects malformed typed handoff");

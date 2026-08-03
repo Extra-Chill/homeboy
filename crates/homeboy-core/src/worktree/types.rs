@@ -1,5 +1,18 @@
 use serde::{Deserialize, Serialize};
 
+use crate::error::Result;
+use crate::workspace_claim::WorkspaceIdentity;
+
+/// Canonical, portable identity for a managed task worktree. The registry
+/// handle and registered component identify the physical allocation; paths and
+/// logical agent-task IDs intentionally do not participate.
+pub fn task_worktree_workspace_identity(
+    component_id: &str,
+    handle: &str,
+) -> Result<WorkspaceIdentity> {
+    WorkspaceIdentity::new("task-worktree", format!("{component_id}/{handle}"))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskWorktreeState {
@@ -56,6 +69,10 @@ pub struct TaskWorktreeRecord {
     pub worktree_path: String,
     pub branch: String,
     pub base_ref: String,
+    /// Stored for new manifests. Older records deterministically derive the
+    /// same value from their stable registry identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_identity: Option<WorkspaceIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,6 +82,158 @@ pub struct TaskWorktreeRecord {
     pub branch_cleanup_intent: BranchCleanupIntent,
     pub created_at: String,
     pub state: TaskWorktreeState,
+    #[serde(default)]
+    pub lifecycle_revision: u64,
+    /// Immutable terminal evidence is retained on the manifest so reconciliation
+    /// remains possible after the controller compacts its run record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_workspace_authority: Option<TerminalWorkspaceAuthorityProof>,
+}
+
+pub const TERMINAL_WORKSPACE_AUTHORITY_SCHEMA: &str = "homeboy/terminal-workspace-authority/v1";
+pub const TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY: &str = "terminal-workspace-authority";
+
+/// Versioned, portable evidence that every authority which could own a task
+/// workspace observed a terminal outcome. This is evidence, not a time fence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalWorkspaceAuthorityProof {
+    pub schema: String,
+    pub capability: String,
+    pub capability_version: u32,
+    pub workspace: WorkspaceIdentity,
+    pub task_worktree_id: String,
+    pub manifest_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub controller_state: String,
+    pub controller_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_runner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_runner_job_id: Option<String>,
+    pub authority_set: Vec<String>,
+    pub authority_set_fingerprint: String,
+    pub observations: Vec<TerminalWorkspaceAuthorityObservation>,
+    pub issued_evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalWorkspaceAuthorityObservation {
+    pub authority: String,
+    pub capability: String,
+    pub capability_version: u32,
+    pub status: String,
+    pub evidence: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_job_id: Option<String>,
+}
+
+impl TerminalWorkspaceAuthorityProof {
+    pub fn exact_for(&self, record: &TaskWorktreeRecord, expected_run_id: Option<&str>) -> bool {
+        let Ok(workspace) = record.effective_workspace_identity() else {
+            return false;
+        };
+        let mut authorities = self.authority_set.clone();
+        authorities.sort();
+        authorities.dedup();
+        let controller_terminal = matches!(
+            self.controller_state.as_str(),
+            "Succeeded"
+                | "CandidateRecoverable"
+                | "PartialRecoverable"
+                | "PartialFailure"
+                | "Failed"
+                | "Cancelled"
+        );
+        let accepted_binding_matches =
+            self.accepted_runner_id.is_some() == self.accepted_runner_job_id.is_some();
+        let observation_bindings_match = self.observations.iter().all(|observation| {
+            observation.run_id.as_deref() == expected_run_id
+                && (observation.authority == "controller"
+                    || observation.runner_job_id == self.accepted_runner_job_id)
+        });
+        let controller_observation_matches = self.observations.iter().any(|observation| {
+            observation.authority == "controller"
+                && observation.status == "terminal"
+                && observation.runner_job_id.is_none()
+        });
+        let accepted_observation_matches =
+            match (&self.accepted_runner_id, &self.accepted_runner_job_id) {
+                (Some(runner_id), Some(job_id)) => self.observations.iter().any(|observation| {
+                    observation.authority == *runner_id
+                        && observation.runner_job_id.as_deref() == Some(job_id)
+                }),
+                (None, None) => true,
+                _ => false,
+            };
+        self.schema == TERMINAL_WORKSPACE_AUTHORITY_SCHEMA
+            && self.capability == TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY
+            && self.capability_version == 1
+            && self.workspace == workspace
+            && self.task_worktree_id == record.id
+            && self.manifest_revision == record.lifecycle_revision
+            && self.run_id.as_deref() == expected_run_id
+            && self
+                .issued_evidence
+                .iter()
+                .any(|evidence| match expected_run_id {
+                    Some(run_id) => evidence == &format!("controller-run:{run_id}"),
+                    None => evidence == "controller-no-run-id",
+                })
+            && controller_terminal
+            && accepted_binding_matches
+            && authorities == self.authority_set
+            && authorities
+                .first()
+                .is_some_and(|authority| authority == "controller")
+            && self.authority_set_fingerprint == authority_set_fingerprint(&authorities)
+            && self.observations.len() == authorities.len()
+            && self.observations.iter().all(|observation| {
+                observation.capability == TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY
+                    && observation.capability_version == 1
+                    && !observation.authority.trim().is_empty()
+                    && matches!(observation.status.as_str(), "terminal" | "absent_terminal")
+            })
+            && self
+                .observations
+                .iter()
+                .map(|observation| &observation.authority)
+                .collect::<std::collections::BTreeSet<_>>()
+                == authorities.iter().collect()
+            && observation_bindings_match
+            && controller_observation_matches
+            && accepted_observation_matches
+    }
+}
+
+pub fn authority_set_fingerprint(authorities: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for authority in authorities {
+        hasher.update(authority.as_bytes());
+        hasher.update([0]);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+impl TaskWorktreeRecord {
+    pub fn effective_workspace_identity(&self) -> Result<WorkspaceIdentity> {
+        let derived = task_worktree_workspace_identity(&self.component_id, &self.id)?;
+        if let Some(identity) = &self.workspace_identity {
+            identity.verify()?;
+            if identity != &derived {
+                return Err(crate::error::Error::validation_invalid_argument(
+                    "workspace_identity",
+                    "task worktree manifest identity conflicts with its stable handle and component",
+                    Some(self.id.clone()),
+                    None,
+                ));
+            }
+        }
+        Ok(derived)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

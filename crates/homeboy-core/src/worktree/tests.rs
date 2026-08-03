@@ -65,13 +65,58 @@ fn fixture_record(source: &Path, worktree: &Path) -> TaskWorktreeRecord {
         worktree_path: worktree.to_string_lossy().to_string(),
         branch: "task".to_string(),
         base_ref: "HEAD".to_string(),
+        workspace_identity: None,
         task_url: Some("https://example.com/task".to_string()),
         run_id: None,
         cleanup_policy: CleanupPolicy::RemoveWhenSafe,
         branch_cleanup_intent: BranchCleanupIntent::DeleteWhenMerged,
         created_at: "2026-01-01T00:00:00Z".to_string(),
         state: TaskWorktreeState::Active,
+        lifecycle_revision: 0,
+        terminal_workspace_authority: None,
     }
+}
+
+#[test]
+fn task_worktree_identity_is_path_independent_and_rejects_conflicts() {
+    let source = tempfile::tempdir().expect("source");
+    let first = fixture_record(source.path(), &source.path().join("one"));
+    let second = fixture_record(source.path(), &source.path().join("two"));
+    let identity = first
+        .effective_workspace_identity()
+        .expect("derive legacy identity");
+
+    assert_eq!(
+        identity,
+        second
+            .effective_workspace_identity()
+            .expect("same identity")
+    );
+    assert_eq!(identity.kind, "task-worktree");
+    assert_eq!(identity.locator, "fixture/fixture@task");
+
+    let claim_store = tempfile::tempdir().expect("claim store");
+    let claims = crate::workspace_claim::WorkspaceClaimStore::new(claim_store.path());
+    let owner = claims
+        .register_owner(identity.clone(), "agent-task-run", 1_000, 1)
+        .expect("register task-worktree owner");
+    assert_eq!(owner.workspace, identity);
+    assert!(claims
+        .acquire(
+            second
+                .effective_workspace_identity()
+                .expect("record identity"),
+            1_000,
+            2
+        )
+        .is_err());
+
+    let mut conflicting = first;
+    conflicting.workspace_identity = Some(
+        crate::workspace_claim::WorkspaceIdentity::new("task-worktree", "other/record")
+            .expect("identity"),
+    );
+    assert!(conflicting.effective_workspace_identity().is_err());
 }
 
 fn git_repo() -> tempfile::TempDir {

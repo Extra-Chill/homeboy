@@ -17,7 +17,7 @@ use homeboy_core::runner_job_execution_context::RunnerJobExecutionContext;
 use super::super::execution::{exec_worker_local_until_cancelled_with_progress, RunnerExecOptions};
 use super::broker::{
     append_progress_data, cancelled_job_snapshot, claim_job, consume_execution, finish_job,
-    start_claim_heartbeat,
+    start_claim_heartbeat, validate_workspace_owner,
 };
 use super::result::{
     cancelled_output, claimed_output, log_worker_event, remote_runner_result_from_exec_output,
@@ -266,6 +266,34 @@ fn run_once_output(
             )
         })?
         .verify()?;
+    if claim.request.requires_workspace_claim_protocol() {
+        claim
+            .workspace_claim_protocol
+            .as_ref()
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "workspace_claim_protocol",
+                    "reverse runner claim predates workspace-claim protocol negotiation",
+                    Some(claim.job.id.to_string()),
+                    None,
+                )
+            })?
+            .verify()?;
+    }
+    if claim.request.requires_workspace_owner_lease_protocol() {
+        claim
+            .workspace_owner_lease_protocol
+            .as_ref()
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "workspace_owner_lease_protocol",
+                    "reverse runner claim predates workspace owner lease protocol negotiation",
+                    Some(claim.job.id.to_string()),
+                    None,
+                )
+            })?
+            .verify()?;
+    }
     let execution_context = execution_context.verify_claim(&claim.job, &claim.request)?;
 
     // Commit runner-owned evidence before materializing any broker input. The
@@ -297,8 +325,17 @@ fn run_once_output(
             "phase": "runner_job_execution_context_verified",
             "runner_job_execution_context": execution_context.evidence_record()?,
         }),
+        claim.request.workspace_claim_binding.as_ref(),
+        claim.request.workspace_owner_lease.as_ref(),
     )?;
-    let _heartbeat = start_claim_heartbeat(&client, &options, &claim.job)?;
+    let heartbeat = start_claim_heartbeat(
+        &client,
+        &options,
+        &claim.job,
+        claim.request.workspace_claim_binding.clone(),
+        claim.request.workspace_owner_lease.clone(),
+    )?;
+    let current_owner_lease = heartbeat.owner_lease_handle();
     // Remote capability-parity preflight: validate that this runner can satisfy
     // the claimed job's top-level command (and any required paths) before
     // starting execution, so a missing tool fails before remote dispatch instead
@@ -306,6 +343,23 @@ fn run_once_output(
     // before handing the claimed job directly to the local runtime.
     let capability_preflight = reverse_worker_capability_preflight(&claim.request);
     let mut execution_envelope = claim.request.execution_envelope();
+    // Authorize the exact durable owner lease immediately before any workspace,
+    // private-file, or source materialization. This intentionally does not consume
+    // the receipt; consume remains at the provider-invocation boundary below.
+    if let Some(lease) = current_owner_lease
+        .lock()
+        .expect("owner lease lock")
+        .as_ref()
+    {
+        validate_workspace_owner(
+            &client,
+            &options.broker_url,
+            options.broker_token.as_deref(),
+            &options.runner_id,
+            &claim.job,
+            lease,
+        )?;
+    }
     let _command_assets =
         materialize_command_assets(&claim.job.id.to_string(), &mut execution_envelope)?;
     let _private_at_files = verify_private_at_files(&mut execution_envelope)?;
@@ -320,6 +374,11 @@ fn run_once_output(
             &options.runner_id,
             &claim.job,
             result,
+            claim.request.workspace_claim_binding.as_ref(),
+            current_owner_lease
+                .lock()
+                .expect("owner lease lock")
+                .as_ref(),
         )
     };
     let mut cancel_seen = false;
@@ -328,6 +387,8 @@ fn run_once_output(
     let progress_client = client.clone();
     let progress_options = options.clone();
     let progress_job = claim.job.clone();
+    let progress_workspace_claim_binding = claim.request.workspace_claim_binding.clone();
+    let progress_owner_lease = current_owner_lease.clone();
     let progress_sink = Arc::new(move |data| {
         append_progress_data(
             &progress_client,
@@ -336,6 +397,11 @@ fn run_once_output(
             &progress_options.runner_id,
             &progress_job,
             data,
+            progress_workspace_claim_binding.as_ref(),
+            progress_owner_lease
+                .lock()
+                .expect("owner lease lock")
+                .as_ref(),
         )
     });
     let exec_result = exec_worker_local_until_cancelled_with_progress(
@@ -356,6 +422,11 @@ fn run_once_output(
                 &options.runner_id,
                 &claim.job,
                 recovered.id(),
+                claim.request.workspace_claim_binding.as_ref(),
+                current_owner_lease
+                    .lock()
+                    .expect("owner lease lock")
+                    .as_ref(),
             )?;
             // Consumption atomically verifies the live claim and commits the
             // one-time receipt. Its returned job has a newer timestamp, so it

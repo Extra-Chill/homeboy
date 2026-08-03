@@ -16,6 +16,7 @@ use homeboy_core::api_jobs::{
     Job, RemoteRunnerJobRequest, RemoteRunnerSubmissionLookup, RunnerJobLogSnapshot,
 };
 use homeboy_core::error::{Error, Result};
+use homeboy_core::workspace_claim::{WorkspaceClaim, WorkspaceIdentity};
 
 /// Result of reconciling a runner job across its known daemon generations.
 ///
@@ -31,6 +32,72 @@ pub enum RunnerJobReconciliation {
 /// Runner-side operations the agent-task lifecycle needs when reconciling or
 /// resuming a run that was handed off to a remote runner.
 pub trait RunnerContinuationProvider: Send + Sync {
+    /// `false` is a fail-closed declaration for older providers. Ordinary jobs
+    /// do not call these methods and retain their existing compatibility.
+    fn supports_workspace_claims(&self) -> bool {
+        false
+    }
+
+    /// Explicit capability gate for terminal historical inspection. Older
+    /// providers fail closed rather than turning an unavailable probe into
+    /// absent-job evidence.
+    fn supports_terminal_workspace_authority(&self) -> bool {
+        false
+    }
+
+    /// Configured remote authorities which must participate in a workspace
+    /// claim. The default keeps older providers compatible for local-only runs.
+    fn workspace_claim_runner_ids(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    /// Every configured direct or reverse runner authority which must attest a
+    /// terminal workspace. Implementations may use a stricter set than claims.
+    fn terminal_workspace_authority_runner_ids(&self) -> Result<Vec<String>> {
+        self.workspace_claim_runner_ids()
+    }
+
+    fn acquire_workspace_claim(
+        &self,
+        _runner_id: &str,
+        _workspace: WorkspaceIdentity,
+        _lifecycle_revision: u64,
+    ) -> Result<WorkspaceClaim> {
+        Err(Error::validation_invalid_argument(
+            "workspace_claim",
+            "runner does not advertise workspace claim capability",
+            None,
+            None,
+        ))
+    }
+
+    fn validate_workspace_claim(&self, _runner_id: &str, _claim: &WorkspaceClaim) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn release_workspace_claim(&self, _runner_id: &str, _claim: &WorkspaceClaim) -> Result<()> {
+        Err(Error::validation_invalid_argument(
+            "workspace_claim",
+            "runner does not advertise workspace claim capability",
+            None,
+            None,
+        ))
+    }
+
+    /// Token-free inventory for bounded write-ahead-intent recovery. `Ok(true)`
+    /// means the authority confirms no live claim or owner for this identity.
+    fn workspace_claim_authority_is_clear(
+        &self,
+        _runner_id: &str,
+        _workspace: &WorkspaceIdentity,
+    ) -> Result<bool> {
+        Err(Error::validation_invalid_argument(
+            "workspace_claim",
+            "runner does not advertise workspace claim authority inventory",
+            None,
+            None,
+        ))
+    }
     /// Durable snapshot (job + event log) for a runner job.
     fn runner_job_log_snapshot(
         &self,

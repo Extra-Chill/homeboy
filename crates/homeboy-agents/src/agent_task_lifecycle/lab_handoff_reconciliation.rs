@@ -330,7 +330,7 @@ pub fn run_owes_candidate_follow_up(run_id: &str) -> Result<bool> {
                 .metadata
                 .pointer("/artifact_projection/status")
                 .and_then(Value::as_str)
-                == Some("pending")),
+                .is_some_and(|status| matches!(status, "pending" | "failed"))),
         Err(_) => Ok(false),
     }
 }

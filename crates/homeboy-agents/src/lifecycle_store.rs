@@ -229,8 +229,14 @@ fn write_record_with_aggregate(
     record: &AgentTaskRunRecord,
     aggregate: Option<AgentTaskAggregate>,
 ) -> Result<()> {
-    let committed = write_record_with_aggregate_without_workspace_authority(record, aggregate)?;
+    let mut record = record.clone();
+    // Every durable scheduler/provider/controller heartbeat passes through this
+    // write boundary. Renew before persisting so the record carries the exact
+    // store-issued epoch rather than an optimistic local timestamp.
+    super::renew_record_workspace_owner(&mut record)?;
+    let committed = write_record_with_aggregate_without_workspace_authority(&record, aggregate)?;
     super::workspace_authority::persist_terminal_from_record(&committed)
+        .and_then(|_| super::release_terminal_record_workspace_owner(&committed))
 }
 
 fn write_record_with_aggregate_without_workspace_authority(
@@ -568,6 +574,21 @@ pub(super) fn record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
             problem,
             Some(format!("validate agent-task Lab handoff {}", run.id)),
         ));
+    }
+    if let Some(identity) = record.workspace_identity.as_ref() {
+        identity.verify()?;
+        if record.workspace_owner_lease.as_ref().is_some_and(|lease| {
+            lease.workspace != *identity
+                || lease.lifecycle_revision != record.workspace_lifecycle_revision
+                || lease.owner_id != record.run_id
+        }) {
+            return Err(Error::validation_invalid_argument(
+                "workspace_owner_lease",
+                "agent-task workspace owner lease contradicts durable identity or lifecycle revision",
+                Some(run.id.clone()),
+                None,
+            ));
+        }
     }
     Ok(record)
 }
