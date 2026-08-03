@@ -21,6 +21,8 @@ SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${SCRIPT_DIR}/../../../scripts/lib" && p
 source "${SHARED_LIB_DIR}/runner-harness.sh"
 # shellcheck source=/dev/null
 source "${SHARED_LIB_DIR}/lint-findings-adapter.sh"
+# shellcheck source=/dev/null
+source "${SHARED_LIB_DIR}/repository-file-discovery.sh"
 homeboy_runner_harness_init --bash 4 --steps --sidecar-writer --component-alias PLUGIN_PATH
 homeboy_lint_findings_init
 
@@ -178,9 +180,10 @@ except Exception:
 PYEOF
 }
 
-# Determine lint target (file, glob, or full component)
-# Use array to properly handle paths with spaces
-LINT_FILES=("$PLUGIN_PATH")
+# Determine lint target (file, glob, or full component).
+# Explicit targets may intentionally include generated or Git-ignored files.
+# Use an array to properly handle paths with spaces.
+LINT_FILES=()
 
 if [ -n "${HOMEBOY_LINT_FILE:-}" ]; then
     LINT_FILES=("${PLUGIN_PATH}/${HOMEBOY_LINT_FILE}")
@@ -207,6 +210,14 @@ elif [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
     cd - > /dev/null
 else
     echo "Running PHP linting..."
+    while IFS= read -r -d '' lint_file; do
+        LINT_FILES+=("${PLUGIN_PATH}/${lint_file#./}")
+    done < <(homeboy_discover_repository_files "$PLUGIN_PATH" '*.php')
+
+    if [ "${#LINT_FILES[@]}" -eq 0 ]; then
+        echo "No PHP files found, skipping PHPCS."
+        exit 0
+    fi
 fi
 
 WORDPRESS_LINT_ROLE="production"
