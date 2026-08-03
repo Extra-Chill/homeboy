@@ -530,7 +530,7 @@ fn prepare_payload(
             ));
         }
     }
-    let version = crate::release::version::get_component_version(&component).unwrap_or_default();
+    let version = homeboy_version::version::get_component_version(&component).unwrap_or_default();
     if request
         .config
         .expected_version

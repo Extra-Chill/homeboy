@@ -67,7 +67,7 @@ pub(super) fn remote_version_after_deploy_effect(
 #[cfg(test)]
 mod tests {
     use super::remote_version_after_deploy_effect;
-    use crate::deploy::types::DeployEffect;
+    use crate::types::DeployEffect;
     use homeboy_core::component::{Component, VersionTarget};
     use homeboy_core::project::Project;
     use homeboy_core::server::SshClient;

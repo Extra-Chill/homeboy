@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use crate::release::version;
 use homeboy_core::component::{resolve_component_scope, Component, ScopeCommand};
 use homeboy_core::context::RemoteProjectContext;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::project::Project;
+use homeboy_version::version;
 
 use super::execution::{
     execute_preflighted_component_deploy, release_artifact_plan, resolve_planned_release_artifact,
@@ -658,14 +658,14 @@ fn attach_version_sources(result: &mut DeployOrchestrationResult, components: &[
         let local = row
             .local_version
             .as_ref()
-            .and_then(|_| version::local_version_source(component));
+            .and_then(|_| crate::types::local_version_source(component));
         let artifact = row
             .artifact_path
             .as_ref()
             .and_then(|_| row.local_version.as_ref())
-            .and_then(|_| version::artifact_version_source(component));
+            .and_then(|_| crate::types::artifact_version_source(component));
         let remote = row.remote_version.as_ref().and_then(|_| {
-            version::local_version_source(component).map(|source| VersionSource {
+            crate::types::local_version_source(component).map(|source| VersionSource {
                 path: row
                     .remote_path
                     .as_ref()
@@ -843,10 +843,10 @@ fn validate_effective_remote_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deploy::orchestration_tag_checkout::{
+    use crate::orchestration_tag_checkout::{
         checkout_deploy_tags, deploy_tag_for_version, restore_branches, TagCheckout,
     };
-    use crate::deploy::planning::{load_project_components, ExtensionSkippedComponent};
+    use crate::planning::{load_project_components, ExtensionSkippedComponent};
     use homeboy_core::component::ComponentScriptsConfig;
     use homeboy_core::project::ProjectComponentAttachment;
     use homeboy_core::test_support::{home_env_guard, with_isolated_home};
@@ -929,7 +929,7 @@ mod tests {
     /// Registration overwrites a mutex slot, so calling this from each test is
     /// safe under any thread count or ordering.
     fn with_release_provider() {
-        crate::release::provider_impl::register();
+        crate::provider_impl::register();
     }
 
     fn init_repo_with_tag_gap(path: &Path) {
@@ -1047,7 +1047,7 @@ mod tests {
                 zip.finish().expect("zip finish");
             }
             let asset_bytes = std::fs::read(&asset_path).expect("asset bytes");
-            let sha256 = crate::deploy::sha256_file(&asset_path).expect("sha");
+            let sha256 = crate::sha256_file(&asset_path).expect("sha");
             let lease = ReleaseArtifactLease::test_new(
                 homeboy_core::git::release_download::ReleaseArtifact {
                     path: asset_path.clone(),

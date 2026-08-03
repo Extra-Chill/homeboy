@@ -5,7 +5,7 @@ use homeboy_core::execution::ChangeArtifactProvenance;
 
 use crate::release::changelog::generated_file_mutation_is_authorized_for;
 
-use super::{parse_versions, resolve_target_pattern};
+use homeboy_version::version::{parse_versions, resolve_target_pattern};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionMutation {

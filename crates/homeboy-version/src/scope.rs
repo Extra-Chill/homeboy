@@ -3,7 +3,7 @@ use homeboy_core::error::Result;
 use homeboy_core::git;
 
 #[derive(Debug, Clone)]
-pub(super) struct ReleaseScope {
+pub struct ReleaseScope {
     component: Component,
     pub git_root: String,
     pub component_path: String,
@@ -363,23 +363,19 @@ mod tests {
         };
 
         assert_eq!(
-            crate::release::component_tag_name(&primary, "0.13.2").unwrap(),
+            crate::component_tag_name(&primary, "0.13.2").unwrap(),
             "v0.13.2"
         );
         assert_eq!(
-            crate::release::latest_component_tag(&primary)
-                .unwrap()
-                .as_deref(),
+            crate::latest_component_tag(&primary).unwrap().as_deref(),
             Some("v0.13.1")
         );
         assert_eq!(
-            crate::release::component_tag_name(&theme, "0.1.2").unwrap(),
+            crate::component_tag_name(&theme, "0.1.2").unwrap(),
             "studio-native-theme-v0.1.2"
         );
         assert_eq!(
-            crate::release::latest_component_tag(&theme)
-                .unwrap()
-                .as_deref(),
+            crate::latest_component_tag(&theme).unwrap().as_deref(),
             Some("studio-native-theme-v0.1.1")
         );
     }
@@ -399,9 +395,9 @@ mod tests {
         };
 
         assert_eq!(
-            crate::release::component_tag_name(&theme, "0.1.1").unwrap(),
+            crate::component_tag_name(&theme, "0.1.1").unwrap(),
             "studio-native-theme-v0.1.1"
         );
-        assert_eq!(crate::release::latest_component_tag(&theme).unwrap(), None);
+        assert_eq!(crate::latest_component_tag(&theme).unwrap(), None);
     }
 }

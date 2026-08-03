@@ -388,7 +388,7 @@ mod tests {
         validate_repository_policy, CREATE_INPUT_CONTEXT, ENCODE_POLICY_CONTEXT,
         FLUSH_INPUT_CONTEXT, WRITE_INPUT_CONTEXT,
     };
-    use crate::deploy::DeployConfig;
+    use crate::DeployConfig;
     use homeboy_core::component::{Component, DeploymentProviderAttachment};
     use homeboy_core::error::Error;
     use homeboy_core::project::{Project, ProjectComponentAttachment};

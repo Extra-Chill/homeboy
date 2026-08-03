@@ -3,7 +3,7 @@ name = "homeboy-release"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Release + deploy subsystem for homeboy: build/ship components (deploy) and versioning/changelog/tagging/GitHub releases (release). Mutually dependent, so one crate. Depends on homeboy-core; core does not depend on it (reaches it via the release_provider hook)."
+description = "Release subsystem for homeboy: versioning, changelog finalization, tagging, and GitHub releases. Depends on homeboy-deploy (one-way) and on homeboy-version for the version/changelog/tag primitives it shares with deploy. Core does not depend on it (reaches it via the release_provider hook)."
 publish = false
 
 [lib]
@@ -12,6 +12,8 @@ path = "src/lib.rs"
 
 [dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
+homeboy-version = { version = "0.1.0", path = "../homeboy-version" }
+homeboy-deploy = { version = "0.1.0", path = "../homeboy-deploy" }
 homeboy-paths = { version = "0.1.0", path = "../homeboy-paths" }
 homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
 homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }

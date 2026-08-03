@@ -149,14 +149,14 @@ impl DeployConfig {
 }
 
 impl DeployConfig {
-    pub(crate) fn requested_ref_for(&self, component_id: &str) -> Option<&str> {
+    pub fn requested_ref_for(&self, component_id: &str) -> Option<&str> {
         self.requested_refs
             .get(component_id)
             .map(String::as_str)
             .or(self.requested_ref.as_deref())
     }
 
-    pub(crate) fn resolved_ref_for(&self, component_id: &str) -> Option<&str> {
+    pub fn resolved_ref_for(&self, component_id: &str) -> Option<&str> {
         self.resolved_refs.get(component_id).map(String::as_str)
     }
 
@@ -283,7 +283,7 @@ impl PreparedDeployArtifact {
     }
 }
 
-pub(crate) fn sha256_file(path: &Path) -> Result<String> {
+pub fn sha256_file(path: &Path) -> Result<String> {
     content_hash::sha256_file(path)
 }
 
@@ -473,6 +473,37 @@ pub struct ContentManifestProvenance {
 pub struct VersionSource {
     pub file: String,
     pub path: String,
+}
+
+/// The local file a component's version is read from.
+///
+/// This and `artifact_version_source` used to live in the release crate's
+/// `version` module even though they return deploy types and only deploy calls
+/// them — one of the edges that made release and deploy circular (#11144). They
+/// resolve through `homeboy_version::version::canonical_version_target`, so the
+/// canonical-target policy still has exactly one definition.
+pub fn local_version_source(component: &Component) -> Option<VersionSource> {
+    let target = homeboy_version::version::canonical_version_target(component)?;
+    Some(VersionSource {
+        file: target.file.clone(),
+        path: homeboy_version::version::resolve_version_file_path(
+            &component.local_path,
+            &target.file,
+        ),
+    })
+}
+
+/// The path a component's version is read from inside a built artifact.
+pub fn artifact_version_source(component: &Component) -> Option<VersionSource> {
+    let target = homeboy_version::version::canonical_version_target(component)?;
+    let file = target
+        .artifact_path
+        .clone()
+        .unwrap_or_else(|| target.file.clone());
+    Some(VersionSource {
+        path: file.clone(),
+        file,
+    })
 }
 
 /// Version-target provenance for deploy output. Every populated source follows

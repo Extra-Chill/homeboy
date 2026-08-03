@@ -14,6 +14,7 @@ mod policy;
 pub(crate) mod preparation;
 pub(crate) mod provenance;
 mod provider;
+pub mod provider_impl;
 mod receipt;
 mod safety_and_artifact;
 mod smoke;
@@ -26,7 +27,9 @@ pub use planning::{
     bucket_release_states, calculate_release_state, calculate_release_state_from_baseline,
     classify_release_state,
 };
-pub(crate) use types::sha256_file;
+// `homeboy-release` reads artifact digests through this when projecting a
+// release deployment, so it crosses the crate boundary now.
+pub use types::sha256_file;
 pub use types::{
     compare_deployed_versions, parse_bulk_component_ids, ComponentDeployResult, ComponentStatus,
     DeployConfig, DeployOrchestrationResult, DeployReason, DeploySummary, MultiDeployResult,

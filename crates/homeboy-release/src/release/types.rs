@@ -582,7 +582,7 @@ pub struct ReleaseProjectDeployResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub component_result: Option<crate::deploy::ComponentDeployResult>,
+    pub component_result: Option<homeboy_deploy::ComponentDeployResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

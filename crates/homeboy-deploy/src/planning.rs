@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 
-use crate::release::version;
 use homeboy_core::component::{self, Component};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
@@ -10,6 +9,7 @@ use homeboy_core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanVa
 use homeboy_core::project::{self, Project};
 use homeboy_core::server::SshClient;
 use homeboy_extension as extension;
+use homeboy_version::version;
 
 use super::types::{
     compare_deployed_versions, ComponentStatus, DeployConfig, ReleaseState, ReleaseStateBuckets,
@@ -621,7 +621,7 @@ pub fn calculate_release_state(component: &Component) -> Option<ReleaseState> {
         .ok()
         .map(|info| info.version);
 
-    let tag_prefix = crate::release::component_tag_prefix(component)
+    let tag_prefix = homeboy_version::component_tag_prefix(component)
         .ok()
         .flatten();
     let baseline = git::detect_baseline_with_version_and_tag_prefix(
@@ -962,7 +962,7 @@ fn missing_extension_reason(err: &homeboy_core::error::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deploy::types::{DeployConfig, PreparedDeployProjection};
+    use crate::types::{DeployConfig, PreparedDeployProjection};
     use homeboy_core::component::VersionTarget;
     use homeboy_core::project::Project;
     use homeboy_core::server::SshClient;

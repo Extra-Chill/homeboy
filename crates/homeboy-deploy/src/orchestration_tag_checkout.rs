@@ -4,9 +4,9 @@
 //! component selection and execution. These helpers check out the release tag
 //! for each component before building and restore the original branch afterward.
 
-use crate::release;
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
+use homeboy_version as release;
 
 /// Record of a tag checkout for later branch restoration.
 pub(super) struct TagCheckout {

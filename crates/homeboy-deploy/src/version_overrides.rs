@@ -4,7 +4,6 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::permissions;
-use crate::release::version;
 use homeboy_core::component::{Component, VersionTarget};
 use homeboy_core::engine::hooks::{self, HookFailureMode};
 use homeboy_core::engine::shell;
@@ -17,6 +16,7 @@ use homeboy_extension::{
     load_all_extensions, DeployArchiveInstallPolicy, DeployOverride, DeployVerification,
     ExtensionManifest,
 };
+use homeboy_version::version;
 
 use super::path_roots::resolve_effective_remote_path;
 use super::transfer::scp_file;

@@ -1,31 +1,35 @@
-//! In-core implementation of the `ReleaseProvider` hook.
+//! Implementation of core's `ReleaseProvider` hook.
 //!
-//! Deploy + release still live inside `homeboy-core` during the extraction prep
-//! phase, so this impl delegates straight to the in-core deploy/release fns and
-//! registers itself at startup. When deploy/release move out into the
-//! `homeboy-release` crate, this impl moves with them and registers from the
-//! CLI runtime instead — the hook seam (and all of core's status mechanics)
-//! stays unchanged.
+//! Despite the name, every method this hook needs is answerable at or below the
+//! deploy layer: the deploy-shaped methods come from this crate, and the
+//! version/tag/changelog methods come from `homeboy-version`. Nothing here
+//! needs `homeboy-release`, which is why it lives on this side of the split —
+//! it lets `homeboy-release` depend on `homeboy-deploy` one-way, and lets this
+//! crate's own tests register a real provider without a circular dependency
+//! (#10126).
+//!
+//! `homeboy-release` re-exports this module, so the CLI registration path and
+//! all of core's status mechanics are unchanged.
 
 use homeboy_release_contract::{
     ChangelogSnapshotData, ComponentDeployStatus, ComponentVersionSnapshot,
     FinalizedReleaseSnapshot, ReleaseState, ReleaseStateBuckets, ReleaseStateStatus,
 };
 
-use crate::deploy::{self, DeployConfig};
-use crate::release::{changelog, version};
+use crate::DeployConfig;
 use homeboy_core::component::Component;
 use homeboy_core::release_provider::{
     register_release_provider, ChangelogInfoData, ReleaseProvider, ReleaseStateEntry,
 };
 use homeboy_core::Result;
+use homeboy_version::{changelog, version};
 
 struct CoreReleaseProvider;
 
 impl ReleaseProvider for CoreReleaseProvider {
     fn deploy_component_statuses(&self, project_id: &str) -> Result<Vec<ComponentDeployStatus>> {
         let config = DeployConfig::check_all_no_pull_head();
-        let result = deploy::run(project_id, &config)?;
+        let result = crate::run(project_id, &config)?;
         Ok(result
             .results
             .into_iter()
@@ -39,15 +43,15 @@ impl ReleaseProvider for CoreReleaseProvider {
     }
 
     fn calculate_release_state(&self, component: &Component) -> Option<ReleaseState> {
-        deploy::calculate_release_state(component)
+        crate::calculate_release_state(component)
     }
 
     fn classify_release_state(&self, state: Option<&ReleaseState>) -> ReleaseStateStatus {
-        deploy::classify_release_state(state)
+        crate::classify_release_state(state)
     }
 
     fn bucket_release_states(&self, entries: &[ReleaseStateEntry<'_>]) -> ReleaseStateBuckets {
-        deploy::bucket_release_states(entries.iter().map(|e| (e.component_id, e.release_state)))
+        crate::bucket_release_states(entries.iter().map(|e| (e.component_id, e.release_state)))
     }
 
     fn get_component_version(&self, component: &Component) -> Option<String> {
@@ -55,13 +59,13 @@ impl ReleaseProvider for CoreReleaseProvider {
     }
 
     fn component_tag_prefix(&self, component: &Component) -> Option<String> {
-        crate::release::component_tag_prefix(component)
+        homeboy_version::component_tag_prefix(component)
             .ok()
             .flatten()
     }
 
     fn latest_component_tag(&self, component: &Component) -> Option<String> {
-        crate::release::latest_component_tag(component)
+        homeboy_version::latest_component_tag(component)
             .ok()
             .flatten()
     }
@@ -82,7 +86,7 @@ impl ReleaseProvider for CoreReleaseProvider {
         version: Option<&ComponentVersionSnapshot>,
         baseline_ref: Option<&str>,
     ) -> Option<String> {
-        crate::release::version::validate_baseline_alignment(version, baseline_ref)
+        homeboy_version::version::validate_baseline_alignment(version, baseline_ref)
     }
 
     fn read_changelog_snapshots(

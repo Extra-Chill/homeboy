@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
 
-use crate::release::version;
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
 use homeboy_core::project::{DeploymentProvenanceMode, Project};
+use homeboy_version::version;
 
 use super::super::execution::{release_artifact_plan, ReleaseArtifactPlan};
 use super::super::generated_artifacts::uncommitted_file_report_excluding_known_generated;
@@ -61,7 +61,7 @@ pub(super) fn guard_deployment_provenance(
                 (requested_ref, resolved_sha, is_release_tag)
             }
             None => {
-                let tag = crate::release::latest_component_tag(component)?.ok_or_else(|| {
+                let tag = homeboy_version::latest_component_tag(component)?.ok_or_else(|| {
                     provenance_policy_error(
                         project,
                         &format!("requires a release tag for '{}'", component.id),
@@ -161,7 +161,7 @@ fn resolve_policy_ref(
                 None,
             ));
         }
-        None => crate::deploy::preflight_exact_ref(component, requested_ref)?,
+        None => crate::preflight_exact_ref(component, requested_ref)?,
     };
     config
         .resolved_refs
@@ -170,7 +170,7 @@ fn resolve_policy_ref(
 }
 
 fn is_release_tag(component: &Component, requested_ref: &str) -> Result<bool> {
-    Ok(crate::release::latest_component_tag(component)?.as_deref() == Some(requested_ref))
+    Ok(homeboy_version::latest_component_tag(component)?.as_deref() == Some(requested_ref))
 }
 
 fn is_full_git_sha(value: &str) -> bool {
@@ -600,7 +600,7 @@ mod tests {
         guard_local_build_downgrades, guard_local_build_source_freshness, local_build_components,
         warn_non_default_branch,
     };
-    use crate::deploy::DeployConfig;
+    use crate::DeployConfig;
     use homeboy_core::component::Component;
     use homeboy_core::project::{
         DeploymentForgeEvidence, DeploymentProvenanceMode, DeploymentProvenancePolicy, Project,

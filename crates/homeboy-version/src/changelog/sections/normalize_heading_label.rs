@@ -1,8 +1,8 @@
 //! normalize_heading_label — extracted from sections.rs.
 
 use super::super::settings::KEEP_A_CHANGELOG_SUBSECTIONS;
-use crate::release::changelog::io::FinalizedReleaseSnapshot;
-use crate::release::changelog::sections::types::SectionContentStatus;
+use crate::changelog::io::FinalizedReleaseSnapshot;
+use crate::changelog::sections::types::SectionContentStatus;
 use homeboy_core::engine::text;
 
 pub(crate) fn validate_section_content(body_lines: &[&str]) -> SectionContentStatus {

@@ -271,7 +271,7 @@ pub(crate) fn prepare_component_deploy(
     }) {
         Some(path) => match (
             super::super::content_manifest::package_manifest(path, &exclusions),
-            crate::deploy::sha256_file(path),
+            crate::sha256_file(path),
         ) {
             (Ok(manifest), Ok(sha256)) => (Some(manifest), Some(sha256)),
             (Err(error), _) => {
@@ -378,7 +378,7 @@ fn selected_release_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deploy::PreparedDeployArtifact;
+    use crate::PreparedDeployArtifact;
 
     #[test]
     fn prepared_artifact_does_not_inherit_an_unrelated_release_lease() {
@@ -403,7 +403,7 @@ mod tests {
                 url: "https://example.test/release.zip".to_string(),
                 name: "release.zip".to_string(),
                 size: 7,
-                sha256: crate::deploy::sha256_file(path.path()).expect("sha"),
+                sha256: crate::sha256_file(path.path()).expect("sha"),
             })
             .expect("lease");
 

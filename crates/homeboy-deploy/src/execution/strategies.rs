@@ -263,8 +263,8 @@ pub(super) fn execute_artifact_deploy(
         let manifest_matches =
             super::super::content_manifest::package_manifest(artifact_path, &exclusions)
                 .is_ok_and(|manifest| manifest == *expected_manifest);
-        let sha_matches = crate::deploy::sha256_file(artifact_path)
-            .is_ok_and(|sha256| sha256 == *expected_sha256);
+        let sha_matches =
+            crate::sha256_file(artifact_path).is_ok_and(|sha256| sha256 == *expected_sha256);
         if !manifest_matches || !sha_matches {
             let result = ComponentDeployResult::failed(
                 component,

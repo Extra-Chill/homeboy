@@ -21,7 +21,7 @@ use super::types::{
 
 /// Parse all versions from content using regex pattern.
 /// Content is trimmed to handle trailing newlines in VERSION files.
-pub(crate) fn parse_versions(content: &str, pattern: &str) -> Option<Vec<String>> {
+pub fn parse_versions(content: &str, pattern: &str) -> Option<Vec<String>> {
     text::extract_all(content, pattern)
 }
 
@@ -37,12 +37,12 @@ pub fn default_pattern_for_file(filename: &str) -> Option<String> {
 }
 
 /// Resolve version file path (absolute or relative to local_path)
-pub(crate) fn resolve_version_file_path(local_path: &str, file: &str) -> String {
+pub fn resolve_version_file_path(local_path: &str, file: &str) -> String {
     resolve_path_string(local_path, file)
 }
 
 /// Resolve pattern for a version target, using explicit pattern or extension default.
-pub(crate) fn resolve_target_pattern(target: &VersionTarget) -> Result<String> {
+pub fn resolve_target_pattern(target: &VersionTarget) -> Result<String> {
     let pattern = target
         .pattern
         .clone()
@@ -207,7 +207,7 @@ pub fn read_version(component_id: Option<&str>) -> Result<ComponentVersionInfo> 
     read_component_version(&component)
 }
 
-pub(crate) fn read_component_snapshot(component: &Component) -> Result<ComponentVersionSnapshot> {
+pub fn read_component_snapshot(component: &Component) -> Result<ComponentVersionSnapshot> {
     let info = read_component_version(component)?;
     Ok(ComponentVersionSnapshot {
         component_id: component.id.clone(),
@@ -216,7 +216,7 @@ pub(crate) fn read_component_snapshot(component: &Component) -> Result<Component
     })
 }
 
-pub(crate) fn build_init_warnings(component: &Component) -> Vec<String> {
+pub fn build_init_warnings(component: &Component) -> Vec<String> {
     let mut warnings = Vec::new();
 
     if let Some(targets) = &component.version_targets {

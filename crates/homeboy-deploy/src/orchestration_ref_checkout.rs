@@ -861,7 +861,7 @@ mod tests {
             .map(git_state_snapshot)
             .collect::<Vec<_>>();
 
-        let error = crate::deploy::preflight_exact_refs(&[
+        let error = crate::preflight_exact_refs(&[
             (&remote_only_component, "accepted"),
             (&failing_component, "missing-ref"),
         ])
@@ -881,7 +881,7 @@ mod tests {
         let fixture = remote_fixture();
         let checkout = stale_clone(&fixture);
         let component = fixture_component(&checkout);
-        let accepted_sha = crate::deploy::preflight_exact_refs(&[(&component, "accepted")])
+        let accepted_sha = crate::preflight_exact_refs(&[(&component, "accepted")])
             .expect("preflight accepted branch")
             .remove("fixture")
             .expect("accepted SHA");

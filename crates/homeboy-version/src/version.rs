@@ -1,20 +1,16 @@
 mod default_pattern_for_file;
-mod guard;
 mod types;
 
-pub(crate) use default_pattern_for_file::{
+// These were `pub(crate)` while version lived inside the release crate. They
+// are now read across a crate boundary by `homeboy-release` (version_guard,
+// planner) and `homeboy-deploy` (preflight, planning), so they must be `pub`.
+pub use default_pattern_for_file::{
     build_init_warnings, read_component_snapshot, resolve_version_file_path,
 };
-use default_pattern_for_file::{
-    build_version_parse_error, parse_versions, replace_since_tag_placeholders,
-    resolve_target_pattern,
-};
+use default_pattern_for_file::{build_version_parse_error, replace_since_tag_placeholders};
 pub use default_pattern_for_file::{
-    default_pattern_for_file, read_component_version, read_version,
-};
-pub use guard::{
-    detect_manual_release_owned_mutations, release_owned_lockfiles, ReleaseOwnedMutationViolation,
-    VersionMutation,
+    default_pattern_for_file, parse_versions, read_component_version, read_version,
+    resolve_target_pattern,
 };
 #[cfg(test)]
 use types::DEFAULT_SINCE_PLACEHOLDER;
@@ -23,11 +19,10 @@ pub use types::{
     UnconfiguredPattern, VersionTargetInfo,
 };
 
-use crate::release::changelog;
+use crate::changelog;
 use homeboy_core::component::{self, Component, VersionTarget};
 use homeboy_core::error::{Error, Result};
 
-use crate::deploy::VersionSource;
 use homeboy_core::config::{from_str, set_json_pointer, to_string_pretty};
 use homeboy_core::engine::hooks::{self, HookFailureMode};
 use homeboy_core::engine::local_files;
@@ -102,7 +97,7 @@ pub fn get_component_version(component: &Component) -> Option<String> {
     read_local_version(&component.local_path, target)
 }
 
-pub(crate) fn validate_component_versions(components: &[Component]) -> Result<()> {
+pub fn validate_component_versions(components: &[Component]) -> Result<()> {
     for component in components {
         let Some(targets) = component.version_targets.as_ref() else {
             continue;
@@ -148,27 +143,12 @@ pub(crate) fn validate_component_versions(components: &[Component]) -> Result<()
     Ok(())
 }
 
-pub(crate) fn local_version_source(component: &Component) -> Option<VersionSource> {
-    let target = canonical_version_target(component)?;
-    Some(VersionSource {
-        file: target.file.clone(),
-        path: resolve_version_file_path(&component.local_path, &target.file),
-    })
-}
-
-pub(crate) fn artifact_version_source(component: &Component) -> Option<VersionSource> {
-    let target = canonical_version_target(component)?;
-    let file = target
-        .artifact_path
-        .clone()
-        .unwrap_or_else(|| target.file.clone());
-    Some(VersionSource {
-        path: file.clone(),
-        file,
-    })
-}
-
-fn canonical_version_target(component: &Component) -> Option<&VersionTarget> {
+/// The single version target a component's version is read from.
+///
+/// `local_version_source` / `artifact_version_source` used to live here and
+/// returned `homeboy-deploy` types, which is one of the edges that made release
+/// and deploy circular. They now live in `homeboy-deploy` and call this.
+pub fn canonical_version_target(component: &Component) -> Option<&VersionTarget> {
     component
         .version_targets
         .as_ref()?
@@ -182,7 +162,7 @@ fn canonical_version_target(component: &Component) -> Option<&VersionTarget> {
         })
 }
 
-pub(crate) fn replace_versions(
+pub fn replace_versions(
     content: &str,
     pattern: &str,
     new_version: &str,
@@ -204,7 +184,7 @@ fn find_version_pattern_in_extension(
 
 /// Update version in a file, handling both JSON and text-based version files.
 /// Returns the number of replacements made.
-pub(crate) fn update_version_in_file(
+pub fn update_version_in_file(
     path: &str,
     pattern: &str,
     old_version: &str,
@@ -283,10 +263,7 @@ pub(crate) fn update_version_in_file(
 
 /// Read version from a local file for a component's version target.
 /// Returns None if file doesn't exist or version can't be parsed.
-pub(crate) fn read_local_version(
-    local_path: &str,
-    version_target: &VersionTarget,
-) -> Option<String> {
+pub fn read_local_version(local_path: &str, version_target: &VersionTarget) -> Option<String> {
     let path = resolve_version_file_path(local_path, &version_target.file);
     let content = local_files::local().read(Path::new(&path)).ok()?;
 
@@ -301,7 +278,7 @@ pub(crate) fn read_local_version(
 /// Pre-validate all version targets match the expected version.
 /// This is a read-only operation that ensures all targets are in sync
 /// BEFORE any file modifications (like changelog finalization) occur.
-pub(crate) fn validate_version_targets_at(
+pub fn validate_version_targets_at(
     component: &Component,
     expected_version: &str,
 ) -> Result<Vec<VersionTargetInfo>> {
@@ -395,7 +372,7 @@ fn validate_version_targets(
 ///
 /// When `generated_entries` is None, falls back to finalizing an existing
 /// `## Unreleased` section for internal recovery paths.
-pub(crate) fn validate_and_finalize_changelog(
+pub fn validate_and_finalize_changelog(
     component: &Component,
     current_version: &str,
     new_version: &str,
@@ -550,7 +527,7 @@ pub fn validate_baseline_alignment(
     }
 }
 
-pub(crate) fn bump_component_version_with_changelog(
+pub fn bump_component_version_with_changelog(
     component: &Component,
     bump_type: &str,
     changelog_entries: Option<&std::collections::HashMap<String, Vec<String>>>,
@@ -709,16 +686,13 @@ mod tests {
 
         validate_component_versions(&[component.clone()]).expect("matching targets");
         assert_eq!(get_component_version(&component).as_deref(), Some("1.2.3"));
-        assert_eq!(
-            local_version_source(&component).expect("local source").file,
-            "package.json"
-        );
-        assert_eq!(
-            artifact_version_source(&component)
-                .expect("artifact source")
-                .path,
-            "package.json"
-        );
+        // The VersionSource-shaped assertions this test used to make now live
+        // in homeboy-deploy, next to `local_version_source` /
+        // `artifact_version_source`. What this crate owns is the canonical
+        // target those two resolve through.
+        let canonical = canonical_version_target(&component).expect("canonical target");
+        assert_eq!(canonical.file, "package.json");
+        assert_eq!(canonical.artifact_path.as_deref(), Some("package.json"));
     }
 
     #[test]

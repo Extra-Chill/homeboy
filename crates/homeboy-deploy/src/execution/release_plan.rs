@@ -1,5 +1,5 @@
-use crate::release;
 use homeboy_core::component::Component;
+use homeboy_version as release;
 
 use super::super::orchestration_tag_checkout::deploy_tag_for_version;
 use super::super::types::DeployConfig;

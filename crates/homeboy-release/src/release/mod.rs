@@ -1,6 +1,5 @@
 mod advanced_remote;
 pub mod cascade;
-pub mod changelog;
 mod checkout_guard;
 mod context;
 mod deployment;
@@ -21,14 +20,31 @@ mod planning_policy;
 mod planning_quality;
 mod planning_semver;
 mod planning_worktree;
-pub mod provider_impl;
-mod scope;
+pub use homeboy_deploy::provider_impl;
 mod types;
 mod utils;
-pub mod version;
+mod version_guard;
 mod workflow;
 mod workflow_recover;
 mod workspace;
+
+// `changelog`, `scope`, and the version readers moved down into
+// `homeboy-version` so `homeboy-deploy` can use them without depending on this
+// crate (#11144). Re-exported under their original names so every release-side
+// `super::scope::`, `crate::release::changelog::`, and `version::` path keeps
+// resolving unchanged.
+pub use homeboy_version::{changelog, scope};
+
+/// The shared version primitives, plus the release-only version mutation guard.
+///
+/// `version_guard` is the one piece of the old `version` module that could not
+/// move down: it reaches into `planning_worktree` for release-owned lockfile
+/// derivation. Re-merging the two here keeps that split invisible to callers,
+/// which is why `version::release_owned_lockfiles` still resolves.
+pub mod version {
+    pub use crate::release::version_guard::*;
+    pub use homeboy_version::version::*;
+}
 
 pub use cascade::{run_cascade, CascadeResult, CascadeStepResult, ReleasedCoordinates};
 pub use executor::artifacts::{
@@ -51,37 +67,10 @@ pub use workflow::{
     SKIPPED_RELEASE_EXIT_CODE,
 };
 
-/// Return the release tag name this component uses for a version.
-///
-/// This is the shared tag naming contract for release, deploy, status, and
-/// changes. Components scoped below a repository root use component-prefixed
-/// tags; root components use plain `vX.Y.Z` tags.
-pub fn component_tag_name(
-    component: &homeboy_core::component::Component,
-    version: &str,
-) -> homeboy_core::Result<String> {
-    let version = version.trim_start_matches('v');
-    let scope = scope::ReleaseScope::resolve(component, &component.id)?;
-    Ok(scope.tag_name(version))
-}
-
-/// Return the tag prefix this component uses, when it has a component-scoped
-/// release namespace.
-pub fn component_tag_prefix(
-    component: &homeboy_core::component::Component,
-) -> homeboy_core::Result<Option<String>> {
-    let scope = scope::ReleaseScope::resolve(component, &component.id)?;
-    Ok(scope.tag_prefix().map(str::to_string))
-}
-
-/// Resolve the latest release tag for this component using the same namespace
-/// that release uses when creating tags.
-pub fn latest_component_tag(
-    component: &homeboy_core::component::Component,
-) -> homeboy_core::Result<Option<String>> {
-    let scope = scope::ReleaseScope::resolve(component, &component.id)?;
-    scope.latest_tag()
-}
+// The component tag-naming contract moved to `homeboy-version` alongside
+// `scope`. Deploy resolves release tags too (tag-gap detection, ref checkout),
+// so the contract has to sit below both subsystems rather than inside release.
+pub use homeboy_version::{component_tag_name, component_tag_prefix, latest_component_tag};
 
 /// Whether this component would normally get a reviewer-facing GitHub Release
 /// created as part of a release (i.e. it resolves to a GitHub remote).

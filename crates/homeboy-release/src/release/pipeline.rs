@@ -9,10 +9,14 @@ pub(crate) use super::orchestrator::run_with_plan;
 mod tests {
     #[test]
     fn release_runtime_core_stays_ecosystem_agnostic() {
+        // `version.rs` moved to `homeboy-version` (#11144). Its half of this
+        // invariant moved with it — see `version_core_stays_ecosystem_agnostic`
+        // there — rather than being asserted through a cross-crate
+        // `include_str!` path, which would silently stop compiling if the file
+        // were ever relocated again.
         let files = [
             ("executor.rs", include_str!("executor.rs")),
             ("pipeline.rs", include_str!("pipeline.rs")),
-            ("version.rs", include_str!("version.rs")),
         ];
         let forbidden_terms = ["Cargo", "cargo", "Rust", "rust"];
 

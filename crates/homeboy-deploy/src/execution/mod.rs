@@ -59,7 +59,7 @@ mod tests {
     use super::release_plan::{release_artifact_plan, should_try_download_release_artifact};
     use super::strategies::cleanup_deploy_build_artifact;
     use super::{bound_captured_read, ReleaseArtifactPlan, ARTIFACT_VERSION_READ_LIMIT_BYTES};
-    use crate::deploy::types::{DeployConfig, PreparedDeployArtifact};
+    use crate::types::{DeployConfig, PreparedDeployArtifact};
     use homeboy_core::component::{
         ArtifactInput, Component, ComponentScriptsConfig, VersionTarget,
     };
@@ -165,7 +165,7 @@ mod tests {
                 path: "build/fixture.tar.gz".to_string(),
                 durable_path: durable_artifact.display().to_string(),
                 size_bytes: 15,
-                sha256: crate::deploy::sha256_file(&durable_artifact).expect("sha"),
+                sha256: crate::sha256_file(&durable_artifact).expect("sha"),
                 version: "1.2.3".to_string(),
                 tag: "v1.2.3".to_string(),
                 source_commit: "0123456789abcdef".to_string(),

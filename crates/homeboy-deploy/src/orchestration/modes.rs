@@ -342,7 +342,7 @@ fn latest_deploy_tag(component: &Component, expected_version: Option<&str>) -> R
         return Ok(deploy_tag_for_version(component, version));
     }
 
-    match crate::release::latest_component_tag(component) {
+    match homeboy_version::latest_component_tag(component) {
         Ok(Some(tag)) => Ok(tag),
         Ok(None) => Err(Error::validation_invalid_argument(
             "deploy",
@@ -367,7 +367,7 @@ fn latest_deploy_tag(component: &Component, expected_version: Option<&str>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deploy::PreparedDeployArtifact;
+    use crate::PreparedDeployArtifact;
     use std::collections::BTreeMap;
     use std::path::Path;
     use std::process::Command;
@@ -615,7 +615,7 @@ mod tests {
             path: artifact_path.display().to_string(),
             durable_path: artifact_path.display().to_string(),
             size_bytes: "prepared bytes".len() as u64,
-            sha256: crate::deploy::sha256_file(&artifact_path).expect("sha"),
+            sha256: crate::sha256_file(&artifact_path).expect("sha"),
             version: String::new(),
             tag: "prepared".to_string(),
             source_commit: sha,
@@ -740,8 +740,7 @@ mod tests {
                 url: "https://example.test/plugin.zip".to_string(),
                 name: "plugin.zip".to_string(),
                 size: bytes.len() as u64,
-                sha256: crate::deploy::sha256_file(temp.path().join("plugin.zip").as_path())
-                    .expect("sha"),
+                sha256: crate::sha256_file(temp.path().join("plugin.zip").as_path()).expect("sha"),
             })
             .expect("lease");
         let component = Component {
@@ -866,7 +865,7 @@ mod tests {
                 url: "https://example.test/release.zip".to_string(),
                 name: "release.zip".to_string(),
                 size: std::fs::metadata(&release_path).expect("metadata").len(),
-                sha256: crate::deploy::sha256_file(&release_path).expect("sha"),
+                sha256: crate::sha256_file(&release_path).expect("sha"),
             })
             .expect("lease");
         let component = Component {
@@ -881,7 +880,7 @@ mod tests {
             path: prepared_path.display().to_string(),
             durable_path: prepared_path.display().to_string(),
             size_bytes: std::fs::metadata(&prepared_path).expect("metadata").len(),
-            sha256: crate::deploy::sha256_file(&prepared_path).expect("sha"),
+            sha256: crate::sha256_file(&prepared_path).expect("sha"),
             version: "1.0.0".to_string(),
             tag: "v1.0.0".to_string(),
             source_commit: "prepared-commit".to_string(),
@@ -933,7 +932,7 @@ mod tests {
                 url: "https://example.test/plugin.zip".to_string(),
                 name: "plugin.zip".to_string(),
                 size: bytes.len() as u64,
-                sha256: crate::deploy::sha256_file(&package).expect("sha"),
+                sha256: crate::sha256_file(&package).expect("sha"),
             })
             .expect("lease");
         let component = Component {
