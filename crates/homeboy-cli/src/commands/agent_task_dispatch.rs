@@ -27,7 +27,9 @@ pub struct DispatchCoreArgs {
     pub client_context: Option<String>,
 
     /// Maximum total provider executions per task, including same-provider
-    /// retries and provider rotations. `--attempts 1` runs exactly once.
+    /// retries and provider rotations. For Cook, this must be at least
+    /// --max-attempts; use --max-same-provider-retries for gate and review-form
+    /// remediation. `--attempts 1` runs exactly once.
     #[arg(
         long = "max-provider-executions",
         alias = "attempts",
@@ -36,7 +38,9 @@ pub struct DispatchCoreArgs {
     )]
     pub attempts: u32,
 
-    /// Same-provider retries allowed after the first provider execution.
+    /// Same-provider retries allowed after the first provider execution. Cook
+    /// needs one for each possible gate or required review-form remediation;
+    /// provider rotations cannot replace those retries.
     #[arg(
         long = "max-same-provider-retries",
         alias = "same-provider-retries",
@@ -46,6 +50,8 @@ pub struct DispatchCoreArgs {
     pub same_provider_retries: u32,
 
     /// Cross-provider rotations allowed after the first provider execution.
+    /// Rotations are distinct from same-provider Cook remediation and do not
+    /// satisfy its required review-form retry budget.
     #[arg(
         long = "max-provider-rotations",
         alias = "provider-rotations",

@@ -219,6 +219,52 @@ fn cook_remediation_reserves_the_actual_provider_category_before_launch() {
 }
 
 #[test]
+fn cook_budget_preflight_rejects_unfunded_attempts_and_form_remediation() {
+    let default_provider_budget =
+        crate::agent_task_scheduler::AgentTaskExecutionBudget::new(1, 0, 0);
+    let error = validate_effective_cook_budget(3, &default_provider_budget)
+        .expect_err("three Cook attempts require three provider executions");
+    assert!(
+        error.message.contains("--max-attempts 3"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error
+            .message
+            .contains("--max-provider-executions 3 --max-same-provider-retries 2"),
+        "{}",
+        error.message
+    );
+
+    let rotations_only = crate::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 0, 2);
+    let error = validate_effective_cook_budget(3, &rotations_only)
+        .expect_err("required form remediation cannot rotate providers");
+    assert!(
+        error.message.contains("review-form retries"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error
+            .message
+            .contains("provider-rotations 2 cannot replace"),
+        "{}",
+        error.message
+    );
+
+    assert_eq!(
+        validate_effective_cook_budget(
+            3,
+            &crate::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 2, 0),
+        )
+        .expect("funded Cook budget")
+        .requested_attempts,
+        3
+    );
+}
+
+#[test]
 fn service_run_loaded_plan_persists_durable_lifecycle() {
     with_isolated_home(|_| {
         let result = run_loaded_plan(test_plan(), Some("service-run"), SucceedingExecutor)
