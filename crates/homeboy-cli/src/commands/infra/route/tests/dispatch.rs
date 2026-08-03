@@ -2306,7 +2306,7 @@ fn explicit_local_cook_does_not_enter_lab_attempt_dispatch() {
 }
 
 #[test]
-fn cook_to_worktree_provider_workspace_survives_failed_attempt_and_lab_retry() {
+fn lab_cook_materializes_derived_provider_destination_and_preserves_it_for_retry() {
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         git_init(workspace.path());
@@ -2332,7 +2332,7 @@ fn cook_to_worktree_provider_workspace_survives_failed_attempt_and_lab_retry() {
                 "worktree",
                 "add",
                 "-b",
-                "cook-six-fixture-generic-parity",
+                "fix/issue-11291-homeboy",
                 provider_workspace
                     .to_str()
                     .expect("utf8 provider workspace"),
@@ -2344,9 +2344,9 @@ fn cook_to_worktree_provider_workspace_survives_failed_attempt_and_lab_retry() {
         let provider = provider_dir.path().join("provider");
         let payload = serde_json::json!({
             "worktrees": [{
-                "handle": "blocks-engine@cook-six-fixture-generic-parity",
+                "handle": "homeboy@fix-issue-11291-homeboy",
                 "path": provider_workspace,
-                "branch": "cook-six-fixture-generic-parity",
+                "branch": "fix/issue-11291-homeboy",
                 "safety": { "dirty": false, "unpushed": false, "primary": false }
             }]
         });
@@ -2400,13 +2400,9 @@ fn cook_to_worktree_provider_workspace_survives_failed_attempt_and_lab_retry() {
             "agent-task",
             "cook",
             "--repo",
-            "blocks-engine",
-            "--head",
-            "cook-six-fixture-generic-parity",
+            "homeboy",
             "--task-url",
-            "https://example.com/tasks/cook-six-fixture-generic-parity",
-            "--to-worktree",
-            "blocks-engine@cook-six-fixture-generic-parity",
+            "https://github.com/Extra-Chill/homeboy/issues/11291",
             "--verify",
             "true",
             "--backend",
@@ -2421,6 +2417,10 @@ fn cook_to_worktree_provider_workspace_survives_failed_attempt_and_lab_retry() {
         assert_eq!(
             plan.tasks[0].workspace.root.as_deref(),
             Some(expected_root.as_str())
+        );
+        assert_eq!(
+            plan.tasks[0].metadata["worktree_provision"]["handle"],
+            "homeboy@fix-issue-11291-homeboy"
         );
         agent_task_lifecycle::submit_plan(&plan, Some("failed-run")).expect("submit plan");
         agent_task_lifecycle::record_pre_execution_failure(

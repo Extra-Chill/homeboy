@@ -1666,9 +1666,10 @@ fn materialize_agent_task_cook_plan(
     else {
         return Ok(None);
     };
-    crate::commands::agent_task::run::validate_cook_request_with_provenance(cook, provenance)?;
-    let provision = crate::commands::agent_task::run::provision_cook_destination(cook)?;
-    let mut plan = crate::commands::agent_task::run::compile_cook_plan(cook, provision)?;
+    let cook = crate::commands::agent_task::run::resolve_cook_destination(cook.clone())?;
+    crate::commands::agent_task::run::validate_cook_request_with_provenance(&cook, provenance)?;
+    let provision = crate::commands::agent_task::run::provision_cook_destination(&cook)?;
+    let mut plan = crate::commands::agent_task::run::compile_cook_plan(&cook, provision)?;
     if let Some(provenance) = provenance {
         crate::commands::agent_task::run::record_cook_argument_provenance(&mut plan, provenance);
     }

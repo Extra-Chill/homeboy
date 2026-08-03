@@ -251,10 +251,11 @@ fn cook_report_with_continuation(mut value: Value) -> Value {
 /// Converge a Cook promotion destination before compiling a task plan. This is
 /// controller-owned so local and Lab dispatch use the same managed checkout.
 pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::core::Result<Value> {
-    let to_worktree = args
-        .to_worktree
-        .as_deref()
-        .expect("Cook destination is resolved before provisioning");
+    let to_worktree = args.to_worktree.as_deref().ok_or_else(|| {
+        homeboy::core::Error::validation_missing_argument(vec![
+            "--to-worktree is required before provisioning a Cook destination".to_string(),
+        ])
+    })?;
     let direct_path = Path::new(to_worktree);
     if direct_path.is_dir() {
         homeboy::core::worktree_providers::validate_task_worktree_root(direct_path, to_worktree)?;
