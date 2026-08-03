@@ -15,8 +15,9 @@
 //! was its own `homeboy-run-lifecycle-contract` crate until it was merged here;
 //! the two share no types, and `homeboy-core` already imported that crate under
 //! the module name `run_lifecycle_record`, which is the name it keeps.
-//! `cook_status` is the Cook *report* vocabulary (`CookStatus`) and owns the
-//! single definition of Cook terminality.
+//! `cook_status` is the Cook *report* vocabulary (`CookStatus`) plus
+//! `CookDisposition`, the declared answer to whether a Cook will advance on
+//! its own.
 
 pub mod artifact_contract;
 pub mod cook_status;
@@ -28,7 +29,7 @@ pub mod timeline;
 pub use artifact_contract::{
     ArtifactContract, ArtifactRecord, ArtifactViewerLink, ARTIFACT_CONTRACT_SCHEMA,
 };
-pub use cook_status::CookStatus;
+pub use cook_status::{CookDisposition, CookStatus};
 pub use lifecycle::{
     LifecycleContract, LifecyclePhaseContract, LifecyclePhaseKind, LifecyclePhaseResult,
     LifecyclePhaseStatus, LifecycleResultMetadata, LifecycleSnapshotRef,

@@ -17,25 +17,27 @@
 //! is the one place the vocabulary is written down, so the three call sites
 //! classify against the same enum instead of three divergent string literals.
 //!
-//! # Why unknown statuses stay terminal
+//! # Terminality is declared, not inferred
 //!
-//! [`CookStatus::is_terminal`] is defined as "not one of the in-flight
-//! states", deliberately keeping the *in-flight* set closed rather than the
-//! terminal set.
+//! Whether a Cook will advance on its own is *not* derived from this
+//! vocabulary. It is [`CookDisposition`], declared by the exit that built the
+//! report.
 //!
-//! The in-flight set is small, internal, and owned by the Cook loop itself.
-//! The terminal set is open: three call sites feed it straight from
-//! `finalization["status"]`, an arbitrary JSON string, defaulting to
-//! `"unknown"` when the field is missing. Making the *terminal* side the
-//! allow-list would mean any status this binary has not been taught is treated
-//! as still-running — so a Cook that genuinely finished would never emit its
-//! terminal notification and the orchestrator would wait forever. Because new
-//! statuses overwhelmingly arrive from finalization, and finalization statuses
-//! are overwhelmingly terminal, the safer default for an unrecognized status
-//! is "the Cook has stopped".
+//! Inferring it from the status string was the original defect. The terminal
+//! side of the vocabulary is open — several exits feed it straight from
+//! `finalization["status"]`, an arbitrary JSON string that defaults to
+//! `"unknown"` when the field is missing — so any inference has to pick a
+//! wrong default for statuses it has not been taught. Guessing "terminal"
+//! fires a completion at the orchestrator for a Cook that is still running;
+//! guessing "in flight" leaves a finished Cook with no completion at all.
 //!
-//! [`CookStatus::Unknown`] preserves the raw string so this classification
-//! never rewrites a status it did not recognize.
+//! There is no need to guess. At every one of those exits the Cook loop has
+//! already decided: it either handed the work to a durable owner that will
+//! carry it forward, or it stopped. Recording that decision removes the
+//! question instead of answering it.
+//!
+//! [`CookStatus::Unknown`] preserves the raw string so a status this binary
+//! does not recognize is never rewritten.
 
 use std::fmt;
 
@@ -167,17 +169,18 @@ impl CookStatus {
         }
     }
 
-    /// Whether the Cook will advance on its own.
+    /// Whether this status *reads* as a Cook that is still progressing.
     ///
-    /// This is the closed set. Everything else — including
-    /// [`CookStatus::Unknown`] — is terminal.
+    /// This is a property of the vocabulary, not the authority on terminality
+    /// — that is [`CookDisposition`], which the producing exit declares. This
+    /// exists so a report can be checked for self-consistency between the
+    /// status it carries and the disposition it declares, and so batch totals
+    /// can bucket a cell by its reported status.
+    ///
+    /// Unlike the terminal side, this set is closed: it is internal to the
+    /// Cook loop and never sourced from finalization JSON.
     pub fn is_in_flight(&self) -> bool {
         matches!(self, Self::Queued | Self::Running | Self::InFlight)
-    }
-
-    /// Whether the Cook will not advance without external action.
-    pub fn is_terminal(&self) -> bool {
-        !self.is_in_flight()
     }
 
     /// Whether this status alone means the operator has nothing to act on.
@@ -199,6 +202,43 @@ impl CookStatus {
 impl fmt::Display for CookStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// Whether a Cook will advance on its own, as declared by the exit that
+/// produced the report.
+///
+/// Every Cook exit already knows this. It either handed the work to a durable
+/// owner — a runner daemon or detached staging that owns timeout and provider
+/// rotation from that point on — or it stopped and there is nothing left to
+/// carry the Cook forward. This records that fact so no consumer has to
+/// re-derive it from a status string.
+///
+/// Producing a report requires stating one of these, so an exit added later
+/// cannot inherit a default that happens to be wrong for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CookDisposition {
+    /// The Cook returned, but a durable owner is still carrying the work.
+    /// No terminal notification is due.
+    InFlight,
+    /// The Cook will not advance without external action. This is the
+    /// completion the orchestrator is waiting for.
+    Terminal,
+}
+
+impl CookDisposition {
+    /// Whether the Cook will not advance without external action.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Terminal)
+    }
+
+    /// The durable progress phase label for this disposition.
+    pub fn phase(&self) -> &'static str {
+        match self {
+            Self::InFlight => "in_flight",
+            Self::Terminal => "terminal",
+        }
     }
 }
 
@@ -226,11 +266,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_the_in_flight_states_are_non_terminal() {
+    fn the_in_flight_reading_covers_exactly_the_loop_owned_states() {
         for status in ["queued", "running", "in_flight"] {
             assert!(
-                !CookStatus::from_status(status).is_terminal(),
-                "{status} must not be terminal"
+                CookStatus::from_status(status).is_in_flight(),
+                "{status} must read as in flight"
             );
         }
         for status in [
@@ -245,20 +285,40 @@ mod tests {
             "durable_failure",
         ] {
             assert!(
-                CookStatus::from_status(status).is_terminal(),
-                "{status} must be terminal"
+                !CookStatus::from_status(status).is_in_flight(),
+                "{status} must not read as in flight"
             );
         }
     }
 
-    /// A Cook that finished under a status this binary predates must still
-    /// emit its terminal notification, or the orchestrator waits forever.
+    /// The whole point of declaring disposition: a status this binary has
+    /// never seen carries no claim about whether the Cook is still running.
     #[test]
-    fn an_unknown_status_is_terminal() {
+    fn an_unknown_status_makes_no_claim_about_progress() {
         let status = CookStatus::from_status("some_status_from_a_newer_binary");
         assert!(matches!(status, CookStatus::Unknown(_)));
-        assert!(status.is_terminal());
+        assert!(!status.is_in_flight());
         assert!(!status.is_success_exit());
+    }
+
+    #[test]
+    fn disposition_is_the_authority_on_terminality() {
+        assert!(CookDisposition::Terminal.is_terminal());
+        assert!(!CookDisposition::InFlight.is_terminal());
+        assert_eq!(CookDisposition::Terminal.phase(), "terminal");
+        assert_eq!(CookDisposition::InFlight.phase(), "in_flight");
+    }
+
+    #[test]
+    fn disposition_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&CookDisposition::InFlight).expect("serialize"),
+            "\"in_flight\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CookDisposition::Terminal).expect("serialize"),
+            "\"terminal\""
+        );
     }
 
     /// The classification must never rewrite a status it did not recognize.

@@ -19,7 +19,7 @@ use crate::agent_task_scheduler::{
     AgentTaskExecutionBudget, AgentTaskExecutorAdapter, AgentTaskPlan,
 };
 use homeboy_core::command_invocation::CommandInvocation;
-use homeboy_core::cook_status::CookStatus;
+use homeboy_core::cook_status::{CookDisposition, CookStatus};
 use homeboy_core::{Error, Result};
 
 use super::cook_baseline::{
@@ -135,6 +135,7 @@ fn pre_artifact_interruption_report(
     let mut report = cook_report(CookReportInput {
         cook_id,
         status: "pre_artifact_interruption",
+        disposition: CookDisposition::Terminal,
         attempts,
         finalization: None,
         stop_reason: Some(reason),
@@ -692,6 +693,12 @@ pub struct AgentTaskCookReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub invocation_run_ids: Vec<String>,
     pub status: String,
+    /// Whether the Cook will advance on its own, declared by the exit that
+    /// produced this report rather than inferred from `status`.
+    ///
+    /// Consumers waiting on completion should read this instead of
+    /// pattern-matching `status`, which is an open vocabulary.
+    pub disposition: CookDisposition,
     pub attempts: Vec<AgentTaskCookAttemptReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finalization: Option<Value>,
@@ -1658,16 +1665,6 @@ fn cook_component(options: &AgentTaskCookServiceOptions) -> Option<String> {
         .find_map(|contract| contract.slug.clone())
 }
 
-/// Whether a reported cook status means the cook will not advance on its own.
-///
-/// Delegates to [`CookStatus`], which is the single definition of the Cook
-/// status vocabulary and of terminality. It is shared by the durable progress
-/// phase label, the terminal notification, the batch totals, and the exit
-/// code, so a new status cannot make any of them silently disagree.
-fn cook_status_is_terminal(status: &str) -> bool {
-    CookStatus::from_status(status).is_terminal()
-}
-
 pub(crate) fn exhausted_budget_guidance(
     max_attempts: u32,
     budget: &AgentTaskExecutionBudget,
@@ -1733,7 +1730,7 @@ where
         allow_historical_terminal,
     );
     if let Ok(result) = &result {
-        if cook_status_is_terminal(&result.value.status) {
+        if result.value.disposition.is_terminal() {
             crate::agent_task_notify::cook_terminal(
                 &result.value,
                 cook_component(&notification_options).as_deref(),
@@ -1773,11 +1770,7 @@ where
             .last()
             .map(|attempt| attempt.attempt)
             .unwrap_or(1);
-        let phase = if cook_status_is_terminal(&result.value.status) {
-            "terminal"
-        } else {
-            "in_flight"
-        };
+        let phase = result.value.disposition.phase();
         if let Err(error) = report_cook_progress(
             durable_observer,
             &result.value.cook_id,
@@ -1803,6 +1796,7 @@ fn durable_cook_error_report(
         let mut report = cook_report(CookReportInput {
             cook_id: options.cook_id.clone(),
             status: "durable_failure",
+            disposition: CookDisposition::Terminal,
             attempts: Vec::new(),
             finalization: None,
             stop_reason: Some(
@@ -2360,6 +2354,7 @@ where
                     return Ok(cook_report(CookReportInput {
                         cook_id,
                         status: "retries_exhausted",
+                        disposition: CookDisposition::Terminal,
                         attempts,
                         finalization: None,
                         stop_reason: Some(error.to_string()),
@@ -2414,6 +2409,7 @@ where
             return Ok(cook_report(CookReportInput {
                 cook_id,
                 status: "in_flight",
+                disposition: CookDisposition::InFlight,
                 attempts,
                 finalization: None,
                 stop_reason: Some("provider attempt accepted by the runner daemon".to_string()),
@@ -2508,6 +2504,7 @@ where
             return Ok(cook_report(CookReportInput {
                 cook_id,
                 status: "policy_failure",
+                disposition: CookDisposition::Terminal,
                 attempts,
                 finalization: None,
                 stop_reason: Some(
@@ -2538,6 +2535,7 @@ where
             return Ok(cook_report(CookReportInput {
                 cook_id,
                 status: "provider_failure",
+                disposition: CookDisposition::Terminal,
                 attempts,
                 finalization: None,
                 stop_reason: Some(format!(
@@ -2574,6 +2572,7 @@ where
             return Ok(cook_report(CookReportInput {
                 cook_id,
                 status: &status,
+                disposition: CookDisposition::Terminal,
                 attempts,
                 finalization: Some(finalization),
                 stop_reason: None,
@@ -2605,6 +2604,7 @@ where
                 return Ok(cook_report(CookReportInput {
                     cook_id,
                     status: "policy_failure",
+                    disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
                     stop_reason: Some(recovery),
@@ -2652,6 +2652,7 @@ where
                     return Ok(cook_report(CookReportInput {
                         cook_id,
                         status: "green_no_finalize",
+                        disposition: CookDisposition::Terminal,
                         attempts,
                         finalization: None,
                         stop_reason: Some(
@@ -2769,6 +2770,7 @@ where
                         return Ok(cook_report(CookReportInput {
                             cook_id,
                             status: "awaiting_acceptance",
+                            disposition: CookDisposition::Terminal,
                             attempts,
                             finalization: Some(serde_json::json!({
                                 "status": "awaiting_acceptance",
@@ -2800,6 +2802,7 @@ where
                 return Ok(cook_report(CookReportInput {
                     cook_id,
                     status: &final_status,
+                    disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: Some(finalization),
                     stop_reason,
@@ -2811,6 +2814,7 @@ where
                 return Ok(cook_report(CookReportInput {
                     cook_id,
                     status: "no_changes",
+                    disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
                     stop_reason: Some(
@@ -2826,6 +2830,7 @@ where
                 return Ok(cook_report(CookReportInput {
                     cook_id,
                     status: "no_op_gate_failed",
+                    disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
                     stop_reason: Some(
@@ -2842,6 +2847,7 @@ where
                     return Ok(cook_report(CookReportInput {
                         cook_id,
                         status: "policy_failure",
+                        disposition: CookDisposition::Terminal,
                         attempts,
                         finalization: None,
                         stop_reason: Some(
@@ -2880,6 +2886,7 @@ where
                         return Ok(cook_report(CookReportInput {
                             cook_id,
                             status: "execution_budget_exhausted",
+                            disposition: CookDisposition::Terminal,
                             attempts,
                             finalization: None,
                             stop_reason: Some(exhausted_budget_guidance(
@@ -2896,6 +2903,7 @@ where
                         return Ok(cook_report(CookReportInput {
                             cook_id,
                             status: "policy_failure",
+                            disposition: CookDisposition::Terminal,
                             attempts,
                             finalization: None,
                             stop_reason: Some(reason),
@@ -2909,6 +2917,7 @@ where
                 return Ok(cook_report(CookReportInput {
                     cook_id,
                     status: "retries_exhausted",
+                    disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
                     stop_reason: Some(
@@ -2925,6 +2934,7 @@ where
     Ok(cook_report(CookReportInput {
         cook_id,
         status: "retries_exhausted",
+        disposition: CookDisposition::Terminal,
         attempts,
         finalization: None,
         stop_reason: Some("cook attempt budget exhausted".to_string()),
