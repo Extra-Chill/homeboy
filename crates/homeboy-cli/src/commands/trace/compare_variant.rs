@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use homeboy::core::trace_compare;
+use crate::commands::trace::compare_artifacts;
 use homeboy::rig;
 use homeboy_extension::trace as extension_trace;
 use homeboy_extension::trace::TraceCommandOutput;
@@ -74,16 +74,16 @@ pub(super) fn run_compare_variant(mut args: TraceArgs) -> CmdResult<TraceCommand
 
     let (baseline, variant, run_order) = run_compare_variant_pair(args)?;
 
-    trace_compare::prepare_compare_variant_dir(&output_dir)?;
+    compare_artifacts::prepare_compare_variant_dir(&output_dir)?;
     let baseline_path = output_dir.join(TRACE_COMPARE_VARIANT_BASELINE_FILE);
     let variant_path = output_dir.join(TRACE_COMPARE_VARIANT_VARIANT_FILE);
     let compare_path = output_dir.join(TRACE_COMPARE_VARIANT_COMPARE_FILE);
     let run_order_path = output_dir.join(TRACE_COMPARE_VARIANT_RUN_ORDER_FILE);
     let summary_path = output_dir.join(TRACE_COMPARE_VARIANT_SUMMARY_FILE);
 
-    trace_compare::write_compare_variant_json(&baseline_path, &baseline)?;
-    trace_compare::write_compare_variant_json(&variant_path, &variant)?;
-    trace_compare::write_compare_variant_json(&run_order_path, &run_order)?;
+    compare_artifacts::write_compare_variant_json(&baseline_path, &baseline)?;
+    compare_artifacts::write_compare_variant_json(&variant_path, &variant)?;
+    compare_artifacts::write_compare_variant_json(&run_order_path, &run_order)?;
 
     let compare = compare_trace_aggregates_with_focus(
         &baseline_path,
@@ -95,7 +95,7 @@ pub(super) fn run_compare_variant(mut args: TraceArgs) -> CmdResult<TraceCommand
         regression_min_delta_ms,
         &metric_guardrails,
     );
-    trace_compare::write_compare_variant_json(&compare_path, &compare)?;
+    compare_artifacts::write_compare_variant_json(&compare_path, &compare)?;
     write_trace_compare_variant_summary(
         &summary_path,
         &output_dir,
@@ -457,7 +457,7 @@ fn write_trace_compare_variant_summary(
     push_focus_span_summary(&mut out, baseline, variant, compare);
     push_compare_variant_span_summary(&mut out, compare);
 
-    trace_compare::write_compare_variant_summary(path, &out)
+    compare_artifacts::write_compare_variant_summary(path, &out)
 }
 
 fn push_run_order_summary(

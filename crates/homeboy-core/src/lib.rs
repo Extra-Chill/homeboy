@@ -197,7 +197,6 @@ pub mod source_snapshot;
 pub mod stream_capture;
 pub mod structured_sidecar;
 pub mod tag_gap;
-pub mod trace_compare;
 pub mod trace_secrets;
 pub(crate) mod transient_workspace_policy;
 

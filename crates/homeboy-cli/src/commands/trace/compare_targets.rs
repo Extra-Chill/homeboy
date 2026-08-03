@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::commands::trace::compare_artifacts::{self, CompareArtifactSet, CompareObservation};
 use homeboy::core::component;
 use homeboy::core::git;
 use homeboy::core::observation::{NewRunRecord, RunStatus};
-use homeboy::core::trace_compare::{self, CompareArtifactSet, CompareObservation};
 use homeboy_extension::trace as extension_trace;
 use homeboy_extension::trace::{TraceCheckoutProvenance, TraceCommandOutput};
 
@@ -65,7 +65,7 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
                 chrono::Utc::now().format("%Y%m%d%H%M%S")
             ))
     });
-    trace_compare::prepare_output_dir(&output_dir)?;
+    compare_artifacts::prepare_output_dir(&output_dir)?;
 
     let observation = start_compare_observation(&args, &component_id, &scenario_id, &output_dir);
 
@@ -131,9 +131,9 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
         compare: &compare,
         summary_markdown: &summary_markdown,
     };
-    // Core delegation: artifact persistence lives in trace_compare (core service).
+    // Artifact persistence lives in `compare_artifacts`, the sibling service module.
     let artifact_paths =
-        trace_compare::persist_compare_artifacts(&output_dir, compare_artifact_set)?; // homeboy-audit: allow-thin-command-adapter
+        compare_artifacts::persist_compare_artifacts(&output_dir, compare_artifact_set)?; // homeboy-audit: allow-thin-command-adapter
 
     let failed = !baseline_aggregate.passed
         || !candidate_aggregate.passed
@@ -164,7 +164,7 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
             aggregate: &candidate_aggregate,
         },
     );
-    trace_compare::persist_compare_pair_artifact(&artifact_paths.pair, &pair_artifact)?; // homeboy-audit: allow-thin-command-adapter
+    compare_artifacts::persist_compare_pair_artifact(&artifact_paths.pair, &pair_artifact)?; // homeboy-audit: allow-thin-command-adapter
     let pair_json = serde_json::to_value(&pair_artifact).map_err(|err| {
         homeboy::core::Error::internal_json(
             err.to_string(),
@@ -225,11 +225,11 @@ fn build_compare_pair_artifact(
     scenario_id: &str,
     status: &str,
     output_dir: &Path,
-    artifact_paths: &trace_compare::CompareArtifactPaths,
+    artifact_paths: &compare_artifacts::CompareArtifactPaths,
     compare: &extension_trace::TraceCompareOutput,
     baseline: ComparePairSideInputs<'_>,
     candidate: ComparePairSideInputs<'_>,
-) -> trace_compare::ComparePairArtifact {
+) -> compare_artifacts::ComparePairArtifact {
     let post_compare_artifacts = compare
         .browser_proof
         .as_ref()
@@ -238,14 +238,14 @@ fn build_compare_pair_artifact(
                 .baseline_dirs
                 .iter()
                 .chain(proof.candidate_dirs.iter())
-                .map(|dir| trace_compare::ComparePairLinkedArtifact {
+                .map(|dir| compare_artifacts::ComparePairLinkedArtifact {
                     kind: "browser-proof-dir".to_string(),
                     path: dir.clone(),
                 })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    trace_compare::ComparePairArtifact {
+    compare_artifacts::ComparePairArtifact {
         kind: "trace-compare-pair",
         command: "trace.compare".to_string(),
         timestamp: chrono::Utc::now().to_rfc3339(),
@@ -261,12 +261,12 @@ fn build_compare_pair_artifact(
     }
 }
 
-fn compare_pair_side(inputs: ComparePairSideInputs<'_>) -> trace_compare::ComparePairSide {
+fn compare_pair_side(inputs: ComparePairSideInputs<'_>) -> compare_artifacts::ComparePairSide {
     let artifact_dirs = run_artifact_dirs(inputs.aggregate)
         .into_iter()
         .map(|path| path.to_string_lossy().to_string())
         .collect();
-    trace_compare::ComparePairSide::new(
+    compare_artifacts::ComparePairSide::new(
         inputs.target,
         inputs.git_sha,
         inputs.status,
@@ -303,7 +303,7 @@ fn start_compare_observation(
 fn finish_compare_observation(
     observation: Option<CompareObservation>,
     status: RunStatus,
-    paths: &homeboy::core::trace_compare::CompareArtifactPaths,
+    paths: &crate::commands::trace::compare_artifacts::CompareArtifactPaths,
     metadata: serde_json::Value,
 ) {
     let Some(observation) = observation else {
