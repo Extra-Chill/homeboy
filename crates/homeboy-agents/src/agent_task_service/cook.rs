@@ -22,9 +22,9 @@ use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::{Error, Result};
 
 use super::cook_baseline::{
-    cook_attempt_harvest_context, materialize_follow_up_baseline,
-    materialize_initial_candidate_baseline, re_materialize_follow_up_baseline,
-    CookFollowUpBaseline, DerivedCookBaselineCapability,
+    compare_gate_failures_to_verified_base, cook_attempt_harvest_context,
+    materialize_follow_up_baseline, materialize_initial_candidate_baseline,
+    re_materialize_follow_up_baseline, CookFollowUpBaseline, DerivedCookBaselineCapability,
 };
 use super::cook_budget::{
     budget_remaining, execution_budget_usage, reserve_remediation_budget,
@@ -1954,7 +1954,9 @@ where
     // A detached transport may own workspace materialization on the runner.
     // Its initial handoff has no controller-local source path to validate yet;
     // requiring one here turns an accepted detached retry into a local failure.
-    if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
+    if cook_attempt_needs_execution(&options.initial_run_id)
+        && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
+    {
         validate_cook_workspace(&options)?;
     }
     validate_cook_candidate_group(&options.initial_plan)?;
@@ -2112,22 +2114,7 @@ where
             Some(plan) => plan,
             None => agent_task_lifecycle::load_plan(&run_id)?,
         };
-        let needs_execution = agent_task_lifecycle::status(&run_id)
-            .map(|record| {
-                (!matches!(
-                    record.state,
-                    agent_task_lifecycle::AgentTaskRunState::Succeeded
-                        | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-                        | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
-                        | agent_task_lifecycle::AgentTaskRunState::PartialFailure
-                        | agent_task_lifecycle::AgentTaskRunState::Failed
-                        | agent_task_lifecycle::AgentTaskRunState::Cancelled
-                ) || retryable_pre_execution_failure(&record))
-                    && !record.lab_handoff.as_ref().is_some_and(|handoff| {
-                        handoff.state == agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
-                    })
-            })
-            .unwrap_or(true);
+        let needs_execution = cook_attempt_needs_execution(&run_id);
         if needs_execution {
             report_cook_progress(
                 durable_observer,
@@ -2588,7 +2575,7 @@ where
             attempt,
             None,
         )?;
-        let promotion = match side_effects.promote(&options, &run_id) {
+        let mut promotion = match side_effects.promote(&options, &run_id) {
             Ok(report) => report,
             Err(_error) => {
                 attempts.push(AgentTaskCookAttemptReport {
@@ -2611,6 +2598,40 @@ where
                 }));
             }
         };
+        if promotion.status.gate_failed() {
+            let base_sha = promotion
+                .verified_base
+                .as_ref()
+                .map(|base| base.sha.clone())
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "promotion.verified_base",
+                        "gate-failed Cook promotion has no immutable verified base for differential verification",
+                        None,
+                        None,
+                    )
+                })?;
+            let repository_root = promotion.target.path.clone().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "promotion.target.path",
+                    "gate-failed Cook promotion has no candidate repository path for differential verification",
+                    None,
+                    None,
+                )
+            })?;
+            compare_gate_failures_to_verified_base(
+                &mut promotion,
+                std::path::Path::new(&repository_root),
+                &base_sha,
+                options.gates.gate_timeout(),
+                |_compared, _total| Ok(()),
+            )?;
+            agent_task_lifecycle::record_promotion(
+                &run_id,
+                serde_json::to_value(&promotion)
+                    .map_err(|error| Error::internal_json(error.to_string(), None))?,
+            )?;
+        }
 
         let review_form = review_form_from_aggregate(&aggregate)?;
         let previous_failure_set = attempts
@@ -3008,6 +3029,25 @@ fn bind_dispatch_workspace_attestations(plan: &mut AgentTaskPlan) -> Result<()> 
         }
     }
     Ok(())
+}
+
+fn cook_attempt_needs_execution(run_id: &str) -> bool {
+    agent_task_lifecycle::status(run_id)
+        .map(|record| {
+            (!matches!(
+                record.state,
+                agent_task_lifecycle::AgentTaskRunState::Succeeded
+                    | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                    | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
+                    | agent_task_lifecycle::AgentTaskRunState::PartialFailure
+                    | agent_task_lifecycle::AgentTaskRunState::Failed
+                    | agent_task_lifecycle::AgentTaskRunState::Cancelled
+            ) || retryable_pre_execution_failure(&record))
+                && !record.lab_handoff.as_ref().is_some_and(|handoff| {
+                    handoff.state == agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
+                })
+        })
+        .unwrap_or(true)
 }
 
 /// Re-resolve the declared Cook target before a provider can run. Durable
