@@ -1298,6 +1298,110 @@ pub fn connected_daemon_exec_checks_with_timeout(
     )]
 }
 
+/// Observe the already-published daemon session without creating a daemon job
+/// or invoking runner status reconciliation. The persisted session liveness
+/// check has already matched this lease and PID; this request is a bounded
+/// final health observation for the doctor report.
+pub fn connected_daemon_health_checks_with_timeout(
+    runner_id: &str,
+    session: &RunnerSession,
+    timeout: std::time::Duration,
+) -> Vec<RunnerCheck> {
+    if session.mode != RunnerTunnelMode::DirectSsh {
+        return Vec::new();
+    }
+    let Some(local_url) = session.local_url.as_deref() else {
+        return Vec::new();
+    };
+    let mut details = BTreeMap::new();
+    details.insert("url".to_string(), local_url.to_string());
+    if timeout.is_zero() {
+        details.insert(
+            "reason_code".to_string(),
+            "runner_doctor.overall_timeout".to_string(),
+        );
+        return vec![checks::error(
+            "daemon.exec",
+            "Connected runner daemon health probe was skipped because the diagnostic deadline was exhausted".to_string(),
+            None,
+            details,
+        )];
+    }
+    let response = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+        .and_then(|client| {
+            client
+                .get(format!("{}/health", local_url.trim_end_matches('/')))
+                .send()
+        });
+    match response {
+        Ok(response) if response.status().is_success() => {
+            let body = response.json::<serde_json::Value>().unwrap_or_default();
+            let lease = body
+                .pointer("/data/freshness/lease_id")
+                .and_then(serde_json::Value::as_str);
+            let pid = body
+                .pointer("/data/pid")
+                .and_then(serde_json::Value::as_u64);
+            let lease_matches = lease == session.remote_daemon_lease_id.as_deref();
+            let pid_matches = pid == session.remote_daemon_pid.map(u64::from);
+            if lease_matches && pid_matches {
+                return vec![checks::ok(
+                    "daemon.exec",
+                    "Connected runner daemon health and session identity are valid".to_string(),
+                    None,
+                )];
+            }
+            details.insert(
+                "observed_lease".to_string(),
+                lease.unwrap_or("unavailable").to_string(),
+            );
+            details.insert(
+                "observed_pid".to_string(),
+                pid.map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "unavailable".to_string()),
+            );
+            vec![checks::error(
+                "daemon.exec",
+                "Connected runner daemon health identity does not match the controller session"
+                    .to_string(),
+                Some(format!(
+                    "Reconnect runner `{runner_id}` only after inspecting the endpoint mismatch"
+                )),
+                details,
+            )]
+        }
+        Ok(response) => {
+            details.insert("status".to_string(), response.status().as_u16().to_string());
+            vec![checks::error(
+                "daemon.exec",
+                "Connected runner daemon health probe returned an error".to_string(),
+                None,
+                details,
+            )]
+        }
+        Err(error) => {
+            details.insert("error".to_string(), error.to_string());
+            details.insert(
+                "reason_code".to_string(),
+                if error.is_timeout() {
+                    "runner_doctor.daemon_timeout"
+                } else {
+                    "runner_doctor.daemon_request_failed"
+                }
+                .to_string(),
+            );
+            vec![checks::error(
+                "daemon.exec",
+                "Connected runner daemon did not answer the bounded health probe".to_string(),
+                None,
+                details,
+            )]
+        }
+    }
+}
+
 pub(super) fn daemon_exec_check(
     runner_id: &str,
     workspace_root: &str,

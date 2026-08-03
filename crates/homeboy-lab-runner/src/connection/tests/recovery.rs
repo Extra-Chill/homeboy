@@ -77,6 +77,52 @@ fn tunnel_only_failure_reattaches_the_persisted_daemon() {
 }
 
 #[test]
+fn live_exact_owner_with_dead_listener_selects_bounded_replacement() {
+    let session = direct_ssh_session("lease-listener-dead");
+    let mut status = remote_daemon_status_for_test(
+        true,
+        true,
+        0,
+        "lease-listener-dead",
+        session.remote_daemon_pid.expect("pid"),
+    );
+    status.endpoint_probe_error = Some("curl timed out".to_string());
+
+    assert_eq!(
+        remote_daemon_connect_action_with_controller_identity(
+            Some(&session),
+            &status,
+            session.homeboy_build_identity.as_deref().expect("identity"),
+        )
+        .expect("exact idle recovery"),
+        RemoteDaemonConnectAction::ReplaceUnhealthyExactOwner
+    );
+}
+
+#[test]
+fn dead_listener_with_active_jobs_or_ambiguous_coordinates_fails_closed() {
+    let session = direct_ssh_session("lease-listener-dead");
+    let mut active = remote_daemon_status_for_test(
+        true,
+        true,
+        1,
+        "lease-listener-dead",
+        session.remote_daemon_pid.expect("pid"),
+    );
+    active.endpoint_probe_error = Some("curl timed out".to_string());
+    assert!(remote_daemon_connect_action(Some(&session), &active)
+        .expect_err("active work is protected")
+        .contains("active job"));
+
+    let mut drifted = active;
+    drifted.active_jobs = 0;
+    drifted.daemon.as_mut().expect("daemon").pid = Some(9999);
+    assert!(remote_daemon_connect_action(Some(&session), &drifted)
+        .expect_err("PID drift is ambiguous")
+        .contains("not proven"));
+}
+
+#[test]
 fn repeated_tunnel_flaps_continue_to_select_the_same_active_daemon() {
     let mut session = direct_ssh_session("lease-active");
     let status = remote_daemon_status_for_test(true, true, 2, "lease-active", 4242);
@@ -1746,7 +1792,7 @@ fn idle_stale_replacement_uses_actual_endpoint_envelopes_and_reprobes_the_new_ow
             assert_eq!(daemon.build_identity.as_deref(), Some(configured_identity));
             assert_eq!(
                 std::fs::read_to_string(argv_path).expect("read command argv"),
-                "daemon\nstatus\ndaemon\nstop\n--force\n--lease-id\nlease-old\ndaemon\nensure-running\n--addr\n127.0.0.1:0\ndaemon\nstatus\n"
+                "daemon\nstatus\ndaemon\nstop\n--lease-id\nlease-old\ndaemon\nensure-running\n--addr\n127.0.0.1:0\ndaemon\nstatus\n"
             );
         },
     );

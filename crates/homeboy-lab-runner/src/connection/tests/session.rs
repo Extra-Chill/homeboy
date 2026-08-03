@@ -1196,45 +1196,26 @@ fn refresh_disconnect_refuses_remote_lease_drift_after_promotion_started() {
 }
 
 #[test]
-fn refresh_disconnect_accepts_local_tunnel_rotation_and_uses_the_current_tunnel() {
+fn refresh_disconnect_retains_a_rotated_tunnel_without_ssh_authority() {
     test_support::with_isolated_home(|_| {
         crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-        let address = listener.local_addr().expect("address");
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener
-                .accept()
-                .expect("identity request through rotated tunnel");
-            let mut request = [0; 4096];
-            let length = stream.read(&mut request).expect("read identity request");
-            let request = String::from_utf8(request[..length].to_vec()).expect("request text");
-            let nonce = request
-                .split("nonce=")
-                .nth(1)
-                .and_then(|value| value.split_whitespace().next())
-                .expect("identity nonce");
-            let body = format!(
-                r#"{{"protocol":"homeboy.daemon.endpoint-identity.v1","nonce":"{nonce}","daemon":{{"schema":"homeboy.daemon.session_lease.v1","lease_id":"lease-stable","pid":4242}}}}"#
-            );
-            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).expect("identity response");
-        });
         let recorded = direct_ssh_session("lease-stable");
         let mut rotated = recorded.clone();
-        rotated.local_port = Some(address.port());
-        rotated.local_url = Some(format!("http://{address}"));
+        rotated.local_port = Some(49153);
+        rotated.local_url = Some("http://127.0.0.1:49153".to_string());
         rotated.tunnel_pid = None;
         rotated.connected_at = "2026-07-15T23:00:00Z".to_string();
         rotated.homeboy_build_identity = Some("homeboy test+rotated".to_string());
         write_session(&rotated).expect("record rotated tunnel");
 
-        let error = disconnect_with_session("homeboy-lab", Some(&recorded), false)
-            .expect_err("a local fixture cannot authorize the required SSH re-probe");
-        server.join().expect("server");
-        assert!(error.message.contains("unresolved daemon generations"));
-        assert!(error
-            .details
-            .to_string()
-            .contains("runner is not SSH-backed"));
+        let report = disconnect_with_session("homeboy-lab", Some(&recorded), false)
+            .expect("missing SSH authority is reported as a partial disconnect");
+        assert!(report.partial);
+        assert!(!report.disconnected);
+        assert!(report
+            .remote_error
+            .as_deref()
+            .is_some_and(|error| error.contains("requires an SSH authority")));
         assert!(read_session("homeboy-lab").expect("read session").is_some());
     });
 }

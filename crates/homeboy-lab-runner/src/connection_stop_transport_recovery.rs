@@ -121,6 +121,18 @@ pub(crate) fn disconnect_with_session(
         }
     }
     if let Some(session) = &mut session {
+        if session.mode != RunnerTunnelMode::DirectSsh {
+            remove_session(runner_id)?;
+            return Ok(RunnerDisconnectReport {
+                runner_id: runner_id.to_string(),
+                disconnected: true,
+                partial: false,
+                remote_error: None,
+                local_recovery_command: None,
+                session: Some(session.clone()),
+                session_path: session_path(runner_id)?.display().to_string(),
+            });
+        }
         // Retained generations are historical routing evidence, not authority
         // to mutate every port they once used. Resolve one current daemon via
         // SSH and clean up stale local tunnel processes only after its stop.

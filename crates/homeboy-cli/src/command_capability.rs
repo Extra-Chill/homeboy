@@ -91,6 +91,13 @@ pub fn classify(args: &[String]) -> CommandCapability {
         [command, subcommand, ..] if command == "runner" && subcommand == "status" => {
             CommandCapability::ReadOnly
         }
+        [command, subcommand, rest @ ..]
+            if command == "runner"
+                && subcommand == "doctor"
+                && !rest.iter().any(|arg| arg == "--repair") =>
+        {
+            CommandCapability::ReadOnly
+        }
         [command, subcommand, ..]
             if matches!(
                 (command.as_str(), subcommand.as_str()),
@@ -118,6 +125,14 @@ mod tests {
             args(&["homeboy", "self", "identity"]),
             args(&["homeboy", "self", "status"]),
             args(&["homeboy", "status"]),
+            args(&[
+                "homeboy",
+                "runner",
+                "doctor",
+                "lab",
+                "--scope",
+                "lab-offload",
+            ]),
             args(&["homeboy", "agent-task", "retry", "--help"]),
             args(&[
                 "homeboy",

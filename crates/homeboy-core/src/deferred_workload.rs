@@ -98,6 +98,12 @@ pub struct DeferredWorkloadWorkerLock {
     _root: File,
 }
 
+/// Short-lived admission lock for deciding whether a worker process needs to
+/// be spawned. The lifetime worker lock still owns readiness and dispatch.
+pub struct DeferredWorkloadWorkerStartLock {
+    _file: File,
+}
+
 pub fn defer(input: DeferredWorkloadInput) -> Result<DeferredWorkload> {
     if input
         .job_overrides
@@ -330,6 +336,35 @@ pub fn try_acquire_worker_lock() -> Result<Option<DeferredWorkloadWorkerLock>> {
             )),
         )),
     }
+}
+
+pub fn acquire_worker_start_lock() -> Result<DeferredWorkloadWorkerStartLock> {
+    let root = crate::paths::homeboy()?;
+    fs::create_dir_all(&root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create deferred workload root {}", root.display())),
+        )
+    })?;
+    let path = root.join("deferred-workload-worker-start.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("open {}", path.display())))
+        })?;
+    file.lock_exclusive().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "acquire deferred workload start lock {}",
+                path.display()
+            )),
+        )
+    })?;
+    Ok(DeferredWorkloadWorkerStartLock { _file: file })
 }
 
 pub fn worker_status() -> Result<Option<DeferredWorkloadWorkerStatus>> {

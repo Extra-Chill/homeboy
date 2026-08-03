@@ -407,13 +407,51 @@ fn connect_with_orphan_adoption_and_live_lease(
     // A controller can lose its local tunnel after B became admission owner.
     // Rehydrate B from the durable ledger rather than treating the legacy
     // record (which may still name draining A) as the reconnect target.
-    let previous_session =
+    let mut previous_session =
         super::generation_store::admission_session(runner_id, previous_session.as_ref())?
             .or(previous_session);
-    let pending_replacement = super::generation_store::pending_replacement(runner_id)?;
+    let mut pending_replacement = super::generation_store::pending_replacement(runner_id)?;
+    let mut replacement_operation_id = None;
+    if let Some(pending) = pending_replacement.as_ref() {
+        if let Ok(mut observed) = remote_daemon_status(&client, homeboy) {
+            probe_remote_daemon_endpoint(&client, &mut observed);
+            let exact = observed.daemon.as_ref().is_some_and(|daemon| {
+                daemon.lease_id == pending.remote_daemon_lease_id
+                    && daemon.pid == pending.remote_daemon_pid
+                    && pending.remote_daemon_address.as_deref() == Some(daemon.address.as_str())
+            });
+            let exact_dead =
+                exact && observed.stale_reason_code == Some(DaemonStaleReasonCode::PidDead);
+            let authoritatively_superseded = !exact
+                && observed.fresh
+                && observed.endpoint_probe_error.is_none()
+                && observed.daemon.as_ref().is_some_and(|daemon| {
+                    daemon
+                        .lease_id
+                        .as_deref()
+                        .is_some_and(|lease| !lease.is_empty())
+                        && daemon.pid.is_some()
+                        && parse_loopback_daemon_addr(&daemon.address).is_ok()
+                });
+            let exact_unhealthy_idle =
+                exact && observed.endpoint_probe_error.is_some() && observed.active_jobs == 0;
+            if exact_dead || authoritatively_superseded || exact_unhealthy_idle {
+                if exact_unhealthy_idle {
+                    previous_session = Some(pending.clone());
+                }
+                replacement_operation_id = Some(
+                    super::generation_store::retire_pending_replacement(runner_id)?,
+                );
+                pending_replacement = None;
+            }
+        }
+    }
     // This write precedes every remote mutation. A retry reuses the same key
     // even when the SSH command completed but its response was lost.
-    let replacement_operation_id = super::generation_store::replacement_operation(runner_id)?;
+    let replacement_operation_id = match replacement_operation_id {
+        Some(operation_id) => operation_id,
+        None => super::generation_store::replacement_operation(runner_id)?,
+    };
 
     let mut leaseless_recovery = None;
     let mut state_loss_recovery = None;
@@ -743,6 +781,26 @@ fn connect_with_orphan_adoption_and_live_lease(
         attach_state_loss_recovery(&mut report, state_loss_recovery);
         return Ok((report, exit_code));
     };
+
+    // Ordinary ensure-running and exact-owner replacement also cross the
+    // mutation boundary. Persist the returned immutable coordinates before
+    // opening a tunnel so health or endpoint-identity failure can never strand
+    // an unpublished daemon generation.
+    if pending_replacement.is_none()
+        && super::generation_store::replacement_operation_replay(runner_id)?.is_some()
+    {
+        super::generation_store::record_pending_replacement(
+            runner_id,
+            &pending_replacement_session(
+                runner_id,
+                &server_id,
+                &daemon,
+                &version,
+                &configured_build_identity,
+                recovery_evidence.as_ref(),
+            )?,
+        )?;
+    }
 
     let expected_version = daemon.version.clone().unwrap_or(version.clone());
     let expected_identity = daemon
@@ -1493,6 +1551,18 @@ pub fn persisted_status(runner_id: &str) -> Result<RunnerStatusReport> {
         active_job_recovery_evidence: None,
         session_path: session_path.display().to_string(),
     })
+}
+
+/// Bounded, observation-only doctor projection. Unlike `status`, this never
+/// reconciles jobs, generations, sessions, or tunnels, but a disconnected
+/// session still receives remote lease recovery evidence when SSH is available.
+pub fn diagnostic_status(runner_id: &str) -> Result<RunnerStatusReport> {
+    let mut report = persisted_status(runner_id)?;
+    if !report.connected {
+        let runner = load(runner_id)?;
+        report.daemon_freshness = remote_daemon_recovery_freshness(runner_id, &runner);
+    }
+    Ok(report)
 }
 
 /// Recover only this controller's lost direct SSH projection. The remote daemon
