@@ -4,6 +4,51 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.328.0] - 2026-08-03
+
+### Added
+- give findings a structured line number
+- declare package artifact readiness
+- finish intentional no-change outcomes
+
+### Changed
+- Bound daemon startup cleanup
+- hydrate real dependency roots only
+- Declare Cook terminality instead of inferring it from an open status vocabulary
+- Bound controller-local agent-task readers
+- Bound gate-toolchain preflight execution
+- Project authoritative terminal Cook status
+
+### Fixed
+- reclaim leaked tempdirs by owner liveness, not age
+- acknowledge cancellation promptly
+- converge runner recovery with controller
+- bound unchanged heartbeat output
+- repair two semantic merge conflicts breaking main
+- restore compilation after the package-artifact gate field
+- compile package artifact test fixtures
+- see inline test modules and unrestored env mutations
+- stop a gate test from deleting HOME for the whole process
+- make manual identity usable
+- bundle complete partial clone snapshots
+- grant gate-fix candidate reads
+- continue from latest failed attempt
+- match source-policy terms against lexical projections
+- only a complete audit run may close issues on absence
+- keep status observationally read-only
+- classify inherited gate failures
+- make agent-task history bounded
+- bind verification claims to gate evidence
+- stop rendering finding fingerprints as bullet labels
+- accept replacement gate proof
+- resolve substantive candidates in readers
+- preserve derived Lab destination
+- recover unreachable idle daemon leases
+- bound terminal inspection reads
+- preflight effective retry budget
+- retain base-bound patch after provider failure
+- keep the gate temp root short and non-symlink
+
 ## [0.327.8] - 2026-08-03
 
 ### Changed
