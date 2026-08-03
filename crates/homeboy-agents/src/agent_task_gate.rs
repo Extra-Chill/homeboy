@@ -1125,24 +1125,49 @@ impl SelectedGateEnvironment {
     }
 }
 
+/// Resolve the real directory every gate process receives as its temporary
+/// root.
+///
+/// Two independent constraints apply, and canonicalizing satisfies only one of
+/// them:
+///
+/// 1. **Socket budget (#10829).** `InvocationGuard` deliberately exports a
+///    short symlink alias (`<runtime-root>/<short>.t`) and validates it with
+///    `enforce_path_budget`, so gate workloads can bind `AF_UNIX` sockets
+///    under `$TMPDIR`. The managed directory behind that alias is ~125 bytes —
+///    already past the 108-byte Linux `sun_path` capacity before a socket name
+///    is appended. Resolving the alias away discards the very budget the
+///    invocation layer validated.
+/// 2. **Non-symlink root (#11265).** Security-sensitive child tools reject a
+///    symlinked temp root outright, before writing anything into it.
+///
+/// A real `tmp` subdirectory created *through* the alias satisfies both: the
+/// path stays short, the leaf is a genuine directory rather than a symlink,
+/// and the bytes still land in managed runtime-temp storage rather than on the
+/// invocation root's volume (#11125).
+///
+/// Isolated `HOME`/XDG directories hang off this same root, so they inherit
+/// both properties instead of re-deriving them.
+fn gate_temp_root(runtime_tmpdir: &Path) -> Result<PathBuf> {
+    let root = runtime_tmpdir.join("tmp");
+    fs::create_dir_all(&root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "create isolated gate temp directory {}",
+                root.display()
+            )),
+        )
+    })?;
+    Ok(root)
+}
+
 fn selected_gate_environment(
     policy: &AgentTaskGateEnvironmentPolicy,
     runtime_tmpdir: Option<&Path>,
 ) -> Result<SelectedGateEnvironment> {
-    let canonical_runtime_tmpdir = runtime_tmpdir
-        .map(|path| {
-            fs::canonicalize(path).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!(
-                        "canonicalize isolated gate temp directory {}",
-                        path.display()
-                    )),
-                )
-            })
-        })
-        .transpose()?;
-    let runtime_tmpdir = canonical_runtime_tmpdir.as_deref();
+    let gate_tmpdir = runtime_tmpdir.map(gate_temp_root).transpose()?;
+    let runtime_tmpdir = gate_tmpdir.as_deref();
     let mut report = AgentTaskGateEnvironment {
         mode: policy.mode,
         ..AgentTaskGateEnvironment::default()
@@ -1718,12 +1743,7 @@ mod tests {
         )
         .expect("gate report");
 
-        let expected = scratch
-            .path()
-            .canonicalize()
-            .expect("canonical scratch")
-            .display()
-            .to_string();
+        let expected = scratch.path().join("tmp").display().to_string();
         assert_eq!(report.stdout, format!("{expected}:{expected}:{expected}"));
     }
 
@@ -2100,10 +2120,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let runtime_tmpdir = tempfile::tempdir().expect("runtime tmpdir");
         let bin = tempfile::tempdir().expect("bin");
-        let canonical_runtime_tmpdir = runtime_tmpdir
-            .path()
-            .canonicalize()
-            .expect("canonical runtime tmpdir");
+        let gate_tmpdir = runtime_tmpdir.path().join("tmp");
 
         // Fails unless every temp-dir variable points at the invocation temp
         // dir. An unset variable compares as empty and exits non-zero too.
@@ -2112,7 +2129,7 @@ mod tests {
             &tool,
             format!(
                 "#!/bin/sh\n[ \"$TMPDIR\" = '{dir}' ] || exit 3\n[ \"$TEMP\" = '{dir}' ] || exit 4\n[ \"$TMP\" = '{dir}' ] || exit 5\nexit 0\n",
-                dir = canonical_runtime_tmpdir.display()
+                dir = gate_tmpdir.display()
             ),
         )
         .expect("tool");
@@ -2141,12 +2158,7 @@ mod tests {
         )
         .expect("gate environment");
 
-        let expected = runtime_tmpdir
-            .path()
-            .canonicalize()
-            .expect("canonical runtime tmpdir")
-            .display()
-            .to_string();
+        let expected = runtime_tmpdir.path().join("tmp").display().to_string();
         for name in TMPDIR_ENV_VARS {
             assert_eq!(
                 selected.values.get(*name),
@@ -2156,9 +2168,16 @@ mod tests {
         }
     }
 
+    /// A symlinked invocation temp alias must yield sandbox paths that are
+    /// simultaneously **short** and **non-symlink**.
+    ///
+    /// Resolving the alias away (canonicalizing) would satisfy the non-symlink
+    /// half while discarding the `sockaddr_un` budget the invocation layer
+    /// validated on the alias, so this asserts the exported paths stay *under
+    /// the alias* rather than under its canonical target.
     #[cfg(unix)]
     #[test]
-    fn gate_environment_resolves_symlinked_invocation_tmpdir() {
+    fn gate_environment_exports_a_real_directory_beneath_the_invocation_tmp_alias() {
         let runtime_tmpdir = tempfile::tempdir().expect("runtime tmpdir");
         let alias_root = tempfile::tempdir().expect("alias root");
         let alias = alias_root.path().join("runtime-tmp-alias");
@@ -2167,18 +2186,24 @@ mod tests {
         let selected =
             selected_gate_environment(&AgentTaskGateEnvironmentPolicy::default(), Some(&alias))
                 .expect("gate environment");
-        let expected_root = runtime_tmpdir
-            .path()
-            .canonicalize()
-            .expect("canonical temp root");
+        let expected_root = alias.join("tmp");
 
         for name in TMPDIR_ENV_VARS {
             assert_eq!(
                 selected.values.get(*name).map(PathBuf::from),
                 Some(expected_root.clone()),
-                "{name} must resolve past the invocation temp alias"
+                "{name} must stay beneath the short invocation temp alias"
             );
         }
+
+        // The exported root is reached *through* the alias, but is itself a
+        // real directory — the property security-sensitive child tools check.
+        assert!(!fs::symlink_metadata(&expected_root)
+            .expect("gate temp root metadata")
+            .file_type()
+            .is_symlink());
+        assert!(expected_root.is_dir());
+
         for variable in &selected.report.sanitized {
             let path = PathBuf::from(&variable.value);
             assert!(path.starts_with(&expected_root));
