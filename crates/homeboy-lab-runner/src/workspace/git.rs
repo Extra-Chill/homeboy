@@ -234,9 +234,8 @@ pub(super) fn materialize_git_from_controller_bundle(
 }
 
 /// Materialize a controller Git workspace as its exact captured commit, then
-/// apply its filtered working-tree contents. Prefer the runner's configured
-/// remote so partial controller clones never need to hydrate historical
-/// promisor objects. An unpublished commit falls back to a controller bundle.
+/// apply its filtered working-tree contents. The controller completes and
+/// transfers the object closure; a Lab must never contact the source remote.
 pub(super) fn materialize_git_snapshot_from_controller_bundle(
     runner: &Runner,
     local_path: &Path,
@@ -247,83 +246,21 @@ pub(super) fn materialize_git_snapshot_from_controller_bundle(
     let branch = git_output(local_path, &["rev-parse", "--abbrev-ref", "HEAD"])
         .ok()
         .filter(|branch| branch != "HEAD");
-    let remote_url = git_output(local_path, &["config", "--get", "remote.origin.url"]).ok();
-    if let Some(remote_url) = remote_url.as_deref().filter(|url| !url.trim().is_empty()) {
-        match materialize_git(
-            runner,
-            remote_path,
-            remote_url,
-            &head,
-            branch.as_deref(),
-            None,
-            &[],
-            false,
-        ) {
-            Ok(()) => {
-                materialize_snapshot_overlay(runner, local_path, remote_path, excludes)?;
-                return Ok(None);
-            }
-            Err(runner_error) => {
-                return materialize_git_snapshot_from_controller_bundle_fallback(
-                    runner,
-                    local_path,
-                    remote_path,
-                    excludes,
-                    &head,
-                    branch.as_deref(),
-                    remote_url,
-                    Some(runner_error),
-                );
-            }
-        }
-    }
-    materialize_git_snapshot_from_controller_bundle_fallback(
+    let remote_url = git_output(local_path, &["config", "--get", "remote.origin.url"])
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| "homeboy-controller-bundle".to_string());
+    let provenance = materialize_git_from_controller_bundle(
         runner,
         local_path,
         remote_path,
-        excludes,
         &head,
         branch.as_deref(),
-        "homeboy-controller-bundle",
-        None,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn materialize_git_snapshot_from_controller_bundle_fallback(
-    runner: &Runner,
-    local_path: &Path,
-    remote_path: &str,
-    excludes: &[String],
-    head: &str,
-    branch: Option<&str>,
-    remote_url: &str,
-    runner_error: Option<Error>,
-) -> Result<Option<ControllerGitBundleProvenance>> {
-    let result = materialize_git_from_controller_bundle(
-        runner,
-        local_path,
-        remote_path,
-        head,
-        branch,
-        remote_url,
+        &remote_url,
         None,
         &[],
         false,
-    );
-    let provenance = match result {
-        Ok(provenance) => provenance,
-        Err(bundle_error) => {
-            let runner_diagnostic = runner_error.map_or_else(
-                || "runner-side exact-SHA materialization was unavailable because the source has no origin remote".to_string(),
-                |error| error.message,
-            );
-            return Err(Error::internal_unexpected(format!(
-                "could not materialize exact Git commit `{head}`: runner-side checkout failed: {runner_diagnostic}; controller bundle fallback failed: {}",
-                bundle_error.message
-            )));
-        }
-    };
+    )?;
     materialize_snapshot_overlay(runner, local_path, remote_path, excludes)?;
     Ok(Some(provenance))
 }
@@ -336,6 +273,7 @@ fn sha256_file(path: &Path) -> Result<String> {
 /// promisor remote itself. The controller is the only participant allowed to
 /// use the source checkout's authenticated transport.
 fn hydrate_controller_bundle_objects(local_path: &Path, refs: &[String]) -> Result<()> {
+    repair_controller_bundle_commit_closure(local_path, refs)?;
     let mut object_list = Command::new("git")
         // A stale commit graph can name promisor objects that do not exist in
         // the local database. Walk the repaired closure from real objects so
@@ -409,6 +347,20 @@ fn hydrate_controller_bundle_objects(local_path: &Path, refs: &[String]) -> Resu
         );
     }
 
+    if let Some(remote) = promisor_remote(local_path)? {
+        let missing = missing_promisor_objects(local_path, refs)?;
+        if !missing.is_empty() {
+            return Err(controller_object_closure_error(
+                "hydrate git bundle objects completed with required promisor objects still unavailable",
+                None,
+                local_path,
+                &remote,
+                refs,
+                &missing,
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -474,9 +426,14 @@ fn refetch_controller_bundle_commits(
     // `incomplete_refs` was derived from explicit missing-object probe output
     // in a promisor-configured checkout. The transport result itself stays out
     // of provenance: it may contain credentials or remote implementation data.
+    let missing = missing_promisor_objects(local_path, refs).unwrap_or_default();
     Err(controller_object_closure_error(
         "refetch controller git bundle commits failed while required promisor objects remained unavailable",
         output.status.code(),
+        local_path,
+        remote,
+        refs,
+        &missing,
     ))
 }
 
@@ -487,21 +444,50 @@ fn controller_bundle_failure(
     exit_status: Option<i32>,
 ) -> Result<()> {
     match has_reported_missing_promisor_objects(local_path, refs) {
-        Ok(true) => Err(controller_object_closure_error(
-            format!("{action} failed while required promisor objects remained unavailable"),
-            exit_status,
-        )),
+        Ok(true) => {
+            let remote = promisor_remote(local_path)?.unwrap_or_default();
+            let missing = missing_promisor_objects(local_path, refs)?;
+            Err(controller_object_closure_error(
+                format!("{action} failed while required promisor objects remained unavailable"),
+                exit_status,
+                local_path,
+                &remote,
+                refs,
+                &missing,
+            ))
+        }
         // Preserve the operation that actually failed. A probe failure is not
         // evidence that this checkout has a missing promisor-object closure.
         Ok(false) | Err(_) => Err(git_command_failure(action, exit_status)),
     }
 }
 
-fn controller_object_closure_error(message: impl Into<String>, exit_status: Option<i32>) -> Error {
-    let mut error = Error::internal_unexpected(message);
+fn controller_object_closure_error(
+    message: impl Into<String>,
+    exit_status: Option<i32>,
+    local_path: &Path,
+    remote: &str,
+    refs: &[String],
+    missing: &[String],
+) -> Error {
+    let repair_command = format!(
+        "git -C {} fetch --no-tags --filter=blob:none {} {}",
+        shell::quote_arg(&local_path.display().to_string()),
+        shell::quote_arg(remote),
+        refs.iter()
+            .map(|git_ref| shell::quote_arg(git_ref))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    let mut error = Error::internal_unexpected(format!(
+        "{}; repair the controller checkout with `{repair_command}`",
+        message.into()
+    ));
     error.details = serde_json::json!({
         "reason": "controller_git_object_closure_unavailable",
         "git_exit_status": exit_status,
+        "missing_object_ids": missing,
+        "repair_command": repair_command,
     });
     error
 }
@@ -531,10 +517,20 @@ pub(super) fn ref_has_missing_objects(local_path: &Path, git_ref: &str) -> Resul
 /// missing object. A non-zero Git exit is not proof of an incomplete object
 /// closure: it can be caused by invalid refs, permissions, or corruption.
 fn has_reported_missing_promisor_objects(local_path: &Path, refs: &[String]) -> Result<bool> {
+    Ok(!missing_promisor_objects(local_path, refs)?.is_empty())
+}
+
+const MISSING_PROMISOR_OBJECT_DIAGNOSTIC_LIMIT: usize = 8;
+
+/// Return a bounded list of missing promised objects without allowing Git to
+/// hydrate them. The list is diagnostic only; closure hydration remains the
+/// controller's responsibility.
+fn missing_promisor_objects(local_path: &Path, refs: &[String]) -> Result<Vec<String>> {
     if promisor_remote(local_path)?.is_none() {
-        return Ok(false);
+        return Ok(Vec::new());
     }
 
+    let mut missing = Vec::new();
     for git_ref in refs {
         let output = Command::new("git")
             .args([
@@ -563,15 +559,18 @@ fn has_reported_missing_promisor_objects(local_path: &Path, refs: &[String]) -> 
             ));
         }
 
-        if String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .any(|line| line.starts_with('?'))
-        {
-            return Ok(true);
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let Some(object_id) = line.strip_prefix('?') else {
+                continue;
+            };
+            if missing.len() == MISSING_PROMISOR_OBJECT_DIAGNOSTIC_LIMIT {
+                return Ok(missing);
+            }
+            missing.push(object_id.to_string());
         }
     }
 
-    Ok(false)
+    Ok(missing)
 }
 
 fn promisor_remote(local_path: &Path) -> Result<Option<String>> {
