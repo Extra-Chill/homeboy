@@ -894,7 +894,6 @@ mod status_serialization_tests {
     fn admission_summary_fresh_idle_accepts_and_is_safe_to_rotate() {
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
-        report.active_job_count = 2;
         let summary = report.admission_summary(0);
         assert!(summary.connected);
         assert!(summary.daemon_fresh);

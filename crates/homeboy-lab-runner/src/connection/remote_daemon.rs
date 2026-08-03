@@ -618,6 +618,12 @@ pub(super) fn ensure_remote_daemon(
     let mut status = remote_daemon_status(client, homeboy)?;
     probe_remote_daemon_endpoint(client, &mut status);
     if let Some(lease_id) = orphan_lease_id {
+        if let Some(fence) = admission_fence {
+            return Err(format!(
+                "runner `{runner_id}` generation `{}` has {} unresolved active job(s); refusing orphan adoption before terminal job evidence is available",
+                fence.generation, fence.active_job_count,
+            ));
+        }
         if status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
             && status
                 .daemon
