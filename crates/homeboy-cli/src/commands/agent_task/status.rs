@@ -313,12 +313,6 @@ pub(super) fn list_runs(
 ) -> CmdResult<Value> {
     let report = agent_task_service_direct::discover_runs_with_options(filter, options)?;
     let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
-    attach_collection_budget(
-        &mut value,
-        "runs",
-        "homeboy agent-task list --full",
-        "homeboy agent-task list --full --output <path>",
-    );
     attach_agent_task_discovery_actionable(&mut value);
     Ok((value, 0))
 }
@@ -348,12 +342,6 @@ pub(super) fn list_active(
             json!("run the per-run `commands.reconcile` preview, then repeat it with `--apply` after reviewing authoritative provider state"),
         );
     }
-    attach_collection_budget(
-        &mut value,
-        "runs",
-        "homeboy agent-task active --full",
-        "homeboy agent-task active --full --output <path>",
-    );
     attach_agent_task_discovery_actionable(&mut value);
     Ok((value, 0))
 }

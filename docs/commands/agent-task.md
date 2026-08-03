@@ -39,7 +39,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `retry <run-id>` | Submit a fresh durable run from an existing run's plan. |
 | `prompts save\|list\|show\|remove` | Manage markdown prompts in Homeboy-owned storage. |
 
-`agent-task list`, `agent-task active`, and `agent-task latest` accept `--limit <n>` to cap discovery output. `agent-task reconcile <run-id>` is the recovery path emitted by status and activity: it previews only that run by default, refreshes runner/provider state before classification, and requires `--apply` to mutate it. If ownership or provider state changes before apply, it reports a no-op. `agent-task active --reconcile` is an explicit fleet operation: it previews every candidate by default and requires `--apply` to reconcile the displayed set.
+`agent-task list`, `agent-task active`, and `agent-task latest` accept `--limit <n>` to cap discovery output. `list` defaults to 20 newest rows and returns `next_cursor` when another page exists; repeat the same filters with `--cursor <next_cursor>`. `list --full` returns every matching row. Filter list discovery by `--task-url`, `--repo`, `--worktree`, `--submitted-after`, `--state`, `--run-placement`, or `--parent-id`. `agent-task reconcile <run-id>` is the recovery path emitted by status and activity: it previews only that run by default, refreshes runner/provider state before classification, and requires `--apply` to mutate it. If ownership or provider state changes before apply, it reports a no-op. `agent-task active --reconcile` is an explicit fleet operation: it previews every candidate by default and requires `--apply` to reconcile the displayed set.
 
 ### Resource Behavior
 
