@@ -4,7 +4,7 @@
 use crate::agent_task::{AgentTaskRequest, AgentTaskSourceRef};
 use crate::agent_task_lifecycle::{self, AgentTaskRecordHealthSummary, AgentTaskRunRecord};
 use crate::agent_task_scheduler::AgentTaskState;
-use homeboy_core::Result;
+use homeboy_core::{Error, Result};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,12 +18,21 @@ pub enum AgentTaskDiscoveryFilter {
 /// this carries the operator-facing `--limit` cap shared by the `list`/`active`
 /// list surfaces so a large run history stays scannable, matching the
 /// pagination affordance other list commands expose (#5681).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentTaskDiscoveryOptions {
     /// Maximum number of runs to return, applied after filtering/sorting.
     /// `None` returns every matching run. Ignored for the `latest` filter,
     /// which is always a single run.
     pub limit: Option<usize>,
+    /// Zero-based offset into the filtered, newest-first result set.
+    pub cursor: usize,
+    pub repo: Option<String>,
+    pub workspace: Option<String>,
+    pub task_url: Option<String>,
+    pub submitted_after: Option<String>,
+    pub state: Option<String>,
+    pub placement: Option<String>,
+    pub parent_id: Option<String>,
 }
 
 /// Number of minutes a `Running` record may go without an `updated_at`
@@ -49,6 +58,9 @@ pub struct AgentTaskDiscoveryReport {
     /// `true` when `total > count` because the `--limit` cap truncated results.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
+    /// Offset to pass as `--cursor` for the next distinct page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<usize>,
     pub runs: Vec<AgentTaskDiscoveryRun>,
     /// Bounded health evidence for malformed, legacy, conflicting, or
     /// quarantined lifecycle rows omitted from the typed run projection.
@@ -240,29 +252,37 @@ fn discovery_report(
             )
         });
     }
+    let submitted_after = options
+        .submitted_after
+        .as_deref()
+        .map(parse_submitted_after)
+        .transpose()?;
+    records.retain(|record| matches_discovery_options(record, &options, submitted_after.as_ref()));
     if filter == AgentTaskDiscoveryFilter::Latest {
         records.truncate(1);
     }
-
     let total = records.len();
+
+    let now = chrono::Utc::now();
+    let liveness_summary = is_active.then(|| liveness_summary_for_records(&records, now));
 
     // `latest` is always a single run; only `all`/`active` honor a limit cap.
     let effective_limit = match filter {
         AgentTaskDiscoveryFilter::Latest => None,
         _ => options.limit,
     };
-    if let Some(limit) = effective_limit {
-        records.truncate(limit);
-    }
+    let cursor = options.cursor.min(total);
+    let end = effective_limit
+        .map(|limit| cursor.saturating_add(limit).min(total))
+        .unwrap_or(total);
+    let records = records.drain(cursor..end).collect::<Vec<_>>();
 
-    let now = chrono::Utc::now();
     let runs: Vec<_> = records
         .into_iter()
         .map(|record| discovery_run(record, is_active, now))
         .collect();
 
-    let liveness_summary = is_active.then(|| liveness_summary(&runs));
-    let truncated = runs.len() < total;
+    let truncated = end < total;
 
     Ok(AgentTaskDiscoveryReport {
         schema: "homeboy/agent-task-discovery/v1",
@@ -275,6 +295,7 @@ fn discovery_report(
         total,
         limit: effective_limit,
         truncated,
+        next_cursor: truncated.then_some(end),
         runs,
         record_health,
         liveness_summary,
@@ -282,17 +303,103 @@ fn discovery_report(
     })
 }
 
-fn liveness_summary(runs: &[AgentTaskDiscoveryRun]) -> AgentTaskLivenessSummary {
+fn matches_discovery_options(
+    record: &AgentTaskRunRecord,
+    options: &AgentTaskDiscoveryOptions,
+    submitted_after: Option<&chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    if options
+        .state
+        .as_deref()
+        .is_some_and(|state| format!("{:?}", record.state).eq_ignore_ascii_case(state) == false)
+        || submitted_after.is_some_and(|after| {
+            chrono::DateTime::parse_from_rfc3339(&record.submitted_at)
+                .map(|submitted| submitted.with_timezone(&chrono::Utc) <= *after)
+                .unwrap_or(true)
+        })
+        || options.placement.as_deref().is_some_and(|placement| {
+            let source = run_source(record);
+            !matches!(
+                (placement, source.as_str()),
+                ("local", "local") | ("remote", "remote")
+            ) && !(placement == "runner" && source.starts_with("runner:"))
+        })
+    {
+        return false;
+    }
+
+    if options.repo.is_none()
+        && options.workspace.is_none()
+        && options.task_url.is_none()
+        && options.parent_id.is_none()
+    {
+        return true;
+    }
+
+    let plan = agent_task_lifecycle::load_controller_plan(&record.run_id).ok();
+    let first_task = plan.as_ref().and_then(|plan| plan.tasks.first());
+    let repo = plan
+        .as_ref()
+        .and_then(|plan| plan.group_key.as_deref())
+        .or_else(|| first_task.and_then(|task| task.group_key.as_deref()))
+        .or_else(|| first_task.and_then(|task| task.workspace.component_id.as_deref()))
+        .or_else(|| first_task.and_then(|task| task.workspace.slug.as_deref()));
+    let remote_workspace = metadata_string(&record.metadata, "remote_workspace");
+    let workspace = first_task
+        .and_then(|task| task.workspace.root.as_deref())
+        .or(remote_workspace.as_deref());
+    let sourced_task_url = first_task.and_then(task_source_url);
+    let task_url = first_task
+        .and_then(|task| task.workspace.task_url.as_deref())
+        .or(sourced_task_url.as_deref());
+    let parent_matches = first_task
+        .map(|task| task.parent_plan_id.as_deref() == options.parent_id.as_deref())
+        .unwrap_or(false);
+
+    options
+        .repo
+        .as_deref()
+        .is_none_or(|value| repo == Some(value))
+        && options
+            .workspace
+            .as_deref()
+            .is_none_or(|value| workspace == Some(value))
+        && options
+            .task_url
+            .as_deref()
+            .is_none_or(|value| task_url == Some(value))
+        && options.parent_id.as_deref().is_none_or(|_| parent_matches)
+}
+
+fn parse_submitted_after(value: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
+        .map_err(|_| {
+            Error::validation_invalid_argument(
+                "submitted-after",
+                "must be a valid RFC3339 timestamp",
+                Some(value.to_string()),
+                Some(vec![
+                    "Example: --submitted-after 2026-08-03T10:00:00Z".to_string()
+                ]),
+            )
+        })
+}
+
+fn liveness_summary_for_records(
+    records: &[AgentTaskRunRecord],
+    now: chrono::DateTime<chrono::Utc>,
+) -> AgentTaskLivenessSummary {
     let mut summary = AgentTaskLivenessSummary {
         reconcile_command: "homeboy agent-task active --reconcile --dry-run",
         ..Default::default()
     };
-    for run in runs {
-        match run.liveness {
-            Some(AgentTaskLiveness::Active) | None => summary.active += 1,
-            Some(AgentTaskLiveness::Stale) => summary.stale += 1,
-            Some(AgentTaskLiveness::Suspect) => summary.suspect += 1,
-            Some(AgentTaskLiveness::Unreconciled) => summary.unreconciled += 1,
+    for record in records {
+        match classify_liveness(record, age_minutes(record.updated_at.as_deref(), now), now) {
+            AgentTaskLiveness::Active => summary.active += 1,
+            AgentTaskLiveness::Stale => summary.stale += 1,
+            AgentTaskLiveness::Suspect => summary.suspect += 1,
+            AgentTaskLiveness::Unreconciled => summary.unreconciled += 1,
         }
     }
     summary
@@ -310,8 +417,18 @@ fn classify_liveness(
         if agent_task_lifecycle::has_expired_pending_runner_submission_intent(record, now) {
             return AgentTaskLiveness::Unreconciled;
         }
-        // Queued runs are genuinely pending work unless their controller-owned
-        // Lab handoff exceeded its durable acceptance deadline.
+        // A queued record with no queued/running task and an expired heartbeat
+        // cannot be claimed by a worker. Keep it visible for reconciliation,
+        // but never project this historical ghost as active work.
+        let has_pending_task = record
+            .tasks
+            .iter()
+            .any(|task| matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running));
+        if !has_pending_task
+            && last_update_age_minutes.is_some_and(|age| age >= STALE_UPDATE_THRESHOLD_MINUTES)
+        {
+            return AgentTaskLiveness::Stale;
+        }
         return AgentTaskLiveness::Active;
     }
 

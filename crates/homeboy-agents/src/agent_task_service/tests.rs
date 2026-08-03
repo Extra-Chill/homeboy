@@ -876,6 +876,7 @@ fn discovery_active_classifies_liveness_and_source() {
             record.metadata = serde_json::json!({
                 "runner_id": "homeboy-lab",
                 "runner_job_id": "job-xyz",
+                "stale_running": true,
             });
         })
         .expect("stale runner-backed record stored");
@@ -1117,7 +1118,10 @@ fn discovery_limit_caps_list_and_reports_total() {
 
         let report = discover_runs_with_options(
             AgentTaskDiscoveryFilter::All,
-            AgentTaskDiscoveryOptions { limit: Some(2) },
+            AgentTaskDiscoveryOptions {
+                limit: Some(2),
+                ..Default::default()
+            },
         )
         .expect("listed with limit");
 
@@ -1126,6 +1130,122 @@ fn discovery_limit_caps_list_and_reports_total() {
         assert_eq!(report.limit, Some(2));
         assert!(report.truncated);
         assert_eq!(report.runs.len(), 2);
+    });
+}
+
+#[test]
+fn discovery_998_record_history_pages_without_repeating_or_losing_records() {
+    with_isolated_home(|_| {
+        for index in 0..998 {
+            agent_task_lifecycle::submit_plan(
+                &discovery_plan(),
+                Some(&format!("run-page-{index:04}")),
+            )
+            .expect("submitted");
+        }
+
+        let first = discover_runs_with_options(
+            AgentTaskDiscoveryFilter::All,
+            AgentTaskDiscoveryOptions {
+                limit: Some(20),
+                state: Some("queued".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("first page");
+        let second = discover_runs_with_options(
+            AgentTaskDiscoveryFilter::All,
+            AgentTaskDiscoveryOptions {
+                limit: Some(20),
+                cursor: first.next_cursor.expect("continuation"),
+                state: Some("queued".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("second page");
+        let exhaustive = discover_runs_with_options(
+            AgentTaskDiscoveryFilter::All,
+            AgentTaskDiscoveryOptions {
+                state: Some("queued".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("full history");
+
+        assert_eq!(first.total, 998);
+        assert_eq!(first.count, 20);
+        assert_eq!(first.next_cursor, Some(20));
+        assert!(first.truncated);
+        assert_eq!(second.total, 998);
+        assert_eq!(second.count, 20);
+        assert_ne!(first.runs[0].run_id, second.runs[0].run_id);
+        assert_eq!(exhaustive.count, 998);
+        assert!(!exhaustive.truncated);
+        assert_eq!(exhaustive.next_cursor, None);
+    });
+}
+
+#[test]
+fn discovery_filters_by_cook_identity_and_omits_stale_queued_ghosts_from_active() {
+    with_isolated_home(|_| {
+        let mut matching = discovery_plan();
+        matching.group_key = Some("matching-repo".to_string());
+        matching.tasks[0].workspace.root = Some("/work/matching".to_string());
+        matching.tasks[0].workspace.task_url =
+            Some("https://example.test/issues/11086".to_string());
+        matching.tasks[0].parent_plan_id = Some("batch-11086".to_string());
+        agent_task_lifecycle::submit_plan(&matching, Some("run-matching")).expect("matching run");
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-other")).expect("other run");
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-queued-ghost"))
+            .expect("ghost run");
+        agent_task_lifecycle::rewrite_record_for_test("run-queued-ghost", |record| {
+            record.tasks[0].state = AgentTaskState::Succeeded;
+            record.updated_at = Some("2000-01-01T00:00:00+00:00".to_string());
+        })
+        .expect("age ghost");
+
+        let filtered = discover_runs_with_options(
+            AgentTaskDiscoveryFilter::All,
+            AgentTaskDiscoveryOptions {
+                repo: Some("matching-repo".to_string()),
+                workspace: Some("/work/matching".to_string()),
+                task_url: Some("https://example.test/issues/11086".to_string()),
+                parent_id: Some("batch-11086".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("filtered discovery");
+        let active = discover_runs(AgentTaskDiscoveryFilter::Active).expect("active discovery");
+
+        assert_eq!(filtered.runs.len(), 1);
+        assert_eq!(filtered.runs[0].run_id, "run-matching");
+        let ghost = active
+            .runs
+            .iter()
+            .find(|run| run.run_id == "run-queued-ghost")
+            .expect("stale ghost remains reconcilable");
+        assert_eq!(ghost.liveness, Some(AgentTaskLiveness::Stale));
+        assert_eq!(active.liveness_summary.expect("summary").stale, 1);
+    });
+}
+
+#[test]
+fn discovery_rejects_invalid_submitted_after_timestamps() {
+    with_isolated_home(|_| {
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-invalid-timestamp-filter"))
+            .expect("submitted");
+
+        let error = discover_runs_with_options(
+            AgentTaskDiscoveryFilter::All,
+            AgentTaskDiscoveryOptions {
+                submitted_after: Some("yesterday".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect_err("invalid timestamp is rejected");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("RFC3339"));
     });
 }
 
@@ -1139,7 +1259,10 @@ fn discovery_latest_ignores_limit() {
 
         let report = discover_runs_with_options(
             AgentTaskDiscoveryFilter::Latest,
-            AgentTaskDiscoveryOptions { limit: Some(5) },
+            AgentTaskDiscoveryOptions {
+                limit: Some(5),
+                ..Default::default()
+            },
         )
         .expect("latest listed");
 

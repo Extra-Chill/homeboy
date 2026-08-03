@@ -143,6 +143,25 @@ pub struct CookContinueArgs {
 pub struct ListArgs {
     #[arg(long = "limit", value_name = "N", conflicts_with = "full")]
     pub limit: Option<usize>,
+    /// Continue at this zero-based offset. Reuse every filter from the prior page.
+    #[arg(long, value_name = "N", conflicts_with = "full")]
+    pub cursor: Option<usize>,
+    #[arg(long)]
+    pub repo: Option<String>,
+    #[arg(long)]
+    pub worktree: Option<String>,
+    #[arg(long = "task-url")]
+    pub task_url: Option<String>,
+    /// RFC3339 submission timestamp; excludes older records.
+    #[arg(long = "submitted-after", value_name = "RFC3339")]
+    pub submitted_after: Option<String>,
+    #[arg(long, value_parser = ["queued", "running", "succeeded", "failed", "cancelled"])]
+    pub state: Option<String>,
+    /// Filter by recorded execution placement, not the global routing policy.
+    #[arg(long = "run-placement", value_parser = ["local", "remote", "runner"])]
+    pub run_placement: Option<String>,
+    #[arg(long = "parent-id")]
+    pub parent_id: Option<String>,
     /// Return every matching record. This is intentionally explicit because
     /// discovery defaults to a finite agent-facing page.
     #[arg(long)]
@@ -185,6 +204,14 @@ impl From<ListArgs> for AgentTaskDiscoveryOptions {
     fn from(args: ListArgs) -> Self {
         Self {
             limit: (!args.full).then(|| args.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT)),
+            cursor: args.cursor.unwrap_or_default(),
+            repo: args.repo,
+            workspace: args.worktree,
+            task_url: args.task_url,
+            submitted_after: args.submitted_after,
+            state: args.state,
+            placement: args.run_placement,
+            parent_id: args.parent_id,
         }
     }
 }
@@ -192,6 +219,7 @@ impl From<ActiveArgs> for AgentTaskDiscoveryOptions {
     fn from(args: ActiveArgs) -> Self {
         Self {
             limit: (!args.full).then(|| args.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT)),
+            ..Default::default()
         }
     }
 }
@@ -199,6 +227,7 @@ impl From<LatestArgs> for AgentTaskDiscoveryOptions {
     fn from(args: LatestArgs) -> Self {
         Self {
             limit: Some(args.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT)),
+            ..Default::default()
         }
     }
 }
