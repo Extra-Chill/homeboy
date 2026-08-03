@@ -158,6 +158,125 @@ exit 1
 }
 
 #[test]
+fn changed_scope_baseline_verdict_matches_an_identical_merge_tree() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let source = tempfile::tempdir().expect("source dir");
+        let run_git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(source.path())
+                .output()
+                .expect("git command");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run_git(&["init", "-q"]);
+        run_git(&["config", "user.email", "homeboy@example.com"]);
+        run_git(&["config", "user.name", "Homeboy Test"]);
+        std::fs::write(source.path().join("legacy.php"), "<?php // base\n").expect("base source");
+        std::fs::write(source.path().join("untouched.php"), "<?php // debt\n")
+            .expect("untouched debt source");
+        run_git(&["add", "."]);
+        run_git(&["commit", "-q", "-m", "base"]);
+        run_git(&["branch", "baseline"]);
+        std::fs::write(source.path().join("legacy.php"), "<?php // candidate\n")
+            .expect("candidate source");
+        run_git(&["add", "."]);
+        run_git(&["commit", "-q", "-m", "candidate"]);
+        run_git(&["branch", "merge-candidate"]);
+
+        let component = routed_lint_component(
+            home.path(),
+            source.path(),
+            r#"#!/bin/sh
+if [ -n "$HOMEBOY_LINT_GLOB" ]; then
+  printf '[]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+  exit 0
+else
+  printf '[{"tool":"phpcs","message":"known","fingerprint":"known","file":"untouched.php"},{"tool":"phpstan","message":"relocated","fingerprint":"relocated","file":"legacy.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+  exit 1
+fi
+"#,
+        );
+        let known = homeboy_core::finding::HomeboyFinding::builder("phpcs", "known")
+            .fingerprint("known")
+            .build();
+        crate::lint::baseline::save_baseline(source.path(), "fixture", &[known])
+            .expect("save baseline");
+
+        let mut pr_args = lint_args();
+        pr_args.changed_since = Some("baseline".to_string());
+        pr_args.precomputed_changed_files = Some(vec!["legacy.php".to_string()]);
+        let pr_result = run_main_lint_workflow(
+            &component,
+            source.path(),
+            pr_args,
+            &RunDir::create().expect("PR run dir"),
+        )
+        .expect("PR workflow result");
+
+        let merge_tree = std::process::Command::new("git")
+            .args(["rev-parse", "merge-candidate^{tree}"])
+            .current_dir(source.path())
+            .output()
+            .expect("merge tree");
+        let head_tree = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD^{tree}"])
+            .current_dir(source.path())
+            .output()
+            .expect("head tree");
+        assert_eq!(
+            head_tree.stdout, merge_tree.stdout,
+            "trees must be identical"
+        );
+
+        let merge_result = run_main_lint_workflow(
+            &component,
+            source.path(),
+            lint_args(),
+            &RunDir::create().expect("merge run dir"),
+        )
+        .expect("merge workflow result");
+
+        assert_eq!(pr_result.status, "failed");
+        assert_eq!(merge_result.status, "failed");
+        assert_eq!(
+            pr_result
+                .baseline_comparison
+                .as_ref()
+                .expect("PR baseline comparison")
+                .new_items
+                .iter()
+                .map(|item| item.fingerprint.as_str())
+                .collect::<Vec<_>>(),
+            merge_result
+                .baseline_comparison
+                .as_ref()
+                .expect("merge baseline comparison")
+                .new_items
+                .iter()
+                .map(|item| item.fingerprint.as_str())
+                .collect::<Vec<_>>(),
+            "the PR gate must predict the full-scope verdict for the same tree"
+        );
+        assert_eq!(
+            pr_result
+                .baseline_comparison
+                .as_ref()
+                .expect("PR baseline comparison")
+                .new_items
+                .len(),
+            1,
+            "the untouched baseline finding remains accepted"
+        );
+    });
+}
+
+#[test]
 fn runner_failure_without_findings_is_an_infrastructure_error_without_autofix() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let source = tempfile::tempdir().expect("source dir");
