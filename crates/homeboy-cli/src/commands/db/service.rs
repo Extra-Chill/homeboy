@@ -13,4 +13,4 @@ mod ssh_forward;
 pub use operations::{
     delete_row, describe_table, drop_table, list_tables, query, search, DbResult,
 };
-pub use ssh_forward::{create_tunnel, DbTunnelInfo, DbTunnelResult};
+pub use ssh_forward::{create_tunnel, DbTunnelResult};

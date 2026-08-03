@@ -81,7 +81,6 @@ pub mod context;
 pub mod controller_pin_reference;
 pub mod controller_runtime;
 pub mod daemon;
-pub mod db;
 pub mod deferred_workload;
 pub mod deps;
 pub mod engine;

@@ -6,9 +6,9 @@
 use serde::Serialize;
 use std::process::{Command, Stdio};
 
-use crate::context::resolve_project_ssh;
-use crate::project;
-use crate::{Error, Result};
+use homeboy::core::context::resolve_project_ssh;
+use homeboy::core::project;
+use homeboy::core::{Error, Result};
 
 const DEFAULT_DATABASE_HOST: &str = "127.0.0.1";
 const DEFAULT_LOCAL_DB_PORT: u16 = 33306;
