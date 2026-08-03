@@ -144,6 +144,13 @@ fn cook_progress_is_durable_across_active_and_terminal_lifecycle_states() {
             .expect("retain terminal progress");
         assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
         assert_eq!(terminal.metadata["cook_progress"]["phase"], "terminal");
+        let terminal =
+            record_cook_terminal_result(run_id, false, 1).expect("record terminal Cook result");
+        assert_eq!(
+            terminal.metadata["cook_progress"]["terminal_success"],
+            false
+        );
+        assert_eq!(terminal.metadata["cook_progress"]["exit_code"], 1);
     });
 }
 

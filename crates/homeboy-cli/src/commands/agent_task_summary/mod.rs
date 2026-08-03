@@ -108,12 +108,14 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     let tasks_planned = array_len(payload, &["tasks"]).unwrap_or(0);
     let tasks_attempted = status_attempted_task_count(payload);
     let metrics = code_production_metrics(payload);
-    let state = effective_run_state(
-        raw_state,
-        tasks_attempted,
-        metrics.candidate_state,
-        metrics.candidate_scan_degraded,
-    );
+    let state = string_value(payload, &["cook", "state"]).unwrap_or_else(|| {
+        effective_run_state(
+            raw_state,
+            tasks_attempted,
+            metrics.candidate_state,
+            metrics.candidate_scan_degraded,
+        )
+    });
     let artifact_count = array_len(payload, &["artifact_refs"]).unwrap_or(0);
     let aggregate_path = string_value(payload, &["aggregate_path"]);
 
@@ -129,7 +131,13 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Diagnostic: {diagnostic}"));
     }
     lines.push(format!("Artifacts: {artifact_count}"));
-    if metrics.candidate_state.is_available() {
+    if let Some(cook_status) = string_value(payload, &["cook", "state"]) {
+        let publication = string_value(payload, &["cook", "publication"])
+            .map(|publication| format!("publication {publication}"))
+            .unwrap_or_else(|| "publication outcome unknown".to_string());
+        lines.push(format!("Cook: {cook_status} ({publication})"));
+        lines.push(format!("Next: homeboy agent-task diagnose {run_id} --full"));
+    } else if metrics.candidate_state.is_available() {
         if let Some(path) = aggregate_path {
             lines.push(format!("Aggregate: {path}"));
         }

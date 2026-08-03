@@ -1139,6 +1139,34 @@ pub fn record_cook_progress(
     record.ok_or_else(|| Error::internal_unexpected("Cook progress record was unchanged"))
 }
 
+/// Bind the Cook's authoritative command result to its terminal progress
+/// record. Provider and gate state alone cannot establish whether publication
+/// completed, so readers use this positive completion fact rather than a list
+/// of success-status strings.
+pub fn record_cook_terminal_result(
+    run_id: &str,
+    terminal_success: bool,
+    exit_code: i32,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        let Some(progress) = record
+            .ensure_metadata_object()
+            .get_mut("cook_progress")
+            .and_then(Value::as_object_mut)
+        else {
+            return false;
+        };
+        if progress.get("phase").and_then(Value::as_str) != Some("terminal") {
+            return false;
+        }
+        progress.insert("terminal_success".to_string(), json!(terminal_success));
+        progress.insert("exit_code".to_string(), json!(exit_code));
+        true
+    })?;
+    record.ok_or_else(|| Error::internal_unexpected("Cook terminal result was unchanged"))
+}
+
 /// Record the provider's terminal result before controller-owned patch
 /// harvesting. Harvesting can fail or be interrupted independently of the
 /// provider execution, so it must not leave this reservation running.
