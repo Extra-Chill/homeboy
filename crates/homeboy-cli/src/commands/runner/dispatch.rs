@@ -936,6 +936,77 @@ fn map_env(result: CmdResult<RunnerEnvOutput>) -> CmdResult<RunnerCommandOutput>
     result.map(|(output, exit_code)| (RunnerCommandOutput::Env(output), exit_code))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refresh_failure_maps_parent_run_job_evidence_and_recovery_actions() {
+        let output = runner::HomeboyBinaryRefreshOutput {
+            variant: "refresh_homeboy",
+            command: "runner.refresh_homeboy",
+            runner_id: "lab".to_string(),
+            dry_run: false,
+            plan: runner::HomeboyBinaryRefreshPlan {
+                runner_id: "lab".to_string(),
+                mode: "materialize".to_string(),
+                source: None,
+                git_ref: None,
+                target_dir: None,
+                binary_path: "/runner/homeboy".to_string(),
+                script: String::new(),
+                reconnect: false,
+                followup_commands: Vec::new(),
+            },
+            identity: None,
+            updated_fields: Vec::new(),
+            phase_summary: Vec::new(),
+            daemon_refreshed: false,
+            interrupted_job_ids: Vec::new(),
+            selected_binary_path: "/runner/homeboy".to_string(),
+            reconnect_required: true,
+            followup_commands: Vec::new(),
+            reconnect_deferred: None,
+            failure: Some(runner::HomeboyBinaryRefreshFailure {
+                exit_code: 2,
+                failed_command: vec!["git".to_string()],
+                source: None,
+                git_ref: None,
+                source_sha: None,
+                build_path: "/runner/homeboy".to_string(),
+                stdout: String::new(),
+                stderr: "fatal ancestry failure".to_string(),
+                capture: None,
+                execution_record: None,
+                job_id: Some("job-1".to_string()),
+                mirror_run_id: Some("run-1".to_string()),
+                recovery_actions: vec![
+                    homeboy::core::runner_execution_envelope::RunnerExecutionNextAction {
+                        label: "retry".to_string(),
+                        command: vec!["homeboy".to_string(), "retry".to_string()],
+                    },
+                ],
+                verification: None,
+            }),
+            bootstrap_provenance: None,
+            rollback: None,
+        };
+        let (mapped, exit_code) = map_refresh_homeboy(Ok((output, 2))).expect("mapped output");
+        assert_eq!(exit_code, 2);
+        let value = serde_json::to_value(mapped).expect("JSON envelope");
+        assert_eq!(value["_homeboy_actionable"]["run"]["id"], "run-1");
+        assert_eq!(
+            value["_homeboy_actionable"]["refs"]["jobs"][0]["id"],
+            "job-1"
+        );
+        assert!(value["_homeboy_actionable"]["next_actions"]
+            .as_array()
+            .expect("next actions")
+            .iter()
+            .any(|action| action["command"] == "homeboy retry"));
+    }
+}
+
 fn map_job(result: CmdResult<RunnerJobCommandOutput>) -> CmdResult<RunnerCommandOutput> {
     result.map(|(output, exit_code)| match output {
         RunnerJobCommandOutput::Daemon(output) => (RunnerCommandOutput::Job(output), exit_code),

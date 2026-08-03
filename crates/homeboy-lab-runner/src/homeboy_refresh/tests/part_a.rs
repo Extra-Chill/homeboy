@@ -1567,7 +1567,7 @@ fn refresh_phase_summary_distinguishes_tolerated_probe_from_required_failure() {
 }
 
 #[test]
-fn refresh_ancestry_exit_status_requires_authoritative_git_result() {
+fn fatal_ancestry_executor_output_retains_parent_actionable_refs() {
     let plan = HomeboyBinaryRefreshPlan {
         runner_id: "lab".to_string(),
         mode: "materialize".to_string(),
@@ -1580,11 +1580,31 @@ fn refresh_ancestry_exit_status_requires_authoritative_git_result() {
         followup_commands: Vec::new(),
     };
 
-    assert!(classify_refresh_ancestry_exit(&plan, 0).unwrap());
-    assert!(!classify_refresh_ancestry_exit(&plan, 1).unwrap());
-    let error = classify_refresh_ancestry_exit(&plan, 128)
-        .expect_err("git comparison errors are not ancestry evidence");
-    assert_eq!(error.details["field"], "allow_downgrade");
+    let probe =
+        runner_commits_are_ancestral_with(&plan, "candidate", "authority", false, |_, _| {
+            Ok((ancestry_exec_output(128), 128))
+        })
+        .expect("executor output is retained for classification");
+    assert_eq!(probe.exit_code, 128);
+    assert!(!probe.is_ancestor);
+    let failure = refresh_failure(&plan, probe.execution, probe.exit_code);
+    assert_eq!(failure.job_id.as_deref(), Some("ancestry-job"));
+    assert_eq!(failure.mirror_run_id.as_deref(), Some("ancestry-run"));
+}
+
+#[test]
+fn terminal_refresh_errors_include_the_completed_and_failed_phases() {
+    for phase in ["generation_rotation", "disconnect", "reconnect_transport"] {
+        let error = refresh_error_with_phase_summary(
+            Error::internal_unexpected("terminal refresh failure"),
+            &[
+                refresh_phase("materialize", true, 0),
+                refresh_phase(phase, true, 1),
+            ],
+        );
+        assert_eq!(error.details["phase_summary"][1]["name"], phase);
+        assert_eq!(error.details["phase_summary"][1]["status"], "failed");
+    }
 }
 
 #[test]

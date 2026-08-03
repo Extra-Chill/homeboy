@@ -595,8 +595,19 @@ pub fn refresh_homeboy_binary(
         Ok(bootstrap) => bootstrap,
         Err(error) => {
             let verification = error.message;
-            phase_summary.push(refresh_phase("identity_verification", true, 1));
-            let failure = ancestry_failure.into_inner().unwrap_or_else(|| {
+            let ancestry_failure = ancestry_failure.into_inner();
+            let phase_name = if ancestry_failure.is_some() {
+                "downgrade_safety_probe"
+            } else if error.details.get("field").and_then(Value::as_str) == Some("identity") {
+                "identity_verification"
+            } else if error.details.get("field").and_then(Value::as_str) == Some("allow_downgrade")
+            {
+                "downgrade_validation"
+            } else {
+                "configuration_promotion"
+            };
+            phase_summary.push(refresh_phase(phase_name, true, 1));
+            let failure = ancestry_failure.unwrap_or_else(|| {
                 refresh_verification_failure(&plan, exec_output.clone(), verification.clone())
             });
             return Ok((
@@ -675,7 +686,9 @@ pub fn refresh_homeboy_binary(
                     &plan.binary_path,
                     previous_homeboy_path.as_deref(),
                 )?;
-                return Err(error);
+                let mut phases = phase_summary.clone();
+                phases.push(refresh_phase("generation_rotation", true, 1));
+                return Err(refresh_error_with_phase_summary(error, &phases));
             }
             phase_summary.push(refresh_phase("generation_rotation", true, 0));
             return Ok((
@@ -750,12 +763,15 @@ pub fn refresh_homeboy_binary(
                 .map(|_| ())
             })
             .map_err(|error| {
-                durable_refresh_partial_error_if_needed(
+                let error = durable_refresh_partial_error_if_needed(
                     error,
                     &plan.runner_id,
                     previous_homeboy_path.as_deref(),
                     options.force,
-                )
+                );
+                let mut phases = phase_summary.clone();
+                phases.push(refresh_phase("disconnect", true, 1));
+                refresh_error_with_phase_summary(error, &phases)
             });
         }
         phase_summary.push(refresh_phase("disconnect", true, 0));
@@ -804,12 +820,15 @@ pub fn refresh_homeboy_binary(
                     },
                 )
                 .map_err(|error| {
-                    durable_refresh_partial_error_if_needed(
+                    let error = durable_refresh_partial_error_if_needed(
                         error,
                         &plan.runner_id,
                         previous_homeboy_path.as_deref(),
                         options.force,
-                    )
+                    );
+                    let mut phases = phase_summary.clone();
+                    phases.push(refresh_phase("reconnect_transport", true, 1));
+                    refresh_error_with_phase_summary(error, &phases)
                 });
             }
         };
@@ -1478,6 +1497,16 @@ fn ancestry_comparison_error(plan: &HomeboyBinaryRefreshPlan) -> Error {
     )
 }
 
+fn refresh_error_with_phase_summary(
+    mut error: Error,
+    phase_summary: &[HomeboyRefreshPhase],
+) -> Error {
+    error.details["phase_summary"] = serde_json::to_value(phase_summary).unwrap_or_else(
+        |_| serde_json::json!([{ "name": "refresh", "status": "failed", "required": true }]),
+    );
+    error
+}
+
 fn runner_commits_are_ancestral(
     plan: &HomeboyBinaryRefreshPlan,
     older: &str,
@@ -1552,19 +1581,6 @@ fn refresh_ancestry_execution_options(
             ..Default::default()
         })
         .without_handoff()
-}
-
-fn classify_refresh_ancestry_exit(plan: &HomeboyBinaryRefreshPlan, exit_code: i32) -> Result<bool> {
-    match exit_code {
-        0 => Ok(true),
-        1 => Ok(false),
-        _ => Err(Error::validation_invalid_argument(
-            "allow_downgrade",
-            "authoritative source repository cannot compare selected Homeboy commits",
-            Some(plan.runner_id.clone()),
-            None,
-        )),
-    }
 }
 
 pub fn plan_runner_dev_sync(options: &RunnerDevSyncOptions) -> Result<RunnerDevSyncPlan> {
