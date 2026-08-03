@@ -23,8 +23,8 @@
 
 use serde::Serialize;
 
-use crate::error::Result;
-use crate::git;
+use homeboy::core::error::Result;
+use homeboy::core::git;
 
 /// Commands that accept a `--changed-since` scope. Everything else always runs
 /// at full scope. Typed here instead of a shell `case` statement so the

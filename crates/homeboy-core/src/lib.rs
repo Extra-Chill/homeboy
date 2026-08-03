@@ -64,10 +64,7 @@ pub mod browser_evidence;
 pub mod build_identity;
 pub mod capacity;
 pub mod change_artifact;
-pub mod ci_gate;
-pub mod ci_plan;
 pub mod ci_profile;
-pub mod ci_scope;
 pub mod cleanup;
 // code_audit lives in its own crate (homeboy-code-audit). Re-exported as
 // `crate::code_audit` so the in-crate consumers and the provider impls (which
