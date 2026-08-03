@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.327.8] - 2026-08-03
+
+### Changed
+- relocate nine single-consumer modules out of homeboy-core (123 -> 114 top-level modules)
+- extract homeboy-deploy (and the homeboy-version crate it required)
+
+### Fixed
+- restore direct HOME resolution for the runtime root
+- attach successful retries to durable lineage
+- restore Rust test parallelism now the home-root race is fixed
+
 ## [0.327.7] - 2026-08-03
 
 ### Fixed
