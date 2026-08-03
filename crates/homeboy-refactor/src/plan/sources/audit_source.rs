@@ -45,6 +45,7 @@ mod tests {
                     description: "fixture finding".to_string(),
                     suggestion: "fix it".to_string(),
                     kind,
+                    line: None,
                 })
                 .collect(),
             duplicate_groups: Vec::new(),

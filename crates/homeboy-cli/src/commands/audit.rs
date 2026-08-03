@@ -587,6 +587,7 @@ mod tests {
             description: "Missing run function".to_string(),
             suggestion: "Add run()".to_string(),
             kind: code_audit::AuditFinding::MissingMethod,
+            line: None,
         };
         code_audit::AuditRunWorkflowResult {
             output: AuditCommandOutput::Full {

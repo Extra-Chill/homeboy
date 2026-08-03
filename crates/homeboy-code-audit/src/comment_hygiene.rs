@@ -90,6 +90,7 @@ fn make_finding(
         description,
         suggestion,
         kind,
+        line: None,
     }
 }
 

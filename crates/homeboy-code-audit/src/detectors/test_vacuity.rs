@@ -101,6 +101,7 @@ pub(crate) fn find_vacuous_test_methods(
                 method
             ),
             kind: AuditFinding::VacuousTest,
+            line: None,
         });
     }
 }

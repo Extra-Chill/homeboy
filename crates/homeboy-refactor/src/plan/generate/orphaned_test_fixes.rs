@@ -809,6 +809,7 @@ mod tests {
             description: "Test method 'test_process_data' references 'process_data' which no longer exists in the source".to_string(),
             suggestion: "Remove orphaned test".to_string(),
             kind: AuditFinding::OrphanedTest,
+                    line: None,
         }
     }
 
@@ -912,6 +913,7 @@ mod tests {
                     .to_string(),
             suggestion: "Remove".to_string(),
             kind: AuditFinding::OrphanedTest,
+            line: None,
         });
 
         let mut fixes: Vec<Fix> = Vec::new();

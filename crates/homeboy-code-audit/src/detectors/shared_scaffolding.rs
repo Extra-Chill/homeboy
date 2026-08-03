@@ -150,6 +150,7 @@ fn detect_shared_scaffolding(fingerprints: &[&FileFingerprint]) -> Vec<Finding> 
             description,
             suggestion,
             kind: AuditFinding::SharedScaffolding,
+            line: None,
         });
     }
 

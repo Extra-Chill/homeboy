@@ -634,6 +634,7 @@ where
         }),
         suggestion: render_template(suggestion, Some(captures), extra),
         kind: AuditFinding::from_str(&rule.kind).unwrap_or(AuditFinding::LegacyComment),
+        line: None,
     }
 }
 
@@ -657,6 +658,7 @@ fn finding_from_derived_literal_site(
         description: render_template_from_values(description, &site.captures, extra),
         suggestion: render_template_from_values(suggestion, &site.captures, extra),
         kind: AuditFinding::from_str(&rule.kind).unwrap_or(AuditFinding::LegacyComment),
+        line: None,
     }
 }
 
@@ -679,6 +681,7 @@ fn finding_from_derived_absence_site(
         description: render_template_from_values(description, &site.captures, extra),
         suggestion: render_template_from_values(suggestion, &site.captures, extra),
         kind: AuditFinding::from_str(&rule.kind).unwrap_or(AuditFinding::LegacyComment),
+        line: None,
     }
 }
 

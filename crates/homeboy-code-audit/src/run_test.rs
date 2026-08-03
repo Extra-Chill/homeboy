@@ -23,6 +23,7 @@ fn make_finding(kind: AuditFinding, file: &str) -> Finding {
         description: format!("{:?} on {}", kind, file),
         suggestion: "fix it".to_string(),
         kind,
+        line: None,
     }
 }
 

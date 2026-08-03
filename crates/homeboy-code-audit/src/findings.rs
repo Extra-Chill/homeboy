@@ -42,6 +42,7 @@ pub fn build_findings(results: &[CheckResult]) -> Vec<Finding> {
                     description: deviation.description.clone(),
                     suggestion: deviation.suggestion.clone(),
                     kind: deviation.kind.clone(),
+                    line: None,
                 });
             }
         }
@@ -194,6 +195,7 @@ mod tests {
             description: "unused import".to_string(),
             suggestion: "remove it".to_string(),
             kind: AuditFinding::CompilerWarning,
+            line: None,
         };
 
         let json = serde_json::to_value(&finding).expect("serialize finding");

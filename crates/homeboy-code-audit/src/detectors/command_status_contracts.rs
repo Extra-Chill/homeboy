@@ -357,6 +357,7 @@ fn finding(file: &str, scenario_id: &str, description: String, suggestion: Strin
         ),
         suggestion,
         kind: AuditFinding::CommandStatusContractViolation,
+        line: None,
     }
 }
 
@@ -378,6 +379,7 @@ fn fixture_missing_finding(
         ),
         suggestion,
         kind: AuditFinding::CommandStatusFixtureMissing,
+        line: None,
     }
 }
 

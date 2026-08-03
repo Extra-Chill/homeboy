@@ -593,6 +593,7 @@ mod tests {
             description: description.to_string(),
             suggestion: String::new(),
             kind: AuditFinding::MissingMethod,
+            line: None,
         }
     }
 
@@ -609,6 +610,7 @@ mod tests {
             description: description.to_string(),
             suggestion: String::new(),
             kind,
+            line: None,
         }
     }
 
@@ -1148,6 +1150,7 @@ mod tests {
             description: "File has 2484 lines (threshold: 1000)".to_string(),
             suggestion: String::new(),
             kind: AuditFinding::GodFile,
+            line: None,
         };
         let f2 = Finding {
             convention: "structural".to_string(),
@@ -1156,6 +1159,7 @@ mod tests {
             description: "File has 2645 lines (threshold: 1000)".to_string(),
             suggestion: String::new(),
             kind: AuditFinding::GodFile,
+            line: None,
         };
         assert_eq!(
             AuditFinding(&f1).fingerprint(),

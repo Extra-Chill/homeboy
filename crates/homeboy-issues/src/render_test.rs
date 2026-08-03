@@ -651,3 +651,40 @@ fn merging_a_narrowed_run_narrows_the_result() {
         vec!["profile=pr".to_string()]
     );
 }
+
+#[test]
+fn audit_findings_with_a_line_render_a_file_and_line_label() {
+    // The reason #11320 existed: after #11319 the bullet label prefers
+    // `file:line`, and audit could never supply the line half.
+    let output = json!({
+        "data": {
+            "command": "audit",
+            "passed": false,
+            "findings": [
+                {
+                    "tool": "audit",
+                    "rule": "core_boundary_leak",
+                    "category": "core_boundary_leak:core-agnostic-source",
+                    "message": "configured ecosystem term `node` appears at line 148",
+                    "file": "crates/homeboy-agents/src/artifacts.rs",
+                    "line": 148
+                }
+            ]
+        }
+    });
+
+    let rendered =
+        build_findings_from_native_output("audit", output, &IssueRenderContext::default()).unwrap();
+    let group = rendered
+        .groups
+        .get("core_boundary_leak:core-agnostic-source")
+        .unwrap();
+
+    assert!(
+        group
+            .body
+            .contains("- `crates/homeboy-agents/src/artifacts.rs:148` —"),
+        "{}",
+        group.body
+    );
+}
