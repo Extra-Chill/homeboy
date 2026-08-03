@@ -989,6 +989,8 @@ fn materialize_failure_preserves_compiler_diagnostics_and_active_binary() {
         assert!(failure.stderr.contains("compiler_diagnostic_marker"));
         assert!(failure.capture.is_some());
         assert!(failure.execution_record.is_some());
+        assert_eq!(failure.recovery_actions.len(), 1);
+        assert_eq!(failure.recovery_actions[0].label, "refresh_retry");
         assert_eq!(
             crate::load("lab-local")
                 .expect("reload runner")
@@ -1443,8 +1445,8 @@ fn connected_refresh_keeps_daemon_execution_options() {
 
     assert!(!options.allow_diagnostic_ssh);
     assert_eq!(options.diagnostic_ssh_timeout, None);
-    assert!(!options.mirror_evidence);
-    assert!(!options.print_handoff);
+    assert!(options.mirror_evidence);
+    assert!(options.print_handoff);
 }
 
 #[test]
@@ -1511,6 +1513,18 @@ fn refresh_phase_summary_distinguishes_tolerated_probe_from_required_failure() {
             exit_code: 101,
         }
     );
+    let select = HomeboyBinaryRefreshPlan {
+        runner_id: "lab".to_string(),
+        mode: "select".to_string(),
+        source: None,
+        git_ref: None,
+        target_dir: None,
+        binary_path: "/runner/homeboy".to_string(),
+        script: String::new(),
+        reconnect: false,
+        followup_commands: Vec::new(),
+    };
+    assert_eq!(refresh_execution_phase_name(&select), "select");
 }
 
 #[test]

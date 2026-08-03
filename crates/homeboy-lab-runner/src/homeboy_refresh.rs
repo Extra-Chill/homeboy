@@ -134,6 +134,13 @@ fn refresh_phase(name: &'static str, required: bool, exit_code: i32) -> HomeboyR
     }
 }
 
+fn refresh_execution_phase_name(plan: &HomeboyBinaryRefreshPlan) -> &'static str {
+    match plan.mode.as_str() {
+        "select" => "select",
+        _ => "materialize",
+    }
+}
+
 /// Evidence for an explicitly authorized rollback. `previous` names only
 /// authorities proven to be newer descendants than the selected candidate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -188,6 +195,10 @@ pub struct HomeboyBinaryRefreshFailure {
     pub job_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mirror_run_id: Option<String>,
+    /// Recovery actions remain on the parent refresh result so a required
+    /// failure is actionable without treating tolerated probes as debt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovery_actions: Vec<homeboy_core::runner_execution_envelope::RunnerExecutionNextAction>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification: Option<String>,
 }
@@ -372,7 +383,7 @@ pub fn refresh_homeboy_binary(
         exec_options,
         Some(connection_status.clone()),
     )?;
-    let materialization_phase = refresh_phase("materialize", true, exit_code);
+    let execution_phase = refresh_phase(refresh_execution_phase_name(&plan), true, exit_code);
     if exit_code != 0 {
         return Ok((
             HomeboyBinaryRefreshOutput {
@@ -382,7 +393,7 @@ pub fn refresh_homeboy_binary(
                 dry_run: false,
                 identity: None,
                 updated_fields: Vec::new(),
-                phase_summary: vec![materialization_phase],
+                phase_summary: vec![execution_phase],
                 daemon_refreshed: false,
                 interrupted_job_ids: Vec::new(),
                 selected_binary_path: plan.binary_path.clone(),
@@ -397,7 +408,7 @@ pub fn refresh_homeboy_binary(
             exit_code,
         ));
     }
-    let mut phase_summary = vec![materialization_phase];
+    let mut phase_summary = vec![execution_phase];
 
     // A reconnect replaces the daemon control plane. Prove it is admissible
     // before selecting the new global binary: a deferred refresh must leave
@@ -543,6 +554,7 @@ pub fn refresh_homeboy_binary(
         Ok(bootstrap) => bootstrap,
         Err(error) => {
             let verification = error.message;
+            phase_summary.push(refresh_phase("identity_verification", true, 1));
             return Ok((
                 HomeboyBinaryRefreshOutput {
                     variant: "refresh_homeboy",
@@ -571,6 +583,7 @@ pub fn refresh_homeboy_binary(
             ));
         }
     };
+    phase_summary.push(refresh_phase("identity_verification", true, 0));
     let identity = bootstrap.identity;
     let updated_fields = bootstrap.updated_fields;
     let rollback = bootstrap.rollback;
@@ -779,6 +792,8 @@ pub fn refresh_homeboy_binary(
                     options.force,
                 ));
             }
+            phase_summary.push(refresh_phase("reconnect", true, reconnect_exit_code));
+            phase_summary.push(refresh_phase("daemon_identity_verification", true, 1));
             return Ok((
                 HomeboyBinaryRefreshOutput {
                     variant: "refresh_homeboy",
@@ -835,6 +850,9 @@ pub fn refresh_homeboy_binary(
                         options.force,
                     ));
                 }
+                phase_summary.push(refresh_phase("reconnect", true, 0));
+                phase_summary.push(refresh_phase("daemon_identity_verification", true, 0));
+                phase_summary.push(refresh_phase("admission_readiness", true, 1));
                 return Ok((
                     HomeboyBinaryRefreshOutput {
                         variant: "refresh_homeboy",
@@ -864,6 +882,8 @@ pub fn refresh_homeboy_binary(
                 ));
             }
         }
+        phase_summary.push(refresh_phase("reconnect", true, 0));
+        phase_summary.push(refresh_phase("daemon_identity_verification", true, 0));
     } else {
         interrupted_job_ids = Vec::new();
     }
@@ -958,6 +978,24 @@ fn refresh_failure(
     execution: RunnerExecOutput,
     exit_code: i32,
 ) -> HomeboyBinaryRefreshFailure {
+    let mut recovery_actions = execution
+        .execution_record
+        .as_ref()
+        .map(|record| record.next_actions.clone())
+        .unwrap_or_default();
+    if recovery_actions.is_empty() {
+        recovery_actions.push(
+            homeboy_core::runner_execution_envelope::RunnerExecutionNextAction {
+                label: "refresh_retry".to_string(),
+                command: vec![
+                    "homeboy".to_string(),
+                    "runner".to_string(),
+                    "refresh-homeboy".to_string(),
+                    plan.runner_id.clone(),
+                ],
+            },
+        );
+    }
     HomeboyBinaryRefreshFailure {
         exit_code,
         failed_command: execution.argv.clone(),
@@ -971,6 +1009,7 @@ fn refresh_failure(
         execution_record: execution.execution_record.clone(),
         job_id: execution.job_id.clone(),
         mirror_run_id: execution.mirror_run_id.clone(),
+        recovery_actions,
         verification: None,
     }
 }
@@ -1181,14 +1220,12 @@ fn refresh_execution_options(
             plan.script.clone(),
         ])
     };
-    options
-        .with_capability_preflight(RunnerCapabilityPreflight {
-            command: "runner.refresh-homeboy".to_string(),
-            required_commands,
-            timeout: disconnected_ssh.then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT),
-            ..Default::default()
-        })
-        .without_evidence_mirror()
+    options.with_capability_preflight(RunnerCapabilityPreflight {
+        command: "runner.refresh-homeboy".to_string(),
+        required_commands,
+        timeout: disconnected_ssh.then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT),
+        ..Default::default()
+    })
 }
 
 #[derive(Debug, Clone)]
