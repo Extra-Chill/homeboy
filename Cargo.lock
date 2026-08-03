@@ -785,6 +785,7 @@ dependencies = [
  "homeboy-agents",
  "homeboy-command-contract",
  "homeboy-core",
+ "homeboy-deploy",
  "homeboy-engine-primitives",
  "homeboy-extension",
  "homeboy-extension-contract",
@@ -803,6 +804,7 @@ dependencies = [
  "homeboy-triage",
  "homeboy-tunnel",
  "homeboy-upgrade",
+ "homeboy-version",
  "libc",
  "reqwest",
  "rusqlite",
@@ -913,6 +915,31 @@ dependencies = [
  "tempfile",
  "uuid",
  "windows-sys 0.61.2",
+ "zip",
+]
+
+[[package]]
+name = "homeboy-deploy"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "glob",
+ "glob-match",
+ "homeboy-core",
+ "homeboy-engine-primitives",
+ "homeboy-extension",
+ "homeboy-paths",
+ "homeboy-product-identity",
+ "homeboy-release-contract",
+ "homeboy-version",
+ "libc",
+ "regex",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "uuid",
  "zip",
 ]
 
@@ -1137,11 +1164,13 @@ dependencies = [
  "glob",
  "glob-match",
  "homeboy-core",
+ "homeboy-deploy",
  "homeboy-engine-primitives",
  "homeboy-extension",
  "homeboy-paths",
  "homeboy-product-identity",
  "homeboy-release-contract",
+ "homeboy-version",
  "libc",
  "regex",
  "semver",
@@ -1257,6 +1286,22 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml",
+]
+
+[[package]]
+name = "homeboy-version"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "homeboy-core",
+ "homeboy-extension",
+ "homeboy-product-identity",
+ "homeboy-release-contract",
+ "regex",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

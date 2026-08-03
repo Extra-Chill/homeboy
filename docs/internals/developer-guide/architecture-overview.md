@@ -173,7 +173,7 @@ Semantic versioning:
 
 ### Changelog Management
 
-**Location:** `crates/homeboy-release/src/release/changelog/`
+**Location:** `crates/homeboy-version/src/changelog/`
 
 Changelog operations:
 - Add entries

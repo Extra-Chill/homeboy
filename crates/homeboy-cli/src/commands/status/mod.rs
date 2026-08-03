@@ -12,7 +12,7 @@
 use homeboy::core::component;
 use homeboy::core::context;
 use homeboy::core::scope::{self, Scope};
-use homeboy_release::deploy::ReleaseStateStatus;
+use homeboy_deploy::ReleaseStateStatus;
 use homeboy_release::release::version;
 use std::collections::HashMap;
 
@@ -487,33 +487,24 @@ fn deployed_version_dashboard_status(
     remote_ver: &Option<String>,
     origin_tag: Option<&str>,
 ) -> ProjectComponentDashboardStatus {
-    match homeboy_release::deploy::compare_deployed_versions(
-        local_ver.as_deref(),
-        remote_ver.as_deref(),
-    ) {
-        homeboy_release::deploy::ComponentStatus::NeedsUpdate => {
-            ProjectComponentDashboardStatus::Outdated
-        }
-        homeboy_release::deploy::ComponentStatus::UpToDate
+    match homeboy_deploy::compare_deployed_versions(local_ver.as_deref(), remote_ver.as_deref()) {
+        homeboy_deploy::ComponentStatus::NeedsUpdate => ProjectComponentDashboardStatus::Outdated,
+        homeboy_deploy::ComponentStatus::UpToDate
             if local_ver
                 .as_deref()
                 .is_some_and(|local| origin_tag_is_newer_than_local(origin_tag, local)) =>
         {
             ProjectComponentDashboardStatus::PinnedCurrent
         }
-        homeboy_release::deploy::ComponentStatus::Unknown => {
-            ProjectComponentDashboardStatus::Unknown
-        }
-        homeboy_release::deploy::ComponentStatus::UpToDate
-        | homeboy_release::deploy::ComponentStatus::BehindRemote => {
-            ProjectComponentDashboardStatus::Current
-        }
-        homeboy_release::deploy::ComponentStatus::BehindUpstream
-        | homeboy_release::deploy::ComponentStatus::SourceStale
-        | homeboy_release::deploy::ComponentStatus::VersionUpToDateContentUnverified
-        | homeboy_release::deploy::ComponentStatus::RemoteModified
-        | homeboy_release::deploy::ComponentStatus::Missing
-        | homeboy_release::deploy::ComponentStatus::MixedDrift => {
+        homeboy_deploy::ComponentStatus::Unknown => ProjectComponentDashboardStatus::Unknown,
+        homeboy_deploy::ComponentStatus::UpToDate
+        | homeboy_deploy::ComponentStatus::BehindRemote => ProjectComponentDashboardStatus::Current,
+        homeboy_deploy::ComponentStatus::BehindUpstream
+        | homeboy_deploy::ComponentStatus::SourceStale
+        | homeboy_deploy::ComponentStatus::VersionUpToDateContentUnverified
+        | homeboy_deploy::ComponentStatus::RemoteModified
+        | homeboy_deploy::ComponentStatus::Missing
+        | homeboy_deploy::ComponentStatus::MixedDrift => {
             unreachable!("version comparison only returns version statuses")
         }
     }

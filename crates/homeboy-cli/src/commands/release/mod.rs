@@ -4,7 +4,7 @@ use std::{fs, path::Path};
 
 use homeboy::core::component;
 use homeboy::core::scope::{self, Scope};
-use homeboy_release::deploy::{self, ReleaseStateStatus};
+use homeboy_deploy::{self as deploy, ReleaseStateStatus};
 use homeboy_release::release::{
     self, ArtifactSourceAuthorityManifest, BatchReleaseResult, ReleaseCommandInput,
     ReleaseCommandResult, ReleaseExecutionPlan, ReleasePackageResult, ReleasePhase,

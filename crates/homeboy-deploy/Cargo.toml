@@ -1,41 +1,37 @@
 [package]
-name = "homeboy-release"
+name = "homeboy-deploy"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Release subsystem for homeboy: versioning, changelog finalization, tagging, and GitHub releases. Depends on homeboy-deploy (one-way) and on homeboy-version for the version/changelog/tag primitives it shares with deploy. Core does not depend on it (reaches it via the release_provider hook)."
+description = "Deploy subsystem for homeboy: build components and ship them to targets. Sits below homeboy-release — release depends on deploy, never the reverse. Shared version/changelog/tag-naming primitives live in homeboy-version."
 publish = false
 
 [lib]
-name = "homeboy_release"
+name = "homeboy_deploy"
 path = "src/lib.rs"
 
 [dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
 homeboy-version = { version = "0.1.0", path = "../homeboy-version" }
-homeboy-deploy = { version = "0.1.0", path = "../homeboy-deploy" }
 homeboy-paths = { version = "0.1.0", path = "../homeboy-paths" }
 homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
 homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }
 homeboy-release-contract = { version = "0.1.0", path = "../contracts/homeboy-release-contract" }
+homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 regex = "1.11"
-zip = "0.6"
 chrono = "0.4"
 semver = "1.0"
-tempfile = "3.14"
 sha2 = "0.10.9"
+zip = "0.6"
 glob = "0.3"
 glob-match = "0.2"
 uuid = { version = "1.11", features = ["v4", "v5", "serde"] }
-homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
+tempfile = "3.14"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Pipes"] }
 
 [dev-dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }

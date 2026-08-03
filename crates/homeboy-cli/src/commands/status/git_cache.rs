@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use homeboy::core::component;
 use homeboy::core::git;
-use homeboy_release::deploy::{self, ReleaseState};
+use homeboy_deploy::{self as deploy, ReleaseState};
 use homeboy_release::release::version;
 
 use super::types::{UnreleasedMerge, UpstreamDrift};

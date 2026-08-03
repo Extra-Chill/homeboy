@@ -2,8 +2,8 @@ use clap::Args;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-use homeboy_release::deploy::{
-    self, ComponentDeployResult, DeployConfig, DeploySummary, MultiDeploySummary,
+use homeboy_deploy::{
+    self as deploy, ComponentDeployResult, DeployConfig, DeploySummary, MultiDeploySummary,
     ProjectDeployResult,
 };
 
@@ -404,7 +404,7 @@ fn apply_release_set(
         }
         refs.push((component, entry.requested_ref.as_str()));
     }
-    let resolved_refs = homeboy_release::deploy::preflight_exact_refs(&refs)?;
+    let resolved_refs = homeboy_deploy::preflight_exact_refs(&refs)?;
     args.component = Some(active.iter().map(|(entry, _)| entry.id.clone()).collect());
     args.component_ids.clear();
     args.exact_refs = active

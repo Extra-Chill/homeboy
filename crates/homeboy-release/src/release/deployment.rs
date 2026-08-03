@@ -1,5 +1,7 @@
-use crate::deploy::{self, DeployConfig, PreparedDeployArtifact, PreparedDeployProjection};
 use homeboy_core::error::{Error, Result};
+use homeboy_deploy::{
+    self as deploy, DeployConfig, PreparedDeployArtifact, PreparedDeployProjection,
+};
 use std::collections::BTreeMap;
 use std::fs;
 
@@ -300,7 +302,7 @@ fn prepared_release_artifact(
         path: artifact.path.clone(),
         durable_path: durable_path.clone(),
         size_bytes: metadata.len(),
-        sha256: crate::deploy::sha256_file(path)?,
+        sha256: homeboy_deploy::sha256_file(path)?,
         version: version.to_string(),
         tag,
         source_commit: source_commit.trim().to_string(),
@@ -886,7 +888,7 @@ mod tests {
 
     #[test]
     fn release_deploy_config_reuses_prepared_release_package() {
-        let artifact = crate::deploy::PreparedDeployArtifact {
+        let artifact = homeboy_deploy::PreparedDeployArtifact {
             component_id: "demo".to_string(),
             path: "/source/demo.zip".to_string(),
             durable_path: "/durable/demo.zip".to_string(),
@@ -945,7 +947,7 @@ mod tests {
                 .expect("save target project");
             }
 
-            let artifact = crate::deploy::PreparedDeployArtifact {
+            let artifact = homeboy_deploy::PreparedDeployArtifact {
                 component_id: "demo".to_string(),
                 path: "/source/demo.zip".to_string(),
                 durable_path: "/durable/demo.zip".to_string(),
