@@ -2230,3 +2230,33 @@ fn a_caller_can_opt_a_runner_backed_status_out_of_every_runner_probe() {
         );
     });
 }
+
+#[test]
+fn runner_backed_logs_read_persisted_events_without_a_runner_probe() {
+    super::ensure_runner_continuation_provider_reset_hook();
+    with_isolated_home(|_| {
+        let interactions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _provider = RunnerContinuationTestGuard::install(Box::new(CountingRunnerProvider {
+            interactions: interactions.clone(),
+        }));
+
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "runner-backed-logs-local-only",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-10418-logs",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("detached handoff recorded");
+
+        let log = logs("runner-backed-logs-local-only").expect("durable logs resolve");
+
+        assert_eq!(log.run_id, "runner-backed-logs-local-only");
+        assert_eq!(
+            interactions.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "logs must not wait for an unavailable runner"
+        );
+    });
+}

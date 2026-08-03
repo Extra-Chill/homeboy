@@ -50,15 +50,10 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
         ));
     }
 
-    let options = agent_task_lifecycle::AgentTaskStatusOptions {
-        runner_probe: if args.no_runner_probe {
-            agent_task_lifecycle::AgentTaskRunnerProbe::Never
-        } else {
-            agent_task_lifecycle::AgentTaskRunnerProbe::WhenRunnerBacked
-        },
-    };
-    let outcome = match agent_task_service_direct::status_with_options(&args.run_id, options) {
-        Ok(outcome) => outcome,
+    // Terminal inspection is a durable-local read. Reconciliation has its own
+    // explicit command so an unavailable runner cannot hold status hostage.
+    let record = match agent_task_service_direct::persisted_status(&args.run_id) {
+        Ok(record) => record,
         Err(error) if is_missing_agent_task_run_metadata_error(&error) => {
             if let Some(remediation) =
                 agent_task_service::offloaded_status_remediation(&args.run_id)?
@@ -69,8 +64,12 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
         }
         Err(error) => return Err(error),
     };
-    let runner_probe = runner_probe_projection(&outcome.runner_probe);
-    let record = outcome.record;
+    let runner_probe = runner_probe_projection(&agent_task_lifecycle::runner_probe_plan(
+        &record,
+        agent_task_lifecycle::AgentTaskStatusOptions {
+            runner_probe: agent_task_lifecycle::AgentTaskRunnerProbe::Never,
+        },
+    ));
     // A future durable budget is incompatible, not an absent optional preview.
     if let Err(error) = agent_task_lifecycle::load_plan(&args.run_id) {
         if error
@@ -643,6 +642,7 @@ pub(super) fn logs(args: LogsArgs) -> CmdResult<Value> {
     };
     let mut value = serde_json::to_value(log).unwrap_or(Value::Null);
     enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
+    bound_full_reader_payload(&mut value);
     Ok((value, 0))
 }
 
@@ -745,7 +745,9 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
 }
 
 pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
-    let record = agent_task_service::status(&args.run_id)?;
+    // Keep diagnosis within the same durable-local inspection contract as
+    // status and logs; reconciliation is explicitly requested separately.
+    let record = agent_task_service_direct::persisted_status(&args.run_id)?;
     let aggregate = completed_run_aggregate(&args.run_id).transpose()?;
     let mut hydrated_evidence = Vec::new();
     let mut total_hydrated_evidence = 0;
@@ -828,6 +830,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         &missing_artifacts,
         record.runner_id(),
     );
+    bound_full_reader_payload(&mut value);
     Ok((value, 0))
 }
 
