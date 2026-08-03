@@ -50,6 +50,7 @@
 //! (`<workload-id>/daemon/daemon.sock` ≈ 40 bytes) underneath.
 
 use crate::error::{Error, Result};
+#[cfg(windows)]
 use crate::paths;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -151,22 +152,34 @@ fn cache_fallback_root() -> Result<PathBuf> {
         if let Some(xdg_cache) = non_empty_env("XDG_CACHE_HOME") {
             return Ok(PathBuf::from(xdg_cache).join("homeboy").join("inv"));
         }
-        // Resolve through `paths`, which prefers the process-local home-root
-        // override over an unsynchronized `getenv` (#7505). `homeboy()` returns
-        // `<home>/.config/homeboy`, so step back to the home root rather than
-        // re-reading `HOME` here and reintroducing the race this fixes.
-        let config_root = paths::homeboy()?;
-        let home = config_root
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| {
-                Error::internal_unexpected(format!(
-                    "could not derive a home root from config directory {}",
-                    config_root.display()
-                ))
-            })?
-            .to_path_buf();
-        Ok(home.join(".cache").join("homeboy").join("inv"))
+        // Deliberately reads `HOME` directly rather than deriving it from
+        // `paths::homeboy()`.
+        //
+        // #11266 routed this through `paths` so it would honor the home-root
+        // override and avoid a second `getenv`. That broke
+        // `promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_id`,
+        // which passed in three pre-#11266 runs and failed in every run after.
+        //
+        // This resolver is not where the race lived: the
+        // "HOME environment variable not set" failures came from
+        // `paths::homeboy()` and `paths::homeboy_data()`, which #11266 does
+        // fix and which keep the override. The invocation runtime root is
+        // additionally pinned by `HOMEBOY_INVOCATION_RUNTIME_DIR_ENV` for every
+        // hermetic test, so it was never a meaningful source of the race —
+        // only of extra blast radius.
+        //
+        // Socket paths under this root must stay inside the `sockaddr_un`
+        // budget (~104 bytes), so its shape is load-bearing in a way the
+        // config root's is not. Keep them independent.
+        let home = env::var("HOME").map_err(|_| {
+            Error::internal_unexpected(
+                "HOME environment variable not set on Unix-like system".to_string(),
+            )
+        })?;
+        Ok(PathBuf::from(home)
+            .join(".cache")
+            .join("homeboy")
+            .join("inv"))
     }
 }
 
