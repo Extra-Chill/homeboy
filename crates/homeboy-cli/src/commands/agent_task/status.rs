@@ -145,7 +145,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     if let Some((progress, source_run_id)) = selected_cook_terminal_progress(&target, run_id) {
         project_owning_cook_terminal_status_from_progress(
             &mut value,
-            &progress,
+            Some(&progress),
             Some(&source_run_id),
         );
     } else {
@@ -200,7 +200,7 @@ fn selected_cook_terminal_progress(
     if source_run_id == selected_run_id {
         return None;
     }
-    let record = agent_task_lifecycle::exact_record(&source_run_id).ok()?;
+    let record = agent_task_service_direct::persisted_status(&source_run_id).ok()?;
     let progress = record.metadata.get("cook_progress")?.clone();
     (progress.get("phase").and_then(Value::as_str) == Some("terminal"))
         .then_some((progress, source_run_id))
