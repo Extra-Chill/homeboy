@@ -1,20 +1,21 @@
+mod failure_log_triage;
+mod gate;
+mod plan;
+mod scope;
+
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::path::PathBuf;
 
-use homeboy::core::ci_failure_log_triage::{self, CiFailureTriageOutput, CiFailureTriageRequest};
-use homeboy::core::ci_gate::{
-    self, DifferentialGateDecision, DifferentialGateInput, DifferentialGateSide,
-};
-use homeboy::core::ci_plan::{self, CiEventContext, CiPlan};
+use failure_log_triage::{CiFailureTriageOutput, CiFailureTriageRequest};
+use gate::{DifferentialGateDecision, DifferentialGateInput, DifferentialGateSide};
 use homeboy::core::ci_profile::{self, CiInventory, CiRunOutput, CiRunSelection};
-use homeboy::core::ci_scope::{
-    self, GithubActionsContext, MergeBaseResolver, ResolvedScope, ScopeRequest,
-};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::refactor::auto::transaction::{
     self, CiContext, TransactionOutcome, TransactionRequest, AUTOFIX_COMMIT_PREFIX,
 };
+use plan::{CiEventContext, CiPlan};
+use scope::{GithubActionsContext, MergeBaseResolver, ResolvedScope, ScopeRequest};
 
 use super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs};
 use super::{CmdResult, CommandReport};
@@ -288,7 +289,7 @@ pub fn run(args: CiArgs) -> CmdResult<CiOutput> {
 }
 
 fn run_differential_gate(args: CiDifferentialGateArgs) -> CmdResult<CiOutput> {
-    let decision = ci_gate::classify(DifferentialGateInput {
+    let decision = gate::classify(DifferentialGateInput {
         baseline: DifferentialGateSide {
             command: args.baseline_command,
             exit_code: args.baseline_exit_code,
@@ -312,7 +313,7 @@ fn run_differential_gate(args: CiDifferentialGateArgs) -> CmdResult<CiOutput> {
 }
 
 fn run_triage(args: CiTriageArgs) -> CmdResult<CiOutput> {
-    let output = ci_failure_log_triage::triage_pr_failures(CiFailureTriageRequest {
+    let output = failure_log_triage::triage_pr_failures(CiFailureTriageRequest {
         reference: args.reference,
         repo: args.repo,
         max_runs: args.max_runs,
@@ -325,7 +326,7 @@ fn run_triage(args: CiTriageArgs) -> CmdResult<CiOutput> {
 
 fn run_plan(args: CiPlanArgs) -> CmdResult<CiOutput> {
     let context = CiEventContext::parse(&args.context);
-    let plan = ci_plan::plan(&args.commands, context);
+    let plan = plan::plan(&args.commands, context);
 
     Ok((
         CiOutput::Plan(CiPlanCommandOutput {
@@ -362,7 +363,7 @@ fn run_scope(args: CiScopeArgs) -> CmdResult<CiOutput> {
         Some(path) => MergeBaseResolver::Git { path },
         None => MergeBaseResolver::TrustBaseRef,
     };
-    let scope = ci_scope::resolve_scope(&request, resolver)?;
+    let scope = scope::resolve_scope(&request, resolver)?;
 
     let mut command_flags = std::collections::BTreeMap::new();
     for command in &args.for_commands {

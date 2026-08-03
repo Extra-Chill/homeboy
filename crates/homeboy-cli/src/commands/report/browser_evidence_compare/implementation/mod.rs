@@ -7,6 +7,7 @@ mod parse;
 mod reader;
 mod render;
 mod visual;
+mod visual_provider;
 
 pub(super) use compare::compare_variants;
 pub(super) use reader::read_evidence_dirs;

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use homeboy::core::trace_compare::{
+use crate::commands::trace::compare_artifacts::{
     prepare_matrix_cell_dir, prepare_matrix_output_dir, prepare_variant_matrix_output_dir,
     write_json_artifact, write_matrix_summary, write_variant_matrix_summary,
 };

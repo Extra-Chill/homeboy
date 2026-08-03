@@ -1,11 +1,11 @@
-//! Core CI command-plan orchestration.
+//! CI command-plan orchestration.
 //!
 //! `homeboy-action` historically owned command inference, the quality-vs-ops
 //! split, canonical ordering, refactor-only detection, the `HOMEBOY_SKIP_LINT`
 //! decision, and per-command output filenames — all assembled by shell string
 //! builders (`scripts/core/resolve-commands.sh`, `scripts/core/lib.sh`). Those
-//! behaviors are reusable outside the GitHub Action, so this module promotes
-//! them into core as pure, agnostic logic.
+//! behaviors are reusable outside the GitHub Action, so this module hoists
+//! them out of shell into pure, agnostic Rust.
 //!
 //! Everything here is deterministic and side-effect free: it turns a raw,
 //! comma-separated command request plus an event context into a structured
@@ -85,7 +85,7 @@ fn categorize(base: &str) -> CommandCategory {
     }
 }
 
-/// A single planned command with its derived, core-owned metadata.
+/// A single planned command with its derived, plan-owned metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PlannedCommand {
     /// The full command request as the runner should invoke it

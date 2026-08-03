@@ -1,12 +1,15 @@
+mod service;
+
 use clap::{Args, Subcommand};
 use serde::{Serialize, Serializer};
 
 use super::utils::args::MutationArgs;
 
-use homeboy::core::db::{self, DbResult, DbTunnelResult};
 use homeboy::core::engine::text;
 use homeboy::core::observation::store::{self, ObservationDbStatus};
 use homeboy::core::project;
+use service as db;
+use service::{DbResult, DbTunnelResult};
 
 use super::CmdResult;
 

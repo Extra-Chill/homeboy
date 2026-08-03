@@ -6,13 +6,13 @@
 use serde::Serialize;
 use std::collections::HashMap;
 
-use crate::context::require_project_base_path;
-use crate::engine::executor::execute_for_project;
-use crate::engine::template::{render_map, TemplateVars};
-use crate::engine::text;
-use crate::extension_store::load_all_extensions;
-use crate::project::{self, Project};
-use crate::{Error, Result};
+use homeboy::core::context::require_project_base_path;
+use homeboy::core::engine::executor::execute_for_project;
+use homeboy::core::engine::template::{render_map, TemplateVars};
+use homeboy::core::engine::text;
+use homeboy::core::extension_store::load_all_extensions;
+use homeboy::core::project::{self, Project};
+use homeboy::core::{Error, Result};
 use homeboy_extension_contract::DatabaseCliConfig;
 
 #[derive(Serialize, Clone)]

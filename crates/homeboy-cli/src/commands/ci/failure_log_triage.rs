@@ -6,8 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Error, Result};
-use crate::git::GhClient;
+use homeboy::core::error::{Error, Result};
+use homeboy::core::git::GhClient;
 
 const DEFAULT_MAX_RUNS: usize = 5;
 const DEFAULT_MAX_SNIPPETS_PER_JOB: usize = 4;

@@ -11,7 +11,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use crate::{Error, Result};
+use homeboy::core::{Error, Result};
 
 /// Inputs required to run the external visual-compare provider for one variant.
 pub struct VisualCompareProviderRequest<'a> {

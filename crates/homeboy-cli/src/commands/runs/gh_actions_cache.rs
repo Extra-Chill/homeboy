@@ -2,10 +2,10 @@
 //!
 //! The `runs gh-actions` command is a thin adapter: it computes data and paths,
 //! then delegates artifact and HTTP-cache file writes to these helpers so the
-//! orchestration of directory creation and byte writes lives in core.
+//! orchestration of directory creation and byte writes lives here.
 
-use crate::error::{Error, Result};
-use crate::paths;
+use homeboy::core::error::{Error, Result};
+use homeboy::core::paths;
 use std::fs;
 use std::path::{Path, PathBuf};
 

@@ -1,17 +1,17 @@
-//! Trace-compare persistence core service.
+//! Trace-compare persistence service.
 //!
-//! Command modules stay thin adapters: they resolve targets, run the proof
-//! matrix, and assemble the comparison output, then delegate the orchestration
-//! — output-directory creation, JSON/markdown artifact persistence, and the
-//! observation run lifecycle — to this core service. Keeping filesystem
-//! mutation and run-artifact persistence here means the command layer never
-//! accumulates orchestration weight.
+//! The `trace compare*` command modules stay thin adapters: they resolve
+//! targets, run the proof matrix, and assemble the comparison output, then
+//! delegate the orchestration — output-directory creation, JSON/markdown
+//! artifact persistence, and the observation run lifecycle — to this module.
+//! Keeping filesystem mutation and run-artifact persistence here means the
+//! command entry points never accumulate orchestration weight.
 
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::observation::{NewRunRecord, ObservationStore, RunEvidenceCommands, RunStatus};
+use homeboy::core::observation::{NewRunRecord, ObservationStore, RunEvidenceCommands, RunStatus};
 
 /// Resolved on-disk locations of the artifacts a compare run persists.
 pub struct CompareArtifactPaths {
@@ -130,9 +130,9 @@ pub struct CompareArtifactSet<'a, B, C, M> {
 }
 
 /// Create the output directory for a compare run, mirroring `mkdir -p`.
-pub fn prepare_output_dir(output_dir: &Path) -> crate::Result<()> {
+pub fn prepare_output_dir(output_dir: &Path) -> homeboy::core::Result<()> {
     std::fs::create_dir_all(output_dir).map_err(|err| {
-        crate::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!(
                 "Failed to create trace compare output dir {}: {}",
                 output_dir.display(),
@@ -144,12 +144,12 @@ pub fn prepare_output_dir(output_dir: &Path) -> crate::Result<()> {
 }
 
 /// Serialize `value` to pretty JSON and write it to `path`.
-pub fn write_json_artifact<T: Serialize>(path: &Path, value: &T) -> crate::Result<()> {
+pub fn write_json_artifact<T: Serialize>(path: &Path, value: &T) -> homeboy::core::Result<()> {
     let content = serde_json::to_string_pretty(value).map_err(|err| {
-        crate::Error::internal_json(err.to_string(), Some("trace.compare.json".to_string()))
+        homeboy::core::Error::internal_json(err.to_string(), Some("trace.compare.json".to_string()))
     })?;
     std::fs::write(path, content).map_err(|err| {
-        crate::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!("Failed to write trace artifact {}: {}", path.display(), err),
             Some("trace.compare.write".to_string()),
         )
@@ -162,7 +162,7 @@ pub fn write_json_artifact<T: Serialize>(path: &Path, value: &T) -> crate::Resul
 pub fn persist_compare_artifacts<B: Serialize, C: Serialize, M: Serialize>(
     output_dir: &Path,
     set: CompareArtifactSet<'_, B, C, M>,
-) -> crate::Result<CompareArtifactPaths> {
+) -> homeboy::core::Result<CompareArtifactPaths> {
     let paths = CompareArtifactPaths {
         baseline: output_dir.join("baseline.aggregate.json"),
         candidate: output_dir.join("candidate.aggregate.json"),
@@ -174,7 +174,7 @@ pub fn persist_compare_artifacts<B: Serialize, C: Serialize, M: Serialize>(
     write_json_artifact(&paths.candidate, set.candidate_aggregate)?;
     write_json_artifact(&paths.compare, set.compare)?;
     std::fs::write(&paths.summary, set.summary_markdown).map_err(|err| {
-        crate::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!(
                 "Failed to write trace compare summary {}: {}",
                 paths.summary.display(),
@@ -189,7 +189,10 @@ pub fn persist_compare_artifacts<B: Serialize, C: Serialize, M: Serialize>(
 /// Persist the first-class compare pair artifact to `path`, returning the
 /// artifact unchanged so the command layer can embed it in observation
 /// metadata. This is the canonical evidence index for a compare run.
-pub fn persist_compare_pair_artifact(path: &Path, pair: &ComparePairArtifact) -> crate::Result<()> {
+pub fn persist_compare_pair_artifact(
+    path: &Path,
+    pair: &ComparePairArtifact,
+) -> homeboy::core::Result<()> {
     write_json_artifact(path, pair)
 }
 
@@ -197,9 +200,9 @@ pub fn persist_compare_pair_artifact(path: &Path, pair: &ComparePairArtifact) ->
 /// subdirectories), mirroring `mkdir -p`. Bundle runs accumulate many
 /// directories, so the create-dir orchestration lives here, keeping the command
 /// a thin adapter that only computes which directories it needs.
-pub fn prepare_compare_bundle_dir(dir: &Path) -> crate::Result<()> {
+pub fn prepare_compare_bundle_dir(dir: &Path) -> homeboy::core::Result<()> {
     std::fs::create_dir_all(dir).map_err(|err| {
-        crate::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!(
                 "Failed to create trace compare bundle dir {}: {}",
                 dir.display(),
@@ -213,9 +216,9 @@ pub fn prepare_compare_bundle_dir(dir: &Path) -> crate::Result<()> {
 /// Write a pre-rendered text artifact for a compare-bundle run. The command
 /// layer renders the content; this owns the filesystem write so persistence
 /// orchestration never accumulates in the command.
-pub fn write_compare_bundle_text(path: &Path, content: &str) -> crate::Result<()> {
+pub fn write_compare_bundle_text(path: &Path, content: &str) -> homeboy::core::Result<()> {
     std::fs::write(path, content).map_err(|err| {
-        crate::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!(
                 "Failed to write trace compare bundle artifact {}: {}",
                 path.display(),
@@ -234,7 +237,7 @@ pub fn write_compare_bundle_scenario_log(
     command: &str,
     status: &str,
     failure: Option<&str>,
-) -> crate::Result<()> {
+) -> homeboy::core::Result<()> {
     let mut log = format!("command: {}\nstatus: {}\n", command, status);
     if let Some(failure) = failure {
         log.push_str(&format!("failure: {}\n", failure));
@@ -250,7 +253,7 @@ pub fn write_compare_bundle_error_scenario(
     component: &str,
     scenario: &str,
     failure: &str,
-) -> crate::Result<()> {
+) -> homeboy::core::Result<()> {
     let value = serde_json::json!({
         "command": "trace.compare-bundle.scenario",
         "passed": false,
@@ -324,9 +327,9 @@ impl CompareObservation {
 /// Create the output directory for a compare-variant run, mirroring `mkdir -p`.
 /// Owns the filesystem orchestration so the command layer only computes the
 /// directory it needs and delegates persistence to core.
-pub fn prepare_compare_variant_dir(output_dir: &Path) -> crate::Result<()> {
+pub fn prepare_compare_variant_dir(output_dir: &Path) -> homeboy::core::Result<()> {
     std::fs::create_dir_all(output_dir).map_err(|err| {
-        crate::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!(
                 "Failed to create trace compare-variant output directory {}: {}",
                 output_dir.display(),
@@ -340,15 +343,18 @@ pub fn prepare_compare_variant_dir(output_dir: &Path) -> crate::Result<()> {
 /// Serialize `value` to pretty JSON (with a trailing newline) and write it to
 /// `path`. Owns the filesystem write so the command layer never touches
 /// `std::fs` directly for compare-variant artifacts.
-pub fn write_compare_variant_json<T: Serialize>(path: &Path, value: &T) -> crate::Result<()> {
+pub fn write_compare_variant_json<T: Serialize>(
+    path: &Path,
+    value: &T,
+) -> homeboy::core::Result<()> {
     let json = serde_json::to_string_pretty(value).map_err(|err| {
-        crate::Error::internal_json(
+        homeboy::core::Error::internal_json(
             err.to_string(),
             Some(format!("serialize {}", path.display())),
         )
     })?;
     std::fs::write(path, format!("{}\n", json)).map_err(|err| {
-        crate::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!("Failed to write {}: {}", path.display(), err),
             Some("trace.compare_variant.write".to_string()),
         )
@@ -358,9 +364,9 @@ pub fn write_compare_variant_json<T: Serialize>(path: &Path, value: &T) -> crate
 /// Write the pre-rendered compare-variant summary markdown to `path`. The
 /// command layer renders the markdown; this owns the filesystem write so
 /// persistence orchestration never accumulates in the command.
-pub fn write_compare_variant_summary(path: &Path, summary: &str) -> crate::Result<()> {
+pub fn write_compare_variant_summary(path: &Path, summary: &str) -> homeboy::core::Result<()> {
     std::fs::write(path, summary).map_err(|err| {
-        crate::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!("Failed to write {}: {}", path.display(), err),
             Some("trace.compare_variant.summary".to_string()),
         )
@@ -370,9 +376,9 @@ pub fn write_compare_variant_summary(path: &Path, summary: &str) -> crate::Resul
 /// Create the top-level output directory for a scenario-matrix run, mirroring
 /// `mkdir -p`. Owns the filesystem orchestration so the command layer only
 /// computes the directory it needs.
-pub fn prepare_matrix_output_dir(output_dir: &Path) -> crate::Result<()> {
+pub fn prepare_matrix_output_dir(output_dir: &Path) -> homeboy::core::Result<()> {
     std::fs::create_dir_all(output_dir).map_err(|err| {
-        crate::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!(
                 "Failed to create trace matrix output dir {}: {}",
                 output_dir.display(),
@@ -386,9 +392,9 @@ pub fn prepare_matrix_output_dir(output_dir: &Path) -> crate::Result<()> {
 /// Create the per-cell output directory for a scenario-matrix run, mirroring
 /// `mkdir -p`. Each matrix cell writes its own artifacts, so the directory
 /// orchestration lives here, keeping the command a thin adapter.
-pub fn prepare_matrix_cell_dir(cell_dir: &Path) -> crate::Result<()> {
+pub fn prepare_matrix_cell_dir(cell_dir: &Path) -> homeboy::core::Result<()> {
     std::fs::create_dir_all(cell_dir).map_err(|err| {
-        crate::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!(
                 "Failed to create trace matrix cell dir {}: {}",
                 cell_dir.display(),
@@ -402,9 +408,9 @@ pub fn prepare_matrix_cell_dir(cell_dir: &Path) -> crate::Result<()> {
 /// Write the pre-rendered scenario-matrix summary markdown to `path`. The
 /// command layer renders the markdown; this owns the filesystem write so
 /// persistence orchestration never accumulates in the command.
-pub fn write_matrix_summary(path: &Path, summary: &str) -> crate::Result<()> {
+pub fn write_matrix_summary(path: &Path, summary: &str) -> homeboy::core::Result<()> {
     std::fs::write(path, summary).map_err(|err| {
-        crate::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!(
                 "Failed to write trace matrix summary {}: {}",
                 path.display(),
@@ -418,9 +424,9 @@ pub fn write_matrix_summary(path: &Path, summary: &str) -> crate::Result<()> {
 /// Create the top-level output directory for a variant-matrix run, mirroring
 /// `mkdir -p`. Owns the filesystem orchestration so the command layer only
 /// computes the directory it needs.
-pub fn prepare_variant_matrix_output_dir(output_dir: &Path) -> crate::Result<()> {
+pub fn prepare_variant_matrix_output_dir(output_dir: &Path) -> homeboy::core::Result<()> {
     std::fs::create_dir_all(output_dir).map_err(|err| {
-        crate::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!(
                 "Failed to create trace variant output dir {}: {}",
                 output_dir.display(),
@@ -434,9 +440,9 @@ pub fn prepare_variant_matrix_output_dir(output_dir: &Path) -> crate::Result<()>
 /// Write the pre-rendered variant-matrix summary markdown to `path`. The
 /// command layer renders the markdown; this owns the filesystem write so
 /// persistence orchestration never accumulates in the command.
-pub fn write_variant_matrix_summary(path: &Path, summary: &str) -> crate::Result<()> {
+pub fn write_variant_matrix_summary(path: &Path, summary: &str) -> homeboy::core::Result<()> {
     std::fs::write(path, summary).map_err(|err| {
-        crate::Error::internal_io(
+        homeboy::core::Error::internal_io(
             format!(
                 "Failed to write trace variant summary {}: {}",
                 path.display(),

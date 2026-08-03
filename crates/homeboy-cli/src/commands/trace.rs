@@ -28,6 +28,7 @@ mod aggregate;
 #[cfg(test)]
 mod aggregate_tests;
 mod bundle;
+mod compare_artifacts;
 mod compare_bundle;
 mod compare_targets;
 mod compare_variant;

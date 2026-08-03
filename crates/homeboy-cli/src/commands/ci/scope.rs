@@ -2,10 +2,10 @@
 //!
 //! Translates a continuous-integration event into the Homeboy scope that
 //! gated commands (audit, lint, test, review, refactor) should operate on.
-//! Core already owns the `--changed-since` semantics; this module owns the
+//! Homeboy already owns the `--changed-since` semantics; this module owns the
 //! *event-context → scope* translation so provider-specific automation (the
-//! GitHub Actions runner, for example) calls core instead of re-deriving the
-//! mapping in shell.
+//! GitHub Actions runner, for example) calls into Homeboy instead of
+//! re-deriving the mapping in shell.
 //!
 //! The model is split into two layers:
 //!
@@ -23,8 +23,8 @@
 
 use serde::Serialize;
 
-use crate::error::Result;
-use crate::git;
+use homeboy::core::error::Result;
+use homeboy::core::git;
 
 /// Commands that accept a `--changed-since` scope. Everything else always runs
 /// at full scope. Typed here instead of a shell `case` statement so the

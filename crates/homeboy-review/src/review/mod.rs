@@ -15,6 +15,7 @@ use homeboy_finding::HomeboyFinding;
 
 mod artifact_findings;
 pub mod render;
+pub mod top_n;
 
 pub use artifact_findings::ReviewArtifactFindings;
 

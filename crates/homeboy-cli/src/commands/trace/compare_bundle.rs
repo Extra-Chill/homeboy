@@ -6,8 +6,8 @@ use serde::Serialize;
 
 use super::compare_targets::run_compare_targets;
 use super::TraceArgs;
+use crate::commands::trace::compare_artifacts::write_json_artifact;
 use crate::commands::CmdResult;
-use homeboy::core::trace_compare::write_json_artifact;
 
 pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
     if args.baseline_target.is_none() || args.candidate.is_none() {
@@ -30,7 +30,7 @@ pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutpu
                 chrono::Utc::now().format("%Y%m%d%H%M%S")
             ))
     });
-    homeboy::core::trace_compare::prepare_compare_bundle_dir(&output_dir)?;
+    crate::commands::trace::compare_artifacts::prepare_compare_bundle_dir(&output_dir)?;
 
     let mut cells = Vec::new();
     let mut scenario_entries = Vec::new();
@@ -38,7 +38,7 @@ pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutpu
     for (index, scenario) in scenarios.iter().enumerate() {
         let scenario_slug = sanitize_path_component(scenario);
         let scenario_dir = output_dir.join(format!("{:03}-{}", index + 1, scenario_slug));
-        homeboy::core::trace_compare::prepare_compare_bundle_dir(&scenario_dir)?;
+        crate::commands::trace::compare_artifacts::prepare_compare_bundle_dir(&scenario_dir)?;
 
         let mut compare_args = args.clone();
         compare_args.comp.component = Some("compare".to_string());
@@ -47,7 +47,7 @@ pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutpu
         compare_args.output_dir = Some(scenario_dir.clone());
 
         let command = compare_command(&compare_args, &component, scenario, &scenario_dir);
-        homeboy::core::trace_compare::write_compare_bundle_scenario_log(
+        crate::commands::trace::compare_artifacts::write_compare_bundle_scenario_log(
             &scenario_dir.join("scenario.log"),
             &command,
             "running",
@@ -56,7 +56,7 @@ pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutpu
         let (passed, status, exit_code, failure) = match run_compare_targets(compare_args) {
             Ok((TraceCommandOutput::Compare(compare), exit_code)) => {
                 write_json_artifact(&scenario_dir.join("scenario.compare.json"), &compare)?;
-                homeboy::core::trace_compare::write_compare_bundle_text(
+                crate::commands::trace::compare_artifacts::write_compare_bundle_text(
                     &scenario_dir.join("scenario.compare.md"),
                     &super::output::render_trace_compare_evidence_markdown(&compare),
                 )?;
@@ -70,7 +70,7 @@ pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutpu
             }
             Ok((_, exit_code)) => {
                 let failure = "trace compare-bundle expected compare output".to_string();
-                homeboy::core::trace_compare::write_compare_bundle_error_scenario(
+                crate::commands::trace::compare_artifacts::write_compare_bundle_error_scenario(
                     &scenario_dir,
                     &component,
                     scenario,
@@ -80,7 +80,7 @@ pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutpu
             }
             Err(err) => {
                 let failure = err.to_string();
-                homeboy::core::trace_compare::write_compare_bundle_error_scenario(
+                crate::commands::trace::compare_artifacts::write_compare_bundle_error_scenario(
                     &scenario_dir,
                     &component,
                     scenario,
@@ -89,7 +89,7 @@ pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutpu
                 (false, "error".to_string(), 1, Some(failure))
             }
         };
-        homeboy::core::trace_compare::write_compare_bundle_scenario_log(
+        crate::commands::trace::compare_artifacts::write_compare_bundle_scenario_log(
             &scenario_dir.join("scenario.log"),
             &command,
             &status,
@@ -157,7 +157,7 @@ pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutpu
         scenarios: scenario_entries,
     };
     write_json_artifact(&manifest_path, &manifest)?;
-    homeboy::core::trace_compare::write_compare_bundle_text(
+    crate::commands::trace::compare_artifacts::write_compare_bundle_text(
         &readme_path,
         &render_compare_bundle_readme(&manifest),
     )?;
@@ -181,7 +181,7 @@ pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutpu
         cells,
     };
     write_json_artifact(&bundle_json_path, &output)?;
-    homeboy::core::trace_compare::write_compare_bundle_text(
+    crate::commands::trace::compare_artifacts::write_compare_bundle_text(
         &summary_path,
         &super::output::render_scenario_matrix_markdown(&output),
     )?;
