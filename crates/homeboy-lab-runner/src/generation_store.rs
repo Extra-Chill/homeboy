@@ -1,7 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
@@ -107,6 +107,8 @@ pub(crate) fn write_durable_json<T: serde::Serialize>(
 /// Serialize read-modify-write registry updates independently for each runner.
 /// A status reconciliation and `/exec` acceptance can arrive concurrently.
 fn with_registry_lock<T>(runner_id: &str, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+    const LOCK_RETRY: Duration = Duration::from_millis(25);
     let lock_path = path(runner_id)?.with_extension("lock");
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
@@ -127,11 +129,35 @@ fn with_registry_lock<T>(runner_id: &str, operation: impl FnOnce() -> Result<T>)
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(Error::internal_io(
-                std::io::Error::last_os_error().to_string(),
-                Some("lock generation registry".to_string()),
-            ));
+        let deadline = Instant::now() + LOCK_TIMEOUT;
+        loop {
+            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some("lock generation registry".to_string()),
+                ));
+            }
+            if Instant::now() >= deadline {
+                let mut error = Error::internal_io(
+                    format!(
+                        "timed out after {}ms waiting for runner generation registry lock",
+                        LOCK_TIMEOUT.as_millis()
+                    ),
+                    Some("lock generation registry".to_string()),
+                );
+                error.details = serde_json::json!({
+                    "kind": "runner_generation_lock_timeout",
+                    "runner_id": runner_id,
+                    "timeout_ms": LOCK_TIMEOUT.as_millis(),
+                });
+                error.retryable = Some(true);
+                return Err(error);
+            }
+            std::thread::sleep(LOCK_RETRY);
         }
     }
     let result = operation();
@@ -1183,7 +1209,7 @@ pub(crate) fn record_reconnected_job_owner(
     runner_id: &str,
     session: &RunnerSession,
     job_id: &str,
-) -> Result<()> {
+) -> Result<RunnerSession> {
     let lease_id = session
         .remote_daemon_lease_id
         .as_deref()
@@ -1230,8 +1256,9 @@ pub(crate) fn record_reconnected_job_owner(
                 None,
             ));
         }
-        entry.endpoint = session.clone();
-        write(runner_id, &generations)
+        let replaced = std::mem::replace(&mut entry.endpoint, session.clone());
+        write(runner_id, &generations)?;
+        Ok(replaced)
     })
 }
 
@@ -2424,7 +2451,7 @@ mod tests {
     }
 
     #[test]
-    fn reattached_job_owner_updates_only_its_generation_endpoint() {
+    fn dropped_generation_a_reconnect_retains_one_owner_after_admission_rotates_to_b() {
         test_support::with_isolated_home(|_| {
             let stale = session("lease-stale", "daemon-stale", Some(101));
             let fresh = session("lease-fresh", "daemon-fresh", Some(202));
@@ -2442,8 +2469,12 @@ mod tests {
             reattached.local_url = Some("http://127.0.0.1:49152".to_string());
             reattached.local_port = Some(49152);
             reattached.tunnel_pid = Some(303);
-            record_reconnected_job_owner("runner-a", &reattached, "job-stale")
+            let replaced = record_reconnected_job_owner("runner-a", &reattached, "job-stale")
                 .expect("retain reattached owner");
+            assert_eq!(
+                replaced, stale,
+                "the dropped generation-A endpoint is superseded"
+            );
 
             assert_eq!(
                 job_session("runner-a", "job-stale", Some(&fresh)).expect("route stale job"),

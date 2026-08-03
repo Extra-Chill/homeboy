@@ -1527,6 +1527,9 @@ where
         match fetch_daemon_job(client, &endpoint, job_id) {
             Ok(job) => return Ok((job, endpoint)),
             Err(err) => {
+                if !daemon_poll_transport_was_lost(&err) {
+                    return Err(err);
+                }
                 if let Some(refreshed_endpoint) = reload_endpoint()? {
                     if refreshed_endpoint != endpoint {
                         endpoint = refreshed_endpoint;
@@ -1545,6 +1548,17 @@ where
             }
         }
     }
+}
+
+pub(super) fn daemon_poll_transport_was_lost(error: &Error) -> bool {
+    matches!(
+        error
+            .details
+            .pointer("/daemon_transport_error/kind")
+            .and_then(Value::as_str),
+        Some("connect" | "timeout" | "body_decode")
+    ) || (error.details.get("http_status").is_none()
+        && super::super::daemon_health::runner_daemon_health_failure(error).is_some())
 }
 
 fn refreshed_daemon_endpoint(

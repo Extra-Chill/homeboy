@@ -1695,8 +1695,31 @@ pub(crate) fn reconnect_job_owner_for_polling(
     runner_id: &str,
     job_id: &str,
 ) -> Result<RunnerSession> {
+    let _lease = homeboy_core::runtime_promotion::acquire_waiting_for_compatible(
+        "runner durable job tunnel recovery",
+        format!("{runner_id}:{job_id}"),
+        DIRECT_TUNNEL_RECOVERY_WAIT,
+        super::lab_selection::emit_runtime_promotion_wait,
+    )?;
+    let legacy = read_session_or_live_peer(runner_id)?;
+    if let Some(session) = super::generation_store::job_session(runner_id, job_id, legacy.as_ref())?
+    {
+        if session_is_live(&session) {
+            return Ok(session);
+        }
+    }
     let session = reconnect_job_owner(runner_id, job_id)?;
-    super::generation_store::record_reconnected_job_owner(runner_id, &session, job_id)?;
+    let replaced =
+        match super::generation_store::record_reconnected_job_owner(runner_id, &session, job_id) {
+            Ok(replaced) => replaced,
+            Err(error) => {
+                close_reconnected_job_log_owner(&session);
+                return Err(error);
+            }
+        };
+    if replaced.tunnel_pid != session.tunnel_pid {
+        close_reconnected_job_log_owner(&replaced);
+    }
     Ok(session)
 }
 
