@@ -853,47 +853,43 @@ fn compact_status_prioritizes_dirty_controller_before_runner_convergence() {
 #[test]
 fn runner_status_actions_preserve_runner_ids_for_every_admission_state() {
     let cases = [
-        (
-            "disconnected",
-            disconnected_report(),
-            Some("homeboy runner connect homeboy-lab"),
-        ),
-        (
-            "stale",
-            stale_report(),
-            Some("homeboy runner refresh-homeboy homeboy-lab --reconnect"),
-        ),
+        ("disconnected", disconnected_report(), None),
+        ("stale", stale_report(), Some("c8a6673b6abc")),
         ("active-job", active_job_report(), None),
         ("connected", connected_report(), None),
-        (
-            "version-skew",
-            version_skew_report(),
-            Some("homeboy runner refresh-homeboy homeboy-lab --reconnect"),
-        ),
+        ("version-skew", version_skew_report(), Some("c8a6673b6abc")),
     ];
 
-    for (state, report, compact_action) in cases {
+    for (state, report, pinned_ref) in cases {
         let admission = report.admission_summary(0);
-        assert_eq!(admission.next_action.as_deref(), compact_action, "{state}");
-
-        let action = report.status_action();
-        let mut argv = vec!["homeboy".to_string()];
-        argv.extend(action.args.clone());
-        Cli::try_parse_from(&argv).unwrap_or_else(|error| {
-            panic!("{state} status action must satisfy the CLI contract: {error}")
-        });
-
         let operator = operator_summary(&report);
-        assert_eq!(operator.next_action, action.render_command(), "{state}");
-        if let Some(compact_action) = compact_action {
+
+        if let Some(compact_action) = admission.next_action.as_deref() {
             assert_eq!(operator.next_action, compact_action, "{state}");
+            assert_rendered_runner_action_parses(state, compact_action, pinned_ref);
         }
+        assert_rendered_runner_action_parses(state, &operator.next_action, pinned_ref);
     }
+}
+
+fn assert_rendered_runner_action_parses(state: &str, command: &str, pinned_ref: Option<&str>) {
+    let argv = shlex::split(command)
+        .unwrap_or_else(|| panic!("{state} action must be valid shell text: {command}"));
+    assert_eq!(argv.first().map(String::as_str), Some("homeboy"), "{state}");
+    assert!(argv.iter().any(|arg| arg == "homeboy lab"), "{state}");
+    if let Some(pinned_ref) = pinned_ref {
+        assert!(
+            argv.windows(2).any(|args| args == ["--ref", pinned_ref]),
+            "{state}"
+        );
+    }
+    Cli::try_parse_from(&argv)
+        .unwrap_or_else(|error| panic!("{state} action must satisfy the CLI contract: {error}"));
 }
 
 fn connected_report() -> RunnerStatusReport {
     RunnerStatusReport {
-        runner_id: "homeboy-lab".to_string(),
+        runner_id: "homeboy lab".to_string(),
         connected: true,
         state: runner::RunnerSessionState::Connected,
         session: None,
@@ -928,11 +924,11 @@ fn active_job_report() -> RunnerStatusReport {
 fn stale_report() -> RunnerStatusReport {
     let mut report = connected_report();
     report.stale_daemon = Some(homeboy::runner::runners::RunnerStaleDaemonWarning::new(
-        "homeboy-lab",
+        "homeboy lab",
         "0.327.7".to_string(),
         "0.327.8".to_string(),
         None,
-        None,
+        Some("homeboy 0.327.8+c8a6673b6abc".to_string()),
     ));
     report
 }
@@ -941,7 +937,7 @@ fn version_skew_report() -> RunnerStatusReport {
     let mut report = stale_report();
     report.stale_daemon = report.stale_daemon.map(|warning| {
         warning.with_controller_compatibility(
-            "homeboy-lab",
+            "homeboy lab",
             "0.327.9".to_string(),
             "homeboy 0.327.9+abcdef123456".to_string(),
             false,

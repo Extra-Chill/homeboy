@@ -721,11 +721,7 @@ impl RunnerStatusReport {
         if !self.is_connected() {
             Some(crate::daemon_repair::connect_action(&self.runner_id))
         } else if let Some(warning) = &self.stale_daemon {
-            warning.recovery_actions.first().cloned().or_else(|| {
-                Some(crate::daemon_repair::refresh_homeboy_action(
-                    &self.runner_id,
-                ))
-            })
+            warning.primary_recovery_action()
         } else if self.active_job_state != RunnerActiveJobState::Available {
             Some(status_action(&self.runner_id))
         } else {
@@ -961,7 +957,9 @@ mod status_serialization_tests {
             job_command_binary_version: "0.299.0".to_string(),
             active_daemon_control_plane_build_identity: None,
             job_command_binary_build_identity: None,
-            refresh_command: "homeboy runner refresh-homeboy homeboy-lab".to_string(),
+            refresh_command:
+                "homeboy runner refresh-homeboy homeboy-lab --ref c8a6673b6abc --reconnect"
+                    .to_string(),
             stale_runtime_paths: Vec::new(),
             changed_runtime_paths: Vec::new(),
             message: "stale".to_string(),
@@ -974,13 +972,10 @@ mod status_serialization_tests {
             !summary.accepting_jobs,
             "a stale daemon must not admit work"
         );
-        assert!(
-            summary
-                .next_action
-                .as_deref()
-                .is_some_and(|a| a.contains("refresh-homeboy")),
-            "stale daemon points at refresh: {:?}",
-            summary.next_action
+        assert_eq!(
+            summary.next_action.as_deref(),
+            Some("homeboy runner refresh-homeboy homeboy-lab --ref c8a6673b6abc --reconnect"),
+            "the legacy serialized recovery remains the action source when argv is unavailable"
         );
     }
 
@@ -1177,6 +1172,18 @@ impl RunnerStaleDaemonWarning {
         self.recovery_actions = actions;
     }
 
+    /// The first recovery step expressed as an executable action.
+    ///
+    /// Older persisted warnings can have only `refresh_command`. Preserve that
+    /// serialized command, including a pinned ref, by tokenizing it into argv
+    /// instead of replacing it with a newly composed recovery command.
+    fn primary_recovery_action(&self) -> Option<ExecutableAction> {
+        self.recovery_actions
+            .first()
+            .cloned()
+            .or_else(|| action_from_refresh_command(&self.refresh_command))
+    }
+
     pub fn with_controller_compatibility(
         mut self,
         runner_id: &str,
@@ -1304,6 +1311,39 @@ impl RunnerStaleDaemonWarning {
         }
         self
     }
+}
+
+fn action_from_refresh_command(command: &str) -> Option<ExecutableAction> {
+    if command.trim().is_empty() {
+        return None;
+    }
+    if let Some(argv) = shlex::split(command) {
+        if let Some((program, args)) = argv.split_first() {
+            if program == "homeboy"
+                && !args
+                    .iter()
+                    .any(|arg| matches!(arg.as_str(), "&&" | ";" | "|"))
+            {
+                return Some(ExecutableAction::new(
+                    "runner.stale_recovery",
+                    "recover stale runner daemon",
+                    program,
+                    args.iter().cloned(),
+                    ActionSafety::Mutating,
+                ));
+            }
+        }
+    }
+    // Preserve a legacy chained recovery verbatim. Its shell form is already
+    // the published recovery contract; wrapping it avoids silently selecting a
+    // new, unpinned command when no typed steps were persisted.
+    Some(ExecutableAction::new(
+        "runner.stale_recovery",
+        "recover stale runner daemon",
+        "sh",
+        ["-lc", command],
+        ActionSafety::Mutating,
+    ))
 }
 
 /// The recovery for an identity-drifted runner daemon, as argv.
