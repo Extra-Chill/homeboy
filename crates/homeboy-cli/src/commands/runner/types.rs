@@ -353,7 +353,7 @@ pub enum RunnerCommandOutput {
     Lifecycle(lifecycle::RunnerLifecycleOutput),
     Job(RunnerJobOutput),
     BrokerJob(RunnerBrokerJobOutput),
-    RefreshHomeboy(homeboy::runner::runners::HomeboyBinaryRefreshOutput),
+    RefreshHomeboy(RunnerRefreshHomeboyCommandOutput),
     DevSync(homeboy::runner::runners::RunnerDevSyncOutput),
     CachePrune(homeboy::runner::runners::RunnerBinaryCachePruneOutput),
     Worker(ReverseRunnerWorkerOutput),
@@ -366,6 +366,17 @@ pub enum RunnerCommandOutput {
 pub struct RunnerExecutionCommandOutput {
     #[serde(flatten)]
     pub output: RunnerExecOutput,
+    #[serde(
+        rename = "_homeboy_actionable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub actionable: Option<CommandActionableMetadata>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerRefreshHomeboyCommandOutput {
+    #[serde(flatten)]
+    pub output: homeboy::runner::runners::HomeboyBinaryRefreshOutput,
     #[serde(
         rename = "_homeboy_actionable",
         skip_serializing_if = "Option::is_none"
