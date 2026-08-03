@@ -86,8 +86,8 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     let run_id = &target.run_id;
     // Terminal inspection is a durable-local read. Reconciliation has its own
     // explicit command so an unavailable runner cannot hold status hostage.
-    let record = match agent_task_service_direct::persisted_status(run_id) {
-        Ok(record) => record,
+    let durable_read = match agent_task_lifecycle::durable_local_read(run_id) {
+        Ok(read) => read,
         Err(error) if is_missing_agent_task_run_metadata_error(&error) => {
             if let Some(remediation) = agent_task_service::offloaded_status_remediation(run_id)? {
                 return Ok((remediation, 1));
@@ -96,6 +96,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
         }
         Err(error) => return Err(error),
     };
+    let record = durable_read.record;
     let runner_probe = runner_probe_projection(&agent_task_lifecycle::runner_probe_plan(
         &record,
         agent_task_lifecycle::AgentTaskStatusOptions {
@@ -112,6 +113,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
         }
     }
     let mut value = serde_json::to_value(&record).unwrap_or(Value::Null);
+    attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
     let acceptance_is_actionable = record.state
         == agent_task_lifecycle::AgentTaskRunState::Succeeded
         && record
@@ -162,6 +164,21 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     attach_runner_probe(&mut summary, &runner_probe);
     attach_agent_task_status_actionable(&mut summary, run_id);
     Ok((summary, 0))
+}
+
+fn attach_durable_read_availability(
+    value: &mut Value,
+    unavailable_sources: &[agent_task_lifecycle::AgentTaskDurableReadUnavailable],
+) {
+    if let Value::Object(map) = value {
+        map.insert(
+            "durable_read".to_string(),
+            json!({
+                "phase": "controller_local",
+                "unavailable_sources": unavailable_sources,
+            }),
+        );
+    }
 }
 
 fn attach_full_status_candidate(
@@ -707,8 +724,9 @@ pub(super) fn artifacts(args: StatusArgs) -> CmdResult<Value> {
 pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
     let target = resolve_cook_reader_target(&args.run_id)?;
     let run_id = &target.run_id;
+    let durable_read = agent_task_lifecycle::durable_local_read(run_id)?;
     let artifacts = agent_task_service::artifacts(run_id)?;
-    let aggregate = completed_run_aggregate(run_id).transpose()?;
+    let aggregate = durable_read.aggregate;
     let failed_tasks = failed_task_statuses(aggregate.as_ref());
     let plan = agent_task_lifecycle::load_plan(run_id).ok();
 
@@ -770,6 +788,7 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
     if let Some(selection) = target.selection {
         value["candidate_selection"] = selection;
     }
+    attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
     if !args.full {
         attach_collection_budget(
             &mut value,
@@ -2016,14 +2035,8 @@ fn enrich_with_diagnostic_summary(value: &mut Value, run_id: &str) -> homeboy::c
 pub(crate) fn completed_run_aggregate(
     run_id: &str,
 ) -> Option<homeboy::core::Result<AgentTaskAggregate>> {
-    match agent_task_lifecycle::aggregate_source(run_id) {
-        Ok((raw, _path)) => Some(serde_json::from_str(&raw).map_err(|error| {
-            homeboy::core::Error::validation_invalid_json(
-                error,
-                Some("agent-task aggregate".to_string()),
-                Some(raw),
-            )
-        })),
+    match agent_task_lifecycle::durable_local_read(run_id) {
+        Ok(snapshot) => snapshot.aggregate.map(Ok),
         Err(error) if error.code == homeboy::core::ErrorCode::ValidationInvalidArgument => None,
         Err(error) => Some(Err(error)),
     }

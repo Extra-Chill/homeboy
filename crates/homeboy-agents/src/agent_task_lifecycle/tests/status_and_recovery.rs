@@ -2232,6 +2232,91 @@ fn a_caller_can_opt_a_runner_backed_status_out_of_every_runner_probe() {
 }
 
 #[test]
+fn durable_aggregate_read_returns_partial_local_evidence_without_a_runner_probe() {
+    super::ensure_runner_continuation_provider_reset_hook();
+    with_isolated_home(|_| {
+        let interactions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _provider = RunnerContinuationTestGuard::install(Box::new(CountingRunnerProvider {
+            interactions: interactions.clone(),
+        }));
+
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "runner-backed-durable-read",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-11166",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("detached handoff recorded");
+
+        let snapshot =
+            durable_local_read("runner-backed-durable-read").expect("durable local read resolves");
+        let artifacts =
+            artifacts("runner-backed-durable-read").expect("durable local artifacts resolve");
+
+        assert_eq!(snapshot.record.run_id, "runner-backed-durable-read");
+        assert!(snapshot.aggregate.is_none());
+        assert_eq!(snapshot.unavailable_sources.len(), 1);
+        assert_eq!(snapshot.unavailable_sources[0].source, "aggregate");
+        assert_eq!(
+            snapshot.unavailable_sources[0].reason_code,
+            "durable_read.unavailable"
+        );
+        assert_eq!(artifacts.run_id, "runner-backed-durable-read");
+        assert_eq!(
+            interactions.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "aggregate readers must return local partial evidence without probing an unavailable runner"
+        );
+    });
+}
+
+#[test]
+fn durable_aggregate_read_rejects_an_oversized_file_before_deserializing_it() {
+    with_isolated_home(|_| {
+        let record =
+            submit_plan(&test_plan(), Some("oversized-durable-aggregate")).expect("durable record");
+        let path = store::aggregate_path(&record.run_id).expect("aggregate path");
+        std::fs::write(
+            &path,
+            vec![b'x'; (store::DURABLE_AGGREGATE_MAX_BYTES + 1) as usize],
+        )
+        .expect("oversized aggregate fixture");
+
+        let snapshot = durable_local_read(&record.run_id).expect("partial durable read");
+
+        assert_eq!(snapshot.record.run_id, record.run_id);
+        assert!(snapshot.aggregate.is_none());
+        assert_eq!(snapshot.unavailable_sources.len(), 1);
+        assert_eq!(snapshot.unavailable_sources[0].source, "aggregate");
+        assert_eq!(
+            snapshot.unavailable_sources[0].reason_code,
+            "durable_read.oversized"
+        );
+    });
+}
+
+#[test]
+fn durable_aggregate_read_returns_within_the_readonly_sqlite_contention_budget() {
+    with_isolated_home(|_| {
+        let record = submit_plan(&test_plan(), Some("contended-durable-read")).expect("record");
+        let path = homeboy_core::observation::store::database_path().expect("database path");
+        let lock = rusqlite::Connection::open(path).expect("lock connection");
+        lock.execute_batch(
+            "PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; UPDATE runs SET status = status;",
+        )
+        .expect("exclusive lock");
+
+        let started = std::time::Instant::now();
+        let error = durable_local_read(&record.run_id).expect_err("contended read fails bounded");
+
+        assert_eq!(error.code, ErrorCode::ObservationStoreBusy);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    });
+}
+
+#[test]
 fn runner_backed_logs_read_persisted_events_without_a_runner_probe() {
     super::ensure_runner_continuation_provider_reset_hook();
     with_isolated_home(|_| {

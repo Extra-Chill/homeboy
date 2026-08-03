@@ -724,6 +724,11 @@ fn evidence_command_hydrates_homeboy_and_file_refs_with_filters_and_redaction() 
 
         assert_eq!(exit_code, 0);
         assert_eq!(value["schema"], "homeboy/agent-task-evidence/v1");
+        assert_eq!(value["durable_read"]["phase"], "controller_local");
+        assert!(value["durable_read"]["unavailable_sources"]
+            .as_array()
+            .expect("durable source availability")
+            .is_empty());
         assert_eq!(value["count"], 4);
         let entries = value["evidence"].as_array().expect("evidence array");
         let file_entry = entries

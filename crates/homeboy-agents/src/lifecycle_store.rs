@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 
 #[cfg(test)]
@@ -114,6 +115,55 @@ pub(super) fn read_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
     }
 }
 
+/// Maximum controller-local aggregate size accepted by a read-only inspection.
+///
+/// Aggregates are compact lifecycle projections, not artifact payloads. Keeping
+/// this cap below the general output limits makes a malformed or accidentally
+/// redirected aggregate fail as partial evidence rather than consuming an
+/// unbounded amount of memory in `status`, `evidence`, or `review`.
+pub(super) const DURABLE_AGGREGATE_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Read the controller-owned aggregate without consulting the mirrored
+/// observation row. The reader checks metadata before allocating and takes one
+/// extra byte while reading to defend against a file changing after `metadata`.
+pub(super) fn read_aggregate_bounded(run_id: &str) -> Result<AgentTaskAggregate> {
+    let path = aggregate_path(run_id)?;
+    let metadata = fs::metadata(&path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    if metadata.len() > DURABLE_AGGREGATE_MAX_BYTES {
+        let mut error = Error::internal_io(
+            format!(
+                "aggregate exceeds durable read size budget: {} bytes exceeds {} bytes",
+                metadata.len(),
+                DURABLE_AGGREGATE_MAX_BYTES
+            ),
+            Some(path.display().to_string()),
+        );
+        error.details = json!({ "reason_code": "durable_read.oversized" });
+        return Err(error);
+    }
+    let mut file = fs::File::open(&path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    let mut raw = Vec::with_capacity(metadata.len() as usize);
+    file.by_ref()
+        .take(DURABLE_AGGREGATE_MAX_BYTES + 1)
+        .read_to_end(&mut raw)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    if raw.len() as u64 > DURABLE_AGGREGATE_MAX_BYTES {
+        let mut error = Error::internal_io(
+            format!(
+                "aggregate exceeds durable read size budget while reading: more than {} bytes",
+                DURABLE_AGGREGATE_MAX_BYTES
+            ),
+            Some(path.display().to_string()),
+        );
+        error.details = json!({ "reason_code": "durable_read.oversized" });
+        return Err(error);
+    }
+    serde_json::from_slice(&raw)
+        .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))
+}
+
 pub(super) fn aggregate_path(run_id: &str) -> Result<PathBuf> {
     Ok(run_dir(run_id)?.join("aggregate.json"))
 }
@@ -227,6 +277,21 @@ fn write_record_with_aggregate_without_workspace_authority(
 
 pub(super) fn read_record(run_id: &str) -> Result<AgentTaskRunRecord> {
     let store = ObservationStore::open_initialized()?;
+    let run = store.get_run(run_id)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "run_id",
+            format!("agent-task run record not found: {run_id}"),
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    record_from_run(&run)
+}
+
+/// Read one durable record under the observation store's read-only busy budget.
+/// Inspection must not initialize, migrate, or contend like a writer.
+pub(super) fn read_record_bounded(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let store = ObservationStore::open_readonly()?;
     let run = store.get_run(run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "run_id",

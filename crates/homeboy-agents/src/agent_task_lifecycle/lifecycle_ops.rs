@@ -1750,7 +1750,7 @@ pub fn status_with_options(
 /// wedged runner must never hide state already persisted by the controller.
 pub fn persisted_status(run_id: &str) -> Result<AgentTaskRunRecord> {
     let resolved_run_id = resolve_run_id(run_id)?;
-    store::read_record(&resolved_run_id)
+    store::read_record_bounded(&resolved_run_id)
 }
 
 /// Refresh accepted runner handoffs and expire unbound controller handoffs before
@@ -2306,9 +2306,10 @@ pub fn find_unbound_cook_retry_successor(
 /// authority to reuse whatever happens to exist at that path.
 
 pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
-    let record = status(run_id)?;
+    let snapshot = durable_local_read(run_id)?;
+    let record = snapshot.record;
     let run_id = record.run_id.clone();
-    let aggregate = store::read_aggregate(&run_id).ok();
+    let aggregate = snapshot.aggregate;
     let latest_executor_evidence = record.latest_executor_evidence.as_ref();
     Ok(AgentTaskRunArtifacts {
         schema: schemas::RUN_ARTIFACTS.to_string(),
@@ -2319,6 +2320,58 @@ pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
             .map(|aggregate| aggregate_artifacts(Some(&aggregate)))
             .unwrap_or_default(),
         evidence_refs: aggregate_evidence_refs(aggregate.as_ref(), latest_executor_evidence),
+    })
+}
+
+/// A bounded controller-local view used by read-only aggregate consumers.
+///
+/// It intentionally never calls [`status`], which can reconcile a live runner.
+/// The observation-store record read uses its read-only 750ms SQLite busy bound;
+/// aggregate failure is represented in `unavailable_sources` so callers can
+/// still render the durable identity and phase they did obtain.
+#[derive(Debug, Clone)]
+pub struct AgentTaskDurableLocalRead {
+    pub record: AgentTaskRunRecord,
+    pub aggregate: Option<AgentTaskAggregate>,
+    pub unavailable_sources: Vec<AgentTaskDurableReadUnavailable>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentTaskDurableReadUnavailable {
+    pub source: &'static str,
+    pub reason_code: &'static str,
+    pub detail: String,
+}
+
+/// Read the durable controller record and its local aggregate within the
+/// read-only store budget, without runner liveness reconciliation.
+pub fn durable_local_read(run_id: &str) -> Result<AgentTaskDurableLocalRead> {
+    let record = persisted_status(run_id)?;
+    let aggregate = match store::read_aggregate_bounded(&record.run_id) {
+        Ok(aggregate) => Some(aggregate),
+        Err(error) => {
+            return Ok(AgentTaskDurableLocalRead {
+                record,
+                aggregate: None,
+                unavailable_sources: vec![AgentTaskDurableReadUnavailable {
+                    source: "aggregate",
+                    reason_code: if error.details["reason_code"] == "durable_read.oversized" {
+                        "durable_read.oversized"
+                    } else {
+                        "durable_read.unavailable"
+                    },
+                    detail: format!(
+                        "The controller-local aggregate was unavailable within the durable read; the record below remains authoritative partial evidence: {}",
+                        error.message
+                    ),
+                }],
+            });
+        }
+    };
+    Ok(AgentTaskDurableLocalRead {
+        record,
+        aggregate,
+        unavailable_sources: Vec::new(),
     })
 }
 

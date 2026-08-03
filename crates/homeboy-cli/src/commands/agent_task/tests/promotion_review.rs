@@ -118,6 +118,11 @@ fn review_reports_completed_aggregate_and_promotion_hints() {
 
         assert_eq!(exit_code, 0);
         assert_eq!(value["state"], "succeeded");
+        assert_eq!(value["durable_read"]["phase"], "controller_local");
+        assert!(value["durable_read"]["unavailable_sources"]
+            .as_array()
+            .expect("durable source availability")
+            .is_empty());
         assert_eq!(value["aggregate_review"]["summary"]["apply_candidates"], 1);
         assert_eq!(value["artifacts"]["artifacts"][0]["id"], "patch-a");
         assert_eq!(value["promotion_candidates"][0]["task_id"], "task-a");

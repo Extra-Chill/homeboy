@@ -729,6 +729,7 @@ dependencies = [
  "libc",
  "regex",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_json_path",

@@ -180,7 +180,10 @@ impl TryFrom<FinalizePrEvidenceArgs> for AgentTaskPrEvidence {
 pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
     let target = super::status::resolve_cook_reader_target(&args.run_id)?;
     let run_id = &target.run_id;
-    let record = agent_task_lifecycle::status(run_id)?;
+    // Review is an aggregate reader. Its durable controller projection remains
+    // useful even when an unrelated runner is unavailable.
+    let durable_read = agent_task_lifecycle::durable_local_read(run_id)?;
+    let record = durable_read.record;
     // A review that names a target worktree is preparing a promotion handoff.
     // Materialize recovered runner artifacts before rendering its command.
     if args.to_worktree.is_some() {
@@ -188,10 +191,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
     }
     let log = agent_task_lifecycle::logs(run_id)?;
     let artifacts = agent_task_lifecycle::artifacts(run_id)?;
-    let aggregate_source = completed_run_aggregate_source(run_id).transpose()?;
-    let aggregate = aggregate_source
-        .as_ref()
-        .map(|(aggregate, _path)| aggregate);
+    let aggregate = durable_read.aggregate.as_ref();
     let aggregate_review =
         aggregate.map(|aggregate| AgentTaskAggregateReport::from(aggregate.outcomes.clone()));
     let diagnostic_summary = aggregate.and_then(super::diagnostic_summary_from_aggregate);
@@ -230,7 +230,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
                     promotion_candidates(
                         &record.run_id,
                         Some(&record.run_id),
-                        aggregate_source.as_ref().map(|(_, path)| path.as_str()),
+                        record.aggregate_path.as_deref(),
                         args.to_worktree.as_deref(),
                         cook_base.as_deref(),
                         args.provider_command.as_deref(),
@@ -270,6 +270,10 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
             "transport": {
                 "authoritative": "homeboy-agent-task-lifecycle",
                 "chat_state_required": false
+            },
+            "durable_read": {
+                "phase": "controller_local",
+                "unavailable_sources": durable_read.unavailable_sources,
             }
     });
     if let Some(selection) = target.selection {
@@ -1231,26 +1235,6 @@ pub(crate) fn default_protected_branches() -> Vec<String> {
         "master".to_string(),
         "trunk".to_string(),
     ]
-}
-
-fn completed_run_aggregate_source(
-    run_id: &str,
-) -> Option<homeboy::core::Result<(AgentTaskAggregate, String)>> {
-    match agent_task_lifecycle::aggregate_source(run_id) {
-        Ok((raw, path)) => Some(
-            serde_json::from_str(&raw)
-                .map(|aggregate| (aggregate, path.display().to_string()))
-                .map_err(|error| {
-                    homeboy::core::Error::validation_invalid_json(
-                        error,
-                        Some("agent-task aggregate".to_string()),
-                        Some(raw),
-                    )
-                }),
-        ),
-        Err(error) if error.code == homeboy::core::ErrorCode::ValidationInvalidArgument => None,
-        Err(error) => Some(Err(error)),
-    }
 }
 
 fn promotion_candidates(

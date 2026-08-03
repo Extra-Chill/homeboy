@@ -9,7 +9,9 @@ use crate::cli_surface::{
     Commands, DynamicCommandDescriptor, ExtensionCommandArgContract, ExtensionCommandArgsContract,
     ExtensionCommandHealth, ExtensionCommandManifest,
 };
-use crate::command_capability::{classify as classify_command_capability, CommandCapability};
+use crate::command_capability::{
+    classify as classify_command_capability, requires_startup_reconciliation, CommandCapability,
+};
 use crate::commands;
 use crate::commands::cli;
 use crate::commands::output_runtime;
@@ -356,7 +358,7 @@ impl CliRuntime {
         // Recover completed generic runner-exec jobs before a mutating invocation
         // can evict their evidence. Read-only commands must not mutate durable
         // state during startup.
-        if command_capability == CommandCapability::Mutation
+        if requires_startup_reconciliation(&normalized)
             && !normalized
                 .windows(2)
                 .any(|args| args == ["agent-task", "promotion-provider"])
