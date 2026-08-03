@@ -167,8 +167,17 @@ on:
       HOMEBOY_APP_PRIVATE_KEY:
         required: false
 
+# A called workflow cannot request a permission the CALLER has not granted —
+# GitHub fails the whole run at startup, before any job, with no usable error
+# in the API. Adding a scope here is therefore a breaking change for every
+# consumer that does not already grant it, and it presents to them as
+# "no checks reported" rather than as a failure.
+#
+# `actions: read` was added in #313 and silently disabled CI in every consumer
+# repo from v2.10.0 onward. It was not needed: the only actions-scoped step is
+# `actions/download-artifact` reading artifacts from its OWN run, which the
+# default token can already do. See #327.
 permissions:
-  actions: read
   contents: write
   pull-requests: write
   issues: write
