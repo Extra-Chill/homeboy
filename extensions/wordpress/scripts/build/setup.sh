@@ -38,6 +38,43 @@ install_wp_codebox() {
         return 0
     }
 
+    probe_wp_codebox_runtime() {
+        local bin_path="$1"
+
+        # `commands` verifies the CLI entrypoint without starting a WordPress workload.
+        if ! "${bin_path}" commands >/dev/null 2>&1; then
+            echo "WP Codebox CLI runtime probe failed: ${bin_path}" >&2
+            return 1
+        fi
+
+        return 0
+    }
+
+    probe_wp_codebox_native_runtime() {
+        local dependency_root="$1"
+
+        # Resolve from WP Codebox's dependency tree so Homeboy's dependencies
+        # cannot satisfy this check. Requiring sharp loads its platform binary.
+        if ! node -e 'const root=process.argv[1]; require(require.resolve("sharp", { paths: [ root ] }));' "${dependency_root}" >/dev/null 2>&1; then
+            echo "WP Codebox native runtime probe failed to load sharp from: ${dependency_root}" >&2
+            return 1
+        fi
+
+        return 0
+    }
+
+    wp_codebox_dependency_root() {
+        local bin_path="$1"
+        local install_root="${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
+        local core_module="${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}"
+
+        case "${core_module}" in
+            "${install_root}/source/node_modules/"*) printf '%s' "${install_root}/source" ;;
+            "${install_root}/release/wp-codebox-cli/node_modules/"*) printf '%s' "${install_root}/release/wp-codebox-cli" ;;
+            *) dirname "${bin_path}" ;;
+        esac
+    }
+
     first_non_empty_env() {
         local name
         for name in "$@"; do
@@ -76,7 +113,7 @@ install_wp_codebox() {
             configured_core_module=1
         fi
 
-        if [ "${configured_bin}" -eq 1 ] && { [ "${configured_core_module}" -eq 1 ] || resolve_core_module_from_known_locations; }; then
+        if [ "${configured_bin}" -eq 1 ] && { [ "${configured_core_module}" -eq 1 ] || resolve_core_module_from_known_locations; } && probe_wp_codebox_runtime "${HOMEBOY_WP_CODEBOX_BIN}" && probe_wp_codebox_native_runtime "$(wp_codebox_dependency_root "${HOMEBOY_WP_CODEBOX_BIN}")"; then
             node "${EXTENSION_PATH}/scripts/build/persist-wp-codebox-overrides.mjs" "${EXTENSION_PATH}/wordpress.json"
             return 0
         fi
@@ -120,10 +157,10 @@ install_wp_codebox() {
 
     if [ "${source_install_requested}" -eq 0 ] && [ -n "${HOMEBOY_WP_CODEBOX_BIN:-}" ] && [ -x "${HOMEBOY_WP_CODEBOX_BIN}" ]; then
         echo "WP Codebox already configured: ${HOMEBOY_WP_CODEBOX_BIN}"
-        if resolve_core_module_from_known_locations; then
+        if resolve_core_module_from_known_locations && probe_wp_codebox_runtime "${HOMEBOY_WP_CODEBOX_BIN}" && probe_wp_codebox_native_runtime "$(wp_codebox_dependency_root "${HOMEBOY_WP_CODEBOX_BIN}")"; then
             return 0
         fi
-        echo "WP Codebox CLI is configured without a runtime core module; (re)installing source module" >&2
+        echo "WP Codebox CLI is configured without a ready runtime; (re)installing source module" >&2
     fi
 
     if [ "${source_install_requested}" -eq 0 ] && command -v wp-codebox >/dev/null 2>&1; then
@@ -131,10 +168,10 @@ install_wp_codebox() {
         detected_bin="$(command -v wp-codebox)"
         echo "WP Codebox already available: ${detected_bin}"
         write_github_env "HOMEBOY_WP_CODEBOX_BIN" "${detected_bin}"
-        if resolve_core_module_from_known_locations; then
+        if resolve_core_module_from_known_locations && probe_wp_codebox_runtime "${detected_bin}" && probe_wp_codebox_native_runtime "$(wp_codebox_dependency_root "${detected_bin}")"; then
             return 0
         fi
-        echo "WP Codebox CLI is available without a runtime core module; (re)installing source module" >&2
+        echo "WP Codebox CLI is available without a ready runtime; (re)installing source module" >&2
     fi
 
     local install_mode install_root bin_dir bin_path platform arch artifact_name download_url artifact_path extract_dir
@@ -184,11 +221,11 @@ EOF
             write_github_env "PATH" "${bin_dir}:${PATH}"
 
             echo "WP Codebox installed: ${bin_path}"
-            if resolve_core_module_from_known_locations; then
+            if resolve_core_module_from_known_locations && probe_wp_codebox_runtime "${bin_path}" && probe_wp_codebox_native_runtime "${extract_dir}/wp-codebox-cli"; then
                 return 0
             fi
 
-            echo "WP Codebox release artifact did not include a runtime core module; falling back to source install" >&2
+            echo "WP Codebox release artifact did not provide a ready runtime; falling back to source install" >&2
         fi
 
         if [ "${release_artifact_downloaded}" -eq 0 ]; then
@@ -212,6 +249,11 @@ EOF
     git -C "${repo_dir}" fetch --quiet origin "${ref}"
     git -C "${repo_dir}" checkout --quiet FETCH_HEAD
 
+    if [ ! -f "${repo_dir}/package-lock.json" ] && [ ! -f "${repo_dir}/npm-shrinkwrap.json" ]; then
+        echo "WP Codebox source install requires an npm lockfile (package-lock.json or npm-shrinkwrap.json) for deterministic npm ci: ${source}" >&2
+        exit 1
+    fi
+
     local source_sha
     source_sha="$(git -C "${repo_dir}" rev-parse HEAD)"
     export WP_CODEBOX_SOURCE_REF="${ref}"
@@ -219,7 +261,7 @@ EOF
     write_github_env "WP_CODEBOX_SOURCE_REF" "${ref}"
     write_github_env "WP_CODEBOX_SOURCE_SHA" "${source_sha}"
 
-    npm --prefix "${repo_dir}" install --quiet --no-fund --no-audit --omit=optional
+    npm --prefix "${repo_dir}" ci --quiet --no-fund --no-audit --include=optional
     npm --prefix "${repo_dir}" run build --silent
 
     resolve_core_module_from_known_locations || {
@@ -233,6 +275,15 @@ EOF
         echo "Built WP Codebox source did not contain an executable CLI at ${source_bin_path}" >&2
         exit 1
     fi
+
+    probe_wp_codebox_runtime "${source_bin_path}" || {
+        echo "Built WP Codebox source CLI runtime is not ready" >&2
+        exit 1
+    }
+    probe_wp_codebox_native_runtime "${repo_dir}" || {
+        echo "Built WP Codebox source native runtime is not ready" >&2
+        exit 1
+    }
 
     bin_path="${source_bin_path}"
 

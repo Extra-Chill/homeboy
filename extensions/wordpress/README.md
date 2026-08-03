@@ -805,6 +805,14 @@ The script resolves `runtime_bin` first, then legacy `HOMEBOY_WP_CODEBOX_BIN` or
 WP Codebox owns the health output, including JSON mode, binary/source checks,
 stale `recipe-run` process checks, and archive cache cleanup behavior.
 
+### Source hydration
+
+Source installs require the checked-out WP Codebox source to provide an npm
+lockfile (`package-lock.json` or `npm-shrinkwrap.json`). Homeboy hydrates it with
+`npm ci --include=optional`, which removes stale dependencies and installs the
+current platform's optional native packages before checking both the CLI and the
+`sharp` native runtime.
+
 ## Environment variables
 
 | Variable | Purpose |

@@ -16,7 +16,7 @@ OVERRIDE_GITHUB_ENV_FILE="${TMPDIR}/override-github-env"
 ARTIFACT_ROOT="${TMPDIR}/artifact-root"
 ARTIFACT_PATH="${TMPDIR}/wp-codebox-cli-linux-x64.tar.gz"
 
-mkdir -p "${FAKE_BIN}" "${HOME_DIR}" "${EXTENSION_DIR}/scripts/build" "${ARTIFACT_ROOT}/wp-codebox-cli/bin" "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist"
+mkdir -p "${FAKE_BIN}" "${HOME_DIR}" "${EXTENSION_DIR}/scripts/build" "${ARTIFACT_ROOT}/wp-codebox-cli/bin" "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist" "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/sharp"
 
 cat > "${EXTENSION_DIR}/scripts/build/persist-wp-codebox-overrides.mjs" <<'NODE'
 #!/usr/bin/env node
@@ -31,6 +31,8 @@ SH
 chmod +x "${ARTIFACT_ROOT}/wp-codebox-cli/bin/wp-codebox"
 printf '%s\n' 'module.exports = { fixture: true };' > "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js"
 printf '%s\n' 'module.exports = { runtimeContractManifest() { return {}; } };' > "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/contracts.js"
+printf '%s\n' 'module.exports = require("./native.js");' > "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/sharp/index.js"
+printf '%s\n' 'module.exports = { native: true };' > "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/sharp/native.js"
 tar -czf "${ARTIFACT_PATH}" -C "${ARTIFACT_ROOT}" wp-codebox-cli
 
 cat > "${FAKE_BIN}/curl" <<SH
@@ -69,6 +71,9 @@ case "$1" in
     clone)
         dest="${@: -1}"
         mkdir -p "${dest}/.git"
+        if [ "${FAKE_WP_CODEBOX_NO_LOCKFILE:-}" != "1" ]; then
+            printf '%s\n' '{}' > "${dest}/package-lock.json"
+        fi
         ;;
     -C)
         if [ "${3:-}" = "rev-parse" ] && [ "${4:-}" = "HEAD" ]; then
@@ -95,11 +100,18 @@ while [ "$#" -gt 0 ]; do
             prefix="$2"
             shift 2
             ;;
-        install)
-            if [[ " $* " != *" --omit=optional "* ]]; then
-                printf 'expected wp-codebox source install to omit optional dependencies: %s\n' "$*" >&2
+        ci)
+            if [[ " $* " != *" --include=optional "* ]]; then
+                printf 'expected wp-codebox source install to include optional dependencies: %s\n' "$*" >&2
                 exit 1
             fi
+            if [[ " $* " == *" --omit=optional "* ]]; then
+                printf 'wp-codebox source install must not omit optional dependencies: %s\n' "$*" >&2
+                exit 1
+            fi
+            mkdir -p "${prefix}/node_modules/sharp"
+            printf '%s\n' 'module.exports = require("./native.js");' > "${prefix}/node_modules/sharp/index.js"
+            printf '%s\n' 'module.exports = { native: true };' > "${prefix}/node_modules/sharp/native.js"
             exit 0
             ;;
         run)
@@ -195,13 +207,9 @@ if ! grep -q '^WP_CODEBOX_SOURCE_SHA=0123456789abcdef0123456789abcdef01234567$' 
     exit 1
 fi
 
-# Cold-cache regression: a later CI step picks up a cached wp-codebox CLI via
-# HOMEBOY_WP_CODEBOX_BIN, but HOMEBOY_WP_CODEBOX_CORE_MODULE did not survive the
-# step/process boundary. The runtime-core module is still on disk from the
-# earlier install. Setup must re-derive the core package module from the known install
-# locations instead of leaving it unset (which made the recipe loader hard-fail
-# with "@automattic/wp-codebox-core not found" and "No tests ran"). The CLI bin
-# is already present, so this path must NOT trigger a network install.
+# Cached native-runtime regression: `commands` can succeed while a lazy native
+# dependency is unavailable. Setup must probe sharp and rebuild from the source
+# lockfile instead of trusting the cached node_modules tree.
 COLD_HOME="${TMPDIR}/cold-home"
 COLD_INSTALL_DIR="${TMPDIR}/cold-install"
 COLD_GITHUB_ENV_FILE="${TMPDIR}/cold-github-env"
@@ -218,15 +226,8 @@ SH
 chmod +x "${COLD_BIN}"
 printf '%s\n' 'module.exports = { fixture: true };' > "${COLD_INSTALL_DIR}/source/node_modules/@automattic/wp-codebox-core/dist/index.js"
 printf '%s\n' 'module.exports = { runtimeContractManifest() { return {}; } };' > "${COLD_INSTALL_DIR}/source/node_modules/@automattic/wp-codebox-core/dist/contracts.js"
-
-# A network would be a hard failure here: the bin already exists, so no curl/git
-# install should run. Point curl/git at stubs that fail loudly if invoked.
-cat > "${FAKE_BIN}/curl-fail" <<'SH'
-#!/usr/bin/env bash
-printf 'cold-cache path must not download via curl: %s\n' "$*" >&2
-exit 1
-SH
-chmod +x "${FAKE_BIN}/curl-fail"
+mkdir -p "${COLD_INSTALL_DIR}/source/node_modules/sharp"
+printf '%s\n' 'module.exports = require("./native.js");' > "${COLD_INSTALL_DIR}/source/node_modules/sharp/index.js"
 
 (
     cd "${EXTENSION_DIR}"
@@ -235,6 +236,7 @@ chmod +x "${FAKE_BIN}/curl-fail"
     GITHUB_ENV="${COLD_GITHUB_ENV_FILE}" \
     HOMEBOY_WP_CODEBOX_BIN="${COLD_BIN}" \
     HOMEBOY_WP_CODEBOX_INSTALL_DIR="${COLD_INSTALL_DIR}" \
+    FAKE_WP_CODEBOX_RELEASE_MISSING="1" \
     bash "${ROOT_DIR}/scripts/build/setup.sh" > "${TMPDIR}/cold-setup.out"
 )
 
@@ -246,13 +248,41 @@ fi
 
 cold_core_module="$(grep '^HOMEBOY_WP_CODEBOX_CORE_MODULE=' "${COLD_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
 if [ "${cold_core_module}" != "${COLD_INSTALL_DIR}/source/node_modules/@automattic/wp-codebox-core/dist/contracts.js" ]; then
-    echo "Expected cold-cache setup to resolve the on-disk core package module, got: ${cold_core_module}" >&2
+    echo "Expected cold-cache setup to rebuild and export the runtime core module, got: ${cold_core_module}" >&2
     exit 1
 fi
 
-if grep -qi 'Installing WP Codebox CLI' "${TMPDIR}/cold-setup.out"; then
-    echo "Cold-cache path must not reinstall the CLI when a cached bin and module exist" >&2
+if ! grep -q 'Installing WP Codebox CLI' "${TMPDIR}/cold-setup.out"; then
+    echo "Broken cached runtime must be rebuilt instead of reused" >&2
     cat "${TMPDIR}/cold-setup.out" >&2
+    exit 1
+fi
+
+if ! node -e 'require(require.resolve("sharp", { paths: [ process.argv[1] ] }));' "${COLD_INSTALL_DIR}/source"; then
+    echo "Expected source hydration to restore the cached native runtime dependency" >&2
+    exit 1
+fi
+
+NO_LOCKFILE_OUTPUT="${TMPDIR}/no-lockfile.out"
+NO_LOCKFILE_ERROR="${TMPDIR}/no-lockfile.err"
+if (
+    cd "${EXTENSION_DIR}"
+    HOME="${TMPDIR}/no-lockfile-home" \
+    PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
+    GITHUB_ENV="${TMPDIR}/no-lockfile-github-env" \
+    HOMEBOY_WP_CODEBOX_INSTALL_MODE="source" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${TMPDIR}/no-lockfile-install" \
+    HOMEBOY_WP_CODEBOX_SOURCE="https://example.test/custom-wp-codebox.git" \
+    FAKE_WP_CODEBOX_NO_LOCKFILE="1" \
+    bash "${ROOT_DIR}/scripts/build/setup.sh" > "${NO_LOCKFILE_OUTPUT}" 2> "${NO_LOCKFILE_ERROR}"
+); then
+    echo "Source setup without a lockfile must fail" >&2
+    exit 1
+fi
+
+if ! grep -q 'WP Codebox source install requires an npm lockfile (package-lock.json or npm-shrinkwrap.json) for deterministic npm ci: https://example.test/custom-wp-codebox.git' "${NO_LOCKFILE_ERROR}"; then
+    echo "Expected a deterministic lockfile diagnostic for custom WP Codebox sources" >&2
+    cat "${NO_LOCKFILE_ERROR}" >&2
     exit 1
 fi
 
@@ -262,7 +292,8 @@ mkdir -p \
     "${STALE_ROOT}/packages/cli/dist" \
     "${STALE_ROOT}/packages/runtime-core/dist" \
     "${CURRENT_ROOT}/packages/cli/dist" \
-    "${CURRENT_ROOT}/packages/runtime-core/dist"
+    "${CURRENT_ROOT}/packages/runtime-core/dist" \
+    "${CURRENT_ROOT}/node_modules/sharp"
 
 cat > "${STALE_ROOT}/packages/cli/dist/index.js" <<'NODE'
 #!/usr/bin/env node
@@ -277,6 +308,8 @@ console.log('current wp-codebox');
 NODE
 chmod +x "${CURRENT_ROOT}/packages/cli/dist/index.js"
 printf '%s\n' 'module.exports = { runtimeContractManifest() { return { fixture: "current" }; } };' > "${CURRENT_ROOT}/packages/runtime-core/dist/index.js"
+printf '%s\n' 'module.exports = require("./native.js");' > "${CURRENT_ROOT}/node_modules/sharp/index.js"
+printf '%s\n' 'module.exports = { native: true };' > "${CURRENT_ROOT}/node_modules/sharp/native.js"
 
 (
     cd "${EXTENSION_DIR}"

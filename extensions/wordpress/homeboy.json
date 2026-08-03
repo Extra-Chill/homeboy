@@ -5,11 +5,13 @@
   "self_checks": {
     "lint": [
       "jq empty wordpress.json",
-      "bash -n scripts/build/install-composer-dependencies.sh scripts/test/test-runner.sh scripts/test/test-runner-wp-codebox.sh scripts/bench/bench-runner.sh scripts/bench/bench-runner-wp-codebox.sh scripts/doctor/wp-codebox-doctor.sh scripts/test/wp-codebox-doctor-smoke.sh tests/extension-composer-vendor-integrity-smoke.sh scripts/lint/eslint-dependency-tree-scope-smoke.sh",
+      "bash -n scripts/build/install-composer-dependencies.sh scripts/build/setup.sh scripts/build/setup-wp-codebox-smoke.sh scripts/build/update-wp-codebox-cache.sh scripts/build/update-wp-codebox-cache-smoke.sh scripts/test/test-runner.sh scripts/test/test-runner-wp-codebox.sh scripts/bench/bench-runner.sh scripts/bench/bench-runner-wp-codebox.sh scripts/doctor/wp-codebox-doctor.sh scripts/test/wp-codebox-doctor-smoke.sh tests/extension-composer-vendor-integrity-smoke.sh scripts/lint/eslint-dependency-tree-scope-smoke.sh",
       "node --check index.js lib/codebox-client.js lib/wp-codebox-resolver.js lib/wp-codebox-fuzz-run.js scripts/fuzz/fuzz-runner.cjs scripts/bench/wp-codebox-bench-adapter.mjs scripts/test/wp-codebox-phpunit-adapter.mjs"
     ],
     "test": [
       "node tests/wp-codebox-canonical-cli-adapters-smoke.mjs",
+      "bash scripts/build/setup-wp-codebox-smoke.sh",
+      "bash scripts/build/update-wp-codebox-cache-smoke.sh",
       "bash scripts/test/wp-codebox-doctor-smoke.sh",
       "bash tests/installed-test-helper-resolution-smoke.sh",
       "bash tests/extension-composer-vendor-integrity-smoke.sh",
