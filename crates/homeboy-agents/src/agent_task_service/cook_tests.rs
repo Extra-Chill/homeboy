@@ -57,6 +57,44 @@ fn test_review_form_outputs() -> Value {
     serde_json::json!({ "review_form": test_review_form() })
 }
 
+#[test]
+fn remediation_policy_rejects_denied_workspace_read_before_dispatch() {
+    let mut request = AgentTaskRequest {
+        schema: crate::agent_task::AGENT_TASK_REQUEST_SCHEMA.to_string(),
+        task_id: "gate-fix".to_string(),
+        group_key: None,
+        parent_plan_id: None,
+        executor: AgentTaskExecutor {
+            backend: "fixture".to_string(),
+            selector: None,
+            runtime_selection: None,
+            required_capabilities: Vec::new(),
+            secret_env: Vec::new(),
+            model: None,
+            config: Value::Null,
+        },
+        instructions: "Fix the failing gate.".to_string(),
+        inputs: Value::Null,
+        source_refs: Vec::new(),
+        workspace: AgentTaskWorkspace::default(),
+        component_contracts: Vec::new(),
+        policy: AgentTaskPolicy::default(),
+        limits: AgentTaskLimits::default(),
+        expected_artifacts: Vec::new(),
+        artifact_declarations: Vec::new(),
+        output_declarations: Vec::new(),
+        metadata: Value::Null,
+    };
+
+    assert_eq!(
+        remediation_tool_policy_error(&request).as_deref(),
+        Some("Cook remediation policy must grant the runner read access to the task workspace before dispatch")
+    );
+
+    request.policy.grant_workspace_read_tool();
+    assert!(remediation_tool_policy_error(&request).is_none());
+}
+
 fn seed_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
     use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_scheduler::{
@@ -1212,6 +1250,11 @@ impl AgentTaskExecutorAdapter for ReviewFormOnlyExecutor {
         request: crate::agent_task::AgentTaskRequest,
         _context: crate::agent_task_scheduler::AgentTaskExecutionContext,
     ) -> crate::agent_task::AgentTaskOutcome {
+        assert!(
+            request.policy.permits_workspace_read_tool(),
+            "the form-only remediation must be able to inspect the authenticated candidate"
+        );
+        assert_eq!(request.policy.write, "none");
         crate::agent_task::AgentTaskOutcome {
             schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,

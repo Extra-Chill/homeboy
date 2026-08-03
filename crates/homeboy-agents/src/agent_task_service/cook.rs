@@ -1269,6 +1269,13 @@ pub(crate) enum CookFollowUpBudgetScope {
     CandidateAdoptionReview,
 }
 
+fn remediation_tool_policy_error(request: &crate::agent_task::AgentTaskRequest) -> Option<String> {
+    (!request.policy.permits_workspace_read_tool()).then(|| {
+        "Cook remediation policy must grant the runner read access to the task workspace before dispatch"
+            .to_string()
+    })
+}
+
 fn follow_up_budget_scope(
     source_request: &crate::agent_task::AgentTaskRequest,
     follow_up_request: &crate::agent_task::AgentTaskRequest,
@@ -1322,6 +1329,9 @@ pub(crate) fn dispatch_cook_follow_up<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
+    if let Some(reason) = remediation_tool_policy_error(&follow_up_request) {
+        return Ok(CookFollowUpDispatch::PolicyFailure { reason });
+    }
     let recipe = super::load_recipe(cook_id)?;
     let related_attempts = recipe.attempts.iter().filter(|recipe_attempt| {
         recipe_attempt.plan.tasks.len() == 1

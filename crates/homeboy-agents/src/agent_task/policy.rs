@@ -36,6 +36,27 @@ impl Default for AgentTaskPolicy {
     }
 }
 
+impl AgentTaskPolicy {
+    /// Permit a remediation provider to inspect its task workspace through its
+    /// runner-owned read tool without granting any write tool.
+    pub(crate) fn grant_workspace_read_tool(&mut self) {
+        self.read = "workspace".to_string();
+        self.tools.tools.insert(
+            "read".to_string(),
+            AgentToolPolicyRule {
+                execution_location: AgentToolExecutionLocation::Runner,
+                timeout_ms: None,
+                reason: Some("inspect the task workspace during remediation".to_string()),
+            },
+        );
+    }
+
+    pub(crate) fn permits_workspace_read_tool(&self) -> bool {
+        self.read == "workspace"
+            && self.tools.execution_location_for("read") == AgentToolExecutionLocation::Runner
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentToolRequest {
     #[serde(default = "agent_tool_request_schema")]
