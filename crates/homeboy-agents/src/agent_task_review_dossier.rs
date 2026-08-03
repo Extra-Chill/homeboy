@@ -626,6 +626,93 @@ pub fn validate_profile(profile: &AgentTaskReviewProfile) -> Result<()> {
 }
 
 impl AgentTaskReviewDossier {
+    /// Report independent, operator-supplied dossier gaps together before a
+    /// preflight asks the caller to reconstruct a large finalization command.
+    pub fn validate_preflight_fields(&self, profile: &AgentTaskReviewProfile) -> Result<()> {
+        validate_profile(profile)?;
+        let mut gaps = Vec::new();
+        let mut missing = |field: &str, message: &str| {
+            gaps.push((field.to_string(), message.to_string()));
+        };
+        if self.schema != AGENT_TASK_REVIEW_DOSSIER_SCHEMA {
+            missing("schema", "review dossier schema is not supported");
+        }
+        if self.summary.trim().is_empty() {
+            missing("summary", "summary is required");
+        }
+        if self
+            .what_changed
+            .iter()
+            .all(|value| value.trim().is_empty())
+        {
+            missing("what_changed", "what changed is required");
+        }
+        if self.compatibility.trim().is_empty() {
+            missing("compatibility", "compatibility is required");
+        }
+        if self.how_to_test.is_empty() {
+            missing("how_to_test", "How to test requires --test-step COMMAND=>EXPECTED, a recorded targeted command, or a manual reviewer instruction");
+        }
+        for (index, step) in self.how_to_test.iter().enumerate() {
+            if step.command.trim().is_empty() || step.expected.trim().is_empty() {
+                missing(
+                    &format!("how_to_test[{index}]"),
+                    "each test step needs a runnable command and expected result",
+                );
+            } else if !reviewer_runnable_command(&step.command) {
+                missing(
+                    &format!("how_to_test[{index}].command"),
+                    "test commands must be reviewer-runnable and cannot contain operator-only references",
+                );
+            }
+        }
+        if self.ai_assistance.used && placeholder_model(&self.ai_assistance.model) {
+            missing(
+                "ai_assistance.model",
+                "AI disclosure requires a concrete model identifier",
+            );
+        }
+        if self.ai_assistance.used && self.ai_assistance.used_for.trim().is_empty() {
+            missing(
+                "ai_assistance.used_for",
+                "AI disclosure requires a concrete, self-reflective description of how AI was used (the `used_for` field); it cannot be empty",
+            );
+        } else if self.ai_assistance.used && used_for_is_placeholder(&self.ai_assistance.used_for) {
+            missing(
+                "ai_assistance.used_for",
+                "AI disclosure `used_for` is a placeholder; provide a genuine, self-reflective description of the process the AI took",
+            );
+        }
+        if !self.changed_public_contracts.is_empty() && self.public_contract_evidence.is_none() {
+            missing(
+                "public_contract_evidence",
+                "declared public contracts require compatibility, external-consumer, and external-usage evidence",
+            );
+        }
+        if self.changed_public_contracts.is_empty() && self.public_contract_evidence.is_some() {
+            missing(
+                "public_contract_evidence",
+                "public-contract evidence requires a declared changed public contract",
+            );
+        }
+        if gaps.is_empty() {
+            return Ok(());
+        }
+        Err(Error::validation_invalid_argument(
+            "review_dossier",
+            format!(
+                "review dossier validation failed with {} independent error(s)",
+                gaps.len()
+            ),
+            None,
+            Some(
+                gaps.iter()
+                    .map(|(field, message)| format!("{field}: {message}"))
+                    .collect(),
+            ),
+        ))
+    }
+
     pub fn apply_overrides(&mut self) -> Result<()> {
         let mut seen = std::collections::BTreeSet::new();
         for override_ in &self.overrides {
@@ -1314,6 +1401,36 @@ mod tests {
                 reference: "#8058".into(),
             }],
             overrides: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn preflight_fields_aggregate_independent_dossier_gaps() {
+        let mut value = dossier();
+        value.summary.clear();
+        value.what_changed.clear();
+        value.how_to_test.clear();
+        value.compatibility.clear();
+        value.ai_assistance.model = "unknown".to_string();
+        value.ai_assistance.used_for.clear();
+
+        let error = value
+            .validate_preflight_fields(&default_profile())
+            .expect_err("all supplied dossier gaps are reported together");
+        assert!(error.message.contains("6 independent error(s)"));
+        let diagnostics = error.details.to_string();
+        for field in [
+            "summary",
+            "what_changed",
+            "how_to_test",
+            "compatibility",
+            "ai_assistance.model",
+            "ai_assistance.used_for",
+        ] {
+            assert!(
+                diagnostics.contains(field),
+                "missing {field}: {diagnostics}"
+            );
         }
     }
 

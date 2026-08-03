@@ -428,9 +428,12 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
             .is_some_and(|status| matches!(status, "review_ready" | "validated"));
         return Ok((value, i32::from(!success)));
     }
-    let run_id = args
+    let mut run_id = args
         .run_id
         .expect("clap requires --run-id without --recover");
+    if args.manual_finalization {
+        run_id = agent_task_service::prepare_manual_finalization_identity(&run_id)?;
+    }
     // Retained for the finalization handoff, which names the exact apply command
     // after a validated preflight (#9867). `run_id` itself moves into the options.
     let handoff_run_id = run_id.clone();
