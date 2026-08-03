@@ -361,6 +361,7 @@ fn lab_cook_dispatcher_recipe_round_trips_exact_transport() {
             secret_env_names: vec!["TOKEN".to_string()],
             workspace_root: Some("/runner/workspaces".to_string()),
         },
+        progress_reporter: crate::commands::agent_task::CookProgressReporter::new(false),
     };
     let recipe = crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher::durable_recipe(
         &dispatcher,
@@ -681,6 +682,7 @@ fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
             detach_after_handoff: false,
             source_path: None,
             job_overrides: runners::LabJobOverrides::default(),
+            progress_reporter: crate::commands::agent_task::CookProgressReporter::new(false),
         };
 
         let error =

@@ -768,6 +768,7 @@ fn run_split_placement_fanout(
                 detach_after_handoff,
                 source_path,
                 job_overrides: job_overrides.clone(),
+                progress_reporter: crate::commands::agent_task::CookProgressReporter::new(false),
             })
                 as Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>
         };
@@ -966,6 +967,8 @@ fn run_split_placement_cook(
         .first()
         .map(|task| task.task_id.as_str())
         .unwrap_or("cook-provider-attempt");
+    let progress_reporter =
+        crate::commands::agent_task::CookProgressReporter::new(cook.no_progress);
     let mut controller = cook.clone();
     controller.dispatch.run_id = Some(cook_id);
     controller.attempt_run_id = Some(attempt_run_id);
@@ -984,9 +987,16 @@ fn run_split_placement_cook(
         detach_after_handoff: cli.detach_after_handoff,
         source_path,
         job_overrides: lab_job_overrides(cli)?,
+        progress_reporter: progress_reporter.clone(),
     });
     let progress = |phase: &str, cook_id: Option<&str>, run_id: Option<&str>| {
-        crate::commands::agent_task::emit_cook_progress(phase, cook_id, run_id);
+        if cook.no_progress && phase == "durable_identity" {
+            if let Some(run_id) = run_id {
+                crate::commands::agent_task::run::announce_durable_cook_identity(cook_id, run_id);
+            }
+        } else {
+            progress_reporter.report(phase, cook_id, run_id);
+        }
         Ok(())
     };
     let (value, exit_code) =
@@ -1022,6 +1032,7 @@ struct LabCookAttemptDispatcher {
     detach_after_handoff: bool,
     source_path: Option<PathBuf>,
     job_overrides: runners::LabJobOverrides,
+    progress_reporter: crate::commands::agent_task::CookProgressReporter,
 }
 
 pub(crate) fn reconstruct_cook_attempt_dispatcher(
@@ -1099,6 +1110,7 @@ pub(crate) fn reconstruct_cook_attempt_dispatcher(
                 overrides["workspace_root"].clone(),
             )?,
         },
+        progress_reporter: crate::commands::agent_task::CookProgressReporter::new(false),
     };
     Ok(Some(Arc::new(dispatcher)))
 }
@@ -1220,16 +1232,13 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
         )?;
         let (heartbeat_stop, heartbeat_wait) = mpsc::channel();
         let heartbeat_run_id = run_id.to_string();
+        let heartbeat_progress_reporter = self.progress_reporter.clone();
         let outcome = std::thread::scope(|scope| {
             scope.spawn(move || {
                 while let Err(mpsc::RecvTimeoutError::Timeout) =
                     heartbeat_wait.recv_timeout(Duration::from_secs(15))
                 {
-                    crate::commands::agent_task::emit_cook_progress(
-                        "heartbeat",
-                        None,
-                        Some(&heartbeat_run_id),
-                    );
+                    heartbeat_progress_reporter.report("heartbeat", None, Some(&heartbeat_run_id));
                 }
             });
             let outcome = lab_routing::dispatch_lab_offload(
@@ -1554,6 +1563,7 @@ pub(crate) fn dispatch_controller_plan_to_lab(
         detach_after_handoff: true,
         source_path,
         job_overrides: runners::LabJobOverrides::default(),
+        progress_reporter: crate::commands::agent_task::CookProgressReporter::new(false),
     };
     <LabCookAttemptDispatcher as crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>::prepare_for_cook(&dispatcher)?;
     <LabCookAttemptDispatcher as crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>::dispatch_attempt(

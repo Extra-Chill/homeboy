@@ -292,6 +292,16 @@ mod tests {
     }
 
     #[test]
+    fn cook_help_exposes_quiet_progress_for_orchestration() {
+        let help = rendered_cook_help();
+        assert!(help.contains("--no-progress"), "{help}");
+        assert!(
+            help.contains("Suppress intermediate Cook progress"),
+            "{help}"
+        );
+    }
+
+    #[test]
     fn cook_cli_preflight_explains_the_default_provider_budget_conflict() {
         let cli = crate::cli_surface::Cli::try_parse_from([
             "homeboy",
@@ -458,6 +468,10 @@ pub struct AgentTaskCookArgs {
     /// Return the complete cook report, including nested promotion and gate evidence.
     #[arg(long)]
     pub full: bool,
+    /// Suppress intermediate Cook progress lines after the durable run identity.
+    /// The final result still contains status and evidence commands for orchestration.
+    #[arg(long)]
+    pub no_progress: bool,
     /// Base branch the finalized pull request targets and the branch changes are
     /// diffed against (default `main`).
     #[arg(long, default_value = "main", value_name = "BRANCH")]
