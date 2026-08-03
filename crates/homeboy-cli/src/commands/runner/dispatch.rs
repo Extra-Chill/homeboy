@@ -869,7 +869,55 @@ fn runner_exec_command_output(
 fn map_refresh_homeboy(
     result: CmdResult<runner::HomeboyBinaryRefreshOutput>,
 ) -> CmdResult<RunnerCommandOutput> {
-    result.map(|(output, exit_code)| (RunnerCommandOutput::RefreshHomeboy(output), exit_code))
+    result.map(|(output, exit_code)| {
+        let actionable = output.failure.as_ref().map(|failure| {
+            let mut metadata = failure
+                .mirror_run_id
+                .as_ref()
+                .map(|run_id| {
+                    crate::commands::utils::response::actionable_metadata_for_run_ref(
+                        run_id.clone(),
+                        "runner_exec",
+                        "homeboy-runner-refresh",
+                    )
+                })
+                .unwrap_or_default();
+            if let Some(job_id) = &failure.job_id {
+                metadata
+                    .refs
+                    .jobs
+                    .push(crate::commands::utils::response::CommandJobRef {
+                        id: job_id.clone(),
+                        kind: "runner_job".to_string(),
+                        source: "homeboy-runner-refresh".to_string(),
+                        status_command: format!(
+                            "homeboy runner job logs {} {job_id}",
+                            output.runner_id
+                        ),
+                        watch_command: Some(format!(
+                            "homeboy runner job logs {} {job_id} --follow",
+                            output.runner_id
+                        )),
+                    });
+            }
+            metadata
+                .next_actions
+                .extend(failure.recovery_actions.iter().map(|action| {
+                    crate::commands::utils::response::CommandNextAction::new(
+                        action.label.clone(),
+                        action.command.join(" "),
+                    )
+                }));
+            metadata
+        });
+        (
+            RunnerCommandOutput::RefreshHomeboy(super::types::RunnerRefreshHomeboyCommandOutput {
+                output,
+                actionable,
+            }),
+            exit_code,
+        )
+    })
 }
 
 fn map_dev_sync(
