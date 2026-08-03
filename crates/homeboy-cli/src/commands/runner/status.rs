@@ -300,16 +300,13 @@ pub(super) fn operator_summary(report: &RunnerStatusReport) -> RunnerOperatorSum
     if let Some(error) = &report.active_job_error {
         risk.push(error.code.clone());
     }
-    let next_action = report
-        .stale_daemon
-        .as_ref()
-        .map(|warning| {
-            let controller = warning
-                .controller_homeboy_build_identity
-                .as_deref()
-                .map(str::to_string)
-                .unwrap_or_else(|| homeboy_product_identity::build_identity().display);
-            risk.push(format!(
+    if let Some(warning) = report.stale_daemon.as_ref() {
+        let controller = warning
+            .controller_homeboy_build_identity
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| homeboy_product_identity::build_identity().display);
+        risk.push(format!(
                 "compatibility_skew{}: controller `{controller}`; configured executable `{}`; daemon `{}`",
                 warning
                     .compatibility_reason
@@ -318,14 +315,12 @@ pub(super) fn operator_summary(report: &RunnerStatusReport) -> RunnerOperatorSum
                 warning.job_command_binary_build_identity.as_deref().unwrap_or(&warning.job_command_binary_version),
                 warning.active_daemon_control_plane_build_identity.as_deref().unwrap_or(&warning.active_daemon_control_plane_version),
             ));
-            warning.refresh_command.clone()
-        })
-        .unwrap_or_else(|| format!("homeboy runner status {} --full", shell_arg(&report.runner_id)));
+    }
     RunnerOperatorSummary {
         identity: bounded_status_text(&report.runner_id),
         state: format!("{:?}", report.state).to_ascii_lowercase(),
         risk,
-        next_action,
+        next_action: report.status_action().render_command(),
     }
 }
 
