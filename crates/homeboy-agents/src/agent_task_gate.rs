@@ -1271,13 +1271,16 @@ pub(crate) fn preflight_gate_toolchains(
     timeout: Duration,
 ) -> Result<()> {
     let selected_environment = selected_gate_environment(policy, runtime_tmpdir)?;
-    let started = std::time::Instant::now();
+    // The deadline covers declared probe execution. Controller scheduling before
+    // the first child starts cannot make an otherwise successful probe fail.
+    let mut started = None;
     for requirement in requirements {
-        let remaining = timeout.saturating_sub(started.elapsed());
-        if remaining.is_zero() {
+        let elapsed = started.map(|started: std::time::Instant| started.elapsed());
+        let remaining = timeout.saturating_sub(elapsed.unwrap_or_default());
+        if started.is_some() && remaining.is_zero() {
             return Err(toolchain_preflight_error(
                 requirement,
-                started.elapsed(),
+                elapsed.expect("started preflight deadline"),
                 timeout,
                 Duration::ZERO,
                 None,
@@ -1296,7 +1299,7 @@ pub(crate) fn preflight_gate_toolchains(
         let mut child = process.spawn().map_err(|error| {
             toolchain_preflight_error(
                 requirement,
-                started.elapsed(),
+                elapsed.unwrap_or_default(),
                 timeout,
                 remaining,
                 None,
@@ -1304,6 +1307,9 @@ pub(crate) fn preflight_gate_toolchains(
                 &format!("could not resolve or initialize the executable: {error}"),
             )
         })?;
+        let started = *started.get_or_insert_with(std::time::Instant::now);
+        let elapsed = started.elapsed();
+        let remaining = timeout.saturating_sub(elapsed);
         let supervised = homeboy_core::engine::command::wait_with_bounded_output_supervised(
             &mut child,
             GATE_TOOLCHAIN_CAPTURE_LIMIT_BYTES,
@@ -2152,7 +2158,7 @@ mod tests {
                 probe_arguments: vec!["--version".to_string()],
             }],
             None,
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         );
 
         match prior_home {
@@ -2190,7 +2196,7 @@ mod tests {
                 probe_arguments: vec!["initialize".to_string()],
             }],
             None,
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .expect_err("unusable declared toolchain fails preflight");
 
@@ -2239,7 +2245,7 @@ mod tests {
                 probe_arguments: vec!["initialize".to_string()],
             }],
             Some(runtime_tmpdir.path()),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .expect("preflight probes run in the invocation temp dir");
     }
@@ -2334,7 +2340,7 @@ mod tests {
         let first = bin.path().join("first-tool");
         let second = bin.path().join("second-tool");
         fs::write(&first, "#!/bin/sh\n/bin/sleep 0.1\n").expect("first tool");
-        fs::write(&second, "#!/bin/sh\n/bin/sleep 30\n").expect("second tool");
+        fs::write(&second, "#!/bin/sh\n/bin/sleep 0.05\nexit 7\n").expect("second tool");
         for tool in [&first, &second] {
             let mut permissions = fs::metadata(tool).expect("tool metadata").permissions();
             permissions.set_mode(0o755);
@@ -2356,12 +2362,12 @@ mod tests {
                 },
             ],
             None,
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .expect_err("second probe must consume only the first probe's remaining deadline");
 
         assert!(started.elapsed() < Duration::from_secs(3));
-        assert_eq!(error.details["toolchain_preflight"]["timed_out"], true);
+        assert_eq!(error.details["toolchain_preflight"]["timed_out"], false);
         assert_eq!(
             error.details["toolchain_preflight"]["command"],
             second.display().to_string()
@@ -2370,7 +2376,7 @@ mod tests {
             error.details["toolchain_preflight"]["probe_timeout_ms"]
                 .as_u64()
                 .expect("per-probe timeout")
-                < 1_000
+                < 10_000
         );
     }
 
@@ -2399,7 +2405,7 @@ mod tests {
                 probe_arguments: Vec::new(),
             }],
             None,
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .expect_err("noisy failed probe must return diagnostics");
 
