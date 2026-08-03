@@ -6,11 +6,13 @@ use std::str::FromStr;
 
 use homeboy_audit_contract::{
     AuditConfig, SourcePolicyMatchMode, SourcePolicyRule, SourcePolicyRuleBody, SourcePolicyTerm,
+    SourcePolicyTermContext,
 };
 
 use super::conventions::{AuditFinding, Language};
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
+use super::source_text::SourceMasks;
 
 pub(crate) fn run(fingerprints: &[&FileFingerprint], rules: &[SourcePolicyRule]) -> Vec<Finding> {
     if rules.is_empty() {
@@ -159,6 +161,11 @@ fn run_forbidden_terms(
 
     let mut findings = Vec::new();
     for fp in eligible_files(rule, fingerprints) {
+        // Scan each file once into comment-stripped and string-only
+        // projections. Matching against raw lines cannot tell a leak from prose
+        // describing one, which is what made this detector ~80% noise (#11330).
+        let masks = (!rule.scan_comments).then(|| SourceMasks::new(&fp.content, fp.language));
+
         for (index, line) in fp.content.lines().enumerate() {
             let trimmed = line.trim_start();
             if rule
@@ -168,6 +175,8 @@ fn run_forbidden_terms(
             {
                 break;
             }
+            // Allow/ignore markers are authored against the source as written,
+            // so they read the raw line even when matching reads a projection.
             if rule
                 .allow_line_contains
                 .iter()
@@ -180,8 +189,17 @@ fn run_forbidden_terms(
                 continue;
             }
 
+            let code = masks.as_ref().map_or(line, |masks| masks.code(index));
+            let strings = masks.as_ref().map(|masks| masks.strings(index));
+
             for matcher in &matchers {
-                if matcher.matches(line) {
+                let haystack = match matcher.context {
+                    SourcePolicyTermContext::Code => code,
+                    // Without projections (scan_comments) there is no string
+                    // mask to narrow to, so the term reads the whole line.
+                    SourcePolicyTermContext::StringLiteral => strings.unwrap_or(line),
+                };
+                if matcher.matches(haystack) {
                     findings.push(finding_for_match(rule, fp, index, &matcher.label));
                 }
             }
@@ -259,6 +277,8 @@ fn finding_for_match(
 
 struct TermMatcher {
     label: String,
+    /// Lexical region this term is matched against.
+    context: SourcePolicyTermContext,
     regex: Regex,
     /// Matches the term reassembled from adjacent string-literal fragments.
     /// Populated only when the term opts in with `detect_split`.
@@ -292,6 +312,7 @@ impl TermMatcher {
 
         Regex::new(&pattern).ok().map(|regex| Self {
             label: term.label.clone().unwrap_or_else(|| value.to_string()),
+            context: term.context.unwrap_or_default(),
             regex,
             split_regex,
         })
@@ -428,6 +449,7 @@ mod tests {
             exclude_path_contains: vec!["src/core/generated/".to_string()],
             allow_line_contains: vec!["homeboy-audit: allow-source-policy".to_string()],
             ignore_line_prefixes: vec!["//".to_string()],
+            scan_comments: false,
             ignore_after_line_equals: vec!["#[cfg(test)]".to_string()],
             example_path_contains: vec!["/fixtures/".to_string()],
             example_classification: None,
@@ -442,12 +464,14 @@ mod tests {
                         label: None,
                         match_mode: None,
                         detect_split: false,
+                        context: None,
                     },
                     SourcePolicyTerm {
                         value: "florp-run".to_string(),
                         label: None,
                         match_mode: Some(SourcePolicyMatchMode::Literal),
                         detect_split: false,
+                        context: None,
                     },
                 ],
                 default_match: SourcePolicyMatchMode::Token,
@@ -524,6 +548,7 @@ mod tests { const SAMPLE: &str = "florpstack"; }
                 label: Some("numbered widget".to_string()),
                 match_mode: Some(SourcePolicyMatchMode::Regex),
                 detect_split: false,
+                context: None,
             }],
             default_match: SourcePolicyMatchMode::Token,
             case_insensitive: false,
@@ -544,6 +569,7 @@ mod tests { const SAMPLE: &str = "florpstack"; }
                 label: None,
                 match_mode: Some(SourcePolicyMatchMode::Literal),
                 detect_split,
+                context: None,
             }],
             default_match: SourcePolicyMatchMode::Literal,
             case_insensitive: true,
@@ -626,6 +652,7 @@ mod tests { const SAMPLE: &str = "florpstack"; }
                 label: Some("FLORP_TOKEN".to_string()),
                 match_mode: Some(SourcePolicyMatchMode::Regex),
                 detect_split: false,
+                context: None,
             }],
             default_match: SourcePolicyMatchMode::Token,
             case_insensitive: true,
@@ -655,6 +682,7 @@ mod tests { const SAMPLE: &str = "florpstack"; }
                 label: Some("florp diagnostic code".to_string()),
                 match_mode: Some(SourcePolicyMatchMode::Regex),
                 detect_split: false,
+                context: None,
             }],
             default_match: SourcePolicyMatchMode::Token,
             case_insensitive: true,
@@ -685,6 +713,7 @@ mod tests { const SAMPLE: &str = "florpstack"; }
                 label: None,
                 match_mode: Some(SourcePolicyMatchMode::Token),
                 detect_split: false,
+                context: None,
             }],
             default_match: SourcePolicyMatchMode::Token,
             case_insensitive: true,
@@ -732,6 +761,7 @@ fn dispatch() {
                 label: Some("command-layer dependency".to_string()),
                 match_mode: Some(SourcePolicyMatchMode::Literal),
                 detect_split: false,
+                context: None,
             }],
             default_match: SourcePolicyMatchMode::Literal,
             case_insensitive: false,
@@ -762,12 +792,14 @@ fn dispatch() {
                     label: None,
                     match_mode: Some(SourcePolicyMatchMode::Token),
                     detect_split: false,
+                    context: None,
                 },
                 SourcePolicyTerm {
                     value: "widget-package.json".to_string(),
                     label: None,
                     match_mode: Some(SourcePolicyMatchMode::Literal),
                     detect_split: false,
+                    context: None,
                 },
             ],
             default_match: SourcePolicyMatchMode::Token,
@@ -808,6 +840,7 @@ mod tests { const PACKAGE: &str = "widget-package.json"; }
                 label: Some("direct process execution".to_string()),
                 match_mode: Some(SourcePolicyMatchMode::Regex),
                 detect_split: false,
+                context: None,
             }],
             default_match: SourcePolicyMatchMode::Regex,
             case_insensitive: false,
@@ -1028,3 +1061,7 @@ fn dispatch() {
         assert!(findings.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "source_policy_context_test.rs"]
+mod source_policy_context_test;

@@ -120,6 +120,7 @@
       {
         "allow_line_contains": [
           "audit-allow-cargo-secondary-key",
+          "cargo:rerun-if-changed",
           "clippy::",
           "Extra-Chill/homeboy",
           "target/release/homeboy"
@@ -326,7 +327,8 @@
             "value": "python3"
           },
           {
-            "value": "node"
+            "value": "node",
+            "context": "string_literal"
           },
           {
             "value": "opencode"
