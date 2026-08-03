@@ -596,7 +596,12 @@ fn signal_process_group(root_pid: u32, signal: libc::c_int) -> io::Result<()> {
 
 #[cfg(unix)]
 fn descendant_pids(root_pid: u32) -> io::Result<Vec<u32>> {
-    let output = Command::new("ps").args(["-axo", "pid=,ppid="]).output()?;
+    // Process-tree cleanup is controller infrastructure, not workload code. It
+    // must remain available when a caller replaces the ambient PATH.
+    let output = Command::new("ps")
+        .env("PATH", "/usr/bin:/bin")
+        .args(["-axo", "pid=,ppid="])
+        .output()?;
     let parents: Vec<(u32, u32)> = String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| {

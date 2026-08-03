@@ -2005,6 +2005,7 @@ where
                 &options.gates.gate_environment,
                 &required_toolchains,
                 None,
+                options.gates.gate_timeout(),
             )
         });
     if let Err(error) = preflight {
