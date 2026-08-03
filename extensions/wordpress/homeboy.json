@@ -25,6 +25,7 @@
       "node tests/wp-codebox-artifacts-isolated-snapshot-smoke.js",
       "node tests/wordpress-manifest-settings-smoke.js",
       "node tests/wordpress-artifact-cleanup-declarations-smoke.js",
+      "bash scripts/lint/stable-fingerprint-smoke.sh",
       "bash scripts/lint/eslint-dependency-tree-scope-smoke.sh"
     ]
   }

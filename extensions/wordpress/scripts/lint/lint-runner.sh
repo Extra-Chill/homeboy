@@ -11,6 +11,7 @@ set -euo pipefail
 # flows go through `homeboy refactor --from lint --write` (#1145).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STABLE_FINGERPRINT_HELPER="${SCRIPT_DIR}/stable-fingerprint.php"
 SHARED_LIB_DIR="${HOMEBOY_SHARED_LIB_DIR:-}"
 if [ -z "$SHARED_LIB_DIR" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" ]; then
     SHARED_LIB_DIR="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
@@ -861,6 +862,7 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
         _PHPCS_FINDINGS_TMPFILE=$(homeboy_mktemp 'phpcs-findings.XXXXXX')
         echo "$json_output" | php -r '
             ini_set("memory_limit", "-1");
+            require $argv[3];
             $json = json_decode(file_get_contents("php://stdin"), true);
             if (!$json || empty($json["files"])) {
                 file_put_contents($argv[2], "[]\n");
@@ -927,13 +929,13 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
                         "category" => $category,
                         "message" => $message,
                         "fixable" => (bool) ($msg["fixable"] ?? false),
-                        "fingerprint" => sha1($id),
                         "excerpt" => $readExcerpt($filePath, $line),
                     ];
                 }
             }
+            $findings = homeboy_assign_stable_lint_fingerprints($findings);
             file_put_contents($argv[2], json_encode($findings, JSON_UNESCAPED_SLASHES) . "\n");
-        ' "$PLUGIN_PATH" "$_PHPCS_FINDINGS_TMPFILE" 2>/dev/null || true
+        ' "$PLUGIN_PATH" "$_PHPCS_FINDINGS_TMPFILE" "$STABLE_FINGERPRINT_HELPER" 2>/dev/null || true
         # Writing the findings sidecar is best-effort observability; never let a
         # sidecar-writer failure fail the lint gate (homeboy-extensions#1402).
         merge_findings_into_sidecar "$_PHPCS_FINDINGS_TMPFILE" || true

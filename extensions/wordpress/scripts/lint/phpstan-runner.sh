@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STABLE_FINGERPRINT_HELPER="${SCRIPT_DIR}/stable-fingerprint.php"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
@@ -1234,6 +1235,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     if [ -n "${_HOMEBOY_PHPSTAN_FINDINGS_FILE:-}" ] && [ -n "$json_output" ]; then
         _PHPSTAN_FINDINGS_OUTPUT_TMPFILE=$(homeboy_mktemp 'phpstan-findings.XXXXXX')
         echo "$json_output" | php -r '
+            require $argv[3];
             $json = json_decode(file_get_contents("php://stdin"), true);
             if (!$json || empty($json["files"])) {
                 file_put_contents($argv[2], "[]");
@@ -1272,13 +1274,13 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
                         "category" => "phpstan",
                         "message" => $message,
                         "fixable" => false,
-                        "fingerprint" => sha1($id),
                         "excerpt" => $readExcerpt($filePath, $line),
                     ];
                 }
             }
+            $findings = homeboy_assign_stable_lint_fingerprints($findings);
             file_put_contents($argv[2], json_encode($findings, JSON_UNESCAPED_SLASHES) . "\n");
-        ' "$PLUGIN_PATH" "${_PHPSTAN_FINDINGS_OUTPUT_TMPFILE}" 2>/dev/null || true
+        ' "$PLUGIN_PATH" "${_PHPSTAN_FINDINGS_OUTPUT_TMPFILE}" "$STABLE_FINGERPRINT_HELPER" 2>/dev/null || true
         # Best-effort observability; never fail the gate on a sidecar write.
         write_phpstan_findings_sidecar "${_HOMEBOY_PHPSTAN_FINDINGS_FILE}" "${_PHPSTAN_FINDINGS_OUTPUT_TMPFILE}" || true
         rm -f "${_PHPSTAN_FINDINGS_OUTPUT_TMPFILE}"
