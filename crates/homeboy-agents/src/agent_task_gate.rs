@@ -421,6 +421,21 @@ pub struct AgentTaskGateEnvironment {
     pub preserved: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sanitized: Vec<AgentTaskGateEnvironmentVariable>,
+    /// Package-owned artifacts deliberately mapped into the isolated gate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_artifacts: Vec<AgentTaskGatePackageArtifactReadiness>,
+}
+
+/// Readiness evidence for an artifact selected by an installed package rather
+/// than a host-wide toolchain. The package owns the artifact names and revisions;
+/// Homeboy only maps a declared cache and verifies that selection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGatePackageArtifactReadiness {
+    pub package: String,
+    pub cache_environment: String,
+    pub cache_source: String,
+    pub cache_path: String,
+    pub required_artifacts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -435,6 +450,7 @@ impl AgentTaskGateEnvironment {
             && self.inherited.is_empty()
             && self.preserved.is_empty()
             && self.sanitized.is_empty()
+            && self.package_artifacts.is_empty()
     }
 
     pub(crate) fn replay_policy(&self) -> AgentTaskGateEnvironmentPolicy {
@@ -959,7 +975,9 @@ pub(crate) fn run_gate_command_with_supervision(
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let selected_environment = selected_gate_environment(gate_environment, runtime_tmpdir)?;
+    let mut selected_environment = selected_gate_environment(gate_environment, runtime_tmpdir)?;
+    selected_environment.report.package_artifacts =
+        gate_package_artifact_readiness(cwd, gate_environment)?;
     selected_environment.apply(&mut process);
     if supervision.is_some() {
         if !homeboy_core::engine::command::supports_process_tree_isolation() {
@@ -1072,7 +1090,10 @@ pub(crate) fn run_gate_command_with_timeout(
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let selected_environment = selected_gate_environment(gate_environment, Some(runtime_tmpdir))?;
+    let mut selected_environment =
+        selected_gate_environment(gate_environment, Some(runtime_tmpdir))?;
+    selected_environment.report.package_artifacts =
+        gate_package_artifact_readiness(cwd, gate_environment)?;
     selected_environment.apply(&mut process);
     homeboy_core::engine::command::isolate_process_tree(&mut process);
     let mut child = process.spawn().map_err(|error| {
@@ -1285,6 +1306,10 @@ pub(crate) fn preflight_gate_toolchains(
     runtime_tmpdir: Option<&Path>,
     timeout: Duration,
 ) -> Result<()> {
+    // Package artifacts are distinct from executable toolchains: their exact
+    // revision is selected by the installed package, and checking them here
+    // prevents an environmental gate failure from spending provider budget.
+    gate_package_artifact_readiness(cwd, policy)?;
     let selected_environment = selected_gate_environment(policy, runtime_tmpdir)?;
     // The deadline covers declared probe execution. Controller scheduling before
     // the first child starts cannot make an otherwise successful probe fail.
@@ -1370,6 +1395,132 @@ pub(crate) fn preflight_gate_toolchains(
         }
     }
     Ok(())
+}
+
+/// Validate package-owned Playwright artifacts from the package's installed
+/// manifest. The cache location is never inferred from HOME or an OS-specific
+/// default: callers must explicitly map `PLAYWRIGHT_BROWSERS_PATH` with the
+/// gate environment policy, so HOME/XDG isolation remains intact.
+fn gate_package_artifact_readiness(
+    cwd: &Path,
+    policy: &AgentTaskGateEnvironmentPolicy,
+) -> Result<Vec<AgentTaskGatePackageArtifactReadiness>> {
+    const CACHE_ENVIRONMENT: &str = "PLAYWRIGHT_BROWSERS_PATH";
+    let Some((cache_path, cache_source)) = gate_artifact_cache_mapping(policy, CACHE_ENVIRONMENT)?
+    else {
+        return Ok(Vec::new());
+    };
+    let manifest_path = cwd
+        .join("node_modules")
+        .join("playwright-core")
+        .join("browsers.json");
+    if !manifest_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("read {}", manifest_path.display())),
+            )
+        })?)
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "gate_environment.preserve",
+                format!(
+                    "invalid package artifact manifest {}: {error}",
+                    manifest_path.display()
+                ),
+                None,
+                None,
+            )
+        })?;
+    let required_artifacts: Vec<String> = manifest
+        .get("browsers")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|browser| {
+            browser
+                .get("installByDefault")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        })
+        .filter_map(|browser| {
+            Some((
+                browser.get("name")?.as_str()?,
+                browser.get("revision")?.as_str()?,
+            ))
+        })
+        .map(|(name, revision)| format!("{}-{revision}", name.replace('-', "_")))
+        .collect();
+    if required_artifacts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let missing: Vec<String> = required_artifacts
+        .iter()
+        .filter(|artifact| !cache_path.join(artifact).is_dir())
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        return Err(package_artifact_readiness_error(
+            CACHE_ENVIRONMENT,
+            &cache_source,
+            &manifest_path,
+            &missing,
+        ));
+    }
+    Ok(vec![AgentTaskGatePackageArtifactReadiness {
+        package: "playwright-core".to_string(),
+        cache_environment: CACHE_ENVIRONMENT.to_string(),
+        cache_source,
+        cache_path: cache_path.display().to_string(),
+        required_artifacts,
+    }])
+}
+
+fn gate_artifact_cache_mapping(
+    policy: &AgentTaskGateEnvironmentPolicy,
+    name: &str,
+) -> Result<Option<(PathBuf, String)>> {
+    if let Some(source) = policy.preserve.get(name) {
+        return preserved_environment_value(source)
+            .map(PathBuf::from)
+            .map(|path| Some((path, source.clone())));
+    }
+    Ok(policy
+        .variables
+        .get(name)
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| (PathBuf::from(value), "declared value".to_string())))
+}
+
+fn package_artifact_readiness_error(
+    cache_environment: &str,
+    cache_source: &str,
+    manifest_path: &Path,
+    missing: &[String],
+) -> Error {
+    let remediation = "node ./node_modules/playwright/cli.js install";
+    let mut error = Error::validation_invalid_argument(
+        "gate_environment.preserve",
+        format!(
+            "package-owned gate artifacts are unavailable through {cache_environment} mapped from {cache_source}: {}",
+            missing.join(", ")
+        ),
+        Some(manifest_path.display().to_string()),
+        Some(vec![format!("Run `{remediation}` in the package root, then retry Cook.")]),
+    );
+    error.retryable = Some(true);
+    error.details["package_artifact_readiness"] = json!({
+        "package": "playwright-core",
+        "manifest": manifest_path,
+        "cache_environment": cache_environment,
+        "cache_source": cache_source,
+        "missing_artifacts": missing,
+        "remediation": remediation,
+    });
+    error
 }
 
 fn toolchain_preflight_error(
@@ -2128,6 +2279,106 @@ mod tests {
         };
 
         assert!(options.required_toolchains().is_empty());
+    }
+
+    #[test]
+    fn mapped_package_artifacts_preserve_isolation_and_record_exact_revisions() {
+        let _guard = ENV_MUTEX.lock().expect("env lock");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let cache = tempfile::tempdir().expect("cache");
+        let manifest = workspace
+            .path()
+            .join("node_modules/playwright-core/browsers.json");
+        fs::create_dir_all(manifest.parent().expect("manifest parent")).expect("package root");
+        fs::write(
+            &manifest,
+            r#"{"browsers":[{"name":"chromium","revision":"1234","installByDefault":true},{"name":"firefox","revision":"5678","installByDefault":true},{"name":"webkit","revision":"9999","installByDefault":false}]}"#,
+        )
+        .expect("manifest");
+        fs::create_dir_all(cache.path().join("chromium-1234")).expect("chromium cache");
+        fs::create_dir_all(cache.path().join("firefox-5678")).expect("firefox cache");
+        let prior_cache = std::env::var_os("HOMEBOY_TEST_PLAYWRIGHT_CACHE");
+        std::env::set_var("HOMEBOY_TEST_PLAYWRIGHT_CACHE", cache.path());
+        let policy = AgentTaskGateEnvironmentPolicy {
+            preserve: BTreeMap::from([(
+                "PLAYWRIGHT_BROWSERS_PATH".to_string(),
+                "HOMEBOY_TEST_PLAYWRIGHT_CACHE".to_string(),
+            )]),
+            ..AgentTaskGateEnvironmentPolicy::default()
+        };
+
+        let result = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+            workspace.path(),
+            1,
+            "test \"$PLAYWRIGHT_BROWSERS_PATH\" = \"$HOMEBOY_TEST_PLAYWRIGHT_CACHE\" && test \"$HOME\" != \"$HOMEBOY_TEST_PLAYWRIGHT_CACHE\"",
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            &policy,
+        );
+
+        match prior_cache {
+            Some(value) => std::env::set_var("HOMEBOY_TEST_PLAYWRIGHT_CACHE", value),
+            None => std::env::remove_var("HOMEBOY_TEST_PLAYWRIGHT_CACHE"),
+        }
+        let report = result.expect("mapped package artifacts are gate-ready");
+        assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
+        assert_eq!(report.environment.package_artifacts.len(), 1);
+        assert_eq!(
+            report.environment.package_artifacts[0].required_artifacts,
+            vec!["chromium-1234", "firefox-5678"]
+        );
+        assert_eq!(
+            report.environment.package_artifacts[0].cache_source,
+            "HOMEBOY_TEST_PLAYWRIGHT_CACHE"
+        );
+    }
+
+    #[test]
+    fn missing_mapped_package_artifact_fails_before_gate_execution_with_install_command() {
+        let _guard = ENV_MUTEX.lock().expect("env lock");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let cache = tempfile::tempdir().expect("cache");
+        let manifest = workspace
+            .path()
+            .join("node_modules/playwright-core/browsers.json");
+        fs::create_dir_all(manifest.parent().expect("manifest parent")).expect("package root");
+        fs::write(
+            &manifest,
+            r#"{"browsers":[{"name":"chromium-headless-shell","revision":"1234","installByDefault":true}]}"#,
+        )
+        .expect("manifest");
+        let prior_cache = std::env::var_os("HOMEBOY_TEST_PLAYWRIGHT_CACHE");
+        std::env::set_var("HOMEBOY_TEST_PLAYWRIGHT_CACHE", cache.path());
+        let policy = AgentTaskGateEnvironmentPolicy {
+            preserve: BTreeMap::from([(
+                "PLAYWRIGHT_BROWSERS_PATH".to_string(),
+                "HOMEBOY_TEST_PLAYWRIGHT_CACHE".to_string(),
+            )]),
+            ..AgentTaskGateEnvironmentPolicy::default()
+        };
+
+        let result = preflight_gate_toolchains(
+            workspace.path(),
+            &policy,
+            &[],
+            None,
+            Duration::from_secs(10),
+        );
+
+        match prior_cache {
+            Some(value) => std::env::set_var("HOMEBOY_TEST_PLAYWRIGHT_CACHE", value),
+            None => std::env::remove_var("HOMEBOY_TEST_PLAYWRIGHT_CACHE"),
+        }
+        let error = result.expect_err("missing browser cache must stop gate preflight");
+        assert_eq!(
+            error.details["package_artifact_readiness"]["missing_artifacts"],
+            json!(["chromium_headless_shell-1234"])
+        );
+        assert_eq!(
+            error.details["package_artifact_readiness"]["remediation"],
+            "node ./node_modules/playwright/cli.js install"
+        );
     }
 
     #[cfg(unix)]

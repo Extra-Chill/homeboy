@@ -1995,26 +1995,23 @@ where
         &options.ai_tool,
     );
     let required_toolchains = options.gates.required_toolchains();
-    let preflight = required_toolchains
-        .is_empty()
-        .then_some(Ok(()))
-        .unwrap_or_else(|| {
-            let gate_workspace = options.source_worktree_path.as_deref().ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "workspace",
-                    "Cook requires a workspace before gate toolchain preflight",
-                    Some(options.to_worktree.clone()),
-                    None,
-                )
-            })?;
-            crate::agent_task_gate::preflight_gate_toolchains(
-                gate_workspace,
-                &options.gates.gate_environment,
-                &required_toolchains,
+    let preflight = {
+        let gate_workspace = options.source_worktree_path.as_deref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "workspace",
+                "Cook requires a workspace before gate toolchain preflight",
+                Some(options.to_worktree.clone()),
                 None,
-                options.gates.gate_timeout(),
             )
-        });
+        })?;
+        crate::agent_task_gate::preflight_gate_toolchains(
+            gate_workspace,
+            &options.gates.gate_environment,
+            &required_toolchains,
+            None,
+            options.gates.gate_timeout(),
+        )
+    };
     if let Err(error) = preflight {
         let error = with_pre_execution_phase(error, "gate_toolchain_preflight");
         record_pre_execution_failure(
