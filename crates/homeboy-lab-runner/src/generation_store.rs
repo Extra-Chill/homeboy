@@ -3,9 +3,14 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use chrono::Utc;
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::paths;
+use homeboy_core::process::{
+    process_identity_state_with_start_identity, process_start_identity, ProcessIdentityState,
+    ProcessStartIdentity,
+};
 use homeboy_core::server::SshClient;
 
 use crate::rolling_generation::RollingResultOwnerRetirement;
@@ -50,9 +55,15 @@ fn admission_reservation_path(runner_id: &str) -> Result<PathBuf> {
         .join("admission-mutation-reservation.json"))
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct AdmissionReservation {
     operation_id: String,
+    owner_pid: u32,
+    owner_start_identity: ProcessStartIdentity,
+    created_at: String,
+    operation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -408,14 +419,29 @@ pub(crate) fn admission_session(
 pub(crate) fn with_admission_fence<T>(
     runner_id: &str,
     legacy: Option<&RunnerSession>,
+    operation_name: &str,
     operation: impl FnOnce(Option<&AdmissionFence>) -> Result<T>,
 ) -> Result<T> {
     let (reservation, fence) = with_registry_lock(runner_id, || {
+        if let Some(reservation) = active_admission_reservation_locked(runner_id)? {
+            return Err(admission_reservation_error(runner_id, &reservation));
+        }
+        let generations = read_locked(runner_id, legacy)?;
         let reservation = AdmissionReservation {
             operation_id: uuid::Uuid::new_v4().to_string(),
+            owner_pid: std::process::id(),
+            owner_start_identity: process_start_identity(std::process::id())
+                .map_err(Error::internal_unexpected)?
+                .ok_or_else(|| {
+                    Error::internal_unexpected(
+                        "current process exited while reserving daemon mutation",
+                    )
+                })?,
+            created_at: Utc::now().to_rfc3339(),
+            operation: operation_name.to_string(),
+            generation: legacy.map(legacy_generation),
         };
         write_durable_json(&admission_reservation_path(runner_id)?, &reservation)?;
-        let generations = read_locked(runner_id, legacy)?;
         let fence = generations.as_ref().and_then(|generations| {
             generations
                 .generations
@@ -429,23 +455,91 @@ pub(crate) fn with_admission_fence<T>(
         Ok((reservation, fence))
     })?;
     let result = operation(fence.as_ref());
+    let clear = clear_owned_admission_reservation(runner_id, &reservation);
+    match (result, clear) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Err(error), Err(_)) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+/// Read a reservation while holding the registry lock. A process that has
+/// exited or whose PID was reused cannot still own a remote mutation, so its
+/// durable reservation is reclaimed before a new owner proceeds.
+fn active_admission_reservation_locked(runner_id: &str) -> Result<Option<AdmissionReservation>> {
+    let path = admission_reservation_path(runner_id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let reservation: AdmissionReservation =
+        serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+        })?)
+        .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+    match process_identity_state_with_start_identity(
+        reservation.owner_pid,
+        None,
+        Some(&reservation.owner_start_identity),
+    ) {
+        ProcessIdentityState::Dead | ProcessIdentityState::IdentityMismatch => {
+            std::fs::remove_file(&path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("remove {}", path.display())),
+                )
+            })?;
+            Ok(None)
+        }
+        ProcessIdentityState::Live | ProcessIdentityState::Unverifiable => Ok(Some(reservation)),
+    }
+}
+
+fn clear_owned_admission_reservation(
+    runner_id: &str,
+    reservation: &AdmissionReservation,
+) -> Result<()> {
     with_registry_lock(runner_id, || {
         let path = admission_reservation_path(runner_id)?;
-        if path.exists()
-            && serde_json::from_slice::<AdmissionReservation>(&std::fs::read(&path).map_err(
-                |error| {
-                    Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-                },
-            )?)
-            .ok()
-            .is_some_and(|current| current.operation_id == reservation.operation_id)
+        if !path.exists() {
+            return Ok(());
+        }
+        let current: AdmissionReservation =
+            serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+            })?)
+            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+        if current.operation_id == reservation.operation_id
+            && current.owner_pid == reservation.owner_pid
+            && current.owner_start_identity == reservation.owner_start_identity
         {
-            std::fs::remove_file(path)
-                .map_err(|error| Error::internal_io(error.to_string(), None))?;
+            std::fs::remove_file(&path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("remove {}", path.display())),
+                )
+            })?;
         }
         Ok(())
-    })?;
-    result
+    })
+}
+
+fn admission_reservation_error(runner_id: &str, reservation: &AdmissionReservation) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "runner_mutation_reservation",
+        format!(
+            "runner `{runner_id}` daemon mutation `{}` for generation `{}` is still owned by PID {}; retry admission after it completes or run `homeboy runner reconcile {runner_id}` to recover a dead owner",
+            reservation.operation,
+            reservation.generation.as_deref().unwrap_or("unknown"),
+            reservation.owner_pid,
+        ),
+        Some(runner_id.to_string()),
+        Some(vec![format!("homeboy runner reconcile {runner_id}")]),
+    )
+    .with_retryable(true);
+    error.details["reservation_operation"] = serde_json::json!(reservation.operation);
+    error.details["reservation_generation"] = serde_json::json!(reservation.generation);
+    error.details["reservation_created_at"] = serde_json::json!(reservation.created_at);
+    error
 }
 
 /// A recovery-created daemon is durable before a controller can authenticate
@@ -1236,13 +1330,8 @@ fn reconcile_with(
 
 pub(crate) fn record_job(runner_id: &str, session: &RunnerSession, job_id: &str) -> Result<()> {
     with_registry_lock(runner_id, || {
-        if admission_reservation_path(runner_id)?.exists() {
-            return Err(Error::validation_invalid_argument(
-                "runner",
-                "runner daemon mutation reservation is active; retry job admission after reconnect completes",
-                Some(runner_id.to_string()),
-                None,
-            ));
+        if let Some(reservation) = active_admission_reservation_locked(runner_id)? {
+            return Err(admission_reservation_error(runner_id, &reservation));
         }
         let mut generations = read_locked(runner_id, Some(session))?.unwrap_or_else(|| {
             RollingGenerations::new(legacy_generation(session), session.clone())
@@ -1571,6 +1660,127 @@ mod tests {
             last_seen_at: None,
             leaseless_recovery_evidence: None,
         }
+    }
+
+    fn reservation(
+        operation: &str,
+        pid: u32,
+        identity: ProcessStartIdentity,
+    ) -> AdmissionReservation {
+        AdmissionReservation {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            owner_pid: pid,
+            owner_start_identity: identity,
+            created_at: "2026-08-03T00:00:00Z".to_string(),
+            operation: operation.to_string(),
+            generation: Some("lease-a".to_string()),
+        }
+    }
+
+    #[test]
+    fn live_reservation_blocks_admission_with_retryable_reconcile_action() {
+        test_support::with_isolated_home(|_| {
+            let current_identity = process_start_identity(std::process::id())
+                .expect("inspect test process")
+                .expect("test process is live");
+            write_durable_json(
+                &admission_reservation_path("runner-a").expect("reservation path"),
+                &reservation("ensure_remote_daemon", std::process::id(), current_identity),
+            )
+            .expect("write live reservation");
+
+            let error = record_job("runner-a", &session("lease-a", "daemon-a", None), "job-a")
+                .expect_err("live mutation blocks admission");
+
+            assert_eq!(error.code.as_str(), "validation.invalid_argument");
+            assert_eq!(error.retryable, Some(true));
+            assert_eq!(error.details["field"], "runner_mutation_reservation");
+            assert_eq!(
+                error.details["reservation_operation"],
+                "ensure_remote_daemon"
+            );
+            assert_eq!(
+                error.details["tried"],
+                serde_json::json!(["homeboy runner reconcile runner-a"])
+            );
+        });
+    }
+
+    #[test]
+    fn failed_mutation_clears_its_owned_reservation_before_returning() {
+        test_support::with_isolated_home(|_| {
+            let error = with_admission_fence("runner-a", None, "ensure_remote_daemon", |_| {
+                Err::<(), _>(Error::internal_unexpected("remote mutation failed"))
+            })
+            .expect_err("operation failure is returned");
+            assert_eq!(error.message, "remote mutation failed");
+            assert!(
+                !admission_reservation_path("runner-a")
+                    .expect("reservation path")
+                    .exists(),
+                "an error path must not strand its reservation"
+            );
+            record_job("runner-a", &session("lease-a", "daemon-a", None), "job-a")
+                .expect("admission proceeds after failed mutation cleanup");
+        });
+    }
+
+    #[test]
+    fn concurrent_admission_observes_mutation_reservation_without_waiting_for_remote_work() {
+        test_support::with_isolated_home(|_| {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let holder_barrier = std::sync::Arc::clone(&barrier);
+            let holder = std::thread::spawn(move || {
+                with_admission_fence("runner-a", None, "ensure_remote_daemon", |_| {
+                    holder_barrier.wait();
+                    holder_barrier.wait();
+                    Ok(())
+                })
+            });
+
+            barrier.wait();
+            let error = record_job("runner-a", &session("lease-a", "daemon-a", None), "job-a")
+                .expect_err("admission races a durable mutation reservation");
+            assert_eq!(error.retryable, Some(true));
+            assert_eq!(
+                error.details["reservation_operation"],
+                "ensure_remote_daemon"
+            );
+            barrier.wait();
+            holder
+                .join()
+                .expect("mutation owner thread")
+                .expect("mutation succeeds");
+            record_job("runner-a", &session("lease-a", "daemon-a", None), "job-a")
+                .expect("admission succeeds after reservation release");
+        });
+    }
+
+    #[test]
+    fn dead_reservation_is_reclaimed_before_admission() {
+        test_support::with_isolated_home(|_| {
+            let mut owner = std::process::Command::new("sh")
+                .args(["-c", "sleep 60"])
+                .spawn()
+                .expect("start reservation owner");
+            let identity = process_start_identity(owner.id())
+                .expect("inspect child")
+                .expect("child is live");
+            owner.kill().expect("stop reservation owner");
+            owner.wait().expect("reap reservation owner");
+            write_durable_json(
+                &admission_reservation_path("runner-a").expect("reservation path"),
+                &reservation("recover_missing_lease_state", owner.id(), identity),
+            )
+            .expect("write dead reservation");
+
+            record_job("runner-a", &session("lease-a", "daemon-a", None), "job-a")
+                .expect("dead owner reservation is reclaimed");
+
+            assert!(!admission_reservation_path("runner-a")
+                .expect("reservation path")
+                .exists());
+        });
     }
 
     #[test]

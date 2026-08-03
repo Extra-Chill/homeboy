@@ -497,6 +497,7 @@ fn connect_with_orphan_adoption_and_live_lease(
             let output = fenced_remote_mutation(
                 runner_id,
                 previous_session.as_ref(),
+                "replay_replacement_operation",
                 &client,
                 &command,
                 REMOTE_LEASELESS_RECOVERY_TIMEOUT,
@@ -622,6 +623,7 @@ fn connect_with_orphan_adoption_and_live_lease(
             let recovery = fenced_remote_mutation(
                 runner_id,
                 previous_session.as_ref(),
+                "recover_missing_lease_state",
                 &client,
                 &command,
                 REMOTE_LEASELESS_RECOVERY_TIMEOUT,
@@ -698,6 +700,7 @@ fn connect_with_orphan_adoption_and_live_lease(
                 fenced_remote_mutation(
                     runner_id,
                     previous_session.as_ref(),
+                    "reconcile_leaseless_orphans",
                     &client,
                     &command,
                     REMOTE_LEASELESS_RECOVERY_TIMEOUT,
@@ -777,6 +780,7 @@ fn connect_with_orphan_adoption_and_live_lease(
         None => super::generation_store::with_admission_fence(
             runner_id,
             previous_session.as_ref(),
+            "ensure_remote_daemon",
             |admission_fence| {
                 ensure_remote_daemon(
                     &client,
@@ -1303,13 +1307,18 @@ fn remote_state_loss_recovery_command(
 fn fenced_remote_mutation(
     runner_id: &str,
     previous_session: Option<&RunnerSession>,
+    operation_name: &str,
     client: &SshClient,
     command: &str,
     timeout: Duration,
 ) -> homeboy_core::server::CommandOutput {
-    match super::generation_store::with_admission_fence(runner_id, previous_session, |fence| {
-        if let Some(fence) = fence {
-            return Err(Error::validation_invalid_argument(
+    match super::generation_store::with_admission_fence(
+        runner_id,
+        previous_session,
+        operation_name,
+        |fence| {
+            if let Some(fence) = fence {
+                return Err(Error::validation_invalid_argument(
                     "reconnect",
                     format!(
                         "runner `{runner_id}` generation `{}` has {} unresolved active job(s); refusing daemon recovery before terminal job evidence is available",
@@ -1318,9 +1327,10 @@ fn fenced_remote_mutation(
                     Some(runner_id.to_string()),
                     None,
                 ));
-        }
-        Ok(client.execute_with_timeout(command, timeout))
-    }) {
+            }
+            Ok(client.execute_with_timeout(command, timeout))
+        },
+    ) {
         Ok(output) => output,
         Err(error) => homeboy_core::server::CommandOutput {
             success: false,
