@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.24] - 2026-08-03
+
+### Fixed
+- honor project PHPUnit bootstraps
+
 ## [3.34.23] - 2026-08-01
 
 ### Fixed
