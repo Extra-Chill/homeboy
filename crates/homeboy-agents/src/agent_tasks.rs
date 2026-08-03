@@ -270,6 +270,7 @@ pub mod gate {
         AgentTaskGateArtifactEnvironmentMapping, AgentTaskGateArtifactPathRequirement,
         AgentTaskGateEnvironment, AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy,
         AgentTaskGateEnvironmentVariable, AgentTaskGateExecutionPolicy,
+        AgentTaskGateExtensionInput, AgentTaskGateExtensionInputProvenance,
         AgentTaskGateFailureEvidence, AgentTaskGatePackageArtifactProvenance,
         AgentTaskGatePackageArtifactRequirement, AgentTaskGateReport, AgentTaskGateRevealPolicy,
         AgentTaskGateStatus, AgentTaskGateToolchainRequirement, AgentTaskGateVisibility,

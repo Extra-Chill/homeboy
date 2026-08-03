@@ -3231,6 +3231,7 @@ fi
             provider_config: Some(r#"{"runtime":"opencode"}"#.to_string()),
             gates: super::super::args::VerifyGateArgs {
                 gate_package_artifacts: Vec::new(),
+                gate_extension_inputs: Vec::new(),
                 verify: vec!["cargo test --lib".to_string()],
                 private_verify: Vec::new(),
                 private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,

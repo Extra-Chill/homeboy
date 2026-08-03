@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use homeboy::agents::agent_task_scheduler::AgentTaskCandidateCompletionPolicy;
 use homeboy::agents::agent_tasks::gate::{
     AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy, AgentTaskGateExecutionPolicy,
-    AgentTaskGatePackageArtifactRequirement, AgentTaskGateRevealPolicy,
-    AgentTaskGateToolchainRequirement, VerifyGateOptions,
+    AgentTaskGateExtensionInput, AgentTaskGatePackageArtifactRequirement,
+    AgentTaskGateRevealPolicy, AgentTaskGateToolchainRequirement, VerifyGateOptions,
 };
 
 use super::super::super::super::agent_task_dispatch::DispatchArgs;
@@ -84,6 +84,10 @@ pub struct VerifyGateArgs {
     /// remediation metadata. Repeat for multiple resources.
     #[arg(long = "gate-package-artifact", value_name = "JSON", value_parser = parse_gate_package_artifact)]
     pub gate_package_artifacts: Vec<AgentTaskGatePackageArtifactRequirement>,
+    /// Explicit extension input as a JSON object with `id` and absolute
+    /// `source`. Only selected inputs are copied into isolated HOME.
+    #[arg(long = "gate-extension-input", value_name = "JSON", value_parser = parse_gate_extension_input)]
+    pub gate_extension_inputs: Vec<AgentTaskGateExtensionInput>,
     /// Run gates with an isolated `$HOME` so gate side effects do not touch the
     /// operator's home directory (default true).
     #[arg(
@@ -134,6 +138,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                     .collect::<BTreeMap<_, _>>(),
                 isolate_home: args.isolate_gate_home,
                 isolate_xdg: args.isolate_gate_xdg,
+                extension_inputs: args.gate_extension_inputs,
             },
             gate_toolchains: args
                 .gate_toolchains
@@ -155,6 +160,11 @@ fn parse_gate_package_artifact(
 ) -> Result<AgentTaskGatePackageArtifactRequirement, String> {
     serde_json::from_str(value)
         .map_err(|error| format!("invalid gate package artifact declaration: {error}"))
+}
+
+fn parse_gate_extension_input(value: &str) -> Result<AgentTaskGateExtensionInput, String> {
+    serde_json::from_str(value)
+        .map_err(|error| format!("invalid gate extension input declaration: {error}"))
 }
 
 fn parse_gate_environment(value: &str) -> Result<(String, String), String> {
@@ -223,6 +233,8 @@ mod tests {
             "replace",
             "--gate-env",
             "FEATURE=enabled",
+            "--gate-extension-input",
+            r#"{"id":"wordpress","source":"/opt/extensions/wordpress","identity":"sha256:content"}"#,
         ])
         .expect("parse gate environment")
         .gates
@@ -232,6 +244,14 @@ mod tests {
             AgentTaskGateEnvironmentMode::Replace
         );
         assert_eq!(options.gate_environment.variables["FEATURE"], "enabled");
+        assert_eq!(
+            options.gate_environment.extension_inputs,
+            vec![AgentTaskGateExtensionInput {
+                id: "wordpress".to_string(),
+                source: "/opt/extensions/wordpress".to_string(),
+                identity: Some("sha256:content".to_string()),
+            }]
+        );
 
         let options: VerifyGateOptions = TestCli::try_parse_from([
             "homeboy",
