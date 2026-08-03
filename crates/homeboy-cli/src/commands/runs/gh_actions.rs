@@ -199,7 +199,7 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
                     continue;
                 }
 
-                let stored_path = homeboy::core::gh_actions_cache::persist_artifact_file(
+                let stored_path = crate::commands::runs::gh_actions_cache::persist_artifact_file(
                     &homeboy_run_id,
                     &artifact_id,
                     &file_name,
@@ -464,7 +464,7 @@ fn list_workflow_runs(
     let (etag, body) = split_headers_and_body(&raw);
 
     // Persist body and ETag for the next invocation.
-    homeboy::core::gh_actions_cache::write_runs_cache(
+    crate::commands::runs::gh_actions_cache::write_runs_cache(
         &body_path,
         &etag_path,
         body.as_bytes(),
@@ -709,7 +709,7 @@ mod helpers {
     }
 
     pub fn list_runs_cache_path(key: &str, ext: &str) -> homeboy::core::Result<PathBuf> {
-        homeboy::core::gh_actions_cache::list_runs_cache_path(key, ext)
+        crate::commands::runs::gh_actions_cache::list_runs_cache_path(key, ext)
     }
 
     // ── Glob compilation ────────────────────────────────────────────────────

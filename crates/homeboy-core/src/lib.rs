@@ -112,7 +112,6 @@ pub use homeboy_finding as finding;
 pub mod fleet;
 pub use homeboy_gate_contract::gate;
 pub mod gate_feedback_baseline;
-pub mod gh_actions_cache;
 pub mod git;
 pub mod harvest;
 pub mod host_mutation_lifecycle;
