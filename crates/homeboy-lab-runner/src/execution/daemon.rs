@@ -268,7 +268,7 @@ pub(super) fn exec_via_daemon(
             &client,
             &daemon_endpoint,
             &job_id,
-            || refreshed_daemon_endpoint(&runner.id, accepted_daemon_identity.as_deref()),
+            || refreshed_daemon_endpoint(&runner.id, &job_id, accepted_daemon_identity.as_deref()),
         )
         .map_err(|err| {
             terminal_runner_poll_failure(
@@ -1493,7 +1493,7 @@ pub(crate) fn observe_daemon_job_until_terminal(
             &client,
             &endpoint,
             runner_job_id,
-            || refreshed_daemon_endpoint(runner_id, accepted_daemon_identity),
+            || refreshed_daemon_endpoint(runner_id, runner_job_id, accepted_daemon_identity),
         )?;
         endpoint = refreshed_endpoint;
         if job.status.is_terminal() {
@@ -1527,6 +1527,9 @@ where
         match fetch_daemon_job(client, &endpoint, job_id) {
             Ok(job) => return Ok((job, endpoint)),
             Err(err) => {
+                if !daemon_poll_transport_was_lost(&err) {
+                    return Err(err);
+                }
                 if let Some(refreshed_endpoint) = reload_endpoint()? {
                     if refreshed_endpoint != endpoint {
                         endpoint = refreshed_endpoint;
@@ -1547,14 +1550,23 @@ where
     }
 }
 
+pub(super) fn daemon_poll_transport_was_lost(error: &Error) -> bool {
+    matches!(
+        error
+            .details
+            .pointer("/daemon_transport_error/kind")
+            .and_then(Value::as_str),
+        Some("connect" | "timeout" | "body_decode")
+    ) || (error.details.get("http_status").is_none()
+        && super::super::daemon_health::runner_daemon_health_failure(error).is_some())
+}
+
 fn refreshed_daemon_endpoint(
     runner_id: &str,
+    job_id: &str,
     expected_identity: Option<&str>,
 ) -> Result<Option<String>> {
-    let report = super::super::status(runner_id)?;
-    let Some(session) = report.session.filter(|_| report.connected) else {
-        return Ok(None);
-    };
+    let session = super::super::connection::reconnect_job_owner_for_polling(runner_id, job_id)?;
     if session.mode != crate::RunnerTunnelMode::DirectSsh {
         return Ok(None);
     }

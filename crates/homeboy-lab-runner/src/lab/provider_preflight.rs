@@ -798,6 +798,7 @@ mod tests {
             local_port: Some(49152),
             local_url: Some("http://127.0.0.1:49152".to_string()),
             tunnel_pid: Some(tunnel_pid),
+            tunnel_process_start_identity: None,
             remote_daemon_pid: Some(1234),
             remote_daemon_lease_id: Some(lease_id.to_string()),
             homeboy_version: "0.0.0-test".to_string(),

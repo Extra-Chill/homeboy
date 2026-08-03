@@ -1,7 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
@@ -24,6 +24,21 @@ fn path(runner_id: &str) -> Result<PathBuf> {
     Ok(paths::runner_sessions_dir()?
         .join(runner_id)
         .join("generations.json"))
+}
+
+fn recovery_lock_path(runner_id: &str, generation: &str) -> Result<PathBuf> {
+    let generation = generation
+        .chars()
+        .map(|character| {
+            character
+                .is_ascii_alphanumeric()
+                .then_some(character)
+                .unwrap_or('_')
+        })
+        .collect::<String>();
+    Ok(paths::runner_sessions_dir()?
+        .join(runner_id)
+        .join(format!("recovery-{generation}.lock")))
 }
 
 fn pending_replacement_path(runner_id: &str) -> Result<PathBuf> {
@@ -106,8 +121,13 @@ pub(crate) fn write_durable_json<T: serde::Serialize>(
 
 /// Serialize read-modify-write registry updates independently for each runner.
 /// A status reconciliation and `/exec` acceptance can arrive concurrently.
-fn with_registry_lock<T>(runner_id: &str, operation: impl FnOnce() -> Result<T>) -> Result<T> {
-    let lock_path = path(runner_id)?.with_extension("lock");
+fn with_lock<T>(
+    lock_path: PathBuf,
+    runner_id: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+    const LOCK_RETRY: Duration = Duration::from_millis(25);
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             Error::internal_io(
@@ -127,11 +147,35 @@ fn with_registry_lock<T>(runner_id: &str, operation: impl FnOnce() -> Result<T>)
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(Error::internal_io(
-                std::io::Error::last_os_error().to_string(),
-                Some("lock generation registry".to_string()),
-            ));
+        let deadline = Instant::now() + LOCK_TIMEOUT;
+        loop {
+            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some("lock generation registry".to_string()),
+                ));
+            }
+            if Instant::now() >= deadline {
+                let mut error = Error::internal_io(
+                    format!(
+                        "timed out after {}ms waiting for runner generation registry lock",
+                        LOCK_TIMEOUT.as_millis()
+                    ),
+                    Some("lock generation registry".to_string()),
+                );
+                error.details = serde_json::json!({
+                    "kind": "runner_generation_lock_timeout",
+                    "runner_id": runner_id,
+                    "timeout_ms": LOCK_TIMEOUT.as_millis(),
+                });
+                error.retryable = Some(true);
+                return Err(error);
+            }
+            std::thread::sleep(LOCK_RETRY);
         }
     }
     let result = operation();
@@ -141,6 +185,26 @@ fn with_registry_lock<T>(runner_id: &str, operation: impl FnOnce() -> Result<T>)
         let _ = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) };
     }
     result
+}
+
+fn with_registry_lock<T>(runner_id: &str, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    with_lock(
+        path(runner_id)?.with_extension("lock"),
+        runner_id,
+        operation,
+    )
+}
+
+pub(crate) fn with_generation_recovery_lock<T>(
+    runner_id: &str,
+    generation: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    with_lock(
+        recovery_lock_path(runner_id, generation)?,
+        runner_id,
+        operation,
+    )
 }
 
 fn legacy_generation(session: &RunnerSession) -> String {
@@ -787,7 +851,7 @@ trait GenerationEndpointOperations {
     fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool;
     fn active_jobs(&self, session: &RunnerSession) -> Option<usize>;
     fn stop(&self, session: &RunnerSession) -> bool;
-    fn terminate_tunnel(&self, pid: u32);
+    fn terminate_tunnel(&self, session: &RunnerSession);
 }
 
 struct HttpGenerationEndpointOperations {
@@ -848,8 +912,8 @@ impl GenerationEndpointOperations for HttpGenerationEndpointOperations {
             .is_ok_and(|response| response.status().is_success())
     }
 
-    fn terminate_tunnel(&self, pid: u32) {
-        crate::connection::terminate_generation_tunnel(pid);
+    fn terminate_tunnel(&self, session: &RunnerSession) {
+        crate::connection::terminate_tunnel_if_owned(session);
     }
 }
 
@@ -949,8 +1013,8 @@ impl GenerationEndpointOperations for SshGenerationEndpointOperations<'_> {
             .is_some()
     }
 
-    fn terminate_tunnel(&self, pid: u32) {
-        crate::connection::terminate_generation_tunnel(pid);
+    fn terminate_tunnel(&self, session: &RunnerSession) {
+        crate::connection::terminate_tunnel_if_owned(session);
     }
 }
 
@@ -975,8 +1039,8 @@ where
         self.primary.stop(session) || self.fallback.stop(session)
     }
 
-    fn terminate_tunnel(&self, pid: u32) {
-        self.primary.terminate_tunnel(pid);
+    fn terminate_tunnel(&self, session: &RunnerSession) {
+        self.primary.terminate_tunnel(session);
     }
 }
 
@@ -1116,9 +1180,7 @@ fn reconcile_with(
         .into_iter()
         .filter_map(|(generation, session)| {
             if operations.stop(&session) {
-                if let Some(pid) = session.tunnel_pid {
-                    operations.terminate_tunnel(pid);
-                }
+                operations.terminate_tunnel(&session);
                 Some(generation)
             } else {
                 None
@@ -1173,6 +1235,66 @@ pub(crate) fn record_job(runner_id: &str, session: &RunnerSession, job_id: &str)
             .unwrap_or_else(|| generations.admission_owner.clone());
         generations.admit_job_for(&owner, job_id);
         write(runner_id, &generations)
+    })
+}
+
+/// Replace the local endpoint for a job's already-owned generation after an
+/// authenticated reattachment. Unlike admission, this cannot change where new
+/// work is sent.
+pub(crate) fn record_reconnected_job_owner(
+    runner_id: &str,
+    session: &RunnerSession,
+    job_id: &str,
+) -> Result<RunnerSession> {
+    let lease_id = session
+        .remote_daemon_lease_id
+        .as_deref()
+        .ok_or_else(|| Error::internal_unexpected("reconnected daemon session has no lease ID"))?;
+    with_registry_lock(runner_id, || {
+        let Some(mut generations) = read_locked(runner_id, Some(session))? else {
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                "runner has no durable daemon generation binding for this job",
+                Some(runner_id.to_string()),
+                None,
+            ));
+        };
+        let owner = generations.job_owner(job_id).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "job_id",
+                "runner has no durable daemon generation binding for this job",
+                Some(job_id.to_string()),
+                None,
+            )
+        })?;
+        let Some(generation) = generations
+            .generations
+            .iter()
+            .find_map(|(generation, entry)| {
+                (generation == owner
+                    || entry.endpoint.remote_daemon_lease_id.as_deref() == Some(owner))
+                .then_some(generation.clone())
+            })
+        else {
+            return Err(Error::internal_unexpected(
+                "job owner does not resolve to a persisted daemon generation",
+            ));
+        };
+        let entry = generations
+            .generations
+            .get_mut(&generation)
+            .expect("job owner generation was resolved");
+        if entry.endpoint.remote_daemon_lease_id.as_deref() != Some(lease_id) {
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                "reattached daemon lease does not match the durable job owner",
+                Some(runner_id.to_string()),
+                None,
+            ));
+        }
+        let replaced = std::mem::replace(&mut entry.endpoint, session.clone());
+        write(runner_id, &generations)?;
+        Ok(replaced)
     })
 }
 
@@ -1472,6 +1594,7 @@ mod tests {
             local_port: Some(4000),
             local_url: Some(format!("http://{endpoint}:4000")),
             tunnel_pid,
+            tunnel_process_start_identity: None,
             remote_daemon_pid: Some(42),
             remote_daemon_lease_id: Some(lease.to_string()),
             homeboy_version: "test".to_string(),
@@ -1545,8 +1668,10 @@ mod tests {
             !self.stop_failures.borrow().contains(&lease_id)
         }
 
-        fn terminate_tunnel(&self, pid: u32) {
-            self.terminated_pids.borrow_mut().push(pid);
+        fn terminate_tunnel(&self, session: &RunnerSession) {
+            if let Some(pid) = session.tunnel_pid {
+                self.terminated_pids.borrow_mut().push(pid);
+            }
         }
     }
 
@@ -1990,7 +2115,7 @@ mod tests {
                 true
             }
 
-            fn terminate_tunnel(&self, _: u32) {}
+            fn terminate_tunnel(&self, _: &RunnerSession) {}
         }
 
         let fresh = session("lease-fresh", "daemon-fresh", Some(202));
@@ -2361,6 +2486,43 @@ mod tests {
                 Some(session("lease-stale", "daemon-stale", Some(101)))
             );
             assert!(operations.stopped_leases.borrow().is_empty());
+        });
+    }
+
+    #[test]
+    fn dropped_generation_a_reconnect_retains_one_owner_after_admission_rotates_to_b() {
+        test_support::with_isolated_home(|_| {
+            let stale = session("lease-stale", "daemon-stale", Some(101));
+            let fresh = session("lease-fresh", "daemon-fresh", Some(202));
+            record_job("runner-a", &stale, "job-stale").expect("record stale job");
+            activate(
+                "runner-a",
+                &stale,
+                "lease-fresh".to_string(),
+                fresh.clone(),
+                &["job-stale".to_string()],
+            )
+            .expect("activate fresh generation");
+
+            let mut reattached = stale.clone();
+            reattached.local_url = Some("http://127.0.0.1:49152".to_string());
+            reattached.local_port = Some(49152);
+            reattached.tunnel_pid = Some(303);
+            let replaced = record_reconnected_job_owner("runner-a", &reattached, "job-stale")
+                .expect("retain reattached owner");
+            assert_eq!(
+                replaced, stale,
+                "the dropped generation-A endpoint is superseded"
+            );
+
+            assert_eq!(
+                job_session("runner-a", "job-stale", Some(&fresh)).expect("route stale job"),
+                Some(reattached)
+            );
+            assert_eq!(
+                admission_session("runner-a", Some(&stale)).expect("retain admission owner"),
+                Some(fresh)
+            );
         });
     }
 
