@@ -93,6 +93,10 @@ pub struct HomeboyBinaryRefreshOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<Value>,
     pub updated_fields: Vec<String>,
+    /// Refresh-owned commands are reported here rather than as independently
+    /// actionable runner-exec handoffs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phase_summary: Vec<HomeboyRefreshPhase>,
     pub daemon_refreshed: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interrupted_job_ids: Vec<String>,
@@ -107,6 +111,27 @@ pub struct HomeboyBinaryRefreshOutput {
     pub bootstrap_provenance: Option<HomeboyBootstrapProvenance>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rollback: Option<HomeboyBinaryRefreshRollback>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HomeboyRefreshPhase {
+    pub name: &'static str,
+    pub required: bool,
+    pub status: &'static str,
+    pub exit_code: i32,
+}
+
+fn refresh_phase(name: &'static str, required: bool, exit_code: i32) -> HomeboyRefreshPhase {
+    HomeboyRefreshPhase {
+        name,
+        required,
+        status: match (required, exit_code) {
+            (_, 0) => "succeeded",
+            (false, 1) => "tolerated_failure",
+            _ => "failed",
+        },
+        exit_code,
+    }
 }
 
 /// Evidence for an explicitly authorized rollback. `previous` names only
@@ -314,6 +339,7 @@ pub fn refresh_homeboy_binary(
                 dry_run: true,
                 identity: None,
                 updated_fields: Vec::new(),
+                phase_summary: Vec::new(),
                 daemon_refreshed: false,
                 interrupted_job_ids: Vec::new(),
                 selected_binary_path: plan.binary_path.clone(),
@@ -346,6 +372,7 @@ pub fn refresh_homeboy_binary(
         exec_options,
         Some(connection_status.clone()),
     )?;
+    let materialization_phase = refresh_phase("materialize", true, exit_code);
     if exit_code != 0 {
         return Ok((
             HomeboyBinaryRefreshOutput {
@@ -355,6 +382,7 @@ pub fn refresh_homeboy_binary(
                 dry_run: false,
                 identity: None,
                 updated_fields: Vec::new(),
+                phase_summary: vec![materialization_phase],
                 daemon_refreshed: false,
                 interrupted_job_ids: Vec::new(),
                 selected_binary_path: plan.binary_path.clone(),
@@ -369,6 +397,7 @@ pub fn refresh_homeboy_binary(
             exit_code,
         ));
     }
+    let mut phase_summary = vec![materialization_phase];
 
     // A reconnect replaces the daemon control plane. Prove it is admissible
     // before selecting the new global binary: a deferred refresh must leave
@@ -392,6 +421,7 @@ pub fn refresh_homeboy_binary(
                 plan: plan.clone(),
                 identity: parse_identity(&exec_output.stdout).ok(),
                 updated_fields: Vec::new(),
+                phase_summary: phase_summary.clone(),
                 daemon_refreshed: false,
                 interrupted_job_ids: Vec::new(),
                 selected_binary_path: plan.binary_path.clone(),
@@ -440,13 +470,21 @@ pub fn refresh_homeboy_binary(
                     options.allow_downgrade,
                     &promotion_authorities,
                     |older, newer| {
-                        runner_commits_are_ancestral(
+                        let result = runner_commits_are_ancestral(
                             &plan,
                             older,
                             newer,
                             disconnected_ssh,
                             &connection_status,
-                        )
+                        );
+                        if let Ok(ancestral) = result {
+                            phase_summary.push(refresh_phase(
+                                "downgrade_safety_probe",
+                                false,
+                                if ancestral { 0 } else { 1 },
+                            ));
+                        }
+                        result
                     },
                 )?;
                 Ok((
@@ -474,13 +512,21 @@ pub fn refresh_homeboy_binary(
                 options.allow_downgrade,
                 &promotion_authorities,
                 |older, newer| {
-                    runner_commits_are_ancestral(
+                    let result = runner_commits_are_ancestral(
                         &plan,
                         older,
                         newer,
                         disconnected_ssh,
                         &connection_status,
-                    )
+                    );
+                    if let Ok(ancestral) = result {
+                        phase_summary.push(refresh_phase(
+                            "downgrade_safety_probe",
+                            false,
+                            if ancestral { 0 } else { 1 },
+                        ));
+                    }
+                    result
                 },
             )?;
             let updated_fields =
@@ -505,6 +551,7 @@ pub fn refresh_homeboy_binary(
                     dry_run: false,
                     identity: parse_identity(&exec_output.stdout).ok(),
                     updated_fields: Vec::new(),
+                    phase_summary,
                     daemon_refreshed: false,
                     interrupted_job_ids: Vec::new(),
                     selected_binary_path: plan.binary_path.clone(),
@@ -584,6 +631,7 @@ pub fn refresh_homeboy_binary(
                     plan: plan.clone(),
                     identity: Some(identity.clone()),
                     updated_fields: updated_fields.clone(),
+                    phase_summary,
                     daemon_refreshed: true,
                     interrupted_job_ids: Vec::new(),
                     selected_binary_path: plan.binary_path.clone(),
@@ -619,6 +667,7 @@ pub fn refresh_homeboy_binary(
                         plan: plan.clone(),
                         identity: Some(identity),
                         updated_fields: Vec::new(),
+                        phase_summary,
                         daemon_refreshed: false,
                         interrupted_job_ids: Vec::new(),
                         selected_binary_path: plan.binary_path.clone(),
@@ -739,6 +788,7 @@ pub fn refresh_homeboy_binary(
                     plan: plan.clone(),
                     identity: Some(identity),
                     updated_fields: Vec::new(),
+                    phase_summary,
                     daemon_refreshed: false,
                     interrupted_job_ids,
                     selected_binary_path: plan.binary_path.clone(),
@@ -794,6 +844,7 @@ pub fn refresh_homeboy_binary(
                         plan: plan.clone(),
                         identity: Some(identity),
                         updated_fields: Vec::new(),
+                        phase_summary,
                         daemon_refreshed: false,
                         interrupted_job_ids,
                         selected_binary_path: plan.binary_path.clone(),
@@ -829,6 +880,7 @@ pub fn refresh_homeboy_binary(
             plan: plan.clone(),
             identity: Some(identity.clone()),
             updated_fields: updated_fields.clone(),
+            phase_summary,
             daemon_refreshed,
             interrupted_job_ids,
             selected_binary_path: plan.binary_path.clone(),
@@ -1129,12 +1181,14 @@ fn refresh_execution_options(
             plan.script.clone(),
         ])
     };
-    options.with_capability_preflight(RunnerCapabilityPreflight {
-        command: "runner.refresh-homeboy".to_string(),
-        required_commands,
-        timeout: disconnected_ssh.then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT),
-        ..Default::default()
-    })
+    options
+        .with_capability_preflight(RunnerCapabilityPreflight {
+            command: "runner.refresh-homeboy".to_string(),
+            required_commands,
+            timeout: disconnected_ssh.then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT),
+            ..Default::default()
+        })
+        .without_evidence_mirror()
 }
 
 #[derive(Debug, Clone)]
@@ -1385,12 +1439,14 @@ fn refresh_ancestry_execution_options(
     } else {
         RunnerExecOptions::raw_command(command)
     };
-    options.with_capability_preflight(RunnerCapabilityPreflight {
-        command: "runner.refresh-homeboy".to_string(),
-        required_commands: vec!["git".to_string()],
-        timeout: disconnected_ssh.then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT),
-        ..Default::default()
-    })
+    options
+        .with_capability_preflight(RunnerCapabilityPreflight {
+            command: "runner.refresh-homeboy".to_string(),
+            required_commands: vec!["git".to_string()],
+            timeout: disconnected_ssh.then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT),
+            ..Default::default()
+        })
+        .without_evidence_mirror()
 }
 
 fn classify_refresh_ancestry_exit(plan: &HomeboyBinaryRefreshPlan, exit_code: i32) -> Result<bool> {

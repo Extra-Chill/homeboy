@@ -969,6 +969,15 @@ fn materialize_failure_preserves_compiler_diagnostics_and_active_binary() {
                 .unwrap_or_default()
         );
         let failure = output.failure.expect("failure evidence is preserved");
+        assert_eq!(
+            output.phase_summary,
+            vec![HomeboyRefreshPhase {
+                name: "materialize",
+                required: true,
+                status: "failed",
+                exit_code: 101,
+            }]
+        );
         assert_eq!(failure.exit_code, 101);
         assert_eq!(failure.source_sha.as_deref(), Some(source_sha.as_str()));
         assert!(failure
@@ -1434,6 +1443,8 @@ fn connected_refresh_keeps_daemon_execution_options() {
 
     assert!(!options.allow_diagnostic_ssh);
     assert_eq!(options.diagnostic_ssh_timeout, None);
+    assert!(!options.mirror_evidence);
+    assert!(!options.print_handoff);
 }
 
 #[test]
@@ -1464,6 +1475,8 @@ fn refresh_ancestry_probe_executes_in_the_runner_repository() {
             .required_commands,
         vec!["git"]
     );
+    assert!(!connected.mirror_evidence);
+    assert!(!connected.print_handoff);
 
     let disconnected = refresh_ancestry_execution_options(
         "/runner/homeboy",
@@ -1475,6 +1488,28 @@ fn refresh_ancestry_probe_executes_in_the_runner_repository() {
     assert_eq!(
         disconnected.diagnostic_ssh_timeout,
         Some(DISCONNECTED_SSH_REFRESH_TIMEOUT)
+    );
+}
+
+#[test]
+fn refresh_phase_summary_distinguishes_tolerated_probe_from_required_failure() {
+    assert_eq!(
+        refresh_phase("downgrade_safety_probe", false, 1),
+        HomeboyRefreshPhase {
+            name: "downgrade_safety_probe",
+            required: false,
+            status: "tolerated_failure",
+            exit_code: 1,
+        }
+    );
+    assert_eq!(
+        refresh_phase("materialize", true, 101),
+        HomeboyRefreshPhase {
+            name: "materialize",
+            required: true,
+            status: "failed",
+            exit_code: 101,
+        }
     );
 }
 
