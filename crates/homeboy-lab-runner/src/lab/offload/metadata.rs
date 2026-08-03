@@ -201,15 +201,15 @@ pub(crate) fn lab_runner_homeboy_metadata(
 ) -> serde_json::Value {
     let controller_version = homeboy_product_identity::product_version();
     let controller_build_identity = homeboy_product_identity::build_identity().display;
-    let refresh_commands = vec![
-        runner_homeboy_align_to_controller_command(runner_id),
-        format!("homeboy runner disconnect {}", shell::quote_arg(runner_id)),
-        format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
-    ];
-    let primary_remediation_command =
-        runner_homeboy_primary_remediation_command(runner_id, configured_executable, status);
-    let topology_recovery_command =
-        runner_homeboy_topology_recovery_command(runner_id, configured_executable, status);
+    // Status owns the controller-to-runner convergence target. Reusing its
+    // recovery avoids dispatch telling an operator to reinstall the runner's
+    // already-incompatible configured binary (#11360).
+    let refresh_commands = runner_homeboy_refresh_commands(runner_id, status);
+    let primary_remediation_command = refresh_commands
+        .first()
+        .cloned()
+        .unwrap_or_else(|| runner_homeboy_align_to_controller_command(runner_id));
+    let topology_recovery_command = primary_remediation_command.clone();
     let controller_binary = std::env::current_exe()
         .ok()
         .map(|path| path.display().to_string());
@@ -449,74 +449,8 @@ fn lab_runner_homeboy_version_drift(status: &RunnerStatusReport) -> bool {
     classify_runner_homeboy_version_drift(status) != RunnerHomeboyVersionDrift::None
 }
 
-fn runner_daemon_newer_than_controller(status: &RunnerStatusReport) -> bool {
-    let Some(controller) = parse_version_triplet(homeboy_product_identity::product_version())
-    else {
-        return false;
-    };
-    status
-        .stale_daemon
-        .as_ref()
-        .map(|warning| warning.active_daemon_control_plane_version.as_str())
-        .into_iter()
-        .chain(
-            status
-                .session
-                .as_ref()
-                .map(|session| session.homeboy_version.as_str()),
-        )
-        .filter_map(parse_version_triplet)
-        .any(|runner| runner > controller)
-}
-
-fn runner_homeboy_primary_remediation_command(
-    runner_id: &str,
-    configured_executable: &str,
-    status: &RunnerStatusReport,
-) -> String {
-    if runner_daemon_newer_than_controller(status) {
-        return controller_homeboy_recovery_command();
-    }
-
-    if let Some(command) = runner_configured_binary_select_command(runner_id, configured_executable)
-    {
-        return command;
-    }
-
-    runner_homeboy_refresh_commands(runner_id, status)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| runner_homeboy_align_to_controller_command(runner_id))
-}
-
-fn runner_homeboy_topology_recovery_command(
-    runner_id: &str,
-    configured_executable: &str,
-    status: &RunnerStatusReport,
-) -> String {
-    if runner_daemon_newer_than_controller(status) {
-        return controller_homeboy_recovery_command();
-    }
-    runner_configured_binary_select_command(runner_id, configured_executable).unwrap_or_else(|| {
-        runner_homeboy_primary_remediation_command(runner_id, configured_executable, status)
-    })
-}
-
-fn runner_configured_binary_select_command(
-    runner_id: &str,
-    configured_executable: &str,
-) -> Option<String> {
-    let configured_executable = configured_executable.trim();
-    if configured_executable.is_empty() || configured_executable == "homeboy" {
-        return None;
-    }
-    Some(format!(
-        "homeboy runner refresh-homeboy {} --select {} --reconnect",
-        shell::quote_arg(runner_id),
-        shell::quote_arg(configured_executable)
-    ))
-}
-
+/// Recover the controller runtime when an independent handoff-stage check
+/// proves that the controller, rather than a runner, must be upgraded.
 pub(crate) fn controller_homeboy_recovery_command() -> String {
     let Ok(exe) = std::env::current_exe() else {
         return "homeboy upgrade".to_string();
@@ -755,15 +689,12 @@ pub(crate) fn stale_runner_homeboy_error(
         });
     let refresh = refresh_commands.join(" && ");
     let mut tried = Vec::new();
-    if runner_daemon_newer_than_controller(status) {
-        tried.push(format!(
-            "Upgrade this local Homeboy controller before retrying Lab offload: {}",
-            runner_homeboy_primary_remediation_command(runner_id, configured_executable, status)
-        ));
-    }
     tried.push(format!(
         "One-command topology recovery: {}",
-        runner_homeboy_topology_recovery_command(runner_id, configured_executable, status)
+        refresh_commands
+            .first()
+            .cloned()
+            .unwrap_or_else(|| runner_homeboy_align_to_controller_command(runner_id))
     ));
     tried.extend([
         format!("Reconnect runner `{runner_id}` before retrying Lab offload: {refresh}"),
@@ -789,7 +720,7 @@ pub(crate) fn runner_homeboy_refresh_commands(
         .as_ref()
         .map(|warning| warning.recovery_commands.clone())
         .unwrap_or_default();
-    if !commands.is_empty() && !runner_id.contains(char::is_whitespace) {
+    if !commands.is_empty() {
         return commands;
     }
     vec![
