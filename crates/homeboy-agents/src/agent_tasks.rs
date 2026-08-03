@@ -267,9 +267,11 @@ pub mod review_dossier {
 /// Gate report contracts, visibility, and reveal policies.
 pub mod gate {
     pub use super::super::agent_task_gate::{
+        AgentTaskGateArtifactEnvironmentMapping, AgentTaskGateArtifactPathRequirement,
         AgentTaskGateEnvironment, AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy,
         AgentTaskGateEnvironmentVariable, AgentTaskGateExecutionPolicy,
-        AgentTaskGateFailureEvidence, AgentTaskGateReport, AgentTaskGateRevealPolicy,
+        AgentTaskGateFailureEvidence, AgentTaskGatePackageArtifactProvenance,
+        AgentTaskGatePackageArtifactRequirement, AgentTaskGateReport, AgentTaskGateRevealPolicy,
         AgentTaskGateStatus, AgentTaskGateToolchainRequirement, AgentTaskGateVisibility,
         VerifyGateOptions, AGENT_TASK_GATE_REPORT_SCHEMA,
     };

@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use homeboy::agents::agent_task_scheduler::AgentTaskCandidateCompletionPolicy;
 use homeboy::agents::agent_tasks::gate::{
     AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy, AgentTaskGateExecutionPolicy,
-    AgentTaskGateRevealPolicy, AgentTaskGateToolchainRequirement, VerifyGateOptions,
+    AgentTaskGatePackageArtifactRequirement, AgentTaskGateRevealPolicy,
+    AgentTaskGateToolchainRequirement, VerifyGateOptions,
 };
 
 use super::super::super::super::agent_task_dispatch::DispatchArgs;
@@ -78,6 +79,11 @@ pub struct VerifyGateArgs {
     /// `COMMAND --version` in the final isolated gate environment. Repeatable.
     #[arg(long = "gate-toolchain", value_name = "COMMAND")]
     pub gate_toolchains: Vec<String>,
+    /// Caller-declared package resource readiness as a JSON object. The object
+    /// defines its environment mapping, required paths or digests, and opaque
+    /// remediation metadata. Repeat for multiple resources.
+    #[arg(long = "gate-package-artifact", value_name = "JSON", value_parser = parse_gate_package_artifact)]
+    pub gate_package_artifacts: Vec<AgentTaskGatePackageArtifactRequirement>,
     /// Run gates with an isolated `$HOME` so gate side effects do not touch the
     /// operator's home directory (default true).
     #[arg(
@@ -137,10 +143,18 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                     probe_arguments: vec!["--version".to_string()],
                 })
                 .collect(),
+            gate_package_artifacts: args.gate_package_artifacts,
             gate_diagnostic_sidecars: Vec::new(),
             hydrate_dependencies: true,
         }
     }
+}
+
+fn parse_gate_package_artifact(
+    value: &str,
+) -> Result<AgentTaskGatePackageArtifactRequirement, String> {
+    serde_json::from_str(value)
+        .map_err(|error| format!("invalid gate package artifact declaration: {error}"))
 }
 
 fn parse_gate_environment(value: &str) -> Result<(String, String), String> {

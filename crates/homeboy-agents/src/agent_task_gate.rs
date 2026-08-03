@@ -82,6 +82,11 @@ pub struct VerifyGateOptions {
     /// provider can spend an execution budget.
     #[serde(default)]
     pub gate_toolchains: Vec<AgentTaskGateToolchainRequirement>,
+    /// Caller-owned package resources required by deterministic gates. Homeboy
+    /// validates declared paths and records provenance without interpreting the
+    /// package, artifact, or remediation semantics.
+    #[serde(default)]
+    pub gate_package_artifacts: Vec<AgentTaskGatePackageArtifactRequirement>,
     /// Explicit mappings for producer-owned diagnostic sidecars. Homeboy only
     /// consumes declared schemas and paths; producer semantics remain opaque.
     #[serde(default)]
@@ -142,6 +147,36 @@ pub struct AgentTaskGateToolchainRequirement {
     pub probe_arguments: Vec<String>,
 }
 
+/// A caller-declared resource selected by a package or extension.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGatePackageArtifactRequirement {
+    pub id: String,
+    pub environment: AgentTaskGateArtifactEnvironmentMapping,
+    #[serde(default)]
+    pub required_paths: Vec<AgentTaskGateArtifactPathRequirement>,
+    /// Opaque caller metadata returned with failures and gate provenance.
+    pub remediation: serde_json::Value,
+}
+
+/// An explicit environment mapping for a package resource. `source` reads a
+/// host setting; `default` supplies a stable value when no host setting is used.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateArtifactEnvironmentMapping {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+}
+
+/// A resource path relative to the gate workspace, optionally pinned by SHA-256.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateArtifactPathRequirement {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
 fn default_toolchain_probe_arguments() -> Vec<String> {
     vec!["--version".to_string()]
 }
@@ -198,6 +233,7 @@ impl Default for VerifyGateOptions {
             rerun_completed_gates: false,
             gate_environment: AgentTaskGateEnvironmentPolicy::default(),
             gate_toolchains: Vec::new(),
+            gate_package_artifacts: Vec::new(),
             gate_diagnostic_sidecars: Vec::new(),
             hydrate_dependencies: default_hydrate_dependencies(),
         }
@@ -499,6 +535,27 @@ pub struct AgentTaskGateEnvironment {
     pub preserved: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sanitized: Vec<AgentTaskGateEnvironmentVariable>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_artifacts: Vec<AgentTaskGatePackageArtifactProvenance>,
+}
+
+/// Generic provenance for caller-declared package resources.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGatePackageArtifactProvenance {
+    pub id: String,
+    pub environment: String,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub artifacts: Vec<AgentTaskGateArtifactPathProvenance>,
+    pub remediation: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateArtifactPathProvenance {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -513,6 +570,7 @@ impl AgentTaskGateEnvironment {
             && self.inherited.is_empty()
             && self.preserved.is_empty()
             && self.sanitized.is_empty()
+            && self.package_artifacts.is_empty()
     }
 
     pub(crate) fn replay_policy(&self) -> AgentTaskGateEnvironmentPolicy {
@@ -911,6 +969,7 @@ mod baseline_tests {
             temp.path(),
             Duration::from_millis(20),
             &AgentTaskGateEnvironmentPolicy::default(),
+            &[],
         )
         .expect("bounded gate report");
 
@@ -936,6 +995,7 @@ mod baseline_tests {
             temp.path(),
             Duration::from_millis(20),
             &AgentTaskGateEnvironmentPolicy::default(),
+            &[],
         )
         .expect("bounded gate report");
 
@@ -996,6 +1056,7 @@ pub(crate) fn run_gate_command_with_policy_and_runtime_tmpdir(
         reveal_policy,
         runtime_tmpdir,
         &AgentTaskGateEnvironmentPolicy::default(),
+        &[],
     )
 }
 
@@ -1007,6 +1068,7 @@ pub(crate) fn run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
     reveal_policy: AgentTaskGateRevealPolicy,
     runtime_tmpdir: Option<&Path>,
     gate_environment: &AgentTaskGateEnvironmentPolicy,
+    package_artifacts: &[AgentTaskGatePackageArtifactRequirement],
 ) -> Result<AgentTaskGateReport> {
     run_gate_command_with_supervision(
         cwd,
@@ -1017,6 +1079,7 @@ pub(crate) fn run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
         runtime_tmpdir,
         None,
         gate_environment,
+        package_artifacts,
     )
 }
 
@@ -1029,6 +1092,7 @@ pub(crate) fn run_gate_command_with_supervision(
     runtime_tmpdir: Option<&Path>,
     supervision: Option<&GateSupervision>,
     gate_environment: &AgentTaskGateEnvironmentPolicy,
+    package_artifacts: &[AgentTaskGatePackageArtifactRequirement],
 ) -> Result<AgentTaskGateReport> {
     let command_vec = vec!["sh".to_string(), "-lc".to_string(), command.to_string()];
     let mut process = Command::new(&command_vec[0]);
@@ -1037,7 +1101,10 @@ pub(crate) fn run_gate_command_with_supervision(
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let selected_environment = selected_gate_environment(gate_environment, runtime_tmpdir)?;
+    let (gate_environment, package_artifacts) =
+        validate_package_artifacts(cwd, gate_environment, package_artifacts)?;
+    let mut selected_environment = selected_gate_environment(&gate_environment, runtime_tmpdir)?;
+    selected_environment.report.package_artifacts = package_artifacts;
     selected_environment.apply(&mut process);
     if supervision.is_some() {
         if !homeboy_core::engine::command::supports_process_tree_isolation() {
@@ -1142,6 +1209,7 @@ pub(crate) fn run_gate_command_with_timeout(
     runtime_tmpdir: &Path,
     timeout: Duration,
     gate_environment: &AgentTaskGateEnvironmentPolicy,
+    package_artifacts: &[AgentTaskGatePackageArtifactRequirement],
 ) -> Result<AgentTaskGateReport> {
     let command_vec = vec!["sh".to_string(), "-lc".to_string(), command.to_string()];
     let mut process = Command::new("sh");
@@ -1150,7 +1218,11 @@ pub(crate) fn run_gate_command_with_timeout(
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let selected_environment = selected_gate_environment(gate_environment, Some(runtime_tmpdir))?;
+    let (gate_environment, package_artifacts) =
+        validate_package_artifacts(cwd, gate_environment, package_artifacts)?;
+    let mut selected_environment =
+        selected_gate_environment(&gate_environment, Some(runtime_tmpdir))?;
+    selected_environment.report.package_artifacts = package_artifacts;
     selected_environment.apply(&mut process);
     homeboy_core::engine::command::isolate_process_tree(&mut process);
     let mut child = process.spawn().map_err(|error| {
@@ -1360,10 +1432,12 @@ pub(crate) fn preflight_gate_toolchains(
     cwd: &Path,
     policy: &AgentTaskGateEnvironmentPolicy,
     requirements: &[AgentTaskGateToolchainRequirement],
+    package_artifacts: &[AgentTaskGatePackageArtifactRequirement],
     runtime_tmpdir: Option<&Path>,
     timeout: Duration,
 ) -> Result<()> {
-    let selected_environment = selected_gate_environment(policy, runtime_tmpdir)?;
+    let (policy, _) = validate_package_artifacts(cwd, policy, package_artifacts)?;
+    let selected_environment = selected_gate_environment(&policy, runtime_tmpdir)?;
     // The deadline covers declared probe execution. Controller scheduling before
     // the first child starts cannot make an otherwise successful probe fail.
     let mut started = None;
@@ -1448,6 +1522,129 @@ pub(crate) fn preflight_gate_toolchains(
         }
     }
     Ok(())
+}
+
+fn validate_package_artifacts(
+    cwd: &Path,
+    policy: &AgentTaskGateEnvironmentPolicy,
+    requirements: &[AgentTaskGatePackageArtifactRequirement],
+) -> Result<(
+    AgentTaskGateEnvironmentPolicy,
+    Vec<AgentTaskGatePackageArtifactProvenance>,
+)> {
+    let mut policy = policy.clone();
+    let mut provenance = Vec::with_capacity(requirements.len());
+    for requirement in requirements {
+        if requirement.id.trim().is_empty()
+            || requirement.environment.name.trim().is_empty()
+            || requirement.required_paths.is_empty()
+            || requirement.remediation.is_null()
+        {
+            return Err(package_artifact_error(
+                requirement,
+                "each declaration requires an id, environment mapping, required path, and remediation metadata",
+                Vec::new(),
+            ));
+        }
+        let mapping = &requirement.environment;
+        if mapping.source.is_some() == mapping.default.is_some() {
+            return Err(package_artifact_error(
+                requirement,
+                "environment mapping requires exactly one of source or default",
+                Vec::new(),
+            ));
+        }
+        if (mapping.name == "HOME" && policy.isolate_home)
+            || (XDG_ENV_VARS.contains(&mapping.name.as_str()) && policy.isolate_xdg)
+        {
+            return Err(package_artifact_error(
+                requirement,
+                "environment mapping conflicts with the declared HOME/XDG isolation policy",
+                Vec::new(),
+            ));
+        }
+        let value = match (&mapping.source, &mapping.default) {
+            (Some(source), None) => preserved_environment_value(source)?,
+            (None, Some(default)) if !default.is_empty() => default.clone(),
+            _ => {
+                return Err(package_artifact_error(
+                    requirement,
+                    "environment mapping resolved to an empty value",
+                    Vec::new(),
+                ));
+            }
+        };
+        policy.variables.insert(mapping.name.clone(), value.clone());
+        let mut artifacts = Vec::with_capacity(requirement.required_paths.len());
+        let mut missing = Vec::new();
+        for artifact in &requirement.required_paths {
+            let path = Path::new(&artifact.path);
+            if path.is_absolute() || artifact.path.trim().is_empty() || artifact.path.contains("..")
+            {
+                missing.push(artifact.path.clone());
+                continue;
+            }
+            let path = cwd.join(path);
+            if !path.exists() {
+                missing.push(artifact.path.clone());
+                continue;
+            }
+            if let Some(expected) = &artifact.sha256 {
+                let bytes = fs::read(&path).map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                })?;
+                let actual = format!("sha256:{:x}", Sha256::digest(bytes));
+                if expected != &actual {
+                    missing.push(artifact.path.clone());
+                    continue;
+                }
+            }
+            artifacts.push(AgentTaskGateArtifactPathProvenance {
+                path: artifact.path.clone(),
+                sha256: artifact.sha256.clone(),
+            });
+        }
+        if !missing.is_empty() {
+            return Err(package_artifact_error(
+                requirement,
+                "required artifact paths are unavailable or do not match their declared digest",
+                missing,
+            ));
+        }
+        provenance.push(AgentTaskGatePackageArtifactProvenance {
+            id: requirement.id.clone(),
+            environment: mapping.name.clone(),
+            value,
+            source: mapping.source.clone(),
+            artifacts,
+            remediation: requirement.remediation.clone(),
+        });
+    }
+    Ok((policy, provenance))
+}
+
+fn package_artifact_error(
+    requirement: &AgentTaskGatePackageArtifactRequirement,
+    message: &str,
+    invalid_paths: Vec<String>,
+) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "gate_package_artifacts",
+        format!(
+            "package artifact readiness for `{}` failed: {message}",
+            requirement.id
+        ),
+        Some(requirement.id.clone()),
+        None,
+    );
+    error.retryable = Some(true);
+    error.details["package_artifact_readiness"] = json!({
+        "id": requirement.id,
+        "environment": requirement.environment,
+        "invalid_paths": invalid_paths,
+        "remediation": requirement.remediation,
+    });
+    error
 }
 
 fn toolchain_preflight_error(
@@ -1892,6 +2089,7 @@ mod tests {
             None,
             Some(&supervision),
             &AgentTaskGateEnvironmentPolicy::default(),
+            &[],
         )
         .is_err());
         let pid = child_pid
@@ -1928,6 +2126,7 @@ mod tests {
             None,
             Some(&supervision),
             &AgentTaskGateEnvironmentPolicy::default(),
+            &[],
         )
         .expect("gate");
         assert!(tails
@@ -1964,6 +2163,7 @@ mod tests {
             None,
             Some(&supervision),
             &AgentTaskGateEnvironmentPolicy::default(),
+            &[],
         )
         .expect("private gate");
         let tails = tails.lock().expect("tails");
@@ -2329,6 +2529,7 @@ mod tests {
             AgentTaskGateRevealPolicy::FullEvidence,
             None,
             &policy,
+            &[],
         )
         .expect("gate report");
 
@@ -2340,6 +2541,88 @@ mod tests {
         assert_eq!(report.environment.inherited.len(), 1);
         assert_eq!(report.environment.inherited[0].name, "DECLARED_INPUT");
         assert_eq!(report.environment.inherited[0].value, "kept");
+    }
+
+    #[test]
+    fn declared_package_artifact_maps_resource_preserves_isolation_and_records_provenance() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let artifact = workspace.path().join("fixtures/ready.bin");
+        fs::create_dir_all(artifact.parent().expect("artifact parent")).expect("artifact parent");
+        fs::write(&artifact, b"neutral fixture").expect("artifact");
+        let digest = format!("sha256:{:x}", Sha256::digest(b"neutral fixture"));
+        let requirement = AgentTaskGatePackageArtifactRequirement {
+            id: "fixture-resource".to_string(),
+            environment: AgentTaskGateArtifactEnvironmentMapping {
+                name: "FIXTURE_RESOURCE_ROOT".to_string(),
+                source: None,
+                default: Some("fixtures".to_string()),
+            },
+            required_paths: vec![AgentTaskGateArtifactPathRequirement {
+                path: "fixtures/ready.bin".to_string(),
+                sha256: Some(digest),
+            }],
+            remediation: json!({"action": "refresh_fixture_resource"}),
+        };
+
+        let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+            workspace.path(),
+            1,
+            "test \"$FIXTURE_RESOURCE_ROOT\" = fixtures && test \"$HOME\" != fixtures",
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[requirement],
+        )
+        .expect("declared resource is gate-ready");
+
+        assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
+        assert_eq!(report.environment.package_artifacts.len(), 1);
+        assert_eq!(
+            report.environment.package_artifacts[0].id,
+            "fixture-resource"
+        );
+        assert_eq!(
+            report.environment.package_artifacts[0].artifacts[0].path,
+            "fixtures/ready.bin"
+        );
+    }
+
+    #[test]
+    fn missing_declared_package_artifact_stops_preflight_with_caller_remediation() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let requirement = AgentTaskGatePackageArtifactRequirement {
+            id: "fixture-resource".to_string(),
+            environment: AgentTaskGateArtifactEnvironmentMapping {
+                name: "FIXTURE_RESOURCE_ROOT".to_string(),
+                source: None,
+                default: Some("fixtures".to_string()),
+            },
+            required_paths: vec![AgentTaskGateArtifactPathRequirement {
+                path: "fixtures/missing.bin".to_string(),
+                sha256: None,
+            }],
+            remediation: json!({"action": "refresh_fixture_resource"}),
+        };
+
+        let error = preflight_gate_toolchains(
+            workspace.path(),
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[],
+            &[requirement],
+            None,
+            Duration::from_secs(1),
+        )
+        .expect_err("missing resource must stop provider preflight");
+
+        assert_eq!(
+            error.details["package_artifact_readiness"]["invalid_paths"],
+            json!(["fixtures/missing.bin"])
+        );
+        assert_eq!(
+            error.details["package_artifact_readiness"]["remediation"]["action"],
+            "refresh_fixture_resource"
+        );
     }
 
     /// Toolchain preflight is declared, never inferred. A gate command is a
@@ -2428,6 +2711,7 @@ mod tests {
                 command: "cargo".to_string(),
                 probe_arguments: vec!["--version".to_string()],
             }],
+            &[],
             None,
             Duration::from_secs(10),
         );
@@ -2458,6 +2742,7 @@ mod tests {
                 command: "other-tool".to_string(),
                 probe_arguments: vec!["initialize".to_string()],
             }],
+            &[],
             None,
             Duration::from_secs(10),
         )
@@ -2507,6 +2792,7 @@ mod tests {
                 command: tool.display().to_string(),
                 probe_arguments: vec!["initialize".to_string()],
             }],
+            &[],
             Some(runtime_tmpdir.path()),
             Duration::from_secs(10),
         )
@@ -2542,6 +2828,7 @@ mod tests {
                 command: tool.display().to_string(),
                 probe_arguments: Vec::new(),
             }],
+            &[],
             None,
             Duration::from_millis(500),
         )
@@ -2583,6 +2870,7 @@ mod tests {
                 command: tool.display().to_string(),
                 probe_arguments: Vec::new(),
             }],
+            &[],
             None,
             Duration::from_millis(100),
         )
@@ -2624,6 +2912,7 @@ mod tests {
                     probe_arguments: Vec::new(),
                 },
             ],
+            &[],
             None,
             Duration::from_secs(10),
         )
@@ -2667,6 +2956,7 @@ mod tests {
                 command: tool.display().to_string(),
                 probe_arguments: Vec::new(),
             }],
+            &[],
             None,
             Duration::from_secs(10),
         )

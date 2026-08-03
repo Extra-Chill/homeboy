@@ -347,6 +347,7 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                     &runtime.context().tmp_dir,
                     timeout,
                     &gate.environment.replay_policy(),
+                    &[],
                 )
             })();
             let result: Result<()> = match baseline {
