@@ -1175,9 +1175,9 @@ pub fn reconstruct_adoption_options(
     reconstruct_recipe_options(recipe, None, false, false)
 }
 
-/// Resolve a Cook identifier to the durable attempt whose controller runtime
-/// owns continuation. Both the CLI re-exec boundary and the Cook handler use
-/// this so an upgraded controller cannot select different attempts.
+/// Resolve a Cook identifier to its latest durable attempt. Candidate selection
+/// is promotion authority, not continuation authority: a failed gate-feedback
+/// attempt must remain the source of the next retry.
 pub fn resolve_cook_continuation_run_id(cook_or_attempt_id: &str) -> Result<String> {
     let recipe = match load_recipe(cook_or_attempt_id) {
         // A Cook ID can also be its original attempt's run ID. In that case the
@@ -1188,53 +1188,29 @@ pub fn resolve_cook_continuation_run_id(cook_or_attempt_id: &str) -> Result<Stri
             return Ok(cook_or_attempt_id.to_string());
         }
     };
-    if !agent_task_lifecycle::cook_index_exists(&recipe.cook_id)? {
-        let attempts = recipe
+    let run_id = if agent_task_lifecycle::cook_index_exists(&recipe.cook_id)? {
+        agent_task_lifecycle::cook_index(&recipe.cook_id)?.latest_run_id
+    } else {
+        recipe
             .attempts
-            .iter()
-            .map(|attempt| agent_task_lifecycle::AgentTaskCookIndexAttempt {
-                attempt: attempt.attempt,
-                run_id: attempt.run_id.clone(),
-                recorded_at: String::new(),
-            })
-            .collect();
-        let selection =
-            agent_task_lifecycle::select_cook_candidate_from_attempts(&recipe.cook_id, attempts)?;
-        if selection.incomplete {
-            return Err(Error::validation_invalid_argument(
-                "cook_id",
-                "candidate selection is incomplete after its bounded recovery window",
-                Some(recipe.cook_id.clone()),
-                None,
-            ));
-        }
-        return Ok(selection.run_id);
-    }
-    let selection = agent_task_lifecycle::select_cook_candidate(&recipe.cook_id)?;
-    if selection.incomplete {
+            .last()
+            .expect("validated recipe has an attempt")
+            .run_id
+            .clone()
+    };
+    if !recipe
+        .attempts
+        .iter()
+        .any(|attempt| attempt.run_id == run_id)
+    {
         return Err(Error::validation_invalid_argument(
             "cook_id",
-            "candidate selection is incomplete after its bounded recovery window",
+            "Cook index latest attempt is not declared by the durable recipe",
             Some(recipe.cook_id.clone()),
             None,
         ));
     }
-    Ok(Some(selection.run_id)
-        .filter(|run_id| !run_id.is_empty())
-        .filter(|run_id| {
-            recipe
-                .attempts
-                .iter()
-                .any(|attempt| attempt.run_id == *run_id)
-        })
-        .unwrap_or_else(|| {
-            recipe
-                .attempts
-                .last()
-                .expect("validated recipe has an attempt")
-                .run_id
-                .clone()
-        }))
+    Ok(run_id)
 }
 
 /// Adoption accepts historical policy, but a remediation retry still needs the
