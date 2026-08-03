@@ -1,11 +1,11 @@
-//! Trace-compare persistence core service.
+//! Trace-compare persistence service.
 //!
-//! Command modules stay thin adapters: they resolve targets, run the proof
-//! matrix, and assemble the comparison output, then delegate the orchestration
-//! — output-directory creation, JSON/markdown artifact persistence, and the
-//! observation run lifecycle — to this core service. Keeping filesystem
-//! mutation and run-artifact persistence here means the command layer never
-//! accumulates orchestration weight.
+//! The `trace compare*` command modules stay thin adapters: they resolve
+//! targets, run the proof matrix, and assemble the comparison output, then
+//! delegate the orchestration — output-directory creation, JSON/markdown
+//! artifact persistence, and the observation run lifecycle — to this module.
+//! Keeping filesystem mutation and run-artifact persistence here means the
+//! command entry points never accumulate orchestration weight.
 
 use std::path::{Path, PathBuf};
 
