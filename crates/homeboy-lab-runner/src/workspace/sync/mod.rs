@@ -2021,6 +2021,9 @@ pub(crate) fn record_workspace_terminal_evidence(
             lifecycle.ttl = evidence.reconciliation_ttl.clone();
         }
     }
+    if let Some(reconciliation) = evidence.reconciliation.as_ref() {
+        metadata.job_id = Some(reconciliation.job_id.clone());
+    }
     metadata.terminal_evidence = Some(evidence);
     write_workspace_metadata(&runner, metadata)
 }

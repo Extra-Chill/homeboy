@@ -125,15 +125,16 @@ fn controller_tunnel_loss_during_live_workload_retains_workspace_for_reconciliat
         let live_workload = Path::new(&remote_path).join("live-workload");
         fs::write(&live_workload, "still running\n").expect("live workload input");
 
-        // Simulate losing the controller tunnel after dispatch but before an
-        // authoritative daemon terminal result or artifact handoff arrives.
+        // Simulate losing the controller tunnel while an accepted daemon job is
+        // live, before its terminal result or artifact handoff arrives.
         {
-            let _handle = MaterializedWorkspace::new(
+            let mut handle = MaterializedWorkspace::new(
                 "lab-local-tunnel-loss".to_string(),
                 remote_path.clone(),
                 None,
                 WorkspaceCleanupPolicy::DeleteAlways,
             );
+            handle.retain_for_reconciliation("job-11380", Some("generation-11380"));
         }
 
         assert!(
@@ -148,12 +149,49 @@ fn controller_tunnel_loss_during_live_workload_retains_workspace_for_reconciliat
             "uncertain_handoff"
         );
         assert_eq!(metadata["terminal_evidence"]["reconciliation_needed"], true);
+        assert_eq!(metadata["job_id"], "job-11380");
+        assert_eq!(
+            metadata["terminal_evidence"]["reconciliation"]["daemon_generation"],
+            "generation-11380"
+        );
+        assert_eq!(
+            metadata["terminal_evidence"]["reconciliation"]["reconnect_command"],
+            "homeboy runner status lab-local-tunnel-loss --full"
+        );
+        assert_eq!(
+            metadata["terminal_evidence"]["reconciliation"]["reconcile_command"],
+            "homeboy runner job reconcile lab-local-tunnel-loss"
+        );
         assert_eq!(
             metadata["resource_lifecycle"]["cleanup_policy"],
             "delete_after_ttl"
         );
         assert!(metadata["resource_lifecycle"]["ttl"].is_string());
         assert!(metadata["terminal_evidence"]["cleanup_trigger"].is_null());
+    });
+}
+
+#[test]
+fn pre_dispatch_failure_reaps_workspace_under_delete_on_terminal_policy() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        let remote_path = sync_local_workspace("lab-local-pre-dispatch", runner_root.path());
+
+        // Setup, runtime materialization, hydration, and preflight fail before
+        // daemon admission, so they must not enter reconciliation retention.
+        {
+            let _handle = MaterializedWorkspace::new(
+                "lab-local-pre-dispatch".to_string(),
+                remote_path.clone(),
+                None,
+                WorkspaceCleanupPolicy::DeleteAlways,
+            );
+        }
+
+        assert!(
+            !Path::new(&remote_path).exists(),
+            "a proven pre-dispatch failure must use immediate policy cleanup"
+        );
     });
 }
 

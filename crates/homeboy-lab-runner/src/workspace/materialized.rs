@@ -19,7 +19,7 @@
 use homeboy_core::resource_lifecycle_index::ResourceLifecycleResourceStatus;
 
 use super::sync::{reap_run_workspace, record_workspace_terminal_evidence};
-use super::types::RunnerWorkspaceTerminalEvidence;
+use super::types::{RunnerWorkspaceReconciliation, RunnerWorkspaceTerminalEvidence};
 
 /// Teardown policy for a run-owned materialized workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +92,7 @@ pub(crate) struct MaterializedWorkspace {
     policy: WorkspaceCleanupPolicy,
     outcome: WorkspaceTerminalOutcome,
     authoritative_terminal_outcome: bool,
+    reconciliation: Option<RunnerWorkspaceReconciliation>,
     relinquished: bool,
 }
 
@@ -107,11 +108,11 @@ impl MaterializedWorkspace {
             remote_path,
             artifact_dir,
             policy,
-            // Until the daemon publishes a terminal result and the controller
-            // completes its result handoff, the remote job may still own this
-            // checkout. Retain that uncertainty through a bounded lifecycle.
-            outcome: WorkspaceTerminalOutcome::UncertainHandoff,
-            authoritative_terminal_outcome: false,
+            // Workspace creation and setup errors happen before daemon
+            // admission, so they retain the existing immediate cleanup policy.
+            outcome: WorkspaceTerminalOutcome::Failure,
+            authoritative_terminal_outcome: true,
+            reconciliation: None,
             relinquished: false,
         }
     }
@@ -129,6 +130,35 @@ impl MaterializedWorkspace {
     pub(crate) fn preserve(&mut self) {
         self.relinquished = true;
         self.outcome = WorkspaceTerminalOutcome::UncertainHandoff;
+    }
+
+    /// Retain a workspace after an accepted daemon job becomes unobservable.
+    /// The exact owner makes reconnect/reconciliation actionable while the
+    /// standard TTL lifecycle bounds retention if recovery never completes.
+    pub(crate) fn retain_for_reconciliation(
+        &mut self,
+        job_id: &str,
+        daemon_generation: Option<&str>,
+    ) {
+        self.outcome = WorkspaceTerminalOutcome::UncertainHandoff;
+        self.authoritative_terminal_outcome = false;
+        self.reconciliation = Some(RunnerWorkspaceReconciliation {
+            job_id: job_id.to_string(),
+            daemon_generation: daemon_generation.map(ToString::to_string),
+            reconnect_command: format!(
+                "homeboy runner status {} --full",
+                homeboy_core::engine::shell::quote_arg(&self.runner_id),
+            ),
+            reconcile_command: format!(
+                "homeboy runner job reconcile {}",
+                homeboy_core::engine::shell::quote_arg(&self.runner_id),
+            ),
+            job_logs_command: format!(
+                "homeboy runner job logs {} {} --follow",
+                homeboy_core::engine::shell::quote_arg(&self.runner_id),
+                homeboy_core::engine::shell::quote_arg(job_id),
+            ),
+        });
     }
 
     fn should_reap(&self) -> bool {
@@ -178,6 +208,7 @@ impl MaterializedWorkspace {
             reconciliation_needed: !self.authoritative_terminal_outcome && !self.relinquished,
             reconciliation_ttl: (!self.authoritative_terminal_outcome && !self.relinquished)
                 .then(runner_workspace_ttl),
+            reconciliation: self.reconciliation.clone(),
         };
         if let Err(error) = record_workspace_terminal_evidence(
             &self.runner_id,
