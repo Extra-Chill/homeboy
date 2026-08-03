@@ -12,6 +12,9 @@
 use serde_json::Value;
 use std::path::PathBuf;
 
+use homeboy_core::engine::canonical_json::canonical_json_bytes;
+use homeboy_engine_primitives::content_hash;
+
 use crate::agent_task_finalization::{
     finalize_pr_with_backend, preflight_pr_with_backend, validate_publication_intent,
     AgentTaskPrEvidence, AgentTaskPrFinalizationBackend, AgentTaskPrFinalizationOptions,
@@ -225,6 +228,151 @@ pub(crate) fn persisted_promotion_for_attempt(
     restore_gate_feedback_baseline(&record, &mut promotion)?;
     promotion.normalize_gate_outcome();
     Ok(Some(promotion))
+}
+
+/// Records green verification produced after an infrastructure-invalid gate
+/// failure without rewriting the original promotion evidence. The replacement
+/// must describe the exact already-applied candidate, so recovery never
+/// re-applies a patch or silently broadens its verification scope.
+pub fn record_replacement_gate_proof(
+    run_id: &str,
+    mut replacement: AgentTaskPromotionReport,
+    external_authorization: Option<String>,
+) -> Result<AgentTaskPromotionReport> {
+    let original = persisted_promotion_for_attempt(run_id)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "latest_promotion",
+            "replacement gate proof requires a persisted failed promotion",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    if original.status == AgentTaskPromotionStatus::Applied
+        && original.provenance.get("replacement_gate_proof").is_some()
+        && replacement.source == original.source
+        && replacement.target == original.target
+        && replacement.to_worktree == original.to_worktree
+        && replacement.patch_artifact == original.patch_artifact
+        && replacement.changed_files == original.changed_files
+        && replacement.verified_base == original.verified_base
+        && replacement.deterministic_gates == original.deterministic_gates
+        && replacement.command_evidence == original.command_evidence
+    {
+        return Ok(original);
+    }
+    if original.status != AgentTaskPromotionStatus::GateFailed || !original.status.patch_promoted()
+    {
+        return Err(Error::validation_invalid_argument(
+            "latest_promotion.status",
+            "replacement gate proof is only valid for an already-applied candidate whose original gates failed",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    if external_authorization
+        .as_deref()
+        .is_none_or(|authorization| authorization.trim().is_empty())
+    {
+        return Err(Error::validation_invalid_argument(
+            "authorize_external_proof",
+            "externally produced replacement gate proof requires explicit operator authorization",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    replacement.normalize_gate_outcome();
+    if replacement.status != AgentTaskPromotionStatus::Applied
+        || replacement.deterministic_gates.is_empty()
+        || replacement.verified_base.is_none()
+        || replacement.deterministic_gates.iter().any(|gate| {
+            gate.command.is_empty()
+                || gate.exit_code != 0
+                || gate.candidate_checkout.is_none()
+                || !replacement
+                    .command_evidence
+                    .iter()
+                    .any(|evidence| evidence.exit_code == 0 && evidence.command == gate.command)
+        })
+    {
+        return Err(Error::validation_invalid_argument(
+            "replacement_gate_proof",
+            "replacement proof requires every green gate to have matching zero-exit command evidence, plus candidate checkout and verified base",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    let same_candidate = replacement.provenance.get("candidate")
+        == original.provenance.get("candidate")
+        && replacement.provenance.get("candidate_checkout")
+            == original.provenance.get("candidate_checkout");
+    if replacement.source.run_id.as_deref() != Some(run_id)
+        || replacement.target != original.target
+        || replacement.to_worktree != original.to_worktree
+        || replacement.patch_artifact != original.patch_artifact
+        || replacement.changed_files != original.changed_files
+        || replacement.verified_base != original.verified_base
+        || !same_candidate
+    {
+        return Err(Error::validation_invalid_argument(
+            "replacement_gate_proof",
+            "replacement proof drifted from the exact failed promotion candidate, base, target, artifact, or scope",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    let record = agent_task_lifecycle::status(run_id)?;
+    let original_history_index = record
+        .metadata
+        .get("promotions")
+        .and_then(Value::as_array)
+        .and_then(|promotions| {
+            record
+                .metadata
+                .get("latest_promotion")
+                .and_then(|latest| promotions.iter().rposition(|promotion| promotion == latest))
+        })
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "latest_promotion",
+                "replacement gate proof requires the original immutable promotion in history",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    let original_history = &record.metadata["promotions"][original_history_index];
+    let original_digest =
+        content_hash::sha256_hex(&canonical_json_bytes(original_history).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize original promotion history".to_string()),
+            )
+        })?);
+    replacement.provenance["replacement_gate_proof"] = serde_json::json!({
+        "schema": "homeboy/agent-task-replacement-gate-proof/v1",
+        "original_history": {
+            "run_id": record.run_id,
+            "metadata_key": "promotions",
+            "index": original_history_index,
+            "status": original.status,
+            "deterministic_gate_count": original.deterministic_gates.len(),
+            "sha256": original_digest,
+        },
+        "reason": "infrastructure_invalid_original_gates",
+        "operator_authorization": external_authorization,
+        "externally_produced": true,
+        // `Inherit` serializes as the default in gate reports; recording the
+        // resolved policy here keeps that valid standard policy explicit.
+        "environment_policy": replacement.deterministic_gates.iter().map(|gate| serde_json::json!({
+            "gate_id": gate.id,
+            "environment": gate.environment,
+        })).collect::<Vec<_>>(),
+    });
+    agent_task_lifecycle::record_promotion(
+        run_id,
+        serde_json::to_value(&replacement)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+    )?;
+    Ok(replacement)
 }
 
 /// Older applied reports lost the post-apply baseline when the final gate
@@ -1883,6 +2031,75 @@ fn cook_review_dossier(
         successful_run_id,
         &terminal_form,
     )?;
+    let mut evidence = vec![
+        AgentTaskReviewEvidence {
+            summary: format!("Task objective: {task_summary}"),
+            url: None,
+        },
+        AgentTaskReviewEvidence {
+            summary: format!(
+                "Verified candidate scope: {changed_file_count} changed file(s): {changed_files}."
+            ),
+            url: None,
+        },
+        AgentTaskReviewEvidence {
+            summary: format!(
+                "Cook deterministic verification: {gate_count} gate(s) completed green."
+            ),
+            url: None,
+        },
+        AgentTaskReviewEvidence {
+            summary: if adoption {
+                "Candidate adoption provenance: an immutable candidate was adopted through the recorded Cook workflow and passed the recorded gates.".to_string()
+            } else {
+                "Candidate adoption provenance: the candidate was promoted from the recorded Cook task execution.".to_string()
+            },
+            url: None,
+        },
+    ];
+    // Form-only continuations may substitute the implementation promotion for
+    // candidate metadata; the persisted terminal record remains recovery proof.
+    if let Some(replacement) = agent_task_lifecycle::status(successful_run_id)
+        .ok()
+        .and_then(|record| {
+            record
+                .metadata
+                .get("promotions")
+                .and_then(Value::as_array)
+                .and_then(|promotions| {
+                    promotions.iter().rev().find_map(|promotion| {
+                        promotion
+                            .pointer("/provenance/replacement_gate_proof")
+                            .cloned()
+                    })
+                })
+        })
+    {
+        let original_gates = replacement["original_history"]["deterministic_gate_count"]
+            .as_u64()
+            .unwrap_or_default();
+        evidence.extend([
+            AgentTaskReviewEvidence {
+                summary: format!(
+                    "Original infrastructure-invalid verification retained: {original_gates} failed gate record(s); inspect durable gate details."
+                ),
+                // The durable record is operator-only. Keep this reviewer-facing
+                // provenance as text so `enrich_dossier` does not remove it.
+                url: None,
+            },
+            AgentTaskReviewEvidence {
+                summary: format!(
+                    "Replacement candidate-bound verification: {gate_count} gate(s) completed green with matching command evidence."
+                ),
+                url: None,
+            },
+            AgentTaskReviewEvidence {
+                summary: "Explicit operator authorization for external replacement proof was recorded."
+                    .to_string(),
+                url: None,
+            },
+        ]);
+    }
     Ok(AgentTaskReviewDossier {
         schema: "homeboy/agent-task-review-dossier/v1".to_string(),
         summary: lineage.summary,
@@ -1892,32 +2109,7 @@ fn cook_review_dossier(
         // Deterministic evidence: orchestrator-owned. The task objective, scope,
         // gate count, and adoption provenance are factual records, not prose the
         // AI restates.
-        evidence: vec![
-            AgentTaskReviewEvidence {
-                summary: format!("Task objective: {task_summary}"),
-                url: None,
-            },
-            AgentTaskReviewEvidence {
-                summary: format!(
-                    "Verified candidate scope: {changed_file_count} changed file(s): {changed_files}."
-                ),
-                url: None,
-            },
-            AgentTaskReviewEvidence {
-                summary: format!(
-                    "Cook deterministic verification: {gate_count} gate(s) completed green."
-                ),
-                url: None,
-            },
-            AgentTaskReviewEvidence {
-                summary: if adoption {
-                    "Candidate adoption provenance: an immutable candidate was adopted through the recorded Cook workflow and passed the recorded gates.".to_string()
-                } else {
-                    "Candidate adoption provenance: the candidate was promoted from the recorded Cook task execution.".to_string()
-                },
-                url: None,
-            },
-        ],
+        evidence,
         changed_public_contracts: Vec::new(),
         public_contract_evidence: None,
         ai_assistance: AgentTaskReviewAiAssistance {
