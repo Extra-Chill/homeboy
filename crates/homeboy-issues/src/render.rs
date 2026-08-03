@@ -14,11 +14,38 @@ use homeboy_code_audit::FindingConfidence;
 use homeboy_core::finding::HomeboyFinding;
 
 /// Canonical input shape consumed by `homeboy runs findings reconcile`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReconcileFindingsInput {
     pub command: String,
     #[serde(default)]
     pub groups: BTreeMap<String, RenderedIssueGroup>,
+    /// Whether the producing run measured its whole surface.
+    ///
+    /// Only a complete measurement may retire a category on absence. See
+    /// [`ReconcileFindingsInput::complete_measurement`] and the reconciler's
+    /// `close_absent_open_issues`.
+    #[serde(default = "default_complete_measurement")]
+    pub complete_measurement: bool,
+    /// Human-readable reasons the measurement was narrowed, when it was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub measurement_narrowed_by: Vec<String>,
+}
+
+/// Producers that predate the coverage declaration are treated as complete so
+/// lint and test keep their existing close-on-absence behavior.
+fn default_complete_measurement() -> bool {
+    true
+}
+
+impl Default for ReconcileFindingsInput {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            groups: BTreeMap::new(),
+            complete_measurement: true,
+            measurement_narrowed_by: Vec::new(),
+        }
+    }
 }
 
 /// One rendered category row in the reconcile input.
@@ -47,6 +74,14 @@ impl ReconcileFindingsInput {
         for (category, group) in other.groups {
             self.groups.insert(category, group);
         }
+        // Coverage is the weakest link: merging a narrowed run into a complete
+        // one yields a narrowed union, never a complete one.
+        self.complete_measurement &= other.complete_measurement;
+        for reason in other.measurement_narrowed_by {
+            if !self.measurement_narrowed_by.contains(&reason) {
+                self.measurement_narrowed_by.push(reason);
+            }
+        }
     }
 }
 
@@ -70,10 +105,45 @@ pub fn build_findings_from_native_output(
     }
 }
 
+/// Read the audit run's coverage declaration out of its envelope.
+///
+/// `measurement` is emitted at the envelope root by `audit`/`audit.compared`
+/// and under `summary` by `audit.summary`. An envelope without it predates the
+/// declaration and is treated as complete, preserving prior behavior.
+fn audit_measurement(data: &Value) -> (bool, Vec<String>) {
+    let Some(measurement) = data
+        .get("measurement")
+        .or_else(|| data.pointer("/summary/measurement"))
+    else {
+        return (true, Vec::new());
+    };
+    let complete = measurement
+        .get("complete")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let narrowed_by = measurement
+        .get("narrowed_by")
+        .and_then(Value::as_array)
+        .map(|reasons| {
+            reasons
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    (complete, narrowed_by)
+}
+
 fn render_audit(data: &Value, context: &IssueRenderContext) -> ReconcileFindingsInput {
+    let (complete_measurement, measurement_narrowed_by) = audit_measurement(data);
     let normalized_findings = normalized_findings(data);
     if !normalized_findings.is_empty() {
-        return render_normalized_findings("audit", normalized_findings, Some(data), context);
+        let mut input =
+            render_normalized_findings("audit", normalized_findings, Some(data), context);
+        input.complete_measurement = complete_measurement;
+        input.measurement_narrowed_by = measurement_narrowed_by;
+        return input;
     }
 
     let mut by_kind: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
@@ -113,6 +183,8 @@ fn render_audit(data: &Value, context: &IssueRenderContext) -> ReconcileFindings
     ReconcileFindingsInput {
         command: "audit".to_string(),
         groups,
+        complete_measurement,
+        measurement_narrowed_by,
     }
 }
 
@@ -247,6 +319,7 @@ fn render_lint(data: &Value, context: &IssueRenderContext) -> ReconcileFindingsI
     ReconcileFindingsInput {
         command: "lint".to_string(),
         groups,
+        ..Default::default()
     }
 }
 
@@ -353,6 +426,7 @@ fn render_test(data: &Value, context: &IssueRenderContext) -> ReconcileFindingsI
     ReconcileFindingsInput {
         command: "test".to_string(),
         groups,
+        ..Default::default()
     }
 }
 
@@ -416,6 +490,7 @@ fn render_normalized_findings(
     ReconcileFindingsInput {
         command: command.to_string(),
         groups,
+        ..Default::default()
     }
 }
 

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use homeboy::core::code_audit::FindingConfidence;
 use homeboy::issues::{
-    apply_plan, build_findings_from_native_output, reconcile_scoped, GithubTracker,
+    apply_plan, build_findings_from_native_output, reconcile_measured, GithubTracker,
     IssueRenderContext, ReconcileConfig, ReconcileFindingsInput, ReconcilePlan, ReconcileResult,
     Tracker,
 };
@@ -322,7 +322,21 @@ fn run_reconcile_command(
         request.run_url,
     )?;
     let command_label = findings_input.command.clone();
+    let complete_measurement = findings_input.complete_measurement;
+    let measurement_narrowed_by = findings_input.measurement_narrowed_by.clone();
     let groups = into_issue_groups(findings_input, &request.component_id);
+
+    if !complete_measurement {
+        eprintln!(
+            "[issues] {} run was narrowed ({}); absent categories will not be closed",
+            command_label,
+            if measurement_narrowed_by.is_empty() {
+                "reason not declared".to_string()
+            } else {
+                measurement_narrowed_by.join(", ")
+            }
+        );
+    }
 
     let config = build_reconcile_config(request.no_refresh_closed);
 
@@ -333,12 +347,13 @@ fn run_reconcile_command(
     let existing = tracker_impl.list_issues(&command_label, request.list_limit)?;
 
     // Pure decision.
-    let plan = reconcile_scoped(
+    let plan = reconcile_measured(
         &groups,
         &existing,
         &config,
         &command_label,
         &request.component_id,
+        complete_measurement,
     );
     let plan_lines = render_plan_lines(&plan);
     let plan_summary = summarize_plan(&plan);
@@ -802,7 +817,30 @@ fn parse_findings_value(value: Value) -> homeboy::core::Result<ReconcileFindings
         }
     }
 
-    Ok(ReconcileFindingsInput { command, groups })
+    // A hand-authored findings file may declare narrowed coverage the same way
+    // a native envelope does; absent, it is treated as a complete measurement.
+    let complete_measurement = obj
+        .get("complete_measurement")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let measurement_narrowed_by = obj
+        .get("measurement_narrowed_by")
+        .and_then(|v| v.as_array())
+        .map(|reasons| {
+            reasons
+                .iter()
+                .filter_map(|reason| reason.as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(ReconcileFindingsInput {
+        command,
+        groups,
+        complete_measurement,
+        measurement_narrowed_by,
+    })
 }
 
 fn parse_confidence(raw: &str) -> Option<FindingConfidence> {

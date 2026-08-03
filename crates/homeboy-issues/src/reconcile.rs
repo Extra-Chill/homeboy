@@ -24,7 +24,7 @@ pub fn reconcile(
     existing: &[TrackedIssue],
     config: &ReconcileConfig,
 ) -> ReconcilePlan {
-    reconcile_with_scope(groups, existing, config, None)
+    reconcile_with_scope(groups, existing, config, None, true)
 }
 
 /// Reconcile within an explicit `(command, component)` scope.
@@ -41,7 +41,44 @@ pub fn reconcile_scoped(
     command: &str,
     component_id: &str,
 ) -> ReconcilePlan {
-    reconcile_with_scope(groups, existing, config, Some((command, component_id)))
+    reconcile_with_scope(
+        groups,
+        existing,
+        config,
+        Some((command, component_id)),
+        true,
+    )
+}
+
+/// Reconcile within a scope whose measurement may have been narrowed.
+///
+/// `complete_measurement` is the producing run's own declaration that it
+/// examined its whole surface. When it is false the reconciler still files and
+/// updates, but it will not retire a category that is merely absent — absence
+/// from a narrowed run is not evidence the findings are gone.
+///
+/// This is not hypothetical. `release.yml` runs `review audit --profile=pr`,
+/// and `AuditProfile::Pr` executes seven detector families; `core_boundary_leaks`
+/// and `source_policy` are deliberately excluded from it. A PR-profile run
+/// therefore *cannot* emit those categories at any debt level, and treating that
+/// silence as a fix closed 23 tracking issues — 409 findings in one of them — as
+/// "All findings have been resolved" 29 minutes after a full-tree sweep filed
+/// them. See homeboy #11298.
+pub fn reconcile_measured(
+    groups: &[IssueGroup],
+    existing: &[TrackedIssue],
+    config: &ReconcileConfig,
+    command: &str,
+    component_id: &str,
+    complete_measurement: bool,
+) -> ReconcilePlan {
+    reconcile_with_scope(
+        groups,
+        existing,
+        config,
+        Some((command, component_id)),
+        complete_measurement,
+    )
 }
 
 fn reconcile_with_scope(
@@ -49,6 +86,7 @@ fn reconcile_with_scope(
     existing: &[TrackedIssue],
     config: &ReconcileConfig,
     scope: Option<(&str, &str)>,
+    complete_measurement: bool,
 ) -> ReconcilePlan {
     // Index existing issues by (command, component, category). New issues carry
     // a stable hidden body key; legacy action-created issues fall back to the
@@ -204,7 +242,9 @@ fn reconcile_with_scope(
         push_file_new(&mut actions, group);
     }
 
-    if let Some((command, component_id)) = scope {
+    // Only a run that measured its whole surface may retire a category on
+    // absence. A narrowed run reports silence for everything it did not look at.
+    if let (Some((command, component_id)), true) = (scope, complete_measurement) {
         close_absent_open_issues(
             &mut actions,
             &by_category,
@@ -1019,6 +1059,72 @@ mod tests {
                 keep: 10,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn narrowed_measurement_never_closes_absent_categories() {
+        // Regression for homeboy #11298. `release.yml` runs
+        // `review audit --profile=pr`, and `AuditProfile::Pr` does not execute
+        // the `core_boundary_leaks` or `source_policy` detector families at all.
+        // Their absence from its output is structural, not evidence of a fix —
+        // yet it closed 23 full-tree tracking issues as "All findings have been
+        // resolved", one of them carrying 409 findings.
+        let existing = vec![
+            issue(11298, "core boundary leak", TrackedIssueState::Open, 409),
+            issue(11300, "dead code", TrackedIssueState::Open, 147),
+        ];
+
+        let plan = reconcile_measured(
+            &[],
+            &existing,
+            &cfg(),
+            "audit",
+            "sample-plugin",
+            false, // narrowed run: profile=pr
+        );
+
+        assert!(
+            plan.actions.is_empty(),
+            "a narrowed run must not retire categories it never measured, got {:?}",
+            plan.actions
+        );
+    }
+
+    #[test]
+    fn narrowed_measurement_still_files_and_updates_what_it_did_measure() {
+        // Coverage gating is about closing, not about going silent: a narrowed
+        // run must still report the findings it actually produced.
+        let existing = vec![issue(
+            11298,
+            "core boundary leak",
+            TrackedIssueState::Open,
+            409,
+        )];
+        let groups = vec![group("structural", 3)];
+
+        let plan = reconcile_measured(&groups, &existing, &cfg(), "audit", "sample-plugin", false);
+
+        assert_eq!(plan.actions.len(), 1);
+        assert!(
+            matches!(&plan.actions[0], ReconcileAction::FileNew { title, .. }
+                if title == "audit: structural in sample-plugin (3)"),
+            "got {:?}",
+            plan.actions[0]
+        );
+    }
+
+    #[test]
+    fn complete_measurement_still_closes_absent_categories() {
+        // The full-tree sweep keeps its authority to retire resolved debt.
+        let existing = vec![issue(11300, "dead code", TrackedIssueState::Open, 147)];
+
+        let plan = reconcile_measured(&[], &existing, &cfg(), "audit", "sample-plugin", true);
+
+        assert_eq!(plan.actions.len(), 1);
+        assert!(matches!(
+            &plan.actions[0],
+            ReconcileAction::Close { number: 11300, .. }
         ));
     }
 

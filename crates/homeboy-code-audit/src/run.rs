@@ -42,10 +42,27 @@ pub struct AuditRunWorkflowResult {
     pub timing: AuditTiming,
 }
 
+/// Coverage declaration for this run — see [`report::AuditMeasurement`].
+///
+/// Threaded into every emitted envelope so downstream consumers can tell a
+/// clean category from an unmeasured one.
+fn measurement_for(args: &AuditRunWorkflowArgs) -> report::AuditMeasurement {
+    report::AuditMeasurement::new(
+        args.profile,
+        args.changed_since.is_some(),
+        !args.only_kinds.is_empty(),
+        !args.exclude_kinds.is_empty(),
+        !args.only_labels.is_empty(),
+        !args.exclude_labels.is_empty(),
+    )
+}
+
 /// Run the main audit workflow.
 pub fn run_main_audit_workflow(
     args: AuditRunWorkflowArgs,
 ) -> homeboy_error::Result<AuditRunWorkflowResult> {
+    let measurement = measurement_for(&args);
+
     // Run audit — scoped or full
     let result = run_audit(&args)?;
 
@@ -72,6 +89,7 @@ pub fn run_main_audit_workflow(
                         findings: vec![],
                         duplicate_groups: vec![],
                     },
+                    measurement,
                     fixability: None,
                     extension_phase_timings: Vec::new(),
                     actionable: None,
@@ -360,6 +378,7 @@ fn run_comparison_workflow(
         let findings = result.findings.clone();
         let summary = timing.time_phase("report_assembly", || {
             let mut summary = report::build_audit_summary(&result, exit_code);
+            summary.measurement = Some(measurement_for(args));
             summary.fixability = compute_fixability_if_requested(&result, analysis, args);
             summary
         });
@@ -378,6 +397,7 @@ fn run_comparison_workflow(
             output: AuditCommandOutput::Full {
                 passed: exit_code == 0,
                 result,
+                measurement: measurement_for(args),
                 fixability,
                 extension_phase_timings: Vec::new(),
                 actionable: None,
@@ -549,6 +569,7 @@ fn build_comparison_output(
                 &existing_baseline,
             ));
             summary.unbaselined_findings = report::build_unbaselined_finding_summary(&comparison);
+            summary.measurement = Some(measurement_for(args));
             summary
         });
         Ok(AuditRunWorkflowResult {
@@ -568,6 +589,7 @@ fn build_comparison_output(
                 passed: exit_code == 0,
                 result,
                 baseline_comparison: comparison,
+                measurement: measurement_for(args),
                 changed_since: changed_since_summary,
                 summary: None,
                 fixability,

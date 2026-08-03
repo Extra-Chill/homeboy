@@ -33,6 +33,9 @@ pub struct AuditSummaryOutput {
     pub top_findings: Vec<HomeboyFinding>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fixability: Option<AuditFixability>,
+    /// Coverage declaration — see [`AuditMeasurement`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub measurement: Option<AuditMeasurement>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changed_since: Option<AuditChangedSinceSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,6 +84,63 @@ pub struct AuditChangedSinceSummary {
     pub contextual_findings: usize,
 }
 
+/// What this audit run actually measured.
+///
+/// Consumers that retire findings on absence — issue reconciliation above all —
+/// must not read "this run reported no findings in category X" as "category X
+/// is clean". A `pr` profile runs seven detector families; `core_boundary_leaks`
+/// and `source_policy` are deliberately excluded from it (see
+/// [`crate::AuditProfile::includes_detector`]), so a PR-profile run *cannot*
+/// emit those categories no matter how much debt the tree carries. Kind/label
+/// filters and `--changed-since` narrow the surface the same way.
+///
+/// `complete` is therefore the only safe licence to close on absence: it is true
+/// only for an unfiltered whole-tree run.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AuditMeasurement {
+    /// Profile the run executed under (`full`, `pr`, `architecture`).
+    pub profile: String,
+    /// True when the run measured every detector across the whole tree.
+    pub complete: bool,
+    /// Why the measurement was narrowed, when it was.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub narrowed_by: Vec<String>,
+}
+
+impl AuditMeasurement {
+    /// Build the coverage declaration for one audit run.
+    pub fn new(
+        profile: crate::AuditProfile,
+        changed_since: bool,
+        only_kinds: bool,
+        exclude_kinds: bool,
+        only_labels: bool,
+        exclude_labels: bool,
+    ) -> Self {
+        let mut narrowed_by = Vec::new();
+        if profile != crate::AuditProfile::Full {
+            narrowed_by.push(format!("profile={}", profile.as_str()));
+        }
+        for (narrowed, reason) in [
+            (changed_since, "changed-since"),
+            (only_kinds, "only-kinds"),
+            (exclude_kinds, "exclude-kinds"),
+            (only_labels, "only-labels"),
+            (exclude_labels, "exclude-labels"),
+        ] {
+            if narrowed {
+                narrowed_by.push(reason.to_string());
+            }
+        }
+
+        Self {
+            profile: profile.as_str().to_string(),
+            complete: narrowed_by.is_empty(),
+            narrowed_by,
+        }
+    }
+}
+
 /// Baseline filtering counters for compact audit summaries.
 ///
 /// `total_findings` on [`AuditSummaryOutput`] is the current findings count.
@@ -109,6 +169,8 @@ pub enum AuditCommandOutput {
         passed: bool,
         #[serde(flatten)]
         result: CodeAuditResult,
+        /// Coverage declaration — see [`AuditMeasurement`].
+        measurement: AuditMeasurement,
         #[serde(skip_serializing_if = "Option::is_none")]
         fixability: Option<AuditFixability>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -144,6 +206,8 @@ pub enum AuditCommandOutput {
         #[serde(flatten)]
         result: CodeAuditResult,
         baseline_comparison: baseline::BaselineComparison,
+        /// Coverage declaration — see [`AuditMeasurement`].
+        measurement: AuditMeasurement,
         #[serde(skip_serializing_if = "Option::is_none")]
         changed_since: Option<AuditChangedSinceSummary>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -226,6 +290,7 @@ pub fn build_audit_summary(result: &CodeAuditResult, exit_code: i32) -> AuditSum
         finding_groups,
         top_findings,
         fixability: None,
+        measurement: None,
         changed_since: None,
         baseline_filtering: None,
         unbaselined_findings: Vec::new(),

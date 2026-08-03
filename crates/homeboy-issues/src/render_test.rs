@@ -550,3 +550,104 @@ fn normalized_finding_label_strips_backticks() {
 
     assert!(group.body.contains("- `weirdfingerprint` — bad quoting"));
 }
+
+#[test]
+fn audit_envelope_measurement_marks_narrowed_runs() {
+    // A `--profile=pr` audit declares narrowed coverage; the reconcile input
+    // must carry that through so the reconciler will not close on absence.
+    let output = json!({
+        "data": {
+            "command": "audit",
+            "passed": false,
+            "measurement": {
+                "profile": "pr",
+                "complete": false,
+                "narrowed_by": ["profile=pr", "changed-since"]
+            },
+            "findings": [
+                {"tool": "audit", "rule": "structural", "category": "structural",
+                 "message": "module is oversized", "file": "src/a.rs"}
+            ]
+        }
+    });
+
+    let rendered =
+        build_findings_from_native_output("audit", output, &IssueRenderContext::default()).unwrap();
+
+    assert!(!rendered.complete_measurement);
+    assert_eq!(
+        rendered.measurement_narrowed_by,
+        vec!["profile=pr".to_string(), "changed-since".to_string()]
+    );
+}
+
+#[test]
+fn audit_envelope_measurement_marks_full_runs_complete() {
+    let output = json!({
+        "data": {
+            "command": "audit",
+            "passed": false,
+            "measurement": {"profile": "full", "complete": true},
+            "findings": [
+                {"tool": "audit", "rule": "dead_code", "category": "dead_code",
+                 "message": "unreferenced export", "file": "src/a.rs"}
+            ]
+        }
+    });
+
+    let rendered =
+        build_findings_from_native_output("audit", output, &IssueRenderContext::default()).unwrap();
+
+    assert!(rendered.complete_measurement);
+    assert!(rendered.measurement_narrowed_by.is_empty());
+}
+
+#[test]
+fn envelope_without_measurement_is_treated_as_complete() {
+    // Envelopes produced before the coverage declaration existed must keep
+    // their prior close-on-absence behavior rather than silently stop closing.
+    let output = json!({
+        "data": {
+            "passed": false,
+            "status": "failed",
+            "findings": [
+                {"tool": "lint", "category": "style", "message": "trailing whitespace",
+                 "file": "src/lib.rs", "line": 12}
+            ]
+        }
+    });
+
+    let rendered =
+        build_findings_from_native_output("lint", output, &IssueRenderContext::default()).unwrap();
+
+    assert!(rendered.complete_measurement);
+}
+
+#[test]
+fn merging_a_narrowed_run_narrows_the_result() {
+    // Coverage is the weakest link across merged inputs.
+    let mut complete = build_findings_from_native_output(
+        "audit",
+        json!({"data": {"measurement": {"profile": "full", "complete": true},
+               "findings": [{"tool": "audit", "category": "A", "message": "one"}]}}),
+        &IssueRenderContext::default(),
+    )
+    .unwrap();
+    let narrowed = build_findings_from_native_output(
+        "audit",
+        json!({"data": {"measurement": {"profile": "pr", "complete": false,
+               "narrowed_by": ["profile=pr"]},
+               "findings": [{"tool": "audit", "category": "B", "message": "two"}]}}),
+        &IssueRenderContext::default(),
+    )
+    .unwrap();
+
+    assert!(complete.complete_measurement);
+    complete.merge(narrowed);
+
+    assert!(!complete.complete_measurement);
+    assert_eq!(
+        complete.measurement_narrowed_by,
+        vec!["profile=pr".to_string()]
+    );
+}

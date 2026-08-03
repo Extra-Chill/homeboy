@@ -464,3 +464,81 @@ fn test_from_main_workflow() {
     assert_eq!(exit_code, 3);
     assert!(matches!(output, AuditCommandOutput::Summary(_)));
 }
+
+#[test]
+fn measurement_is_complete_only_for_an_unfiltered_full_run() {
+    let complete = crate::report::AuditMeasurement::new(
+        crate::AuditProfile::Full,
+        false,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    assert!(complete.complete);
+    assert_eq!(complete.profile, "full");
+    assert!(complete.narrowed_by.is_empty());
+}
+
+#[test]
+fn pr_profile_declares_a_narrowed_measurement() {
+    // `AuditProfile::Pr` runs seven detector families. `core_boundary_leaks`
+    // and `source_policy` are deliberately not among them, so a PR-profile run
+    // cannot emit those categories however much debt the tree carries. It must
+    // never be read as authority that they are clean. See homeboy #11298.
+    let narrowed = crate::report::AuditMeasurement::new(
+        crate::AuditProfile::Pr,
+        false,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    assert!(!narrowed.complete);
+    assert_eq!(narrowed.profile, "pr");
+    assert_eq!(narrowed.narrowed_by, vec!["profile=pr".to_string()]);
+}
+
+#[test]
+fn every_narrowing_flag_is_recorded_and_defeats_completeness() {
+    let narrowed = crate::report::AuditMeasurement::new(
+        crate::AuditProfile::Full,
+        true,
+        true,
+        true,
+        true,
+        true,
+    );
+
+    assert!(!narrowed.complete);
+    assert_eq!(
+        narrowed.narrowed_by,
+        vec![
+            "changed-since".to_string(),
+            "only-kinds".to_string(),
+            "exclude-kinds".to_string(),
+            "only-labels".to_string(),
+            "exclude-labels".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn changed_since_alone_narrows_a_full_profile_run() {
+    // Whole-tree detectors still run, but only over the changed scope, so the
+    // run cannot speak for categories outside the diff.
+    let narrowed = crate::report::AuditMeasurement::new(
+        crate::AuditProfile::Full,
+        true,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    assert!(!narrowed.complete);
+    assert_eq!(narrowed.profile, "full");
+    assert_eq!(narrowed.narrowed_by, vec!["changed-since".to_string()]);
+}

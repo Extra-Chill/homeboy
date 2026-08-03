@@ -591,6 +591,14 @@ mod tests {
         code_audit::AuditRunWorkflowResult {
             output: AuditCommandOutput::Full {
                 passed: false,
+                measurement: code_audit::AuditMeasurement::new(
+                    code_audit::AuditProfile::Full,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                ),
                 result: code_audit::CodeAuditResult {
                     component_id: "homeboy".to_string(),
                     source_path: home.to_string_lossy().to_string(),

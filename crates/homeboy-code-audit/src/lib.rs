@@ -86,7 +86,7 @@ pub(crate) use execution_plan::{
 pub use findings::{homeboy_finding_from_audit, Finding, FindingConfidence, Severity};
 pub use fingerprint::FileFingerprint;
 pub use homeboy_engine_primitives::test_path::is_test_path;
-pub use report::AuditCommandOutput;
+pub use report::{AuditCommandOutput, AuditMeasurement};
 pub use run::{run_main_audit_workflow, AuditRunWorkflowArgs, AuditRunWorkflowResult};
 
 pub use entry::{
