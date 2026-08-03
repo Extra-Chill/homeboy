@@ -1587,6 +1587,18 @@ fn fatal_ancestry_executor_output_retains_parent_actionable_refs() {
         .expect("executor output is retained for classification");
     assert_eq!(probe.exit_code, 128);
     assert!(!probe.is_ancestor);
+    let phase = refresh_ancestry_phase(&probe.execution);
+    assert_eq!(
+        vec![phase],
+        vec![HomeboyRefreshPhase {
+            name: "downgrade_safety_probe",
+            required: true,
+            status: "failed",
+            exit_code: 128,
+            job_id: Some("ancestry-job".to_string()),
+            mirror_run_id: Some("ancestry-run".to_string()),
+        }]
+    );
     let failure = refresh_failure(&plan, probe.execution, probe.exit_code);
     assert_eq!(failure.job_id.as_deref(), Some("ancestry-job"));
     assert_eq!(failure.mirror_run_id.as_deref(), Some("ancestry-run"));

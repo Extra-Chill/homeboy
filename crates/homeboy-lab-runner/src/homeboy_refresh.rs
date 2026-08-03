@@ -152,6 +152,14 @@ fn refresh_execution_phase(
     phase
 }
 
+fn refresh_ancestry_phase(execution: &RunnerExecOutput) -> HomeboyRefreshPhase {
+    refresh_execution_phase(
+        "downgrade_safety_probe",
+        execution.exit_code >= 2,
+        execution,
+    )
+}
+
 fn refresh_execution_phase_name(plan: &HomeboyBinaryRefreshPlan) -> &'static str {
     match plan.mode.as_str() {
         "select" => "select",
@@ -509,11 +517,7 @@ pub fn refresh_homeboy_binary(
                         );
                         match result {
                             Ok(result) => {
-                                phase_summary.push(refresh_execution_phase(
-                                    "downgrade_safety_probe",
-                                    false,
-                                    &result.execution,
-                                ));
+                                phase_summary.push(refresh_ancestry_phase(&result.execution));
                                 if result.exit_code >= 2 {
                                     *ancestry_failure.borrow_mut() = Some(refresh_failure(
                                         &plan,
@@ -562,11 +566,7 @@ pub fn refresh_homeboy_binary(
                     );
                     match result {
                         Ok(result) => {
-                            phase_summary.push(refresh_execution_phase(
-                                "downgrade_safety_probe",
-                                false,
-                                &result.execution,
-                            ));
+                            phase_summary.push(refresh_ancestry_phase(&result.execution));
                             if result.exit_code >= 2 {
                                 *ancestry_failure.borrow_mut() = Some(refresh_failure(
                                     &plan,
@@ -596,9 +596,9 @@ pub fn refresh_homeboy_binary(
         Err(error) => {
             let verification = error.message;
             let ancestry_failure = ancestry_failure.into_inner();
-            let phase_name = if ancestry_failure.is_some() {
-                "downgrade_safety_probe"
-            } else if error.details.get("field").and_then(Value::as_str) == Some("identity") {
+            let phase_name = if error.details.get("field").and_then(Value::as_str)
+                == Some("identity")
+            {
                 "identity_verification"
             } else if error.details.get("field").and_then(Value::as_str) == Some("allow_downgrade")
             {
@@ -606,7 +606,9 @@ pub fn refresh_homeboy_binary(
             } else {
                 "configuration_promotion"
             };
-            phase_summary.push(refresh_phase(phase_name, true, 1));
+            if ancestry_failure.is_none() {
+                phase_summary.push(refresh_phase(phase_name, true, 1));
+            }
             let failure = ancestry_failure.unwrap_or_else(|| {
                 refresh_verification_failure(&plan, exec_output.clone(), verification.clone())
             });
