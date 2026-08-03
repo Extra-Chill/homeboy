@@ -13,6 +13,10 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::agent_task_gate::{
+    failure_fingerprint, run_gate_command_with_timeout, AgentTaskGateBaselineComparison,
+    AgentTaskGateDifferentialResult, AgentTaskGateStatus,
+};
 use crate::agent_task_promotion::{normalize_promotion_patch, AgentTaskPromotionReport};
 use crate::agent_task_scheduler::AgentTaskPlan;
 use homeboy_core::{Error, Result};
@@ -270,6 +274,172 @@ pub(crate) fn materialize_follow_up_baseline(
     materialize_follow_up_baseline_at(promotion, None, source_run_id, bound_task_id)
 }
 
+/// Replay unresolved failed gates against the immutable verified base. This is
+/// controller work, not provider remediation: callers persist the resulting
+/// promotion before evaluating Cook feedback.
+pub(crate) fn compare_gate_failures_to_verified_base(
+    promotion: &mut AgentTaskPromotionReport,
+    repository_root: &std::path::Path,
+    base_sha: &str,
+    timeout: std::time::Duration,
+    mut checkpoint: impl FnMut(usize, usize) -> Result<()>,
+) -> Result<()> {
+    if !promotion.status.gate_failed() {
+        return Ok(());
+    }
+    let unresolved = promotion
+        .deterministic_gates
+        .iter()
+        .filter(|gate| {
+            gate.status == AgentTaskGateStatus::Failed && gate.baseline_comparison.is_none()
+        })
+        .count();
+    if unresolved == 0 {
+        return Ok(());
+    }
+    let baseline_root = tempfile::tempdir().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create Cook gate baseline".to_string()),
+        )
+    })?;
+    let baseline_path = baseline_root.path().join("base");
+    let output = std::process::Command::new("git")
+        .args(["worktree", "add", "--detach"])
+        .arg(&baseline_path)
+        .arg(base_sha)
+        .current_dir(repository_root)
+        .output()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("materialize Cook gate baseline".to_string()),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(Error::internal_io(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            Some("materialize immutable Cook gate baseline".to_string()),
+        ));
+    }
+    let comparison = (|| -> Result<()> {
+        homeboy_core::hygiene::materialize_worktree_dependencies(&baseline_path)?;
+        let mut compared = 0;
+        for (index, gate) in promotion.deterministic_gates.iter_mut().enumerate() {
+            if gate.status != AgentTaskGateStatus::Failed || gate.baseline_comparison.is_some() {
+                continue;
+            }
+            compared += 1;
+            checkpoint(compared, unresolved)?;
+            let command = gate.command.last().cloned().unwrap_or_default();
+            let baseline_run_dir = homeboy_core::engine::run_dir::RunDir::create()?;
+            let baseline = (|| {
+                let runtime = homeboy_core::engine::invocation::InvocationGuard::acquire(
+                    &baseline_run_dir,
+                    &homeboy_core::engine::invocation::InvocationRequirements::default(),
+                )?;
+                run_gate_command_with_timeout(
+                    &baseline_path,
+                    index + 1,
+                    &command,
+                    gate.visibility,
+                    gate.reveal_policy,
+                    &runtime.context().tmp_dir,
+                    timeout,
+                    &gate.environment.replay_policy(),
+                )
+            })();
+            let result: Result<()> = match baseline {
+                Ok(baseline) if baseline.exit_code == 124 => {
+                    gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+                        base_ref: base_sha.to_string(),
+                        exit_code: baseline.exit_code,
+                        failure_fingerprint: failure_fingerprint(
+                            &baseline.stdout,
+                            &baseline.stderr,
+                        ),
+                        matches_candidate_failure: false,
+                        result: AgentTaskGateDifferentialResult::Inconclusive,
+                    });
+                    Ok(())
+                }
+                Ok(baseline) if baseline.status == AgentTaskGateStatus::Failed => {
+                    let matches = failure_fingerprint(&gate.stdout, &gate.stderr)
+                        == failure_fingerprint(&baseline.stdout, &baseline.stderr);
+                    gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+                        base_ref: base_sha.to_string(),
+                        exit_code: baseline.exit_code,
+                        failure_fingerprint: failure_fingerprint(
+                            &baseline.stdout,
+                            &baseline.stderr,
+                        ),
+                        matches_candidate_failure: matches,
+                        result: if matches {
+                            AgentTaskGateDifferentialResult::BaselineRed
+                        } else {
+                            AgentTaskGateDifferentialResult::CandidateRegression
+                        },
+                    });
+                    if matches {
+                        gate.accept_inherited_failure();
+                    }
+                    Ok(())
+                }
+                Ok(baseline) => {
+                    gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+                        base_ref: base_sha.to_string(),
+                        exit_code: baseline.exit_code,
+                        failure_fingerprint: failure_fingerprint(
+                            &baseline.stdout,
+                            &baseline.stderr,
+                        ),
+                        matches_candidate_failure: false,
+                        result: AgentTaskGateDifferentialResult::CandidateRegression,
+                    });
+                    Ok(())
+                }
+                Err(error) => {
+                    gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+                        base_ref: base_sha.to_string(),
+                        exit_code: 124,
+                        failure_fingerprint: String::new(),
+                        matches_candidate_failure: false,
+                        result: AgentTaskGateDifferentialResult::Inconclusive,
+                    });
+                    // Preserve the inconclusive evidence and leave the candidate
+                    // gate red. A baseline execution failure must never convert a
+                    // candidate failure into an infrastructure error that loses
+                    // its durable comparison result.
+                    let _ = error;
+                    Ok(())
+                }
+            };
+            baseline_run_dir.finish(result.is_ok());
+            result?;
+        }
+        promotion.normalize_gate_outcome();
+        Ok(())
+    })();
+    let cleanup = std::process::Command::new("git")
+        .args(["worktree", "remove", "--force"])
+        .arg(&baseline_path)
+        .current_dir(repository_root)
+        .status()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("remove Cook gate baseline".to_string()),
+            )
+        })?;
+    if !cleanup.success() {
+        return Err(Error::internal_io(
+            "git worktree remove failed".to_string(),
+            Some("remove Cook gate baseline".to_string()),
+        ));
+    }
+    comparison
+}
+
 /// Re-materialize a follow-up baseline worktree at a specific path that was
 /// previously created by [`materialize_follow_up_baseline`] but has since been
 /// reaped (e.g. by tmp cleanup, disk-pressure cleanup, or `git worktree prune`).
@@ -505,6 +675,10 @@ fn parent_snapshot_from_transport(raw: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_task_gate::{
+        AgentTaskGateEnvironment, AgentTaskGateRevealPolicy, AgentTaskGateStatus,
+    };
+    use homeboy_core::gate::HomeboyGateVisibility;
     use sha2::{Digest, Sha256};
 
     #[test]
@@ -525,6 +699,102 @@ mod tests {
                 ["snapshot_hash"],
             "abc"
         );
+    }
+
+    #[test]
+    fn differential_gate_comparison_classifies_inherited_regression_and_inconclusive() {
+        for (name, command, candidate_output, timeout, expected, accepted) in [
+            (
+                "inherited",
+                "printf 'same\\n' >&2; exit 1",
+                "same\n",
+                std::time::Duration::from_secs(1),
+                AgentTaskGateDifferentialResult::BaselineRed,
+                true,
+            ),
+            (
+                "regression",
+                "cat state >&2; exit 1",
+                "candidate\n",
+                std::time::Duration::from_secs(1),
+                AgentTaskGateDifferentialResult::CandidateRegression,
+                false,
+            ),
+            (
+                "inconclusive",
+                "sleep 1; exit 1",
+                "candidate\n",
+                std::time::Duration::from_millis(10),
+                AgentTaskGateDifferentialResult::Inconclusive,
+                false,
+            ),
+        ] {
+            let temp = tempfile::tempdir().expect("repository");
+            git_output(temp.path(), &["init", "-b", "main"]).expect("init");
+            git_output(temp.path(), &["config", "user.name", "Homeboy Test"]).expect("name");
+            git_output(temp.path(), &["config", "user.email", "test@example.test"]).expect("email");
+            std::fs::write(temp.path().join("state"), "base\n").expect("base state");
+            git_output(temp.path(), &["add", "state"]).expect("add");
+            git_output(temp.path(), &["commit", "-m", "base"]).expect("commit");
+            let base = git_output(temp.path(), &["rev-parse", "HEAD"]).expect("base sha");
+            std::fs::write(temp.path().join("state"), "candidate\n").expect("candidate state");
+            let mut promotion: AgentTaskPromotionReport =
+                serde_json::from_value(serde_json::json!({
+                    "schema": "homeboy/agent-task-promotion-report/v1",
+                    "status": "gate_failed",
+                    "source": {"kind": "aggregate", "task_id": "task"},
+                    "to_worktree": "fixture",
+                    "target": {"worktree": "fixture", "path": temp.path()},
+                    "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
+                    "deterministic_gates": [],
+                    "operator_notification": {"status": "blocked", "message": "red"}
+                }))
+                .expect("promotion");
+            let mut gate = crate::agent_task_gate::AgentTaskGateReport::new(
+                name,
+                vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
+                1,
+                "",
+                candidate_output,
+                None,
+                HomeboyGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                AgentTaskGateEnvironment::default(),
+            );
+            gate.status = AgentTaskGateStatus::Failed;
+            promotion.deterministic_gates.push(gate);
+
+            let result = compare_gate_failures_to_verified_base(
+                &mut promotion,
+                temp.path(),
+                &base,
+                timeout,
+                |_compared, _total| Ok(()),
+            );
+
+            result.expect("baseline comparison");
+            assert_eq!(
+                promotion.deterministic_gates[0]
+                    .baseline_comparison
+                    .as_ref()
+                    .expect("comparison")
+                    .result,
+                expected
+            );
+            assert_eq!(
+                promotion.deterministic_gates[0].status
+                    == AgentTaskGateStatus::AcceptedInheritedFailure,
+                accepted
+            );
+            assert_eq!(
+                promotion.status,
+                if accepted {
+                    crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+                } else {
+                    crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
+                }
+            );
+        }
     }
 }
 

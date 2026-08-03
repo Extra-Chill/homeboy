@@ -393,6 +393,20 @@ pub struct AgentTaskGateBaselineComparison {
     pub exit_code: i32,
     pub failure_fingerprint: String,
     pub matches_candidate_failure: bool,
+    #[serde(default)]
+    pub result: AgentTaskGateDifferentialResult,
+}
+
+/// The durable outcome of replaying a candidate gate against its immutable base.
+/// `InheritedRed` is deliberately distinct from a passing gate.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskGateDifferentialResult {
+    BaselineRed,
+    CandidateRegression,
+    CandidateImprovement,
+    #[default]
+    Inconclusive,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -769,6 +783,7 @@ impl AgentTaskGateReport {
             .inputs(PlanValues::new().json("command", &self.command))
             .output_value("exit_code", serde_json::json!(self.exit_code))
             .output_value("accepted_inherited_failure", serde_json::json!(true))
+            .output_value("baseline_red", serde_json::json!(true))
             .gate_result(gate_result)
             .build();
     }

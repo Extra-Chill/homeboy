@@ -6092,6 +6092,7 @@ fn adopted_baseline_gate_outcome_is_candidate_bound_and_recovery_safe() {
             exit_code: 1,
             failure_fingerprint: "inherited failure".to_string(),
             matches_candidate_failure: true,
+            result: crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
         });
     accepted.normalize_gate_outcome();
 
@@ -6130,6 +6131,122 @@ fn adopted_baseline_gate_outcome_is_candidate_bound_and_recovery_safe() {
         .unwrap()
         .commit = "other-candidate".to_string();
     assert!(!wrong_candidate.has_visible_passed_gate_for_command(command));
+}
+
+#[test]
+fn normal_cook_finalizes_an_inherited_gate_failure_without_provider_retry() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("repository");
+        let root = temp.path();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.name", "Homeboy Test"],
+            vec!["config", "user.email", "test@example.test"],
+        ] {
+            git_output(root, &args).expect("git setup");
+        }
+        std::fs::write(root.join("failure"), "inherited\n").unwrap();
+        std::fs::write(root.join("candidate"), "base\n").unwrap();
+        git_output(root, &["add", "."]).unwrap();
+        git_output(root, &["commit", "-m", "base"]).unwrap();
+        let base = git_output(root, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(root.join("candidate"), "provider-produced\n").unwrap();
+        git_output(root, &["add", "candidate"]).unwrap();
+        git_output(root, &["commit", "-m", "provider candidate"]).unwrap();
+
+        let cook_id = "cook-normal-inherited";
+        let run_id = format!("{cook_id}-run");
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = run_id.clone();
+        options.no_finalize = false;
+        options.to_worktree = root.display().to_string();
+        options.source_worktree_path = Some(root.to_path_buf());
+        options.max_attempts = 1;
+        options.gates.verify = vec!["cat failure >&2; exit 1".to_string()];
+        options.initial_plan.options.execution_budget =
+            crate::agent_task_scheduler::AgentTaskExecutionBudget::new(1, 0, 0);
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&run_id)).unwrap();
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, &run_id).unwrap();
+        seed_review_form_aggregate(&run_id, &options.initial_plan);
+        agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
+            record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+        })
+        .unwrap();
+        let gate = crate::agent_task_gate::AgentTaskGateReport::new(
+            "verify-1",
+            vec![
+                "sh".to_string(),
+                "-lc".to_string(),
+                options.gates.verify[0].clone(),
+            ],
+            1,
+            "",
+            "inherited\n",
+            None,
+            homeboy_core::gate::HomeboyGateVisibility::Visible,
+            crate::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence,
+            crate::agent_task_gate::AgentTaskGateEnvironment::default(),
+        );
+        let promotion: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
+            "schema": "homeboy/agent-task-promotion-report/v1",
+            "status": "gate_failed",
+            "source": {"kind": "aggregate", "task_id": "provider", "run_id": run_id},
+            "to_worktree": root,
+            "target": {"worktree": root, "path": root},
+            "patch_artifact": {"id": "provider-patch", "kind": "patch", "path": "provider.patch"},
+            "changed_files": ["candidate"],
+            "deterministic_gates": [gate],
+            "verified_base": {"base": "main", "sha": base},
+            "provenance": {"worktree_path": root},
+            "operator_notification": {"status": "blocked", "message": "gate failed"}
+        }))
+        .unwrap();
+        agent_task_lifecycle::record_promotion(&run_id, serde_json::to_value(promotion).unwrap())
+            .unwrap();
+        let finalized = Arc::new(AtomicUsize::new(0));
+        let finalization_count = Arc::clone(&finalized);
+        let expected_base = base.clone();
+        let expected_run_id = run_id.clone();
+        let result = run_cook_with_finalizer(
+            options,
+            UnusedExecutor,
+            move |_, received_run, promotion| {
+                finalization_count.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(received_run, expected_run_id);
+                assert_eq!(promotion.verified_base.as_ref().unwrap().sha, expected_base);
+                assert_eq!(
+                    promotion.deterministic_gates[0]
+                        .baseline_comparison
+                        .as_ref()
+                        .unwrap()
+                        .result,
+                    crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed
+                );
+                Ok(serde_json::json!({"status": "review_ready"}))
+            },
+        )
+        .unwrap();
+        assert_eq!(result.value.status, "review_ready", "{:#?}", result.value);
+        assert_eq!(finalized.load(Ordering::SeqCst), 1);
+        let record = agent_task_lifecycle::status(&run_id).unwrap();
+        assert_eq!(record.metadata["provider_executions_consumed"], 1);
+        let persisted = persisted_promotion_for_attempt(&run_id).unwrap().unwrap();
+        assert_eq!(persisted.status, AgentTaskPromotionStatus::Applied);
+        assert_eq!(persisted.deterministic_gates[0].exit_code, 1);
+        assert_eq!(
+            persisted.deterministic_gates[0].status,
+            crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure
+        );
+        assert_eq!(
+            persisted.deterministic_gates[0]
+                .baseline_comparison
+                .as_ref()
+                .unwrap()
+                .base_ref,
+            base
+        );
+    });
 }
 
 #[test]
@@ -6952,6 +7069,7 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
                 exit_code: 1,
                 failure_fingerprint: "inherited failure".to_string(),
                 matches_candidate_failure: true,
+                result: crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
             });
         adopted.operator_notification =
             crate::agent_task_promotion::AgentTaskPromotionNotification {
