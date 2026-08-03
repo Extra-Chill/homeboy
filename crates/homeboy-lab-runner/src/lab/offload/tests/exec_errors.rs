@@ -64,6 +64,11 @@ fn lost_exec_response_reconciles_the_single_accepted_durable_job() {
         )
         .expect("record controller proxy before daemon acceptance");
         let mut status = reverse_status("homeboy-lab");
+        status
+            .session
+            .as_mut()
+            .expect("reverse session")
+            .remote_daemon_lease_id = Some("generation-8525".to_string());
         status.active_runner_jobs.push(crate::RunnerJob {
             runner_id: "homeboy-lab".to_string(),
             job_id: "job-8525".to_string(),
@@ -88,12 +93,14 @@ fn lost_exec_response_reconciles_the_single_accepted_durable_job() {
         });
 
         let response_error = Error::internal_unexpected("/exec response connection reset");
-        let job_id = accepted_runner_job_id_with("homeboy-lab", run_id, || Ok(status))
+        let job = accepted_runner_job_id_with("homeboy-lab", run_id, || Ok(status))
             .expect("reconcile exactly one accepted daemon job");
+        assert_eq!(job.id, "job-8525");
+        assert_eq!(job.daemon_generation.as_deref(), Some("generation-8525"));
         let outcome = in_flight_daemon_disconnect_outcome(
             base_lab_plan(Some(&portable_lab_command("agent-task cook"))),
             "homeboy-lab",
-            &job_id,
+            &job.id,
             run_id,
             "/runner/workspace",
             &[

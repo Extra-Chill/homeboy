@@ -1,4 +1,5 @@
 use homeboy_engine_primitives::content_hash;
+use std::cell::RefCell;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -93,6 +94,10 @@ pub struct HomeboyBinaryRefreshOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<Value>,
     pub updated_fields: Vec<String>,
+    /// Refresh-owned commands are reported here rather than as independently
+    /// actionable runner-exec handoffs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phase_summary: Vec<HomeboyRefreshPhase>,
     pub daemon_refreshed: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interrupted_job_ids: Vec<String>,
@@ -107,6 +112,59 @@ pub struct HomeboyBinaryRefreshOutput {
     pub bootstrap_provenance: Option<HomeboyBootstrapProvenance>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rollback: Option<HomeboyBinaryRefreshRollback>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HomeboyRefreshPhase {
+    pub name: &'static str,
+    pub required: bool,
+    pub status: &'static str,
+    pub exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirror_run_id: Option<String>,
+}
+
+fn refresh_phase(name: &'static str, required: bool, exit_code: i32) -> HomeboyRefreshPhase {
+    HomeboyRefreshPhase {
+        name,
+        required,
+        status: match (required, exit_code) {
+            (_, 0) => "succeeded",
+            (false, 1) => "tolerated_failure",
+            _ => "failed",
+        },
+        exit_code,
+        job_id: None,
+        mirror_run_id: None,
+    }
+}
+
+fn refresh_execution_phase(
+    name: &'static str,
+    required: bool,
+    execution: &RunnerExecOutput,
+) -> HomeboyRefreshPhase {
+    let mut phase = refresh_phase(name, required, execution.exit_code);
+    phase.job_id = execution.job_id.clone();
+    phase.mirror_run_id = execution.mirror_run_id.clone();
+    phase
+}
+
+fn refresh_ancestry_phase(execution: &RunnerExecOutput) -> HomeboyRefreshPhase {
+    refresh_execution_phase(
+        "downgrade_safety_probe",
+        execution.exit_code >= 2,
+        execution,
+    )
+}
+
+fn refresh_execution_phase_name(plan: &HomeboyBinaryRefreshPlan) -> &'static str {
+    match plan.mode.as_str() {
+        "select" => "select",
+        _ => "materialize",
+    }
 }
 
 /// Evidence for an explicitly authorized rollback. `previous` names only
@@ -163,6 +221,10 @@ pub struct HomeboyBinaryRefreshFailure {
     pub job_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mirror_run_id: Option<String>,
+    /// Recovery actions remain on the parent refresh result so a required
+    /// failure is actionable without treating tolerated probes as debt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovery_actions: Vec<homeboy_core::runner_execution_envelope::RunnerExecutionNextAction>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification: Option<String>,
 }
@@ -314,6 +376,7 @@ pub fn refresh_homeboy_binary(
                 dry_run: true,
                 identity: None,
                 updated_fields: Vec::new(),
+                phase_summary: Vec::new(),
                 daemon_refreshed: false,
                 interrupted_job_ids: Vec::new(),
                 selected_binary_path: plan.binary_path.clone(),
@@ -346,6 +409,7 @@ pub fn refresh_homeboy_binary(
         exec_options,
         Some(connection_status.clone()),
     )?;
+    let execution_phase = refresh_phase(refresh_execution_phase_name(&plan), true, exit_code);
     if exit_code != 0 {
         return Ok((
             HomeboyBinaryRefreshOutput {
@@ -355,6 +419,7 @@ pub fn refresh_homeboy_binary(
                 dry_run: false,
                 identity: None,
                 updated_fields: Vec::new(),
+                phase_summary: vec![execution_phase],
                 daemon_refreshed: false,
                 interrupted_job_ids: Vec::new(),
                 selected_binary_path: plan.binary_path.clone(),
@@ -369,6 +434,7 @@ pub fn refresh_homeboy_binary(
             exit_code,
         ));
     }
+    let mut phase_summary = vec![execution_phase];
 
     // A reconnect replaces the daemon control plane. Prove it is admissible
     // before selecting the new global binary: a deferred refresh must leave
@@ -392,6 +458,7 @@ pub fn refresh_homeboy_binary(
                 plan: plan.clone(),
                 identity: parse_identity(&exec_output.stdout).ok(),
                 updated_fields: Vec::new(),
+                phase_summary: phase_summary.clone(),
                 daemon_refreshed: false,
                 interrupted_job_ids: Vec::new(),
                 selected_binary_path: plan.binary_path.clone(),
@@ -429,6 +496,7 @@ pub fn refresh_homeboy_binary(
     // Selection belongs to the controller-owned runner registry. It must be
     // persisted after the candidate has been verified, whether or not this
     // invocation also replaces the active daemon.
+    let ancestry_failure = RefCell::new(None);
     let bootstrap = if disconnected_ssh {
         ssh_bootstrap_promote_with(
             &plan,
@@ -440,13 +508,28 @@ pub fn refresh_homeboy_binary(
                     options.allow_downgrade,
                     &promotion_authorities,
                     |older, newer| {
-                        runner_commits_are_ancestral(
+                        let result = runner_commits_are_ancestral(
                             &plan,
                             older,
                             newer,
                             disconnected_ssh,
                             &connection_status,
-                        )
+                        );
+                        match result {
+                            Ok(result) => {
+                                phase_summary.push(refresh_ancestry_phase(&result.execution));
+                                if result.exit_code >= 2 {
+                                    *ancestry_failure.borrow_mut() = Some(refresh_failure(
+                                        &plan,
+                                        result.execution,
+                                        result.exit_code,
+                                    ));
+                                    return Err(ancestry_comparison_error(&plan));
+                                }
+                                Ok(result.is_ancestor)
+                            }
+                            Err(error) => Err(error),
+                        }
                     },
                 )?;
                 Ok((
@@ -474,13 +557,28 @@ pub fn refresh_homeboy_binary(
                 options.allow_downgrade,
                 &promotion_authorities,
                 |older, newer| {
-                    runner_commits_are_ancestral(
+                    let result = runner_commits_are_ancestral(
                         &plan,
                         older,
                         newer,
                         disconnected_ssh,
                         &connection_status,
-                    )
+                    );
+                    match result {
+                        Ok(result) => {
+                            phase_summary.push(refresh_ancestry_phase(&result.execution));
+                            if result.exit_code >= 2 {
+                                *ancestry_failure.borrow_mut() = Some(refresh_failure(
+                                    &plan,
+                                    result.execution,
+                                    result.exit_code,
+                                ));
+                                return Err(ancestry_comparison_error(&plan));
+                            }
+                            Ok(result.is_ancestor)
+                        }
+                        Err(error) => Err(error),
+                    }
                 },
             )?;
             let updated_fields =
@@ -497,6 +595,23 @@ pub fn refresh_homeboy_binary(
         Ok(bootstrap) => bootstrap,
         Err(error) => {
             let verification = error.message;
+            let ancestry_failure = ancestry_failure.into_inner();
+            let phase_name = if error.details.get("field").and_then(Value::as_str)
+                == Some("identity")
+            {
+                "identity_verification"
+            } else if error.details.get("field").and_then(Value::as_str) == Some("allow_downgrade")
+            {
+                "downgrade_validation"
+            } else {
+                "configuration_promotion"
+            };
+            if ancestry_failure.is_none() {
+                phase_summary.push(refresh_phase(phase_name, true, 1));
+            }
+            let failure = ancestry_failure.unwrap_or_else(|| {
+                refresh_verification_failure(&plan, exec_output.clone(), verification.clone())
+            });
             return Ok((
                 HomeboyBinaryRefreshOutput {
                     variant: "refresh_homeboy",
@@ -505,17 +620,14 @@ pub fn refresh_homeboy_binary(
                     dry_run: false,
                     identity: parse_identity(&exec_output.stdout).ok(),
                     updated_fields: Vec::new(),
+                    phase_summary,
                     daemon_refreshed: false,
                     interrupted_job_ids: Vec::new(),
                     selected_binary_path: plan.binary_path.clone(),
                     reconnect_required: !plan.reconnect,
                     followup_commands: plan.followup_commands.clone(),
                     reconnect_deferred: None,
-                    failure: Some(refresh_verification_failure(
-                        &plan,
-                        exec_output,
-                        verification,
-                    )),
+                    failure: Some(failure),
                     bootstrap_provenance: None,
                     rollback: None,
                     plan,
@@ -524,6 +636,9 @@ pub fn refresh_homeboy_binary(
             ));
         }
     };
+    phase_summary.push(refresh_phase("identity_verification", true, 0));
+    phase_summary.push(refresh_phase("bootstrap_promotion", true, 0));
+    phase_summary.push(refresh_phase("configuration_promotion", true, 0));
     let identity = bootstrap.identity;
     let updated_fields = bootstrap.updated_fields;
     let rollback = bootstrap.rollback;
@@ -573,8 +688,11 @@ pub fn refresh_homeboy_binary(
                     &plan.binary_path,
                     previous_homeboy_path.as_deref(),
                 )?;
-                return Err(error);
+                let mut phases = phase_summary.clone();
+                phases.push(refresh_phase("generation_rotation", true, 1));
+                return Err(refresh_error_with_phase_summary(error, &phases));
             }
+            phase_summary.push(refresh_phase("generation_rotation", true, 0));
             return Ok((
                 HomeboyBinaryRefreshOutput {
                     variant: "refresh_homeboy",
@@ -584,6 +702,7 @@ pub fn refresh_homeboy_binary(
                     plan: plan.clone(),
                     identity: Some(identity.clone()),
                     updated_fields: updated_fields.clone(),
+                    phase_summary,
                     daemon_refreshed: true,
                     interrupted_job_ids: Vec::new(),
                     selected_binary_path: plan.binary_path.clone(),
@@ -619,6 +738,7 @@ pub fn refresh_homeboy_binary(
                         plan: plan.clone(),
                         identity: Some(identity),
                         updated_fields: Vec::new(),
+                        phase_summary,
                         daemon_refreshed: false,
                         interrupted_job_ids: Vec::new(),
                         selected_binary_path: plan.binary_path.clone(),
@@ -645,14 +765,18 @@ pub fn refresh_homeboy_binary(
                 .map(|_| ())
             })
             .map_err(|error| {
-                durable_refresh_partial_error_if_needed(
+                let error = durable_refresh_partial_error_if_needed(
                     error,
                     &plan.runner_id,
                     previous_homeboy_path.as_deref(),
                     options.force,
-                )
+                );
+                let mut phases = phase_summary.clone();
+                phases.push(refresh_phase("disconnect", true, 1));
+                refresh_error_with_phase_summary(error, &phases)
             });
         }
+        phase_summary.push(refresh_phase("disconnect", true, 0));
         let (report, connect_exit_code) = match connect_with_orphan_adoption(
             &plan.runner_id,
             refresh_owned_lease.as_deref(),
@@ -698,12 +822,15 @@ pub fn refresh_homeboy_binary(
                     },
                 )
                 .map_err(|error| {
-                    durable_refresh_partial_error_if_needed(
+                    let error = durable_refresh_partial_error_if_needed(
                         error,
                         &plan.runner_id,
                         previous_homeboy_path.as_deref(),
                         options.force,
-                    )
+                    );
+                    let mut phases = phase_summary.clone();
+                    phases.push(refresh_phase("reconnect_transport", true, 1));
+                    refresh_error_with_phase_summary(error, &phases)
                 });
             }
         };
@@ -730,6 +857,12 @@ pub fn refresh_homeboy_binary(
                     options.force,
                 ));
             }
+            phase_summary.push(refresh_phase(
+                "reconnect_transport",
+                true,
+                reconnect_exit_code,
+            ));
+            phase_summary.push(refresh_phase("daemon_identity_verification", true, 1));
             return Ok((
                 HomeboyBinaryRefreshOutput {
                     variant: "refresh_homeboy",
@@ -739,6 +872,7 @@ pub fn refresh_homeboy_binary(
                     plan: plan.clone(),
                     identity: Some(identity),
                     updated_fields: Vec::new(),
+                    phase_summary,
                     daemon_refreshed: false,
                     interrupted_job_ids,
                     selected_binary_path: plan.binary_path.clone(),
@@ -785,6 +919,9 @@ pub fn refresh_homeboy_binary(
                         options.force,
                     ));
                 }
+                phase_summary.push(refresh_phase("reconnect_transport", true, 0));
+                phase_summary.push(refresh_phase("daemon_identity_verification", true, 0));
+                phase_summary.push(refresh_phase("admission_readiness", true, 1));
                 return Ok((
                     HomeboyBinaryRefreshOutput {
                         variant: "refresh_homeboy",
@@ -794,6 +931,7 @@ pub fn refresh_homeboy_binary(
                         plan: plan.clone(),
                         identity: Some(identity),
                         updated_fields: Vec::new(),
+                        phase_summary,
                         daemon_refreshed: false,
                         interrupted_job_ids,
                         selected_binary_path: plan.binary_path.clone(),
@@ -813,6 +951,9 @@ pub fn refresh_homeboy_binary(
                 ));
             }
         }
+        phase_summary.push(refresh_phase("reconnect_transport", true, 0));
+        phase_summary.push(refresh_phase("daemon_identity_verification", true, 0));
+        phase_summary.push(refresh_phase("admission_readiness", true, 0));
     } else {
         interrupted_job_ids = Vec::new();
     }
@@ -829,6 +970,7 @@ pub fn refresh_homeboy_binary(
             plan: plan.clone(),
             identity: Some(identity.clone()),
             updated_fields: updated_fields.clone(),
+            phase_summary,
             daemon_refreshed,
             interrupted_job_ids,
             selected_binary_path: plan.binary_path.clone(),
@@ -906,6 +1048,24 @@ fn refresh_failure(
     execution: RunnerExecOutput,
     exit_code: i32,
 ) -> HomeboyBinaryRefreshFailure {
+    let mut recovery_actions = execution
+        .execution_record
+        .as_ref()
+        .map(|record| record.next_actions.clone())
+        .unwrap_or_default();
+    if recovery_actions.is_empty() {
+        recovery_actions.push(
+            homeboy_core::runner_execution_envelope::RunnerExecutionNextAction {
+                label: "refresh_retry".to_string(),
+                command: vec![
+                    "homeboy".to_string(),
+                    "runner".to_string(),
+                    "refresh-homeboy".to_string(),
+                    plan.runner_id.clone(),
+                ],
+            },
+        );
+    }
     HomeboyBinaryRefreshFailure {
         exit_code,
         failed_command: execution.argv.clone(),
@@ -919,6 +1079,7 @@ fn refresh_failure(
         execution_record: execution.execution_record.clone(),
         job_id: execution.job_id.clone(),
         mirror_run_id: execution.mirror_run_id.clone(),
+        recovery_actions,
         verification: None,
     }
 }
@@ -1323,13 +1484,38 @@ fn identity_commit(identity: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+struct RefreshAncestryExecution {
+    execution: RunnerExecOutput,
+    is_ancestor: bool,
+    exit_code: i32,
+}
+
+fn ancestry_comparison_error(plan: &HomeboyBinaryRefreshPlan) -> Error {
+    Error::validation_invalid_argument(
+        "allow_downgrade",
+        "authoritative source repository cannot compare selected Homeboy commits",
+        Some(plan.runner_id.clone()),
+        Some(vec!["Inspect the parent refresh failure evidence and retry once the runner repository is healthy.".to_string()]),
+    )
+}
+
+fn refresh_error_with_phase_summary(
+    mut error: Error,
+    phase_summary: &[HomeboyRefreshPhase],
+) -> Error {
+    error.details["phase_summary"] = serde_json::to_value(phase_summary).unwrap_or_else(
+        |_| serde_json::json!([{ "name": "refresh", "status": "failed", "required": true }]),
+    );
+    error
+}
+
 fn runner_commits_are_ancestral(
     plan: &HomeboyBinaryRefreshPlan,
     older: &str,
     newer: &str,
     disconnected_ssh: bool,
     status_snapshot: &super::RunnerStatusReport,
-) -> Result<bool> {
+) -> Result<RefreshAncestryExecution> {
     runner_commits_are_ancestral_with(
         plan,
         older,
@@ -1337,7 +1523,6 @@ fn runner_commits_are_ancestral(
         disconnected_ssh,
         |runner_id, options| {
             exec_with_status_snapshot(runner_id, options, Some(status_snapshot.clone()))
-                .map(|(_, exit_code)| exit_code)
         },
     )
 }
@@ -1347,8 +1532,8 @@ fn runner_commits_are_ancestral_with(
     older: &str,
     newer: &str,
     disconnected_ssh: bool,
-    mut exec_runner: impl FnMut(&str, RunnerExecOptions) -> Result<i32>,
-) -> Result<bool> {
+    mut exec_runner: impl FnMut(&str, RunnerExecOptions) -> Result<(RunnerExecOutput, i32)>,
+) -> Result<RefreshAncestryExecution> {
     let repository = plan.target_dir.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "allow_downgrade",
@@ -1357,11 +1542,16 @@ fn runner_commits_are_ancestral_with(
             None,
         )
     })?;
-    let exit_code = exec_runner(
+    let (mut execution, exit_code) = exec_runner(
         &plan.runner_id,
         refresh_ancestry_execution_options(repository, older, newer, disconnected_ssh),
     )?;
-    classify_refresh_ancestry_exit(plan, exit_code)
+    execution.exit_code = exit_code;
+    Ok(RefreshAncestryExecution {
+        is_ancestor: exit_code == 0,
+        execution,
+        exit_code,
+    })
 }
 
 fn refresh_ancestry_execution_options(
@@ -1385,25 +1575,14 @@ fn refresh_ancestry_execution_options(
     } else {
         RunnerExecOptions::raw_command(command)
     };
-    options.with_capability_preflight(RunnerCapabilityPreflight {
-        command: "runner.refresh-homeboy".to_string(),
-        required_commands: vec!["git".to_string()],
-        timeout: disconnected_ssh.then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT),
-        ..Default::default()
-    })
-}
-
-fn classify_refresh_ancestry_exit(plan: &HomeboyBinaryRefreshPlan, exit_code: i32) -> Result<bool> {
-    match exit_code {
-        0 => Ok(true),
-        1 => Ok(false),
-        _ => Err(Error::validation_invalid_argument(
-            "allow_downgrade",
-            "authoritative source repository cannot compare selected Homeboy commits",
-            Some(plan.runner_id.clone()),
-            None,
-        )),
-    }
+    options
+        .with_capability_preflight(RunnerCapabilityPreflight {
+            command: "runner.refresh-homeboy".to_string(),
+            required_commands: vec!["git".to_string()],
+            timeout: disconnected_ssh.then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT),
+            ..Default::default()
+        })
+        .without_handoff()
 }
 
 pub fn plan_runner_dev_sync(options: &RunnerDevSyncOptions) -> Result<RunnerDevSyncPlan> {

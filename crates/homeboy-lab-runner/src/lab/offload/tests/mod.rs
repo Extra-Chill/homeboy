@@ -120,6 +120,7 @@ pub(super) fn reverse_status(runner_id: &str) -> RunnerStatusReport {
             local_port: None,
             local_url: None,
             tunnel_pid: None,
+            tunnel_process_start_identity: None,
             remote_daemon_pid: None,
             remote_daemon_lease_id: None,
             homeboy_version: "homeboy 0.0.0".to_string(),

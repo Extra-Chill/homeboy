@@ -261,6 +261,7 @@ mod tests {
                 local_port: Some(7357),
                 local_url: Some("http://127.0.0.1:7357".to_string()),
                 tunnel_pid: Some(123),
+                tunnel_process_start_identity: None,
                 remote_daemon_pid: Some(456),
                 remote_daemon_lease_id: Some("lease-456".to_string()),
                 homeboy_version: homeboy_product_identity::product_version().to_string(),

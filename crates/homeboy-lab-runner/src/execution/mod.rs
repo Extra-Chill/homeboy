@@ -300,6 +300,13 @@ impl RunnerExecOptions {
         self
     }
 
+    /// Keep durable evidence for a parent-owned substep without emitting an
+    /// independently actionable handoff while that parent is still running.
+    pub(crate) fn without_handoff(mut self) -> Self {
+        self.print_handoff = false;
+        self
+    }
+
     /// Mark this exec as a read-only retrieval of retained runner evidence. The
     /// read routes to the generation that still owns the retained run/artifact
     /// and never rotates the shared admission tunnel, so a stale admission

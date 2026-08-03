@@ -648,6 +648,7 @@ mod tests {
             local_port: None,
             local_url: None,
             tunnel_pid: None,
+            tunnel_process_start_identity: None,
             remote_daemon_pid: None,
             remote_daemon_lease_id: None,
             homeboy_version: "test".to_string(),

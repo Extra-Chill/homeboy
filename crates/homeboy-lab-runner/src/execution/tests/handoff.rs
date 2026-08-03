@@ -1708,6 +1708,23 @@ fn daemon_polling_reloads_a_refreshed_session_endpoint() {
 }
 
 #[test]
+fn authoritative_daemon_job_error_does_not_reopen_a_tunnel() {
+    let error = Error::new(
+        ErrorCode::InternalUnexpected,
+        "daemon request failed: job not found",
+        serde_json::json!({
+            "http_status": 404,
+            "path": "/jobs/job-42",
+        }),
+    );
+
+    assert!(
+        !super::super::daemon::daemon_poll_transport_was_lost(&error),
+        "an authoritative daemon response must not trigger generation recovery"
+    );
+}
+
+#[test]
 fn daemon_exec_request_failed_error_handles_null_payload_with_reconnect_hint() {
     // The historical #3631/#3624 symptom: a stale/restarting daemon answers
     // with an empty/null error payload. We must never surface a bare `null`,
