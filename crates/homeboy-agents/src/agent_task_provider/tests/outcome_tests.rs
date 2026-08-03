@@ -472,8 +472,10 @@ fn revision_bound_no_change_verdict_accepts_substantive_review_only_for_clean_ch
         "status": "succeeded",
         "intentional_no_change": {
             "schema": "homeboy/intentional-no-change/v1",
-            "verdict": "no_change",
+            "verdict": "investigation_only",
             "inspected_revision": revision,
+            "next_action": "Record the review conclusion with the owning team.",
+            "source_evidence": ["provider://review/transcript"],
         }
     }));
     outcome.status = AgentTaskOutcomeStatus::Succeeded;

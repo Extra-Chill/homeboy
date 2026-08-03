@@ -2505,6 +2505,7 @@ pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<Agen
             disposition,
             attempts,
             finalization,
+            intentional_no_change: None,
             selected_candidate,
             stop_reason,
             terminal_phase: None,

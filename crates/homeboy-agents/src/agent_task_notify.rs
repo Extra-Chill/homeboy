@@ -321,6 +321,7 @@ mod tests {
             disposition: homeboy_core::cook_status::CookDisposition::Terminal,
             attempts: Vec::new(),
             finalization,
+            intentional_no_change: None,
             selected_candidate: None,
             stop_reason: None,
             terminal_phase: None,

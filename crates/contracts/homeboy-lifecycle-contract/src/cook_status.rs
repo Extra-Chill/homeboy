@@ -65,6 +65,8 @@ pub enum CookStatus {
     ReviewReady,
     /// Gates were green but finalization was intentionally not performed.
     GreenNoFinalize,
+    /// A verified provider review intentionally produced no candidate patch.
+    IntentionalNoChange,
     /// Finalization ran and found no changed files.
     NoChanges,
     /// A no-op candidate failed its gates.
@@ -118,6 +120,7 @@ impl CookStatus {
             "completed" => Self::Completed,
             "review_ready" => Self::ReviewReady,
             "green_no_finalize" => Self::GreenNoFinalize,
+            "intentional_no_change" => Self::IntentionalNoChange,
             "no_changes" => Self::NoChanges,
             "no_op_gate_failed" => Self::NoOpGateFailed,
             "gate_failed" => Self::GateFailed,
@@ -148,6 +151,7 @@ impl CookStatus {
             Self::Completed => "completed",
             Self::ReviewReady => "review_ready",
             Self::GreenNoFinalize => "green_no_finalize",
+            Self::IntentionalNoChange => "intentional_no_change",
             Self::NoChanges => "no_changes",
             Self::NoOpGateFailed => "no_op_gate_failed",
             Self::GateFailed => "gate_failed",
@@ -195,6 +199,7 @@ impl CookStatus {
                 | Self::InFlight
                 | Self::ReviewReady
                 | Self::GreenNoFinalize
+                | Self::IntentionalNoChange
         )
     }
 }
@@ -277,6 +282,7 @@ mod tests {
             "completed",
             "review_ready",
             "green_no_finalize",
+            "intentional_no_change",
             "no_changes",
             "gate_failed",
             "awaiting_acceptance",
@@ -342,6 +348,7 @@ mod tests {
             CookStatus::Completed,
             CookStatus::ReviewReady,
             CookStatus::GreenNoFinalize,
+            CookStatus::IntentionalNoChange,
             CookStatus::NoChanges,
             CookStatus::NoOpGateFailed,
             CookStatus::GateFailed,
@@ -375,13 +382,14 @@ mod tests {
     /// Pins the exit-code vocabulary that previously lived as a separate
     /// string list, so it cannot drift from terminality again.
     #[test]
-    fn success_exit_covers_in_flight_plus_the_two_green_terminal_states() {
+    fn success_exit_covers_in_flight_and_candidate_free_terminal_successes() {
         for status in [
             "queued",
             "running",
             "in_flight",
             "review_ready",
             "green_no_finalize",
+            "intentional_no_change",
         ] {
             assert!(
                 CookStatus::from_status(status).is_success_exit(),

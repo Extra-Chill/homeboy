@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crate::agent_task_cook_loop::{
     evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopReport, AgentTaskCookLoopStatus,
+    AgentTaskIntentionalNoChange,
 };
 use crate::agent_task_dispatch_plan::{build_dispatch_plan, validate_single_cook_prompt_source};
 use crate::agent_task_dispatch_service::{self, AgentTaskDispatchCommand};
@@ -115,6 +116,19 @@ fn pre_artifact_interruption_phase(
     } else {
         PreArtifactInterruptionPhase::AfterProviderReturn
     }
+}
+
+fn intentional_no_change_from_aggregate(
+    aggregate: &crate::agent_task_scheduler::AgentTaskAggregate,
+) -> Option<AgentTaskIntentionalNoChange> {
+    aggregate.outcomes.iter().find_map(|outcome| {
+        let declaration = outcome
+            .outputs
+            .get("provider_run_result")?
+            .get("intentional_no_change")?
+            .clone();
+        serde_json::from_value::<AgentTaskIntentionalNoChange>(declaration).ok()
+    })
 }
 
 fn pre_artifact_execution_count(record: &agent_task_lifecycle::AgentTaskRunRecord) -> u32 {
@@ -702,6 +716,10 @@ pub struct AgentTaskCookReport {
     pub attempts: Vec<AgentTaskCookAttemptReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finalization: Option<Value>,
+    /// A verified review outcome that intentionally has no candidate to promote
+    /// or finalize.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intentional_no_change: Option<AgentTaskCookIntentionalNoChangeReport>,
     /// Candidate authority is separate from `latest_run_id`, which remains the
     /// chronological invocation/index compatibility field.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -721,6 +739,14 @@ pub struct AgentTaskCookReport {
     /// evidence; operators retrieve that through the listed diagnose command.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_context: Option<AgentTaskCookFailureContext>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentTaskCookIntentionalNoChangeReport {
+    #[serde(flatten)]
+    pub declaration: AgentTaskIntentionalNoChange,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_form: Option<crate::agent_task_review_dossier::AiFilledReviewForm>,
 }
 
 /// Durable identity and legal recovery surface for a failed Cook.
@@ -2646,6 +2672,7 @@ where
         }
 
         let review_form = review_form_from_aggregate(&aggregate)?;
+        let intentional_no_change = intentional_no_change_from_aggregate(&aggregate);
         let previous_failure_set = attempts
             .last()
             .and_then(|attempt| attempt.feedback.as_ref())
@@ -2663,8 +2690,11 @@ where
             // The form is publication evidence. A no-finalize Cook preserves
             // the verified patch for review without entering finalization.
             require_review_form: !options.no_finalize,
-            review_form,
-            metadata: serde_json::json!({"previous_failure_set": previous_failure_set}),
+            review_form: review_form.clone(),
+            metadata: serde_json::json!({
+                "previous_failure_set": previous_failure_set,
+                "intentional_no_change": intentional_no_change,
+            }),
         });
         let feedback_status = feedback.status;
         let follow_up_request = feedback.follow_up_request.clone();
@@ -2678,6 +2708,34 @@ where
         });
 
         match feedback_status {
+            AgentTaskCookLoopStatus::IntentionalNoChange => {
+                let declaration = feedback
+                    .intentional_no_change
+                    .expect("intentional no-change feedback carries its declaration");
+                let mut report = cook_report(CookReportInput {
+                    cook_id,
+                    status: "intentional_no_change",
+                    disposition: CookDisposition::Terminal,
+                    attempts,
+                    finalization: None,
+                    stop_reason: Some(format!(
+                        "provider completed a verified {} review without a candidate patch; publication was skipped{}",
+                        declaration.verdict,
+                        declaration
+                            .next_action
+                            .is_empty()
+                            .then(String::new)
+                            .unwrap_or_else(|| format!("; next action: {}", declaration.next_action))
+                    )),
+                    exit_code: 0,
+                    invocation_latest_run_id: Some(&run_id),
+                });
+                report.value.intentional_no_change = Some(AgentTaskCookIntentionalNoChangeReport {
+                    declaration,
+                    review_form,
+                });
+                return Ok(report);
+            }
             AgentTaskCookLoopStatus::GreenCompleted => {
                 if options.no_finalize {
                     return Ok(cook_report(CookReportInput {

@@ -65,6 +65,8 @@ pub struct AgentTaskCookLoopReport {
     pub failed_gate_results: Vec<HomeboyGateResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up_request: Option<AgentTaskRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intentional_no_change: Option<AgentTaskIntentionalNoChange>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
 }
@@ -73,6 +75,7 @@ pub struct AgentTaskCookLoopReport {
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskCookLoopStatus {
     GreenCompleted,
+    IntentionalNoChange,
     NoChanges,
     NoOpGateFailed,
     RetryRequested,
@@ -97,8 +100,44 @@ pub enum AgentTaskCookLoopQualityClassification {
     LargeOrRiskyPatch,
     VerifiedPatch,
     VerifiedNoOp,
+    IntentionalNoChange,
     Regressing,
     Stagnating,
+}
+
+/// Provider-declared disposition for a review that intentionally produced no
+/// patch. The declaration is accepted only after provider normalization binds
+/// it to a clean, inspected workspace revision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskIntentionalNoChange {
+    pub schema: String,
+    pub verdict: AgentTaskIntentionalNoChangeVerdict,
+    pub inspected_revision: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub next_action: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskIntentionalNoChangeVerdict {
+    Blocked,
+    AlreadySatisfied,
+    /// Legacy `no_change` declarations deserialize as this unambiguous review
+    /// outcome, preserving existing providers while exposing the typed contract.
+    #[serde(alias = "no_change")]
+    InvestigationOnly,
+}
+
+impl std::fmt::Display for AgentTaskIntentionalNoChangeVerdict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Blocked => "blocked",
+            Self::AlreadySatisfied => "already_satisfied",
+            Self::InvestigationOnly => "investigation_only",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -174,7 +213,18 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         .filter(|gate| gate.status == HomeboyGateStatus::Failed)
         .collect();
     let retry_budget_remaining = options.max_attempts.saturating_sub(options.attempt);
-    let mut quality = classify_cook_loop_quality(&options.promotion_report);
+    let intentional_no_change = (options.promotion_report.status
+        == AgentTaskPromotionStatus::VerifiedNoChanges)
+        .then(|| {
+            options
+                .metadata
+                .get("intentional_no_change")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+        })
+        .flatten();
+    let mut quality =
+        classify_cook_loop_quality(&options.promotion_report, intentional_no_change.is_some());
     let failure_progression = failure_progression(&options, &failed_gates);
     apply_failure_progression_to_quality(&mut quality, &failure_progression);
     let should_retry = options.promotion_report.status == AgentTaskPromotionStatus::GateFailed
@@ -211,6 +261,8 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         AgentTaskCookLoopStatus::RetryRequested
     } else if options.promotion_report.status == AgentTaskPromotionStatus::NoChangesGateFailed {
         AgentTaskCookLoopStatus::NoOpGateFailed
+    } else if intentional_no_change.is_some() {
+        AgentTaskCookLoopStatus::IntentionalNoChange
     } else if quality.classification == AgentTaskCookLoopQualityClassification::NoChanges {
         AgentTaskCookLoopStatus::NoChanges
     } else if !failed_gates.is_empty() {
@@ -236,13 +288,29 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         failed_gates,
         failed_gate_results,
         follow_up_request,
+        intentional_no_change,
         metadata: report_metadata(options.metadata, &failure_progression),
     }
 }
 
-fn classify_cook_loop_quality(report: &AgentTaskPromotionReport) -> AgentTaskCookLoopQualityReport {
+fn classify_cook_loop_quality(
+    report: &AgentTaskPromotionReport,
+    intentional_no_change: bool,
+) -> AgentTaskCookLoopQualityReport {
     let changed_file_count = report.changed_files.len();
     if changed_file_count == 0 {
+        if intentional_no_change {
+            return AgentTaskCookLoopQualityReport {
+                classification: AgentTaskCookLoopQualityClassification::IntentionalNoChange,
+                summary: "provider intentionally completed review without a candidate patch"
+                    .to_string(),
+                signals: vec![
+                    "changed_files=0".to_string(),
+                    "intentional_no_change=verified".to_string(),
+                ],
+                failure_progression: None,
+            };
+        }
         if report.status == AgentTaskPromotionStatus::VerifiedNoChanges {
             return AgentTaskCookLoopQualityReport {
                 classification: AgentTaskCookLoopQualityClassification::VerifiedNoOp,
@@ -1062,6 +1130,52 @@ mod tests {
 
     #[test]
     fn verified_no_op_completes_and_failed_no_op_is_terminal_failure() {
+        let intentional = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report_with_changed_files(
+                AgentTaskPromotionStatus::VerifiedNoChanges,
+                vec![green_gate()],
+                Vec::new(),
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-intentional-no-change".to_string()),
+            current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
+            metadata: json!({
+                "intentional_no_change": {
+                    "schema": "homeboy/intentional-no-change/v1",
+                    "verdict": "blocked",
+                    "inspected_revision": "abc123",
+                    "next_action": "Add the missing owning-layer contract.",
+                    "source_evidence": ["homeboy://evidence/provider-review"],
+                }
+            }),
+        });
+        assert_eq!(
+            intentional.status,
+            AgentTaskCookLoopStatus::IntentionalNoChange
+        );
+        assert_eq!(
+            intentional.quality.classification,
+            AgentTaskCookLoopQualityClassification::IntentionalNoChange
+        );
+        let declaration = intentional.intentional_no_change.unwrap();
+        assert_eq!(
+            declaration.verdict,
+            AgentTaskIntentionalNoChangeVerdict::Blocked
+        );
+        assert_eq!(
+            declaration.next_action,
+            "Add the missing owning-layer contract."
+        );
+        assert_eq!(
+            declaration.source_evidence,
+            vec!["homeboy://evidence/provider-review"]
+        );
+        assert!(intentional.follow_up_request.is_none());
+
         let verified = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report_with_changed_files(
