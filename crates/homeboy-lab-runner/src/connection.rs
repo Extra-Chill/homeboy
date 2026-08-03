@@ -1,6 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -1677,7 +1678,7 @@ fn reconnect_job_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
             None,
         )
     })?;
-    Ok(RunnerSession {
+    let session = RunnerSession {
         local_port: Some(local_port),
         local_url: Some(local_url),
         tunnel_pid,
@@ -1685,7 +1686,9 @@ fn reconnect_job_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
         remote_daemon_pid: daemon.pid,
         remote_daemon_lease_id: daemon.lease_id,
         ..owner
-    })
+    };
+    remember_owned_tunnel(&session);
+    Ok(session)
 }
 
 /// Reopen and retain the direct tunnel for the durable generation which owns a
@@ -1695,7 +1698,21 @@ pub(crate) fn reconnect_job_owner_for_polling(
     runner_id: &str,
     job_id: &str,
 ) -> Result<RunnerSession> {
-    super::generation_store::with_job_recovery_lock(runner_id, job_id, || {
+    let legacy = read_session_or_live_peer(runner_id)?;
+    let owner = super::generation_store::job_session(runner_id, job_id, legacy.as_ref())?
+        .or(legacy)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "runner",
+                "runner has no durable daemon generation binding for this job",
+                Some(runner_id.to_string()),
+                None,
+            )
+        })?;
+    let generation = owner.remote_daemon_lease_id.clone().ok_or_else(|| {
+        Error::internal_unexpected("job-owning daemon generation has no lease ID")
+    })?;
+    super::generation_store::with_generation_recovery_lock(runner_id, &generation, || {
         let legacy = read_session_or_live_peer(runner_id)?;
         if let Some(session) =
             super::generation_store::job_session(runner_id, job_id, legacy.as_ref())?
@@ -1705,35 +1722,56 @@ pub(crate) fn reconnect_job_owner_for_polling(
             }
         }
         let session = reconnect_job_owner(runner_id, job_id)?;
-        let tunnel_identity = session.tunnel_pid.and_then(|pid| {
-            homeboy_core::process::process_start_identity(pid)
-                .ok()
-                .flatten()
-        });
-        if let Err(error) =
-            super::generation_store::record_reconnected_job_owner(runner_id, &session, job_id)
-        {
-            terminate_tunnel_if_owned(&session, tunnel_identity.as_ref());
-            return Err(error);
-        }
-        // Historical session records contain only a PID. Never signal an
-        // unproven PID because it may now identify an unrelated process.
+        let replaced = match super::generation_store::record_reconnected_job_owner(
+            runner_id, &session, job_id,
+        ) {
+            Ok(replaced) => replaced,
+            Err(error) => {
+                close_reconnected_job_log_owner(&session);
+                return Err(error);
+            }
+        };
+        close_reconnected_job_log_owner(&replaced);
         Ok(session)
     })
 }
 
-fn terminate_tunnel_if_owned(
-    session: &RunnerSession,
-    expected_identity: Option<&homeboy_core::process::ProcessStartIdentity>,
-) {
-    let Some((pid, expected_identity)) = session.tunnel_pid.zip(expected_identity) else {
+fn owned_tunnels() -> &'static Mutex<HashMap<u32, homeboy_core::process::ProcessStartIdentity>> {
+    static OWNED_TUNNELS: OnceLock<
+        Mutex<HashMap<u32, homeboy_core::process::ProcessStartIdentity>>,
+    > = OnceLock::new();
+    OWNED_TUNNELS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn remember_owned_tunnel(session: &RunnerSession) {
+    let Some(pid) = session.tunnel_pid else {
         return;
     };
-    if homeboy_core::process::process_start_identity(pid)
+    if let Some(identity) = homeboy_core::process::process_start_identity(pid)
         .ok()
         .flatten()
-        .as_ref()
-        == Some(expected_identity)
+    {
+        owned_tunnels()
+            .lock()
+            .expect("owned tunnel registry lock")
+            .insert(pid, identity);
+    }
+}
+
+fn terminate_tunnel_if_owned(session: &RunnerSession) {
+    let Some(pid) = session.tunnel_pid else {
+        return;
+    };
+    let identity = owned_tunnels()
+        .lock()
+        .expect("owned tunnel registry lock")
+        .remove(&pid);
+    if identity.is_some()
+        && identity.as_ref()
+            == homeboy_core::process::process_start_identity(pid)
+                .ok()
+                .flatten()
+                .as_ref()
     {
         terminate_pid(pid);
     }
@@ -1748,9 +1786,7 @@ pub fn reconnect_job_log_owner(runner_id: &str, job_id: &str) -> Result<RunnerSe
 /// Close the local tunnel opened exclusively for job log/cancel recovery. This
 /// never stops the remote daemon generation that owns the durable job.
 pub fn close_reconnected_job_log_owner(session: &RunnerSession) {
-    if let Some(pid) = session.tunnel_pid {
-        terminate_pid(pid);
-    }
+    terminate_tunnel_if_owned(session);
 }
 
 /// Resolve a direct-SSH session for work admission. A readiness observation can

@@ -26,8 +26,8 @@ fn path(runner_id: &str) -> Result<PathBuf> {
         .join("generations.json"))
 }
 
-fn recovery_lock_path(runner_id: &str, job_id: &str) -> Result<PathBuf> {
-    let job = job_id
+fn recovery_lock_path(runner_id: &str, generation: &str) -> Result<PathBuf> {
+    let generation = generation
         .chars()
         .map(|character| {
             character
@@ -38,7 +38,7 @@ fn recovery_lock_path(runner_id: &str, job_id: &str) -> Result<PathBuf> {
         .collect::<String>();
     Ok(paths::runner_sessions_dir()?
         .join(runner_id)
-        .join(format!("recovery-{job}.lock")))
+        .join(format!("recovery-{generation}.lock")))
 }
 
 fn pending_replacement_path(runner_id: &str) -> Result<PathBuf> {
@@ -195,12 +195,16 @@ fn with_registry_lock<T>(runner_id: &str, operation: impl FnOnce() -> Result<T>)
     )
 }
 
-pub(crate) fn with_job_recovery_lock<T>(
+pub(crate) fn with_generation_recovery_lock<T>(
     runner_id: &str,
-    job_id: &str,
+    generation: &str,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    with_lock(recovery_lock_path(runner_id, job_id)?, runner_id, operation)
+    with_lock(
+        recovery_lock_path(runner_id, generation)?,
+        runner_id,
+        operation,
+    )
 }
 
 fn legacy_generation(session: &RunnerSession) -> String {
