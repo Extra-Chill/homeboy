@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::{
-    RunnerActiveJobState, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
+    RunnerActiveJobState, RunnerExecMode, RunnerSessionState, RunnerStaleDaemonWarning,
+    RunnerStatusReport,
 };
 use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 use homeboy_core::test_support;
@@ -57,6 +58,38 @@ fn fixture_commits_are_ancestral(repository: &Path, older: &str, newer: &str) ->
         .status()
         .expect("compare fixture commits");
     Ok(status.success())
+}
+
+fn ancestry_exec_output(exit_code: i32) -> RunnerExecOutput {
+    RunnerExecOutput {
+        variant: "exec",
+        command: "runner.exec",
+        runner_id: "lab".to_string(),
+        dry_run: false,
+        mode: RunnerExecMode::Daemon,
+        argv: vec!["git".to_string()],
+        remote_cwd: "/runner/homeboy".to_string(),
+        exit_code,
+        stdout: String::new(),
+        stderr: String::new(),
+        source_snapshot: None,
+        job: None,
+        runner_job: None,
+        job_id: Some("ancestry-job".to_string()),
+        job_events: None,
+        mirror_run_id: Some("ancestry-run".to_string()),
+        patch: None,
+        mutation_artifacts: None,
+        artifacts: Vec::new(),
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
+        metrics: None,
+        capture: None,
+        execution_record: None,
+        runner_result: None,
+        handoff: None,
+        diagnostics: None,
+    }
 }
 
 fn linear_commit_fixture() -> (tempfile::TempDir, String, String) {
@@ -976,6 +1009,8 @@ fn materialize_failure_preserves_compiler_diagnostics_and_active_binary() {
                 required: true,
                 status: "failed",
                 exit_code: 101,
+                job_id: None,
+                mirror_run_id: None,
             }]
         );
         assert_eq!(failure.exit_code, 101);
@@ -1477,7 +1512,7 @@ fn refresh_ancestry_probe_executes_in_the_runner_repository() {
             .required_commands,
         vec!["git"]
     );
-    assert!(!connected.mirror_evidence);
+    assert!(connected.mirror_evidence);
     assert!(!connected.print_handoff);
 
     let disconnected = refresh_ancestry_execution_options(
@@ -1502,6 +1537,8 @@ fn refresh_phase_summary_distinguishes_tolerated_probe_from_required_failure() {
             required: false,
             status: "tolerated_failure",
             exit_code: 1,
+            job_id: None,
+            mirror_run_id: None,
         }
     );
     assert_eq!(
@@ -1511,6 +1548,8 @@ fn refresh_phase_summary_distinguishes_tolerated_probe_from_required_failure() {
             required: true,
             status: "failed",
             exit_code: 101,
+            job_id: None,
+            mirror_run_id: None,
         }
     );
     let select = HomeboyBinaryRefreshPlan {
@@ -1586,14 +1625,16 @@ fn remote_forward_upgrade_uses_runner_owned_ancestry_evidence() {
                     assert_eq!(runner_id, "lab");
                     assert_eq!(options.command[2], runner_repository);
                     options.command[2] = fixture.path().display().to_string();
-                    Ok(Command::new(&options.command[0])
+                    let exit_code = Command::new(&options.command[0])
                         .args(&options.command[1..])
                         .status()
                         .expect("runner ancestry probe")
                         .code()
-                        .expect("git exit code"))
+                        .expect("git exit code");
+                    Ok((ancestry_exec_output(exit_code), exit_code))
                 },
             )
+            .map(|result| result.is_ancestor)
         },
     )
     .expect("forward upgrade is accepted");
@@ -1638,14 +1679,16 @@ fn remote_true_downgrade_is_still_refused_from_runner_owned_evidence() {
                     assert_eq!(runner_id, "lab");
                     assert_eq!(options.command[2], runner_repository);
                     options.command[2] = fixture.path().display().to_string();
-                    Ok(Command::new(&options.command[0])
+                    let exit_code = Command::new(&options.command[0])
                         .args(&options.command[1..])
                         .status()
                         .expect("runner ancestry probe")
                         .code()
-                        .expect("git exit code"))
+                        .expect("git exit code");
+                    Ok((ancestry_exec_output(exit_code), exit_code))
                 },
             )
+            .map(|result| result.is_ancestor)
         },
     )
     .expect_err("true downgrade remains refused");

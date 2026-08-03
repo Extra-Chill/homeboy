@@ -1,4 +1,5 @@
 use homeboy_engine_primitives::content_hash;
+use std::cell::RefCell;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -119,6 +120,10 @@ pub struct HomeboyRefreshPhase {
     pub required: bool,
     pub status: &'static str,
     pub exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirror_run_id: Option<String>,
 }
 
 fn refresh_phase(name: &'static str, required: bool, exit_code: i32) -> HomeboyRefreshPhase {
@@ -131,7 +136,20 @@ fn refresh_phase(name: &'static str, required: bool, exit_code: i32) -> HomeboyR
             _ => "failed",
         },
         exit_code,
+        job_id: None,
+        mirror_run_id: None,
     }
+}
+
+fn refresh_execution_phase(
+    name: &'static str,
+    required: bool,
+    execution: &RunnerExecOutput,
+) -> HomeboyRefreshPhase {
+    let mut phase = refresh_phase(name, required, execution.exit_code);
+    phase.job_id = execution.job_id.clone();
+    phase.mirror_run_id = execution.mirror_run_id.clone();
+    phase
 }
 
 fn refresh_execution_phase_name(plan: &HomeboyBinaryRefreshPlan) -> &'static str {
@@ -470,6 +488,7 @@ pub fn refresh_homeboy_binary(
     // Selection belongs to the controller-owned runner registry. It must be
     // persisted after the candidate has been verified, whether or not this
     // invocation also replaces the active daemon.
+    let ancestry_failure = RefCell::new(None);
     let bootstrap = if disconnected_ssh {
         ssh_bootstrap_promote_with(
             &plan,
@@ -488,14 +507,25 @@ pub fn refresh_homeboy_binary(
                             disconnected_ssh,
                             &connection_status,
                         );
-                        if let Ok(ancestral) = result {
-                            phase_summary.push(refresh_phase(
-                                "downgrade_safety_probe",
-                                false,
-                                if ancestral { 0 } else { 1 },
-                            ));
+                        match result {
+                            Ok(result) => {
+                                phase_summary.push(refresh_execution_phase(
+                                    "downgrade_safety_probe",
+                                    false,
+                                    &result.execution,
+                                ));
+                                if result.exit_code >= 2 {
+                                    *ancestry_failure.borrow_mut() = Some(refresh_failure(
+                                        &plan,
+                                        result.execution,
+                                        result.exit_code,
+                                    ));
+                                    return Err(ancestry_comparison_error(&plan));
+                                }
+                                Ok(result.is_ancestor)
+                            }
+                            Err(error) => Err(error),
                         }
-                        result
                     },
                 )?;
                 Ok((
@@ -530,14 +560,25 @@ pub fn refresh_homeboy_binary(
                         disconnected_ssh,
                         &connection_status,
                     );
-                    if let Ok(ancestral) = result {
-                        phase_summary.push(refresh_phase(
-                            "downgrade_safety_probe",
-                            false,
-                            if ancestral { 0 } else { 1 },
-                        ));
+                    match result {
+                        Ok(result) => {
+                            phase_summary.push(refresh_execution_phase(
+                                "downgrade_safety_probe",
+                                false,
+                                &result.execution,
+                            ));
+                            if result.exit_code >= 2 {
+                                *ancestry_failure.borrow_mut() = Some(refresh_failure(
+                                    &plan,
+                                    result.execution,
+                                    result.exit_code,
+                                ));
+                                return Err(ancestry_comparison_error(&plan));
+                            }
+                            Ok(result.is_ancestor)
+                        }
+                        Err(error) => Err(error),
                     }
-                    result
                 },
             )?;
             let updated_fields =
@@ -555,6 +596,9 @@ pub fn refresh_homeboy_binary(
         Err(error) => {
             let verification = error.message;
             phase_summary.push(refresh_phase("identity_verification", true, 1));
+            let failure = ancestry_failure.into_inner().unwrap_or_else(|| {
+                refresh_verification_failure(&plan, exec_output.clone(), verification.clone())
+            });
             return Ok((
                 HomeboyBinaryRefreshOutput {
                     variant: "refresh_homeboy",
@@ -570,11 +614,7 @@ pub fn refresh_homeboy_binary(
                     reconnect_required: !plan.reconnect,
                     followup_commands: plan.followup_commands.clone(),
                     reconnect_deferred: None,
-                    failure: Some(refresh_verification_failure(
-                        &plan,
-                        exec_output,
-                        verification,
-                    )),
+                    failure: Some(failure),
                     bootstrap_provenance: None,
                     rollback: None,
                     plan,
@@ -584,6 +624,8 @@ pub fn refresh_homeboy_binary(
         }
     };
     phase_summary.push(refresh_phase("identity_verification", true, 0));
+    phase_summary.push(refresh_phase("bootstrap_promotion", true, 0));
+    phase_summary.push(refresh_phase("configuration_promotion", true, 0));
     let identity = bootstrap.identity;
     let updated_fields = bootstrap.updated_fields;
     let rollback = bootstrap.rollback;
@@ -635,6 +677,7 @@ pub fn refresh_homeboy_binary(
                 )?;
                 return Err(error);
             }
+            phase_summary.push(refresh_phase("generation_rotation", true, 0));
             return Ok((
                 HomeboyBinaryRefreshOutput {
                     variant: "refresh_homeboy",
@@ -715,6 +758,7 @@ pub fn refresh_homeboy_binary(
                 )
             });
         }
+        phase_summary.push(refresh_phase("disconnect", true, 0));
         let (report, connect_exit_code) = match connect_with_orphan_adoption(
             &plan.runner_id,
             refresh_owned_lease.as_deref(),
@@ -792,7 +836,11 @@ pub fn refresh_homeboy_binary(
                     options.force,
                 ));
             }
-            phase_summary.push(refresh_phase("reconnect", true, reconnect_exit_code));
+            phase_summary.push(refresh_phase(
+                "reconnect_transport",
+                true,
+                reconnect_exit_code,
+            ));
             phase_summary.push(refresh_phase("daemon_identity_verification", true, 1));
             return Ok((
                 HomeboyBinaryRefreshOutput {
@@ -850,7 +898,7 @@ pub fn refresh_homeboy_binary(
                         options.force,
                     ));
                 }
-                phase_summary.push(refresh_phase("reconnect", true, 0));
+                phase_summary.push(refresh_phase("reconnect_transport", true, 0));
                 phase_summary.push(refresh_phase("daemon_identity_verification", true, 0));
                 phase_summary.push(refresh_phase("admission_readiness", true, 1));
                 return Ok((
@@ -882,8 +930,9 @@ pub fn refresh_homeboy_binary(
                 ));
             }
         }
-        phase_summary.push(refresh_phase("reconnect", true, 0));
+        phase_summary.push(refresh_phase("reconnect_transport", true, 0));
         phase_summary.push(refresh_phase("daemon_identity_verification", true, 0));
+        phase_summary.push(refresh_phase("admission_readiness", true, 0));
     } else {
         interrupted_job_ids = Vec::new();
     }
@@ -1414,13 +1463,28 @@ fn identity_commit(identity: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+struct RefreshAncestryExecution {
+    execution: RunnerExecOutput,
+    is_ancestor: bool,
+    exit_code: i32,
+}
+
+fn ancestry_comparison_error(plan: &HomeboyBinaryRefreshPlan) -> Error {
+    Error::validation_invalid_argument(
+        "allow_downgrade",
+        "authoritative source repository cannot compare selected Homeboy commits",
+        Some(plan.runner_id.clone()),
+        Some(vec!["Inspect the parent refresh failure evidence and retry once the runner repository is healthy.".to_string()]),
+    )
+}
+
 fn runner_commits_are_ancestral(
     plan: &HomeboyBinaryRefreshPlan,
     older: &str,
     newer: &str,
     disconnected_ssh: bool,
     status_snapshot: &super::RunnerStatusReport,
-) -> Result<bool> {
+) -> Result<RefreshAncestryExecution> {
     runner_commits_are_ancestral_with(
         plan,
         older,
@@ -1428,7 +1492,6 @@ fn runner_commits_are_ancestral(
         disconnected_ssh,
         |runner_id, options| {
             exec_with_status_snapshot(runner_id, options, Some(status_snapshot.clone()))
-                .map(|(_, exit_code)| exit_code)
         },
     )
 }
@@ -1438,8 +1501,8 @@ fn runner_commits_are_ancestral_with(
     older: &str,
     newer: &str,
     disconnected_ssh: bool,
-    mut exec_runner: impl FnMut(&str, RunnerExecOptions) -> Result<i32>,
-) -> Result<bool> {
+    mut exec_runner: impl FnMut(&str, RunnerExecOptions) -> Result<(RunnerExecOutput, i32)>,
+) -> Result<RefreshAncestryExecution> {
     let repository = plan.target_dir.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "allow_downgrade",
@@ -1448,11 +1511,16 @@ fn runner_commits_are_ancestral_with(
             None,
         )
     })?;
-    let exit_code = exec_runner(
+    let (mut execution, exit_code) = exec_runner(
         &plan.runner_id,
         refresh_ancestry_execution_options(repository, older, newer, disconnected_ssh),
     )?;
-    classify_refresh_ancestry_exit(plan, exit_code)
+    execution.exit_code = exit_code;
+    Ok(RefreshAncestryExecution {
+        is_ancestor: exit_code == 0,
+        execution,
+        exit_code,
+    })
 }
 
 fn refresh_ancestry_execution_options(
@@ -1483,7 +1551,7 @@ fn refresh_ancestry_execution_options(
             timeout: disconnected_ssh.then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT),
             ..Default::default()
         })
-        .without_evidence_mirror()
+        .without_handoff()
 }
 
 fn classify_refresh_ancestry_exit(plan: &HomeboyBinaryRefreshPlan, exit_code: i32) -> Result<bool> {
