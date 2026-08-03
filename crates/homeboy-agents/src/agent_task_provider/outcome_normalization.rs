@@ -110,8 +110,18 @@ enum IntentionalNoChangeVerdict {
 #[derive(serde::Deserialize)]
 struct IntentionalNoChangeDeclaration {
     schema: String,
-    verdict: String,
+    #[serde(rename = "verdict")]
+    _verdict: IntentionalNoChangeDisposition,
     inspected_revision: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum IntentionalNoChangeDisposition {
+    Blocked,
+    AlreadySatisfied,
+    #[serde(alias = "no_change")]
+    InvestigationOnly,
 }
 
 /// A provider may declare a no-change review only through this versioned result
@@ -132,12 +142,11 @@ fn intentional_no_change_verdict(
     let Ok(declaration) = serde_json::from_value::<IntentionalNoChangeDeclaration>(verdict.clone())
     else {
         return IntentionalNoChangeVerdict::Invalid(
-            "provider declared an intentional no-change verdict without a valid schema, no_change verdict, and inspected workspace revision; changes require recovery review"
+            "provider declared an intentional no-change verdict without a valid schema, supported disposition, and inspected workspace revision; changes require recovery review"
                 .to_string(),
         );
     };
     if declaration.schema != INTENTIONAL_NO_CHANGE_SCHEMA
-        || declaration.verdict != "no_change"
         || declaration.inspected_revision.trim().is_empty()
     {
         return IntentionalNoChangeVerdict::Invalid(
