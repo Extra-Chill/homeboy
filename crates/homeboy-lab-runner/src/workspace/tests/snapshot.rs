@@ -304,7 +304,7 @@ fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
 }
 
 #[test]
-fn snapshot_git_falls_back_to_filesystem_snapshot_when_git_closure_is_unavailable() {
+fn snapshot_git_fails_before_handoff_when_controller_closure_is_unavailable() {
     let _path_guard = PATH_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -370,43 +370,19 @@ fn snapshot_git_falls_back_to_filesystem_snapshot_when_git_closure_is_unavailabl
         );
         std::env::set_var("PATH", original_path);
 
-        let (synced, exit_code) = result.expect("filesystem fallback");
-        assert_eq!(exit_code, 0);
-        assert_eq!(
-            synced
-                .materialization_plan
-                .actual_materialization_mode
-                .as_deref(),
-            Some("filesystem_snapshot")
+        let error = result.expect_err("closure failure must stop Lab handoff");
+        assert!(
+            error.message.contains("list git bundle objects"),
+            "{error:?}"
         );
-        assert!(synced.materialization_plan.controller_git_bundle.is_none());
-        assert_eq!(
-            synced.materialization_plan.fallback_reason.as_deref(),
-            Some("snapshot_git_checkout_and_controller_bundle_failed")
-        );
-        let remote = Path::new(&synced.remote_path);
-        assert_eq!(
-            fs::read_to_string(remote.join("dirty.txt")).unwrap(),
-            "dirty\n"
-        );
-        assert!(!remote.join(".git").exists());
-        let component = std::process::Command::new("sh")
-            .args(["-c", "test -f components/demo/component.txt && pwd"])
-            .current_dir(remote)
-            .output()
-            .expect("execute from remote component workspace");
-        assert!(component.status.success());
-        let metadata: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(remote.join(".homeboy/runner-workspace.json")).expect("metadata"),
-        )
-        .expect("parse metadata");
-        assert_eq!(
-            metadata["actual_materialization_mode"],
-            "filesystem_snapshot"
-        );
-        assert_eq!(
-            metadata["fallback_reason"],
-            "snapshot_git_checkout_and_controller_bundle_failed"
+        let workspaces_root = runner_root.path().join("_lab_workspaces");
+        assert!(
+            !workspaces_root.exists()
+                || fs::read_dir(workspaces_root)
+                    .expect("read workspaces root")
+                    .next()
+                    .is_none(),
+            "failed controller hydration must not hand off a fallback workspace"
         );
     });
 }
@@ -1257,7 +1233,7 @@ fn snapshot_git_sync_falls_back_for_unpublished_commit_and_preserves_dirty_overl
 }
 
 #[test]
-fn filesystem_snapshot_of_dirty_partial_clone_avoids_git_bundle_closure() {
+fn snapshot_git_hydrates_partial_clone_on_controller_without_lab_remote_access() {
     let _path_guard = PATH_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -1311,8 +1287,6 @@ fn filesystem_snapshot_of_dirty_partial_clone_avoids_git_bundle_closure() {
                 ".",
             ],
         );
-        let source_branch = git_output(source.path(), &["rev-parse", "--abbrev-ref", "HEAD"])
-            .expect("source branch");
         assert!(
             git_output(
                 source.path(),
@@ -1336,9 +1310,14 @@ fn filesystem_snapshot_of_dirty_partial_clone_avoids_git_bundle_closure() {
 
         let shim_root = tempfile::tempdir().expect("git shim root");
         let shim = shim_root.path().join("git");
+        let lab_remote_access = shim_root.path().join("lab-remote-accessed");
+        let origin_url = format!("file://{}", origin.path().display());
         fs::write(
             &shim,
-            "#!/bin/sh\nfor arg in \"$@\"; do [ \"$arg\" = \"rev-list\" ] && { echo 'git bundle closure enumeration invoked' >&2; exit 91; }; done\nexec /usr/bin/git \"$@\"\n",
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = clone ]; then for arg in \"$@\"; do [ \"$arg\" = {origin_url:?} ] && {{ : > {}; exit 91; }}; done; fi\nexec /usr/bin/git \"$@\"\n",
+                lab_remote_access.display(),
+            ),
         )
         .expect("write git shim");
         #[cfg(unix)]
@@ -1356,24 +1335,27 @@ fn filesystem_snapshot_of_dirty_partial_clone_avoids_git_bundle_closure() {
             "lab-local-partial-snapshot",
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
-                mode: RunnerWorkspaceSyncMode::Snapshot,
+                mode: RunnerWorkspaceSyncMode::SnapshotGit,
                 ..Default::default()
             },
         )
-        .expect("filesystem snapshot must not enumerate a Git bundle closure");
+        .expect("controller must hydrate and bundle the partial clone");
         std::env::set_var("PATH", original_path);
 
         let remote = Path::new(&output.remote_path);
         assert_eq!(exit_code, 0);
-        assert!(output.materialization_plan.controller_git_bundle.is_none());
+        assert!(
+            output.materialization_plan.controller_git_bundle.is_some(),
+            "snapshot-git handoff must retain controller bundle provenance"
+        );
         assert_eq!(
             output
                 .materialization_plan
                 .actual_materialization_mode
                 .as_deref(),
-            Some("filesystem_snapshot")
+            Some("snapshot-git")
         );
-        assert!(!remote.join(".git").exists());
+        assert!(remote.join(".git").exists());
         assert_eq!(
             fs::read_to_string(remote.join("file.txt")).unwrap(),
             "dirty\n"
@@ -1387,31 +1369,36 @@ fn filesystem_snapshot_of_dirty_partial_clone_avoids_git_bundle_closure() {
             output.current_workspace.source_commit.as_deref(),
             Some(head.as_str())
         );
-        assert_eq!(
-            output.current_workspace.source_ref.as_deref(),
-            Some(source_branch.as_str())
-        );
         let metadata: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(remote.join(".homeboy/runner-workspace.json"))
                 .expect("read workspace metadata"),
         )
         .expect("parse workspace metadata");
-        assert_eq!(
-            metadata["actual_materialization_mode"],
-            "filesystem_snapshot"
-        );
+        assert_eq!(metadata["actual_materialization_mode"], "snapshot-git");
         assert_eq!(
             metadata["source_remote_url"],
             format!("file://{}", origin.path().display())
         );
         assert!(
-            git_output(
+            !git_output(
                 source.path(),
                 &["rev-list", "--objects", "--missing=print", "HEAD"]
             )
-            .expect("inspect controller after runner checkout")
+            .expect("inspect hydrated controller")
             .contains(&format!("?{base_blob}")),
-            "runner-side materialization must not hydrate controller promisor objects"
+            "controller must hydrate every promised snapshot object before handoff"
+        );
+        assert!(
+            !lab_remote_access.exists(),
+            "Lab materializer must not contact the promisor remote"
+        );
+        assert!(
+            git_output(
+                remote,
+                &["config", "--get-regexp", r"^remote\..*\.promisor$"]
+            )
+            .is_err(),
+            "Lab checkout must not inherit promisor remote configuration"
         );
     });
 }

@@ -175,29 +175,7 @@ pub fn sync_workspace(
                         materialization_plan.controller_git_bundle = provenance;
                         (None, None)
                     }
-                    Err(_) => {
-                        rollback_materialized_workspace(&runner, workspace_root, &remote_path);
-                        if let Err(snapshot_error) = materialize_snapshot_with_scratch(
-                            &runner,
-                            &local_path,
-                            &remote_path,
-                            &excludes,
-                            Some(scratch),
-                        ) {
-                            rollback_materialized_workspace(&runner, workspace_root, &remote_path);
-                            return Err(snapshot_error);
-                        }
-                        materialization_plan.snapshot_transfer =
-                            Some(super::types::SnapshotTransferStats {
-                                reused: ByteFileCounts::default(),
-                                transferred: stats.clone(),
-                                final_size: stats.clone(),
-                            });
-                        (
-                            None,
-                            Some("snapshot_git_checkout_and_controller_bundle_failed".to_string()),
-                        )
-                    }
+                    Err(error) => return Err(error),
                 }
             } else if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
                 match materialize_snapshot_git(
