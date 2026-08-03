@@ -31,16 +31,26 @@ const DEFAULT_PROCESS_WATCH_INTERVAL: &str = "1s";
 pub struct ObserveArgs {
     #[command(flatten)]
     pub comp: PositionalComponentArgs,
+    /// How long to observe before closing the run, as a duration such as `30s`
+    /// or `5m`.
     #[arg(long, default_value = DEFAULT_DURATION, value_parser = parse_duration)]
     pub duration: Duration,
+    /// Log file to tail for the length of the run. Repeatable.
     #[arg(long = "tail-log", value_name = "PATH")]
     pub tail_logs: Vec<PathBuf>,
+    /// Regex applied to every `--tail-log` probe, so only matching lines are
+    /// recorded.
     #[arg(long, value_name = "REGEX")]
     pub grep: Option<String>,
+    /// Regex matched against running process command lines; a snapshot is
+    /// recorded on each interval. Repeatable.
     #[arg(long = "watch-process", value_name = "REGEX")]
     pub watch_processes: Vec<String>,
+    /// How often `--watch-process` samples, as a duration such as `1s`.
     #[arg(long = "watch-process-interval", default_value = DEFAULT_PROCESS_WATCH_INTERVAL, value_parser = parse_duration)]
     pub watch_process_interval: Duration,
+    /// Raw `TraceProbeConfig` JSON for probes that the flags above cannot
+    /// express. Repeatable.
     #[arg(long = "probe", value_name = "JSON")]
     pub probes: Vec<String>,
 }
