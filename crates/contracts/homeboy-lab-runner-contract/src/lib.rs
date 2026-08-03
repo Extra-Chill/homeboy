@@ -443,6 +443,20 @@ pub enum RunnerSessionState {
     Recorded,
 }
 
+/// Kernel-derived identity for one local tunnel process instance. This survives
+/// controller restart so a recycled PID is never signaled from durable state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "platform", rename_all = "snake_case")]
+pub enum RunnerTunnelProcessStartIdentity {
+    Linux {
+        starttime_ticks: u64,
+    },
+    Macos {
+        start_seconds: u64,
+        start_microseconds: u64,
+    },
+}
+
 /// A persisted runner session record. Pure serde data so the core daemon's
 /// `/runner/sessions` endpoints can build and persist sessions without a
 /// core -> runner edge. `leaseless_recovery_evidence` is carried as opaque JSON
@@ -467,6 +481,8 @@ pub struct RunnerSession {
     #[serde(default)]
     pub local_url: Option<String>,
     pub tunnel_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_process_start_identity: Option<RunnerTunnelProcessStartIdentity>,
     pub remote_daemon_pid: Option<u32>,
     #[serde(default)]
     pub remote_daemon_lease_id: Option<String>,

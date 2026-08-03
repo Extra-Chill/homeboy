@@ -851,7 +851,7 @@ trait GenerationEndpointOperations {
     fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool;
     fn active_jobs(&self, session: &RunnerSession) -> Option<usize>;
     fn stop(&self, session: &RunnerSession) -> bool;
-    fn terminate_tunnel(&self, pid: u32);
+    fn terminate_tunnel(&self, session: &RunnerSession);
 }
 
 struct HttpGenerationEndpointOperations {
@@ -912,8 +912,8 @@ impl GenerationEndpointOperations for HttpGenerationEndpointOperations {
             .is_ok_and(|response| response.status().is_success())
     }
 
-    fn terminate_tunnel(&self, pid: u32) {
-        crate::connection::terminate_generation_tunnel(pid);
+    fn terminate_tunnel(&self, session: &RunnerSession) {
+        crate::connection::terminate_tunnel_if_owned(session);
     }
 }
 
@@ -1013,8 +1013,8 @@ impl GenerationEndpointOperations for SshGenerationEndpointOperations<'_> {
             .is_some()
     }
 
-    fn terminate_tunnel(&self, pid: u32) {
-        crate::connection::terminate_generation_tunnel(pid);
+    fn terminate_tunnel(&self, session: &RunnerSession) {
+        crate::connection::terminate_tunnel_if_owned(session);
     }
 }
 
@@ -1039,8 +1039,8 @@ where
         self.primary.stop(session) || self.fallback.stop(session)
     }
 
-    fn terminate_tunnel(&self, pid: u32) {
-        self.primary.terminate_tunnel(pid);
+    fn terminate_tunnel(&self, session: &RunnerSession) {
+        self.primary.terminate_tunnel(session);
     }
 }
 
@@ -1180,9 +1180,7 @@ fn reconcile_with(
         .into_iter()
         .filter_map(|(generation, session)| {
             if operations.stop(&session) {
-                if let Some(pid) = session.tunnel_pid {
-                    operations.terminate_tunnel(pid);
-                }
+                operations.terminate_tunnel(&session);
                 Some(generation)
             } else {
                 None
@@ -1596,6 +1594,7 @@ mod tests {
             local_port: Some(4000),
             local_url: Some(format!("http://{endpoint}:4000")),
             tunnel_pid,
+            tunnel_process_start_identity: None,
             remote_daemon_pid: Some(42),
             remote_daemon_lease_id: Some(lease.to_string()),
             homeboy_version: "test".to_string(),
@@ -1669,8 +1668,10 @@ mod tests {
             !self.stop_failures.borrow().contains(&lease_id)
         }
 
-        fn terminate_tunnel(&self, pid: u32) {
-            self.terminated_pids.borrow_mut().push(pid);
+        fn terminate_tunnel(&self, session: &RunnerSession) {
+            if let Some(pid) = session.tunnel_pid {
+                self.terminated_pids.borrow_mut().push(pid);
+            }
         }
     }
 
@@ -2114,7 +2115,7 @@ mod tests {
                 true
             }
 
-            fn terminate_tunnel(&self, _: u32) {}
+            fn terminate_tunnel(&self, _: &RunnerSession) {}
         }
 
         let fresh = session("lease-fresh", "daemon-fresh", Some(202));

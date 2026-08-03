@@ -26,6 +26,7 @@ mod session_enums {
     // runner-internal call sites resolve unchanged.
     pub use homeboy_lab_runner_contract::{
         RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerTunnelMode,
+        RunnerTunnelProcessStartIdentity,
     };
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

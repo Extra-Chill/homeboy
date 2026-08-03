@@ -275,6 +275,7 @@ mod tests {
             local_port: Some(4000),
             local_url: Some(format!("http://{endpoint}:4000")),
             tunnel_pid: None,
+            tunnel_process_start_identity: None,
             remote_daemon_pid: Some(42),
             remote_daemon_lease_id: Some(lease.to_string()),
             homeboy_version: "test".to_string(),

@@ -773,6 +773,7 @@ fn connected_direct_session(
         local_port: Some(1234),
         local_url: local_url.map(str::to_string),
         tunnel_pid: None,
+        tunnel_process_start_identity: None,
         remote_daemon_pid: Some(42),
         remote_daemon_lease_id: Some("lease-42".to_string()),
         homeboy_version: "homeboy 0.0.0".to_string(),

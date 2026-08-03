@@ -29,9 +29,7 @@ pub(crate) fn disconnect_local_recovery(runner_id: &str) -> Result<RunnerDisconn
     let session_path = session_path(runner_id)?.display().to_string();
     if let Some(session) = session.as_ref() {
         if session.mode == RunnerTunnelMode::DirectSsh {
-            if let Some(pid) = session.tunnel_pid {
-                terminate_pid(pid);
-            }
+            terminate_tunnel_if_owned(session);
         }
         let removed = remove_session_if_matches(runner_id, session)?;
         if removed {
@@ -175,15 +173,13 @@ pub(crate) fn disconnect_with_session(
         if let Some(authoritative_session) = authoritative_session {
             *session = authoritative_session.clone();
         }
-        let mut reconciled_tunnel_pids = retained_generations
+        let reconciled_tunnels = retained_generations
             .iter()
             .filter(|generation| {
                 generation.remote_daemon_lease_id != session.remote_daemon_lease_id
             })
-            .filter_map(|generation| generation.tunnel_pid)
+            .cloned()
             .collect::<Vec<_>>();
-        reconciled_tunnel_pids.sort_unstable();
-        reconciled_tunnel_pids.dedup();
         let generations = vec![session.clone()];
         let mut unresolved = Vec::new();
         for generation in generations {
@@ -198,9 +194,7 @@ pub(crate) fn disconnect_with_session(
                     continue;
                 }
             }
-            if let Some(pid) = generation.tunnel_pid {
-                terminate_pid(pid);
-            }
+            terminate_tunnel_if_owned(&generation);
         }
         if !unresolved.is_empty() {
             return partial_disconnect_report(
@@ -216,8 +210,8 @@ pub(crate) fn disconnect_with_session(
                 ),
             );
         }
-        for pid in reconciled_tunnel_pids {
-            terminate_pid(pid);
+        for session in reconciled_tunnels {
+            terminate_tunnel_if_owned(&session);
         }
         super::super::generation_store::clear(runner_id)?;
         let ownership = read_ownership(runner_id)?;
@@ -812,6 +806,7 @@ mod tests {
             local_port: Some(49153),
             local_url: Some("http://127.0.0.1:49153".to_string()),
             tunnel_pid: Some(1234),
+            tunnel_process_start_identity: None,
             remote_daemon_pid: Some(4242),
             remote_daemon_lease_id: Some(lease_id.to_string()),
             homeboy_version: "test".to_string(),
@@ -867,6 +862,7 @@ mod tests {
                 .and_then(|port| port.parse().ok()),
             local_url: Some(local_url),
             tunnel_pid: None,
+            tunnel_process_start_identity: None,
             remote_daemon_pid: Some(4242),
             remote_daemon_lease_id: Some("lease-fixture".to_string()),
             homeboy_version: "test".to_string(),

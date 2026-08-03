@@ -1,7 +1,6 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -31,7 +30,7 @@ use super::session::{
     RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
     RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence, RunnerSession,
     RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath,
-    RunnerStatusReport, RunnerTunnelMode,
+    RunnerStatusReport, RunnerTunnelMode, RunnerTunnelProcessStartIdentity,
 };
 use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
 use homeboy_core::broker_auth;
@@ -203,6 +202,7 @@ pub(crate) fn rotate_daemon_generation(
         local_port: Some(local_port),
         local_url: Some(local_url),
         tunnel_pid,
+        tunnel_process_start_identity: capture_tunnel_process_start_identity(tunnel_pid)?,
         remote_daemon_pid: daemon.pid,
         remote_daemon_lease_id: daemon.lease_id,
         homeboy_version: current.homeboy_version.clone(),
@@ -260,14 +260,8 @@ fn rollback_rotated_candidate(
         );
         let _ = client.execute(&command);
     }
-    if let Some(pid) = candidate.tunnel_pid {
-        terminate_generation_tunnel(pid);
-    }
+    terminate_tunnel_if_owned(candidate);
     let _ = super::generation_store::rollback_activation(runner_id, current, generation);
-}
-
-pub(crate) fn terminate_generation_tunnel(pid: u32) {
-    terminate_pid(pid);
 }
 
 fn cleanup_direct_generation_with<Fallback, Tunnel>(
@@ -859,6 +853,7 @@ fn connect_with_orphan_adoption_and_live_lease(
         local_port: Some(local_port),
         local_url: Some(local_url),
         tunnel_pid,
+        tunnel_process_start_identity: capture_tunnel_process_start_identity(tunnel_pid)?,
         remote_daemon_pid: daemon.pid,
         remote_daemon_lease_id,
         homeboy_version: expected_version,
@@ -985,6 +980,7 @@ fn pending_replacement_session(
         local_port: None,
         local_url: None,
         tunnel_pid: None,
+        tunnel_process_start_identity: None,
         remote_daemon_pid: daemon.pid,
         remote_daemon_lease_id: daemon.lease_id.clone(),
         homeboy_version: version.to_string(),
@@ -1308,6 +1304,7 @@ pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerCo
         local_port: None,
         local_url: None,
         tunnel_pid: None,
+        tunnel_process_start_identity: None,
         remote_daemon_pid: None,
         remote_daemon_lease_id: None,
         homeboy_version,
@@ -1678,23 +1675,25 @@ fn reconnect_job_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
             None,
         )
     })?;
+    let tunnel_process_start_identity = match capture_tunnel_process_start_identity(tunnel_pid) {
+        Ok(identity) => identity,
+        Err(error) => {
+            if let Some(pid) = tunnel_pid {
+                terminate_pid(pid);
+            }
+            return Err(error);
+        }
+    };
     let session = RunnerSession {
         local_port: Some(local_port),
         local_url: Some(local_url),
         tunnel_pid,
+        tunnel_process_start_identity,
         remote_daemon_address: Some(daemon.address),
         remote_daemon_pid: daemon.pid,
         remote_daemon_lease_id: daemon.lease_id,
         ..owner
     };
-    if let Err(error) = remember_owned_tunnel(&session) {
-        // This PID came directly from the tunnel operation, so it is ours even
-        // when the OS cannot provide a durable start identity for it.
-        if let Some(pid) = session.tunnel_pid {
-            terminate_pid(pid);
-        }
-        return Err(error);
-    }
     Ok(session)
 }
 
@@ -1771,16 +1770,11 @@ where
     })
 }
 
-fn owned_tunnels() -> &'static Mutex<HashMap<u32, homeboy_core::process::ProcessStartIdentity>> {
-    static OWNED_TUNNELS: OnceLock<
-        Mutex<HashMap<u32, homeboy_core::process::ProcessStartIdentity>>,
-    > = OnceLock::new();
-    OWNED_TUNNELS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn remember_owned_tunnel(session: &RunnerSession) -> Result<()> {
-    let Some(pid) = session.tunnel_pid else {
-        return Ok(());
+fn capture_tunnel_process_start_identity(
+    pid: Option<u32>,
+) -> Result<Option<RunnerTunnelProcessStartIdentity>> {
+    let Some(pid) = pid else {
+        return Ok(None);
     };
     let identity = homeboy_core::process::process_start_identity(pid)
         .map_err(|error| {
@@ -1789,24 +1783,27 @@ fn remember_owned_tunnel(session: &RunnerSession) -> Result<()> {
         .ok_or_else(|| {
             Error::internal_unexpected("new tunnel exited before its process identity was captured")
         })?;
-    owned_tunnels()
-        .lock()
-        .expect("owned tunnel registry lock")
-        .insert(pid, identity);
-    Ok(())
+    Ok(Some(match identity {
+        homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks } => {
+            RunnerTunnelProcessStartIdentity::Linux { starttime_ticks }
+        }
+        homeboy_core::process::ProcessStartIdentity::Macos {
+            start_seconds,
+            start_microseconds,
+        } => RunnerTunnelProcessStartIdentity::Macos {
+            start_seconds,
+            start_microseconds,
+        },
+    }))
 }
 
-fn terminate_tunnel_if_owned(session: &RunnerSession) {
+pub(crate) fn terminate_tunnel_if_owned(session: &RunnerSession) {
     let Some(pid) = session.tunnel_pid else {
         return;
     };
-    let identity = owned_tunnels()
-        .lock()
-        .expect("owned tunnel registry lock")
-        .remove(&pid);
     terminate_tunnel_with_identity(
         pid,
-        identity.as_ref(),
+        session.tunnel_process_start_identity.as_ref(),
         homeboy_core::process::process_start_identity,
         terminate_pid,
     );
@@ -1814,7 +1811,7 @@ fn terminate_tunnel_if_owned(session: &RunnerSession) {
 
 fn terminate_tunnel_with_identity<Inspect, Terminate>(
     pid: u32,
-    expected_identity: Option<&homeboy_core::process::ProcessStartIdentity>,
+    expected_identity: Option<&RunnerTunnelProcessStartIdentity>,
     inspect: Inspect,
     terminate: Terminate,
 ) where
@@ -1822,7 +1819,20 @@ fn terminate_tunnel_with_identity<Inspect, Terminate>(
         Fn(u32) -> std::result::Result<Option<homeboy_core::process::ProcessStartIdentity>, String>,
     Terminate: Fn(u32),
 {
-    if expected_identity == inspect(pid).ok().flatten().as_ref() {
+    let actual_identity = inspect(pid).ok().flatten().map(|identity| match identity {
+        homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks } => {
+            RunnerTunnelProcessStartIdentity::Linux { starttime_ticks }
+        }
+        homeboy_core::process::ProcessStartIdentity::Macos {
+            start_seconds,
+            start_microseconds,
+        } => RunnerTunnelProcessStartIdentity::Macos {
+            start_seconds,
+            start_microseconds,
+        },
+    });
+    if matches!((expected_identity, actual_identity.as_ref()), (Some(expected), Some(actual)) if expected == actual)
+    {
         terminate(pid);
     }
 }

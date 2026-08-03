@@ -200,7 +200,7 @@ fn failed_recovery_persistence_closes_only_the_new_tunnel() {
 
 #[test]
 fn pid_reuse_never_signals_a_temporary_tunnel() {
-    let expected = homeboy_core::process::ProcessStartIdentity::Macos {
+    let expected = RunnerTunnelProcessStartIdentity::Macos {
         start_seconds: 1,
         start_microseconds: 2,
     };
@@ -218,6 +218,43 @@ fn pid_reuse_never_signals_a_temporary_tunnel() {
     );
 
     assert!(!signaled.get(), "a reused PID must never be signaled");
+}
+
+#[test]
+fn missing_or_uninspectable_tunnel_identity_never_signals() {
+    let signaled = std::cell::Cell::new(false);
+    terminate_tunnel_with_identity(42, None, |_| Ok(None), |_| signaled.set(true));
+    terminate_tunnel_with_identity(
+        42,
+        None,
+        |_| Err("inspection failed".to_string()),
+        |_| signaled.set(true),
+    );
+
+    assert!(!signaled.get());
+}
+
+#[test]
+fn persisted_tunnel_identity_roundtrips_and_old_sessions_default_to_none() {
+    let mut session = direct_ssh_session("lease-persisted");
+    session.tunnel_process_start_identity = Some(RunnerTunnelProcessStartIdentity::Macos {
+        start_seconds: 1,
+        start_microseconds: 2,
+    });
+    let persisted = serde_json::to_value(&session).expect("serialize session");
+    let restored: RunnerSession = serde_json::from_value(persisted).expect("restore session");
+    assert_eq!(
+        restored.tunnel_process_start_identity,
+        session.tunnel_process_start_identity
+    );
+
+    let mut legacy = serde_json::to_value(&session).expect("serialize legacy session");
+    legacy
+        .as_object_mut()
+        .expect("session object")
+        .remove("tunnel_process_start_identity");
+    let restored: RunnerSession = serde_json::from_value(legacy).expect("restore legacy session");
+    assert_eq!(restored.tunnel_process_start_identity, None);
 }
 
 #[test]

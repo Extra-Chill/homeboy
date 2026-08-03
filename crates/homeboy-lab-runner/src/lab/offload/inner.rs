@@ -3064,6 +3064,7 @@ mod tests {
             local_port: None,
             local_url: local_url.map(str::to_string),
             tunnel_pid: None,
+            tunnel_process_start_identity: None,
             remote_daemon_pid: None,
             remote_daemon_lease_id: lease_id.map(str::to_string),
             homeboy_version: "test".to_string(),
