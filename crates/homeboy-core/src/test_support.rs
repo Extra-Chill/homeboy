@@ -565,7 +565,7 @@ fn short_invocation_tempdir() -> TempDir {
         tempdir_with_cached_exec_base(
             SHORT_EXEC_CAPABLE_TEMP_BASE.get_or_init(|| Mutex::new(None)),
             short_tempdir_candidates(),
-            "hb-test-",
+            &owned_tempdir_prefix(),
             dir_allows_exec,
         )
     }
@@ -627,14 +627,42 @@ fn dir_allows_exec(dir: &Path) -> bool {
     allowed
 }
 
-/// Age past which a leaked `hb-test-*` tempdir is considered abandoned and
-/// eligible for the startup sweep. Generous enough to never race a concurrently
-/// running test (individual tests finish in seconds/minutes), while still
-/// reclaiming disk from processes that were killed before `Drop` could run.
+/// Filename prefix for every tempdir a test process owns.
+#[cfg(unix)]
+const TEST_TEMPDIR_PREFIX: &str = "hb-test-";
+
+/// Age past which a leaked tempdir with *no owner PID in its name* is
+/// considered abandoned.
+///
+/// This is now only the fallback for directories written by a binary that
+/// predates [`owned_tempdir_prefix`]. Current directories carry their creator's
+/// PID and are reclaimed on liveness instead, without waiting out a timer.
 #[cfg(unix)]
 const LEAKED_TEMPDIR_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
-/// Sweep stale `hb-test-*` tempdirs abandoned by killed test processes.
+/// Tempdir prefix that records the creating process, e.g. `hb-test-4127-`.
+///
+/// Ownership is a fact, not something to infer from a clock. Stamping the PID
+/// into the name lets the sweep ask "is the process that made this still
+/// alive?" instead of "has enough time passed that it probably is not?".
+#[cfg(unix)]
+fn owned_tempdir_prefix() -> String {
+    format!("{TEST_TEMPDIR_PREFIX}{}-", std::process::id())
+}
+
+/// Recover the owning PID from a tempdir name produced by
+/// [`owned_tempdir_prefix`].
+///
+/// Returns `None` for any name that does not carry one — notably directories
+/// left by older binaries, which fall back to the age heuristic.
+#[cfg(unix)]
+fn tempdir_owner_pid(name: &str) -> Option<u32> {
+    name.strip_prefix(TEST_TEMPDIR_PREFIX)?
+        .split_once('-')
+        .and_then(|(pid, _)| pid.parse::<u32>().ok())
+}
+
+/// Sweep `hb-test-*` tempdirs abandoned by dead test processes.
 ///
 /// `TempDir`'s RAII cleanup is correct for graceful exits but **cannot** run
 /// when a process is `SIGKILL`ed — which on hardened / RAM-constrained hosts is
@@ -642,12 +670,25 @@ const LEAKED_TEMPDIR_MAX_AGE: std::time::Duration = std::time::Duration::from_se
 /// test leaks up to three `hb-test-*` directories; over many runs these fill
 /// the disk (observed: 130 dirs / ~18G taking a host to 100%, see #9173).
 ///
+/// Reclaim is driven by **owner liveness**, not age. Each directory carries the
+/// PID that created it (see [`owned_tempdir_prefix`]), so the sweep can ask
+/// whether that process still exists rather than waiting out a timer. This
+/// matters because the age heuristic alone could not keep up: a leaked
+/// directory holds a full copy of the test binary (~431M via `publish_pin`),
+/// and at a normal test cadence an hour of accumulation reaches ~16G (#11353).
+///
+/// Checking liveness is also a *stronger* guarantee than the timer it replaces
+/// — a running test's directory is protected because its process is alive, not
+/// because it happens to be recent. PID reuse fails safe: a recycled PID makes
+/// a dead directory look alive, so it simply survives to a later pass.
+///
 /// This is a best-effort safety net, gated to run **once per process** before
 /// the first tempdir is created. It only removes directories:
 /// - directly under a known tempdir root (never recurses into subdirs),
 /// - whose name starts with `hb-test-`,
-/// - whose mtime is older than [`LEAKED_TEMPDIR_MAX_AGE`] (so a concurrent
-///   run's live tempdir is never touched).
+/// - that this process does not own, and whose owning PID is gone — or, for
+///   names with no PID (written by an older binary), whose mtime is older than
+///   [`LEAKED_TEMPDIR_MAX_AGE`].
 ///
 /// All errors are swallowed — a failed sweep must never break a test.
 #[cfg(unix)]
@@ -668,7 +709,7 @@ fn sweep_leaked_test_tempdirs(roots: &[PathBuf]) {
             let Some(name) = name.to_str() else {
                 continue;
             };
-            if !name.starts_with("hb-test-") {
+            if !name.starts_with(TEST_TEMPDIR_PREFIX) {
                 continue;
             }
             let Ok(metadata) = entry.metadata() else {
@@ -677,13 +718,21 @@ fn sweep_leaked_test_tempdirs(roots: &[PathBuf]) {
             if !metadata.is_dir() {
                 continue;
             }
-            let stale = metadata
-                .modified()
-                .ok()
-                .and_then(|modified| now.duration_since(modified).ok())
-                .map(|age| age >= LEAKED_TEMPDIR_MAX_AGE)
-                .unwrap_or(false);
-            if stale {
+            let abandoned = match tempdir_owner_pid(name) {
+                // Never reclaim our own directories: this process is mid-run
+                // and still owns them.
+                Some(pid) if pid == std::process::id() => false,
+                Some(pid) => !crate::process::pid_is_running(pid),
+                // No owner recorded — written by a binary predating the PID
+                // prefix. Fall back to the age heuristic.
+                None => metadata
+                    .modified()
+                    .ok()
+                    .and_then(|modified| now.duration_since(modified).ok())
+                    .map(|age| age >= LEAKED_TEMPDIR_MAX_AGE)
+                    .unwrap_or(false),
+            };
+            if abandoned {
                 let _ = fs::remove_dir_all(&path);
             }
         }
@@ -780,7 +829,7 @@ pub fn exec_capable_tempdir() -> TempDir {
         tempdir_with_cached_exec_base(
             EXEC_CAPABLE_TEMP_BASE.get_or_init(|| Mutex::new(None)),
             exec_capable_tempdir_candidates(),
-            "hb-test-",
+            &owned_tempdir_prefix(),
             dir_allows_exec,
         )
     }
@@ -1729,5 +1778,91 @@ mod tests {
             assert_eq!(mode & 0o222, 0);
             assert_ne!(mode & 0o111, 0);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tempdir_names_carry_their_owning_pid() {
+        let prefix = owned_tempdir_prefix();
+        assert!(prefix.starts_with(TEST_TEMPDIR_PREFIX));
+        assert_eq!(
+            tempdir_owner_pid(&format!("{prefix}AbCdEf")),
+            Some(std::process::id())
+        );
+    }
+
+    /// Directories written before the PID prefix existed must stay on the age
+    /// heuristic rather than being misread as owned by PID-less garbage.
+    #[cfg(unix)]
+    #[test]
+    fn legacy_and_malformed_tempdir_names_report_no_owner() {
+        for name in [
+            "hb-test-AbCdEf",
+            "hb-test-",
+            "hb-test-notapid-AbCdEf",
+            "hb-test--AbCdEf",
+            "something-else",
+        ] {
+            assert_eq!(tempdir_owner_pid(name), None, "{name} must have no owner");
+        }
+    }
+
+    /// The reclaim contract: a dead owner's directory goes, a live owner's
+    /// stays, and neither decision waits on a clock.
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_reclaims_dead_owners_and_spares_live_ones() {
+        let root = tempfile::tempdir().expect("sweep root");
+
+        // A conclusively dead PID: spawn a child, reap it, and reuse its id.
+        // Not PID 0 — `kill(0, 0)` addresses the caller's whole process group
+        // and therefore reports *alive*, which would make this test vacuous.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn short-lived child");
+        let dead_pid = child.id();
+        child.wait().expect("reap short-lived child");
+        assert!(
+            !crate::process::pid_is_running(dead_pid),
+            "reaped child must read as dead"
+        );
+        let dead = root
+            .path()
+            .join(format!("{TEST_TEMPDIR_PREFIX}{dead_pid}-deadxx"));
+        // This process is unambiguously alive.
+        let live = root.path().join(owned_tempdir_prefix() + "livexx");
+        // No PID segment and freshly created — the age fallback must keep it.
+        let legacy_fresh = root.path().join("hb-test-legacyx");
+        // Not ours at all.
+        let unrelated = root.path().join("someone-elses-dir");
+
+        for path in [&dead, &live, &legacy_fresh, &unrelated] {
+            fs::create_dir_all(path).expect("seed sweep fixture");
+            fs::write(path.join("payload"), b"x").expect("seed payload");
+        }
+
+        sweep_leaked_test_tempdirs(&[root.path().to_path_buf()]);
+
+        assert!(!dead.exists(), "a dead owner's tempdir must be reclaimed");
+        assert!(live.exists(), "a live owner's tempdir must be preserved");
+        assert!(
+            legacy_fresh.exists(),
+            "a recent PID-less tempdir must survive on the age heuristic"
+        );
+        assert!(
+            unrelated.exists(),
+            "unrelated directories must be untouched"
+        );
+    }
+
+    /// The PID segment lengthens the invocation runtime root, which is the
+    /// budget `sockaddr_un` is measured against. Pin that it still fits, so a
+    /// future change to the naming cannot silently push socket paths over.
+    #[cfg(unix)]
+    #[test]
+    fn the_invocation_tempdir_still_fits_the_socket_budget() {
+        let dir = short_invocation_tempdir();
+        crate::engine::invocation::enforce_path_budget(dir.path())
+            .expect("invocation tempdir must leave room for a workload socket name");
     }
 }
