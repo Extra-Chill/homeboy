@@ -142,6 +142,15 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
         }
     }
     enrich_with_diagnostic_summary(&mut value, run_id)?;
+    if let Some((progress, source_run_id)) = selected_cook_terminal_progress(&target, run_id) {
+        project_owning_cook_terminal_status_from_progress(
+            &mut value,
+            &progress,
+            Some(&source_run_id),
+        );
+    } else {
+        project_owning_cook_terminal_status(&mut value);
+    }
     attach_transport_proxy_recovery_guidance(&mut value, run_id);
     if let Some(selection) = target.selection.as_ref() {
         value["candidate_selection"] = selection.clone();
@@ -152,7 +161,8 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
         bound_full_reader_payload(&mut value);
         attach_runner_probe(&mut value, &runner_probe);
         attach_agent_task_status_actionable(&mut value, run_id);
-        return Ok((value, 0));
+        let exit_code = status_exit_code(&value);
+        return Ok((value, exit_code));
     }
     let summary = compact_status_summary(&value, run_id);
     let mut summary = summary;
@@ -161,7 +171,96 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     }
     attach_runner_probe(&mut summary, &runner_probe);
     attach_agent_task_status_actionable(&mut summary, run_id);
-    Ok((summary, 0))
+    let exit_code = status_exit_code(&summary);
+    Ok((summary, exit_code))
+}
+
+/// A Cook owns the provider attempt's publication lifecycle. Once it records a
+/// terminal outcome, that outcome is the status headline; the child run state
+/// remains available as `child_run_state` and in `execution_states.provider`.
+fn project_owning_cook_terminal_status(value: &mut Value) {
+    let progress = value.pointer("/metadata/cook_progress").cloned();
+    project_owning_cook_terminal_status_from_progress(value, progress.as_ref(), None);
+}
+
+/// Main's substantive-candidate reader can resolve an earlier patch-producing
+/// attempt while the latest attempt owns the Cook's terminal publication result.
+/// Read that separate lifecycle record so candidate evidence and Cook truth stay
+/// visible together.
+fn selected_cook_terminal_progress(
+    target: &CookReaderTarget,
+    selected_run_id: &str,
+) -> Option<(Value, String)> {
+    let source_run_id = target
+        .selection
+        .as_ref()?
+        .get("latest_attempt_run_id")?
+        .as_str()?
+        .to_string();
+    if source_run_id == selected_run_id {
+        return None;
+    }
+    let record = agent_task_lifecycle::exact_record(&source_run_id).ok()?;
+    let progress = record.metadata.get("cook_progress")?.clone();
+    (progress.get("phase").and_then(Value::as_str) == Some("terminal"))
+        .then_some((progress, source_run_id))
+}
+
+fn project_owning_cook_terminal_status_from_progress(
+    value: &mut Value,
+    progress: Option<&Value>,
+    source_run_id: Option<&str>,
+) {
+    let Some(progress) = progress
+        .filter(|progress| progress.get("phase").and_then(Value::as_str) == Some("terminal"))
+    else {
+        return;
+    };
+    if progress.get("terminal_success").and_then(Value::as_bool) == Some(true) {
+        return;
+    }
+    let Some(status) = progress
+        .get("detail")
+        .and_then(Value::as_str)
+        .filter(|status| !status.trim().is_empty())
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let publication = if progress.get("terminal_success").and_then(Value::as_bool) == Some(false) {
+        "blocked"
+    } else {
+        "unknown"
+    };
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    if let Some(run_state) = object.get("state").cloned() {
+        object.insert("child_run_state".to_string(), run_state);
+    }
+    object.insert("state".to_string(), Value::String(status.clone()));
+    let mut cook = json!({
+        "state": status,
+        "phase": "terminal",
+        "publication": publication,
+    });
+    if let Some(source_run_id) = source_run_id {
+        cook["source_run_id"] = json!(source_run_id);
+    }
+    object.insert("cook".to_string(), cook);
+}
+
+fn blocked_owning_cook(value: &Value) -> bool {
+    value.pointer("/cook/phase").and_then(Value::as_str) == Some("terminal")
+        && value.pointer("/cook/publication").and_then(Value::as_str) != Some("completed")
+}
+
+fn status_exit_code(value: &Value) -> i32 {
+    if blocked_owning_cook(value) {
+        1
+    } else {
+        0
+    }
 }
 
 fn attach_full_status_candidate(
@@ -436,7 +535,15 @@ fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
         ..Default::default()
     };
 
-    if classify_candidates(value).state().is_available() {
+    if blocked_owning_cook(value) {
+        metadata.next_actions.push(
+            CommandNextAction::new(
+                "diagnose blocked Cook",
+                format!("homeboy agent-task diagnose {run_id} --full"),
+            )
+            .with_kind(CommandNextActionKind::Show),
+        );
+    } else if classify_candidates(value).state().is_available() {
         let review_command = format!("homeboy agent-task review {run_id}");
         metadata.next_actions.push(
             CommandNextAction::new("review run", review_command)
@@ -2371,6 +2478,8 @@ fn compact_status_summary_with_aggregate(
         "schema": "homeboy/agent-task-status-summary/v1",
         "run_id": record.get("run_id").cloned().unwrap_or_else(|| json!(run_id)),
         "state": record.get("state").cloned().unwrap_or(Value::Null),
+        "child_run_state": record.get("child_run_state").cloned().unwrap_or(Value::Null),
+        "cook": record.get("cook").cloned().unwrap_or(Value::Null),
         "timestamps": compact_fields(record, &["created_at", "updated_at", "started_at", "completed_at"]),
         "work_summary": work_summary,
         "canonical_candidate": canonical_candidate_projection(canonical_candidate),
@@ -3530,6 +3639,202 @@ mod tests {
             .any(
                 |action| action["command"] == "homeboy agent-task review agent-task-durable-patch"
             ));
+    }
+
+    #[test]
+    fn terminal_cook_gate_failure_overrides_successful_provider_status() {
+        let mut status = blocked_cook_status_fixture("gate_failed", "gate_failed", "not_attempted");
+
+        project_owning_cook_terminal_status(&mut status);
+        let mut status = compact_status_summary(&status, "cook-attempt-1");
+        attach_agent_task_status_actionable(&mut status, "cook-attempt-1");
+        let rendered = crate::commands::agent_task_summary::render_agent_task_summary(
+            crate::commands::agent_task_summary::AgentTaskSummaryKind::Status,
+            &status,
+        )
+        .expect("status summary");
+
+        assert_eq!(status["state"], "gate_failed");
+        assert_eq!(status["child_run_state"], "succeeded");
+        assert_eq!(
+            status["execution_states"]["provider"][0]["state"],
+            "succeeded"
+        );
+        assert_eq!(status["execution_states"]["gate"]["state"], "failed");
+        assert_eq!(status["cook"]["publication"], "blocked");
+        assert_eq!(status_exit_code(&status), 1);
+        assert!(rendered.contains("Status: gate_failed"));
+        assert!(rendered.contains("Cook: gate_failed (publication blocked)"));
+        assert!(rendered.contains("Next: homeboy agent-task diagnose cook-attempt-1 --full"));
+        assert!(!rendered.contains("Next: homeboy agent-task review"));
+        assert!(
+            status[ACTIONABLE_METADATA_KEY]["next_actions"]
+                .as_array()
+                .expect("next actions")
+                .iter()
+                .any(|action| action["command"]
+                    == "homeboy agent-task diagnose cook-attempt-1 --full")
+        );
+        assert!(!status[ACTIONABLE_METADATA_KEY]["next_actions"]
+            .as_array()
+            .expect("next actions")
+            .iter()
+            .any(|action| action["command"] == "homeboy agent-task review cook-attempt-1"));
+    }
+
+    #[test]
+    fn terminal_cook_finalization_failure_overrides_successful_provider_status() {
+        let mut status =
+            blocked_cook_status_fixture("finalization_failed", "applied", "finalization_failed");
+
+        project_owning_cook_terminal_status(&mut status);
+        attach_agent_task_status_actionable(&mut status, "cook-attempt-1");
+
+        assert_eq!(status["state"], "finalization_failed");
+        assert_eq!(status["child_run_state"], "succeeded");
+        assert_eq!(
+            status["execution_states"]["provider"][0]["state"],
+            "succeeded"
+        );
+        assert_eq!(status["execution_states"]["promotion"]["state"], "applied");
+        assert_eq!(
+            status["execution_states"]["finalization"]["state"],
+            "finalization_failed"
+        );
+        assert_eq!(status_exit_code(&status), 1);
+        assert!(
+            status[ACTIONABLE_METADATA_KEY]["next_actions"]
+                .as_array()
+                .expect("next actions")
+                .iter()
+                .any(|action| action["command"]
+                    == "homeboy agent-task diagnose cook-attempt-1 --full")
+        );
+    }
+
+    #[test]
+    fn terminal_cook_budget_exhaustion_overrides_successful_provider_status() {
+        let mut status = blocked_cook_status_fixture(
+            "execution_budget_exhausted",
+            "gate_failed",
+            "not_attempted",
+        );
+
+        project_owning_cook_terminal_status(&mut status);
+        let mut status = compact_status_summary(&status, "cook-attempt-1");
+        attach_agent_task_status_actionable(&mut status, "cook-attempt-1");
+
+        assert_eq!(status["state"], "execution_budget_exhausted");
+        assert_eq!(status["child_run_state"], "succeeded");
+        assert_eq!(
+            status["execution_states"]["provider"][0]["state"],
+            "succeeded"
+        );
+        assert_eq!(status["execution_states"]["gate"]["state"], "failed");
+        assert_eq!(status_exit_code(&status), 1);
+        assert!(
+            status[ACTIONABLE_METADATA_KEY]["next_actions"]
+                .as_array()
+                .expect("next actions")
+                .iter()
+                .any(|action| action["command"]
+                    == "homeboy agent-task diagnose cook-attempt-1 --full")
+        );
+    }
+
+    #[test]
+    fn successful_terminal_cook_result_keeps_the_child_status_and_actions() {
+        let mut status = json!({
+            "run_id": "cook-attempt-1",
+            "state": "succeeded",
+            "metadata": {
+                "cook_progress": {
+                    "phase": "terminal",
+                    "detail": "future_success_status",
+                    "terminal_success": true,
+                    "exit_code": 0
+                }
+            }
+        });
+
+        project_owning_cook_terminal_status(&mut status);
+
+        assert_eq!(status["state"], "succeeded");
+        assert!(status.get("cook").is_none());
+        assert_eq!(status_exit_code(&status), 0);
+    }
+
+    #[test]
+    fn green_and_review_ready_terminal_cooks_keep_successful_status_actions() {
+        for terminal_status in ["green_no_finalize", "review_ready"] {
+            let mut status = json!({
+                "run_id": "cook-attempt-1",
+                "state": "succeeded",
+                "tasks": [],
+                "metadata": {
+                    "cook_progress": {
+                        "phase": "terminal",
+                        "detail": terminal_status,
+                        "terminal_success": true,
+                        "exit_code": 0
+                    },
+                    "latest_promotion": {
+                        "status": "applied",
+                        "patch_artifact": { "id": "patch" }
+                    }
+                }
+            });
+
+            project_owning_cook_terminal_status(&mut status);
+            let mut status = compact_status_summary(&status, "cook-attempt-1");
+            attach_agent_task_status_actionable(&mut status, "cook-attempt-1");
+            let rendered = crate::commands::agent_task_summary::render_agent_task_summary(
+                crate::commands::agent_task_summary::AgentTaskSummaryKind::Status,
+                &status,
+            )
+            .expect("status summary");
+
+            assert_eq!(status["state"], "succeeded", "{terminal_status}");
+            assert!(status["cook"].is_null(), "{terminal_status}");
+            assert_eq!(status_exit_code(&status), 0, "{terminal_status}");
+            assert!(rendered.contains("Next: homeboy agent-task review cook-attempt-1"));
+            assert!(status[ACTIONABLE_METADATA_KEY]["next_actions"]
+                .as_array()
+                .expect("next actions")
+                .iter()
+                .any(|action| action["command"] == "homeboy agent-task review cook-attempt-1"));
+        }
+    }
+
+    fn blocked_cook_status_fixture(
+        cook_status: &str,
+        promotion_status: &str,
+        finalization_status: &str,
+    ) -> Value {
+        json!({
+            "run_id": "cook-attempt-1",
+            "state": "succeeded",
+            "tasks": [],
+            "metadata": {
+                "cook_progress": {
+                    "phase": "terminal",
+                    "detail": cook_status,
+                    "terminal_success": false,
+                    "exit_code": 1
+                },
+                "latest_promotion": {
+                    "status": promotion_status,
+                    "patch_artifact": { "id": "patch" }
+                },
+                "cook_finalization": { "status": finalization_status }
+            },
+            "execution_states": {
+                "provider": [{ "task_id": "cook", "state": "succeeded" }],
+                "gate": { "state": if promotion_status == "gate_failed" { "failed" } else { "passed" } },
+                "promotion": { "state": promotion_status },
+                "finalization": { "state": finalization_status }
+            }
+        })
     }
 
     #[test]

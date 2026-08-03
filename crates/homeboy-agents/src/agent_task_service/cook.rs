@@ -1786,6 +1786,15 @@ where
         ) {
             return durable_cook_error_report(&failure_options, error);
         }
+        if phase == "terminal" {
+            if let Err(error) = agent_task_lifecycle::record_cook_terminal_result(
+                run_id,
+                result.exit_code == 0,
+                result.exit_code,
+            ) {
+                return durable_cook_error_report(&failure_options, error);
+            }
+        }
     }
     Ok(result)
 }
