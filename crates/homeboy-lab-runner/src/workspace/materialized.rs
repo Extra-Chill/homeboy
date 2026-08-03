@@ -9,7 +9,8 @@
 //! [`MaterializedWorkspace`] is the run-owned handle that closes that gap: it
 //! carries a [`WorkspaceCleanupPolicy`] and reaps the remote workspace (and its
 //! artifact sibling) on drop. The default policy
-//! [`WorkspaceCleanupPolicy::DeleteAlways`] reaps every known terminal outcome.
+//! [`WorkspaceCleanupPolicy::DeleteAlways`] reaps every authoritatively observed
+//! terminal outcome.
 //! The explicit `PreserveOnFailure` debugging policy retains failed workspaces
 //! through the registered TTL lifecycle. Reap is best-effort: a teardown error
 //! is logged, never propagated, and the controller-side `runner workspace prune`
@@ -90,6 +91,7 @@ pub(crate) struct MaterializedWorkspace {
     artifact_dir: Option<String>,
     policy: WorkspaceCleanupPolicy,
     outcome: WorkspaceTerminalOutcome,
+    authoritative_terminal_outcome: bool,
     relinquished: bool,
 }
 
@@ -105,7 +107,11 @@ impl MaterializedWorkspace {
             remote_path,
             artifact_dir,
             policy,
-            outcome: WorkspaceTerminalOutcome::Failure,
+            // Until the daemon publishes a terminal result and the controller
+            // completes its result handoff, the remote job may still own this
+            // checkout. Retain that uncertainty through a bounded lifecycle.
+            outcome: WorkspaceTerminalOutcome::UncertainHandoff,
+            authoritative_terminal_outcome: false,
             relinquished: false,
         }
     }
@@ -114,6 +120,7 @@ impl MaterializedWorkspace {
     /// from failure before this run-owned handle is dropped.
     pub(crate) fn set_terminal_outcome(&mut self, outcome: WorkspaceTerminalOutcome) {
         self.outcome = outcome;
+        self.authoritative_terminal_outcome = true;
     }
 
     /// Relinquish run-scoped ownership without reaping — e.g. the remote run
@@ -127,7 +134,7 @@ impl MaterializedWorkspace {
     fn should_reap(&self) -> bool {
         // Preserve evidence if we are unwinding from a panic, and honor an
         // explicit relinquish handing the workspace to a live remote job.
-        if self.relinquished || std::thread::panicking() {
+        if self.relinquished || !self.authoritative_terminal_outcome || std::thread::panicking() {
             return false;
         }
         match self.policy {
@@ -164,10 +171,13 @@ impl MaterializedWorkspace {
             } else {
                 "runner.workspace".to_string()
             },
-            cleanup_trigger: (!retained && !self.relinquished)
-                .then(|| "terminal_job_owner".to_string()),
+            cleanup_trigger: (!retained && self.authoritative_terminal_outcome)
+                .then(|| "authoritative_terminal_result_and_handoff".to_string()),
             retained_location: retained.then(|| self.remote_path.clone()),
             reclaim_command: (retained && !self.relinquished).then(|| self.reclaim_command()),
+            reconciliation_needed: !self.authoritative_terminal_outcome && !self.relinquished,
+            reconciliation_ttl: (!self.authoritative_terminal_outcome && !self.relinquished)
+                .then(runner_workspace_ttl),
         };
         if let Err(error) = record_workspace_terminal_evidence(
             &self.runner_id,
@@ -182,6 +192,14 @@ impl MaterializedWorkspace {
             );
         }
     }
+}
+
+fn runner_workspace_ttl() -> String {
+    homeboy_core::defaults::load_config()
+        .lab
+        .runner_workspace_ttl
+        .filter(|ttl| !ttl.trim().is_empty())
+        .unwrap_or_else(|| "P7D".to_string())
 }
 
 impl Drop for MaterializedWorkspace {

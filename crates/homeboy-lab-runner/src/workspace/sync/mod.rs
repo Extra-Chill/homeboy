@@ -2007,13 +2007,18 @@ pub(crate) fn record_workspace_terminal_evidence(
         })?;
     if let Some(lifecycle) = metadata.resource_lifecycle.as_mut() {
         lifecycle.status = lifecycle_status;
-        // A detached or uncertain daemon handoff still has a live job owner.
-        // Prevent every automatic reclaimer from treating this workspace as a
-        // terminal TTL artifact until that owner publishes a terminal result.
+        // A detached daemon handoff still has a known live job owner. Prevent
+        // every automatic reclaimer from treating it as a terminal artifact.
         if relinquished {
             lifecycle.cleanup_policy = ResourceCleanupPolicy::Preserve;
             lifecycle.ttl = None;
             lifecycle.cleanup_command = None;
+        } else if evidence.reconciliation_needed {
+            // The controller cannot establish whether the daemon job completed.
+            // Keep its workspace recoverable while bounding retention through
+            // the normal runner-prune lifecycle.
+            lifecycle.cleanup_policy = ResourceCleanupPolicy::DeleteAfterTtl;
+            lifecycle.ttl = evidence.reconciliation_ttl.clone();
         }
     }
     metadata.terminal_evidence = Some(evidence);

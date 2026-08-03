@@ -604,6 +604,12 @@ pub(crate) struct RunnerWorkspaceTerminalEvidence {
     pub retained_location: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reclaim_command: Option<String>,
+    /// The controller could not observe an authoritative terminal daemon result.
+    /// This workspace remains recoverable until its bounded lifecycle expires.
+    #[serde(default)]
+    pub reconciliation_needed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconciliation_ttl: Option<String>,
 }
 
 // RunnerWorkspaceCurrentSummary now lives in the shared runner-contract crate

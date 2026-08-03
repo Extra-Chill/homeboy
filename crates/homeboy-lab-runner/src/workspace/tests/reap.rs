@@ -118,6 +118,46 @@ fn materialized_workspace_reaps_on_success_under_default_policy() {
 }
 
 #[test]
+fn controller_tunnel_loss_during_live_workload_retains_workspace_for_reconciliation() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        let remote_path = sync_local_workspace("lab-local-tunnel-loss", runner_root.path());
+        let live_workload = Path::new(&remote_path).join("live-workload");
+        fs::write(&live_workload, "still running\n").expect("live workload input");
+
+        // Simulate losing the controller tunnel after dispatch but before an
+        // authoritative daemon terminal result or artifact handoff arrives.
+        {
+            let _handle = MaterializedWorkspace::new(
+                "lab-local-tunnel-loss".to_string(),
+                remote_path.clone(),
+                None,
+                WorkspaceCleanupPolicy::DeleteAlways,
+            );
+        }
+
+        assert!(
+            live_workload.exists(),
+            "an unobserved daemon job must retain its live workspace"
+        );
+        let metadata = fs::read_to_string(Path::new(&remote_path).join(WORKSPACE_METADATA_FILE))
+            .expect("reconciliation metadata");
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("metadata json");
+        assert_eq!(
+            metadata["terminal_evidence"]["final_outcome"],
+            "uncertain_handoff"
+        );
+        assert_eq!(metadata["terminal_evidence"]["reconciliation_needed"], true);
+        assert_eq!(
+            metadata["resource_lifecycle"]["cleanup_policy"],
+            "delete_after_ttl"
+        );
+        assert!(metadata["resource_lifecycle"]["ttl"].is_string());
+        assert!(metadata["terminal_evidence"]["cleanup_trigger"].is_null());
+    });
+}
+
+#[test]
 fn materialized_workspace_preserves_on_failure_under_explicit_debug_policy() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
