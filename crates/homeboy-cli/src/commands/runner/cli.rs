@@ -292,6 +292,11 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         full: bool,
     },
+    /// Reconcile persisted direct-runner generation state and retire verified drained daemons
+    Reconcile {
+        /// Runner ID
+        id: String,
+    },
     /// Close a runner tunnel and remove its persisted session state
     Disconnect {
         /// Runner ID

@@ -1551,6 +1551,51 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_status_projections_preserve_stale_direct_generation_state_without_operations() {
+        test_support::with_isolated_home(|_| {
+            let draining = session("lease-draining", "daemon-draining", Some(101));
+            let active = session("lease-active", "daemon-active", Some(202));
+            record_job("runner-a", &draining, "draining-job").expect("record draining job");
+            activate(
+                "runner-a",
+                &draining,
+                "lease-active".to_string(),
+                active.clone(),
+                &["draining-job".to_string()],
+            )
+            .expect("activate current generation");
+            let registry_path = path("runner-a").expect("registry path");
+            let before = std::fs::read(&registry_path).expect("snapshot durable state");
+            let operations = std::sync::Arc::new(FakeEndpointOperations::default());
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+
+            let observers = (0..2)
+                .map(|_| {
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    let active = active.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        status_projection("runner-a", Some(&active)).expect("status projection")
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            for observer in observers {
+                let projection = observer.join().expect("status observer");
+                assert_eq!(projection.len(), 2);
+            }
+
+            assert_eq!(
+                std::fs::read(registry_path).expect("read durable state"),
+                before
+            );
+            assert!(operations.terminal_reconciled_leases.borrow().is_empty());
+            assert!(operations.stopped_leases.borrow().is_empty());
+            assert!(operations.terminated_pids.borrow().is_empty());
+        });
+    }
+
+    #[test]
     fn endpoint_fallback_retires_only_the_authoritatively_idle_draining_generation() {
         test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));

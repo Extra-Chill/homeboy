@@ -176,6 +176,28 @@ pub(super) fn status(
     ))
 }
 
+pub(super) fn reconcile(id: &str) -> CmdResult<RunnerOutput> {
+    let report = runner::reconcile_status(id)?;
+    let generation_inventory =
+        runner::runner_generation_inventory_for_session(id, report.session.as_ref())?;
+    Ok((
+        RunnerOutput {
+            command: "runner.reconcile".to_string(),
+            id: Some(id.to_string()),
+            extra: RunnerExtra {
+                admission_summary: Some(report.admission_summary(generation_inventory.len())),
+                connection: Some(RunnerConnectionOutput::Status(report.clone())),
+                generation_inventory,
+                operator_hints: runner_status_operator_hints(&report),
+                operator_commands: runner_status_operator_commands(&report),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        0,
+    ))
+}
+
 /// Operator-facing hints for read-only probes that hit their bound while this
 /// status was assembled (#10418). Without these an operator cannot distinguish
 /// "the Lab answered and is idle" from "the Lab never answered".
@@ -1375,6 +1397,16 @@ pub(super) fn runner_status_operator_commands(
                 });
             }
         }
+    }
+
+    if session.mode == RunnerTunnelMode::DirectSsh {
+        commands.push(RunnerOperatorCommand {
+            scope: "generation_reconcile",
+            runner_id: report.runner_id.clone(),
+            job_id: None,
+            command: format!("homeboy runner reconcile {}", shell_arg(&report.runner_id)),
+            description: "Persist fresh generation observations and retire only verified drained daemon generations.".to_string(),
+        });
     }
 
     if let Some(warning) = report.stale_daemon.as_ref() {
