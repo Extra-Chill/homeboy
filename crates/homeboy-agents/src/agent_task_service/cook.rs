@@ -19,6 +19,7 @@ use crate::agent_task_scheduler::{
     AgentTaskExecutionBudget, AgentTaskExecutorAdapter, AgentTaskPlan,
 };
 use homeboy_core::command_invocation::CommandInvocation;
+use homeboy_core::cook_status::CookStatus;
 use homeboy_core::{Error, Result};
 
 use super::cook_baseline::{
@@ -1045,11 +1046,11 @@ fn cook_batch_result(
     let total = cooks.len();
     let mut totals = crate::agent_task_batch::AgentTaskBatchTotals::default();
     for cell in &cooks {
-        match cell.status.as_str() {
-            "queued" => totals.queued += 1,
-            "running" | "in_flight" => totals.running += 1,
-            "cancelled" => totals.cancelled += 1,
-            "timed_out" => totals.timed_out += 1,
+        match CookStatus::from_status(&cell.status) {
+            CookStatus::Queued => totals.queued += 1,
+            CookStatus::Running | CookStatus::InFlight => totals.running += 1,
+            CookStatus::Cancelled => totals.cancelled += 1,
+            CookStatus::TimedOut => totals.timed_out += 1,
             _ if cell.exit_code == 0 => totals.succeeded += 1,
             _ => totals.failed += 1,
         }
@@ -1217,8 +1218,8 @@ fn cook_report_exit_code(report: &AgentTaskCookReport) -> i32 {
     // A review-ready or already-finalized cook is a success; anything the cook
     // could not carry to a green, finalized state is a non-zero resume result
     // the operator must still act on.
-    match report.status.as_str() {
-        "queued" | "running" | "in_flight" | "review_ready" | "green_no_finalize" => 0,
+    match CookStatus::from_status(&report.status) {
+        status if status.is_success_exit() => 0,
         _ => {
             if report
                 .finalization
@@ -1659,11 +1660,12 @@ fn cook_component(options: &AgentTaskCookServiceOptions) -> Option<String> {
 
 /// Whether a reported cook status means the cook will not advance on its own.
 ///
-/// The single definition, shared by the durable progress phase label and the
-/// terminal notification, so a new in-flight status cannot make one of them
-/// silently disagree with the other.
+/// Delegates to [`CookStatus`], which is the single definition of the Cook
+/// status vocabulary and of terminality. It is shared by the durable progress
+/// phase label, the terminal notification, the batch totals, and the exit
+/// code, so a new status cannot make any of them silently disagree.
 fn cook_status_is_terminal(status: &str) -> bool {
-    !matches!(status, "queued" | "running" | "in_flight")
+    CookStatus::from_status(status).is_terminal()
 }
 
 pub(crate) fn exhausted_budget_guidance(

@@ -77,6 +77,7 @@ pub mod content_diff;
 pub mod context;
 pub mod controller_pin_reference;
 pub mod controller_runtime;
+pub use homeboy_lifecycle_contract::cook_status;
 pub mod daemon;
 pub mod deferred_workload;
 pub mod deps;

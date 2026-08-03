@@ -8,15 +8,18 @@
 //! `ArtifactRef` (`from_record`, `to_artifact_ref`, `From<ArtifactRef>`) live
 //! in `homeboy-core` as free functions, so this crate stays observation-free.
 //!
-//! Two distinct lifecycle vocabularies live here and do not overlap. `lifecycle`
-//! is the workload *phase* lifecycle (`LifecyclePhaseKind`).
+//! Three distinct lifecycle vocabularies live here and do not overlap.
+//! `lifecycle` is the workload *phase* lifecycle (`LifecyclePhaseKind`).
 //! `run_lifecycle_record` is a run *state machine* (`RunExecutionState`,
 //! `CleanupState`, `FinalizationState`, `ArtifactRetentionStatus`). The latter
 //! was its own `homeboy-run-lifecycle-contract` crate until it was merged here;
 //! the two share no types, and `homeboy-core` already imported that crate under
 //! the module name `run_lifecycle_record`, which is the name it keeps.
+//! `cook_status` is the Cook *report* vocabulary (`CookStatus`) and owns the
+//! single definition of Cook terminality.
 
 pub mod artifact_contract;
+pub mod cook_status;
 pub mod lifecycle;
 pub mod rig_snapshot;
 pub mod run_lifecycle_record;
@@ -25,6 +28,7 @@ pub mod timeline;
 pub use artifact_contract::{
     ArtifactContract, ArtifactRecord, ArtifactViewerLink, ARTIFACT_CONTRACT_SCHEMA,
 };
+pub use cook_status::CookStatus;
 pub use lifecycle::{
     LifecycleContract, LifecyclePhaseContract, LifecyclePhaseKind, LifecyclePhaseResult,
     LifecyclePhaseStatus, LifecycleResultMetadata, LifecycleSnapshotRef,
