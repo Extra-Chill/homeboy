@@ -101,13 +101,31 @@ pub fn classify(args: &[String]) -> CommandCapability {
         [command, subcommand, ..]
             if matches!(
                 (command.as_str(), subcommand.as_str()),
-                ("runs", "list") | ("daemon", "status")
+                ("runs", "list")
+                    | ("daemon", "status")
+                    | ("agent-task", "status")
+                    | ("agent-task", "evidence")
+                    | ("agent-task", "active")
             ) =>
         {
             CommandCapability::ReadOnly
         }
         _ => CommandCapability::Mutation,
     }
+}
+
+/// Whether startup may reconcile runner-exec state before this invocation.
+///
+/// This is intentionally narrower than command mutation: a review may
+/// materialize a controller-local artifact, but runner recovery would make its
+/// already-durable aggregate unavailable during a Lab outage.
+pub fn requires_startup_reconciliation(args: &[String]) -> bool {
+    classify(args) == CommandCapability::Mutation
+        && !args
+            .get(1..)
+            .unwrap_or_default()
+            .windows(2)
+            .any(|args| args == ["agent-task", "review"])
 }
 
 #[cfg(test)]
@@ -164,6 +182,9 @@ mod tests {
             args(&["homeboy", "runs", "list", "--limit", "10"]),
             args(&["homeboy", "daemon", "status"]),
             args(&["homeboy", "status", "--all"]),
+            args(&["homeboy", "agent-task", "status", "run-1", "--full"]),
+            args(&["homeboy", "agent-task", "evidence", "run-1"]),
+            args(&["homeboy", "agent-task", "active", "--full"]),
         ] {
             assert_eq!(
                 classify(&command),
@@ -185,5 +206,26 @@ mod tests {
         ] {
             assert_eq!(classify(&command), CommandCapability::Mutation);
         }
+    }
+
+    #[test]
+    fn review_keeps_its_local_materialization_capability_but_skips_runner_recovery() {
+        let review = args(&[
+            "homeboy",
+            "agent-task",
+            "review",
+            "run-1",
+            "--to-worktree",
+            "repo@local",
+        ]);
+        assert_eq!(classify(&review), CommandCapability::Mutation);
+        assert!(!requires_startup_reconciliation(&review));
+        assert!(requires_startup_reconciliation(&args(&[
+            "homeboy",
+            "agent-task",
+            "retry",
+            "run-1",
+            "--run",
+        ])));
     }
 }
