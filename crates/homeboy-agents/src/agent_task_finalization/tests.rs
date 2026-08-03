@@ -2124,6 +2124,7 @@ fn options() -> AgentTaskPrFinalizationOptions {
             }],
             compatibility: "No compatibility impact.".to_string(),
             evidence: Vec::new(),
+            verified_commands: Vec::new(),
             changed_public_contracts: Vec::new(),
             public_contract_evidence: None,
             ai_assistance: crate::agent_task_review_dossier::AgentTaskReviewAiAssistance {

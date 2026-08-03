@@ -47,6 +47,7 @@ fn test_review_form() -> crate::agent_task_review_dossier::AiFilledReviewForm {
         summary: "Close the issue by guarding the reload path.".to_string(),
         what_changed: vec!["Add a null guard in the render path.".to_string()],
         compatibility: "Internal-only change; no compatibility impact.".to_string(),
+        verification: Vec::new(),
         used_for: "Reproduced the failure, isolated the reload path, added a guard, and verified with the recorded deterministic gate before finalizing.".to_string(),
     }
 }

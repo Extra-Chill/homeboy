@@ -485,6 +485,7 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
                 .to_string()
         }),
         evidence: Vec::new(),
+        verified_commands: Vec::new(),
         changed_public_contracts: evidence.changed_public_contracts.clone(),
         public_contract_evidence: evidence.public_contract_evidence.clone(),
         ai_assistance: AgentTaskReviewAiAssistance {
