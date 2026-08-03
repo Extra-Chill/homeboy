@@ -87,6 +87,14 @@ mod tests {
         let output = AuditCommandOutput::Full {
             passed: false,
             result: audit_result(vec![audit_finding("src/lib.rs", "missing method")]),
+            measurement: homeboy_code_audit::AuditMeasurement::new(
+                homeboy_code_audit::AuditProfile::Full,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
             fixability: None,
             extension_phase_timings: Vec::new(),
             actionable: None,
@@ -106,6 +114,14 @@ mod tests {
         let output = AuditCommandOutput::Compared {
             passed: false,
             result: audit_result(vec![audit_finding("src/main.rs", "naming drift")]),
+            measurement: homeboy_code_audit::AuditMeasurement::new(
+                homeboy_code_audit::AuditProfile::Full,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
             baseline_comparison: BaselineComparison {
                 new_items: Vec::new(),
                 resolved_fingerprints: Vec::new(),
@@ -140,6 +156,7 @@ mod tests {
             finding_groups: Vec::new(),
             top_findings: vec![top_finding.clone()],
             fixability: None,
+            measurement: None,
             changed_since: None,
             baseline_filtering: None,
             unbaselined_findings: Vec::new(),
