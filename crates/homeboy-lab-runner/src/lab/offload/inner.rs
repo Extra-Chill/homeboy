@@ -2098,6 +2098,11 @@ pub(crate) fn run_lab_offload_inner(
                     expected_daemon_lease_id,
                     agent_task_run_id.as_deref(),
                     DaemonAdmissionPolicy::DurableLeaseRequired,
+                    agent_task_run_id
+                        .as_deref()
+                        .map(homeboy_agents::agent_task_lifecycle::workspace_owner_registration_if_present)
+                        .transpose()?
+                        .flatten(),
                 )
             })
             .transpose()

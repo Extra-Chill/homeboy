@@ -442,6 +442,56 @@ fn remote_runner_claim_rejects_workers_without_the_context_protocol() {
 }
 
 #[test]
+fn workspace_bound_reverse_jobs_reject_old_or_missing_worker_capability() {
+    let store = JobStore::default();
+    let workspace =
+        crate::workspace_claim::WorkspaceIdentity::new("test", "reverse-worker").expect("identity");
+    let claim = crate::workspace_claim::WorkspaceClaim {
+        schema: crate::workspace_claim::WORKSPACE_CLAIM_SCHEMA.to_string(),
+        protocol: crate::workspace_claim::WorkspaceClaimProtocol::current(),
+        workspace: workspace.clone(),
+        lifecycle_revision: 4,
+        token: "broker-token".to_string(),
+        expires_at_ms: crate::api_jobs::timestamp_ms() + 30_000,
+    };
+    let mut request = remote_runner_request("homeboy-lab", None);
+    request.workspace_claim_binding = Some(crate::workspace_claim::WorkspaceClaimBinding {
+        workspace,
+        lifecycle_revision: 4,
+        claim: Some(claim),
+    });
+    let job = store.submit_remote_runner_job(request).expect("job queues");
+
+    assert!(store
+        .claim_remote_runner_job_with_protocols("homeboy-lab", None, 30_000, None, None, None, None)
+        .is_err());
+    assert_eq!(
+        store.get(job.id).expect("queued job").status,
+        JobStatus::Queued
+    );
+
+    let old = crate::workspace_claim::WorkspaceClaimProtocol {
+        capability: crate::workspace_claim::WORKSPACE_CLAIM_CAPABILITY.to_string(),
+        version: 0,
+    };
+    assert!(store
+        .claim_remote_runner_job_with_protocols(
+            "homeboy-lab",
+            None,
+            30_000,
+            None,
+            Some(&crate::runner_job_execution_context::RunnerJobExecutionProtocol::current()),
+            Some(&old),
+            None,
+        )
+        .is_err());
+    assert_eq!(
+        store.get(job.id).expect("queued job").status,
+        JobStatus::Queued
+    );
+}
+
+#[test]
 fn remote_runner_legacy_claims_remain_available_only_for_context_free_jobs() {
     let store = JobStore::default();
     let job = store
@@ -1004,6 +1054,18 @@ fn dead_daemon_recovery_preserves_remote_work_and_uses_broker_claim_reconciliati
         store.get(queued.id).expect("running job").status,
         JobStatus::Running
     );
+    store
+        .consume_remote_runner_execution(
+            queued.id,
+            "homeboy-lab",
+            &claim_id,
+            claim
+                .execution_context
+                .as_ref()
+                .expect("authenticated claim context")
+                .id(),
+        )
+        .expect("worker consumes the accepted execution receipt");
 
     let completed = store
         .finish_remote_runner_job(

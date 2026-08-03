@@ -53,6 +53,7 @@ mod records;
 pub mod runner_continuation;
 mod runner_exec;
 mod workspace_authority;
+mod workspace_claims;
 
 pub(crate) use acceptance_verifier::revalidate_durable_attestation;
 #[cfg(any(test, feature = "test-support"))]
@@ -87,6 +88,7 @@ pub use runner_continuation::{
 };
 pub use runner_exec::*;
 pub use workspace_authority::*;
+pub use workspace_claims::*;
 
 pub(crate) use conversion::*;
 pub(crate) use lifecycle_record_ops::*;

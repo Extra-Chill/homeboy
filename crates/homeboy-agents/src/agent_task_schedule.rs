@@ -10,6 +10,7 @@ use crate::agent_task::{AgentTaskComponentContract, AgentTaskOutcome, AgentTaskR
 use homeboy_core::plan::{
     HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepDependencyKind, PlanStepStatus,
 };
+use homeboy_core::workspace_claim::{WorkspaceIdentity, WorkspaceOwnerLease};
 
 mod plan {
     use super::*;
@@ -28,6 +29,9 @@ mod plan {
         pub artifact_outputs: HashMap<String, Vec<AgentTaskArtifactOutputDeclaration>>,
         pub options: AgentTaskScheduleOptions,
         pub metadata: Value,
+        pub workspace_identity: Option<WorkspaceIdentity>,
+        pub workspace_lifecycle_revision: u64,
+        pub workspace_owner_lease: Option<WorkspaceOwnerLease>,
         pub homeboy_plan: HomeboyPlan,
     }
 
@@ -43,6 +47,9 @@ mod plan {
                 artifact_outputs: HashMap::new(),
                 options: AgentTaskScheduleOptions::default(),
                 metadata: Value::Null,
+                workspace_identity: None,
+                workspace_lifecycle_revision: 0,
+                workspace_owner_lease: None,
                 homeboy_plan: HomeboyPlan::default(),
             };
             plan.rebuild_homeboy_plan();
@@ -120,6 +127,9 @@ mod plan {
                 artifact_outputs,
                 options,
                 metadata,
+                workspace_identity: None,
+                workspace_lifecycle_revision: 0,
+                workspace_owner_lease: None,
                 homeboy_plan,
             }
         }
@@ -135,7 +145,13 @@ mod plan {
                 }
             }
             self.rebuild_homeboy_plan();
-            Self::from_homeboy_plan(self.homeboy_plan)
+            let mut canonical = Self::from_homeboy_plan(self.homeboy_plan);
+            // Workspace authority is plan-level durable state, not a step input.
+            // Keep it through the generic Homeboy-plan normalization projection.
+            canonical.workspace_identity = self.workspace_identity;
+            canonical.workspace_lifecycle_revision = self.workspace_lifecycle_revision;
+            canonical.workspace_owner_lease = self.workspace_owner_lease;
+            canonical
         }
 
         fn to_homeboy_plan(&self) -> HomeboyPlan {
@@ -256,6 +272,12 @@ mod plan {
         options: AgentTaskScheduleOptions,
         #[serde(default, skip_serializing_if = "Value::is_null")]
         metadata: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_identity: Option<WorkspaceIdentity>,
+        #[serde(default)]
+        workspace_lifecycle_revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_owner_lease: Option<WorkspaceOwnerLease>,
     }
 
     impl AgentTaskPlanJson {
@@ -279,6 +301,9 @@ mod plan {
                 artifact_outputs: self.artifact_outputs,
                 options: self.options,
                 metadata: self.metadata,
+                workspace_identity: self.workspace_identity,
+                workspace_lifecycle_revision: self.workspace_lifecycle_revision,
+                workspace_owner_lease: self.workspace_owner_lease,
                 homeboy_plan: HomeboyPlan::default(),
             };
             plan.rebuild_homeboy_plan();
@@ -298,6 +323,9 @@ mod plan {
                 artifact_outputs: plan.artifact_outputs.clone(),
                 options: plan.options.clone(),
                 metadata: plan.metadata.clone(),
+                workspace_identity: plan.workspace_identity.clone(),
+                workspace_lifecycle_revision: plan.workspace_lifecycle_revision,
+                workspace_owner_lease: plan.workspace_owner_lease.clone(),
             }
         }
     }

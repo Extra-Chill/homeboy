@@ -197,6 +197,7 @@ pub fn resolve_workspace_terminal_authority(
         .map_err(|error| {
             Error::internal_json(error.to_string(), Some(path.display().to_string()))
         })?;
+    let substituted_job = job_id.is_some_and(|job_id| job_id != receipt.runner_job_id);
     let valid = receipt.schema == WORKSPACE_TERMINAL_AUTHORITY_SCHEMA
         && receipt.run_id == run_id
         && receipt.runner_id == runner_id
@@ -204,6 +205,12 @@ pub fn resolve_workspace_terminal_authority(
         && !receipt.runner_job_id.is_empty()
         && job_id.is_none_or(|job_id| job_id == receipt.runner_job_id);
     valid.then_some(receipt).map(Some).ok_or_else(|| {
+        // A substituted job identity is a conflicting authority assertion.
+        // Freeze cleanup so later compaction cannot make the workspace appear
+        // safely addressable after a failed exact-binding check.
+        if substituted_job {
+            let _ = begin_workspace_terminal_authority_release(run_id, runner_id, remote_workspace);
+        }
         Error::validation_invalid_argument(
             "workspace_terminal_authority",
             "workspace terminal authority receipt is malformed or contradicts workspace ownership",

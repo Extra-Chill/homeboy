@@ -3328,6 +3328,155 @@ fn routes_exec_body_to_daemon_job() {
 }
 
 #[test]
+fn workspace_claim_authority_route_reports_clear_and_live_owner_without_tokens() {
+    let _home = HomeGuard::new();
+    let store = JobStore::default();
+    let workspace = crate::workspace_claim::WorkspaceIdentity::new("test-workspace", "authority")
+        .expect("workspace identity");
+    let clear = route_with_body(
+        "POST",
+        "/workspace-claims/authority",
+        Some(serde_json::json!({ "workspace": workspace })),
+        &store,
+    );
+    assert_eq!(clear.status_code, 200);
+    assert_eq!(clear.body["body"]["status"]["clear"], true);
+
+    let owner = route_with_body(
+        "POST",
+        "/workspace-owners/register",
+        Some(serde_json::json!({ "workspace": workspace, "owner_id": "visible-only-in-store" })),
+        &store,
+    );
+    assert_eq!(owner.status_code, 200);
+    let live = route_with_body(
+        "POST",
+        "/workspace-claims/authority",
+        Some(serde_json::json!({ "workspace": workspace })),
+        &store,
+    );
+    assert_eq!(live.status_code, 200);
+    assert_eq!(live.body["body"]["status"]["clear"], false);
+    assert_eq!(live.body["body"]["status"]["live_owner_count"], 1);
+    assert!(!live.body.to_string().contains("visible-only-in-store"));
+    assert!(!live.body.to_string().contains(
+        owner.body["body"]["lease"]["token"]
+            .as_str()
+            .expect("token")
+    ));
+}
+
+#[test]
+fn exec_commit_failure_keeps_primary_error_and_restart_recovers_failed_owner_rollback() {
+    super::tests::register_enqueue_test_driver();
+    let _home = create_lab_local_runner();
+    let store = JobStore::open_without_reconciliation(
+        crate::paths::daemon_jobs_file().expect("daemon jobs path"),
+    )
+    .expect("durable job store");
+    let workspace = crate::workspace_claim::WorkspaceIdentity::new(
+        "test-workspace",
+        "endpoint-commit-rollback",
+    )
+    .expect("workspace identity");
+    let claims_root = crate::paths::homeboy_data()
+        .expect("homeboy data")
+        .join("daemon-workspace-claims");
+    let claims = crate::workspace_claim::WorkspaceClaimStore::new(&claims_root);
+    claims
+        .fail_next_owner_releases(&workspace, 1)
+        .expect("inject owner release failure");
+    // The endpoint's pre-dispatch reconciler writes first; fail the following
+    // durable queue commit, after owner registration.
+    store.skip_next_durable_writes(1);
+    store.fail_next_durable_writes(1);
+
+    // Exercise the daemon's actual `/exec` endpoint path after it has registered
+    // the direct owner, rather than testing the rollback helper in isolation.
+    let response = route_with_body(
+        "POST",
+        "/exec",
+        Some(serde_json::json!({
+            "runner_id": "lab-local",
+            "cwd": std::env::current_dir().expect("cwd"),
+            "command": ["sh", "-c", "printf should-not-run"],
+            "workspace_owner_request": {
+                "workspace": workspace,
+                "owner_id": "endpoint-commit-rollback"
+            }
+        })),
+        &store,
+    );
+
+    assert_eq!(response.status_code, 400, "response: {}", response.body);
+    assert_eq!(response.body["error"], "internal.io_error");
+    assert_eq!(
+        response.body["details"]["error"],
+        "injected durable store write failure"
+    );
+    assert!(
+        store.list().is_empty(),
+        "failed commit created no active job"
+    );
+    let recovery = &response.body["details"]["workspace_owner_lease_cleanup"]["recovery"];
+    assert_eq!(
+        recovery["schema"], "homeboy/workspace-owner-release-recovery/v1",
+        "response: {}",
+        response.body
+    );
+    assert_eq!(
+        recovery["lease"]["workspace"],
+        serde_json::to_value(&workspace).expect("serialize workspace")
+    );
+    let token = recovery["lease"]["token"].as_str().expect("owner token");
+    assert!(!token.is_empty());
+    let lease: crate::workspace_claim::WorkspaceOwnerLease =
+        serde_json::from_value(recovery["lease"].clone()).expect("recovery owner lease");
+    assert!(claims
+        .validate_owner(&lease, crate::api_jobs::timestamp_ms())
+        .expect("validate pending owner"));
+    assert_eq!(
+        crate::workspace_claim::WorkspaceClaimStore::new(&claims_root)
+            .pending_owner_release_recoveries()
+            .expect("durable recovery evidence"),
+        vec![serde_json::from_value(recovery.clone()).expect("typed recovery evidence")]
+    );
+
+    // A fresh daemon consumes the durable recovery record before servicing its
+    // first request. The one-shot release injection has now cleared.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("listener address");
+    let server = std::thread::spawn(move || serve_listener_for_requests(listener, 1));
+    let health: Value = reqwest::blocking::get(format!("http://{addr}/health"))
+        .expect("restart health response")
+        .json()
+        .expect("restart health JSON");
+    assert_eq!(health["success"], true);
+    server
+        .join()
+        .expect("join restart daemon")
+        .expect("restart daemon");
+
+    assert!(
+        !crate::workspace_claim::WorkspaceClaimStore::new(&claims_root)
+            .validate_owner(&lease, crate::api_jobs::timestamp_ms())
+            .expect("validate released owner")
+    );
+    assert!(
+        crate::workspace_claim::WorkspaceClaimStore::new(&claims_root)
+            .pending_owner_release_recoveries()
+            .expect("recovery records")
+            .is_empty()
+    );
+    assert!(JobStore::open_without_reconciliation(
+        crate::paths::daemon_jobs_file().expect("daemon jobs path")
+    )
+    .expect("reopen durable jobs")
+    .list()
+    .is_empty());
+}
+
+#[test]
 fn routes_exec_preserves_path_materialization_plan_on_job_metadata() {
     super::tests::register_enqueue_test_driver();
     let _home = create_lab_local_runner();

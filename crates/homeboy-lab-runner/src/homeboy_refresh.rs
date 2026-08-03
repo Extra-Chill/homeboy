@@ -1050,6 +1050,7 @@ fn probe_reconnected_admission_readiness(runner_id: &str, identity_commit: &str)
                 expected_lease_id,
                 None,
                 DaemonAdmissionPolicy::LegacyCompatible,
+                None,
             )
             .map(|reservation| {
                 // Drop releases the reservation immediately; readiness is the

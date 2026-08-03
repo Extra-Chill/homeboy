@@ -94,6 +94,18 @@ pub(super) fn exec_via_daemon(
             env.insert("HOMEBOY_COMMAND".to_string(), homeboy_path.to_string());
         }
     }
+    let workspace_owner_request = if run_id_owns_generic_exec {
+        None
+    } else {
+        run_id
+            .as_deref()
+            .map(homeboy_agents::agent_task_lifecycle::workspace_owner_registration_if_present)
+            .transpose()?
+            .flatten()
+    };
+    if workspace_owner_request.is_some() {
+        require_daemon_workspace_owner_lease_v2(&client, local_url)?;
+    }
     let payload = json!({
         "runner_id": runner.id,
         "runner": runner,
@@ -115,6 +127,11 @@ pub(super) fn exec_via_daemon(
         // reconstruct it from nested lifecycle/metadata, so a resubmission after
         // a transport drop is a safe no-op. Uses the durable run id when present.
         "idempotency_key": run_id,
+        "workspace_owner_request": workspace_owner_request.as_ref().map(|(workspace, owner_id)| json!({
+            "workspace": workspace,
+            "owner_id": owner_id,
+            "ttl_ms": homeboy_core::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
+        })),
     });
     let response = submit_daemon_exec_with_session_recovery(
         local_url,
@@ -441,12 +458,52 @@ pub(super) fn exec_via_daemon(
     ))
 }
 
+/// Workspace-bound direct work must establish that the daemon understands the
+/// v2 lease contract before any mutating endpoint is called.
+fn require_daemon_workspace_owner_lease_v2(client: &Client, local_url: &str) -> Result<()> {
+    let data = daemon_get(client, local_url, "/capabilities").map_err(|error| {
+        Error::validation_invalid_argument(
+            "daemon_capabilities",
+            format!(
+                "direct daemon is unavailable for workspace owner lease v2 preflight: {}",
+                error.message
+            ),
+            Some(local_url.to_string()),
+            None,
+        )
+    })?;
+    let body = canonical_daemon_body(&data, "daemon capabilities response")?;
+    let supported = body
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .is_some_and(|capabilities| {
+            capabilities.iter().any(|capability| {
+                capability.get("capability").and_then(Value::as_str)
+                    == Some(homeboy_core::workspace_claim::WORKSPACE_OWNER_LEASE_CAPABILITY)
+                    && capability.get("version").and_then(Value::as_u64)
+                        == Some(
+                            homeboy_core::workspace_claim::WORKSPACE_CLAIM_PROTOCOL_VERSION as u64,
+                        )
+            })
+        });
+    supported.then_some(()).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "daemon_capabilities",
+            "direct daemon does not advertise workspace owner lease v2",
+            Some(local_url.to_string()),
+            None,
+        )
+    })
+}
+
 /// Selects whether an admission may interoperate with legacy daemon responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DaemonAdmissionPolicy {
     LegacyCompatible,
     DurableLeaseRequired,
 }
+
+type WorkspaceOwnerRegistration = (homeboy_core::workspace_claim::WorkspaceIdentity, String);
 
 const ADMISSION_RECOVERY_WINDOW: Duration = Duration::from_secs(10);
 const ADMISSION_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_millis(250);
@@ -555,6 +612,7 @@ pub(crate) struct DaemonAdmissionReservation {
     local_url: String,
     job_id: String,
     token: Option<String>,
+    workspace_owner_lease: Arc<Mutex<Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>>>,
     renewer_stop: Option<Sender<()>>,
     renewer: Option<std::thread::JoinHandle<()>>,
     authority: DaemonAdmissionReservationAuthority,
@@ -589,11 +647,10 @@ impl Drop for DaemonAdmissionReservation {
             &client,
             &self.local_url,
             &format!("/admissions/{}/release", self.job_id),
-            &self
-                .token
-                .as_ref()
-                .map(|token| json!({ "admission_token": token }))
-                .unwrap_or_else(|| json!({})),
+            &json!({
+                "admission_token": self.token.as_deref(),
+                "workspace_owner_lease": self.workspace_owner_lease.lock().expect("admission owner lease lock").as_ref(),
+            }),
             DaemonPostOptions::default(),
         );
     }
@@ -606,6 +663,7 @@ pub(crate) fn reserve_daemon_admission(
     expected_daemon_lease_id: &str,
     idempotency_key: Option<&str>,
     policy: DaemonAdmissionPolicy,
+    workspace_owner_registration: Option<WorkspaceOwnerRegistration>,
 ) -> Result<DaemonAdmissionReservation> {
     let client = Client::builder()
         .no_proxy()
@@ -614,6 +672,9 @@ pub(crate) fn reserve_daemon_admission(
         .map_err(|err| {
             Error::internal_unexpected(format!("build daemon admission client: {err}"))
         })?;
+    if workspace_owner_registration.is_some() {
+        require_daemon_workspace_owner_lease_v2(&client, local_url)?;
+    }
     let response = daemon_post_json_text(
         &client,
         local_url,
@@ -624,6 +685,11 @@ pub(crate) fn reserve_daemon_admission(
             "expected_daemon_lease_id": expected_daemon_lease_id,
             "idempotency_key": idempotency_key,
             "admission_lease_protocol": 1,
+            "workspace_owner_request": workspace_owner_registration.as_ref().map(|(workspace, owner_id)| json!({
+                "workspace": workspace,
+                "owner_id": owner_id,
+                "ttl_ms": homeboy_core::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
+            })),
         }),
         DaemonPostOptions::default(),
     )?;
@@ -669,6 +735,27 @@ pub(crate) fn reserve_daemon_admission(
             Some("parse daemon admission job".to_string()),
         )
     })?;
+    let workspace_owner_lease = body
+        .get("workspace_owner_lease")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|err| {
+            Error::validation_invalid_argument(
+                "workspace_owner_lease",
+                format!("malformed direct daemon owner lease: {err}"),
+                None,
+                None,
+            )
+        })?;
+    if workspace_owner_registration.is_some() && workspace_owner_lease.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "workspace_owner_lease",
+            "direct daemon admission did not return its durable owner lease",
+            Some(runner_id.to_string()),
+            None,
+        ));
+    }
     let token = body
         .get("admission_token")
         .and_then(Value::as_str)
@@ -706,6 +793,7 @@ pub(crate) fn reserve_daemon_admission(
                 local_url.to_string(),
                 job.id.to_string(),
                 token.to_string(),
+                Arc::new(Mutex::new(workspace_owner_lease.clone())),
                 renewal_health.clone(),
             );
             (Some(stop), Some(renewer))
@@ -718,6 +806,7 @@ pub(crate) fn reserve_daemon_admission(
         local_url: local_url.to_string(),
         job_id: job.id.to_string(),
         token,
+        workspace_owner_lease: Arc::new(Mutex::new(workspace_owner_lease)),
         renewer_stop,
         renewer,
         authority: DaemonAdmissionReservationAuthority {
@@ -740,6 +829,7 @@ pub(crate) fn reserve_daemon_admission_with_recovery(
     expected_daemon_lease_id: &str,
     idempotency_key: Option<&str>,
     policy: DaemonAdmissionPolicy,
+    workspace_owner_registration: Option<WorkspaceOwnerRegistration>,
 ) -> Result<DaemonAdmissionReservation> {
     reserve_daemon_admission_with_recovery_with(
         runner_id,
@@ -753,6 +843,7 @@ pub(crate) fn reserve_daemon_admission_with_recovery(
                 expected_daemon_lease_id,
                 idempotency_key,
                 policy,
+                workspace_owner_registration.clone(),
             )
         },
         || std::thread::sleep(ADMISSION_RECOVERY_RETRY_INTERVAL),
@@ -905,6 +996,7 @@ fn spawn_admission_renewer(
     local_url: String,
     job_id: String,
     token: String,
+    workspace_owner_lease: Arc<Mutex<Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>>>,
     health: Arc<Mutex<AdmissionRenewalHealth>>,
 ) -> (Sender<()>, std::thread::JoinHandle<()>) {
     let (stop, shutdown) = mpsc::channel();
@@ -925,10 +1017,13 @@ fn spawn_admission_renewer(
                 &client,
                 &local_url,
                 &format!("/admissions/{job_id}/renew"),
-                &json!({ "admission_token": token }),
+                &json!({
+                    "admission_token": token,
+                    "workspace_owner_lease": workspace_owner_lease.lock().expect("admission owner lease lock").as_ref(),
+                }),
                 DaemonPostOptions::default(),
             );
-            let expires_at_ms = response
+            let body = response
                 .ok()
                 .and_then(|response| serde_json::from_str::<DaemonEnvelope>(&response.body).ok())
                 .and_then(|envelope| envelope.data)
@@ -936,10 +1031,33 @@ fn spawn_admission_renewer(
                     canonical_daemon_body(&data, "daemon admission renewal response")
                         .ok()
                         .cloned()
-                })
+                });
+            let expires_at_ms = body
+                .as_ref()
                 .and_then(|body| body.pointer("/lease/expires_at_ms").and_then(Value::as_u64));
-            match expires_at_ms {
-                Some(expires_at_ms) if expires_at_ms > 0 => {
+            let renewed_owner = body.as_ref().and_then(|body| {
+                serde_json::from_value(body["workspace_owner_lease"].clone()).ok()
+            });
+            match (expires_at_ms, renewed_owner) {
+                (Some(expires_at_ms), owner) if expires_at_ms > 0 => {
+                    if workspace_owner_lease
+                        .lock()
+                        .expect("admission owner lease lock")
+                        .is_some()
+                        && owner.is_none()
+                    {
+                        health
+                            .lock()
+                            .expect("admission renewal health lock")
+                            .failure =
+                            Some("daemon did not return renewed workspace owner lease".to_string());
+                        return;
+                    }
+                    if let Some(owner) = owner {
+                        *workspace_owner_lease
+                            .lock()
+                            .expect("admission owner lease lock") = Some(owner);
+                    }
                     health
                         .lock()
                         .expect("admission renewal health lock")

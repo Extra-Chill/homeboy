@@ -141,6 +141,8 @@ pub(super) fn replay_request(run_id: &str, command: &[String]) -> RemoteRunnerJo
         require_paths: Vec::new(),
         lab_runner_workload: None,
         lifecycle: None,
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
         metadata: Some(json!({
             "submission_key": format!("agent-task:v1:homeboy-lab:{run_id}"),
             "durable_run_id": run_id,

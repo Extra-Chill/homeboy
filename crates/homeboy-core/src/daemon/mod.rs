@@ -790,6 +790,10 @@ struct ExecRequest {
     /// extraction.
     #[serde(default)]
     idempotency_key: Option<String>,
+    #[serde(default)]
+    workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
+    #[serde(default)]
+    workspace_owner_request: Option<WorkspaceOwnerRegisterRequest>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1122,6 +1126,8 @@ where
     // Expire only reservations that never recorded a child identity.
     job_store.reconcile_expired_local_child_reservations()?;
     job_store.reconcile_expired_admissions()?;
+    reconcile_pending_workspace_owner_releases();
+    reconcile_terminal_workspace_owner_leases(&job_store);
     recover_controller_jobs(&job_store);
     let _ = daemon_runtime_snapshot();
     let loopback_bind = local_addr.ip().is_loopback();
@@ -1242,6 +1248,8 @@ fn spawn_local_child_reservation_reconciler(
     std::thread::spawn(move || loop {
         let _ = job_store.reconcile_expired_local_child_reservations();
         let _ = job_store.reconcile_expired_admissions();
+        reconcile_pending_workspace_owner_releases();
+        reconcile_terminal_workspace_owner_leases(&job_store);
         if shutdown
             .recv_timeout(std::time::Duration::from_secs(
                 LOCAL_CHILD_RESERVATION_RECONCILE_INTERVAL_SECS,
@@ -1473,6 +1481,16 @@ where
             }),
             artifact: None,
         },
+        ("GET", "/capabilities") => daemon_endpoint_response(
+            "daemon.capabilities",
+            json!({
+                "schema": "homeboy/daemon-capabilities/v1",
+                "capabilities": [
+                    crate::workspace_claim::WorkspaceClaimProtocol::current(),
+                    crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current(),
+                ],
+            }),
+        ),
         ("GET", "/config/paths") => match config_paths_body() {
             Ok(body) => HttpResponse {
                 status_code: 200,
@@ -1488,6 +1506,38 @@ where
         },
         ("POST", "/exec") => match enqueue_exec_job(body, job_store) {
             Ok(body) => daemon_endpoint_response("jobs.exec", body),
+            Err(err) => error_response(400, err),
+        },
+        ("POST", "/workspace-claims/acquire") => match acquire_workspace_claim(body) {
+            Ok(body) => daemon_endpoint_response("workspace_claim.acquire", body),
+            Err(err) => error_response(400, err),
+        },
+        ("POST", "/workspace-claims/validate") => match validate_workspace_claim(body) {
+            Ok(body) => daemon_endpoint_response("workspace_claim.validate", body),
+            Err(err) => error_response(400, err),
+        },
+        ("POST", "/workspace-claims/release") => match release_workspace_claim(body) {
+            Ok(body) => daemon_endpoint_response("workspace_claim.release", body),
+            Err(err) => error_response(400, err),
+        },
+        ("POST", "/workspace-claims/authority") => match workspace_claim_authority_status(body) {
+            Ok(body) => daemon_endpoint_response("workspace_claim.authority", body),
+            Err(err) => error_response(400, err),
+        },
+        ("POST", "/workspace-owners/register") => match register_workspace_owner(body) {
+            Ok(body) => daemon_endpoint_response("workspace_owner.register", body),
+            Err(err) => error_response(400, err),
+        },
+        ("POST", "/workspace-owners/validate") => match validate_workspace_owner(body) {
+            Ok(body) => daemon_endpoint_response("workspace_owner.validate", body),
+            Err(err) => error_response(400, err),
+        },
+        ("POST", "/workspace-owners/renew") => match renew_workspace_owner(body) {
+            Ok(body) => daemon_endpoint_response("workspace_owner.renew", body),
+            Err(err) => error_response(400, err),
+        },
+        ("POST", "/workspace-owners/release") => match release_workspace_owner(body) {
+            Ok(body) => daemon_endpoint_response("workspace_owner.release", body),
             Err(err) => error_response(400, err),
         },
         ("POST", "/controller/jobs") => match enqueue_controller_job(body, job_store) {
@@ -1572,6 +1622,14 @@ where
         }
         ("GET", "/exec")
         | ("GET", "/admissions")
+        | ("GET", "/workspace-claims/acquire")
+        | ("GET", "/workspace-claims/validate")
+        | ("GET", "/workspace-claims/release")
+        | ("GET", "/workspace-claims/authority")
+        | ("GET", "/workspace-owners/register")
+        | ("GET", "/workspace-owners/validate")
+        | ("GET", "/workspace-owners/renew")
+        | ("GET", "/workspace-owners/release")
         | ("GET", "/jobs/reconcile-terminal")
         | ("GET", "/controller/jobs") => HttpResponse {
             status_code: 405,
@@ -1585,13 +1643,24 @@ where
         ("POST", "/runner/sessions")
         | ("POST", "/runner/jobs")
         | ("POST", "/runner/jobs/reconcile")
-        | ("POST", "/runner/jobs/claim") => {
+        | ("POST", "/runner/jobs/claim")
+        | ("POST", "/runner/workspace-claims/acquire")
+        | ("POST", "/runner/workspace-claims/validate")
+        | ("POST", "/runner/workspace-claims/release")
+        | ("POST", "/runner/workspace-claims/authority")
+        | ("POST", "/runner/workspace-owners/register")
+        | ("POST", "/runner/workspace-owners/validate")
+        | ("POST", "/runner/workspace-owners/renew")
+        | ("POST", "/runner/workspace-owners/release") => {
             remote_runner::route(method, path, body, job_store, &broker_auth)
         }
         ("GET", "/runner/sessions")
         | ("GET", "/runner/jobs")
         | ("GET", "/runner/jobs/reconcile")
         | ("GET", "/runner/jobs/claim") => method_not_allowed(),
+        ("GET", "/runner/workspace-claims/capabilities") => {
+            remote_runner::route(method, path, body, job_store, &broker_auth)
+        }
         ("GET", path) if path.starts_with("/runner/jobs/") => {
             remote_runner::route(method, path, body, job_store, &broker_auth)
         }
@@ -1644,6 +1713,28 @@ fn reserve_admission(
     job_store: &JobStore,
 ) -> Result<serde_json::Value> {
     let body = body.unwrap_or_else(|| json!({}));
+    let workspace_claim_binding = workspace_claim_binding_from_body(&Some(body.clone()))?;
+    let workspace_owner_request = body
+        .get("workspace_owner_request")
+        .cloned()
+        .map(|value| serde_json::from_value::<WorkspaceOwnerRegisterRequest>(value))
+        .transpose()
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "workspace_owner_request",
+                format!("malformed direct workspace owner request: {error}"),
+                None,
+                None,
+            )
+        })?;
+    if workspace_owner_request.is_some() && workspace_claim_binding.is_some() {
+        return Err(Error::validation_invalid_argument(
+            "workspace_claim_binding",
+            "direct admission uses an owner lease, not a reconciliation claim",
+            None,
+            None,
+        ));
+    }
     let runner_id = body
         .get("runner_id")
         .and_then(serde_json::Value::as_str)
@@ -1695,6 +1786,8 @@ fn reserve_admission(
             "daemon_lease_id": daemon_lease.lease_id.clone(),
             "idempotency_key": idempotency_key,
         },
+        "workspace_claim_binding": body.get("workspace_claim_binding").cloned().unwrap_or(serde_json::Value::Null),
+        "workspace_owner_lease": serde_json::Value::Null,
     });
     // Lease protocol is opt-in so an older controller can finish an admission
     // after a daemon upgrade. New controllers also tolerate old daemons that
@@ -1724,14 +1817,44 @@ fn reserve_admission(
             "idempotent_resubmission": !created,
         }));
     }
+    // Register before committing the admission so reconciliation cannot win the
+    // inter-store window. A failed commit is rolled back below.
+    let mut pending_owner_lease = PendingWorkspaceOwnerLease::new(
+        workspace_owner_request
+            .as_ref()
+            .map(|request| {
+                daemon_workspace_claim_store()?.register_owner(
+                    request.workspace.clone(),
+                    request.owner_id.clone(),
+                    request.ttl_ms,
+                    workspace_claim_now_ms(),
+                )
+            })
+            .transpose()?,
+    );
     let reservation = match idempotency_key {
         Some(idempotency_key) => job_store.create_or_renew_admission_at(
             metadata,
             idempotency_key,
             crate::api_jobs::timestamp_ms(),
-        )?,
-        None => job_store.create_admission_at(metadata, crate::api_jobs::timestamp_ms())?,
+            workspace_claim_binding,
+            pending_owner_lease.lease().cloned(),
+        ),
+        None => job_store.create_admission_at(
+            metadata,
+            crate::api_jobs::timestamp_ms(),
+            workspace_claim_binding,
+            pending_owner_lease.lease().cloned(),
+        ),
     };
+    let reservation = match reservation {
+        Ok(reservation) => reservation,
+        Err(mut error) => {
+            pending_owner_lease.rollback_error(&mut error);
+            return Err(error);
+        }
+    };
+    let workspace_owner_lease = pending_owner_lease.disarm();
     Ok(json!({
         "job": reservation.job,
         "daemon_lease_id": daemon_lease.lease_id,
@@ -1744,6 +1867,7 @@ fn reserve_admission(
             "expires_at_ms": reservation.expires_at_ms,
             "renewable": true,
         },
+        "workspace_owner_lease": workspace_owner_lease,
     }))
 }
 
@@ -1759,6 +1883,326 @@ fn validate_admission_lease(expected_lease_id: &str, actual_lease_id: &str) -> R
         Some(expected_lease_id.to_string()),
         None,
     ))
+}
+
+fn daemon_workspace_claim_store() -> Result<crate::workspace_claim::WorkspaceClaimStore> {
+    Ok(crate::workspace_claim::WorkspaceClaimStore::new(
+        crate::paths::homeboy_data()?.join("daemon-workspace-claims"),
+    ))
+}
+
+fn workspace_claim_now_ms() -> u64 {
+    chrono::Utc::now().timestamp_millis().max(0) as u64
+}
+
+/// Owns a direct workspace lease until a durable job or admission has recorded
+/// the exact token and epoch. Drop closes panic and early-return windows.
+struct PendingWorkspaceOwnerLease {
+    lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
+}
+
+impl PendingWorkspaceOwnerLease {
+    fn new(lease: Option<crate::workspace_claim::WorkspaceOwnerLease>) -> Self {
+        Self { lease }
+    }
+
+    fn lease(&self) -> Option<&crate::workspace_claim::WorkspaceOwnerLease> {
+        self.lease.as_ref()
+    }
+
+    fn disarm(mut self) -> Option<crate::workspace_claim::WorkspaceOwnerLease> {
+        self.lease.take()
+    }
+
+    fn rollback_error(&mut self, error: &mut Error) {
+        let Some(lease) = self.lease.take() else {
+            return;
+        };
+        let cleanup = daemon_workspace_claim_store().and_then(|store| {
+            let release = store.release_owner(&lease, workspace_claim_now_ms());
+            let recovery = release
+                .as_ref()
+                .err()
+                .map(|release_error| store.record_owner_release_failure(&lease, release_error))
+                .transpose()?;
+            Ok((release, recovery))
+        });
+        let (released, cleanup_error, recovery) = match cleanup {
+            Ok((Ok(()), _)) => (true, None, None),
+            Ok((Err(release_error), recovery)) => {
+                (false, Some(release_error.to_string()), recovery)
+            }
+            Err(recovery_error) => (false, Some(recovery_error.to_string()), None),
+        };
+        error.details["workspace_owner_lease_cleanup"] = json!({
+            "schema": "homeboy/workspace-owner-lease-cleanup/v1",
+            "attempted": true,
+            "released": released,
+            "error": cleanup_error,
+            "recovery": recovery,
+        });
+    }
+}
+
+impl Drop for PendingWorkspaceOwnerLease {
+    fn drop(&mut self) {
+        let Some(lease) = self.lease.take() else {
+            return;
+        };
+        let _ = daemon_workspace_claim_store()
+            .and_then(|store| store.release_owner(&lease, workspace_claim_now_ms()));
+    }
+}
+
+/// Restart reconciliation releases only terminal direct records. Queued and
+/// running records retain their exact lease for renewal by their live owner.
+fn reconcile_terminal_workspace_owner_leases(job_store: &JobStore) {
+    let Ok(store) = daemon_workspace_claim_store() else {
+        return;
+    };
+    for (job_id, lease) in job_store.terminal_workspace_owner_leases() {
+        if let Err(error) = store.release_owner(&lease, workspace_claim_now_ms()) {
+            let _ = job_store.record_workspace_owner_cleanup_failure(job_id, &error);
+        }
+    }
+}
+
+/// Failed pre-commit rollback has no job record to attach to. Its durable claim
+/// store evidence is therefore reconciled independently at daemon startup.
+fn reconcile_pending_workspace_owner_releases() {
+    let Ok(store) = daemon_workspace_claim_store() else {
+        return;
+    };
+    let Ok(recoveries) = store.pending_owner_release_recoveries() else {
+        return;
+    };
+    for recovery in recoveries {
+        let _ = store.release_owner(&recovery.lease, workspace_claim_now_ms());
+    }
+}
+
+const DIRECT_WORKSPACE_OWNER_RENEW_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Keeps direct `/exec` ownership below the five-minute authority TTL. The
+/// replacement is committed to the job before the child can continue; a failed
+/// replacement cancels execution and leaves durable recovery evidence.
+struct DirectWorkspaceOwnerRenewer {
+    stop: mpsc::Sender<()>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl DirectWorkspaceOwnerRenewer {
+    fn start(
+        job_id: Uuid,
+        lease: crate::workspace_claim::WorkspaceOwnerLease,
+        job_store: JobStore,
+        cancellation_requested: Arc<AtomicBool>,
+    ) -> Self {
+        let (stop, shutdown) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let mut lease = lease;
+            while shutdown
+                .recv_timeout(DIRECT_WORKSPACE_OWNER_RENEW_INTERVAL)
+                .is_err()
+            {
+                let mut recovery_lease = lease.clone();
+                let outcome = (|| {
+                    let store = daemon_workspace_claim_store()?;
+                    let renewed = store.renew_owner(
+                        &lease,
+                        crate::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
+                        workspace_claim_now_ms(),
+                    )?;
+                    recovery_lease = renewed.clone();
+                    job_store.replace_local_runner_workspace_owner_lease(
+                        job_id,
+                        &lease,
+                        renewed.clone(),
+                    )?;
+                    Ok(renewed)
+                })();
+                match outcome {
+                    Ok(renewed) => lease = renewed,
+                    Err(error) => {
+                        cancellation_requested.store(true, Ordering::SeqCst);
+                        // If the authority advanced but the job write failed,
+                        // retain the exact new token for startup reconciliation.
+                        if let Ok(store) = daemon_workspace_claim_store() {
+                            let _ = store.record_owner_release_failure(&recovery_lease, &error);
+                        }
+                        let _ = job_store.fail_with_data(
+                            job_id,
+                            "workspace owner lease renewal failed",
+                            Some(json!({
+                                "schema": "homeboy/workspace-owner-lease-renewal-failure/v1",
+                                "error_code": error.code.as_str(),
+                                "error": error.to_string(),
+                                "lease": recovery_lease,
+                                "recovery": "daemon startup retries the exact durable owner lease",
+                            })),
+                        );
+                        return;
+                    }
+                }
+            }
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for DirectWorkspaceOwnerRenewer {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn workspace_claim_request<T: serde::de::DeserializeOwned>(
+    body: Option<serde_json::Value>,
+    field: &str,
+) -> Result<T> {
+    serde_json::from_value(body.unwrap_or_else(|| json!({}))).map_err(|error| {
+        Error::validation_invalid_argument(
+            field,
+            format!("malformed workspace claim request: {error}"),
+            None,
+            None,
+        )
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct WorkspaceClaimAcquireRequest {
+    workspace: crate::workspace_claim::WorkspaceIdentity,
+    ttl_ms: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct WorkspaceClaimRequest {
+    claim: crate::workspace_claim::WorkspaceClaim,
+}
+
+#[derive(serde::Deserialize)]
+struct WorkspaceAuthorityStatusRequest {
+    workspace: crate::workspace_claim::WorkspaceIdentity,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
+struct WorkspaceOwnerRegisterRequest {
+    workspace: crate::workspace_claim::WorkspaceIdentity,
+    owner_id: String,
+    #[serde(default = "default_workspace_owner_ttl_ms")]
+    ttl_ms: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct WorkspaceOwnerLeaseRequest {
+    lease: crate::workspace_claim::WorkspaceOwnerLease,
+    #[serde(default = "default_workspace_owner_ttl_ms")]
+    ttl_ms: u64,
+}
+
+fn default_workspace_owner_ttl_ms() -> u64 {
+    crate::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS
+}
+
+fn register_workspace_owner(body: Option<serde_json::Value>) -> Result<serde_json::Value> {
+    let request: WorkspaceOwnerRegisterRequest =
+        workspace_claim_request(body, "workspace_owner_lease")?;
+    let lease = daemon_workspace_claim_store()?.register_owner(
+        request.workspace,
+        request.owner_id,
+        request.ttl_ms,
+        workspace_claim_now_ms(),
+    )?;
+    Ok(json!({ "lease": lease }))
+}
+fn validate_workspace_owner(body: Option<serde_json::Value>) -> Result<serde_json::Value> {
+    let request: WorkspaceOwnerLeaseRequest =
+        workspace_claim_request(body, "workspace_owner_lease")?;
+    Ok(
+        json!({ "valid": daemon_workspace_claim_store()?.validate_owner(&request.lease, workspace_claim_now_ms())? }),
+    )
+}
+fn renew_workspace_owner(body: Option<serde_json::Value>) -> Result<serde_json::Value> {
+    let request: WorkspaceOwnerLeaseRequest =
+        workspace_claim_request(body, "workspace_owner_lease")?;
+    let lease = daemon_workspace_claim_store()?.renew_owner(
+        &request.lease,
+        request.ttl_ms,
+        workspace_claim_now_ms(),
+    )?;
+    Ok(json!({ "lease": lease }))
+}
+fn release_workspace_owner(body: Option<serde_json::Value>) -> Result<serde_json::Value> {
+    let request: WorkspaceOwnerLeaseRequest =
+        workspace_claim_request(body, "workspace_owner_lease")?;
+    daemon_workspace_claim_store()?.release_owner(&request.lease, workspace_claim_now_ms())?;
+    Ok(json!({ "released": true }))
+}
+
+fn acquire_workspace_claim(body: Option<serde_json::Value>) -> Result<serde_json::Value> {
+    let request: WorkspaceClaimAcquireRequest = workspace_claim_request(body, "workspace_claim")?;
+    let claim = daemon_workspace_claim_store()?.acquire(
+        request.workspace,
+        request.ttl_ms,
+        workspace_claim_now_ms(),
+    )?;
+    Ok(json!({ "claim": claim }))
+}
+
+fn validate_workspace_claim(body: Option<serde_json::Value>) -> Result<serde_json::Value> {
+    let request: WorkspaceClaimRequest = workspace_claim_request(body, "workspace_claim")?;
+    let valid =
+        daemon_workspace_claim_store()?.validate(&request.claim, workspace_claim_now_ms())?;
+    Ok(json!({ "valid": valid }))
+}
+
+fn release_workspace_claim(body: Option<serde_json::Value>) -> Result<serde_json::Value> {
+    let request: WorkspaceClaimRequest = workspace_claim_request(body, "workspace_claim")?;
+    daemon_workspace_claim_store()?.release(&request.claim, workspace_claim_now_ms())?;
+    Ok(json!({ "released": true }))
+}
+
+fn workspace_claim_authority_status(body: Option<serde_json::Value>) -> Result<serde_json::Value> {
+    let request: WorkspaceAuthorityStatusRequest = workspace_claim_request(body, "workspace")?;
+    Ok(
+        json!({ "status": daemon_workspace_claim_store()?.authority_status(
+        &request.workspace,
+        workspace_claim_now_ms(),
+    )? }),
+    )
+}
+
+fn authorize_workspace_claim_binding(
+    binding: Option<&crate::workspace_claim::WorkspaceClaimBinding>,
+) -> Result<()> {
+    if let Some(binding) = binding {
+        daemon_workspace_claim_store()?.authorize_binding(binding, workspace_claim_now_ms())?;
+    }
+    Ok(())
+}
+
+fn workspace_claim_binding_from_body(
+    body: &Option<serde_json::Value>,
+) -> Result<Option<crate::workspace_claim::WorkspaceClaimBinding>> {
+    body.as_ref()
+        .and_then(|body| body.get("workspace_claim_binding"))
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "workspace_claim_binding",
+                format!("malformed workspace claim binding: {error}"),
+                None,
+                None,
+            )
+        })
 }
 
 fn admission_job_id(path: &str, suffix: &str) -> Result<uuid::Uuid> {
@@ -1799,6 +2243,37 @@ fn release_admission(
     job_store: &JobStore,
 ) -> Result<serde_json::Value> {
     let job_id = admission_job_id(path, "/release")?;
+    let workspace_owner_lease = body
+        .as_ref()
+        .and_then(|body| body.get("workspace_owner_lease"))
+        .cloned()
+        .map(serde_json::from_value::<crate::workspace_claim::WorkspaceOwnerLease>)
+        .transpose()
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "workspace_owner_lease",
+                format!("malformed direct workspace owner lease: {error}"),
+                Some(job_id.to_string()),
+                None,
+            )
+        })?;
+    authorize_exact_admission_workspace_owner_lease(
+        job_store,
+        job_id,
+        workspace_owner_lease.as_ref(),
+    )?;
+    if let Some(lease) = workspace_owner_lease.as_ref() {
+        if !daemon_workspace_claim_store()?.validate_owner(lease, workspace_claim_now_ms())? {
+            return Err(Error::validation_invalid_argument(
+                "workspace_owner_lease",
+                "direct workspace owner lease is no longer live",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+    }
+    let binding = workspace_claim_binding_from_body(&body)?;
+    authorize_exact_admission_workspace_claim_binding(job_store, job_id, binding.as_ref())?;
     let job = match body
         .and_then(|body| {
             body.get("admission_token")
@@ -1831,6 +2306,13 @@ fn release_admission(
             job_store.cancel(job_id, "admission reservation released")?
         }
     };
+    if let Some(lease) = workspace_owner_lease.as_ref() {
+        if let Err(error) =
+            daemon_workspace_claim_store()?.release_owner(lease, workspace_claim_now_ms())
+        {
+            let _ = job_store.record_workspace_owner_cleanup_failure(job_id, &error);
+        }
+    }
     Ok(json!({ "job": job }))
 }
 
@@ -1840,13 +2322,146 @@ fn renew_admission(
     job_store: &JobStore,
 ) -> Result<serde_json::Value> {
     let job_id = admission_job_id(path, "/renew")?;
+    let workspace_owner_lease = body
+        .as_ref()
+        .and_then(|body| body.get("workspace_owner_lease"))
+        .cloned()
+        .map(serde_json::from_value::<crate::workspace_claim::WorkspaceOwnerLease>)
+        .transpose()
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "workspace_owner_lease",
+                format!("malformed direct workspace owner lease: {error}"),
+                Some(job_id.to_string()),
+                None,
+            )
+        })?;
+    authorize_exact_admission_workspace_owner_lease(
+        job_store,
+        job_id,
+        workspace_owner_lease.as_ref(),
+    )?;
+    let binding = workspace_claim_binding_from_body(&body)?;
+    authorize_exact_admission_workspace_claim_binding(job_store, job_id, binding.as_ref())?;
     let token = admission_token(body)?;
-    let reservation =
-        job_store.renew_admission_at(job_id, &token, crate::api_jobs::timestamp_ms())?;
+    let now = crate::api_jobs::timestamp_ms();
+    // Authentication and the exact durable reservation must be valid before
+    // touching authority. The replacement write remains a CAS for races after
+    // this preflight.
+    job_store.authorize_admission_renewal_with_workspace_owner_lease_at(
+        job_id,
+        &token,
+        workspace_owner_lease.as_ref(),
+        now,
+    )?;
+    let renewed_workspace_owner_lease = workspace_owner_lease
+        .as_ref()
+        .map(|lease| {
+            daemon_workspace_claim_store()?.renew_owner(
+                lease,
+                crate::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
+                workspace_claim_now_ms(),
+            )
+        })
+        .transpose()?;
+    let reservation = job_store.renew_admission_with_workspace_owner_lease_at(
+        job_id,
+        &token,
+        workspace_owner_lease.as_ref(),
+        renewed_workspace_owner_lease.clone(),
+        now,
+    );
+    let reservation = match reservation {
+        Ok(reservation) => reservation,
+        Err(mut error) => {
+            if let Some(renewed) = renewed_workspace_owner_lease.as_ref() {
+                let cleanup = daemon_workspace_claim_store().and_then(|store| {
+                    let release = store.release_owner(renewed, workspace_claim_now_ms());
+                    let recovery = release
+                        .as_ref()
+                        .err()
+                        .map(|release_error| {
+                            store.record_owner_release_failure(renewed, release_error)
+                        })
+                        .transpose()?;
+                    Ok((release, recovery))
+                });
+                let terminal = job_store.fail_admission_renewal_after_owner_replacement_failure(
+                    job_id,
+                    &token,
+                    workspace_owner_lease.as_ref(),
+                    &error,
+                    now,
+                );
+                let terminal_recovery = terminal
+                    .as_ref()
+                    .err()
+                    .map(|terminal_error| {
+                        daemon_workspace_claim_store()?
+                            .record_owner_release_failure(renewed, terminal_error)
+                    })
+                    .transpose();
+                error.details["workspace_owner_lease_renewal_recovery"] = json!({
+                    "schema": "homeboy/workspace-owner-lease-renewal-recovery/v1",
+                    "replacement_lease": renewed,
+                    "cleanup": cleanup.as_ref().map(|(release, recovery)| json!({
+                        "released": release.is_ok(),
+                        "error": release.as_ref().err().map(ToString::to_string),
+                        "recovery": recovery,
+                    })).unwrap_or_else(|cleanup_error| json!({
+                        "released": false,
+                        "error": cleanup_error.to_string(),
+                    })),
+                    "terminalized": terminal.is_ok(),
+                    "terminal_error": terminal.err().map(|terminal_error| terminal_error.to_string()),
+                    "terminal_recovery": terminal_recovery.as_ref().map(|recovery| json!(recovery)).unwrap_or_else(|recovery_error| json!({ "error": recovery_error.to_string() })),
+                });
+            }
+            return Err(error);
+        }
+    };
     Ok(json!({
         "job": reservation.job,
         "lease": { "expires_at_ms": reservation.expires_at_ms, "renewable": true },
+        "workspace_owner_lease": renewed_workspace_owner_lease,
     }))
+}
+
+/// A reservation's initial authorization is durable authority. Renew and release
+/// must present exactly that binding, rather than merely any live claim for the
+/// same workspace. This prevents a newer or different owner from taking over a
+/// reserved admission through its token path.
+fn authorize_exact_admission_workspace_claim_binding(
+    job_store: &JobStore,
+    job_id: uuid::Uuid,
+    presented: Option<&crate::workspace_claim::WorkspaceClaimBinding>,
+) -> Result<()> {
+    let persisted = job_store.admission_workspace_claim_binding(job_id)?;
+    if persisted != presented.cloned() {
+        return Err(Error::validation_invalid_argument(
+            "workspace_claim_binding",
+            "admission renew or release binding does not match the durable reservation",
+            Some(job_id.to_string()),
+            None,
+        ));
+    }
+    authorize_workspace_claim_binding(presented)
+}
+
+fn authorize_exact_admission_workspace_owner_lease(
+    job_store: &JobStore,
+    job_id: uuid::Uuid,
+    presented: Option<&crate::workspace_claim::WorkspaceOwnerLease>,
+) -> Result<()> {
+    if job_store.admission_workspace_owner_lease(job_id)?.as_ref() != presented {
+        return Err(Error::validation_invalid_argument(
+            "workspace_owner_lease",
+            "admission renew or release lease does not match the durable reservation",
+            Some(job_id.to_string()),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 fn lifecycle_stop_request(body: Option<serde_json::Value>) -> Result<LifecycleStopRequest> {
@@ -1989,6 +2604,17 @@ fn enqueue_exec_job(
                 None,
             )
         })?;
+    // Reconciliation bindings are not direct execution authority. Existing
+    // clients may still send one only for ordinary compatibility; workspace
+    // work must carry an owner registration request negotiated through v2.
+    if request.workspace_owner_request.is_some() && request.workspace_claim_binding.is_some() {
+        return Err(Error::validation_invalid_argument(
+            "workspace_claim_binding",
+            "direct workspace execution uses an owner lease, not a reconciliation claim",
+            None,
+            None,
+        ));
+    }
     let mut base_plan = request
         .lab_runner_workload
         .as_ref()
@@ -2072,6 +2698,7 @@ fn enqueue_exec_job(
         "path_materialization_plan": path_materialization_plan,
         "extension_env_providers": plan.extension_env_provenance,
         "lifecycle": lifecycle.clone(),
+        "workspace_owner_request": request.workspace_owner_request.clone(),
     });
 
     // Idempotent resubmission: a daemon `/exec` is not idempotent at the
@@ -2123,11 +2750,32 @@ fn enqueue_exec_job(
     } else {
         None
     };
+    let mut pending_owner_lease = PendingWorkspaceOwnerLease::new(
+        request
+            .workspace_owner_request
+            .as_ref()
+            .map(|owner| {
+                daemon_workspace_claim_store()?.register_owner(
+                    owner.workspace.clone(),
+                    owner.owner_id.clone(),
+                    owner.ttl_ms,
+                    workspace_claim_now_ms(),
+                )
+            })
+            .transpose()?,
+    );
+    if let Some(lease) = pending_owner_lease.lease() {
+        run_ref_metadata["workspace_owner_lease"] = serde_json::to_value(lease)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    }
+    let workspace_owner_lease = pending_owner_lease.lease().cloned();
     let local_runner = LocalRunnerJob {
         runner_id: plan.runner_id.clone(),
         command: plan.command.clone(),
         cwd: Some(plan.cwd.clone()),
         lifecycle: lifecycle.clone(),
+        workspace_claim_binding: request.workspace_claim_binding.clone(),
+        workspace_owner_lease: workspace_owner_lease.clone(),
     };
     let execution_controller_run_id = lifecycle
         .as_ref()
@@ -2137,8 +2785,9 @@ fn enqueue_exec_job(
     // admitting them outside this queue can wedge the shared transport.
     let capacity = plan.concurrency_limit.unwrap_or(usize::MAX).max(1);
     let stall_watchdog_store = job_store.clone();
-    let runner = job_store
-        .run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
+    let workspace_owner_renewal_store = (*job_store).clone();
+    let runner = match job_store
+        .try_run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
             operation,
             source_snapshot.clone(),
             Some(run_ref_metadata),
@@ -2150,6 +2799,16 @@ fn enqueue_exec_job(
             capacity,
             move |job| {
                 let mut plan = plan;
+                if let Some(lease) = workspace_owner_lease.as_ref() {
+                    if !daemon_workspace_claim_store()?.validate_owner(lease, workspace_claim_now_ms())? {
+                        return Err(Error::validation_invalid_argument(
+                            "workspace_owner_lease",
+                            "direct workspace owner lease is no longer live before process spawn",
+                            Some(job.job_id().to_string()),
+                            None,
+                        ));
+                    }
+                }
                 job.progress(json!({ "phase": "local_child_reservation_lookup_started" }))?;
                 let reservation_id = match job.local_child_reservation_id() {
                     Ok(reservation_id) => reservation_id,
@@ -2189,6 +2848,14 @@ fn enqueue_exec_job(
                     .insert("HOMEBOY_RUNNER_CHILD_RESERVATION".to_string(), reservation_id);
                 let liveness = Arc::new(Mutex::new(ExecLiveness::new(Instant::now())));
                 let cancellation_requested = Arc::new(AtomicBool::new(false));
+                let _workspace_owner_renewer = workspace_owner_lease.clone().map(|lease| {
+                    DirectWorkspaceOwnerRenewer::start(
+                        job.job_id(),
+                        lease,
+                        workspace_owner_renewal_store.clone(),
+                        Arc::clone(&cancellation_requested),
+                    )
+                });
                 let stall_evidence = Arc::new(Mutex::new(None));
                 let progress_job = job.clone();
                 let progress_liveness = Arc::clone(&liveness);
@@ -2389,7 +3056,14 @@ fn enqueue_exec_job(
 
                 Ok(result)
             },
-        );
+        ) {
+        Ok(runner) => runner,
+        Err(mut error) => {
+            pending_owner_lease.rollback_error(&mut error);
+            return Err(error);
+        }
+    };
+    let _workspace_owner_lease = pending_owner_lease.disarm();
     let job = job_store.get(runner.job_id)?;
 
     Ok(json!({
@@ -3172,6 +3846,44 @@ mod tests {
     use std::process::Command;
     use std::sync::Arc;
 
+    fn direct_owner_workspace() -> crate::workspace_claim::WorkspaceIdentity {
+        crate::workspace_claim::WorkspaceIdentity::new("test-workspace", "owner-transfer")
+            .expect("workspace identity")
+    }
+
+    fn register_direct_owner(owner_id: &str) -> crate::workspace_claim::WorkspaceOwnerLease {
+        daemon_workspace_claim_store()
+            .expect("owner store")
+            .register_owner(
+                direct_owner_workspace(),
+                owner_id,
+                crate::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
+                workspace_claim_now_ms(),
+            )
+            .expect("register owner")
+    }
+
+    fn assert_owner_live(lease: &crate::workspace_claim::WorkspaceOwnerLease, expected: bool) {
+        assert_eq!(
+            daemon_workspace_claim_store()
+                .expect("owner store")
+                .validate_owner(lease, workspace_claim_now_ms())
+                .expect("validate owner"),
+            expected
+        );
+    }
+
+    fn direct_local_runner(lease: crate::workspace_claim::WorkspaceOwnerLease) -> LocalRunnerJob {
+        LocalRunnerJob {
+            runner_id: "test-runner".to_string(),
+            command: vec!["test".to_string()],
+            cwd: None,
+            lifecycle: None,
+            workspace_claim_binding: None,
+            workspace_owner_lease: Some(lease),
+        }
+    }
+
     pub(super) struct EnqueueTestDriver;
 
     /// Register the enqueue test driver for daemon `/exec` tests. The daemon
@@ -3227,6 +3939,524 @@ mod tests {
     }
 
     #[test]
+    fn admission_commit_failure_releases_owner() {
+        with_isolated_home(|_| {
+            let lease = register_direct_owner("admission-failure");
+            let mut pending = PendingWorkspaceOwnerLease::new(Some(lease.clone()));
+            let mut error = Error::internal_io("injected admission commit failure", None);
+            pending.rollback_error(&mut error);
+            assert_owner_live(&lease, false);
+            assert_eq!(
+                error.details["workspace_owner_lease_cleanup"]["released"],
+                true
+            );
+        });
+    }
+
+    #[test]
+    fn queue_commit_failure_releases_owner() {
+        with_isolated_home(|_| {
+            let lease = register_direct_owner("queue-failure");
+            let pending = PendingWorkspaceOwnerLease::new(Some(lease.clone()));
+            // Drop is the panic/early-return fallback around queue persistence.
+            drop(pending);
+            assert_owner_live(&lease, false);
+        });
+    }
+
+    #[test]
+    fn renewed_admission_persists_epoch_and_releases() {
+        with_isolated_home(|_| {
+            let lease_id = "lease-renew-owner";
+            write_test_lease(lease_id);
+            let store = JobStore::default();
+            let reserved = reserve_admission(
+                Some(json!({
+                    "runner_id": "lab", "expected_daemon_lease_id": lease_id,
+                    "admission_lease_protocol": 1,
+                    "workspace_owner_request": {
+                        "workspace": direct_owner_workspace(), "owner_id": "renew-owner"
+                    },
+                })),
+                &store,
+            )
+            .expect("reserve admission");
+            let job_id = reserved["job"]["id"].as_str().expect("job id");
+            let token = reserved["admission_token"].as_str().expect("token");
+            let lease: crate::workspace_claim::WorkspaceOwnerLease =
+                serde_json::from_value(reserved["workspace_owner_lease"].clone()).expect("lease");
+            let renewed = renew_admission(
+                &format!("/admissions/{job_id}/renew"),
+                Some(json!({ "admission_token": token, "workspace_owner_lease": lease })),
+                &store,
+            )
+            .expect("renew admission");
+            let renewed_lease: crate::workspace_claim::WorkspaceOwnerLease =
+                serde_json::from_value(renewed["workspace_owner_lease"].clone())
+                    .expect("renewed lease");
+            assert!(renewed_lease.lifecycle_revision > lease.lifecycle_revision);
+            assert_owner_live(&renewed_lease, true);
+            let renewed_again = renew_admission(
+                &format!("/admissions/{job_id}/renew"),
+                Some(json!({ "admission_token": token, "workspace_owner_lease": renewed_lease })),
+                &store,
+            )
+            .expect("renew admission with replacement epoch");
+            let renewed_again_lease: crate::workspace_claim::WorkspaceOwnerLease =
+                serde_json::from_value(renewed_again["workspace_owner_lease"].clone())
+                    .expect("twice-renewed lease");
+            assert!(renewed_again_lease.lifecycle_revision > renewed_lease.lifecycle_revision);
+            assert_owner_live(&renewed_again_lease, true);
+            release_admission(
+                &format!("/admissions/{job_id}/release"),
+                Some(json!({ "admission_token": token, "workspace_owner_lease": renewed_again_lease })),
+                &store,
+            )
+            .expect("release renewed admission");
+            assert_owner_live(&renewed_again_lease, false);
+        });
+    }
+
+    #[test]
+    fn invalid_admission_renewal_token_does_not_advance_authority_epoch() {
+        with_isolated_home(|_| {
+            let lease_id = "lease-renew-invalid-token";
+            write_test_lease(lease_id);
+            let store = JobStore::default();
+            let reserved = reserve_admission(
+                Some(json!({
+                    "runner_id": "lab", "expected_daemon_lease_id": lease_id,
+                    "admission_lease_protocol": 1,
+                    "workspace_owner_request": {
+                        "workspace": direct_owner_workspace(), "owner_id": "invalid-token"
+                    },
+                })),
+                &store,
+            )
+            .expect("reserve admission");
+            let job_id = reserved["job"]["id"].as_str().expect("job id");
+            let lease: crate::workspace_claim::WorkspaceOwnerLease =
+                serde_json::from_value(reserved["workspace_owner_lease"].clone()).expect("lease");
+
+            let error = renew_admission(
+                &format!("/admissions/{job_id}/renew"),
+                Some(json!({ "admission_token": "not-the-token", "workspace_owner_lease": lease })),
+                &store,
+            )
+            .expect_err("invalid token must be rejected before authority renewal");
+            assert_eq!(error.code.as_str(), "validation.invalid_argument");
+            assert_owner_live(&lease, true);
+            let renewed = daemon_workspace_claim_store()
+                .expect("owner store")
+                .renew_owner(
+                    &lease,
+                    crate::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
+                    workspace_claim_now_ms(),
+                )
+                .expect("the original epoch remains authoritative");
+            assert!(renewed.lifecycle_revision > lease.lifecycle_revision);
+        });
+    }
+
+    #[test]
+    fn concurrent_admission_renewals_have_one_winner_and_no_stranded_owner() {
+        with_isolated_home(|_| {
+            let lease_id = "lease-concurrent-renew";
+            write_test_lease(lease_id);
+            let store = JobStore::default();
+            let reserved = reserve_admission(
+                Some(json!({
+                    "runner_id": "lab", "expected_daemon_lease_id": lease_id,
+                    "admission_lease_protocol": 1,
+                    "workspace_owner_request": {
+                        "workspace": direct_owner_workspace(), "owner_id": "concurrent-renew"
+                    },
+                })),
+                &store,
+            )
+            .expect("reserve admission");
+            let job_id = reserved["job"]["id"].as_str().expect("job id").to_string();
+            let token = reserved["admission_token"]
+                .as_str()
+                .expect("token")
+                .to_string();
+            let lease: crate::workspace_claim::WorkspaceOwnerLease =
+                serde_json::from_value(reserved["workspace_owner_lease"].clone()).expect("lease");
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let handles = (0..2)
+                .map(|_| {
+                    let store = store.clone();
+                    let job_id = job_id.clone();
+                    let token = token.clone();
+                    let lease = lease.clone();
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        renew_admission(
+                            &format!("/admissions/{job_id}/renew"),
+                            Some(
+                                json!({ "admission_token": token, "workspace_owner_lease": lease }),
+                            ),
+                            &store,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            let results = handles
+                .into_iter()
+                .map(|handle| handle.join().expect("renewal thread"))
+                .collect::<Vec<_>>();
+            assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+            let winner = results
+                .into_iter()
+                .find_map(Result::ok)
+                .expect("one renewal winner");
+            let renewed: crate::workspace_claim::WorkspaceOwnerLease =
+                serde_json::from_value(winner["workspace_owner_lease"].clone())
+                    .expect("winner lease");
+            assert_owner_live(&renewed, true);
+            release_admission(
+                &format!("/admissions/{job_id}/release"),
+                Some(json!({ "admission_token": token, "workspace_owner_lease": renewed.clone() })),
+                &store,
+            )
+            .expect("release exact winner lease");
+            assert_owner_live(&renewed, false);
+        });
+    }
+
+    #[test]
+    fn failed_admission_renewal_releases_replacement_and_terminalizes_reservation() {
+        with_isolated_home(|_| {
+            let lease_id = "lease-renew-durable-failure";
+            write_test_lease(lease_id);
+            let store = JobStore::open_without_reconciliation(
+                paths::daemon_jobs_file().expect("jobs path"),
+            )
+            .expect("durable store");
+            let reserved = reserve_admission(
+                Some(json!({
+                    "runner_id": "lab", "expected_daemon_lease_id": lease_id,
+                    "admission_lease_protocol": 1,
+                    "workspace_owner_request": {
+                        "workspace": direct_owner_workspace(), "owner_id": "durable-failure"
+                    },
+                })),
+                &store,
+            )
+            .expect("reserve admission");
+            let job_id = reserved["job"]["id"].as_str().expect("job id");
+            let token = reserved["admission_token"].as_str().expect("token");
+            let lease: crate::workspace_claim::WorkspaceOwnerLease =
+                serde_json::from_value(reserved["workspace_owner_lease"].clone()).expect("lease");
+            store.fail_next_durable_writes(1);
+
+            let error = renew_admission(
+                &format!("/admissions/{job_id}/renew"),
+                Some(json!({ "admission_token": token, "workspace_owner_lease": lease })),
+                &store,
+            )
+            .expect_err("replacement persistence fails");
+            assert_eq!(
+                error.details["workspace_owner_lease_renewal_recovery"]["terminalized"], true,
+                "{:#?}",
+                error.details
+            );
+            assert_eq!(
+                store
+                    .get(uuid::Uuid::parse_str(job_id).expect("job UUID"))
+                    .expect("reservation")
+                    .status,
+                JobStatus::Failed
+            );
+            assert_owner_live(&lease, false);
+        });
+    }
+
+    #[test]
+    fn failed_admission_renewal_cleanup_evidence_is_consumed_on_restart() {
+        with_isolated_home(|_| {
+            let lease_id = "lease-renew-cleanup-failure";
+            write_test_lease(lease_id);
+            let store = JobStore::open_without_reconciliation(
+                paths::daemon_jobs_file().expect("jobs path"),
+            )
+            .expect("durable store");
+            let reserved = reserve_admission(
+                Some(json!({
+                    "runner_id": "lab", "expected_daemon_lease_id": lease_id,
+                    "admission_lease_protocol": 1,
+                    "workspace_owner_request": {
+                        "workspace": direct_owner_workspace(), "owner_id": "cleanup-failure"
+                    },
+                })),
+                &store,
+            )
+            .expect("reserve admission");
+            let job_id = reserved["job"]["id"].as_str().expect("job id");
+            let token = reserved["admission_token"].as_str().expect("token");
+            let lease: crate::workspace_claim::WorkspaceOwnerLease =
+                serde_json::from_value(reserved["workspace_owner_lease"].clone()).expect("lease");
+            daemon_workspace_claim_store()
+                .expect("owner store")
+                .fail_next_owner_releases(&lease.workspace, 1)
+                .expect("inject cleanup failure");
+            store.fail_next_durable_writes(1);
+
+            renew_admission(
+                &format!("/admissions/{job_id}/renew"),
+                Some(json!({ "admission_token": token, "workspace_owner_lease": lease })),
+                &store,
+            )
+            .expect_err("replacement persistence fails");
+            let owner_store = daemon_workspace_claim_store().expect("owner store");
+            assert_eq!(
+                owner_store
+                    .pending_owner_release_recoveries()
+                    .expect("recovery evidence")
+                    .len(),
+                1
+            );
+            reconcile_pending_workspace_owner_releases();
+            assert!(owner_store
+                .pending_owner_release_recoveries()
+                .expect("cleared recovery evidence")
+                .is_empty());
+        });
+    }
+
+    #[test]
+    fn failed_admission_renewal_terminal_persistence_records_recovery_evidence() {
+        with_isolated_home(|_| {
+            let lease_id = "lease-renew-terminal-persistence-failure";
+            write_test_lease(lease_id);
+            let store = JobStore::open_without_reconciliation(
+                paths::daemon_jobs_file().expect("jobs path"),
+            )
+            .expect("durable store");
+            let reserved = reserve_admission(
+                Some(json!({
+                    "runner_id": "lab", "expected_daemon_lease_id": lease_id,
+                    "admission_lease_protocol": 1,
+                    "workspace_owner_request": {
+                        "workspace": direct_owner_workspace(), "owner_id": "terminal-persistence-failure"
+                    },
+                })),
+                &store,
+            )
+            .expect("reserve admission");
+            let job_id = reserved["job"]["id"].as_str().expect("job id");
+            let token = reserved["admission_token"].as_str().expect("token");
+            let lease: crate::workspace_claim::WorkspaceOwnerLease =
+                serde_json::from_value(reserved["workspace_owner_lease"].clone()).expect("lease");
+            store.fail_next_durable_writes(2);
+
+            let error = renew_admission(
+                &format!("/admissions/{job_id}/renew"),
+                Some(json!({ "admission_token": token, "workspace_owner_lease": lease })),
+                &store,
+            )
+            .expect_err("replacement and terminal persistence fail");
+            assert_eq!(
+                error.details["workspace_owner_lease_renewal_recovery"]["terminalized"],
+                false
+            );
+            let owner_store = daemon_workspace_claim_store().expect("owner store");
+            assert_eq!(
+                owner_store
+                    .pending_owner_release_recoveries()
+                    .expect("terminal persistence evidence")
+                    .len(),
+                1,
+                "{:#?}",
+                error.details
+            );
+            reconcile_pending_workspace_owner_releases();
+            assert!(owner_store
+                .pending_owner_release_recoveries()
+                .expect("consumed evidence")
+                .is_empty());
+        });
+    }
+
+    #[test]
+    fn top_level_router_handles_reverse_owner_lifecycle() {
+        with_isolated_home(|_| {
+            let store = JobStore::default();
+            let registered = route_with_job_store_and_body(
+                "POST",
+                "/runner/workspace-owners/register",
+                Some(json!({
+                    "workspace": direct_owner_workspace(),
+                    "owner_id": "reverse-router-owner",
+                    "ttl_ms": 1_000,
+                })),
+                &store,
+            );
+            assert_eq!(registered.status_code, 200, "{:#?}", registered.body);
+            let lease = registered.body["body"]["workspace_owner_lease"].clone();
+            let renewed = route_with_job_store_and_body(
+                "POST",
+                "/runner/workspace-owners/renew",
+                Some(json!({ "workspace_owner_lease": lease, "ttl_ms": 1_000 })),
+                &store,
+            );
+            assert_eq!(renewed.status_code, 200, "{:#?}", renewed.body);
+            let replacement = renewed.body["body"]["workspace_owner_lease"].clone();
+            let released = route_with_job_store_and_body(
+                "POST",
+                "/runner/workspace-owners/release",
+                Some(json!({ "workspace_owner_lease": replacement })),
+                &store,
+            );
+            assert_eq!(released.status_code, 200, "{:#?}", released.body);
+            assert_eq!(released.body["body"]["released"], true);
+        });
+    }
+
+    #[test]
+    fn queued_cancel_and_spawn_failure_release_owner() {
+        with_isolated_home(|_| {
+            let store = JobStore::default();
+            for (owner, reason) in [
+                ("queued-cancel", "cancel"),
+                ("spawn-failure", "spawn failure"),
+            ] {
+                let lease = register_direct_owner(owner);
+                let job =
+                    store.create_test_local_runner_job(Some(direct_local_runner(lease.clone())));
+                if reason == "cancel" {
+                    store.cancel(job.id, reason).expect("cancel queued job");
+                } else {
+                    store.fail(job.id, reason).expect("record spawn failure");
+                }
+                assert!(store
+                    .get(job.id)
+                    .expect("terminal job")
+                    .status
+                    .is_terminal());
+                assert_owner_live(&lease, false);
+            }
+        });
+    }
+
+    #[test]
+    fn terminal_job_releases_owner() {
+        with_isolated_home(|_| {
+            let store = JobStore::default();
+            let lease = register_direct_owner("terminal");
+            let job = store.create_test_local_runner_job(Some(direct_local_runner(lease.clone())));
+            store.start(job.id).expect("start job");
+            store.complete(job.id, None).expect("complete job");
+            assert_eq!(store.get(job.id).expect("job").status, JobStatus::Succeeded);
+            assert_owner_live(&lease, false);
+        });
+    }
+
+    #[test]
+    fn restart_releases_orphaned_owner_and_preserves_live_owner() {
+        with_isolated_home(|_| {
+            let store = JobStore::default();
+            let orphan = register_direct_owner("restart-orphan");
+            let orphan_job =
+                store.create_test_local_runner_job(Some(direct_local_runner(orphan.clone())));
+            store
+                .fail(orphan_job.id, "terminal before restart")
+                .expect("terminalize orphan");
+            let live = register_direct_owner("restart-live");
+            store.create_test_local_runner_job(Some(direct_local_runner(live.clone())));
+            reconcile_terminal_workspace_owner_leases(&store);
+            assert_owner_live(&orphan, false);
+            assert_owner_live(&live, true);
+        });
+    }
+
+    #[test]
+    fn cleanup_failure_preserves_terminal_outcome_and_records_typed_evidence() {
+        with_isolated_home(|_| {
+            let store = JobStore::open_without_reconciliation(
+                paths::daemon_jobs_file().expect("jobs path"),
+            )
+            .expect("durable store");
+            let lease = register_direct_owner("terminal-cleanup-failure");
+            daemon_workspace_claim_store()
+                .expect("owner store")
+                .fail_next_owner_releases(&lease.workspace, 1)
+                .expect("inject exact owner release failure");
+            let job = store.create_test_local_runner_job(Some(direct_local_runner(lease)));
+            store
+                .fail(job.id, "terminal outcome")
+                .expect("terminalize job");
+            assert_eq!(
+                store.get(job.id).expect("terminal job").status,
+                JobStatus::Failed
+            );
+            assert!(store.events(job.id).expect("evidence").iter().any(|event| {
+                event.data.as_ref().is_some_and(|data| {
+                    data["schema"] == "homeboy/workspace-owner-lease-cleanup/v1"
+                        && data["outcome_preserved"] == true
+                })
+            }));
+        });
+    }
+
+    #[test]
+    fn admissions_commit_failure_releases_new_owner_before_persisting() {
+        with_isolated_home(|_| {
+            let lease_id = "lease-admission-commit-failure";
+            write_test_lease(lease_id);
+            let store = JobStore::open_without_reconciliation(
+                paths::daemon_jobs_file().expect("jobs path"),
+            )
+            .expect("durable store");
+            store.fail_next_durable_writes(1);
+            let workspace = direct_owner_workspace();
+            let error = reserve_admission(
+                Some(json!({
+                    "runner_id": "lab", "expected_daemon_lease_id": lease_id,
+                    "admission_lease_protocol": 1,
+                    "workspace_owner_request": { "workspace": workspace, "owner_id": "admission-commit" },
+                })),
+                &store,
+            )
+            .expect_err("durable admission commit fails");
+            assert_eq!(error.code.as_str(), "internal.io_error");
+            assert!(store.list().is_empty());
+            daemon_workspace_claim_store()
+                .expect("owner store")
+                .acquire(direct_owner_workspace(), 1, workspace_claim_now_ms())
+                .expect("rollback leaves no live owner");
+        });
+    }
+
+    #[test]
+    fn exec_queue_commit_failure_releases_new_owner_before_persisting() {
+        with_isolated_home(|_| {
+            register_enqueue_test_driver();
+            let store = JobStore::open_without_reconciliation(
+                paths::daemon_jobs_file().expect("jobs path"),
+            )
+            .expect("durable store");
+            store.fail_next_durable_writes(1);
+            let workspace = direct_owner_workspace();
+            let error = enqueue_exec_job(
+                Some(json!({
+                    "runner_id": "lab", "cwd": "/tmp", "command": ["homeboy", "test"],
+                    "workspace_owner_request": { "workspace": workspace, "owner_id": "queue-commit" },
+                })),
+                &store,
+            )
+            .expect_err("durable queue commit fails");
+            assert_eq!(error.code.as_str(), "internal.io_error");
+            assert!(store.list().is_empty());
+            daemon_workspace_claim_store()
+                .expect("owner store")
+                .acquire(direct_owner_workspace(), 1, workspace_claim_now_ms())
+                .expect("rollback leaves no live owner");
+        });
+    }
+
+    #[test]
     fn admission_reservation_dedupes_a_detached_run_and_releases_it() {
         with_isolated_home(|_| {
             let lease_id = "lease-deduped-admission";
@@ -3268,6 +4498,55 @@ mod tests {
                 0,
                 "a failed or timed-out handoff leaves no active admission job"
             );
+        });
+    }
+
+    #[test]
+    fn admission_renew_and_release_require_the_exact_durable_binding() {
+        with_isolated_home(|_| {
+            let lease_id = "lease-bound-admission";
+            write_test_lease(lease_id);
+            let store = JobStore::default();
+            let workspace = crate::workspace_claim::WorkspaceIdentity::new("test", "run-1")
+                .expect("workspace identity");
+            let claim = crate::workspace_claim::WorkspaceClaim {
+                schema: crate::workspace_claim::WORKSPACE_CLAIM_SCHEMA.to_string(),
+                protocol: crate::workspace_claim::WorkspaceClaimProtocol::current(),
+                workspace: workspace.clone(),
+                lifecycle_revision: 7,
+                token: "claim-token-a".to_string(),
+                expires_at_ms: u64::MAX,
+            };
+            let binding = crate::workspace_claim::WorkspaceClaimBinding {
+                workspace,
+                lifecycle_revision: 7,
+                claim: Some(claim),
+            };
+            let reserved = reserve_admission(
+                Some(json!({
+                    "runner_id": "lab", "expected_daemon_lease_id": lease_id,
+                    "idempotency_key": "bound-run", "admission_lease_protocol": 1,
+                    "workspace_claim_binding": binding,
+                })),
+                &store,
+            )
+            .expect("reserve bound admission");
+            let job_id = reserved["job"]["id"].as_str().expect("job id");
+            let token = reserved["admission_token"].as_str().expect("token");
+            let mut substituted = binding.clone();
+            substituted.claim.as_mut().expect("claim").token = "claim-token-b".to_string();
+            assert!(renew_admission(
+                &format!("/admissions/{job_id}/renew"),
+                Some(json!({ "admission_token": token, "workspace_claim_binding": substituted })),
+                &store,
+            )
+            .is_err());
+            assert!(release_admission(
+                &format!("/admissions/{job_id}/release"),
+                Some(json!({ "admission_token": token, "workspace_claim_binding": binding })),
+                &store,
+            )
+            .is_ok());
         });
     }
 

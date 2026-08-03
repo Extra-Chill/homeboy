@@ -1,4 +1,7 @@
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::{
+    mpsc::{self, RecvTimeoutError, Sender},
+    Arc, Mutex,
+};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -25,6 +28,8 @@ pub(super) fn claim_job(
             "lease_ms": options.lease_ms.max(1),
             "concurrency_limit": options.concurrency_limit,
             "execution_protocol": homeboy_core::runner_job_execution_context::RunnerJobExecutionProtocol::current(),
+            "workspace_claim_protocol": homeboy_core::workspace_claim::WorkspaceClaimProtocol::current(),
+            "workspace_owner_lease_protocol": homeboy_core::workspace_claim::WorkspaceOwnerLeaseProtocol::current(),
         }),
         "claim reverse runner job",
         options.broker_token.as_deref(),
@@ -48,6 +53,8 @@ pub(super) fn append_progress_data(
     runner_id: &str,
     job: &Job,
     data: serde_json::Value,
+    workspace_claim_binding: Option<&homeboy_core::workspace_claim::WorkspaceClaimBinding>,
+    workspace_owner_lease: Option<&homeboy_core::workspace_claim::WorkspaceOwnerLease>,
 ) -> Result<()> {
     let claim_id = remote_runner_claim_id(job)?;
     broker_http::post_json(
@@ -59,6 +66,8 @@ pub(super) fn append_progress_data(
             "claim_id": claim_id,
             "kind": "progress",
             "data": data,
+            "workspace_claim_binding": workspace_claim_binding,
+            "workspace_owner_lease": workspace_owner_lease,
         }),
         "append reverse runner progress event",
         token,
@@ -73,6 +82,8 @@ pub(super) fn finish_job(
     runner_id: &str,
     job: &Job,
     result: RemoteRunnerJobResult,
+    workspace_claim_binding: Option<&homeboy_core::workspace_claim::WorkspaceClaimBinding>,
+    workspace_owner_lease: Option<&homeboy_core::workspace_claim::WorkspaceOwnerLease>,
 ) -> Result<Job> {
     let claim_id = remote_runner_claim_id(job)?;
     let data = broker_http::post_json(
@@ -83,16 +94,19 @@ pub(super) fn finish_job(
             "runner_id": runner_id,
             "claim_id": claim_id,
             "result": result,
+            "workspace_claim_binding": workspace_claim_binding,
+            "workspace_owner_lease": workspace_owner_lease,
         }),
         "finish reverse runner job",
         token,
     )?;
-    serde_json::from_value(data["job"].clone()).map_err(|err| {
+    let job = serde_json::from_value(data["job"].clone()).map_err(|err| {
         Error::internal_json(
             err.to_string(),
             Some("parse finished reverse runner job".to_string()),
         )
-    })
+    })?;
+    Ok(job)
 }
 
 pub(super) fn consume_execution(
@@ -102,6 +116,8 @@ pub(super) fn consume_execution(
     runner_id: &str,
     job: &Job,
     context_id: &str,
+    workspace_claim_binding: Option<&homeboy_core::workspace_claim::WorkspaceClaimBinding>,
+    workspace_owner_lease: Option<&homeboy_core::workspace_claim::WorkspaceOwnerLease>,
 ) -> Result<Job> {
     let claim_id = remote_runner_claim_id(job)?;
     let data = broker_http::post_json(
@@ -112,16 +128,53 @@ pub(super) fn consume_execution(
             "runner_id": runner_id,
             "claim_id": claim_id,
             "context_id": context_id,
+            "workspace_claim_binding": workspace_claim_binding,
+            "workspace_owner_lease": workspace_owner_lease,
         }),
         "consume reverse runner execution receipt",
         token,
     )?;
-    serde_json::from_value(data["job"].clone()).map_err(|err| {
+    let job = serde_json::from_value(data["job"].clone()).map_err(|err| {
         Error::internal_json(
             err.to_string(),
             Some("parse consumed reverse runner job".to_string()),
         )
-    })
+    })?;
+    Ok(job)
+}
+
+/// Check the exact durable owner lease without consuming the execution receipt.
+/// Input materialization is intentionally gated on this call, not on consume.
+pub(super) fn validate_workspace_owner(
+    client: &Client,
+    broker_url: &str,
+    token: Option<&str>,
+    runner_id: &str,
+    job: &Job,
+    workspace_owner_lease: &homeboy_core::workspace_claim::WorkspaceOwnerLease,
+) -> Result<()> {
+    let claim_id = remote_runner_claim_id(job)?;
+    let data = broker_http::post_json(
+        client,
+        broker_url,
+        &format!("/runner/jobs/{}/validate-owner", job.id),
+        json!({
+            "runner_id": runner_id,
+            "claim_id": claim_id,
+            "workspace_owner_lease": workspace_owner_lease,
+        }),
+        "validate reverse runner workspace owner lease",
+        token,
+    )?;
+    if data["valid"].as_bool() != Some(true) {
+        return Err(Error::validation_invalid_argument(
+            "workspace_owner_lease",
+            "reverse runner workspace owner lease is no longer live",
+            Some(job.id.to_string()),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 fn renew_claim(
@@ -131,7 +184,12 @@ fn renew_claim(
     runner_id: &str,
     job: &Job,
     lease_ms: u64,
-) -> Result<Job> {
+    workspace_claim_binding: Option<&homeboy_core::workspace_claim::WorkspaceClaimBinding>,
+    workspace_owner_lease: Option<&homeboy_core::workspace_claim::WorkspaceOwnerLease>,
+) -> Result<(
+    Job,
+    Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>,
+)> {
     let claim_id = remote_runner_claim_id(job)?;
     let data = broker_http::post_json(
         client,
@@ -141,22 +199,28 @@ fn renew_claim(
             "runner_id": runner_id,
             "claim_id": claim_id,
             "lease_ms": lease_ms.max(1),
+            "workspace_claim_binding": workspace_claim_binding,
+            "workspace_owner_lease": workspace_owner_lease,
         }),
         "renew reverse runner claim",
         token,
     )?;
-    serde_json::from_value(data["job"].clone()).map_err(|err| {
+    let job = serde_json::from_value(data["job"].clone()).map_err(|err| {
         Error::internal_json(
             err.to_string(),
             Some("parse reverse runner heartbeat job".to_string()),
         )
-    })
+    })?;
+    let owner = serde_json::from_value(data["workspace_owner_lease"].clone()).ok();
+    Ok((job, owner))
 }
 
 pub(super) fn start_claim_heartbeat(
     client: &Client,
     options: &ReverseRunnerWorkerOptions,
     job: &Job,
+    workspace_claim_binding: Option<homeboy_core::workspace_claim::WorkspaceClaimBinding>,
+    workspace_owner_lease: Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>,
 ) -> Result<ClaimHeartbeat> {
     remote_runner_claim_id(job)?;
     let (stop, stopped) = mpsc::channel();
@@ -167,41 +231,66 @@ pub(super) fn start_claim_heartbeat(
     let job = job.clone();
     let lease_ms = options.lease_ms.max(1);
     let interval = Duration::from_millis((lease_ms / 2).max(1));
+    let current_owner = Arc::new(Mutex::new(workspace_owner_lease));
+    let heartbeat_owner = current_owner.clone();
     let handle = thread::spawn(move || loop {
         match stopped.recv_timeout(interval) {
             Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
         }
-        if let Err(err) = renew_claim(
+        let presented_owner = heartbeat_owner.lock().expect("owner lease lock").clone();
+        match renew_claim(
             &client,
             &broker_url,
             broker_token.as_deref(),
             &runner_id,
             &job,
             lease_ms,
+            workspace_claim_binding.as_ref(),
+            presented_owner.as_ref(),
         ) {
-            eprintln!(
-                "{}",
-                json!({
-                    "command": "runner.work",
-                    "event": "claim_heartbeat_failed",
-                    "runner_id": runner_id,
-                    "broker_url": broker_url,
-                    "job_id": job.id,
-                    "error": err.to_string(),
-                })
-            );
+            Ok((_job, renewed_owner)) => {
+                *heartbeat_owner.lock().expect("owner lease lock") = renewed_owner
+            }
+            Err(err) => {
+                eprintln!(
+                    "{}",
+                    json!({
+                        "command": "runner.work",
+                        "event": "claim_heartbeat_failed",
+                        "runner_id": runner_id,
+                        "broker_url": broker_url,
+                        "job_id": job.id,
+                        "error": err.to_string(),
+                    })
+                );
+            }
         }
     });
     Ok(ClaimHeartbeat {
         stop: Some(stop),
         handle: Some(handle),
+        owner_lease: current_owner,
     })
 }
 
 pub(super) struct ClaimHeartbeat {
     stop: Option<Sender<()>>,
     handle: Option<JoinHandle<()>>,
+    owner_lease: Arc<Mutex<Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>>>,
+}
+
+impl ClaimHeartbeat {
+    pub(super) fn owner_lease_handle(
+        &self,
+    ) -> Arc<Mutex<Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>>> {
+        self.owner_lease.clone()
+    }
+    pub(super) fn workspace_owner_lease(
+        &self,
+    ) -> Option<homeboy_core::workspace_claim::WorkspaceOwnerLease> {
+        self.owner_lease.lock().expect("owner lease lock").clone()
+    }
 }
 
 impl Drop for ClaimHeartbeat {

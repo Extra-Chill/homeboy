@@ -3092,6 +3092,9 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                     lease_id,
                     Some(&request.recipe.run_id),
                     crate::execution::DaemonAdmissionPolicy::DurableLeaseRequired,
+                    homeboy_agents::agent_task_lifecycle::workspace_owner_registration_if_present(
+                        &request.recipe.run_id,
+                    )?,
                 )?;
                 let authority = admission.authority();
                 authority.prove_server_owned_expiry_or_cancellation_authority()?;
