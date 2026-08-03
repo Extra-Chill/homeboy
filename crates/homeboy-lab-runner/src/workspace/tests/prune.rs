@@ -457,6 +457,66 @@ fn runner_job_authority_requires_exact_transport_state_and_consistent_snapshot()
 }
 
 #[test]
+fn non_agent_task_polling_loss_retains_job_owned_workspace_until_terminal_reconciliation() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let source_parent = tempfile::tempdir().expect("source parent");
+        let source = source_parent.path().join("review-source");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        fs::create_dir_all(&source).expect("source dir");
+        fs::write(source.join("file.txt"), "review\n").expect("source file");
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-local-review-poll-loss","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let (synced, _) = sync_workspace(
+            "lab-local-review-poll-loss",
+            sync_options(source.display().to_string()),
+        )
+        .expect("sync review workspace");
+
+        // A review has no agent-task run id, but a live accepted daemon job
+        // still owns its workspace after the controller loses polling.
+        {
+            let mut workspace = MaterializedWorkspace::new(
+                "lab-local-review-poll-loss".to_string(),
+                synced.remote_path.clone(),
+                None,
+                WorkspaceCleanupPolicy::DeleteAlways,
+            );
+            workspace.retain_for_reconciliation("review-job-11380", Some("generation-review"));
+        }
+
+        let metadata =
+            fs::read_to_string(Path::new(&synced.remote_path).join(WORKSPACE_METADATA_FILE))
+                .expect("retained workspace metadata");
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("metadata json");
+        assert_eq!(metadata["job_id"], "review-job-11380");
+        assert_eq!(
+            metadata["terminal_evidence"]["reconciliation"]["daemon_generation"],
+            "generation-review"
+        );
+
+        let active = vec!["review-job-11380".to_string()];
+        let polling_loss =
+            runner_job_liveness_with("review-job-11380", Ok(JobStatus::Running), Some(&active));
+        assert_eq!(polling_loss.state, "live");
+        assert!(Path::new(&synced.remote_path).exists());
+
+        let terminal =
+            runner_job_liveness_with("review-job-11380", Ok(JobStatus::Succeeded), Some(&[]));
+        assert_eq!(terminal.state, "inactive");
+        assert!(
+            revalidated_candidate_is_deletable(&terminal),
+            "terminal reconciliation authorizes the retained workspace for cleanup"
+        );
+    });
+}
+
+#[test]
 fn prune_revalidates_job_authority_before_deletion() {
     let scanned = runner_job_liveness_with("job-1", Ok(JobStatus::Succeeded), Some(&[]));
     let revalidated = runner_job_liveness_with(

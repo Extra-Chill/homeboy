@@ -717,17 +717,17 @@ pub(crate) fn exec_lab_context(
                         .build(),
                 );
                 if let Some(job_id) = in_flight_job_id.as_deref() {
+                    if let Some(workspace) = context.materialized_workspace.as_mut() {
+                        workspace.retain_for_reconciliation(
+                            job_id,
+                            context
+                                .runner_status
+                                .session
+                                .as_ref()
+                                .and_then(|session| session.remote_daemon_lease_id.as_deref()),
+                        );
+                    }
                     if let Some(run_id) = context.agent_task_run_id.as_deref() {
-                        if let Some(workspace) = context.materialized_workspace.as_mut() {
-                            workspace.retain_for_reconciliation(
-                                job_id,
-                                context
-                                    .runner_status
-                                    .session
-                                    .as_ref()
-                                    .and_then(|session| session.remote_daemon_lease_id.as_deref()),
-                            );
-                        }
                         return in_flight_daemon_disconnect_outcome(
                             context.plan,
                             runner_id,
@@ -790,17 +790,17 @@ pub(crate) fn exec_lab_context(
                 };
             }
             if let Some(job_id) = in_flight_job_id.as_deref() {
+                if let Some(workspace) = context.materialized_workspace.as_mut() {
+                    workspace.retain_for_reconciliation(
+                        job_id,
+                        context
+                            .runner_status
+                            .session
+                            .as_ref()
+                            .and_then(|session| session.remote_daemon_lease_id.as_deref()),
+                    );
+                }
                 if let Some(run_id) = context.agent_task_run_id.as_deref() {
-                    if let Some(workspace) = context.materialized_workspace.as_mut() {
-                        workspace.retain_for_reconciliation(
-                            job_id,
-                            context
-                                .runner_status
-                                .session
-                                .as_ref()
-                                .and_then(|session| session.remote_daemon_lease_id.as_deref()),
-                        );
-                    }
                     return in_flight_daemon_disconnect_outcome(
                         context.plan,
                         runner_id,
