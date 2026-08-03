@@ -1035,6 +1035,43 @@ impl AgentTaskScheduleSupport {
         });
     }
 
+    /// A provider can create a durable patch before failing its completion
+    /// contract. Preserve that candidate for a fresh review and gate pass, but
+    /// retain the provider failure classification as the terminal diagnosis.
+    pub(super) fn preserve_base_bound_patch_after_provider_failure(outcome: &mut AgentTaskOutcome) {
+        if matches!(
+            outcome.status,
+            AgentTaskOutcomeStatus::Succeeded
+                | AgentTaskOutcomeStatus::NoOp
+                | AgentTaskOutcomeStatus::Cancelled
+                | AgentTaskOutcomeStatus::Timeout
+                | AgentTaskOutcomeStatus::CandidateRecoverable
+        ) || !outcome
+            .artifacts
+            .iter()
+            .any(|artifact| is_base_bound_patch_candidate(outcome, artifact))
+        {
+            return;
+        }
+
+        let provider_failure = outcome.failure_classification;
+        outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
+        outcome.summary = Some(
+            "provider completion failed after producing a base-bound patch candidate; fresh review and deterministic gates are required before promotion"
+                .to_string(),
+        );
+        outcome.diagnostics.push(AgentTaskDiagnostic {
+            class: "agent_task.provider_failure_recoverable_candidate".to_string(),
+            message: "a non-empty base-bound patch was retained without treating it as verified or promotable"
+                .to_string(),
+            data: serde_json::json!({
+                "provider_failure_classification": provider_failure,
+                "required_validation": ["fresh_review", "deterministic_gates"],
+                "recovery_action": "homeboy agent-task review <run-id>",
+            }),
+        });
+    }
+
     pub(super) fn cancelled_outcome(task_id: String, summary: String) -> AgentTaskOutcome {
         AgentTaskOutcome {
             task_id,
@@ -1178,6 +1215,7 @@ impl AgentTaskScheduleSupport {
                 AgentTaskOutcomeStatus::Succeeded
                     | AgentTaskOutcomeStatus::NoOp
                     | AgentTaskOutcomeStatus::Cancelled
+                    | AgentTaskOutcomeStatus::CandidateRecoverable
             )
             && matches!(
                 outcome.failure_classification,
@@ -1435,6 +1473,7 @@ impl AgentTaskScheduleSupport {
                     | AgentTaskOutcomeStatus::NoOp
                     | AgentTaskOutcomeStatus::Cancelled
                     | AgentTaskOutcomeStatus::Timeout
+                    | AgentTaskOutcomeStatus::CandidateRecoverable
             )
     }
 
@@ -1600,4 +1639,33 @@ impl AgentTaskScheduleSupport {
 
         totals
     }
+}
+
+fn is_base_bound_patch_candidate(outcome: &AgentTaskOutcome, artifact: &AgentTaskArtifact) -> bool {
+    is_actionable_patch_artifact(artifact)
+        && artifact.size_bytes.is_some_and(|size| size > 0)
+        && artifact
+            .sha256
+            .as_deref()
+            .is_some_and(homeboy_engine_primitives::content_hash::is_sha256_hex)
+        && artifact.metadata.get("task_id").and_then(Value::as_str) == Some(&outcome.task_id)
+        && artifact
+            .metadata
+            .get("producer_attempt")
+            .is_some_and(Value::is_u64)
+        && [
+            "run_id",
+            "base_ref",
+            "provider_backend",
+            "repository_identity",
+            "workspace_identity",
+        ]
+        .iter()
+        .all(|key| {
+            artifact
+                .metadata
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        })
 }
