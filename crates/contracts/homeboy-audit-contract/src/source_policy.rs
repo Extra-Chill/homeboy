@@ -84,6 +84,7 @@ impl CoreBoundaryLeakConfig {
             } else {
                 self.ignore_line_prefixes.clone()
             },
+            scan_comments: false,
             ignore_after_line_equals: Vec::new(),
             example_path_contains: self.example_path_contains.clone(),
             example_classification: None,
@@ -124,6 +125,7 @@ fn core_boundary_term(term: &str) -> Option<SourcePolicyTerm> {
         label: None,
         match_mode: Some(match_mode),
         detect_split: false,
+        context: None,
     })
 }
 
@@ -158,6 +160,13 @@ pub struct SourcePolicyRule {
     /// Trimmed line prefixes skipped before matching, such as comment prefixes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore_line_prefixes: Vec<String>,
+    /// Match inside comments as well as code.
+    ///
+    /// Off by default: a term in a comment describes behavior, it does not
+    /// implement it (#6857). Turn it on for policies that are genuinely about
+    /// comment text, such as banned TODO markers or licence headers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scan_comments: bool,
     /// Exact trimmed lines after which the rest of the file is ignored.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore_after_line_equals: Vec<String>,
@@ -207,6 +216,28 @@ pub struct SourcePolicyTerm {
     /// variable indirection, or character-code arithmetic.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub detect_split: bool,
+    /// Which lexical region of the source this term is trusted in.
+    ///
+    /// Defaults to [`SourcePolicyTermContext::Code`], which matches anywhere
+    /// outside comments. Terms whose bare word is ordinary programming
+    /// vocabulary — `node`, `playground`, `brew` — produce mostly noise there,
+    /// because a local named `node` is a graph node, not Node.js. Scoping such
+    /// a term to [`SourcePolicyTermContext::StringLiteral`] keeps it detecting
+    /// the shape that actually leaks (a command name, a filename, an error
+    /// substring) without deleting it from the policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<SourcePolicyTermContext>,
+}
+
+/// Lexical region a source-policy term is matched against.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourcePolicyTermContext {
+    /// Anywhere in the file except comments. The default.
+    #[default]
+    Code,
+    /// Only inside string literals.
+    StringLiteral,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]

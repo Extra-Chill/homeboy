@@ -56,7 +56,7 @@ pub use remote_execution::{ArtifactPortabilityConfig, RemoteExecutionSafetyConfi
 pub use source_policy::{
     ConventionTagGlob, CoreBoundaryLeakConfig, MutatingResourceAccessConfig, RequestedDetectorRule,
     RequestedDetectorRuleBody, RequiredRegexScope, SourcePolicyMatchMode, SourcePolicyRule,
-    SourcePolicyRuleBody, SourcePolicyTerm,
+    SourcePolicyRuleBody, SourcePolicyTerm, SourcePolicyTermContext,
 };
 pub use test_wiring::{TestWiringConfig, TestWiringPolicy};
 pub use thin_command_adapter::{ThinCommandAdapterConfig, ThinCommandAdapterMarkerGroup};
@@ -284,6 +284,7 @@ mod tests {
                 exclude_path_contains: Vec::new(),
                 allow_line_contains: Vec::new(),
                 ignore_line_prefixes: Vec::new(),
+                scan_comments: false,
                 ignore_after_line_equals: Vec::new(),
                 example_path_contains: Vec::new(),
                 example_classification: None,
@@ -295,6 +296,7 @@ mod tests {
                         label: None,
                         match_mode: None,
                         detect_split: false,
+                        context: None,
                     }],
                     default_match: SourcePolicyMatchMode::Token,
                     case_insensitive: true,
@@ -489,6 +491,7 @@ mod tests {
             exclude_path_contains: Vec::new(),
             allow_line_contains: Vec::new(),
             ignore_line_prefixes: Vec::new(),
+            scan_comments: false,
             ignore_after_line_equals: Vec::new(),
             example_path_contains: Vec::new(),
             example_classification: None,
@@ -500,6 +503,7 @@ mod tests {
                     label: None,
                     match_mode: None,
                     detect_split: false,
+                    context: None,
                 }],
                 default_match: SourcePolicyMatchMode::Token,
                 case_insensitive: true,

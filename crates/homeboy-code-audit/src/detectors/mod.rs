@@ -20,6 +20,7 @@ pub(super) mod repeated_literal_shape;
 pub(super) mod requested_detectors;
 pub(super) mod shared_scaffolding;
 pub(super) mod source_policy;
+pub(super) mod source_text;
 pub(super) mod test_coverage;
 pub(super) mod test_topology;
 pub(super) mod test_vacuity;
