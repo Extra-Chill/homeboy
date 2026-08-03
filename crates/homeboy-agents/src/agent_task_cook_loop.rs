@@ -1434,6 +1434,7 @@ mod tests {
             summary: "Fix the reload crash.".to_string(),
             what_changed: vec!["Guard the null render path.".to_string()],
             compatibility: "Internal only; no compatibility impact.".to_string(),
+            verification: Vec::new(),
             used_for: "Reproduced the crash, isolated the null path, added a guard, and verified with a focused gate before finalizing.".to_string(),
         }
     }

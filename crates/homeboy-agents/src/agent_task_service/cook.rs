@@ -605,7 +605,7 @@ fn project_initial_finalizing_review_form_contract(options: &mut AgentTaskCookSe
             .push(crate::agent_task_review_dossier::review_form_output_declaration());
         if !request.instructions.contains("reviewer-facing PR dossier") {
             request.instructions.push_str(
-                "\n\nProvide the reviewer-facing PR dossier in `outputs.review_form`. Return an object with `summary` (the change and its purpose), `what_changed` (concrete change bullets), `compatibility` (impact assessment), and `used_for` (a concise reflection of the process used). A successful response supplies specific, complete content for every field so Homeboy can finalize a clear pull request.",
+                "\n\nProvide the reviewer-facing PR dossier in `outputs.review_form`. Return an object with `summary` (the change and its purpose), `what_changed` (concrete change bullets), qualitative `compatibility` (impact assessment), optional structured `verification` entries (exact command plus total/passed/failed/ignored counts), and `used_for` (a concise reflection of the process used). Homeboy links verification entries to durable candidate gate evidence. A successful response supplies specific, complete content for every field so Homeboy can finalize a clear pull request.",
             );
         }
     }

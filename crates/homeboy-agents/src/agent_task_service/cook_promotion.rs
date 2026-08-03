@@ -1877,6 +1877,7 @@ fn cook_review_dossier(
     // forward. Resolve the persisted Cook lineage so that follow-up prose cannot
     // erase the implementation attempt that produced the delivered patch.
     let terminal_form = review_form_for_finalization(successful_run_id)?;
+    let verified_commands = terminal_form.verify_against_promotion(verification_promotion)?;
     let lineage = cook_ai_lineage(
         options,
         terminal_promotion,
@@ -1918,6 +1919,7 @@ fn cook_review_dossier(
                 url: None,
             },
         ],
+        verified_commands,
         changed_public_contracts: Vec::new(),
         public_contract_evidence: None,
         ai_assistance: AgentTaskReviewAiAssistance {

@@ -53,6 +53,33 @@ pub struct AgentTaskReviewEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AiReviewVerificationClaim {
+    pub command: String,
+    pub total: u64,
+    pub passed: u64,
+    pub failed: u64,
+    pub ignored: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskReviewVerifiedCommand {
+    pub command: String,
+    pub status: String,
+    pub candidate_commit: String,
+    pub candidate_tree: String,
+    pub candidate_sha256: String,
+    pub evidence_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ignored: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskPublicContract {
     pub id: String,
     pub summary: String,
@@ -92,6 +119,8 @@ pub struct AgentTaskReviewDossier {
     pub compatibility: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<AgentTaskReviewEvidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verified_commands: Vec<AgentTaskReviewVerifiedCommand>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changed_public_contracts: Vec<AgentTaskPublicContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,6 +189,20 @@ pub fn review_form_output_declaration() -> crate::agent_task::AgentTaskOutputDec
                     "minItems": 1
                 },
                 "compatibility": { "type": "string" },
+                "verification": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["command", "total", "passed", "failed", "ignored"],
+                        "properties": {
+                            "command": { "type": "string" },
+                            "total": { "type": "integer", "minimum": 0 },
+                            "passed": { "type": "integer", "minimum": 0 },
+                            "failed": { "type": "integer", "minimum": 0 },
+                            "ignored": { "type": "integer", "minimum": 0 }
+                        }
+                    }
+                },
                 "used_for": { "type": "string" }
             }
         }),
@@ -183,6 +226,9 @@ pub struct AiFilledReviewForm {
     pub what_changed: Vec<String>,
     /// Compatibility / impact assessment.
     pub compatibility: String,
+    /// Numeric test claims which Homeboy binds to durable candidate gate evidence.
+    #[serde(default)]
+    pub verification: Vec<AiReviewVerificationClaim>,
     /// Self-reflective, concise description of the *process* the AI took —
     /// deliberately distinct from `summary` (which describes *what* changed).
     pub used_for: String,
@@ -218,9 +264,11 @@ impl AiFilledReviewForm {
     /// nudge loop can converge.
     pub fn requirement_feedback() -> &'static str {
         "Return a `review_form` object in your task outputs with: `summary` (what is changing and why), \
-`what_changed` (a non-empty list of concrete change bullets), `compatibility` (impact/compatibility \
-assessment), and `used_for` (a concise, self-reflective description of the process you took — distinct \
-from the summary of what changed). A successful `used_for` is a genuine process reflection."
+`what_changed` (a non-empty list of concrete change bullets), `compatibility` (a qualitative impact/compatibility \
+assessment), optional `verification` entries with an exact command and total/passed/failed/ignored counts, and \
+`used_for` (a concise, self-reflective description of the process you took — distinct from the summary of what \
+changed). Homeboy verifies every `verification` entry against its durable candidate gate evidence. A successful \
+`used_for` is a genuine process reflection."
     }
 
     /// Validate that the agent filled every required slot with real content.
@@ -267,6 +315,123 @@ from the summary of what changed). A successful `used_for` is a genuine process 
         }
         Ok(())
     }
+
+    pub fn verify_against_promotion(
+        &self,
+        promotion: &crate::agent_task_promotion::AgentTaskPromotionReport,
+    ) -> Result<Vec<AgentTaskReviewVerifiedCommand>> {
+        let verified = verified_commands_from_promotion(promotion);
+        for (index, claim) in self.verification.iter().enumerate() {
+            let field = format!("review_form.verification[{index}]");
+            let sum = claim
+                .passed
+                .checked_add(claim.failed)
+                .and_then(|value| value.checked_add(claim.ignored));
+            if sum != Some(claim.total) {
+                return Err(review_form_gap(
+                    &format!("{field}.total"),
+                    &format!(
+                        "count mismatch: total {} does not equal passed {} + failed {} + ignored {}; no durable command evidence can support this claim",
+                        claim.total, claim.passed, claim.failed, claim.ignored
+                    ),
+                ));
+            }
+            let Some(command) = verified.iter().find(|item| item.command == claim.command) else {
+                return Err(review_form_gap(
+                    &format!("{field}.command"),
+                    "no successful visible durable gate for this command on the finalized candidate",
+                ));
+            };
+            if command.total.is_none() {
+                return Err(review_form_gap(
+                    &field,
+                    &format!(
+                        "durable evidence `{}` for candidate tree {} does not expose supported test counts; numeric verification claims fail closed",
+                        command.evidence_ref, command.candidate_tree
+                    ),
+                ));
+            }
+            if (
+                command.total,
+                command.passed,
+                command.failed,
+                command.ignored,
+            ) != (
+                Some(claim.total),
+                Some(claim.passed),
+                Some(claim.failed),
+                Some(claim.ignored),
+            ) {
+                return Err(review_form_gap(
+                    &field,
+                    &format!(
+                        "count mismatch with durable evidence `{}` for candidate tree {}",
+                        command.evidence_ref, command.candidate_tree
+                    ),
+                ));
+            }
+        }
+        Ok(verified)
+    }
+}
+
+fn verified_commands_from_promotion(
+    promotion: &crate::agent_task_promotion::AgentTaskPromotionReport,
+) -> Vec<AgentTaskReviewVerifiedCommand> {
+    promotion
+        .deterministic_gates
+        .iter()
+        .filter_map(|gate| {
+            let [shell, flag, command] = gate.command.as_slice() else {
+                return None;
+            };
+            if shell != "sh"
+                || flag != "-lc"
+                || !promotion.has_visible_passed_gate_for_command(command)
+            {
+                return None;
+            }
+            let candidate = gate.candidate_checkout.as_ref()?;
+            let (total, passed, failed, ignored) = test_counts(&gate.stdout).map_or(
+                (None, None, None, None),
+                |(total, passed, failed, ignored)| {
+                    (Some(total), Some(passed), Some(failed), Some(ignored))
+                },
+            );
+            Some(AgentTaskReviewVerifiedCommand {
+                command: command.clone(),
+                status: format!("{:?}", gate.status).to_ascii_lowercase(),
+                candidate_commit: candidate.commit.clone(),
+                candidate_tree: candidate.tree.clone(),
+                candidate_sha256: candidate.candidate_sha256.clone(),
+                evidence_ref: gate.id.clone(),
+                total,
+                passed,
+                failed,
+                ignored,
+            })
+        })
+        .collect()
+}
+
+fn test_counts(stdout: &str) -> Option<(u64, u64, u64, u64)> {
+    let mut found = false;
+    let (passed, failed, ignored) =
+        Regex::new(r"(?m)test result:.*?(\d+) passed; (\d+) failed; (\d+) ignored")
+            .expect("valid test-result regex")
+            .captures_iter(stdout)
+            .try_fold(
+                (0_u64, 0_u64, 0_u64),
+                |(passed, failed, ignored), captures| {
+                    found = true;
+                    Some((
+                        passed.checked_add(captures[1].parse().ok()?)?,
+                        failed.checked_add(captures[2].parse().ok()?)?,
+                        ignored.checked_add(captures[3].parse().ok()?)?,
+                    ))
+                },
+            )?;
+    found.then_some((passed + failed + ignored, passed, failed, ignored))
 }
 
 fn review_form_gap(field: &str, problem: &str) -> Error {
@@ -727,8 +892,8 @@ pub fn render_review_dossier(
             ))
         }
         AgentTaskReviewSectionId::Compatibility if !dossier.compatibility.is_empty() => Some(("Compatibility", prose(&dossier.compatibility))),
-        AgentTaskReviewSectionId::Evidence if !dossier.changed_public_contracts.is_empty() => Some(("Evidence", format!("{}{}", render_public_contract_evidence(dossier), render_evidence(&dossier.evidence)))),
-        AgentTaskReviewSectionId::Evidence if !dossier.evidence.is_empty() => Some(("Evidence", dossier.evidence.iter().map(|item| match &item.url { Some(url) => format!("- {}: {url}", prose(&item.summary)), None => format!("- {}", prose(&item.summary)) }).collect::<Vec<_>>().join("\n"))),
+        AgentTaskReviewSectionId::Evidence if !dossier.changed_public_contracts.is_empty() => Some(("Evidence", format!("{}{}{}", render_public_contract_evidence(dossier), render_verified_commands(&dossier.verified_commands), render_evidence(&dossier.evidence)))),
+        AgentTaskReviewSectionId::Evidence if !dossier.evidence.is_empty() || !dossier.verified_commands.is_empty() => Some(("Evidence", format!("{}{}", render_verified_commands(&dossier.verified_commands), render_evidence(&dossier.evidence)))),
         AgentTaskReviewSectionId::AiAssistance => Some(("AI assistance", format!("- **AI assistance:** {}\n- **Tool(s):** {}\n- **Model:** {}\n- **Used for:** {}", if dossier.ai_assistance.used { "Yes" } else { "No" }, prose(&dossier.ai_assistance.tool), prose(&dossier.ai_assistance.model), prose(&dossier.ai_assistance.used_for)))),
         AgentTaskReviewSectionId::SourceRelationships if !dossier.source_relationships.is_empty() => Some(("Source relationships", dossier.source_relationships.iter().map(|item| format!("- {} {}", match item.kind { AgentTaskReviewIssueRelationshipKind::Closes => "Closes", AgentTaskReviewIssueRelationshipKind::RelatesTo => "Relates to" }, relationship_reference(&item.reference))).collect::<Vec<_>>().join("\n"))), _ => None };
         if let Some((heading, content)) = section {
@@ -779,6 +944,25 @@ fn render_evidence(evidence: &[AgentTaskReviewEvidence]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+fn render_verified_commands(commands: &[AgentTaskReviewVerifiedCommand]) -> String {
+    commands
+        .iter()
+        .map(|command| {
+            let counts = match (command.total, command.passed, command.failed, command.ignored) {
+                (Some(total), Some(passed), Some(failed), Some(ignored)) => format!(
+                    "; total={total}, passed={passed}, failed={failed}, ignored={ignored}"
+                ),
+                _ => String::new(),
+            };
+            format!(
+                "- Verified command `{}`: status={}; candidate commit `{}`, tree `{}`, fingerprint `{}`; durable gate `{}`{}\n",
+                code(&command.command), prose(&command.status), code(&command.candidate_commit),
+                code(&command.candidate_tree), code(&command.candidate_sha256),
+                code(&command.evidence_ref), counts,
+            )
+        })
+        .collect()
 }
 
 fn ordered_sections(profile: &AgentTaskReviewProfile) -> Vec<AgentTaskReviewSectionId> {
@@ -1116,6 +1300,7 @@ mod tests {
             }],
             compatibility: "No compatibility impact".into(),
             evidence: Vec::new(),
+            verified_commands: Vec::new(),
             changed_public_contracts: Vec::new(),
             public_contract_evidence: None,
             ai_assistance: AgentTaskReviewAiAssistance {
@@ -1137,13 +1322,172 @@ mod tests {
             summary: "Fix the widget so it renders on reload.".into(),
             what_changed: vec!["Guard the null path in render().".into()],
             compatibility: "No compatibility impact; internal only.".into(),
+            verification: Vec::new(),
             used_for: "I traced the null deref to the reload path, added a guard, and verified with a focused test before finalizing.".into(),
         }
+    }
+
+    fn promotion(
+        command: &str,
+        candidate_tree: &str,
+    ) -> crate::agent_task_promotion::AgentTaskPromotionReport {
+        serde_json::from_value(serde_json::json!({
+            "schema": "homeboy/agent-task-promotion-report/v1",
+            "status": "applied",
+            "source": { "kind": "fixture", "task_id": "task" },
+            "to_worktree": "fixture",
+            "target": { "worktree": "fixture" },
+            "patch_artifact": { "id": "patch", "kind": "patch", "path": "patch.diff" },
+            "deterministic_gates": [{
+                "id": "gate-connection",
+                "visibility": "visible",
+                "reveal_policy": "full_evidence",
+                "status": "succeeded",
+                "command": ["sh", "-lc", command],
+                "exit_code": 0,
+                "stdout": "test result: FAILED. 175 passed; 2 failed; 0 ignored",
+                "candidate_checkout": {
+                    "schema": "homeboy/agent-task-gate-candidate-checkout/v1",
+                    "commit": "candidate-commit",
+                    "tree": candidate_tree,
+                    "candidate_sha256": "candidate-fingerprint"
+                }
+            }],
+            "provenance": {
+                "candidate_checkout": {
+                    "schema": "homeboy/agent-task-gate-candidate-checkout/v1",
+                    "commit": "candidate-commit",
+                    "tree": candidate_tree,
+                    "candidate_sha256": "candidate-fingerprint"
+                }
+            },
+            "operator_notification": { "status": "completed", "message": "fixture" }
+        }))
+        .expect("fixture promotion")
     }
 
     #[test]
     fn valid_review_form_passes_validation() {
         assert!(valid_form().validate().is_ok());
+    }
+
+    #[test]
+    fn qualitative_compatibility_is_preserved_with_structured_verified_command() {
+        let mut form = valid_form();
+        // This is compatibility interpretation, not a command-result claim.
+        // It must not be subject to keyword/number prose policing.
+        form.compatibility = "Two previously failed deployment attempts are unrelated; the full suite remains the compatibility baseline.".into();
+        form.validate()
+            .expect("legitimate qualitative compatibility");
+        let verified = form
+            .verify_against_promotion(&promotion("cargo test connection", "candidate-tree"))
+            .expect("qualitative compatibility needs no provider test claim");
+        assert_eq!(verified[0].candidate_tree, "candidate-tree");
+        assert_eq!(verified[0].passed, Some(175));
+        assert_eq!(verified[0].evidence_ref, "gate-connection");
+    }
+
+    #[test]
+    fn renderer_shows_candidate_bound_command_evidence() {
+        let mut value = dossier();
+        value.verified_commands = valid_form()
+            .verify_against_promotion(&promotion("cargo test connection", "candidate-tree"))
+            .expect("fixture gate evidence");
+        let body = render_review_dossier(&value, &default_profile());
+        for expected in [
+            "Verified command `cargo test connection`",
+            "status=succeeded",
+            "candidate commit `candidate-commit`",
+            "tree `candidate-tree`",
+            "fingerprint `candidate-fingerprint`",
+            "durable gate `gate-connection`",
+            "total=177, passed=175, failed=2, ignored=0",
+        ] {
+            assert!(body.contains(expected), "missing `{expected}` in {body}");
+        }
+    }
+
+    #[test]
+    fn stale_suite_claim_is_rejected_when_no_post_edit_gate_matches() {
+        let mut form = valid_form();
+        form.verification.push(AiReviewVerificationClaim {
+            command: "cargo test connection::tests".into(),
+            total: 127,
+            passed: 124,
+            failed: 3,
+            ignored: 0,
+        });
+        let error = form
+            .verify_against_promotion(&promotion("cargo test connection", "candidate-tree"))
+            .expect_err("the pre-edit suite cannot verify a different post-edit command");
+        assert_eq!(
+            error.details["field"],
+            "review_form.verification[0].command"
+        );
+        assert!(error.message.contains("finalized candidate"));
+    }
+
+    #[test]
+    fn internally_inconsistent_counts_name_the_exact_claim_field() {
+        let mut form = valid_form();
+        form.verification.push(AiReviewVerificationClaim {
+            command: "cargo test connection".into(),
+            total: 127,
+            passed: 124,
+            failed: 2,
+            ignored: 0,
+        });
+        let error = form
+            .verify_against_promotion(&promotion("cargo test connection", "candidate-tree"))
+            .expect_err("124 + 2 does not equal 127");
+        assert_eq!(error.details["field"], "review_form.verification[0].total");
+        assert!(error.message.contains("count mismatch"));
+    }
+
+    #[test]
+    fn different_candidate_fingerprint_cannot_supply_review_verification() {
+        let mut form = valid_form();
+        form.verification.push(AiReviewVerificationClaim {
+            command: "cargo test connection".into(),
+            total: 177,
+            passed: 175,
+            failed: 2,
+            ignored: 0,
+        });
+        let mut promotion = promotion("cargo test connection", "candidate-tree");
+        promotion.provenance["candidate_checkout"]["tree"] = serde_json::json!("other-tree");
+        let error = form
+            .verify_against_promotion(&promotion)
+            .expect_err("a gate from another candidate cannot be published");
+        assert_eq!(
+            error.details["field"],
+            "review_form.verification[0].command"
+        );
+    }
+
+    #[test]
+    fn unsupported_command_output_fails_closed_for_structured_counts() {
+        let mut form = valid_form();
+        form.verification.push(AiReviewVerificationClaim {
+            command: "cargo test connection".into(),
+            total: 177,
+            passed: 175,
+            failed: 2,
+            ignored: 0,
+        });
+        let mut promotion = promotion("cargo test connection", "candidate-tree");
+        promotion.deterministic_gates[0].stdout = "all checks completed".into();
+        let error = form
+            .verify_against_promotion(&promotion)
+            .expect_err("unparseable output cannot support a numeric claim");
+        assert_eq!(error.details["field"], "review_form.verification[0]");
+        assert!(
+            error
+                .message
+                .contains("numeric verification claims fail closed"),
+            "unexpected error: {}",
+            error.message
+        );
     }
 
     #[test]
