@@ -432,7 +432,7 @@ fn prepare_payload(
         .config
         .requested_ref
         .as_deref()
-        .map(|reference| ExactRefCheckout::materialize(&component, reference, None))
+        .map(|reference| ExactRefCheckout::materialize(&component, reference, None, None))
         .transpose()?;
     if let Some(checkout) = checkout.as_ref() {
         checkout.verify()?;

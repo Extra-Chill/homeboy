@@ -169,6 +169,7 @@ pub(super) fn deploy_components(
                                 component,
                                 requested_ref,
                                 config.resolved_ref_for(&component.id),
+                                Some(&project),
                             )
                         })
                 })
@@ -337,6 +338,7 @@ pub(super) fn deploy_components(
                     &entry.component,
                     &requested_ref,
                     resolved_sha.as_deref(),
+                    Some(&project),
                 )
             })
             .collect::<Result<Vec<_>>>()?;
@@ -2251,7 +2253,7 @@ mod tests {
                 "fixture-packager".to_string(),
                 homeboy_core::component::ScopedExtensionConfig::default(),
             )]));
-            let checkout = ExactRefCheckout::materialize(&component, "requested", None)
+            let checkout = ExactRefCheckout::materialize(&component, "requested", None, None)
                 .expect("materialize requested ref");
             checkout.verify().expect("verify requested ref");
 
@@ -2287,6 +2289,158 @@ mod tests {
                 requested_sha
             );
         });
+    }
+
+    #[test]
+    fn exact_ref_preparation_preserves_duplicate_source_version_target_artifact_paths() {
+        let repo = TempDir::new().expect("repo");
+        run_git(repo.path(), &["init", "-q"]);
+        run_git(repo.path(), &["config", "user.email", "test@example.com"]);
+        run_git(repo.path(), &["config", "user.name", "Test"]);
+        std::fs::create_dir_all(repo.path().join("source")).expect("source directory");
+        std::fs::write(
+            repo.path().join("source/plugin.txt"),
+            "PluginVersion: 1.2.3\nPluginRelease: 1.2.3\n",
+        )
+        .expect("plugin source");
+        std::fs::write(
+            repo.path().join("source/release-set.txt"),
+            "SetVersion: 1.2.3\nSetRelease: 1.2.3\nSetManifest: 1.2.3\n",
+        )
+        .expect("release-set source");
+        let version_targets = |artifact_paths: bool| {
+            serde_json::json!([
+                {"file": "source/plugin.txt", "pattern": "PluginVersion: ([0-9.]+)", "artifact_path": artifact_paths.then_some("wp-build.php")},
+                {"file": "source/plugin.txt", "pattern": "PluginRelease: ([0-9.]+)", "artifact_path": artifact_paths.then_some("wp-build.php")},
+                {"file": "source/release-set.txt", "pattern": "SetVersion: ([0-9.]+)", "artifact_path": artifact_paths.then_some("shared/release-set.json")},
+                {"file": "source/release-set.txt", "pattern": "SetRelease: ([0-9.]+)", "artifact_path": artifact_paths.then_some("shared/release-set.json")},
+                {"file": "source/release-set.txt", "pattern": "SetManifest: ([0-9.]+)", "artifact_path": artifact_paths.then_some("shared/release-set.json")},
+            ])
+        };
+        let write_config = |artifact_paths| {
+            std::fs::write(
+                repo.path().join("homeboy.json"),
+                serde_json::json!({
+                    "id": "fixture",
+                    "build_artifact": "build/fixture.zip",
+                    "extract_command": if artifact_paths { "source-extract {{artifact}}" } else { "stale-extract {{artifact}}" },
+                    "scripts": {"build": ["mkdir -p build/stage/shared && cp source/plugin.txt build/stage/wp-build.php && cp source/release-set.txt build/stage/shared/release-set.json && (cd build/stage && zip -qr ../fixture.zip .)"]},
+                    "version_targets": version_targets(artifact_paths),
+                })
+                .to_string(),
+            )
+            .expect("portable config");
+        };
+        write_config(false);
+        run_git(repo.path(), &["add", "."]);
+        run_git(repo.path(), &["commit", "-q", "-m", "configured"]);
+        let configured = git_stdout(repo.path(), &["rev-parse", "HEAD"]);
+        write_config(true);
+        run_git(repo.path(), &["commit", "-am", "requested", "-q"]);
+        run_git(repo.path(), &["branch", "requested"]);
+        run_git(repo.path(), &["checkout", "-q", &configured]);
+
+        let project = Project {
+            id: "site".to_string(),
+            components: vec![ProjectComponentAttachment {
+                id: "fixture".to_string(),
+                local_path: repo.path().display().to_string(),
+                remote_path: Some("plugins/fixture".to_string()),
+                ..ProjectComponentAttachment::default()
+            }],
+            component_overrides: HashMap::from([(
+                "fixture".to_string(),
+                homeboy_core::component::ComponentOverrideConfig {
+                    build_artifact: Some("build/fixture.zip".to_string()),
+                    extract_command: Some("project-extract {{artifact}}".to_string()),
+                    hooks: HashMap::from([(
+                        "post:deploy".to_string(),
+                        vec!["project-hook".to_string()],
+                    )]),
+                    scopes: Some(homeboy_core::component::ScopeConfig {
+                        deploy: Some(homeboy_core::component::CommandScopeConfig {
+                            exclude: vec!["project-only".to_string()],
+                            ..homeboy_core::component::CommandScopeConfig::default()
+                        }),
+                        ..homeboy_core::component::ScopeConfig::default()
+                    }),
+                    cli_path: Some("project-cli".to_string()),
+                    ..homeboy_core::component::ComponentOverrideConfig::default()
+                },
+            )]),
+            ..Project::default()
+        };
+        let component = homeboy_core::project::resolve_project_component(&project, "fixture")
+            .expect("resolve inline project attachment");
+        assert!(component
+            .version_targets
+            .as_ref()
+            .expect("configured targets")
+            .iter()
+            .all(|target| target.artifact_path.is_none()));
+
+        let checkout = ExactRefCheckout::materialize(&component, "requested", None, Some(&project))
+            .expect("materialize requested ref");
+        assert_eq!(checkout.component.remote_path, "plugins/fixture");
+        assert_eq!(
+            checkout.component.extract_command.as_deref(),
+            Some("project-extract {{artifact}}")
+        );
+        assert_eq!(
+            checkout.component.build_artifact.as_deref(),
+            Some("build/fixture.zip")
+        );
+        assert_eq!(
+            checkout.component.hooks.get("post:deploy"),
+            Some(&vec!["project-hook".to_string()])
+        );
+        assert_eq!(checkout.component.cli_path.as_deref(), Some("project-cli"));
+        assert_eq!(
+            checkout
+                .component
+                .scopes
+                .as_ref()
+                .and_then(|scopes| scopes.deploy.as_ref())
+                .map(|scope| scope.exclude.as_slice()),
+            Some(["project-only".to_string()].as_slice())
+        );
+        assert_eq!(
+            checkout
+                .component
+                .scripts
+                .as_ref()
+                .map(|scripts| scripts.build.len()),
+            Some(1)
+        );
+        let mut config = base_deploy_config();
+        config.requested_ref = Some("requested".to_string());
+        config.force = true;
+        let local_versions = HashMap::from([("fixture".to_string(), "1.2.3".to_string())]);
+        let prepared = prepare_component_deployments(
+            &[checkout.component.clone()],
+            &config,
+            &project,
+            "/srv/site",
+            &local_versions,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("every mapped version target must pass exact-ref ZIP preflight");
+
+        let targets = prepared[0]
+            .component
+            .version_targets
+            .as_deref()
+            .expect("version targets");
+        assert_eq!(targets.len(), 5);
+        assert_eq!(targets[0].artifact_path.as_deref(), Some("wp-build.php"));
+        assert_eq!(targets[1].artifact_path.as_deref(), Some("wp-build.php"));
+        for target in &targets[2..] {
+            assert_eq!(
+                target.artifact_path.as_deref(),
+                Some("shared/release-set.json")
+            );
+        }
     }
 
     #[test]
@@ -2362,7 +2516,7 @@ mod tests {
             }),
             ..Component::default()
         };
-        let checkout = ExactRefCheckout::materialize(&component, "target", None)
+        let checkout = ExactRefCheckout::materialize(&component, "target", None, None)
             .expect("materialize target ref");
         checkout.verify().expect("verify target ref");
         if let Some(barrier) = barrier {
