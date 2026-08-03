@@ -371,6 +371,67 @@ fn policy_denial_is_terminal_even_when_retry_policy_matches_every_failure() {
 }
 
 #[test]
+fn base_bound_patch_survives_policy_denial_and_missing_review_form_for_fresh_review() {
+    let patch = "diff --git a/lib.rs b/lib.rs\n--- a/lib.rs\n+++ b/lib.rs\n@@ -1 +1 @@\n-base\n+candidate\n";
+    let mut denied = outcome(
+        "policy-denied-patch".to_string(),
+        AgentTaskOutcomeStatus::Failed,
+    );
+    denied.failure_classification = Some(AgentTaskFailureClassification::PolicyDenied);
+    denied.artifacts = vec![AgentTaskArtifact {
+        schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+        id: "candidate".to_string(),
+        kind: "patch".to_string(),
+        size_bytes: Some(patch.len() as u64),
+        sha256: Some(homeboy_engine_primitives::content_hash::sha256_hex(
+            patch.as_bytes(),
+        )),
+        metadata: json!({
+            "task_id": "policy-denied-patch",
+            "producer_attempt": 1,
+            "run_id": "run-11280",
+            "base_ref": "base-11280",
+            "provider_backend": "provider",
+            "repository_identity": "repository-11280",
+            "workspace_identity": "workspace-11280",
+        }),
+        ..Default::default()
+    }];
+
+    AgentTaskScheduleSupport::preserve_base_bound_patch_after_provider_failure(&mut denied);
+
+    assert_eq!(denied.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+    assert_eq!(
+        denied.failure_classification,
+        Some(AgentTaskFailureClassification::PolicyDenied)
+    );
+    assert!(denied.outputs.get("review_form").is_none());
+    assert!(denied.diagnostics.iter().any(|diagnostic| {
+        diagnostic.class == "agent_task.provider_failure_recoverable_candidate"
+            && diagnostic.data["recovery_action"] == "homeboy agent-task review <run-id>"
+    }));
+    let outcomes = vec![denied.clone()];
+    assert_eq!(
+        AgentTaskScheduleSupport::aggregate_status(&outcomes),
+        AgentTaskAggregateStatus::PartialRecoverable
+    );
+    let totals = AgentTaskScheduleSupport::totals(1, &outcomes);
+    assert_eq!(totals.candidate_recoverable, 1);
+    assert_eq!(totals.recoverable_candidates, 1);
+    assert_eq!(totals.failed, 0);
+    assert!(!AgentTaskScheduleSupport::should_retry(
+        &denied,
+        1,
+        2,
+        3,
+        3,
+        None,
+        0,
+        &[],
+    ));
+}
+
+#[test]
 fn incomplete_nested_outputs_provider_result_is_detected() {
     // Mirrors a provider wrapper shape: the provider claims
     // top-level success/completed, but `outputs.completed` is false, the reply

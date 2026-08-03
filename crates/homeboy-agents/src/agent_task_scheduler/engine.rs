@@ -806,6 +806,9 @@ where
                             );
                         }
                     }
+                    AgentTaskScheduleSupport::preserve_base_bound_patch_after_provider_failure(
+                        &mut outcome,
+                    );
                     let state = AgentTaskScheduleSupport::state_for_outcome(&outcome);
                     events.push(event(
                         &outcome.task_id,
