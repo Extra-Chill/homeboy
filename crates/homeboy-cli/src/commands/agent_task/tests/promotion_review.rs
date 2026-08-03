@@ -146,6 +146,217 @@ fn review_reports_completed_aggregate_and_promotion_hints() {
 }
 
 #[test]
+fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
+    struct PatchExecutor {
+        path: String,
+        run_id: String,
+        size_bytes: u64,
+        sha256: String,
+    }
+
+    struct NoChangeReviewExecutor;
+
+    impl AgentTaskExecutorAdapter for NoChangeReviewExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("intentional no-change gate retry".to_string()),
+                failure_classification: None,
+                artifacts: Vec::new(),
+                typed_artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                outputs: json!({
+                    "review_form": {
+                        "summary": "Retry reviewed the candidate.",
+                        "what_changed": ["No additional patch was needed."],
+                        "compatibility": "No additional compatibility impact.",
+                        "used_for": "Reviewed failed-gate evidence."
+                    }
+                }),
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }
+        }
+    }
+
+    impl AgentTaskExecutorAdapter for PatchExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("produced patch before failed gate".to_string()),
+                failure_classification: None,
+                artifacts: vec![AgentTaskArtifact {
+                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                    id: "candidate".to_string(),
+                    kind: "patch".to_string(),
+                    name: Some("candidate.patch".to_string()),
+                    label: None,
+                    role: None,
+                    semantic_key: None,
+                    path: Some(self.path.clone()),
+                    url: None,
+                    mime: Some("text/x-diff".to_string()),
+                    size_bytes: Some(self.size_bytes),
+                    sha256: Some(self.sha256.clone()),
+                    metadata: Value::Null,
+                }],
+                typed_artifacts: Vec::new(),
+                evidence_refs: vec![AgentTaskEvidenceRef {
+                    kind: "plan".to_string(),
+                    uri: format!("homeboy://agent-task/run/{}/plan#task=task-a", self.run_id),
+                    label: None,
+                }],
+                diagnostics: Vec::new(),
+                outputs: Value::Null,
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }
+        }
+    }
+
+    with_temp_home(|| {
+        let cook_id = "cook-reader-substantive-candidate";
+        let candidate_run_id = "cook-reader-substantive-candidate-attempt-1";
+        let retry_run_id = "cook-reader-substantive-candidate-attempt-2";
+        let patch = tempfile::NamedTempFile::new().expect("candidate patch");
+        let patch_contents = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
+        std::fs::write(patch.path(), patch_contents).expect("write candidate patch");
+        run_loaded_plan(
+            test_plan(),
+            Some(candidate_run_id),
+            PatchExecutor {
+                path: patch.path().display().to_string(),
+                run_id: candidate_run_id.to_string(),
+                size_bytes: patch_contents.len() as u64,
+                sha256: homeboy_engine_primitives::content_hash::sha256_hex(
+                    patch_contents.as_bytes(),
+                ),
+            },
+        )
+        .expect("substantive candidate completed");
+        run_loaded_plan(test_plan(), Some(retry_run_id), NoChangeReviewExecutor)
+            .expect("intentional no-change retry completed");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, candidate_run_id)
+            .expect("record substantive candidate");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 2, retry_run_id)
+            .expect("record latest no-change retry");
+        agent_task_lifecycle::record_promotion(
+            retry_run_id,
+            json!({
+                "status": "gate_failed",
+                "gate_results": [{ "name": "cargo test", "exit_code": 1 }],
+                "provenance": { "gate_retry": "intentional_no_change" }
+            }),
+        )
+        .expect("record retry verification provenance");
+
+        let (status_value, _) = status(StatusArgs {
+            run_id: cook_id.to_string(),
+            bridge: false,
+            since_cursor: None,
+            full: false,
+            no_runner_probe: false,
+        })
+        .expect("Cook status is bounded");
+        let (review_value, _) = review::review(ReviewArgs {
+            run_id: cook_id.to_string(),
+            to_worktree: None,
+            provider_command: None,
+            provider_argv: Vec::new(),
+        })
+        .expect("Cook review is bounded");
+        let (diagnose_value, _) = diagnose(DiagnoseArgs {
+            run_id: cook_id.to_string(),
+            full: false,
+        })
+        .expect("Cook diagnosis is bounded");
+        let (evidence_value, _) = evidence(EvidenceArgs {
+            run_id: cook_id.to_string(),
+            kind: None,
+            task: None,
+            failure_only: true,
+            full: false,
+        })
+        .expect("Cook failure evidence is bounded");
+        let (all_evidence_value, _) = evidence(EvidenceArgs {
+            run_id: cook_id.to_string(),
+            kind: None,
+            task: None,
+            failure_only: false,
+            full: false,
+        })
+        .expect("Cook evidence reads the selected candidate plan");
+
+        for value in [
+            &status_value,
+            &review_value,
+            &diagnose_value,
+            &evidence_value,
+        ] {
+            assert_eq!(value["run_id"], candidate_run_id);
+            assert_eq!(
+                value["candidate_selection"]["latest_attempt_run_id"],
+                retry_run_id
+            );
+            assert_eq!(value["candidate_selection"]["run_id"], candidate_run_id);
+        }
+        assert_eq!(review_value["contributing_attempt"]["run_id"], retry_run_id);
+        assert_eq!(
+            review_value["contributing_attempt"]["review_form"]["summary"],
+            "Retry reviewed the candidate."
+        );
+        assert_eq!(
+            review_value["contributing_attempt"]["verification"]["provenance"]["gate_retry"],
+            "intentional_no_change"
+        );
+        assert_eq!(
+            all_evidence_value["evidence"][0]["content"]["value"]["task_id"], "task-a",
+            "{all_evidence_value:#}"
+        );
+
+        let (bridge_value, _) = status(StatusArgs {
+            run_id: cook_id.to_string(),
+            bridge: true,
+            since_cursor: Some(0),
+            full: false,
+            no_runner_probe: false,
+        })
+        .expect("Cook bridge status selects the candidate");
+        assert_eq!(bridge_value["schema"], "homeboy/agent-task-run-status/v1");
+        assert_eq!(bridge_value["run_id"], candidate_run_id);
+        assert_eq!(
+            bridge_value["candidate_selection"]["run_id"],
+            candidate_run_id
+        );
+
+        let (attempt_status, _) = status(StatusArgs {
+            run_id: retry_run_id.to_string(),
+            bridge: false,
+            since_cursor: None,
+            full: false,
+            no_runner_probe: false,
+        })
+        .expect("exact attempt remains directly addressable");
+        assert_eq!(attempt_status["run_id"], retry_run_id);
+    });
+}
+
+#[test]
 fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema() {
     with_temp_home(|| {
         let root = tempfile::tempdir().expect("worktree root");
