@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.327.7] - 2026-08-03
+
+### Fixed
+- keep gate retries in current workspace
+- preserve singleton lock identity
+- resolve the home root through a lock, not a racing getenv
+- resolve isolated temp aliases
+- finalize from latest promotion evidence
+- avoid recursive live lease recovery guidance\n\nAI assistance: OpenAI gpt-5.6-sol via OpenCode implemented and verified the recovery diagnostic repair. Chris Huber remains responsible for every line.
+
 ## [0.327.6] - 2026-08-02
 
 ### Fixed
