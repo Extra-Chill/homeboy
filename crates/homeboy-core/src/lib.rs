@@ -61,7 +61,6 @@ pub mod artifact_preview;
 pub mod artifact_ref;
 pub mod broker_auth;
 pub mod browser_evidence;
-pub mod browser_visual_compare;
 pub mod build_identity;
 pub mod capacity;
 pub mod change_artifact;

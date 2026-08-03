@@ -114,8 +114,8 @@ fn run_visual_compare_provider(
     candidate_label: &str,
     include_local_paths: bool,
 ) -> homeboy::core::Result<VisualCompareResult> {
-    let value = homeboy::core::browser_visual_compare::run_visual_compare_provider(
-        &homeboy::core::browser_visual_compare::VisualCompareProviderRequest {
+    let value = super::visual_provider::run_visual_compare_provider(
+        &super::visual_provider::VisualCompareProviderRequest {
             artifacts_dir,
             source_screenshot,
             candidate_screenshot,
