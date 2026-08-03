@@ -613,6 +613,7 @@ pub(super) fn ensure_remote_daemon(
     live_lease_expectation: Option<(&str, u32)>,
     replacement_operation_id: Option<&str>,
     admission_fence: Option<&crate::generation_store::AdmissionFence>,
+    registry_lock_held: bool,
 ) -> std::result::Result<RemoteDaemon, String> {
     let mut status = remote_daemon_status(client, homeboy)?;
     probe_remote_daemon_endpoint(client, &mut status);
@@ -655,7 +656,12 @@ pub(super) fn ensure_remote_daemon(
         }
         RemoteDaemonConnectAction::Start => {
             negotiate_ensure_running_operation_id(client, homeboy, replacement_operation_id)?;
-            journal_ensure_running_replay(runner_id, homeboy, replacement_operation_id)?;
+            journal_ensure_running_replay(
+                runner_id,
+                homeboy,
+                replacement_operation_id,
+                registry_lock_held,
+            )?;
             return remote_daemon_ensure_running(client, homeboy, replacement_operation_id);
         }
         RemoteDaemonConnectAction::ReplaceIdleStale
@@ -665,7 +671,12 @@ pub(super) fn ensure_remote_daemon(
             negotiate_ensure_running_operation_id(client, homeboy, replacement_operation_id)?;
             // Persist B's idempotent receipt key before removing A. A retry then
             // replays this command before inspecting or replacing any lease.
-            journal_ensure_running_replay(runner_id, homeboy, replacement_operation_id)?;
+            journal_ensure_running_replay(
+                runner_id,
+                homeboy,
+                replacement_operation_id,
+                registry_lock_held,
+            )?;
             let daemon = status.daemon.as_ref().expect("replacement requires daemon");
             let lease_id = daemon
                 .lease_id
@@ -705,16 +716,26 @@ fn journal_ensure_running_replay(
     runner_id: &str,
     homeboy: &str,
     replacement_operation_id: Option<&str>,
+    registry_lock_held: bool,
 ) -> std::result::Result<(), String> {
     if replacement_operation_id.is_none() {
         return Ok(());
     }
-    crate::generation_store::record_replacement_operation_replay(
-        runner_id,
-        "ensure-running",
-        &remote_daemon_ensure_running_command(homeboy, replacement_operation_id),
-    )
-    .map_err(|error| error.to_string())
+    let command = remote_daemon_ensure_running_command(homeboy, replacement_operation_id);
+    let write = if registry_lock_held {
+        crate::generation_store::record_replacement_operation_replay_locked(
+            runner_id,
+            "ensure-running",
+            &command,
+        )
+    } else {
+        crate::generation_store::record_replacement_operation_replay(
+            runner_id,
+            "ensure-running",
+            &command,
+        )
+    };
+    write.map_err(|error| error.to_string())
 }
 
 pub(super) fn negotiate_ensure_running_operation_id(

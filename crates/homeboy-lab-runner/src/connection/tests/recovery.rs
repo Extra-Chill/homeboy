@@ -1858,6 +1858,7 @@ fn idle_stale_replacement_uses_actual_endpoint_envelopes_and_reprobes_the_new_ow
                 None,
                 None,
                 None,
+                false,
             )
             .expect("replacement succeeds");
             assert_eq!(daemon.lease_id.as_deref(), Some("lease-new"));
@@ -1889,6 +1890,7 @@ fn idle_stale_replacement_refuses_a_post_stop_owner_or_identity_change() {
                 None,
                 None,
                 None,
+                false,
             )
             .expect_err("concurrent stale daemon is refused");
             assert!(error.contains("ownership changed"));
@@ -1914,6 +1916,7 @@ fn idle_stale_replacement_refuses_a_post_stop_identity_change() {
                 None,
                 None,
                 None,
+                false,
             )
             .expect_err("stale replacement identity is refused");
             assert!(error.contains("does not match configured runner binary"));

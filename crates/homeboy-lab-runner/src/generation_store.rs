@@ -391,23 +391,29 @@ pub(crate) fn admission_session(
     }))
 }
 
-/// A nonzero persisted count remains an admission fence until that generation
-/// authoritatively reports terminal work. A reconnect may restore a tunnel to
-/// a live daemon, but cannot create or replace an admission generation past it.
-pub(crate) fn admission_fence(
+/// Serialize a daemon-creating or replacement mutation with job admission.
+/// The callback runs while the registry lock is held, so a concurrent
+/// `record_job` cannot make a previously idle generation active after the
+/// final fence observation and before the remote mutation begins.
+pub(crate) fn with_admission_fence<T>(
     runner_id: &str,
     legacy: Option<&RunnerSession>,
-) -> Result<Option<AdmissionFence>> {
-    Ok(read(runner_id, legacy)?.and_then(|generations| {
-        generations
-            .generations
-            .iter()
-            .find(|(_, entry)| entry.active_jobs > 0)
-            .map(|(generation, entry)| AdmissionFence {
-                generation: generation.clone(),
-                active_job_count: entry.active_jobs,
-            })
-    }))
+    operation: impl FnOnce(Option<&AdmissionFence>) -> Result<T>,
+) -> Result<T> {
+    with_registry_lock(runner_id, || {
+        let generations = read_locked(runner_id, legacy)?;
+        let fence = generations.as_ref().and_then(|generations| {
+            generations
+                .generations
+                .iter()
+                .find(|(_, entry)| entry.active_jobs > 0)
+                .map(|(generation, entry)| AdmissionFence {
+                    generation: generation.clone(),
+                    active_job_count: entry.active_jobs,
+                })
+        });
+        operation(fence.as_ref())
+    })
 }
 
 /// A recovery-created daemon is durable before a controller can authenticate
@@ -503,6 +509,24 @@ pub(crate) fn record_replacement_operation_replay(
         operation.kind = Some(kind.to_string());
         write_durable_json(&path, &operation)
     })
+}
+
+/// Update an operation journal while the caller holds this runner's registry
+/// lock through [`with_admission_fence`].
+pub(crate) fn record_replacement_operation_replay_locked(
+    runner_id: &str,
+    kind: &str,
+    command: &str,
+) -> Result<()> {
+    let path = replacement_operation_path(runner_id)?;
+    let mut operation: ReplacementOperation =
+        serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+        })?)
+        .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+    operation.replay_command = Some(command.to_string());
+    operation.kind = Some(kind.to_string());
+    write_durable_json(&path, &operation)
 }
 
 pub(crate) fn record_pending_replacement(runner_id: &str, session: &RunnerSession) -> Result<()> {
