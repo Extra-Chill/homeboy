@@ -1613,7 +1613,7 @@ fn recover_dead_direct_tunnel(runner_id: &str, session: Option<&RunnerSession>) 
 /// tunnel can have its port reused by an unrelated process. Instead it opens a
 /// fresh ephemeral tunnel and accepts it only when `/health` proves the exact
 /// persisted daemon lease and PID for the job-owning generation.
-pub fn reconnect_job_log_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
+fn reconnect_job_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
     let runner = load(runner_id)?;
     let legacy = read_session_or_live_peer(runner_id)?;
     let owner = super::generation_store::endpoint_session(
@@ -1686,6 +1686,24 @@ pub fn reconnect_job_log_owner(runner_id: &str, job_id: &str) -> Result<RunnerSe
         remote_daemon_lease_id: daemon.lease_id,
         ..owner
     })
+}
+
+/// Reopen and retain the direct tunnel for the durable generation which owns a
+/// foreground-polled job. This updates only that generation's endpoint; it
+/// never changes the admission generation used for new work.
+pub(crate) fn reconnect_job_owner_for_polling(
+    runner_id: &str,
+    job_id: &str,
+) -> Result<RunnerSession> {
+    let session = reconnect_job_owner(runner_id, job_id)?;
+    super::generation_store::record_reconnected_job_owner(runner_id, &session, job_id)?;
+    Ok(session)
+}
+
+/// Reopen a temporary tunnel to the durable generation which owns `job_id`.
+/// Callers must close the returned tunnel when the one-shot read completes.
+pub fn reconnect_job_log_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
+    reconnect_job_owner(runner_id, job_id)
 }
 
 /// Close the local tunnel opened exclusively for job log/cancel recovery. This

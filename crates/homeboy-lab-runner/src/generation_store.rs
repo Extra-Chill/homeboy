@@ -1176,6 +1176,65 @@ pub(crate) fn record_job(runner_id: &str, session: &RunnerSession, job_id: &str)
     })
 }
 
+/// Replace the local endpoint for a job's already-owned generation after an
+/// authenticated reattachment. Unlike admission, this cannot change where new
+/// work is sent.
+pub(crate) fn record_reconnected_job_owner(
+    runner_id: &str,
+    session: &RunnerSession,
+    job_id: &str,
+) -> Result<()> {
+    let lease_id = session
+        .remote_daemon_lease_id
+        .as_deref()
+        .ok_or_else(|| Error::internal_unexpected("reconnected daemon session has no lease ID"))?;
+    with_registry_lock(runner_id, || {
+        let Some(mut generations) = read_locked(runner_id, Some(session))? else {
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                "runner has no durable daemon generation binding for this job",
+                Some(runner_id.to_string()),
+                None,
+            ));
+        };
+        let owner = generations.job_owner(job_id).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "job_id",
+                "runner has no durable daemon generation binding for this job",
+                Some(job_id.to_string()),
+                None,
+            )
+        })?;
+        let Some(generation) = generations
+            .generations
+            .iter()
+            .find_map(|(generation, entry)| {
+                (generation == owner
+                    || entry.endpoint.remote_daemon_lease_id.as_deref() == Some(owner))
+                .then_some(generation.clone())
+            })
+        else {
+            return Err(Error::internal_unexpected(
+                "job owner does not resolve to a persisted daemon generation",
+            ));
+        };
+        let entry = generations
+            .generations
+            .get_mut(&generation)
+            .expect("job owner generation was resolved");
+        if entry.endpoint.remote_daemon_lease_id.as_deref() != Some(lease_id) {
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                "reattached daemon lease does not match the durable job owner",
+                Some(runner_id.to_string()),
+                None,
+            ));
+        }
+        entry.endpoint = session.clone();
+        write(runner_id, &generations)
+    })
+}
+
 /// Persist a daemon that has already passed the authenticated connection and
 /// endpoint identity checks as the admission owner. This survives controller
 /// session-file drift, while retaining older generations for any work pinned
@@ -2361,6 +2420,39 @@ mod tests {
                 Some(session("lease-stale", "daemon-stale", Some(101)))
             );
             assert!(operations.stopped_leases.borrow().is_empty());
+        });
+    }
+
+    #[test]
+    fn reattached_job_owner_updates_only_its_generation_endpoint() {
+        test_support::with_isolated_home(|_| {
+            let stale = session("lease-stale", "daemon-stale", Some(101));
+            let fresh = session("lease-fresh", "daemon-fresh", Some(202));
+            record_job("runner-a", &stale, "job-stale").expect("record stale job");
+            activate(
+                "runner-a",
+                &stale,
+                "lease-fresh".to_string(),
+                fresh.clone(),
+                &["job-stale".to_string()],
+            )
+            .expect("activate fresh generation");
+
+            let mut reattached = stale.clone();
+            reattached.local_url = Some("http://127.0.0.1:49152".to_string());
+            reattached.local_port = Some(49152);
+            reattached.tunnel_pid = Some(303);
+            record_reconnected_job_owner("runner-a", &reattached, "job-stale")
+                .expect("retain reattached owner");
+
+            assert_eq!(
+                job_session("runner-a", "job-stale", Some(&fresh)).expect("route stale job"),
+                Some(reattached)
+            );
+            assert_eq!(
+                admission_session("runner-a", Some(&stale)).expect("retain admission owner"),
+                Some(fresh)
+            );
         });
     }
 
