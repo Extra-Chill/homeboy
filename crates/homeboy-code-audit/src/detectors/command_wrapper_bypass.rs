@@ -278,6 +278,7 @@ fn detect_command_wrapper_bypass(fingerprints: &[&FileFingerprint]) -> Vec<Findi
                     def.name
                 ),
                 kind: AuditFinding::CommandWrapperBypass,
+                line: None,
             });
         }
     }

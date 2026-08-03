@@ -56,6 +56,7 @@ fn test_build_audit_summary_prioritizes_warnings_in_top_findings() {
         description: "No test file found".to_string(),
         suggestion: "Create test file".to_string(),
         kind: AuditFinding::MissingTestFile,
+        line: None,
     });
     result.findings.push(Finding {
         convention: "duplication".to_string(),
@@ -64,6 +65,7 @@ fn test_build_audit_summary_prioritizes_warnings_in_top_findings() {
         description: "Duplicate function".to_string(),
         suggestion: "Extract shared helper".to_string(),
         kind: AuditFinding::DuplicateFunction,
+        line: None,
     });
 
     let summary = crate::report::build_audit_summary(&result, 1);
@@ -86,6 +88,7 @@ fn test_build_audit_summary_groups_findings_for_drilldown() {
         description: "File exceeds the size threshold".to_string(),
         suggestion: "Split the module into focused pieces".to_string(),
         kind: AuditFinding::GodFile,
+        line: None,
     });
     result.findings.push(Finding {
         convention: "structural".to_string(),
@@ -94,6 +97,7 @@ fn test_build_audit_summary_groups_findings_for_drilldown() {
         description: "File exceeds the size threshold".to_string(),
         suggestion: "Split the module into focused pieces".to_string(),
         kind: AuditFinding::GodFile,
+        line: None,
     });
     result.findings.push(Finding {
         convention: "structural".to_string(),
@@ -102,6 +106,7 @@ fn test_build_audit_summary_groups_findings_for_drilldown() {
         description: "Module has too many items".to_string(),
         suggestion: "Move related items into submodules".to_string(),
         kind: AuditFinding::HighItemCount,
+        line: None,
     });
 
     let summary = build_audit_summary(&result, 1);
@@ -188,6 +193,7 @@ fn test_build_changed_since_summary_splits_introduced_from_context() {
         description: "Existing large file debt".to_string(),
         suggestion: "Consider decomposing into focused modules".to_string(),
         kind: AuditFinding::GodFile,
+        line: None,
     });
     result.findings.push(Finding {
         convention: "dead_code".to_string(),
@@ -196,6 +202,7 @@ fn test_build_changed_since_summary_splits_introduced_from_context() {
         description: "New unused export".to_string(),
         suggestion: "Remove or reference the export".to_string(),
         kind: AuditFinding::UnreferencedExport,
+        line: None,
     });
 
     let comparison = homeboy_core::engine::baseline::Comparison {
@@ -267,6 +274,7 @@ fn test_compute_fixability_skips_structural_only_results() {
         description: "File has 1200 lines".to_string(),
         suggestion: "Consider decomposing into focused modules".to_string(),
         kind: AuditFinding::GodFile,
+        line: None,
     });
 
     assert!(compute_fixability(&result).is_none());

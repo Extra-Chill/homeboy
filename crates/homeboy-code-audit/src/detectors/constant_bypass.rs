@@ -152,6 +152,7 @@ fn detect_constant_bypass_literals(fingerprints: &[&FileFingerprint]) -> Vec<Fin
                     def.name
                 ),
                 kind: AuditFinding::ConstantBypassLiteral,
+                line: None,
             });
         }
     }

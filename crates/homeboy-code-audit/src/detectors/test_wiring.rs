@@ -28,6 +28,7 @@ pub(crate) fn run(root: &Path, audit_config: &AuditConfig) -> Vec<Finding> {
                 description: render_template(&policy.description, &relative),
                 suggestion: render_template(&policy.suggestion, &relative),
                 kind: unwired_test_file_finding(),
+                line: None,
             });
         }
     }

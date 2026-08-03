@@ -95,6 +95,7 @@ fn analyze_layer_ownership(root: &Path) -> Vec<Finding> {
                             rule.name
                         ),
                         kind: AuditFinding::LayerOwnershipViolation,
+                        line: None,
                     });
                 }
             }

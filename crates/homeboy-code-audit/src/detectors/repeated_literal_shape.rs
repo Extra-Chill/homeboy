@@ -173,6 +173,7 @@ fn detect_repeated_literal_shapes(
                 helper_hint, total
             ),
             kind: AuditFinding::RepeatedLiteralShape,
+                    line: None,
         });
     }
 

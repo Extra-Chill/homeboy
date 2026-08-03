@@ -272,6 +272,7 @@ fn finding_for_match(
         description: render_template(&rule.description, &values),
         suggestion: render_template(&rule.suggestion, &values),
         kind: AuditFinding::from_str(&rule.kind).unwrap_or(AuditFinding::SourcePolicyViolation),
+        line: None,
     }
 }
 

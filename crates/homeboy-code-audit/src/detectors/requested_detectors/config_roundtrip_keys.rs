@@ -139,6 +139,7 @@ fn config_roundtrip_findings(
             description: render_template(description, None, render_value),
             suggestion: render_template(suggestion, None, render_value),
             kind: AuditFinding::from_str(&rule.kind).unwrap_or(AuditFinding::LegacyComment),
+            line: None,
         });
     }
 

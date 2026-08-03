@@ -194,6 +194,7 @@ mod tests {
             description: description.to_string(),
             suggestion: "restore the expected method".to_string(),
             kind: AuditFinding::MissingMethod,
+            line: None,
         }
     }
 }

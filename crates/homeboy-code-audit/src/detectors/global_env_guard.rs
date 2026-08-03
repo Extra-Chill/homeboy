@@ -125,6 +125,7 @@ pub(crate) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
                     )
                 },
                 kind: AuditFinding::GlobalEnvMutationGuard,
+                line: Some(site.line as u32),
             });
         }
     }
@@ -177,6 +178,7 @@ pub(crate) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
                     )
                 },
                 kind: AuditFinding::GlobalEnvMutationGuard,
+                            line: Some(site.line as u32),
             });
         }
     }

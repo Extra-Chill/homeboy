@@ -30,6 +30,22 @@ pub struct Finding {
     pub suggestion: String,
     /// The kind of deviation.
     pub kind: AuditFinding,
+    /// 1-based line the finding refers to, when the detector knows it.
+    ///
+    /// Detectors have always known this — a dozen of them format `at line {}`
+    /// into `description` — but it lived only as prose. Nothing downstream
+    /// could sort by it, jump to it, or render `file.rs:148`, and the audit
+    /// fingerprint had to regex the number back out of English to stay stable
+    /// across line shifts (#11320).
+    pub line: Option<u32>,
+}
+
+impl Finding {
+    /// Attach the line this finding refers to.
+    pub fn at_line(mut self, line: usize) -> Self {
+        self.line = Some(line as u32);
+        self
+    }
 }
 
 impl serde::Serialize for Finding {
@@ -81,6 +97,7 @@ impl<'de> serde::Deserialize<'de> for Finding {
                 .unwrap_or_default()
                 .to_string(),
             kind: AuditFinding::from_str(kind).map_err(serde::de::Error::custom)?,
+            line: normalized.location.line.map(|line| line as u32),
         })
     }
 }
@@ -92,7 +109,11 @@ pub fn homeboy_finding_from_audit(finding: &Finding) -> HomeboyFinding {
 impl From<&Finding> for HomeboyFinding {
     fn from(finding: &Finding) -> Self {
         let kind = finding_kind_key(&finding.kind);
-        HomeboyFinding::builder("audit", finding.description.clone())
+        let mut builder = HomeboyFinding::builder("audit", finding.description.clone());
+        if let Some(line) = finding.line {
+            builder = builder.line(line as i64);
+        }
+        builder
             .rule(kind.clone())
             .category(finding.convention.clone())
             .file(finding.file.clone())
@@ -125,6 +146,13 @@ fn audit_finding_fingerprint(finding: &Finding) -> String {
     )
 }
 
+/// Replace line numbers in a description so a finding keeps one identity as
+/// surrounding code shifts.
+///
+/// This regexes English because, until [`Finding::line`] existed, the line
+/// number had nowhere else to live. It stays for the descriptions that still
+/// embed one; new detectors should set the field and leave the number out of
+/// the prose.
 pub fn normalized_finding_description_for_fingerprint(description: &str) -> String {
     let line_number = Regex::new(r" at line \d+").expect("line-number fingerprint regex compiles");
     line_number
@@ -211,5 +239,74 @@ pub fn finding_confidence(finding: &AuditFinding) -> FindingConfidence {
             // Convention, naming, body-shape, and similarity findings require judgment.
             _ => FindingConfidence::Heuristic,
         }
+    }
+}
+
+#[cfg(test)]
+mod line_tests {
+    use super::*;
+
+    fn finding(line: Option<u32>) -> Finding {
+        Finding {
+            convention: "core_boundary_leak:core-agnostic-source".to_string(),
+            severity: Severity::Warning,
+            file: "crates/homeboy-core/src/thing.rs".to_string(),
+            description: "configured ecosystem term `node` appears at line 148".to_string(),
+            suggestion: "move it".to_string(),
+            kind: AuditFinding::CoreBoundaryLeak,
+            line,
+        }
+    }
+
+    #[test]
+    fn the_line_reaches_the_normalized_finding_location() {
+        // The point of the field: downstream consumers get a structured
+        // location instead of having to parse it back out of English.
+        let normalized = HomeboyFinding::from(&finding(Some(148)));
+
+        assert_eq!(normalized.location.line, Some(148));
+        assert_eq!(
+            normalized.location.file.as_deref(),
+            Some("crates/homeboy-core/src/thing.rs")
+        );
+    }
+
+    #[test]
+    fn a_finding_without_a_line_leaves_the_location_line_unset() {
+        assert!(HomeboyFinding::from(&finding(None)).location.line.is_none());
+    }
+
+    #[test]
+    fn at_line_attaches_a_line_to_an_existing_finding() {
+        assert_eq!(finding(None).at_line(148).line, Some(148));
+    }
+
+    #[test]
+    fn the_line_survives_a_serialize_deserialize_round_trip() {
+        let json = serde_json::to_value(finding(Some(148))).expect("serialize");
+        let restored: Finding = serde_json::from_value(json).expect("deserialize");
+
+        assert_eq!(restored.line, Some(148));
+    }
+
+    #[test]
+    fn the_fingerprint_still_ignores_line_numbers() {
+        // Identity must not move when surrounding code shifts, whether the line
+        // is carried structurally, in the prose, or both.
+        let first = audit_finding_fingerprint(&finding(Some(148)));
+        let second = audit_finding_fingerprint(&finding(Some(902)));
+
+        assert_eq!(first, second);
+        assert!(first.contains("at line <line>"));
+    }
+
+    #[test]
+    fn a_line_only_in_the_prose_does_not_reach_the_location() {
+        // Documents the remaining gap for detectors that have not adopted the
+        // field: the number is visible to a reader and invisible to a consumer.
+        let normalized = HomeboyFinding::from(&finding(None));
+
+        assert!(normalized.message.contains("at line 148"));
+        assert!(normalized.location.line.is_none());
     }
 }

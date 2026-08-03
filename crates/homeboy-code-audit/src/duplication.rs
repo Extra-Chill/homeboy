@@ -213,6 +213,7 @@ pub(crate) fn detect_duplicates(
                 description: format!("Duplicate function `{}` — also in {}", method_name, also_in),
                 suggestion: suggestion.clone(),
                 kind: AuditFinding::DuplicateFunction,
+                line: None,
             });
         }
     }
@@ -312,6 +313,7 @@ pub(crate) fn detect_cross_name_duplicates(fingerprints: &[&FileFingerprint]) ->
                     "`{name}` reimplements the same logic as `{names_joined}`. Consolidate onto one shared function (prefer an existing exported primitive) and delete the copies."
                 ),
                 kind: AuditFinding::CrossNameDuplicate,
+                            line: None,
             });
         }
     }
@@ -583,6 +585,7 @@ pub(crate) fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<F
                 ),
                 suggestion: suggestion.clone(),
                 kind: AuditFinding::NearDuplicate,
+                line: None,
             });
         }
     }
@@ -823,6 +826,7 @@ pub(crate) fn detect_skeleton_duplicates(fingerprints: &[&FileFingerprint]) -> V
                 ),
                 suggestion: suggestion.clone(),
                 kind: AuditFinding::SkeletonDuplicate,
+                line: None,
             });
         }
     }
@@ -1616,6 +1620,7 @@ pub(crate) fn detect_parallel_implementations(
                 ),
                 suggestion: suggestion.clone(),
                 kind: AuditFinding::ParallelImplementation,
+                            line: None,
             });
 
             // Emit finding for file B
@@ -1629,6 +1634,7 @@ pub(crate) fn detect_parallel_implementations(
                 ),
                 suggestion,
                 kind: AuditFinding::ParallelImplementation,
+                            line: None,
             });
         }
     }

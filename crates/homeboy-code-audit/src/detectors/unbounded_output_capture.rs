@@ -26,6 +26,7 @@ pub(crate) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
                 description: "Command output capture appears to append stream chunks without an explicit retained-byte bound or truncation metadata.".to_string(),
                 suggestion: "Use a bounded tail buffer and expose structured capture metadata: bytes seen, bytes retained, byte limit, and truncated flag for each captured stream.".to_string(),
                 kind: AuditFinding::UnboundedOutputCapture,
+                            line: None,
             });
         }
 
@@ -37,6 +38,7 @@ pub(crate) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
                 description: "Reporter output appears to emit per-match or per-file details without an explicit item cap or omitted-count metadata.".to_string(),
                 suggestion: "Cap detail rows with take/truncate and report detail metadata: item limit, items rendered, omitted item count, and truncated flag.".to_string(),
                 kind: AuditFinding::UnboundedOutputCapture,
+                            line: None,
             });
         }
     }

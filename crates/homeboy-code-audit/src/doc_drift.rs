@@ -86,6 +86,7 @@ pub(super) fn detect_doc_drift(root: &Path, component_id: &str) -> Vec<Finding> 
                         description,
                         suggestion: suggestion_text,
                         kind,
+                        line: None,
                     });
                 }
                 docs_audit::VerifyResult::Verified

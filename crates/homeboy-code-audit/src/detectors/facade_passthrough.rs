@@ -57,6 +57,7 @@ pub(crate) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
                     .to_string()
             },
             kind: AuditFinding::FacadePassthrough,
+                    line: None,
         });
     }
 

@@ -69,6 +69,7 @@ pub(crate) fn run(
                 ),
                 suggestion: "Route public metadata responses through the permission-aware resolver/helper, require a safer context, or add an explicit audit allowlist for intentional discovery endpoints.".to_string(),
                 kind: AuditFinding::PublicRegistryExposure,
+                            line: Some(line_index as u32 + 1),
             });
         }
     }

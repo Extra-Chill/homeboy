@@ -187,6 +187,7 @@ pub(crate) fn detect_intra_method_duplicates(fingerprints: &[&FileFingerprint]) 
                             method_name, match_len
                         ),
                         kind: AuditFinding::IntraMethodDuplicate,
+                        line: Some(first_file_line as u32),
                     });
                     reported = true;
                     break;

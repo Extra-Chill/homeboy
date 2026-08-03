@@ -149,6 +149,7 @@ fn detect_repeated_enum_dispatch_contracts(files: &[&SourceFile]) -> Vec<Finding
                 key.enum_name
             ),
             kind: AuditFinding::RepeatedEnumDispatchContract,
+                    line: None,
         });
     }
 

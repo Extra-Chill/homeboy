@@ -121,6 +121,7 @@ fn detect_with_config(
                         guard.symbol
                     ),
                     kind: AuditFinding::DeadGuard,
+                                    line: None,
                 });
             }
         }

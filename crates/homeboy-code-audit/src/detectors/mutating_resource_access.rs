@@ -75,6 +75,7 @@ pub(crate) fn run(
                     "Add a configured access helper call before mutating the resource, or route through a configured trusted delegation marker."
                         .to_string(),
                 kind: AuditFinding::MutatingResourceAccess,
+                            line: None,
             });
         }
     }

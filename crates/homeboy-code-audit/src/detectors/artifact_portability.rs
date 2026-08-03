@@ -195,6 +195,7 @@ fn portability_finding(
             "{suggestion}. Suggested portable ref: artifact-store path under HOMEBOY_ARTIFACT_ROOT or runner-artifact://<runner>/<run>/<artifact> instead of {observed_path}"
         ),
         kind: AuditFinding::NonPortableArtifactPath,
+            line: None,
     }
 }
 

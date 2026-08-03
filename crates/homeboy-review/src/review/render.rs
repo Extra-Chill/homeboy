@@ -614,6 +614,7 @@ mod tests {
                 description: "deviates from convention".to_string(),
                 suggestion: "align with siblings".to_string(),
                 kind: AuditFinding::MissingMethod,
+                line: None,
             })
             .collect();
 

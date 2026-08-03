@@ -138,6 +138,7 @@ pub(crate) fn analyze_wrappers(fingerprints: &[&FileFingerprint], root: &Path) -
                 ),
                 suggestion,
                 kind: AuditFinding::MissingWrapperDeclaration,
+                line: None,
             });
         }
     }
