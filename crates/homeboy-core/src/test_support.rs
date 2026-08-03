@@ -466,6 +466,13 @@ impl HomeGuard {
         // exec-capable root.
         let context = HermeticTestContext::new();
         std::env::set_var("HOME", context.home());
+        // `set_var` above stays for the readers that still consult `HOME`
+        // directly and for anything reading it after this process forks. The
+        // override is what makes the *hot* resolvers — `paths::homeboy()`,
+        // `paths::homeboy_data()`, and the invocation runtime root — race-free:
+        // they read it under a lock instead of racing this `setenv` from
+        // worker threads a test spawns inside itself (#7505).
+        crate::paths::set_home_root_override(Some(context.home().to_path_buf()));
         // Preserve the legacy in-process defaults while the subprocess context
         // uses explicit paths. These tests exercise fallback path resolution.
         std::env::set_var("XDG_DATA_HOME", context.home().join(".local").join("share"));
@@ -759,6 +766,10 @@ pub fn exec_capable_tempdir() -> TempDir {
 
 impl Drop for HomeGuard {
     fn drop(&mut self) {
+        // Clear the override before restoring `HOME` so no window exists where
+        // the override still points at this guard's tempdir — which `Drop` is
+        // about to delete — while the environment already names the next root.
+        crate::paths::set_home_root_override(None);
         match &self.prior {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),

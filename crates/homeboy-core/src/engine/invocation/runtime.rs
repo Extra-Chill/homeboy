@@ -50,7 +50,6 @@
 //! (`<workload-id>/daemon/daemon.sock` ≈ 40 bytes) underneath.
 
 use crate::error::{Error, Result};
-#[cfg(windows)]
 use crate::paths;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -152,15 +151,22 @@ fn cache_fallback_root() -> Result<PathBuf> {
         if let Some(xdg_cache) = non_empty_env("XDG_CACHE_HOME") {
             return Ok(PathBuf::from(xdg_cache).join("homeboy").join("inv"));
         }
-        let home = env::var("HOME").map_err(|_| {
-            Error::internal_unexpected(
-                "HOME environment variable not set on Unix-like system".to_string(),
-            )
-        })?;
-        Ok(PathBuf::from(home)
-            .join(".cache")
-            .join("homeboy")
-            .join("inv"))
+        // Resolve through `paths`, which prefers the process-local home-root
+        // override over an unsynchronized `getenv` (#7505). `homeboy()` returns
+        // `<home>/.config/homeboy`, so step back to the home root rather than
+        // re-reading `HOME` here and reintroducing the race this fixes.
+        let config_root = paths::homeboy()?;
+        let home = config_root
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| {
+                Error::internal_unexpected(format!(
+                    "could not derive a home root from config directory {}",
+                    config_root.display()
+                ))
+            })?
+            .to_path_buf();
+        Ok(home.join(".cache").join("homeboy").join("inv"))
     }
 }
 
