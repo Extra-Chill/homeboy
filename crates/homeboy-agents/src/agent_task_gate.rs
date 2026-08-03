@@ -219,7 +219,9 @@ pub struct AgentTaskGateSetupEvidence {
 
 const MAX_GATE_DEPENDENCY_ROOTS: usize = 64;
 
-/// Discover only the checkout root and direct child roots. Provider resolution,
+/// Discover only the checkout root and direct child roots. A directory is not a
+/// dependency root merely because it exists: it must declare a supported,
+/// content-addressed manifest or lock source. Provider resolution,
 /// package-manager detection, and install commands remain outside Homeboy core.
 pub(crate) fn hydrate_gate_dependency_roots(
     checkout: &Path,
@@ -229,7 +231,7 @@ pub(crate) fn hydrate_gate_dependency_roots(
     if !enabled {
         return Ok(Vec::new());
     }
-    let mut roots = vec![checkout.to_path_buf()];
+    let mut candidates = vec![checkout.to_path_buf()];
     for entry in fs::read_dir(checkout).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -252,10 +254,32 @@ pub(crate) fn hydrate_gate_dependency_roots(
         // A linked directory can escape the detached candidate checkout. Setup
         // is allowed only in the candidate root or a real direct child.
         if file_type.is_dir() && path.file_name().is_none_or(|name| name != ".git") {
-            roots.push(path);
+            candidates.push(path);
         }
     }
-    roots.sort();
+    candidates.sort();
+    let mut roots = Vec::new();
+    let mut evidence = Vec::new();
+    for candidate in candidates {
+        let relative = dependency_root_relative(checkout, &candidate);
+        let Some(lock_identity) = dependency_root_identity(&candidate)? else {
+            evidence.push(AgentTaskGateSetupEvidence {
+                schema: "homeboy/agent-task-gate-setup/v1".to_string(),
+                workspace: workspace.to_string(),
+                package_root: relative,
+                lock_identity: "none".to_string(),
+                setup_capability: "dependency.discovery".to_string(),
+                duration_ms: 0,
+                status: "skipped".to_string(),
+                output: "skipped: no supported dependency manifest with a deterministic lock/source identity".to_string(),
+            });
+            continue;
+        };
+        roots.push(DependencyRoot {
+            path: candidate,
+            lock_identity,
+        });
+    }
     if roots.len() > MAX_GATE_DEPENDENCY_ROOTS {
         return Err(Error::validation_invalid_argument(
             "promotion.gate_setup",
@@ -266,66 +290,120 @@ pub(crate) fn hydrate_gate_dependency_roots(
             None,
         ));
     }
-    let mut evidence = Vec::new();
-    for root in roots {
-        // The identity is an input to setup, not a post-setup cache key. A
-        // provider that rewrites it has not verified the declared candidate.
-        let lock_identity = dependency_root_identity(&root)?;
-        let started = std::time::Instant::now();
-        if !homeboy_core::hygiene::materialize_worktree_dependencies(&root)? {
-            continue;
-        }
-        if dependency_root_identity(&root)? != lock_identity {
-            return Err(Error::validation_invalid_argument(
-                "promotion.gate_setup",
-                "dependency setup changed its declared lock identity",
-                Some(root.display().to_string()),
-                None,
-            ));
-        }
-        let relative = root
-            .strip_prefix(checkout)
-            .unwrap_or(&root)
-            .display()
-            .to_string();
+    let hydrated = std::thread::scope(|scope| {
+        roots
+            .into_iter()
+            .map(|root| scope.spawn(move || hydrate_dependency_root(root)))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|worker| {
+                worker.join().map_err(|_| {
+                    Error::internal_unexpected("dependency root hydration worker panicked")
+                })?
+            })
+            .collect::<Result<Vec<_>>>()
+    })?;
+    for setup in hydrated.into_iter().flatten() {
         evidence.push(AgentTaskGateSetupEvidence {
             schema: "homeboy/agent-task-gate-setup/v1".to_string(),
             workspace: workspace.to_string(),
-            package_root: if relative.is_empty() {
-                ".".to_string()
-            } else {
-                relative
-            },
-            lock_identity,
+            package_root: dependency_root_relative(checkout, &setup.root),
+            lock_identity: setup.lock_identity,
             setup_capability: "dependency.install".to_string(),
-            duration_ms: started.elapsed().as_millis(),
+            duration_ms: setup.duration_ms,
             status: "succeeded".to_string(),
             output: "provider-declared dependency setup completed".to_string(),
         });
     }
+    evidence.sort_by(|left, right| left.package_root.cmp(&right.package_root));
     Ok(evidence)
 }
 
-fn dependency_root_identity(root: &Path) -> Result<String> {
+struct DependencyRoot {
+    path: PathBuf,
+    lock_identity: String,
+}
+
+struct HydratedDependencyRoot {
+    root: PathBuf,
+    lock_identity: String,
+    duration_ms: u128,
+}
+
+fn hydrate_dependency_root(root: DependencyRoot) -> Result<Option<HydratedDependencyRoot>> {
+    // The identity is an input to setup, not a post-setup cache key. A provider
+    // that rewrites it has not verified the declared candidate.
+    let started = std::time::Instant::now();
+    if !homeboy_core::hygiene::materialize_worktree_dependencies(&root.path)? {
+        return Ok(None);
+    }
+    if dependency_root_identity(&root.path)?.as_deref() != Some(&root.lock_identity) {
+        return Err(Error::validation_invalid_argument(
+            "promotion.gate_setup",
+            "dependency setup changed its declared lock identity",
+            Some(root.path.display().to_string()),
+            None,
+        ));
+    }
+    Ok(Some(HydratedDependencyRoot {
+        root: root.path,
+        lock_identity: root.lock_identity,
+        duration_ms: started.elapsed().as_millis(),
+    }))
+}
+
+fn dependency_root_relative(checkout: &Path, root: &Path) -> String {
+    let relative = root
+        .strip_prefix(checkout)
+        .unwrap_or(root)
+        .display()
+        .to_string();
+    if relative.is_empty() {
+        ".".to_string()
+    } else {
+        relative
+    }
+}
+
+fn dependency_root_identity(root: &Path) -> Result<Option<String>> {
+    const SOURCE_FILES: &[&str] = &[
+        "homeboy.json",
+        "homeboy-deps.json",
+        "package.json",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+    ];
+    let has_node_lock = [
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+    ]
+    .iter()
+    .any(|name| root.join(name).is_file());
+    let has_homeboy_manifest = ["homeboy.json", "homeboy-deps.json"]
+        .iter()
+        .any(|name| root.join(name).is_file());
+    let has_cargo_root = root.join("Cargo.toml").is_file() && root.join("Cargo.lock").is_file();
+    let has_composer_root =
+        root.join("composer.json").is_file() && root.join("composer.lock").is_file();
+    if !has_node_lock && !has_homeboy_manifest && !has_cargo_root && !has_composer_root {
+        return Ok(None);
+    }
+
     let mut inputs = Vec::new();
-    for entry in fs::read_dir(root).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("read dependency root identity".to_string()),
-        )
-    })? {
-        let path = entry
-            .map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some("read dependency root identity entry".to_string()),
-                )
-            })?
-            .path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if path.is_file() && (name.ends_with(".lock") || name == "homeboy-deps.json") {
+    for name in SOURCE_FILES.iter().copied().chain([
+        "Cargo.toml",
+        "Cargo.lock",
+        "composer.json",
+        "composer.lock",
+    ]) {
+        let path = root.join(name);
+        if path.is_file() {
             inputs.push((
                 name.to_string(),
                 fs::read(&path).map_err(|error| {
@@ -341,7 +419,7 @@ fn dependency_root_identity(root: &Path) -> Result<String> {
         hasher.update([0]);
         hasher.update(bytes);
     }
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok(Some(format!("sha256:{:x}", hasher.finalize())))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1606,6 +1684,58 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn root_package_lock_hydrates_once_and_skips_unrelated_directories() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let checkout = tempfile::tempdir().expect("checkout");
+            let root = checkout.path();
+            fs::write(root.join("package-lock.json"), "{\"lockfileVersion\":3}\n")
+                .expect("package lock");
+            assert!(
+                dependency_root_identity(root)
+                    .expect("package-lock identity")
+                    .is_some(),
+                "a package lock is a deterministic Node dependency source"
+            );
+            fs::write(
+                root.join("homeboy-deps.json"),
+                r#"{"provider":"fixture","commands":{"install":{"argv":["sh","-c","printf hydrated >> hydration-count"]}}}"#,
+            )
+            .expect("dependency provider");
+            for directory in [".claude", "docs", "packages", "scripts", "tests"] {
+                fs::create_dir(root.join(directory)).expect("unrelated directory");
+            }
+
+            let evidence =
+                hydrate_gate_dependency_roots(root, true, "fixture").expect("dependency hydration");
+            let succeeded = evidence
+                .iter()
+                .filter(|setup| setup.status == "succeeded")
+                .collect::<Vec<_>>();
+            assert_eq!(succeeded.len(), 1);
+            assert_eq!(succeeded[0].package_root, ".");
+            assert_ne!(succeeded[0].lock_identity, "none");
+            assert_eq!(
+                fs::read_to_string(root.join("hydration-count")).unwrap(),
+                "hydrated"
+            );
+
+            let skipped = evidence
+                .iter()
+                .filter(|setup| setup.status == "skipped")
+                .map(|setup| setup.package_root.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                skipped,
+                vec![".claude", "docs", "packages", "scripts", "tests"]
+            );
+            assert!(evidence
+                .iter()
+                .filter(|setup| setup.status == "skipped")
+                .all(|setup| setup.setup_capability == "dependency.discovery"));
+        });
+    }
 
     #[cfg(unix)]
     #[test]

@@ -1597,7 +1597,9 @@ fn run_promotion_gates(
         status: status_for_report(options.dry_run, has_gate_failure),
         deterministic_gates,
         gate_results,
-        dependencies_materialized: !destination_gate_setup.is_empty(),
+        dependencies_materialized: destination_gate_setup
+            .iter()
+            .any(|setup| setup.status == "succeeded"),
         candidate_setup,
         destination_gate_setup,
         candidate_checkout,
