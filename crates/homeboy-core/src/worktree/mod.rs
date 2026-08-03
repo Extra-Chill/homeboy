@@ -16,16 +16,22 @@ mod types;
 static TASK_WORKTREE_REGISTRY_GATE: OnceLock<RwLock<()>> = OnceLock::new();
 const MALFORMED_RECORD_REPAIR_LIMIT: usize = 20;
 
+pub use crate::workspace_claim::WorkspaceIdentity;
 pub use types::{
-    authority_set_fingerprint, task_worktree_workspace_identity, AdoptedWorkspaceRecord,
-    BranchCleanupIntent, BranchCleanupStatus, CleanupPolicy, TaskWorktreeRecord, TaskWorktreeState,
+    authority_set_fingerprint, task_worktree_workspace_identity, AdoptedWorkspaceInventoryRecord,
+    AdoptedWorkspaceRecord, BranchCleanupIntent, BranchCleanupStatus, CleanupPolicy,
+    MissingActiveWorktree, MissingActiveWorktreeReason, TaskWorktreeRecord, TaskWorktreeState,
     TerminalWorkspaceAuthorityObservation, TerminalWorkspaceAuthorityProof, WorkspaceRefRecord,
-    WorktreeAdoptOptions, WorktreeAdoptOutput, WorktreeBranchCleanupReport,
-    WorktreeCleanupCandidate, WorktreeCleanupCounts, WorktreeCleanupOptions, WorktreeCleanupOutput,
-    WorktreeCleanupSkipped, WorktreeCreateOptions, WorktreeCreateOutput, WorktreeListOutput,
-    WorktreeQueueCreateOptions, WorktreeQueueCreateOutput, WorktreeQueueCreateRow,
-    WorktreeQueueCreateStatus, WorktreeQueueLockHolder, WorktreeRemoveOptions,
-    WorktreeRemoveOutput, WorktreeSafetyReport, WorktreeStatusOutput,
+    WorktreeAdoptOptions, WorktreeAdoptOutput, WorktreeAdoptedInventoryPage,
+    WorktreeBranchCleanupReport, WorktreeCleanupCandidate, WorktreeCleanupCounts,
+    WorktreeCleanupOptions, WorktreeCleanupOutput, WorktreeCleanupSkipped, WorktreeCreateOptions,
+    WorktreeCreateOutput, WorktreeInventoryApplyRefusal, WorktreeInventoryAuthorization,
+    WorktreeInventoryCrossTab, WorktreeInventoryLocalEvidence, WorktreeInventoryOptions,
+    WorktreeInventoryOutput, WorktreeInventoryRecord, WorktreeListOutput,
+    WorktreeLivenessAuthority, WorktreeQueueCreateOptions, WorktreeQueueCreateOutput,
+    WorktreeQueueCreateRow, WorktreeQueueCreateStatus, WorktreeQueueLockHolder,
+    WorktreeReconciliationAction, WorktreeReconciliationAuthority, WorktreeReconciliationResult,
+    WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeSafetyReport, WorktreeStatusOutput,
     TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY, TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
 };
 
@@ -41,8 +47,22 @@ pub fn list() -> Result<WorktreeListOutput> {
     with_task_worktree_registry_read_lock(list_unlocked)
 }
 
+pub fn inventory(
+    options: WorktreeInventoryOptions,
+    authority: &dyn WorktreeReconciliationAuthority,
+) -> Result<WorktreeInventoryOutput> {
+    inventory_with_store_and_authority(
+        options,
+        &metadata_dir()?,
+        &adopted_metadata_dir()?,
+        authority,
+    )
+}
+
 /// Cache exact terminal authority evidence before a reconciliation claim is
-/// acquired. The receipt binds the manifest revision that was observed.
+/// acquired. The record revision is intentionally unchanged: the receipt binds
+/// the revision that was observed and is checked again under the claim/registry
+/// lease before mutation.
 pub fn persist_terminal_workspace_authority(
     id: &str,
     expected_revision: u64,
@@ -62,16 +82,18 @@ pub fn persist_terminal_workspace_authority(
             ));
         }
         match &record.terminal_workspace_authority {
-            Some(existing) if existing != &proof => Err(Error::validation_invalid_argument(
-                "terminal_workspace_authority",
-                "terminal workspace authority proof conflicts with immutable manifest evidence",
-                Some(id.to_string()),
-                None,
-            )),
+            Some(existing) if existing != &proof => {
+                return Err(Error::validation_invalid_argument(
+                    "terminal_workspace_authority",
+                    "terminal workspace authority proof conflicts with immutable manifest evidence",
+                    Some(id.to_string()),
+                    None,
+                ))
+            }
             Some(_) => Ok(()),
             None => {
                 record.terminal_workspace_authority = Some(proof);
-                write_record(&store, &record)
+                store_ops::write_record_unlocked(&store, &record)
             }
         }
     })
@@ -428,13 +450,16 @@ pub(crate) fn record_active_for_test(id: &str, worktree_path: &Path) {
         worktree_path: worktree_path.to_string_lossy().to_string(),
         branch: format!("task/{id}"),
         base_ref: "main".to_string(),
-        workspace_identity: None,
         task_url: None,
         run_id: None,
         cleanup_policy: CleanupPolicy::RemoveWhenSafe,
         branch_cleanup_intent: BranchCleanupIntent::default(),
         created_at: "2026-01-01T00:00:00Z".to_string(),
         state: TaskWorktreeState::Active,
+        workspace_identity: Some(
+            WorkspaceIdentity::new("task-worktree", format!("fixture/{id}"))
+                .expect("test workspace identity"),
+        ),
         lifecycle_revision: 0,
         terminal_workspace_authority: None,
     };

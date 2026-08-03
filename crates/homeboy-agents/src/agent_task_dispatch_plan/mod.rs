@@ -388,6 +388,9 @@ pub fn build_dispatch_plan_with_provider_requirements(
         "task_url": request.task_url,
         "runtime_dependency_graph": runtime_dependency_graph_evidence,
     });
+    plan.workspace_identity = workspace_target
+        .as_ref()
+        .and_then(|target| target.workspace_identity.clone());
 
     plan.workspace_identity = workspace_target
         .as_ref()

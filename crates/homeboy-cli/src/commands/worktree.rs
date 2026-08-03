@@ -9,8 +9,9 @@ use homeboy::core::cleanup::{
 use homeboy::core::worktree::{
     self, CleanupPolicy, TaskWorktreeRegistryQuarantine, WorktreeAdoptOptions, WorktreeAdoptOutput,
     WorktreeCleanupOptions, WorktreeCleanupOutput, WorktreeCreateOptions, WorktreeCreateOutput,
-    WorktreeListOutput, WorktreeQueueCreateOptions, WorktreeQueueCreateOutput,
-    WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeStatusOutput,
+    WorktreeInventoryOptions, WorktreeInventoryOutput, WorktreeListOutput,
+    WorktreeQueueCreateOptions, WorktreeQueueCreateOutput, WorktreeRemoveOptions,
+    WorktreeRemoveOutput, WorktreeStatusOutput,
 };
 
 use crate::command_contract::{LabCommandContract, WORKTREE_CLEANUP_LAB_LABEL};
@@ -95,6 +96,21 @@ enum WorktreeCommand {
     },
     /// List persisted task worktrees
     List,
+    /// Report bounded local task-worktree inventory and reconcile only leased terminal snapshots
+    Inventory {
+        /// Maximum task-worktree manifests to inspect
+        #[arg(long, default_value_t = 500)]
+        limit: usize,
+        /// Start after this task-worktree record ID
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Start after this adopted-workspace handle
+        #[arg(long)]
+        adopted_cursor: Option<String>,
+        /// Conditionally reconcile clean, missing worktrees with terminal authority; preserve or refuse all other records
+        #[arg(long)]
+        apply: bool,
+    },
     /// Inspect one task worktree and its safety gates
     Status {
         /// Task worktree ID, e.g. component@branch-slug
@@ -178,6 +194,7 @@ pub enum WorktreeOutput {
     Adopt(WorktreeAdoptOutput),
     QueueCreate(WorktreeQueueCreateOutput),
     List(WorktreeListOutput),
+    Inventory(WorktreeInventoryOutput),
     Status(WorktreeStatusOutput),
     Remove(WorktreeRemoveOutput),
     Cleanup(WorktreeCleanupCommandOutput),
@@ -195,6 +212,144 @@ pub struct WorktreeCleanupCommandOutput {
 }
 
 pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
+    struct AgentTaskAuthority(
+        std::sync::Mutex<
+            std::collections::HashMap<
+                String,
+                homeboy::agents::agent_task_lifecycle::CompositeWorkspaceClaim,
+            >,
+        >,
+    );
+    impl worktree::WorktreeReconciliationAuthority for AgentTaskAuthority {
+        fn acquire(
+            &self,
+            record: &worktree::TaskWorktreeRecord,
+        ) -> homeboy::core::Result<worktree::WorktreeLivenessAuthority> {
+            let workspace = match record.effective_workspace_identity() {
+                Ok(workspace) => workspace,
+                Err(error) => {
+                    return Ok(worktree::WorktreeLivenessAuthority::Incomplete {
+                        reason: error.message,
+                    })
+                }
+            };
+            let proof = match homeboy::agents::agent_task_lifecycle::resolve_terminal_workspace_authority(record)? {
+                homeboy::agents::agent_task_lifecycle::TerminalWorkspaceAuthorityResolution::Proven(proof) => proof,
+                homeboy::agents::agent_task_lifecycle::TerminalWorkspaceAuthorityResolution::Refused { reason, .. } => {
+                    return Ok(worktree::WorktreeLivenessAuthority::Incomplete { reason });
+                }
+            };
+            // Persist before acquiring the fence. A no-run-id record can only
+            // ever reach this point through a previously exact cached proof.
+            homeboy::core::worktree::persist_terminal_workspace_authority(
+                &record.id,
+                record.lifecycle_revision,
+                proof,
+            )?;
+            match homeboy::agents::agent_task_lifecycle::acquire_composite_workspace_claim(
+                workspace,
+                record.lifecycle_revision,
+            ) {
+                Ok(composite) => {
+                    let claim = composite.local.clone();
+                    self.0
+                        .lock()
+                        .map_err(|_| {
+                            homeboy::core::Error::internal_unexpected(
+                                "workspace claim adapter lock poisoned",
+                            )
+                        })?
+                        .insert(claim.token.clone(), composite);
+                    Ok(worktree::WorktreeLivenessAuthority::Terminal {
+                        claim,
+                        provenance: "complete local/direct/reverse workspace reconciliation claim"
+                            .to_string(),
+                    })
+                }
+                Err(failure) => Ok(worktree::WorktreeLivenessAuthority::Incomplete {
+                    reason: format!(
+                        "workspace reconciliation authority refused acquisition: {}{}",
+                        failure.primary.message,
+                        failure
+                            .primary
+                            .details
+                            .get("workspace_claim_composite_cleanup")
+                            .and_then(|status| status.get("status"))
+                            .and_then(serde_json::Value::as_str)
+                            .map(|status| format!("; {status}"))
+                            .unwrap_or_default()
+                    ),
+                }),
+            }
+        }
+
+        fn validate(
+            &self,
+            _: &worktree::TaskWorktreeRecord,
+            claim: &homeboy::core::workspace_claim::WorkspaceClaim,
+        ) -> homeboy::core::Result<bool> {
+            let claims = self.0.lock().map_err(|_| {
+                homeboy::core::Error::internal_unexpected("workspace claim adapter lock poisoned")
+            })?;
+            claims
+                .get(&claim.token)
+                .map(homeboy::agents::agent_task_lifecycle::validate_composite_workspace_claim)
+                .transpose()
+                .map(|valid| valid.unwrap_or(false))
+        }
+
+        fn ready_to_commit(&self, claim: &homeboy::core::workspace_claim::WorkspaceClaim) -> bool {
+            self.0
+                .lock()
+                .ok()
+                .and_then(|claims| claims.get(&claim.token).cloned())
+                .is_some_and(|composite| {
+                    composite.local == *claim
+                        && homeboy::agents::agent_task_lifecycle::composite_workspace_claim_ready_to_commit(&composite)
+                })
+        }
+
+        fn requires_terminal_workspace_authority_proof(&self) -> bool {
+            true
+        }
+
+        fn release(
+            &self,
+            claim: &homeboy::core::workspace_claim::WorkspaceClaim,
+        ) -> homeboy::core::Result<()> {
+            let mut claims = self.0.lock().map_err(|_| {
+                homeboy::core::Error::internal_unexpected("workspace claim adapter lock poisoned")
+            })?;
+            let Some(mut composite) = claims.remove(&claim.token) else {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    "workspace_claim",
+                    "workspace composite claim token is unavailable for release",
+                    Some(claim.token.clone()),
+                    None,
+                ));
+            };
+            match homeboy::agents::agent_task_lifecycle::release_composite_workspace_claim(&mut composite)? {
+                homeboy::agents::agent_task_lifecycle::CompositeWorkspaceClaimRelease::Released => {
+                    Ok(())
+                }
+                homeboy::agents::agent_task_lifecycle::CompositeWorkspaceClaimRelease::Partial { failures } => {
+                    let error = homeboy::core::Error::validation_invalid_argument(
+                        "workspace_claim_composite",
+                        "workspace composite release partially failed",
+                        None,
+                        Some(failures),
+                    );
+                    let status = homeboy::agents::agent_task_lifecycle::persist_and_retry_composite_workspace_cleanup(composite, &error);
+                    Err(homeboy::core::Error::validation_invalid_argument(
+                        "workspace_claim_composite",
+                        format!("workspace composite release incomplete: {}", status.public_summary()),
+                        None,
+                        None,
+                    ))
+                }
+            }
+        }
+    }
     let output = match args.command {
         WorktreeCommand::Create {
             component_id,
@@ -252,6 +407,20 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             retry_after_seconds,
         })?),
         WorktreeCommand::List => WorktreeOutput::List(worktree::list()?),
+        WorktreeCommand::Inventory {
+            limit,
+            cursor,
+            adopted_cursor,
+            apply,
+        } => WorktreeOutput::Inventory(worktree::inventory(
+            WorktreeInventoryOptions {
+                limit,
+                cursor,
+                adopted_cursor,
+                apply,
+            },
+            &AgentTaskAuthority(std::sync::Mutex::new(std::collections::HashMap::new())),
+        )?),
         WorktreeCommand::Status { id } => WorktreeOutput::Status(worktree::status(&id)?),
         WorktreeCommand::Remove {
             id,
@@ -410,6 +579,29 @@ mod tests {
         };
 
         assert_eq!(mutation.dry_run.then_some("--dry-run"), Some("--dry-run"));
+    }
+
+    #[test]
+    fn worktree_inventory_defaults_to_a_bounded_preview() {
+        let cli = Cli::parse_from(["homeboy", "worktree", "inventory"]);
+
+        let Commands::Worktree(args) = cli.command else {
+            panic!("expected worktree command");
+        };
+        let WorktreeCommand::Inventory {
+            limit,
+            cursor,
+            adopted_cursor,
+            apply,
+        } = args.command
+        else {
+            panic!("expected worktree inventory command");
+        };
+
+        assert_eq!(limit, 500);
+        assert!(cursor.is_none());
+        assert!(adopted_cursor.is_none());
+        assert!(!apply);
     }
 
     #[test]

@@ -26,6 +26,7 @@ Manage component-backed task worktrees
 | `homeboy worktree adopt` | Adopt an existing local workspace path for @workspace:<handle> refs |
 | `homeboy worktree queue-create` | Create multiple task worktrees one-at-a-time with queue status JSON |
 | `homeboy worktree list` | List persisted task worktrees |
+| `homeboy worktree inventory` | Report bounded local task-worktree inventory and reconcile only leased terminal snapshots |
 | `homeboy worktree status` | Inspect one task worktree and its safety gates |
 | `homeboy worktree remove` | Remove one task worktree after safety checks |
 | `homeboy worktree cleanup` | Remove cleanup-eligible task worktrees after safety checks |
@@ -98,6 +99,21 @@ homeboy worktree list
 
 List persisted task worktrees
 
+## `homeboy worktree inventory`
+
+```sh
+homeboy worktree inventory [OPTIONS]
+```
+
+Report bounded local task-worktree inventory and reconcile only leased terminal snapshots
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--limit` | `<LIMIT>` | Maximum task-worktree manifests to inspect |
+| `--cursor` | `<CURSOR>` | Start after this task-worktree record ID |
+| `--adopted-cursor` | `<ADOPTED_CURSOR>` | Start after this adopted-workspace handle |
+| `--apply` | flag | Conditionally reconcile clean, missing worktrees with terminal authority; preserve or refuse all other records |
+
 ## `homeboy worktree status`
 
 ```sh
@@ -138,9 +154,9 @@ Remove cleanup-eligible task worktrees after safety checks
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--apply` | flag | Remove planned worktrees and artifacts after safety checks. Without this flag, only reports the plan |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--force` | flag | Allow dirty/unpushed worktree removal; hard gates still apply |
-| `--dry-run` | flag | Deprecated plan-only alias retained for one release; bare cleanup also reports the plan |
 | `--cleanup-artifacts` | flag | Also remove declared rebuildable artifacts from the Homeboy checkout that built this binary |
 | `--cleanup-branches` | flag | Delete merged task branches for removed cleanup candidates |
 | `--allow-unmerged-branches` | flag | Permit deleting unmerged task branches. Requires --cleanup-branches |
