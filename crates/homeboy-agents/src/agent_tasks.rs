@@ -431,7 +431,7 @@ pub mod service {
         persist_provider_boundary_replay_evidence, persisted_status, promotion_is_resumable,
         promotion_source, read_plan, rearm_failed_terminal_continuation,
         reconcile_recipe_attempt_for_continuation, reconcile_terminal_artifact_projection,
-        reconstruct_options_with_dispatcher, recover_cook_pr,
+        reconstruct_options_with_dispatcher, record_replacement_gate_proof, recover_cook_pr,
         recover_terminal_transport_proxy_evidence, register_promotion_job_driver,
         resolve_cook_continuation_run_id, resume, resume_cook, resume_cook_batch, retry, run_cook,
         run_cook_batch, run_cook_with_durable_observer, run_loaded_plan, run_next,

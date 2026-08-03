@@ -31,7 +31,10 @@ use homeboy::core::config;
 use homeboy::core::gate::HomeboyGateResult;
 
 use super::super::CmdResult;
-use super::{AdoptArgs, FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs, ReviewArgs};
+use super::{
+    AdoptArgs, FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs,
+    RecordReplacementGateProofArgs, ReviewArgs,
+};
 
 #[derive(Args, Debug)]
 pub struct FinalizePrEvidenceArgs {
@@ -562,6 +565,26 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
     );
 
     Ok((value, exit_code))
+}
+
+pub(crate) fn record_replacement_gate_proof(
+    args: RecordReplacementGateProofArgs,
+) -> CmdResult<Value> {
+    let replacement = serde_json::from_str(&config::read_json_spec_to_string(&args.promotion)?)
+        .map_err(|error| {
+            homeboy::core::Error::validation_invalid_argument(
+                "promotion",
+                format!("replacement gate proof is not a valid promotion report: {error}"),
+                None,
+                None,
+            )
+        })?;
+    let report = agent_task_service::record_replacement_gate_proof(
+        &args.run_id,
+        replacement,
+        args.authorize_external_proof,
+    )?;
+    Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
 }
 
 fn should_persist_manual_preflight_intent(
