@@ -1605,7 +1605,135 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+    /// Serializes tests that mutate process-global environment state.
+    ///
+    /// This must be the lock core hands out, not a module-local one. Rust runs
+    /// a crate's tests as threads in a single process, so a `Mutex` scoped to
+    /// this module only orders `agent_task_gate`'s own tests against each
+    /// other, while every other module in the binary keeps running against the
+    /// same environment. That is how a `HOME` mutation here went unnoticed.
+    fn env_mutex() -> std::sync::MutexGuard<'static, ()> {
+        homeboy_core::test_support::env_lock()
+    }
+
+    /// Restores process-global environment variables when dropped.
+    ///
+    /// Save/restore has to be panic-safe. A failing assertion between the
+    /// mutation and a manual restore would leave the variable altered for every
+    /// test that runs afterwards, turning one red test into a cascade.
+    struct EnvVarGuard {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvVarGuard {
+        fn set(names_and_values: &[(&'static str, &std::path::Path)]) -> Self {
+            let saved = names_and_values
+                .iter()
+                .map(|(name, value)| {
+                    let prior = std::env::var_os(name);
+                    std::env::set_var(name, value);
+                    (*name, prior)
+                })
+                .collect();
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            for (name, prior) in self.saved.drain(..) {
+                match prior {
+                    Some(value) => std::env::set_var(name, value),
+                    // Only remove what was genuinely absent before.
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn env_var_guard_restores_a_prior_value() {
+        let _lock = env_mutex();
+        let scratch = tempfile::tempdir().expect("scratch");
+        std::env::set_var("__HOMEBOY_TEST_ENV_GUARD__", "original");
+
+        {
+            let _guard = EnvVarGuard::set(&[("__HOMEBOY_TEST_ENV_GUARD__", scratch.path())]);
+            assert_eq!(
+                std::env::var_os("__HOMEBOY_TEST_ENV_GUARD__"),
+                Some(scratch.path().as_os_str().to_owned())
+            );
+        }
+
+        assert_eq!(
+            std::env::var("__HOMEBOY_TEST_ENV_GUARD__").ok().as_deref(),
+            Some("original"),
+            "a variable that existed before must be put back, not deleted"
+        );
+        std::env::remove_var("__HOMEBOY_TEST_ENV_GUARD__");
+    }
+
+    #[test]
+    fn env_var_guard_removes_a_variable_that_was_absent() {
+        let _lock = env_mutex();
+        let scratch = tempfile::tempdir().expect("scratch");
+        std::env::remove_var("__HOMEBOY_TEST_ENV_GUARD_ABSENT__");
+
+        {
+            let _guard = EnvVarGuard::set(&[("__HOMEBOY_TEST_ENV_GUARD_ABSENT__", scratch.path())]);
+            assert!(std::env::var_os("__HOMEBOY_TEST_ENV_GUARD_ABSENT__").is_some());
+        }
+
+        assert!(std::env::var_os("__HOMEBOY_TEST_ENV_GUARD_ABSENT__").is_none());
+    }
+
+    #[test]
+    fn env_var_guard_restores_even_when_the_test_body_panics() {
+        // The property that matters. An assertion failing between the mutation
+        // and a hand-written restore is what turns one red test into a cascade
+        // across every test scheduled after it in the same process.
+        let _lock = env_mutex();
+        let scratch = tempfile::tempdir().expect("scratch");
+        std::env::set_var("__HOMEBOY_TEST_ENV_GUARD_PANIC__", "original");
+
+        let panicked = std::panic::catch_unwind(|| {
+            let _guard = EnvVarGuard::set(&[("__HOMEBOY_TEST_ENV_GUARD_PANIC__", scratch.path())]);
+            panic!("assertion failed mid-test");
+        })
+        .is_err();
+
+        assert!(panicked);
+        assert_eq!(
+            std::env::var("__HOMEBOY_TEST_ENV_GUARD_PANIC__")
+                .ok()
+                .as_deref(),
+            Some("original"),
+            "a panicking test must not leak its environment mutation"
+        );
+        std::env::remove_var("__HOMEBOY_TEST_ENV_GUARD_PANIC__");
+    }
+
+    #[test]
+    fn isolated_gate_test_leaves_home_intact() {
+        // Regression: `isolated_gate_does_not_observe_ambient_...` used to end
+        // with an unconditional `remove_var("HOME")`, deleting HOME for the
+        // rest of the process. Roughly ninety tests in modules that sort after
+        // `agent_task_gate` then failed, many with "HOME environment variable
+        // not set on Unix-like system".
+        let _lock = env_mutex();
+        let before = std::env::var_os("HOME");
+
+        {
+            let scratch = tempfile::tempdir().expect("scratch");
+            let _guard = EnvVarGuard::set(&[("HOME", scratch.path())]);
+        }
+
+        assert_eq!(
+            std::env::var_os("HOME"),
+            before,
+            "HOME must survive a gate test that isolates it"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -2013,7 +2141,7 @@ mod tests {
 
     #[test]
     fn isolated_gate_does_not_observe_ambient_durable_recipes_runs_or_runtime_liveness() {
-        let _guard = ENV_MUTEX.lock().expect("env lock");
+        let _guard = env_mutex();
         let worktree = tempfile::tempdir().expect("worktree");
         let ambient = tempfile::tempdir().expect("ambient state");
         let home = ambient.path().join("home");
@@ -2022,9 +2150,11 @@ mod tests {
         fs::create_dir_all(home.join(".homeboy/recipes")).expect("ambient recipe directory");
         fs::create_dir_all(xdg_state.join("runs/active")).expect("ambient run directory");
         fs::create_dir_all(xdg_runtime.join("homeboy-live")).expect("ambient runtime directory");
-        std::env::set_var("HOME", &home);
-        std::env::set_var("XDG_STATE_HOME", &xdg_state);
-        std::env::set_var("XDG_RUNTIME_DIR", &xdg_runtime);
+        let _env = EnvVarGuard::set(&[
+            ("HOME", home.as_path()),
+            ("XDG_STATE_HOME", xdg_state.as_path()),
+            ("XDG_RUNTIME_DIR", xdg_runtime.as_path()),
+        ]);
 
         let report = run_gate_command(
             worktree.path(),
@@ -2032,10 +2162,6 @@ mod tests {
             "test ! -e \"$HOME/.homeboy/recipes\" && test ! -e \"$XDG_STATE_HOME/runs/active\" && test ! -e \"$XDG_RUNTIME_DIR/homeboy-live\"",
         )
         .expect("isolated gate report");
-
-        std::env::remove_var("HOME");
-        std::env::remove_var("XDG_STATE_HOME");
-        std::env::remove_var("XDG_RUNTIME_DIR");
 
         assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
         assert!(report
@@ -2135,7 +2261,7 @@ mod tests {
     fn toolchain_preflight_preserves_only_declared_homes_for_cargo_on_path() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _guard = ENV_MUTEX.lock().expect("env lock");
+        let _guard = env_mutex();
         let workspace = tempfile::tempdir().expect("workspace");
         let original_home = tempfile::tempdir().expect("original home");
         let cargo_bin = original_home.path().join(".cargo/bin");
@@ -2153,10 +2279,10 @@ mod tests {
         let mut permissions = fs::metadata(&cargo).expect("cargo metadata").permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(&cargo, permissions).expect("cargo executable");
-        let prior_home = std::env::var_os("HOME");
-        let prior_path = std::env::var_os("PATH");
-        std::env::set_var("HOME", original_home.path());
-        std::env::set_var("PATH", &cargo_bin);
+        let _env = EnvVarGuard::set(&[
+            ("HOME", original_home.path()),
+            ("PATH", cargo_bin.as_path()),
+        ]);
 
         let policy = AgentTaskGateEnvironmentPolicy {
             preserve: BTreeMap::from([
@@ -2176,14 +2302,6 @@ mod tests {
             Duration::from_secs(10),
         );
 
-        match prior_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match prior_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
         result.expect("declared cargo homes initialize the toolchain");
     }
 
@@ -2192,7 +2310,7 @@ mod tests {
     fn toolchain_preflight_reports_generic_initialization_failures_without_code_feedback() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _guard = ENV_MUTEX.lock().expect("env lock");
+        let _guard = env_mutex();
         let workspace = tempfile::tempdir().expect("workspace");
         let bin = tempfile::tempdir().expect("bin");
         let tool = bin.path().join("other-tool");
