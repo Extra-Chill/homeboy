@@ -533,14 +533,13 @@ fn reserve_cook_retry_lifecycle(
     }
 }
 
-/// A retryable failure before provider execution has no candidate or execution
-/// evidence to supersede, so its retry remains an append-only Cook attempt.
+/// A manually approved retry of a Cook-owned failure with no candidate evidence
+/// remains an append-only Cook attempt. The durable recipe authenticates source
+/// ownership; the Cook index prevents a failed provider retry from superseding
+/// an already-promotable sibling candidate.
 fn retryable_cook_attempt(
     source: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<Option<CookRetryAttempt>> {
-    if source.metadata["pre_execution_failure"]["retryable"] != serde_json::Value::Bool(true) {
-        return Ok(None);
-    }
     let Some(cook_id) = source.metadata["cook_id"].as_str() else {
         return Ok(None);
     };
@@ -575,6 +574,19 @@ fn retryable_cook_attempt(
             )]),
         ));
     };
+    let retryable_pre_execution_failure =
+        source.metadata["pre_execution_failure"]["retryable"] == serde_json::Value::Bool(true);
+    let failed_provider_without_candidate = source.state
+        == agent_task_lifecycle::AgentTaskRunState::Failed
+        && !retryable_pre_execution_failure
+        && agent_task_lifecycle::select_cook_candidate(cook_id)
+            .ok()
+            .is_some_and(|selection| {
+                selection.run_id == source.run_id && selection.selected_artifact_id.is_none()
+            });
+    if !retryable_pre_execution_failure && !failed_provider_without_candidate {
+        return Ok(None);
+    }
     let mut pending_attempt = None;
     for recipe_attempt in recipe
         .attempts

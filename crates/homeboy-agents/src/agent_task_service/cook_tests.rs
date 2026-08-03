@@ -2056,6 +2056,64 @@ fn retryable_pre_provider_retry_stays_attached_to_its_cook() {
 }
 
 #[test]
+fn approved_empty_provider_failure_retry_stays_attached_and_becomes_continuation_candidate() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-provider-failure-retry";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = format!("{cook_id}-attempt-1");
+        options.max_attempts = 2;
+        super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
+        super::super::materialize_initial_cook_attempt(&options)
+            .expect("materialize first attempt");
+
+        let failed = crate::agent_task_service::execution::run_submitted(
+            options.initial_run_id.clone(),
+            ProviderMissingExecutor,
+        )
+        .expect("record provider failure");
+        assert_eq!(failed.exit_code, 1);
+        assert_eq!(
+            agent_task_lifecycle::status(&options.initial_run_id)
+                .expect("failed Cook attempt")
+                .state,
+            agent_task_lifecycle::AgentTaskRunState::Failed
+        );
+
+        // Invoking retry is the explicit operator approval boundary. Its durable
+        // reservation must immediately bind to the owning Cook recipe and index.
+        let retry = crate::agent_task_service::retry(&options.initial_run_id, None, false, false)
+            .expect("approved provider retry remains Cook-owned");
+        let retry_run_id = retry.record.run_id;
+        let patch_root = tempfile::tempdir().expect("candidate patch root");
+        seed_substantive_candidate_aggregate(
+            &retry_run_id,
+            &options.initial_plan,
+            &patch_root.path().join("candidate.patch"),
+            "diff --git a/fixture.txt b/fixture.txt\n+index 0000000..1111111 100644\n--- a/fixture.txt\n+++ b/fixture.txt\n@@ -0,0 +1 @@\n+fixed\n",
+        );
+
+        let index = agent_task_lifecycle::cook_index(cook_id).expect("Cook retry index");
+        assert_eq!(index.latest_run_id, retry_run_id);
+        assert_eq!(index.attempts.len(), 2);
+        let selection = agent_task_lifecycle::select_cook_candidate(cook_id)
+            .expect("substantive retry is selected");
+        assert_eq!(selection.run_id, retry_run_id);
+        assert_eq!(selection.reason, "latest_substantive_candidate_pointer");
+        assert_eq!(
+            super::super::resolve_cook_continuation_run_id(cook_id)
+                .expect("cook-continue resolves the retry candidate"),
+            retry_run_id
+        );
+        assert_eq!(
+            agent_task_lifecycle::status(&retry_run_id)
+                .expect("successful retry")
+                .state,
+            agent_task_lifecycle::AgentTaskRunState::Succeeded
+        );
+    });
+}
+
+#[test]
 fn retryable_pre_provider_retry_propagates_force_after_terminal_successor() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = retryable_pre_provider_cook("cook-forced-terminal-retry", 3);
