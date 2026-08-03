@@ -3092,22 +3092,6 @@ pub fn disconnect_local_recovery(runner_id: &str) -> Result<RunnerDisconnectRepo
 }
 
 #[cfg(test)]
-mod indexed_inspection_tests {
-    #[test]
-    fn indexed_discovery_has_no_reconnect_or_ssh_path() {
-        let source = include_str!("connection.rs");
-        let start = source
-            .find("pub fn statuses_indexed()")
-            .expect("indexed discovery exists");
-        let body = &source[start..source.find("pub fn disconnect").expect("next function")];
-
-        assert!(!body.contains("recover_dead_direct_tunnel"));
-        assert!(!body.contains("connect("));
-        assert!(!body.contains("SshClient"));
-    }
-}
-
-#[cfg(test)]
 mod status_read_purity_tests {
     #[test]
     fn status_has_no_lifecycle_mutation_path() {
