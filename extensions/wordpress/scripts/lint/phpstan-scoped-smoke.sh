@@ -6,12 +6,18 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 # shellcheck source=../../../scripts/lib/runtime-helper-resolver.sh
 source "${ROOT_DIR}/scripts/lib/runtime-helper-resolver.sh"
 SIDECAR_WRITER_HELPER="$(homeboy_runtime_helper "$ROOT_DIR" HOMEBOY_RUNTIME_SIDECAR_WRITER sidecar-writer.sh)"
+RESOLVE_CONTEXT_HELPER="$(homeboy_runtime_helper "$ROOT_DIR" HOMEBOY_RUNTIME_RESOLVE_CONTEXT resolve-context.sh)"
 RUNNER="${SCRIPT_DIR}/phpstan-runner.sh"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 if [ ! -f "$SIDECAR_WRITER_HELPER" ]; then
     echo "Missing sidecar writer helper: $SIDECAR_WRITER_HELPER" >&2
+    exit 1
+fi
+
+if [ ! -f "$RESOLVE_CONTEXT_HELPER" ]; then
+    echo "Missing resolve context helper: $RESOLVE_CONTEXT_HELPER" >&2
     exit 1
 fi
 
@@ -50,16 +56,20 @@ cat > "${EXTENSION_DIR}/vendor/bin/phpstan" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" > "${PHPSTAN_ARGS_FILE}"
+count=0
+[ -f "${PHPSTAN_CALLS_FILE}" ] && count=$(cat "${PHPSTAN_CALLS_FILE}")
+count=$((count + 1))
+printf '%s\n' "$count" > "${PHPSTAN_CALLS_FILE}"
+if [ "${1:-}" = "--version" ]; then
+    printf '%s\n' 'PHPStan - PHP Static Analysis Tool 2.0.0'
+    exit 0
+fi
 for arg in "$@"; do
     case "$arg" in
         --configuration=*) cp "${arg#--configuration=}" "${PHPSTAN_CONFIG_CAPTURE}" ;;
         --autoload-file=*) cp "${arg#--autoload-file=}" "${PHPSTAN_AUTOLOAD_CAPTURE}" ;;
     esac
 done
-count=0
-[ -f "${PHPSTAN_CALLS_FILE}" ] && count=$(cat "${PHPSTAN_CALLS_FILE}")
-count=$((count + 1))
-printf '%s\n' "$count" > "${PHPSTAN_CALLS_FILE}"
 if [ "${PHPSTAN_EMIT_ERROR:-}" = "1" ]; then
     printf '{"totals":{"errors":1,"file_errors":1},"files":{"%s/main.php":{"errors":1,"messages":[{"message":"Call to an undefined function missing_function().","line":1,"identifier":"function.notFound"}]}}}\n' "${HOMEBOY_COMPONENT_PATH}"
     exit 1
@@ -76,6 +86,8 @@ run_phpstan() {
     HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
     HOMEBOY_COMPONENT_ID="phpstan-smoke" \
     HOMEBOY_WORDPRESS_DEPENDENCY_HELPER="$DEPENDENCY_HELPER" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
+    HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
     PHPSTAN_ARGS_FILE="$ARGS_FILE" \
     PHPSTAN_CALLS_FILE="$CALLS_FILE" \
     PHPSTAN_CONFIG_CAPTURE="$CONFIG_CAPTURE" \
@@ -224,18 +236,24 @@ HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
 HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
 HOMEBOY_COMPONENT_ID="phpstan-smoke" \
 HOMEBOY_WORDPRESS_DEPENDENCY_HELPER="$DEPENDENCY_HELPER" \
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
+HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
 PHPSTAN_ARGS_FILE="$ARGS_FILE" \
 PHPSTAN_CALLS_FILE="$CALLS_FILE" \
 PHPSTAN_CONFIG_CAPTURE="$CONFIG_CAPTURE" \
 PHPSTAN_AUTOLOAD_CAPTURE="$AUTOLOAD_CAPTURE" \
 HOMEBOY_SUMMARY_MODE=1 \
 HOMEBOY_LINT_FILE="assets/app.js" \
-"$RUNNER" >/dev/null
+"$RUNNER" >"$OUTPUT_FILE"
 
-if [ "$(cat "$CALLS_FILE")" != "0" ]; then
-    echo "FAIL: non-PHP single-file scope should skip PHPStan" >&2
+if [ "$(cat "$CALLS_FILE")" != "1" ]; then
+    echo "FAIL: non-PHP single-file scope should only run the PHPStan integrity probe" >&2
     exit 1
 fi
+
+assert_contains "--version" "non-PHP single-file scope runs the PHPStan integrity probe"
+assert_not_contains "analyse" "non-PHP single-file scope skips PHPStan analysis"
+assert_file_contains "$OUTPUT_FILE" "no PHP files in requested scope, skipping static analysis" "non-PHP single-file scope reports that PHPStan analysis was skipped"
 
 : > "$ARGS_FILE"
 printf '0\n' > "$CALLS_FILE"
@@ -244,6 +262,7 @@ HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
 HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
 HOMEBOY_COMPONENT_ID="phpstan-smoke" \
 HOMEBOY_WORDPRESS_DEPENDENCY_HELPER="$DEPENDENCY_HELPER" \
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
 PHPSTAN_ARGS_FILE="$ARGS_FILE" \
 PHPSTAN_CALLS_FILE="$CALLS_FILE" \
 PHPSTAN_CONFIG_CAPTURE="$CONFIG_CAPTURE" \
