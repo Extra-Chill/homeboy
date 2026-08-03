@@ -21,8 +21,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ROOT_DIR="$(cd "${EXTENSION_DIR}/.." && pwd)"
-HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
-RESOLVE_CONTEXT_CORE_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/resolve-context.sh}"
+# shellcheck source=../../../scripts/lib/runtime-helper-resolver.sh
+source "${ROOT_DIR}/scripts/lib/runtime-helper-resolver.sh"
+RESOLVE_CONTEXT_CORE_HELPER="$(homeboy_runtime_helper "$ROOT_DIR" HOMEBOY_RUNTIME_RESOLVE_CONTEXT resolve-context.sh)"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wordpress-build-clean-vendor.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 

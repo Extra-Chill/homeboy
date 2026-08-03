@@ -4,14 +4,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STABLE_FINGERPRINT_HELPER="${SCRIPT_DIR}/stable-fingerprint.php"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
+# shellcheck source=../../../scripts/lib/runtime-helper-resolver.sh
+source "${ROOT_DIR}/scripts/lib/runtime-helper-resolver.sh"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 # shellcheck source=../lib/validation-dependencies.sh
 source "${DEPENDENCY_HELPER}"
 # Standalone `homeboy lint` runs do not export HOMEBOY_RUNTIME_SIDECAR_WRITER;
 # fall back to the co-located direct-invocation copy so the sidecar writer is
 # available outside a release run (homeboy-extensions#1415).
-SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
+SIDECAR_WRITER_HELPER="$(homeboy_runtime_helper "$ROOT_DIR" HOMEBOY_RUNTIME_SIDECAR_WRITER sidecar-writer.sh)"
 # shellcheck source=/dev/null
 if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
     source "$SIDECAR_WRITER_HELPER"
@@ -99,8 +100,8 @@ if [[ "${HOMEBOY_SKIP_PHPSTAN:-}" == "1" ]]; then
 fi
 
 # Resolve execution context (shared helper)
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/resolve-context.sh}"
-SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
+RESOLVE_CONTEXT_HELPER="$(homeboy_runtime_helper "$ROOT_DIR" HOMEBOY_RUNTIME_RESOLVE_CONTEXT resolve-context.sh)"
+SIDECAR_WRITER_HELPER="$(homeboy_runtime_helper "$ROOT_DIR" HOMEBOY_RUNTIME_SIDECAR_WRITER sidecar-writer.sh)"
 # shellcheck source=/dev/null
 source "${RESOLVE_CONTEXT_HELPER}"
 homeboy_resolve_context --component-alias PLUGIN_PATH

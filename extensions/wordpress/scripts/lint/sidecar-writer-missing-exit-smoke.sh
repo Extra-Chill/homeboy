@@ -17,19 +17,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
-CORE_RUNTIME_DIR="${HOMEBOY_CORE_DIR}/src/core/extension/runtime"
+# shellcheck source=../../../scripts/lib/runtime-helper-resolver.sh
+source "${ROOT_DIR}/scripts/lib/runtime-helper-resolver.sh"
 RUNNER="${SCRIPT_DIR}/lint-runner.sh"
 
 # The runner sources its prelude/steps/resolve-context helpers via `:?` (they
 # are hard preconditions provided by homeboy core), so provide working copies.
-for helper in runner-prelude.sh runner-steps.sh resolve-context.sh; do
-    if [ ! -f "${CORE_RUNTIME_DIR}/${helper}" ]; then
-        echo "Missing required runtime helper: ${CORE_RUNTIME_DIR}/${helper}" >&2
-        echo "Set HOMEBOY_CORE_DIR to a homeboy checkout to run this smoke." >&2
-        exit 1
-    fi
-done
+RUNNER_PRELUDE_HELPER="$(homeboy_runtime_helper "$ROOT_DIR" HOMEBOY_RUNTIME_RUNNER_PRELUDE runner-prelude.sh)"
+RUNNER_STEPS_HELPER="$(homeboy_runtime_helper "$ROOT_DIR" HOMEBOY_RUNTIME_RUNNER_STEPS runner-steps.sh)"
+RESOLVE_CONTEXT_HELPER="$(homeboy_runtime_helper "$ROOT_DIR" HOMEBOY_RUNTIME_RESOLVE_CONTEXT resolve-context.sh)"
 
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
@@ -43,9 +39,9 @@ trap 'rm -rf "$TMPDIR"' EXIT
 # sidecar-writer.sh, so the prelude's runtime_dir fallback finds nothing.
 RUNTIME_DIR="${TMPDIR}/runtime-no-sidecar"
 mkdir -p "$RUNTIME_DIR"
-cp "${CORE_RUNTIME_DIR}/runner-prelude.sh" \
-   "${CORE_RUNTIME_DIR}/runner-steps.sh" \
-   "${CORE_RUNTIME_DIR}/resolve-context.sh" \
+cp "$RUNNER_PRELUDE_HELPER" \
+   "$RUNNER_STEPS_HELPER" \
+   "$RESOLVE_CONTEXT_HELPER" \
    "$RUNTIME_DIR/"
 # Deliberately do NOT copy sidecar-writer.sh into $RUNTIME_DIR.
 

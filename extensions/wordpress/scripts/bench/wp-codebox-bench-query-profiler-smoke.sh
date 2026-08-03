@@ -6,8 +6,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "$SCRIPT_DIR/../.." && pwd)"
-HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${EXTENSION_PATH}/../.." && pwd)/homeboy}"
-BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/bash-preflight.sh}"
+ROOT_DIR="$(cd "${EXTENSION_PATH}/.." && pwd)"
+# shellcheck source=../../../scripts/lib/runtime-helper-resolver.sh
+source "${ROOT_DIR}/scripts/lib/runtime-helper-resolver.sh"
+BASH_PREFLIGHT_HELPER="$(homeboy_runtime_helper "$ROOT_DIR" HOMEBOY_RUNTIME_BASH_PREFLIGHT bash-preflight.sh)"
 FIXTURE_DIR="${EXTENSION_PATH}/tests/fixtures/bench-query-profiler"
 
 if [ ! -d "$FIXTURE_DIR" ]; then
