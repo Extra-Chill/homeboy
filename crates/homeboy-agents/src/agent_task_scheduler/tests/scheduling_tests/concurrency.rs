@@ -6,6 +6,43 @@ use super::shared::*;
 pub(super) mod concurrency_tests {
     use super::*;
 
+    #[derive(Clone)]
+    struct PanickingExecutor;
+
+    impl AgentTaskExecutorAdapter for PanickingExecutor {
+        fn execute(
+            &self,
+            _request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            panic!("injected provider panic");
+        }
+    }
+
+    #[test]
+    fn provider_panic_returns_a_terminal_failure_without_hanging_the_scheduler() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let aggregate = AgentTaskScheduler::new(PanickingExecutor).run(plan_with_tasks(1));
+            let _ = sender.send(aggregate);
+        });
+
+        let aggregate = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("provider panic must terminate the scheduler");
+        assert_eq!(aggregate.totals.failed, 1);
+        assert_eq!(aggregate.outcomes.len(), 1);
+        assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::Failed);
+        assert_eq!(
+            aggregate.outcomes[0].failure_classification,
+            Some(AgentTaskFailureClassification::ExecutionFailed)
+        );
+        assert!(aggregate.outcomes[0]
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.class == "agent_task.provider_worker_panicked"));
+    }
+
     pub(crate) fn init_git_workspace(path: &std::path::Path) {
         fs::create_dir(path).expect("workspace directory");
         for args in [
