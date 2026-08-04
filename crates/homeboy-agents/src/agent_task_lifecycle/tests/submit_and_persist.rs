@@ -155,6 +155,49 @@ fn cook_progress_is_durable_across_active_and_terminal_lifecycle_states() {
 }
 
 #[test]
+fn cook_progress_carries_provider_activity_and_survives_a_failed_probe() {
+    with_isolated_home(|_| {
+        let run_id = "cook-progress-activity";
+        submit_plan(&test_plan(), Some(run_id)).expect("submit run");
+
+        // A sample makes it into the record an operator reads, dated.
+        let sampled = record_cook_progress_with_activity(
+            run_id,
+            "heartbeat",
+            1,
+            Some("provider execution is still running"),
+            Some(json!({
+                "files_changed": 0,
+                "command": "cargo test -q -p homeboy-agents",
+                "command_elapsed_seconds": 372
+            })),
+        )
+        .expect("record sampled progress");
+        assert_eq!(
+            sampled.metadata["cook_progress"]["activity"]["files_changed"],
+            0
+        );
+        let observed_at = sampled.metadata["cook_progress"]["activity_observed_at"].clone();
+        assert!(observed_at.is_string(), "a fresh sample is dated");
+
+        // A probe that could not read the worktree or the process table is not
+        // evidence the provider stopped. The last real sample is carried
+        // forward with its own observation time, so a reader can see both what
+        // was last seen and how stale it is.
+        let unsampled = record_cook_progress(run_id, "heartbeat", 1, Some("still running"))
+            .expect("record unsampled progress");
+        assert_eq!(
+            unsampled.metadata["cook_progress"]["activity"]["command"],
+            "cargo test -q -p homeboy-agents"
+        );
+        assert_eq!(
+            unsampled.metadata["cook_progress"]["activity_observed_at"], observed_at,
+            "a retained sample keeps the time it was actually observed"
+        );
+    });
+}
+
+#[test]
 fn provider_run_result_reads_declared_output_alias() {
     let role_aliases: AgentTaskProviderRoleAliases = serde_json::from_value(json!({
         "outputs": {

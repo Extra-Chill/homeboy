@@ -795,7 +795,9 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress<E>(
         Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>,
     >,
     progress: Option<
-        &(dyn Fn(&str, Option<&str>, Option<&str>) -> homeboy::core::Result<()> + Send + Sync),
+        &(dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
+              + Send
+              + Sync),
     >,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value>
@@ -836,7 +838,7 @@ where
     let cook_id = requested_cook_id.clone().unwrap_or_else(|| run_id.clone());
     if !no_progress {
         if let Some(progress) = progress {
-            progress("preparing", None, None)?;
+            progress("preparing", None, None, None)?;
         }
     }
     let (run_id, mut initial_plan) = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
@@ -907,12 +909,23 @@ where
         .first()
         .and_then(|task| task.executor.model())
         .map(str::to_string);
-    let durable_observer = |phase: &str, cook_id: &str, run_id: &str| {
-        if no_progress && phase != "durable_identity" {
+    let durable_observer = |event: &agent_task_service::CookProgressEvent<'_>| {
+        if no_progress && event.phase != "durable_identity" {
             return Ok(());
         }
+        // The observer renders the activity sample here rather than passing the
+        // struct on, so foreground clients (TTY, machine log, `--output` file)
+        // all describe a running provider with the same bounded sentence.
+        let activity = event.activity_summary();
         progress
-            .map(|progress| progress(phase, Some(cook_id), Some(run_id)))
+            .map(|progress| {
+                progress(
+                    event.phase,
+                    Some(event.cook_id),
+                    Some(event.run_id),
+                    activity.as_deref(),
+                )
+            })
             .unwrap_or(Ok(()))
     };
     let result = agent_task_service::run_cook_with_durable_observer(

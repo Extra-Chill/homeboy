@@ -1156,18 +1156,62 @@ pub fn record_cook_progress(
     attempt: u32,
     detail: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
+    record_cook_progress_with_activity(run_id, phase, attempt, detail, None)
+}
+
+/// Persist Cook phase together with a sample of what the provider is doing.
+///
+/// The activity sample is written into the same record as the phase so
+/// `agent-task status` answers "is this cook making progress?" from durable
+/// state, without the reader having to find the worktree and run `ps` and
+/// `git status` by hand (#11482). It is evidence, not authority: an absent
+/// sample leaves the previously recorded one in place rather than erasing it,
+/// because a single failed probe is not proof the provider stopped working.
+pub fn record_cook_progress_with_activity(
+    run_id: &str,
+    phase: &str,
+    attempt: u32,
+    detail: Option<&str>,
+    activity: Option<Value>,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let record = store::mutate_record(&run_id, |record| {
         let now = now_timestamp();
-        record.ensure_metadata_object().insert(
-            "cook_progress".to_string(),
-            json!({
+        {
+            let metadata = record.ensure_metadata_object();
+            let previous = metadata.get("cook_progress").cloned();
+            let mut progress = json!({
                 "phase": phase,
                 "attempt": attempt,
                 "detail": detail,
                 "updated_at": now,
-            }),
-        );
+            });
+            match activity {
+                Some(activity) => {
+                    progress["activity"] = activity;
+                    progress["activity_observed_at"] = json!(now);
+                }
+                // A probe that could not read the worktree or the process table
+                // says nothing about the provider. Carry the last real sample
+                // forward with its own observation time so a reader can see both
+                // what was last seen and how stale it is.
+                None => {
+                    if let Some(previous) = previous.as_ref() {
+                        if let Some(retained) = previous
+                            .get("activity")
+                            .filter(|activity| !activity.is_null())
+                        {
+                            progress["activity"] = retained.clone();
+                            progress["activity_observed_at"] = previous
+                                .get("activity_observed_at")
+                                .cloned()
+                                .unwrap_or(Value::Null);
+                        }
+                    }
+                }
+            }
+            metadata.insert("cook_progress".to_string(), progress);
+        }
         if !record.state.is_terminal() && !record.is_runner_backed() {
             record.updated_at = Some(now_timestamp());
             update_lifecycle_heartbeat(record);

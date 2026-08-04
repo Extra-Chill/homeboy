@@ -2939,21 +2939,21 @@ fn cook_repairs_initial_alias_after_submit_before_index_interruption() {
 
         let observed = Arc::new(Mutex::new(Vec::new()));
         let observer_records = observed.clone();
-        let result =
-            run_cook_with_durable_observer(options, UnusedExecutor, &move |phase, cook, run| {
-                let status =
-                    agent_task_lifecycle::status(cook).expect("Cook alias resolves in observer");
-                let logs =
-                    agent_task_lifecycle::logs(cook).expect("Cook alias logs resolve in observer");
-                assert_eq!(status.run_id, run);
-                assert!(!logs.events.is_empty());
-                observer_records
-                    .lock()
-                    .expect("observer records lock")
-                    .push((phase.to_string(), cook.to_string(), run.to_string()));
-                Ok(())
-            })
-            .expect("restart repairs the Cook alias");
+        let result = run_cook_with_durable_observer(options, UnusedExecutor, &move |event| {
+            let (phase, cook, run) = (event.phase, event.cook_id, event.run_id);
+            let status =
+                agent_task_lifecycle::status(cook).expect("Cook alias resolves in observer");
+            let logs =
+                agent_task_lifecycle::logs(cook).expect("Cook alias logs resolve in observer");
+            assert_eq!(status.run_id, run);
+            assert!(!logs.events.is_empty());
+            observer_records
+                .lock()
+                .expect("observer records lock")
+                .push((phase.to_string(), cook.to_string(), run.to_string()));
+            Ok(())
+        })
+        .expect("restart repairs the Cook alias");
 
         assert_eq!(result.value.latest_run_id.as_deref(), Some(run_id));
         assert_eq!(
@@ -3059,23 +3059,23 @@ fn cook_publishes_durable_identity_before_materialization_and_survives_interrupt
 
         let observed = Arc::new(Mutex::new(Vec::new()));
         let observer_records = observed.clone();
-        let result =
-            run_cook_with_durable_observer(options, UnusedExecutor, &move |phase, cook, run| {
-                observer_records
-                    .lock()
-                    .expect("observer records lock")
-                    .push((phase.to_string(), run.to_string()));
-                // Every identity-bearing event must be immediately actionable:
-                // the caller can look the run up the moment it is told about it.
-                assert_eq!(
-                    agent_task_lifecycle::status(cook)
-                        .expect("Cook alias resolves in observer")
-                        .run_id,
-                    run
-                );
-                Ok(())
-            })
-            .expect("interrupted materialization returns a durable report");
+        let result = run_cook_with_durable_observer(options, UnusedExecutor, &move |event| {
+            let (phase, cook, run) = (event.phase, event.cook_id, event.run_id);
+            observer_records
+                .lock()
+                .expect("observer records lock")
+                .push((phase.to_string(), run.to_string()));
+            // Every identity-bearing event must be immediately actionable:
+            // the caller can look the run up the moment it is told about it.
+            assert_eq!(
+                agent_task_lifecycle::status(cook)
+                    .expect("Cook alias resolves in observer")
+                    .run_id,
+                run
+            );
+            Ok(())
+        })
+        .expect("interrupted materialization returns a durable report");
 
         // 1. Identity is published before any materialization work.
         assert_eq!(
@@ -9452,4 +9452,49 @@ fn cook_report_invocation_run_ids_populated_for_policy_failure() {
         );
         assert_eq!(report.value.status, "policy_failure");
     });
+}
+
+#[test]
+fn a_progress_event_carries_provider_activity_to_the_observer() {
+    // The observer boundary used to drop everything but `(phase, cook_id,
+    // run_id)`, which is why every heartbeat an operator saw was identical.
+    // A heartbeat event now has to be able to say what the provider is doing
+    // (#11482).
+    let activity = CookProviderActivity {
+        files_changed: Some(0),
+        command: Some("cargo test -q -p homeboy-agents".to_string()),
+        command_elapsed_seconds: Some(372),
+        elapsed_seconds: Some(400),
+        ..Default::default()
+    };
+    let event = CookProgressEvent {
+        phase: "heartbeat",
+        cook_id: "cook-1",
+        run_id: "cook-1-attempt-1",
+        attempt: 1,
+        detail: Some("provider execution is still running"),
+        activity: Some(&activity),
+    };
+
+    let summary = event
+        .activity_summary()
+        .expect("event renders its activity");
+
+    assert!(summary.contains("no files written yet"));
+    assert!(summary.contains("cargo test -q -p homeboy-agents"));
+    assert_eq!(event.attempt, 1);
+}
+
+#[test]
+fn a_progress_event_without_a_sample_renders_no_activity() {
+    let event = CookProgressEvent {
+        phase: "provider_start",
+        cook_id: "cook-1",
+        run_id: "cook-1-attempt-1",
+        attempt: 1,
+        detail: None,
+        activity: None,
+    };
+
+    assert_eq!(event.activity_summary(), None);
 }

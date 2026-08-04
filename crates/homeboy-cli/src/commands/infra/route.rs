@@ -1016,13 +1016,16 @@ fn run_split_placement_cook(
         job_overrides: lab_job_overrides(cli)?,
         progress_reporter: progress_reporter.clone(),
     });
-    let progress = |phase: &str, cook_id: Option<&str>, run_id: Option<&str>| {
+    let progress = |phase: &str,
+                    cook_id: Option<&str>,
+                    run_id: Option<&str>,
+                    activity: Option<&str>| {
         if cook.no_progress && phase == "durable_identity" {
             if let Some(run_id) = run_id {
                 crate::commands::agent_task::run::announce_durable_cook_identity(cook_id, run_id);
             }
         } else {
-            progress_reporter.report(phase, cook_id, run_id);
+            progress_reporter.report(phase, cook_id, run_id, activity);
         }
         Ok(())
     };
@@ -1265,7 +1268,17 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                 while let Err(mpsc::RecvTimeoutError::Timeout) =
                     heartbeat_wait.recv_timeout(Duration::from_secs(15))
                 {
-                    heartbeat_progress_reporter.report("heartbeat", None, Some(&heartbeat_run_id));
+                    // A Lab-offloaded attempt runs the provider on the runner,
+                    // so neither the local process tree nor a local worktree
+                    // describes it. Report liveness without activity rather
+                    // than sampling this host and reporting someone else's
+                    // work as the provider's (#11482).
+                    heartbeat_progress_reporter.report(
+                        "heartbeat",
+                        None,
+                        Some(&heartbeat_run_id),
+                        None,
+                    );
                 }
             });
             let outcome = lab_routing::dispatch_lab_offload(

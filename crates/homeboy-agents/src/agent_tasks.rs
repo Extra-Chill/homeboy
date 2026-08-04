@@ -451,7 +451,7 @@ pub mod service {
         AgentTaskDiscoveryCounts, AgentTaskDiscoveryFilter, AgentTaskDiscoveryReport,
         AgentTaskDiscoveryRun, AgentTaskHydratedEvidence, AgentTaskPromotionJob,
         AgentTaskPromotionJobDriver, AgentTaskPromotionJobPhase, AgentTaskPromotionRequest,
-        AgentTaskRetryServiceResult, AgentTaskRunResult, AGENT_TASK_PROMOTION_JOB_TYPE,
-        AGENT_TASK_PROMOTION_JOB_VERSION,
+        AgentTaskRetryServiceResult, AgentTaskRunResult, CookActivityProbe, CookProgressEvent,
+        CookProviderActivity, AGENT_TASK_PROMOTION_JOB_TYPE, AGENT_TASK_PROMOTION_JOB_VERSION,
     };
 }

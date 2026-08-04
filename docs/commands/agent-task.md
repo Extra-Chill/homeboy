@@ -341,6 +341,24 @@ homeboy agent-task status <run-id>
 homeboy agent-task evidence <run-id> --full
 ```
 
+#### Provider activity
+
+A locally executed Cook samples what the provider is actually doing and carries
+it on both the heartbeat line and `agent-task status`, under
+`liveness.provider_activity`:
+
+| Field | Meaning |
+|---|---|
+| `files_changed` | Uncommitted files in the destination worktree, untracked included. `0` after several minutes is the clearest sign a cook is not producing work. Homeboy's own `.homeboy/` run state is excluded, so this counts provider edits only. |
+| `commits_written` | Commits made in that worktree since the provider started. A provider that commits leaves a clean tree, so this is what distinguishes "finished" from "did nothing". |
+| `command` / `command_elapsed_seconds` | The longest-running command the provider has spawned, and its age — `cargo test -p homeboy-agents`, six minutes in. |
+| `elapsed_seconds` | Time since provider execution began. |
+| `observed_at` | When the sample was taken. A retained sample keeps its own observation time, so a stale reading is visible as stale. |
+
+Each field is absent when it could not be sampled; an unsampled cook reports no
+activity rather than a zero that would read as a measurement. Lab-offloaded
+attempts run the provider on the runner and therefore report no local activity.
+
 `--placement local` is safe only when local execution on this
 controller is intentional. For agent-task waves with concurrency greater than 1
 or multiple tasks, Homeboy prints `HOMEBOY_LOCAL_FANOUT_WARNING` before provider
