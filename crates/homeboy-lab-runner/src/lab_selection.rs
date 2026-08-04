@@ -145,7 +145,7 @@ fn placement_readiness_from_status(
     let compatible = matches!(capability, super::LabRunnerGateDecision::Eligible);
     let state = if availability.accepts_jobs && compatible {
         PlacementReadinessState::Ready
-    } else if queueable {
+    } else if queueable && compatible {
         PlacementReadinessState::Queueable
     } else {
         PlacementReadinessState::Blocked
@@ -1550,6 +1550,36 @@ mod placement_readiness_tests {
         );
         assert_eq!(result.state, PlacementReadinessState::Blocked);
         assert_eq!(result.recovery_actions[0].command, "install browser");
+    }
+
+    #[test]
+    fn incompatible_busy_reverse_runner_is_blocked_not_queueable() {
+        let mut observed = status();
+        observed.active_jobs.push(
+            serde_json::from_value(serde_json::json!({
+                "runner_id":"lab", "job_id":"00000000-0000-0000-0000-000000000001",
+                "operation":"test", "source":"daemon", "kind":"workload", "status":"running",
+                "command":"test", "started_at_ms":0, "elapsed_ms":0
+            }))
+            .expect("job"),
+        );
+        let mut request = request();
+        request.allow_queue = true;
+        request.durable_workload = true;
+        let result = decide(
+            &request,
+            &observed,
+            Some(1),
+            RunnerTunnelMode::Reverse,
+            super::super::LabRunnerGateDecision::Missing {
+                runner_id: "lab".to_string(),
+                command: "runner preflight",
+                missing_tools: Vec::new(),
+                reason: "missing browser".to_string(),
+                remediation: vec!["install browser".to_string()],
+            },
+        );
+        assert_eq!(result.state, PlacementReadinessState::Blocked);
     }
 
     #[test]
