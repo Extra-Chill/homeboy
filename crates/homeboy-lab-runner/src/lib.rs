@@ -168,6 +168,8 @@ mod workspace;
 pub(crate) use extension_materialization::materialize_lab_job_extension_overlays;
 pub(crate) use workspace::copy_snapshot_to_directory;
 pub use workspace::register_workspace_snapshot_provider;
+#[cfg(test)]
+pub(crate) use workspace::verify_lab_workspace_from_env;
 
 /// Compute the same controller workspace identity used by Lab snapshot
 /// materialization before a detached command is admitted.

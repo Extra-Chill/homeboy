@@ -59,6 +59,7 @@ fn with_default_source(
 mod tests {
     use super::*;
     use crate::bench::parsing::{BenchMetrics, BenchRunSnapshot, BenchScenario};
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_collect_diagnostics() {

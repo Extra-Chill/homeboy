@@ -760,6 +760,7 @@ mod tests {
     use homeboy_core::gate::HOMEBOY_GATE_RESULT_SCHEMA;
     use homeboy_core::server::{RunnerPolicy, RunnerSettings};
     use std::fs;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn ssh_runner() -> Runner {
