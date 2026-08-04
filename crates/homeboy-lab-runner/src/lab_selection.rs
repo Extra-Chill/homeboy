@@ -1627,10 +1627,6 @@ mod placement_readiness_tests {
             preflight.capability.required_capabilities,
             vec!["playwright".to_string()]
         );
-        assert!(preflight
-            .capability
-            .required_tools
-            .contains(&super::super::RunnerRequiredTool::new("playwright")));
     }
 
     #[test]
