@@ -291,7 +291,8 @@ Make a POST request
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--apply` | flag | Confirm the mutating request should be sent |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--body` | `<BODY>` | JSON body |
 | `--form` | `<FORM>` | Form field as key=value. May be repeated |
 
@@ -310,7 +311,8 @@ Make a PUT request
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--apply` | flag | Confirm the mutating request should be sent |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--body` | `<BODY>` | JSON body |
 | `--form` | `<FORM>` | Form field as key=value. May be repeated |
 
@@ -329,7 +331,8 @@ Make a PATCH request
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--apply` | flag | Confirm the mutating request should be sent |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--body` | `<BODY>` | JSON body |
 | `--form` | `<FORM>` | Form field as key=value. May be repeated |
 
@@ -348,4 +351,5 @@ Make a DELETE request
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--apply` | flag | Confirm the mutating request should be sent |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |

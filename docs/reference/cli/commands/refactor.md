@@ -32,7 +32,7 @@ Structural refactoring (rename terms across codebase)
 | `--components` | `<ID[,ID...]>` | Target multiple components with a comma-separated list |
 | `--from` | `<SOURCE>` | Include a specific proposal source (repeatable): audit, lint, test, all |
 | `--all` | flag | Compatibility alias for `--from all` |
-| `--changed-since` | `<CHANGED_SINCE>` | Only include files changed since a git ref (branch, tag, or SHA) |
+| `--changed-since` | `<REF>` | Only operate on files changed since this git ref (branch, tag, or SHA) |
 | `--only` | `<kind>` | Restrict audit-generated fixes to these fix kinds (repeatable) |
 | `--exclude` | `<kind>` | Exclude audit-generated fixes for these fix kinds (repeatable) |
 | `--settings-json-file` | `<FILE>` | Load typed setting overrides from a JSON object file. Repeatable |

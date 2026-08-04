@@ -440,7 +440,8 @@ Report and optionally land a fleet of pull requests
 | Option | Value | Description |
 | --- | --- | --- |
 | `--update-branches` | flag | Update stale PR branches where GitHub can do so safely |
-| `--apply` | flag | Merge green, clean PRs. Without this flag the command is read-only |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--merge-method` | `<MERGE_METHOD>` | Merge method: merge, squash, or rebase |
 | `--path` | `<PATH>` | Workspace path to discover the component from a portable homeboy.json |
 

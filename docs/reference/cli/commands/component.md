@@ -97,6 +97,7 @@ Supports dedicated flags for common fields (e.g., --local-path, --changelog-targ
 | `--changelog-target` | `<CHANGELOG_TARGET>` | Path to changelog file relative to localPath |
 | `--version-target` | `<TARGET>` | Version targets in the form "file" or "file::pattern" (repeatable). Same format as `component create --version-target` |
 | `--extension` | `<EXTENSION>` | Extension(s) this component uses (e.g., a runtime/framework extension id). Repeatable |
+| `--capability-extension` | `<CAPABILITY=EXTENSION>` | Owning extension for a contested capability, as "<capability>=<extension>". Repeatable |
 
 ## `homeboy component delete`
 
@@ -207,7 +208,8 @@ Inspect and optionally repair stale standalone registry local_path data
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--apply` | flag | Apply a safe discovered repair instead of reporting only |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 
 ## `homeboy component artifacts`
 
@@ -224,4 +226,5 @@ Report or remove declared reconstructable artifacts for a component
 | Option | Value | Description |
 | --- | --- | --- |
 | `--path` | `<PATH>` | Discover component from a directory's homeboy.json instead of the registry |
-| `--apply` | flag | Remove reported artifact paths instead of dry-run reporting only |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |

@@ -427,7 +427,8 @@ Plan or delete locally cached runner artifact downloads
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--apply` | flag | Delete the planned cached downloads. Without this flag, only reports the plan |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--runner` | `<RUNNER>` | Limit cleanup to one runner id under the local runner artifact cache |
 | `--run-id` | `<RUN_ID>` | Limit cleanup to one run id. Requires --runner |
 
@@ -441,7 +442,8 @@ Plan or delete persisted local run artifacts and their database records
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--apply` | flag | Delete planned artifact files/directories and their DB rows. Without this flag, only reports the plan |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--older-than-days` | `<OLDER_THAN_DAYS>` | Only include artifacts older than this many days. Defaults to the configured `retention.terminal_run_days` |
 | `--run-id` | `<RUN_ID>` | Limit cleanup to one run id |
 | `--kind` | `<KIND>` | Limit cleanup to one artifact kind |
@@ -517,7 +519,8 @@ Defaults to dry-run; pass `--apply` to actually call the tracker.
 | `--run-url` | `<URL>` | Optional run URL appended to generated issue bodies when using `--from-output` |
 | `--no-refresh-closed` | flag | Don't refresh the body of closed-not_planned issues with the latest finding count. Default is to refresh (so the closed issue stays useful as a "current state" reference) |
 | `--list-limit` | `<LIST_LIMIT>` | Cap the number of issues fetched from the tracker for dedup analysis. Defaults to 200 — high enough for normal repos, but avoids paginating the entire tracker |
-| `--apply` | flag | Actually perform the reconcile actions. Default is dry-run |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--path` | `<PATH>` | Workspace path to discover the component from a portable homeboy.json (CI runners, ad-hoc clones) |
 
 ## `homeboy runs findings reconcile-run`
@@ -541,7 +544,8 @@ Discovers `<command>.json` files in an output directory, runs the existing per-c
 | `--run-url` | `<URL>` | Optional run URL appended to generated issue bodies |
 | `--no-refresh-closed` | flag | Don't refresh the body of closed-not_planned issues with the latest finding count |
 | `--list-limit` | `<LIST_LIMIT>` | Cap the number of issues fetched from the tracker for dedup analysis per command |
-| `--apply` | flag | Actually perform the reconcile actions. Default is dry-run |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--path` | `<PATH>` | Workspace path to discover the component from a portable homeboy.json (CI runners, ad-hoc clones) |
 
 ## `homeboy runs findings build`

@@ -29,8 +29,8 @@ Run scoped audit + lint + test umbrella against PR-style changes
 | `--run-id` | `<RUN_ID>` | Attach to an already-persisted review run instead of starting another audit/lint/test execution |
 | `--path` | `<PATH>` | Override the component checkout path for this invocation |
 | `--extension` | `<ID>` | One-shot extension override for the current invocation |
-| `--changed-since` | `<REF>` | Run audit + lint + test only against files changed since this git ref (branch, tag, or SHA). CI-friendly — mirrors the per-stage flag |
-| `--changed-only` | flag | Run only against files modified in the working tree (staged, unstaged, untracked). Only the lint stage scopes natively; audit and test run on the full component with a hint noting the limitation. Use `--changed-since` for full umbrella scoping |
+| `--changed-since` | `<REF>` | Only operate on files changed since this git ref (branch, tag, or SHA) |
+| `--changed-only` | flag | Operate only on files modified in the working tree (staged, unstaged, untracked). File-scoped, not hunk-scoped |
 | `--summary` | flag | Show compact summary instead of full per-stage output |
 | `--ci-profile` | `<ID>` | Run an extension-declared CI profile as an additional review gate |
 | `--audit-profile` | `<PROFILE>` | Audit detector profile for the audit stage. Defaults to `pr` for changed-file review and `full` for full review Values: `full`, `pr`, `architecture`. |
@@ -71,7 +71,7 @@ Audit code conventions and detect architectural drift
 | `--baseline` | flag | Persist the current run as the new baseline |
 | `--ignore-baseline` | flag | Skip baseline comparison for this run |
 | `--ratchet` | flag | Auto-update the baseline when the current run improves on it |
-| `--changed-since` | `<CHANGED_SINCE>` | Only audit files changed since a git ref (branch, tag, or SHA) |
+| `--changed-since` | `<REF>` | Only operate on files changed since this git ref (branch, tag, or SHA) |
 | `--json-summary` | flag | Include compact machine-readable summary for CI wrappers. Also accepts `--summary` |
 | `--fixability` | flag | Include automated-fixability metadata. This can be expensive because it runs the refactor planner after audit completes |
 
@@ -94,8 +94,8 @@ Lint a component
 | `--summary` | flag | Show compact summary instead of full output |
 | `--file` | `<FILE>` | Lint only a single file (path relative to component root) |
 | `--glob` | `<GLOB>` | Lint only files matching a repo-relative glob pattern |
-| `--changed-only` | flag | Lint modified files in the working tree (file-scoped, not hunk-scoped) |
-| `--changed-since` | `<CHANGED_SINCE>` | Lint only files changed since a git ref (branch, tag, or SHA) — CI-friendly |
+| `--changed-since` | `<REF>` | Only operate on files changed since this git ref (branch, tag, or SHA) |
+| `--changed-only` | flag | Operate only on files modified in the working tree (staged, unstaged, untracked). File-scoped, not hunk-scoped |
 | `--ci-job` | `<ID>` | Run using env from a single extension-declared CI lint job |
 | `--errors-only` | flag | Show only errors, suppress warnings |
 | `--sniffs` | `<SNIFFS>` | Only check specific sniffs (comma-separated codes) |
@@ -138,7 +138,7 @@ Run tests for a component
 | `--drift` | flag | Detect test drift — cross-reference production changes with test files |
 | `--write` | flag | Write fixes to disk for workflows that support it |
 | `--since` | `<REF>` | Git ref to compare against for drift detection (tag, commit, branch) |
-| `--changed-since` | `<REF>` | Limit test execution to files changed since this git ref (PR impact scope) |
+| `--changed-since` | `<REF>` | Only operate on files changed since this git ref (branch, tag, or SHA) |
 | `--ci-job` | `<ID>` | Run using env and passthrough args from a single extension-declared CI test job |
 | `--settings-json-file` | `<FILE>` | Load typed setting overrides from a JSON object file. Repeatable |
 | `--setting` | `<KEY=VALUE>` | String setting override. Repeatable |
@@ -168,7 +168,7 @@ Run a local build quality gate for a component
 | `--rig` | `<ID>` | Scope: local rig id |
 | `--path` | `<PATH>` | Scope: checkout path, bypassing the registry |
 | `--workspace` | flag | Scope: every configured workspace repo |
-| `--changed-since` | `<CHANGED_SINCE>` | Ask the build provider to resolve the build scope from files changed since this git ref |
+| `--changed-since` | `<REF>` | Only operate on files changed since this git ref (branch, tag, or SHA) |
 
 ## `homeboy review ci`
 

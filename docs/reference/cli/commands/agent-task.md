@@ -52,6 +52,7 @@ Run generic agent task plans
 | `homeboy agent-task promote` | _no help text_ |
 | `homeboy agent-task adopt` | Adopt an immutable commit candidate through a tracked cook's normal gates and finalization |
 | `homeboy agent-task finalize-pr` | _no help text_ |
+| `homeboy agent-task record-replacement-gate-proof` | Attach authorized candidate-bound replacement gate proof after an infrastructure gate failure |
 | `homeboy agent-task accept` | Record an independent, durable acceptance verdict for a candidate |
 | `homeboy agent-task gate-feedback` | _no help text_ |
 | `homeboy agent-task providers` | _no help text_ |
@@ -113,14 +114,14 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--run-id` | `<ID>` | Optional durable run id. Generated when omitted |
 | `--provider-config` | `<JSON>` | Provider config JSON object, @file, or - for stdin. Merged with workspace metadata |
 | `--client-context` | `<JSON>` | Opaque client context JSON object, @file, or - for stdin |
-| `--max-provider-executions` | `<N>` | Maximum total provider executions per task, including same-provider retries and provider rotations. `--attempts 1` runs exactly once |
-| `--max-same-provider-retries` | `<N>` | Same-provider retries allowed after the first provider execution |
-| `--max-provider-rotations` | `<N>` | Cross-provider rotations allowed after the first provider execution |
+| `--max-provider-executions` | `<N>` | Maximum total provider executions per task, including same-provider retries and provider rotations. For Cook, this must be at least --max-attempts; use --max-same-provider-retries for gate and review-form remediation. `--attempts 1` runs exactly once |
+| `--max-same-provider-retries` | `<N>` | Same-provider retries allowed after the first provider execution. Cook needs one for each possible gate or required review-form remediation; provider rotations cannot replace those retries |
+| `--max-provider-rotations` | `<N>` | Cross-provider rotations allowed after the first provider execution. Rotations are distinct from same-provider Cook remediation and do not satisfy its required review-form retry budget |
 | `--queue-only` | flag | Persist the run for a daemon/runner but do not execute immediately |
 | `--timeout-ms` | `<MS>` | Provider wall-clock timeout in milliseconds. Defaults to Homeboy's provider timeout |
 | `--candidate-completion` | `<POLICY>` | Completion rule for isolated candidates: wait for all results (default) or promote the first successful candidate |
 | `--goal` | `<TEXT>` | One-line statement of what a successful cook must achieve. Recorded as framing metadata for the provider task and used for review. Without --prompt, it supplies the one provider task |
-| `--to-worktree` | `<HANDLE>` | Workspace handle the cook edits, verifies, and finalizes into (e.g. `repo@branch-slug`). Existing destinations are reused. A missing managed destination is created through its configured provider when --repo, --base, --head, and --task-url declare explicit intent |
+| `--to-worktree` | `<HANDLE>` | Workspace handle the cook edits, verifies, and finalizes into (e.g. `repo@branch-slug`). When omitted, --repo plus --task-url derives an issue-owned destination through the configured workspace provider |
 | `--provider-command` | `<COMMAND>` | Deprecated promotion apply-provider command string. Migrate `--provider-command 'provider --flag value'` to `--provider-argv provider --provider-argv --flag --provider-argv value`; argv preserves exact arguments without shell splitting. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with `workspace_path`. |
 | `--provider-argv` | `<ARG>` | Promotion-only apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. This cannot select an executor. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`. |
 | `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
@@ -134,11 +135,14 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--gate-env` | `<NAME=VALUE>` | Extra environment variable for gate commands, as `NAME=VALUE`. Repeatable |
 | `--gate-env-from` | `<NAME=SOURCE[/PATH]>` | Preserve a required toolchain setting from the host as `NAME=SOURCE` or `NAME=SOURCE/relative/path`. The mapping is retained in gate evidence |
 | `--gate-toolchain` | `<COMMAND>` | Required executable to initialize before provider execution. Its probe is `COMMAND --version` in the final isolated gate environment. Repeatable |
+| `--gate-package-artifact` | `<JSON>` | Caller-declared package resource readiness as a JSON object. The object defines its environment mapping, required paths or digests, and opaque remediation metadata. Repeat for multiple resources |
+| `--gate-extension-input` | `<JSON>` | Explicit extension input as a JSON object with `id` and absolute `source`. Only selected inputs are copied into isolated HOME |
 | `--isolate-gate-home` | `<ISOLATE_GATE_HOME>` | Run gates with an isolated `$HOME` so gate side effects do not touch the operator's home directory (default true) Values: `true`, `false`. |
 | `--isolate-gate-xdg` | `<ISOLATE_GATE_XDG>` | Run gates with isolated XDG base directories so gate side effects do not touch the operator's config/cache/data dirs (default true) Values: `true`, `false`. |
-| `--max-attempts` | `<N>` | Maximum cook attempts before giving up. Each attempt re-runs the agent and gates; a later attempt can recover from a transient failure (default 3) |
+| `--max-attempts` | `<N>` | Maximum Cook attempts before giving up. Each attempt re-runs the agent and gates; a later attempt can recover from a transient failure. Set --max-provider-executions to at least this value and --max-same-provider-retries to at least one less so gate and required review-form remediation remain possible (default 3) |
 | `--no-finalize` | flag | Stop after the work is verified but before opening the pull request, leaving the committed change on the worktree branch for manual review or a later `agent-task review`/finalize |
 | `--full` | flag | Return the complete cook report, including nested promotion and gate evidence |
+| `--no-progress` | flag | Suppress intermediate Cook progress lines after the durable run identity. The final result still contains status and evidence commands for orchestration |
 | `--base` | `<BRANCH>` | Base branch the finalized pull request targets and the branch changes are diffed against (default `main`) |
 | `--head` | `<BRANCH>` | Head branch to push and open the PR from. Defaults to the branch the destination worktree is already on |
 | `--title` | `<TEXT>` | Title for the finalized pull request. Defaults to a title derived from the goal / commit |
@@ -329,6 +333,14 @@ _This command declares no clap help text, so no description can be generated for
 | Option | Value | Description |
 | --- | --- | --- |
 | `--limit` | `<N>` | _no help text_ |
+| `--cursor` | `<N>` | Continue at this zero-based offset. Reuse every filter from the prior page |
+| `--repo` | `<REPO>` | _no help text_ |
+| `--worktree` | `<WORKTREE>` | _no help text_ |
+| `--task-url` | `<TASK_URL>` | _no help text_ |
+| `--submitted-after` | `<RFC3339>` | RFC3339 submission timestamp; excludes older records |
+| `--state` | `<STATE>` | _no help text_ Values: `queued`, `running`, `succeeded`, `failed`, `cancelled`. |
+| `--run-placement` | `<RUN_PLACEMENT>` | Filter by recorded execution placement, not the global routing policy Values: `local`, `remote`, `runner`. |
+| `--parent-id` | `<PARENT_ID>` | _no help text_ |
 | `--full` | flag | Return every matching record. This is intentionally explicit because discovery defaults to a finite agent-facing page |
 
 ## `homeboy agent-task active`
@@ -656,6 +668,8 @@ Requires at least one deterministic gate: pass `--verify` or `--private-verify`.
 | `--gate-env` | `<NAME=VALUE>` | Extra environment variable for gate commands, as `NAME=VALUE`. Repeatable |
 | `--gate-env-from` | `<NAME=SOURCE[/PATH]>` | Preserve a required toolchain setting from the host as `NAME=SOURCE` or `NAME=SOURCE/relative/path`. The mapping is retained in gate evidence |
 | `--gate-toolchain` | `<COMMAND>` | Required executable to initialize before provider execution. Its probe is `COMMAND --version` in the final isolated gate environment. Repeatable |
+| `--gate-package-artifact` | `<JSON>` | Caller-declared package resource readiness as a JSON object. The object defines its environment mapping, required paths or digests, and opaque remediation metadata. Repeat for multiple resources |
+| `--gate-extension-input` | `<JSON>` | Explicit extension input as a JSON object with `id` and absolute `source`. Only selected inputs are copied into isolated HOME |
 | `--isolate-gate-home` | `<ISOLATE_GATE_HOME>` | Run gates with an isolated `$HOME` so gate side effects do not touch the operator's home directory (default true) Values: `true`, `false`. |
 | `--isolate-gate-xdg` | `<ISOLATE_GATE_XDG>` | Run gates with isolated XDG base directories so gate side effects do not touch the operator's config/cache/data dirs (default true) Values: `true`, `false`. |
 | `--dry-run` | flag | _no help text_ |
@@ -814,6 +828,8 @@ _This command declares no clap help text, so no description can be generated for
 | `--gate-env` | `<NAME=VALUE>` | Extra environment variable for gate commands, as `NAME=VALUE`. Repeatable |
 | `--gate-env-from` | `<NAME=SOURCE[/PATH]>` | Preserve a required toolchain setting from the host as `NAME=SOURCE` or `NAME=SOURCE/relative/path`. The mapping is retained in gate evidence |
 | `--gate-toolchain` | `<COMMAND>` | Required executable to initialize before provider execution. Its probe is `COMMAND --version` in the final isolated gate environment. Repeatable |
+| `--gate-package-artifact` | `<JSON>` | Caller-declared package resource readiness as a JSON object. The object defines its environment mapping, required paths or digests, and opaque remediation metadata. Repeat for multiple resources |
+| `--gate-extension-input` | `<JSON>` | Explicit extension input as a JSON object with `id` and absolute `source`. Only selected inputs are copied into isolated HOME |
 | `--isolate-gate-home` | `<ISOLATE_GATE_HOME>` | Run gates with an isolated `$HOME` so gate side effects do not touch the operator's home directory (default true) Values: `true`, `false`. |
 | `--isolate-gate-xdg` | `<ISOLATE_GATE_XDG>` | Run gates with isolated XDG base directories so gate side effects do not touch the operator's config/cache/data dirs (default true) Values: `true`, `false`. |
 
@@ -891,7 +907,24 @@ _This command declares no clap help text, so no description can be generated for
 | `--relates-to` | `<ISSUE_REF>` | Related issue reference: #NUMBER, OWNER/REPO#NUMBER, or a github.com issue URL |
 | `--review-override` | `<TARGET=VALUE@PROVENANCE>` | _no help text_ |
 | `--preflight` | flag | Validate the complete hydrated dossier and candidate without publishing |
-| `--manual-finalization` | flag | _no help text_ |
+| `--manual-finalization` | flag | Publish corrected, independently verified work without a promotion lineage. The ID must identify a failed attempt (a Cook ID resolves to its newest attempt, which must be failed), or be unused so Homeboy can reserve a durable manual-finalization record for its intent and receipt |
+
+## `homeboy agent-task record-replacement-gate-proof`
+
+```sh
+homeboy agent-task record-replacement-gate-proof [OPTIONS] <RUN_ID>
+```
+
+Attach authorized candidate-bound replacement gate proof after an infrastructure gate failure
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<RUN_ID>` | yes | Durable Cook attempt whose applied candidate has infrastructure-invalid gates |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--promotion` | `<JSON|@FILE|->` | Complete typed promotion report from the replacement gate executor: inline JSON, `@FILE`, or `-` |
+| `--authorize-external-proof` | `<TEXT>` | Explicit operator authorization for externally produced proof |
 
 ## `homeboy agent-task accept`
 
