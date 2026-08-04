@@ -143,10 +143,14 @@ fn run_with_release_artifacts(
     let project = project::load(project_id)?;
     let source =
         lifecycle_identity(&[project_id.to_string()], &config.component_ids, config).source;
-    let mut observation = (config.head || config.has_requested_refs())
+    let mut observation = should_observe_deploy(config)
         .then(|| lifecycle::DeployObservation::start(project_id, &source))
         .transpose()?;
-    if let Some(mut result) = provider::run_if_configured(project_id, &project, config)? {
+    let admitted_run_id = observation.as_ref().map(|run| run.run_id().to_string());
+    if let Some(mut result) =
+        provider::run_if_configured(project_id, &project, config, observation.as_mut())
+            .map_err(|error| attach_admitted_run_id(error, admitted_run_id.as_deref()))?
+    {
         if let Some(observation) = observation.as_mut() {
             observation.finish(
                 if result.summary.failed == 0 {
@@ -164,11 +168,17 @@ fn run_with_release_artifacts(
     // A version-pinned release asset is resolved remotely before orchestration;
     // requiring its configured checkout to exist would reintroduce a mutable
     // source gate. Other modes retain the existing early local-path validation.
-    if config.expected_version.is_none() {
-        project::validate_deploy_component_local_paths(&project, &config.component_ids)?;
+    if config.expected_version.is_none()
+        && config.prepared_projection.is_none()
+        && config.prepared_artifact.is_none()
+    {
+        project::validate_deploy_component_local_paths(&project, &config.component_ids)
+            .map_err(|error| attach_admitted_run_id(error, admitted_run_id.as_deref()))?;
     }
-    preflight_prepared_payload_binding(&project, project_id, config)?;
-    let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
+    preflight_prepared_payload_binding(&project, project_id, config)
+        .map_err(|error| attach_admitted_run_id(error, admitted_run_id.as_deref()))?;
+    let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)
+        .map_err(|error| attach_admitted_run_id(error, admitted_run_id.as_deref()))?;
     let mut result = orchestration::deploy_components(
         config,
         &project,
@@ -176,7 +186,8 @@ fn run_with_release_artifacts(
         &base_path,
         release_artifacts,
         observation.as_mut(),
-    )?;
+    )
+    .map_err(|error| attach_admitted_run_id(error, admitted_run_id.as_deref()))?;
     if let Some(observation) = observation.as_mut() {
         observation.finish(
             if result.summary.failed == 0 {
@@ -190,6 +201,22 @@ fn run_with_release_artifacts(
         result.deploy_run_id = Some(observation.run_id().to_string());
     }
     Ok(result)
+}
+
+fn attach_admitted_run_id(mut error: Error, run_id: Option<&str>) -> Error {
+    if let (Some(run_id), Some(details)) = (run_id, error.details.as_object_mut()) {
+        details.insert(
+            "deploy_run_id".to_string(),
+            serde_json::Value::String(run_id.to_string()),
+        );
+    }
+    error
+}
+
+/// Read-only planning modes do not create a deployment lifecycle. Every mode
+/// that can build or mutate a target is admitted before any expensive source work.
+fn should_observe_deploy(config: &DeployConfig) -> bool {
+    !config.dry_run && !config.check
 }
 
 /// Bind caller-supplied payloads before SSH context or lifecycle work begins.
@@ -357,11 +384,30 @@ pub fn run_multi(
         lifecycle::save(&run)?;
         Some(run)
     } else {
-        let run = lifecycle::DeployLifecycleRun::new(Uuid::new_v4().to_string(), identity);
+        let run = lifecycle::DeployLifecycleRun::new(Uuid::new_v4().to_string(), identity.clone());
         lifecycle::save(&run)?;
         Some(run)
     };
-    let deploy_run_id = lifecycle_run.as_ref().map(|run| run.id.clone());
+    let checkpoint_run_id = lifecycle_run.as_ref().map(|run| run.id.clone());
+    let mut aggregate_observation = checkpoint_run_id
+        .as_deref()
+        .map(|id| {
+            if config.resume_run_id.is_some() {
+                lifecycle::DeployObservation::start("multi", &identity.source)
+            } else {
+                lifecycle::DeployObservation::start_with_id(Some(id), "multi", &identity.source)
+            }
+        })
+        .transpose()?;
+    if let (Some(aggregate), Some(prior_checkpoint)) = (
+        aggregate_observation.as_mut(),
+        config.resume_run_id.as_deref(),
+    ) {
+        aggregate.link_resume(prior_checkpoint)?;
+    }
+    let deploy_run_id = aggregate_observation
+        .as_ref()
+        .map(|run| run.run_id().to_string());
 
     let mut project_results = Vec::new();
     let mut succeeded: u32 = 0;
@@ -384,6 +430,7 @@ pub fn run_multi(
                 failed: 0,
             },
             phase_timings: None,
+            observation_run_id: None,
         });
     }
 
@@ -421,6 +468,7 @@ pub fn run_multi(
                     skipped: 1,
                 },
                 phase_timings: Some(timer.into_report()),
+                observation_run_id: None,
             });
             skipped += 1;
             continue;
@@ -443,6 +491,13 @@ pub fn run_multi(
 
         match result {
             Ok(result) => {
+                let observation_run_id = result.deploy_run_id.clone();
+                if let (Some(aggregate), Some(target_run_id)) = (
+                    aggregate_observation.as_mut(),
+                    observation_run_id.as_deref(),
+                ) {
+                    aggregate.link_target(project_id, target_run_id)?;
+                }
                 let deploy_failed = result.summary.failed > 0;
                 let is_planned = config.dry_run || config.check;
 
@@ -460,6 +515,7 @@ pub fn run_multi(
                         results: result.results,
                         summary: result.summary,
                         phase_timings: Some(timings.clone()),
+                        observation_run_id,
                     });
                     if let Some(run) = lifecycle_run.as_mut() {
                         run.update_target(
@@ -479,6 +535,7 @@ pub fn run_multi(
                         results: result.results,
                         summary: result.summary,
                         phase_timings: Some(timings.clone()),
+                        observation_run_id,
                     });
                     planned += 1;
                 } else {
@@ -489,6 +546,7 @@ pub fn run_multi(
                         results: result.results,
                         summary: result.summary,
                         phase_timings: Some(timings.clone()),
+                        observation_run_id,
                     });
                     if let Some(run) = lifecycle_run.as_mut() {
                         run.update_target(
@@ -503,6 +561,17 @@ pub fn run_multi(
                 }
             }
             Err(e) => {
+                let observation_run_id = e
+                    .details
+                    .get("deploy_run_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned);
+                if let (Some(aggregate), Some(target_run_id)) = (
+                    aggregate_observation.as_mut(),
+                    observation_run_id.as_deref(),
+                ) {
+                    aggregate.link_target(project_id, target_run_id)?;
+                }
                 project_results.push(ProjectDeployResult {
                     project_id: project_id.to_string(),
                     status: "failed".to_string(),
@@ -515,6 +584,7 @@ pub fn run_multi(
                         failed: 1,
                     },
                     phase_timings: Some(timings.clone()),
+                    observation_run_id,
                 });
                 if let Some(run) = lifecycle_run.as_mut() {
                     run.update_target(
@@ -532,6 +602,17 @@ pub fn run_multi(
 
     let total_projects = project_results.len() as u32;
 
+    if let Some(aggregate) = aggregate_observation.as_mut() {
+        aggregate.finish(
+            if failed == 0 {
+                homeboy_core::observation::RunStatus::Pass
+            } else {
+                homeboy_core::observation::RunStatus::Fail
+            },
+            (failed > 0).then_some("deployment reported one or more target failures".to_string()),
+        );
+    }
+
     Ok(MultiDeployResult {
         component_ids: component_ids.to_vec(),
         projects: project_results,
@@ -543,6 +624,7 @@ pub fn run_multi(
             planned,
         },
         deploy_run_id,
+        resume_run_id: checkpoint_run_id,
     })
 }
 
@@ -749,6 +831,40 @@ mod tests {
                 )
             }));
         });
+    }
+
+    #[test]
+    fn every_mutating_deploy_mode_is_admitted_to_the_shared_lifecycle() {
+        let ordinary = deploy_config();
+        let mut head = ordinary.clone();
+        head.dry_run = false;
+        head.head = true;
+        let mut exact_ref = head.clone();
+        exact_ref.head = false;
+        exact_ref.requested_ref = Some("d8abbeb".to_string());
+        let mut ordinary_apply = head.clone();
+        ordinary_apply.head = false;
+
+        assert!(should_observe_deploy(&head));
+        assert!(should_observe_deploy(&exact_ref));
+        assert!(should_observe_deploy(&ordinary_apply));
+        assert!(!should_observe_deploy(&ordinary));
+        let mut check = ordinary;
+        check.check = true;
+        assert!(!should_observe_deploy(&check));
+    }
+
+    #[test]
+    fn admitted_run_id_survives_public_error_propagation() {
+        let error = attach_admitted_run_id(
+            Error::validation_invalid_argument("deploy", "failed", None, None),
+            Some("target-observation"),
+        );
+
+        assert_eq!(
+            error.details["deploy_run_id"],
+            serde_json::Value::String("target-observation".to_string())
+        );
     }
 
     #[test]

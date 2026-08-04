@@ -117,7 +117,7 @@ fn execute_deployment(
     let deployment = match deploy::run_multi(&projects, &[component_id.to_string()], &config) {
         Ok(result) => {
             if result.summary.failed > 0 {
-                if let Some(run_id) = result.deploy_run_id.as_deref() {
+                if let Some(run_id) = result.resume_run_id.as_deref() {
                     if let Err(error) = save_recovery(
                         component,
                         expected_version,

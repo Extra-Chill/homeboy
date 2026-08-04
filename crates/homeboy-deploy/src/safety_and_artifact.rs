@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use super::lifecycle::DeployObservation;
 use super::permissions;
 use homeboy_core::component;
 use homeboy_core::defaults;
@@ -22,6 +23,7 @@ pub(super) fn deploy_via_git(
     remote_path: &str,
     git_config: &component::GitDeployConfig,
     component_version: Option<&str>,
+    mut observation: Option<&mut DeployObservation>,
 ) -> Result<DeployResult> {
     // Determine what to checkout
     let checkout_target = if let Some(ref pattern) = git_config.tag_pattern {
@@ -34,7 +36,11 @@ pub(super) fn deploy_via_git(
         git_config.branch.clone()
     };
 
-    // Step 1: Fetch latest
+    // Step 1: Fetch latest. `git fetch` writes remote-tracking refs and
+    // FETCH_HEAD, so record the mutation boundary before issuing it.
+    if let Some(observation) = observation.as_deref_mut() {
+        observation.phase("transfer", true)?;
+    }
     homeboy_core::log_status!(
         "deploy:git",
         "Fetching from {} in {}",
@@ -105,9 +111,14 @@ pub(super) fn deploy_artifact(
     extract_command: Option<&str>,
     verification: Option<&DeployVerification>,
     remote_owner: Option<&str>,
+    mut observation: Option<&mut DeployObservation>,
 ) -> Result<DeployResult> {
     let mut uploaded_artifact_path: Option<String> = None;
     let mut verified = false;
+
+    if let Some(observation) = observation.as_deref_mut() {
+        observation.phase("transfer", true)?;
+    }
 
     // Step 1: Upload (directory or file)
     if local_path.is_dir() {
@@ -195,6 +206,9 @@ pub(super) fn deploy_artifact(
 
         // Step 2: Execute extract command if configured
         if let Some(cmd_template) = extract_command {
+            if let Some(observation) = observation.as_deref_mut() {
+                observation.phase("extract", true)?;
+            }
             // Defense-in-depth: refuse to clean known shared parent directories.
             // The upstream validate_deploy_target() should already catch this,
             // but since this executes `rm -rf` we add an extra guard.
@@ -294,6 +308,11 @@ pub(super) fn deploy_artifact(
     }
 
     // Step 3: Run verification if configured
+    if verification.is_some() {
+        if let Some(observation) = observation.as_deref_mut() {
+            observation.phase("verify", true)?;
+        }
+    }
     if let Some((v, verify_cmd_template)) = verification
         .as_ref()
         .and_then(|v| v.verify_command.as_ref().map(|cmd| (v, cmd)))
@@ -469,9 +488,11 @@ fn render_extract_command(template: &str, vars: &HashMap<String, String>) -> Str
 #[cfg(test)]
 mod tests {
     use super::{
-        deploy_artifact, ensure_not_double_nested, flatten_double_nested_dir, remote_basename,
-        render_extract_command, DANGEROUS_PATH_SUFFIXES,
+        deploy_artifact, deploy_via_git, ensure_not_double_nested, flatten_double_nested_dir,
+        remote_basename, render_extract_command, DANGEROUS_PATH_SUFFIXES,
     };
+    use crate::lifecycle::DeployObservation;
+    use homeboy_core::observation::ObservationStore;
     use homeboy_core::server::SshClient;
     use homeboy_extension::DeployVerification;
     use std::collections::HashMap;
@@ -540,6 +561,47 @@ mod tests {
     }
 
     #[test]
+    fn git_fetch_failure_records_remote_mutation_before_interruption() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let git_config = homeboy_core::component::GitDeployConfig {
+                remote: "origin".to_string(),
+                branch: "main".to_string(),
+                ..Default::default()
+            };
+            let mut observation = DeployObservation::start("site", "HEAD").expect("admit run");
+            let run_id = observation.run_id().to_string();
+
+            let result = deploy_via_git(
+                &local_client(),
+                temp.path().to_str().expect("remote path"),
+                &git_config,
+                None,
+                Some(&mut observation),
+            )
+            .expect("fetch failure is a deploy result");
+            assert!(!result.success);
+            drop(observation);
+
+            let run = ObservationStore::open_initialized()
+                .expect("store")
+                .get_run(&run_id)
+                .expect("read run")
+                .expect("run");
+            let phases = run.metadata_json["phase_history"]
+                .as_array()
+                .expect("phase history")
+                .iter()
+                .filter_map(|entry| entry["phase"].as_str())
+                .collect::<Vec<_>>();
+
+            assert_eq!(phases, ["admitted", "transfer", "failed"]);
+            assert_eq!(run.metadata_json["remote_mutation_started"], true);
+            assert_eq!(run.status, "error");
+        });
+    }
+
+    #[test]
     #[cfg(unix)]
     fn test_directory_artifact_normalizes_group_write_and_setgid() {
         // `deploy_artifact` resolves its permission modes through
@@ -561,6 +623,7 @@ mod tests {
                 &local_client(),
                 &source,
                 target.to_str().expect("target path"),
+                None,
                 None,
                 None,
                 None,
@@ -613,6 +676,7 @@ mod tests {
             None,
             Some(&verification),
             None,
+            None,
         )
         .expect("deploy result");
 
@@ -657,6 +721,7 @@ mod tests {
             &artifact,
             target.to_str().expect("target path"),
             Some("true"),
+            None,
             None,
             None,
         )
@@ -747,6 +812,7 @@ mod tests {
             Some("unzip -o {artifact} && rm {artifact}"),
             None,
             None,
+            None,
         )
         .expect("deploy result");
 
@@ -786,6 +852,7 @@ mod tests {
             Some("unzip -o {artifact} && rm {artifact}"),
             None,
             None,
+            None,
         )
         .expect("deploy result");
 
@@ -794,6 +861,52 @@ mod tests {
         assert!(target.join("readme.txt").is_file());
         // No spurious nested dir matching the target basename.
         assert!(!target.join("flat-plugin").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn deploy_artifact_persists_transfer_extract_and_verify_phases() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let archive = temp.path().join("plugin.zip");
+            let target = temp.path().join("target");
+            write_zip(&archive, &[("plugin.php", "<?php // main")]);
+            let verification = DeployVerification {
+                path_pattern: target.to_string_lossy().to_string(),
+                verify_command: Some(
+                    "test -f {{targetDir}}/plugin.php && printf verified".to_string(),
+                ),
+                verify_error_message: None,
+            };
+            let mut observation = DeployObservation::start("site", "HEAD").expect("admit run");
+            let run_id = observation.run_id().to_string();
+
+            let result = deploy_artifact(
+                &local_client(),
+                &archive,
+                target.to_str().expect("target path"),
+                Some("unzip -o {artifact} && rm {artifact}"),
+                Some(&verification),
+                None,
+                Some(&mut observation),
+            )
+            .expect("deploy result");
+
+            assert!(result.success, "{}", result.error.unwrap_or_default());
+            let run = ObservationStore::open_initialized()
+                .expect("store")
+                .get_run(&run_id)
+                .expect("read run")
+                .expect("run");
+            let phases = run.metadata_json["phase_history"]
+                .as_array()
+                .expect("phase history")
+                .iter()
+                .filter_map(|entry| entry["phase"].as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(phases, ["admitted", "transfer", "extract", "verify"]);
+            assert_eq!(run.metadata_json["remote_mutation_started"], true);
+        });
     }
 
     /// The mandatory sanity check must report failure when a double-nested layout
@@ -850,6 +963,7 @@ mod tests {
             &local_client(),
             &archive,
             target.to_str().expect("target"),
+            None,
             None,
             None,
             None,
