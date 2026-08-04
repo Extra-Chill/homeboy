@@ -65,11 +65,32 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             }
         };
 
+        if let Err(error) = resolve_runtime_tools(&mut request, &provider) {
+            return failure_outcome(
+                &request,
+                AgentTaskOutcomeStatus::Failed,
+                error.failure_classification,
+                error.class,
+                error.message,
+                error.data,
+            );
+        }
+
+        let available_capabilities: Vec<&String> = provider
+            .capabilities
+            .iter()
+            .chain(
+                request
+                    .resolved_runtime_tools
+                    .iter()
+                    .flat_map(|tool| tool.capabilities.iter()),
+            )
+            .collect();
         let missing_capabilities: Vec<String> = request
             .executor
             .required_capabilities
             .iter()
-            .filter(|capability| !provider.capabilities.contains(capability))
+            .filter(|capability| !available_capabilities.contains(capability))
             .cloned()
             .collect();
         if !missing_capabilities.is_empty() {
@@ -84,17 +105,6 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                     missing_capabilities.join(", ")
                 ),
                 json!({ "provider": provider.id, "missing_capabilities": missing_capabilities }),
-            );
-        }
-
-        if let Err(error) = resolve_runtime_tools(&mut request, &provider) {
-            return failure_outcome(
-                &request,
-                AgentTaskOutcomeStatus::Failed,
-                AgentTaskFailureClassification::CapabilityMissing,
-                error.class,
-                error.message,
-                error.data,
             );
         }
 
@@ -191,6 +201,7 @@ fn materialize_executor_request_at_root(
         request,
         artifacts_path: path,
         artifacts_path_provenance: provenance,
+        resolved_runtime_tools: Vec::new(),
         artifacts_root_identity,
     })
 }

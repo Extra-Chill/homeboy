@@ -89,6 +89,12 @@ pub(super) fn provider_secret_env_plan(
 ) -> SecretEnvPlan {
     let provider_names = provider_secret_env(provider, Some(request));
     let mut plan = SecretEnvPlan::from_secret_env_names(request.executor.secret_env.clone());
+    plan.extend_secret_env_names(
+        request
+            .runtime_tools
+            .iter()
+            .flat_map(|tool| tool.secret_env.iter().cloned()),
+    );
     plan.extend_secret_env_names(provider_names.clone());
     plan.map_env_names(provider.id.clone(), provider_names);
     plan

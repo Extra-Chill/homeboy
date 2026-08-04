@@ -6,7 +6,7 @@ use super::schema::request_schema;
 use super::{
     AgentTaskArtifactDeclaration, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits,
     AgentTaskOutcome, AgentTaskPolicy, AgentTaskRuntimeTool, AgentTaskSourceRef,
-    AgentTaskWorkspace,
+    AgentTaskWorkspace, ResolvedAgentTaskRuntimeTool,
 };
 
 /// Provider capability payload used by extension discovery and durable run metadata.
@@ -180,6 +180,10 @@ pub struct AgentTaskExecutorRequest {
     pub request: AgentTaskRequest,
     pub artifacts_path: PathBuf,
     pub artifacts_path_provenance: AgentTaskArtifactsPathProvenance,
+    /// Host-resolved runtime attachments for the provider adapter. This is
+    /// distinct from the caller declaration carried in the flattened request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved_runtime_tools: Vec<ResolvedAgentTaskRuntimeTool>,
     #[serde(skip)]
     pub(crate) artifacts_root_identity:
         crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity,

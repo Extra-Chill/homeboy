@@ -1,8 +1,9 @@
 use super::runner_readiness::resolve_executable_candidate;
 use super::*;
 use crate::agent_task::{
-    AgentTaskRuntimeTool, AgentToolExecutionLocation, ResolvedAgentTaskRuntimeTool,
-    AGENT_TASK_RUNTIME_TOOL_SCHEMA, RESOLVED_AGENT_TASK_RUNTIME_TOOL_SCHEMA,
+    AgentCommandDecision, AgentTaskRuntimeTool, AgentToolExecutionLocation,
+    ResolvedAgentTaskRuntimeTool, AGENT_TASK_RUNTIME_TOOL_SCHEMA,
+    RESOLVED_AGENT_TASK_RUNTIME_TOOL_SCHEMA,
 };
 use crate::agent_task_process_containment::AgentTaskProcessContainment;
 use std::process::{Command, Stdio};
@@ -11,11 +12,12 @@ pub(crate) struct RuntimeToolResolutionError {
     pub(super) class: &'static str,
     pub(super) message: String,
     pub(super) data: Value,
+    pub(super) failure_classification: AgentTaskFailureClassification,
 }
 
 pub(crate) fn resolve_runtime_tools(
     request: &mut AgentTaskExecutorRequest,
-    provider: &AgentTaskExecutorProvider,
+    _provider: &AgentTaskExecutorProvider,
 ) -> Result<(), RuntimeToolResolutionError> {
     let mut resolved = Vec::new();
     for tool in &request.request.runtime_tools {
@@ -34,24 +36,24 @@ pub(crate) fn resolve_runtime_tools(
                     tool.id
                 ),
                 data: json!({ "tool": tool.id, "execution_location": request.request.policy.tools.execution_location_for(&tool.id) }),
+                failure_classification: AgentTaskFailureClassification::CapabilityMissing,
             });
         }
-        let missing: Vec<String> = tool
-            .required_capabilities
-            .iter()
-            .filter(|capability| !provider.capabilities.contains(capability))
-            .cloned()
-            .collect();
-        if !missing.is_empty() {
+        let readiness_command = std::iter::once(tool.command[0].as_str())
+            .chain(tool.readiness.version_command.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if let AgentCommandDecision::Denied(denial) = request
+            .request
+            .policy
+            .tools
+            .evaluate_command(&readiness_command)
+        {
             return Err(RuntimeToolResolutionError {
-                class: "agent_task.capability_missing",
-                message: format!(
-                    "provider '{}' cannot attach runtime tool '{}'; missing capabilities: {}",
-                    provider.id,
-                    tool.id,
-                    missing.join(", ")
-                ),
-                data: json!({ "tool": tool.id, "provider": provider.id, "missing_capabilities": missing }),
+                class: "agent_task.runtime_tool_command_denied",
+                message: denial.message(),
+                data: json!({ "tool": tool.id, "command": denial.command, "reason": denial.reason }),
+                failure_classification: AgentTaskFailureClassification::InvalidInput,
             });
         }
         let executable = resolve_executable_candidate(&tool.command[0]).ok_or_else(|| {
@@ -62,6 +64,7 @@ pub(crate) fn resolve_runtime_tools(
                     tool.id, tool.command[0]
                 ),
                 data: json!({ "tool": tool.id, "command": tool.command, "readiness": "executable_missing" }),
+                failure_classification: AgentTaskFailureClassification::CapabilityMissing,
             }
         })?;
         let version = probe_version(tool, &executable)?;
@@ -74,7 +77,11 @@ pub(crate) fn resolve_runtime_tools(
             schema: RESOLVED_AGENT_TASK_RUNTIME_TOOL_SCHEMA.to_string(),
             id: tool.id.clone(),
             transport: tool.transport.clone(),
-            executable,
+            executable: executable.clone(),
+            argv: std::iter::once(executable.clone())
+                .chain(tool.command.iter().skip(1).cloned())
+                .collect(),
+            env: tool.env.clone(),
             version,
             capabilities: tool.required_capabilities.clone(),
             env_names: tool.env.keys().cloned().collect(),
@@ -97,11 +104,13 @@ pub(crate) fn resolve_runtime_tools(
                     message: "runtime tool resolution requires task metadata to be an object"
                         .to_string(),
                     data: Value::Null,
+                    failure_classification: AgentTaskFailureClassification::InvalidInput,
                 })?;
         metadata.insert(
-            "resolved_runtime_tools".to_string(),
-            serde_json::to_value(resolved).expect("resolved runtime tools serialize"),
+            "runtime_tool_attachment".to_string(),
+            json!({ "count": resolved.len() }),
         );
+        request.resolved_runtime_tools = resolved;
     }
     Ok(())
 }
@@ -123,6 +132,7 @@ fn validate_tool(tool: &AgentTaskRuntimeTool) -> Result<(), RuntimeToolResolutio
             class: "agent_task.runtime_tool_invalid",
             message: format!("runtime tool '{}' has an invalid declaration", tool.id),
             data: json!({ "tool": tool.id, "transport": tool.transport }),
+            failure_classification: AgentTaskFailureClassification::InvalidInput,
         });
     }
     Ok(())
@@ -148,6 +158,7 @@ fn probe_version(
                 tool.id
             ),
             data: json!({ "tool": tool.id }),
+            failure_classification: AgentTaskFailureClassification::Provider,
         }
     })?;
     let mut child = command
@@ -159,6 +170,7 @@ fn probe_version(
                 tool.id
             ),
             data: json!({ "tool": tool.id }),
+            failure_classification: AgentTaskFailureClassification::Provider,
         })?;
     if let Err(error) = containment.attach(&child) {
         let _ = containment.terminate_live(&mut child);
@@ -169,6 +181,7 @@ fn probe_version(
                 tool.id
             ),
             data: json!({ "tool": tool.id }),
+            failure_classification: AgentTaskFailureClassification::Provider,
         });
     }
     let timeout = std::time::Duration::from_millis(tool.timeout_ms.unwrap_or(20_000));
@@ -190,6 +203,7 @@ fn probe_version(
                     class: "agent_task.runtime_tool_readiness_failed",
                     message: format!("readiness probe failed for runtime tool '{}'", tool.id),
                     data: json!({ "tool": tool.id, "readiness": "version_command_failed" }),
+                    failure_classification: AgentTaskFailureClassification::CapabilityMissing,
                 });
             }
             Ok(None) if started.elapsed() >= timeout => {
@@ -198,6 +212,7 @@ fn probe_version(
                     class: "agent_task.runtime_tool_readiness_timeout",
                     message: format!("readiness probe timed out for runtime tool '{}'", tool.id),
                     data: json!({ "tool": tool.id, "timeout_ms": timeout.as_millis() }),
+                    failure_classification: AgentTaskFailureClassification::Timeout,
                 });
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),

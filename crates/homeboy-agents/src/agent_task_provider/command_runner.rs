@@ -8,6 +8,7 @@ use super::runner_readiness::{
 };
 use super::secrets::{provider_secret_env_plan_with_status, provider_secret_sources};
 use super::*;
+use crate::agent_task::ResolvedAgentTaskRuntimeTool;
 use crate::agent_task_executor_evidence::link_latest_executor_evidence;
 use crate::agent_task_process_containment::{
     contained_group_recovery_commands, AgentTaskProcessContainment,
@@ -80,15 +81,26 @@ fn attach_runtime_tool_provenance(
     request: &AgentTaskExecutorRequest,
     outcome: &mut AgentTaskOutcome,
 ) {
-    let Some(tools) = request.request.metadata.get("resolved_runtime_tools") else {
+    if request.resolved_runtime_tools.is_empty() {
         return;
-    };
+    }
     if outcome.metadata.is_null() {
         outcome.metadata = json!({});
     }
     if let Some(metadata) = outcome.metadata.as_object_mut() {
         // This is resolved host evidence only: tool environment values never enter it.
-        metadata.insert("resolved_runtime_tools".to_string(), tools.clone());
+        metadata.insert(
+            "resolved_runtime_tools".to_string(),
+            serde_json::to_value(
+                request
+                    .resolved_runtime_tools
+                    .clone()
+                    .into_iter()
+                    .map(ResolvedAgentTaskRuntimeTool::redacted)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("resolved runtime tool provenance serializes"),
+        );
     }
 }
 
@@ -1071,6 +1083,7 @@ fn test_executor_request(request: &AgentTaskRequest) -> AgentTaskExecutorRequest
             task_id: request.task_id.clone(),
             attempt: 1,
         },
+        resolved_runtime_tools: Vec::new(),
     }
 }
 
@@ -2008,6 +2021,10 @@ pub(super) fn provider_command_env(
         (
             "HOMEBOY_AGENT_TOOL_POLICY_JSON".to_string(),
             serde_json::to_string(&request.policy.tools).unwrap_or_else(|_| "null".to_string()),
+        ),
+        (
+            "HOMEBOY_AGENT_TASK_RUNTIME_TOOLS_JSON".to_string(),
+            serde_json::to_string(&request.runtime_tools).unwrap_or_else(|_| "[]".to_string()),
         ),
         (
             "HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA".to_string(),
