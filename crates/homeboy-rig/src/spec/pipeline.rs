@@ -298,9 +298,8 @@ pub enum PipelineStep {
     /// Apply (or verify) an idempotent local-only patch to a file in a
     /// component checkout. Use case: upstream-source patches that can't be
     /// committed to the consumer branch because rebases would carry them
-    /// to every fresh checkout. Examples: TSRMLS_CC fallback macros on
-    /// upstream Playground C sources, build-time tweaks that aren't
-    /// upstream yet.
+    /// to every fresh checkout. Examples: compatibility shims against an
+    /// upstream source tree, build-time tweaks that aren't upstream yet.
     ///
     /// Idempotency is marker-based: if `marker` is already present in
     /// the file, the step is a no-op. If the optional `after` anchor is
