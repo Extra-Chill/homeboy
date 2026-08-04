@@ -327,7 +327,17 @@ fn finalize_with_operation_claim(
         // This pass owns the operation. Finalize, then record the result as the
         // claim's immutable completion.
         agent_task_lifecycle::ClaimOutcome::Acquired => {
-            let finalization = finalize(options, run_id, promotion)?;
+            let finalization = match finalize(options, run_id, promotion) {
+                Ok(finalization) => finalization,
+                Err(error) => {
+                    agent_task_lifecycle::fail_cook_operation(
+                        run_id,
+                        &operation_key,
+                        bounded_error_diagnostic(&error),
+                    )?;
+                    return Err(error);
+                }
+            };
             agent_task_lifecycle::complete_cook_operation(
                 run_id,
                 &operation_key,
@@ -695,6 +705,37 @@ pub struct AgentTaskCookServiceOptions {
     /// The route-selected provider transport. `None` executes locally.
     pub attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
     pub harvest_context: crate::agent_task_scheduler::HarvestExecutionContext,
+}
+
+const COOK_CONTINUE_ROUTE_SCHEMA: &str = "homeboy/agent-task-cook-continue-route/v1";
+
+/// Record that the `cook-continue` lifecycle route selected this exact attempt.
+/// This is durable route authority, not caller-controlled plan metadata.
+pub fn authorize_cook_continue_route(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    agent_task_lifecycle::exact_record(&options.initial_run_id)?;
+    agent_task_lifecycle::record_metadata_value(
+        &options.initial_run_id,
+        "cook_continue_route",
+        serde_json::json!({
+            "schema": COOK_CONTINUE_ROUTE_SCHEMA,
+            "cook_id": options.cook_id,
+            "run_id": options.initial_run_id,
+        }),
+    )
+}
+
+fn has_cook_continue_route(options: &AgentTaskCookServiceOptions) -> bool {
+    agent_task_lifecycle::exact_record(&options.initial_run_id)
+        .ok()
+        .and_then(|record| record.metadata.get("cook_continue_route").cloned())
+        .as_ref()
+        .and_then(Value::as_object)
+        .is_some_and(|context| {
+            context.get("schema").and_then(Value::as_str) == Some(COOK_CONTINUE_ROUTE_SCHEMA)
+                && context.get("cook_id").and_then(Value::as_str) == Some(options.cook_id.as_str())
+                && context.get("run_id").and_then(Value::as_str)
+                    == Some(options.initial_run_id.as_str())
+        })
 }
 
 /// Provenance supplied when Homeboy adopts a candidate prepared outside its
@@ -2987,9 +3028,26 @@ where
             .and_then(|request| request.inputs.pointer("/cook_loop/failure_set"))
             .cloned()
             .unwrap_or(Value::Null);
+        let feedback_promotion =
+            if review_form_continuation && promotion.status == AgentTaskPromotionStatus::Applied {
+                // Historical terminal review-form continuations can carry the
+                // source attempt's failed gate entries even though their copied,
+                // authenticated promotion is already applied. The applied status
+                // is the durable gate authority for this form-only retry.
+                let mut feedback_promotion = promotion.clone();
+                feedback_promotion.deterministic_gates.retain(|gate| {
+                    gate.status != crate::agent_task_gate::AgentTaskGateStatus::Failed
+                });
+                feedback_promotion
+                    .gate_results
+                    .retain(|gate| gate.status != homeboy_core::gate::HomeboyGateStatus::Failed);
+                feedback_promotion
+            } else {
+                promotion.clone()
+            };
         let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request.clone(),
-            promotion_report: promotion.clone(),
+            promotion_report: feedback_promotion,
             attempt,
             max_attempts: attempt_limit,
             source_run_id: Some(run_id.clone()),
@@ -3203,6 +3261,50 @@ where
                     finalization: Some(finalization),
                     stop_reason,
                     exit_code,
+                    invocation_latest_run_id: Some(&run_id),
+                }));
+            }
+            AgentTaskCookLoopStatus::BaselineRed => {
+                if options.gates.accept_inherited_failures && promotion.finalization_eligible(true)
+                {
+                    report_cook_progress(
+                        durable_observer,
+                        &cook_id,
+                        &run_id,
+                        "finalization",
+                        attempt,
+                        Some("accepted inherited baseline-red gate"),
+                    )?;
+                    let finalization = side_effects.finalize(&options, &run_id, &promotion)?;
+                    let final_status = finalization["status"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string();
+                    return Ok(cook_report(CookReportInput {
+                        cook_id,
+                        status: &final_status,
+                        disposition: CookDisposition::Terminal,
+                        attempts,
+                        finalization: Some(finalization),
+                        stop_reason: Some(
+                            "finalized under explicit accepted inherited baseline-red gate policy"
+                                .to_string(),
+                        ),
+                        exit_code: if final_status == "review_ready" { 0 } else { 1 },
+                        invocation_latest_run_id: Some(&run_id),
+                    }));
+                }
+                return Ok(cook_report(CookReportInput {
+                    cook_id,
+                    status: "baseline_red",
+                    disposition: CookDisposition::Terminal,
+                    attempts,
+                    finalization: None,
+                    stop_reason: Some(
+                        "candidate and immutable baseline failed the same required gate; repair the inherited infrastructure or gate environment before rerunning Cook"
+                            .to_string(),
+                    ),
+                    exit_code: 1,
                     invocation_latest_run_id: Some(&run_id),
                 }));
             }
@@ -3651,11 +3753,17 @@ fn tracked_promotion_continuation(
         } else {
             false
         };
-    if !matches!(
+    let normal_continuation = matches!(
         promotion.status,
         AgentTaskPromotionStatus::VerificationPending | AgentTaskPromotionStatus::Applied
-    ) || (!has_post_apply_checkpoint && !authenticated_legacy_review)
-    {
+    ) && (has_post_apply_checkpoint || authenticated_legacy_review);
+    // A gate-failed candidate remains eligible only when this exact lifecycle
+    // route selected its exact Cook attempt. Plan metadata is caller-controlled
+    // and is therefore never authorization for dirty-worktree reuse.
+    let route_authorized_gate_failure = promotion.status.gate_failed()
+        && has_post_apply_checkpoint
+        && has_cook_continue_route(options);
+    if !(normal_continuation || route_authorized_gate_failure) {
         return Ok(None);
     }
     if promotion.to_worktree != options.to_worktree

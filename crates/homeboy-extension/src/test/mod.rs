@@ -17,7 +17,6 @@ use crate::{
 };
 use homeboy_core::component::Component;
 use homeboy_core::git;
-use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 

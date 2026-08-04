@@ -1,16 +1,139 @@
 //! Tests for `core::stack::status` — read-only stack status.
 //!
-//! The full `status()` entry point hits `gh` for upstream PR metadata, so
-//! tests here focus on the deterministic git-side helpers that build the
-//! report's local-state columns: ahead/behind counts, ref existence, and
-//! commit reachability. End-to-end reporting is verified out-of-band via
-//! the live-verify fixture spec described in the PR body.
+//! Includes focused end-to-end status coverage with a fake `gh`, plus the
+//! deterministic git-side helpers that build local-state columns.
 
-use crate::stack::status::{commit_reachable, count_revs, git_ref_exists, patch_in_base};
+use crate::stack::status::{
+    commit_reachable, count_revs, git_ref_exists, patch_in_base, status, LocalState,
+};
+use crate::stack::{GitRef, StackPrEntry, StackSpec};
+use homeboy_core::test_support::home_env_guard;
 use std::fs;
 
 mod support;
 use support::{commit_file, git, init_repo};
+
+fn stack_spec(id: &str, component_path: String) -> StackSpec {
+    StackSpec {
+        id: id.to_string(),
+        description: String::new(),
+        component: "homeboy".to_string(),
+        component_path,
+        base: GitRef {
+            remote: "origin".to_string(),
+            branch: "main".to_string(),
+        },
+        target: GitRef {
+            remote: "origin".to_string(),
+            branch: "main".to_string(),
+        },
+        prs: vec![StackPrEntry {
+            repo: "Extra-Chill/homeboy".to_string(),
+            number: 11410,
+            note: None,
+        }],
+        provenance: None,
+        requirements: Default::default(),
+    }
+}
+
+fn with_fake_gh(stdout: &str, exit_code: u8, run: impl FnOnce()) {
+    let _guard = home_env_guard();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let gh = dir.path().join("gh");
+    fs::write(
+        &gh,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{}'\nexit {}\n",
+            stdout, exit_code
+        ),
+    )
+    .expect("write fake gh");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755))
+            .expect("make fake gh executable");
+    }
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    std::env::set_var("PATH", format!("{}:{}", dir.path().display(), old_path));
+    run();
+    std::env::set_var("PATH", old_path);
+}
+
+const PR_JSON: &str = r#"{"headRefOid":"deadbeef","state":"OPEN","title":"Checkout-free status","url":"https://github.com/Extra-Chill/homeboy/pull/11410","reviewDecision":"APPROVED","mergedAt":null}"#;
+
+#[test]
+fn status_reports_upstream_and_local_evidence_for_present_checkout() {
+    let (_dir, path) = init_repo();
+    with_fake_gh(PR_JSON, 0, || {
+        let report = status(&stack_spec("present", path.clone())).expect("status report");
+        assert!(report.local_evidence_unavailable.is_none());
+        assert_eq!(report.prs[0].upstream_state.as_deref(), Some("OPEN"));
+        assert_eq!(report.prs[0].local_state, LocalState::Unknown);
+    });
+}
+
+#[test]
+fn status_reports_github_metadata_when_checkout_is_missing() {
+    let path = "/definitely/missing/homeboy-stack-status".to_string();
+    with_fake_gh(PR_JSON, 0, || {
+        let report = status(&stack_spec("missing", path.clone())).expect("status report");
+        assert_eq!(report.prs[0].upstream_state.as_deref(), Some("OPEN"));
+        assert_eq!(report.prs[0].local_state, LocalState::Unknown);
+        assert_eq!(report.target_ahead, None);
+        let evidence = report
+            .local_evidence_unavailable
+            .expect("missing checkout evidence");
+        assert_eq!(
+            evidence.reason,
+            format!("Component path '{}' does not exist", path)
+        );
+        assert_eq!(
+            evidence.recovery_commands[0],
+            format!("git clone <repository-url> {}", path)
+        );
+    });
+}
+
+#[test]
+fn status_reports_local_evidence_unavailable_for_non_git_directory() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().to_string_lossy().to_string();
+    fs::write(dir.path().join("not-a-repository.txt"), "local files").expect("write fixture");
+
+    with_fake_gh(PR_JSON, 0, || {
+        let report = status(&stack_spec("non-git", path.clone())).expect("status report");
+        assert_eq!(report.prs[0].upstream_state.as_deref(), Some("OPEN"));
+        assert_eq!(report.prs[0].local_state, LocalState::Unknown);
+        assert_eq!(report.target_ahead, None);
+        assert_eq!(report.target_behind, None);
+        assert_eq!(
+            report
+                .local_evidence_unavailable
+                .expect("non-Git checkout evidence")
+                .reason,
+            format!("Component path '{}' is not a Git checkout", path)
+        );
+    });
+}
+
+#[test]
+fn status_reports_both_unavailable_evidence_when_github_lookup_fails() {
+    let path = "/definitely/missing/homeboy-stack-status".to_string();
+    with_fake_gh("GitHub unavailable", 1, || {
+        let report = status(&stack_spec("missing", path)).expect("status report");
+        assert!(report.prs[0].upstream_state.is_none());
+        assert_eq!(report.prs[0].local_state, LocalState::Unknown);
+        assert!(report.prs[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("gh pr view Extra-Chill/homeboy#11410 failed"));
+        assert!(report.local_evidence_unavailable.is_some());
+    });
+}
 
 // ---------------------------------------------------------------------------
 // git_ref_exists

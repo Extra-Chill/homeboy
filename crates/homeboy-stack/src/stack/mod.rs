@@ -48,7 +48,7 @@ pub use spec::{
     exists, expand_path, list, list_ids, load, parse_git_ref, save, GitRef, StackPrEntry,
     StackProvenance, StackRequirements, StackSpec,
 };
-pub use status::{status, LocalState, StatusOutput, StatusPr};
+pub use status::{status, LocalEvidenceUnavailable, LocalState, StatusOutput, StatusPr};
 pub use sync::{
     diff, sync, DiffOutput, DroppedPr, ReplayedPr, SyncOutput, SyncPreview, UncertainPr,
 };

@@ -1892,6 +1892,9 @@ fn run_command_provider_cleanup_with_liveness(
                         crate::engine::command::SupervisedCommandTermination::TimedOut => {
                             WorktreeProviderCleanupOutcome::TimedOut
                         }
+                        crate::engine::command::SupervisedCommandTermination::NoProgress => {
+                            WorktreeProviderCleanupOutcome::TimedOut
+                        }
                         crate::engine::command::SupervisedCommandTermination::Cancelled => {
                             WorktreeProviderCleanupOutcome::Cancelled
                         }

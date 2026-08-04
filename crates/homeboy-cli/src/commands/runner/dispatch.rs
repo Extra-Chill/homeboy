@@ -138,6 +138,8 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             durable_workload,
             required_tools,
             required_capabilities,
+            provider,
+            source_path_inputs,
         } => Ok((
             RunnerCommandOutput::Preflight(runner::placement_readiness(
                 &runner::PlacementReadinessRequest {
@@ -151,6 +153,9 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
                         .map(runner::RunnerRequiredTool::new)
                         .collect(),
                     required_capabilities,
+                    provider,
+                    required_toolchain_probes: Vec::new(),
+                    source_path_inputs,
                 },
             )?),
             0,

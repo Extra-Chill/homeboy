@@ -9,7 +9,6 @@ use homeboy_core::component::Component;
 use homeboy_core::config;
 use homeboy_core::error::Result;
 use homeboy_core::git::output_optional;
-use homeboy_core::is_zero_u32;
 use homeboy_core::paths as base_path;
 use homeboy_core::phase_timing::PhaseTimingReport;
 use homeboy_core::project::Project;

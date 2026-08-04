@@ -325,7 +325,7 @@ fn interrupted_candidate_adoption_can_be_explicitly_replaced_with_audit_history(
 }
 
 #[test]
-fn candidate_adoption_gate_heartbeats_are_durable() {
+fn public_candidate_adoption_gate_progress_is_durable() {
     with_isolated_home(|_| {
         let record = submit_plan(&test_plan(), Some("adoption-gate-supervision")).expect("submit");
         start_candidate_adoption(
@@ -337,14 +337,86 @@ fn candidate_adoption_gate_heartbeats_are_durable() {
         .expect("start adoption");
         start_candidate_adoption_gate(&record.run_id, "cargo test", u32::MAX, 1800)
             .expect("persist gate identity before child work");
-        heartbeat_candidate_adoption_gate(&record.run_id, "running output tail")
-            .expect("persist periodic gate heartbeat");
+        heartbeat_candidate_adoption_gate(
+            &record.run_id,
+            crate::agent_task_gate::AgentTaskGateVisibility::Visible,
+            crate::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence,
+            &crate::agent_task_gate::AgentTaskGateLiveStatus {
+                visibility: crate::agent_task_gate::AgentTaskGateVisibility::Visible,
+                reveal_policy: crate::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence,
+                elapsed_ms: 42,
+                last_progress_ms_ago: Some(7),
+                progress: Some(homeboy_engine_primitives::command::CommandProgress {
+                    phase: "tests".to_string(),
+                    current: Some("case".to_string()),
+                }),
+                output_tail: "running output tail".to_string(),
+            },
+        )
+        .expect("persist periodic gate heartbeat");
         let running = status(&record.run_id).expect("read running adoption");
         let adoption = running.candidate_adoption.expect("active adoption");
         assert_eq!(adoption.phase, "gate_running");
         assert_eq!(adoption.gate_process_group, Some(u32::MAX));
         assert_eq!(adoption.gate_timeout_seconds, Some(1800));
         assert_eq!(adoption.gate_output_tail, "running output tail");
+        assert_eq!(adoption.gate_elapsed_ms, Some(42));
+        assert_eq!(adoption.gate_last_progress_ms_ago, Some(7));
+        assert_eq!(
+            adoption
+                .gate_progress
+                .expect("public progress")
+                .current
+                .as_deref(),
+            Some("case")
+        );
+    });
+}
+
+#[test]
+fn private_candidate_adoption_gate_progress_is_redacted_before_persistence() {
+    with_isolated_home(|_| {
+        let record =
+            submit_plan(&test_plan(), Some("private-adoption-gate-supervision")).expect("submit");
+        start_candidate_adoption(
+            &record.run_id,
+            "d3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1",
+            "openai/gpt-5.6-terra",
+            "private gate",
+        )
+        .expect("start adoption");
+        start_candidate_adoption_gate(&record.run_id, "private gate", u32::MAX, 1800)
+            .expect("persist gate identity before child work");
+        heartbeat_candidate_adoption_gate(
+            &record.run_id,
+            crate::agent_task_gate::AgentTaskGateVisibility::Private,
+            crate::agent_task_gate::AgentTaskGateRevealPolicy::SummaryOnly,
+            &crate::agent_task_gate::AgentTaskGateLiveStatus {
+                visibility: crate::agent_task_gate::AgentTaskGateVisibility::Private,
+                reveal_policy: crate::agent_task_gate::AgentTaskGateRevealPolicy::SummaryOnly,
+                elapsed_ms: 42,
+                last_progress_ms_ago: Some(7),
+                progress: Some(homeboy_engine_primitives::command::CommandProgress {
+                    phase: "private-phase-secret".to_string(),
+                    current: Some("sha256:private-digest-123 count=42".to_string()),
+                }),
+                output_tail: "private output secret".to_string(),
+            },
+        )
+        .expect("persist policy-filtered heartbeat");
+
+        let adoption = status(&record.run_id)
+            .expect("read running adoption")
+            .candidate_adoption
+            .expect("active adoption");
+        assert_eq!(adoption.gate_output_tail, "private gate output withheld");
+        assert_eq!(adoption.gate_elapsed_ms, Some(0));
+        assert!(adoption.gate_last_progress_ms_ago.is_none());
+        assert!(adoption.gate_progress.is_none());
+        let persisted = serde_json::to_string(&adoption).expect("adoption serializes");
+        assert!(!persisted.contains("private-phase-secret"));
+        assert!(!persisted.contains("private-digest-123"));
+        assert!(!persisted.contains("private output secret"));
     });
 }
 

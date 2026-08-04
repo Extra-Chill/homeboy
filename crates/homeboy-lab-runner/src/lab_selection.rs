@@ -62,6 +62,42 @@ pub struct PlacementReadinessRequest {
     pub durable_workload: bool,
     pub required_tools: Vec<super::RunnerRequiredTool>,
     pub required_capabilities: Vec<String>,
+    /// Provider, toolchain, browser, and source/path requirements are part of
+    /// the admission identity, rather than wrapper-only diagnostics.
+    pub provider: Option<String>,
+    pub required_toolchain_probes: Vec<super::RunnerToolchainReadinessProbe>,
+    pub source_path_inputs: Vec<String>,
+}
+
+/// The immutable admission contract shared by mutation-free preflight and the
+/// execution path. Callers construct it before any setup; execution evaluates
+/// it again against its fresh runner snapshot before reserving daemon capacity.
+#[derive(Debug, Clone)]
+pub struct LabAdmissionPlan {
+    pub request: PlacementReadinessRequest,
+    pub capability: super::PreparedLabRunnerCapability,
+    pub toolchain: Option<super::RunnerCapabilityPreflight>,
+}
+
+pub fn compile_lab_admission_plan(request: PlacementReadinessRequest) -> LabAdmissionPlan {
+    let capability = super::prepare_lab_runner_capability(super::LabRunnerCapabilityContract {
+        // The shared contract currently retains a static diagnostic label. The
+        // caller command remains on `request` and is serialized in the result.
+        command: "runner preflight",
+        required_tools: request.required_tools.clone(),
+        required_capabilities: request.required_capabilities.clone(),
+    });
+    let toolchain =
+        (!request.required_toolchain_probes.is_empty()).then(|| super::RunnerCapabilityPreflight {
+            command: request.command.clone(),
+            required_toolchain_probes: request.required_toolchain_probes.clone(),
+            ..Default::default()
+        });
+    LabAdmissionPlan {
+        request,
+        capability,
+        toolchain,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -78,12 +114,6 @@ pub struct PlacementReadinessPredicate {
     pub satisfied: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct PlacementRecoveryAction {
-    pub command: String,
-    pub requires_confirmation: bool,
-}
-
 /// A snapshot, not a reservation. It cannot create a rig/run/runner mutation.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PlacementReadiness {
@@ -93,29 +123,26 @@ pub struct PlacementReadiness {
     pub runner_id: String,
     pub state: PlacementReadinessState,
     pub predicates: Vec<PlacementReadinessPredicate>,
-    pub recovery_actions: Vec<PlacementRecoveryAction>,
+    pub recovery_actions: Vec<ExecutableAction>,
     pub revalidate_before_execution: bool,
 }
 
 pub fn placement_readiness(request: &PlacementReadinessRequest) -> Result<PlacementReadiness> {
     let runner = load(&request.runner_id)?;
     let status = status(&request.runner_id)?;
-    let capability_plan =
-        super::prepare_lab_runner_capability(super::LabRunnerCapabilityContract {
-            // The public request retains the caller's command context. The shared
-            // capability contract currently stores its diagnostic label as static
-            // data, so use the generic admission label without weakening predicates.
-            command: "runner preflight",
-            required_tools: request.required_tools.clone(),
-            required_capabilities: request.required_capabilities.clone(),
-        });
+    let plan = compile_lab_admission_plan(request.clone());
+    if let Some(toolchain) = plan.toolchain.as_ref() {
+        // This probe only observes runner toolchain state; unlike execution it
+        // neither creates a workspace nor reserves daemon admission.
+        crate::capabilities::preflight_runner_toolchain_readiness(&runner, toolchain)?;
+    }
     let capability = super::evaluate_lab_runner_capabilities_for_runner(
         &runner,
-        &capability_plan,
+        &plan.capability,
         super::LabRunnerGateMode::Explicit,
     )?;
     Ok(placement_readiness_from_status(
-        request,
+        &plan.request,
         &status,
         runner.settings.concurrency_limit,
         status_tunnel_mode(&status),
@@ -154,9 +181,16 @@ fn placement_readiness_from_status(
         match capability {
             super::LabRunnerGateDecision::Missing { remediation, .. } => remediation
                 .into_iter()
-                .map(|command| PlacementRecoveryAction {
-                    command,
-                    requires_confirmation: false,
+                .enumerate()
+                .map(|(index, command)| {
+                    ExecutableAction::new(
+                        format!("runner.capability.remediation.{index}"),
+                        "Inspect runner capability remediation",
+                        "homeboy",
+                        ["runner", "doctor", &request.runner_id],
+                        ActionSafety::ReadOnly,
+                    )
+                    .with_evidence(serde_json::json!({ "remediation": command }))
                 })
                 .collect(),
             super::LabRunnerGateDecision::Eligible => Vec::new(),
@@ -164,15 +198,15 @@ fn placement_readiness_from_status(
     } else if availability.accepts_jobs || queueable {
         Vec::new()
     } else if let Some(action) = status.admission_action() {
-        vec![PlacementRecoveryAction {
-            command: action.render_command(),
-            requires_confirmation: !matches!(action.safety, ActionSafety::ReadOnly),
-        }]
+        vec![action]
     } else {
-        vec![PlacementRecoveryAction {
-            command: format!("homeboy runner status {} --full", request.runner_id),
-            requires_confirmation: false,
-        }]
+        vec![ExecutableAction::new(
+            "runner.status",
+            "Inspect runner status",
+            "homeboy",
+            ["runner", "status", &request.runner_id, "--full"],
+            ActionSafety::ReadOnly,
+        )]
     };
     PlacementReadiness {
         schema: "homeboy/placement-readiness/v1",
@@ -210,6 +244,20 @@ fn placement_readiness_from_status(
             PlacementReadinessPredicate {
                 id: "required_capabilities",
                 satisfied: compatible,
+            },
+            PlacementReadinessPredicate {
+                id: "source_path_inputs_declared",
+                satisfied: request
+                    .source_path_inputs
+                    .iter()
+                    .all(|path| !path.trim().is_empty()),
+            },
+            PlacementReadinessPredicate {
+                id: "provider_declared",
+                satisfied: request
+                    .provider
+                    .as_ref()
+                    .is_none_or(|provider| !provider.trim().is_empty()),
             },
         ],
         recovery_actions,
@@ -1427,6 +1475,9 @@ mod placement_readiness_tests {
             durable_workload: false,
             required_tools: Vec::new(),
             required_capabilities: Vec::new(),
+            provider: None,
+            required_toolchain_probes: Vec::new(),
+            source_path_inputs: Vec::new(),
         }
     }
 
@@ -1473,6 +1524,31 @@ mod placement_readiness_tests {
         assert_eq!(result.state, PlacementReadinessState::Ready);
         assert!(result.recovery_actions.is_empty());
         assert!(result.revalidate_before_execution);
+    }
+
+    #[test]
+    fn execution_and_preflight_compile_the_same_capability_and_toolchain_plan() {
+        let mut request = request();
+        request.required_tools = vec![super::super::RunnerRequiredTool::new("node")];
+        request.required_capabilities = vec!["browser".to_string()];
+        request.provider = Some("openai".to_string());
+        request.source_path_inputs = vec!["/workspace/provider.json".to_string()];
+        request.required_toolchain_probes = vec![super::super::RunnerToolchainReadinessProbe {
+            extension_id: "fixture".to_string(),
+            id: "fixture:node".to_string(),
+            command: "node --version".to_string(),
+            repair_command: None,
+            diagnostic_env: Vec::new(),
+        }];
+
+        let preflight = compile_lab_admission_plan(request.clone());
+        let execution = compile_lab_admission_plan(request);
+        assert_eq!(preflight.capability, execution.capability);
+        assert_eq!(preflight.toolchain, execution.toolchain);
+        assert_eq!(
+            preflight.capability.required_capabilities,
+            vec!["browser".to_string()]
+        );
     }
 
     #[test]
@@ -1549,7 +1625,10 @@ mod placement_readiness_tests {
             decision,
         );
         assert_eq!(result.state, PlacementReadinessState::Blocked);
-        assert_eq!(result.recovery_actions[0].command, "install browser");
+        assert_eq!(
+            result.recovery_actions[0].evidence,
+            Some(serde_json::json!({ "remediation": "install browser" }))
+        );
     }
 
     #[test]
@@ -1599,5 +1678,13 @@ mod placement_readiness_tests {
             .predicates
             .iter()
             .any(|predicate| predicate.id == "runner_connected" && !predicate.satisfied));
+        let action = &result.recovery_actions[0];
+        assert_eq!(action.id, "runner.connect");
+        assert_eq!(action.safety, ActionSafety::Mutating);
+        assert_eq!(
+            serde_json::to_value(&result).expect("serialized v1 envelope")["recovery_actions"][0]
+                ["program"],
+            "homeboy"
+        );
     }
 }

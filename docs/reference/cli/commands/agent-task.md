@@ -22,45 +22,45 @@ Run generic agent task plans
 
 | Subcommand | Summary |
 | --- | --- |
-| `homeboy agent-task doctor` | _no help text_ |
+| `homeboy agent-task doctor` | Diagnose provider and runtime readiness on a runner, and optionally repair it |
 | `homeboy agent-task cook` | Submit an agent task, run its gates, and open a pull request |
 | `homeboy agent-task cook-continue` | Continue a detached Cook from its durable Cook ID or provider attempt ID. The persisted recipe supplies the original prompt, transport, gates, worktree, and disclosure policy |
-| `homeboy agent-task loop` | _no help text_ |
-| `homeboy agent-task run-plan` | _no help text_ |
-| `homeboy agent-task run` | _no help text_ |
-| `homeboy agent-task run-next` | _no help text_ |
-| `homeboy agent-task submit` | _no help text_ |
-| `homeboy agent-task status` | _no help text_ |
-| `homeboy agent-task list` | _no help text_ |
-| `homeboy agent-task active` | _no help text_ |
+| `homeboy agent-task loop` | Operate durable defined multi-agent loops: define, inspect, resume, and stop |
+| `homeboy agent-task run-plan` | Run an `AgentTaskPlan` through extension-declared executor providers |
+| `homeboy agent-task run` | Execute a previously submitted durable run |
+| `homeboy agent-task run-next` | Claim and execute the oldest queued durable run |
+| `homeboy agent-task submit` | Persist an agent-task plan and return a durable run id without executing it |
+| `homeboy agent-task status` | Read durable run status |
+| `homeboy agent-task list` | List durable runs, newest first |
+| `homeboy agent-task active` | List queued and running durable runs, newest first |
 | `homeboy agent-task reconcile` | Preview or apply reconciliation for one durable run |
-| `homeboy agent-task reconcile-records` | _no help text_ |
-| `homeboy agent-task latest` | _no help text_ |
-| `homeboy agent-task logs` | _no help text_ |
-| `homeboy agent-task artifacts` | _no help text_ |
+| `homeboy agent-task reconcile-records` | Reconcile stored durable run records against authoritative provider state |
+| `homeboy agent-task latest` | Show the latest durable run |
+| `homeboy agent-task logs` | Read the canonical durable event stream for a run |
+| `homeboy agent-task artifacts` | List artifacts and evidence refs recorded for a completed run |
 | `homeboy agent-task retained-artifacts` | Discover or attach selected outputs retained in a terminal Lab Cook workspace |
-| `homeboy agent-task evidence` | _no help text_ |
-| `homeboy agent-task diagnose` | _no help text_ |
+| `homeboy agent-task evidence` | Retrieve selected durable evidence recorded for a run |
+| `homeboy agent-task diagnose` | Compute a root cause, causal chain, and next actions for a failed run |
 | `homeboy agent-task runtime-recover` | Recover a missing or corrupted immutable controller runtime pin |
 | `homeboy agent-task runtime-validate` | Validate controller runtime eligibility without executing provider work |
-| `homeboy agent-task replay-provider-boundary` | _no help text_ |
-| `homeboy agent-task cancel` | _no help text_ |
-| `homeboy agent-task resume` | _no help text_ |
-| `homeboy agent-task retry` | _no help text_ |
-| `homeboy agent-task fanout` | _no help text_ |
-| `homeboy agent-task review` | _no help text_ |
-| `homeboy agent-task promote` | _no help text_ |
+| `homeboy agent-task replay-provider-boundary` | Hydrate the latest raw executor input and print provider-boundary fields without relaunching a provider |
+| `homeboy agent-task cancel` | Mark a queued or stale-running durable run as cancelled |
+| `homeboy agent-task resume` | Resume a queued or stale-running durable run |
+| `homeboy agent-task retry` | Submit a fresh durable run from an existing run's plan |
+| `homeboy agent-task fanout` | Cook, submit, and inspect batches of independent tasks |
+| `homeboy agent-task review` | Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints |
+| `homeboy agent-task promote` | Promote a completed generic patch artifact into a managed worktree |
 | `homeboy agent-task adopt` | Adopt an immutable commit candidate through a tracked cook's normal gates and finalization |
-| `homeboy agent-task finalize-pr` | _no help text_ |
+| `homeboy agent-task finalize-pr` | Finalize a green run, or recover publication from a durable Cook record |
 | `homeboy agent-task record-replacement-gate-proof` | Attach authorized candidate-bound replacement gate proof after an infrastructure gate failure |
 | `homeboy agent-task accept` | Record an independent, durable acceptance verdict for a candidate |
-| `homeboy agent-task gate-feedback` | _no help text_ |
-| `homeboy agent-task providers` | _no help text_ |
-| `homeboy agent-task prompts` | _no help text_ |
-| `homeboy agent-task contract` | _no help text_ |
-| `homeboy agent-task compile-loop` | _no help text_ |
-| `homeboy agent-task auth` | _no help text_ |
-| `homeboy agent-task controller` | _no help text_ |
+| `homeboy agent-task gate-feedback` | Convert deterministic gate results into a cook retry or stop decision |
+| `homeboy agent-task providers` | List extension-declared executor providers and optional secret/backend readiness |
+| `homeboy agent-task prompts` | Manage markdown prompts in Homeboy-owned storage |
+| `homeboy agent-task contract` | Export Homeboy's machine-readable agent-task core contract metadata |
+| `homeboy agent-task compile-loop` | Compile a declarative loop definition into an agent-task plan without submitting or running it |
+| `homeboy agent-task auth` | Configure and inspect provider authentication secrets |
+| `homeboy agent-task controller` | Create, inspect, and resume durable multi-agent loop controller state |
 
 ## `homeboy agent-task doctor`
 
@@ -68,7 +68,7 @@ Run generic agent task plans
 homeboy agent-task doctor [OPTIONS]
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Diagnose provider and runtime readiness on a runner, and optionally repair it
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -130,7 +130,9 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--gate-execution-policy` | `<POLICY>` | Gate scheduling policy: `ordered-fail-fast` (default) skips downstream gates after the first failure; `continue-all` runs every declared gate Values: `ordered-fail-fast`, `continue-all`. |
 | `--gate-timeout-seconds` | `<SECONDS>` | Wall-clock timeout, in seconds, for each verification gate command (default 1800 = 30 min). A gate exceeding this fails |
 | `--gate-heartbeat-interval-seconds` | `<SECONDS>` | How often, in seconds, to emit a heartbeat while a gate runs so long gates are not mistaken for a stalled cook (default 5) |
+| `--gate-no-progress-timeout-seconds` | `<SECONDS>` | Maximum time, in seconds, a gate may run without a structured `HOMEBOY_PROGRESS` marker (default 300 = 5 min) |
 | `--rerun-completed-gates` | flag | Re-run gates that already recorded a passing result on a previous attempt instead of reusing the recorded pass. Off by default |
+| `--accept-inherited-failures` | flag | Finalize only when an inherited required-gate failure was reproduced on the immutable baseline. The gate remains reported as baseline-red |
 | `--gate-environment-mode` | `<MODE>` | Environment for gate commands: `inherit` (default) extends the current environment; `replace` starts from an empty environment plus `--gate-env` Values: `inherit`, `replace`. |
 | `--gate-env` | `<NAME=VALUE>` | Extra environment variable for gate commands, as `NAME=VALUE`. Repeatable |
 | `--gate-env-from` | `<NAME=SOURCE[/PATH]>` | Preserve a required toolchain setting from the host as `NAME=SOURCE` or `NAME=SOURCE/relative/path`. The mapping is retained in gate evidence |
@@ -168,6 +170,7 @@ Continue a detached Cook from its durable Cook ID or provider attempt ID. The pe
 
 | Option | Value | Description |
 | --- | --- | --- |
+| `--preflight` | flag | Validate continuation admission without dispatching a provider or mutating lifecycle state |
 | `--full` | flag | Include the complete Cook report rather than the compact lifecycle view |
 
 ## `homeboy agent-task loop`
@@ -176,14 +179,16 @@ Continue a detached Cook from its durable Cook ID or provider attempt ID. The pe
 homeboy agent-task loop <COMMAND>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Operate durable defined multi-agent loops: define, inspect, resume, and stop.
+
+A loop is not a one-shot PR cook. It persists controller state, tracks whether it is on or off, counts revolutions, and records its continuation policy. Use `agent-task cook` for single-PR work.
 
 | Subcommand | Summary |
 | --- | --- |
-| `homeboy agent-task loop define` | _no help text_ |
-| `homeboy agent-task loop status` | _no help text_ |
-| `homeboy agent-task loop resume` | _no help text_ |
-| `homeboy agent-task loop stop` | _no help text_ |
+| `homeboy agent-task loop define` | Define or update a durable loop from a spec |
+| `homeboy agent-task loop status` | Read durable loop state: on/off, revolutions taken, and continuation policy |
+| `homeboy agent-task loop resume` | Resume a stopped or exhausted durable loop, optionally raising its revolution limit |
+| `homeboy agent-task loop stop` | Stop a durable loop and record the handoff |
 
 ## `homeboy agent-task loop define`
 
@@ -191,7 +196,9 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task loop define [OPTIONS] <SPEC>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Define or update a durable loop from a spec.
+
+`--on`/`--off` set whether the loop runs; `--revolution-limit` bounds how many revolutions it may take before it stops on its own.
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -214,7 +221,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task loop status <LOOP_ID>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Read durable loop state: on/off, revolutions taken, and continuation policy
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -226,7 +233,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task loop resume [OPTIONS] <LOOP_ID>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Resume a stopped or exhausted durable loop, optionally raising its revolution limit
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -246,7 +253,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task loop stop <LOOP_ID>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Stop a durable loop and record the handoff
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -258,7 +265,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task run-plan [OPTIONS]
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Run an `AgentTaskPlan` through extension-declared executor providers
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -272,7 +279,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task run [OPTIONS] <RUN_ID>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Execute a previously submitted durable run
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -288,7 +295,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task run-next
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Claim and execute the oldest queued durable run
 
 ## `homeboy agent-task submit`
 
@@ -296,7 +303,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task submit [OPTIONS]
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Persist an agent-task plan and return a durable run id without executing it
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -309,7 +316,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task status [OPTIONS] <RUN_ID>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Read durable run status
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -317,6 +324,7 @@ _This command declares no clap help text, so no description can be generated for
 
 | Option | Value | Description |
 | --- | --- | --- |
+| `--exact` | flag | Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt |
 | `--bridge` | flag | _no help text_ |
 | `--since-cursor` | `<CURSOR>` | _no help text_ |
 | `--full` | flag | _no help text_ |
@@ -328,7 +336,9 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task list [OPTIONS]
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+List durable runs, newest first.
+
+Discovery returns a finite agent-facing page by default; use `--limit` for a different page or `--full` for every matching record.
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -349,7 +359,9 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task active [OPTIONS]
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+List queued and running durable runs, newest first.
+
+`--reconcile` turns this into an explicit fleet operation: it previews every candidate by default and requires `--apply` to mutate the set.
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -382,7 +394,7 @@ Preview or apply reconciliation for one durable run
 homeboy agent-task reconcile-records [OPTIONS]
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Reconcile stored durable run records against authoritative provider state
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -394,7 +406,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task latest [OPTIONS]
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Show the latest durable run
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -406,7 +418,9 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task logs [OPTIONS] <RUN_ID>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Read the canonical durable event stream for a run.
+
+`--raw` additionally emits transport frames for diagnostics.
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -422,7 +436,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task artifacts [OPTIONS] <RUN_ID>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+List artifacts and evidence refs recorded for a completed run
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -430,6 +444,7 @@ _This command declares no clap help text, so no description can be generated for
 
 | Option | Value | Description |
 | --- | --- | --- |
+| `--exact` | flag | Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt |
 | `--bridge` | flag | _no help text_ |
 | `--since-cursor` | `<CURSOR>` | _no help text_ |
 | `--full` | flag | _no help text_ |
@@ -483,7 +498,9 @@ Attach one repository-relative file or directory from the retained workspace
 homeboy agent-task evidence [OPTIONS] <RUN_ID>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Retrieve selected durable evidence recorded for a run.
+
+Narrow the result with `--task` or `--kind`; `--full` returns the unprojected evidence.
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -502,7 +519,9 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task diagnose [OPTIONS] <RUN_ID>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Compute a root cause, causal chain, and next actions for a failed run.
+
+Next actions are derived from the failure classification, not from prose.
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -547,7 +566,9 @@ Validate controller runtime eligibility without executing provider work
 homeboy agent-task replay-provider-boundary [OPTIONS] <RUN_ID>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Hydrate the latest raw executor input and print provider-boundary fields without relaunching a provider.
+
+Persists the inspection as `provider-boundary-replay` evidence. Use `--task <task-id>` for multi-task runs.
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -563,7 +584,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task cancel [OPTIONS] <RUN_ID>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Mark a queued or stale-running durable run as cancelled
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -579,7 +600,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task resume [OPTIONS] <RUN_ID>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Resume a queued or stale-running durable run
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -587,6 +608,7 @@ _This command declares no clap help text, so no description can be generated for
 
 | Option | Value | Description |
 | --- | --- | --- |
+| `--exact` | flag | Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt |
 | `--bridge` | flag | _no help text_ |
 | `--since-cursor` | `<CURSOR>` | _no help text_ |
 | `--full` | flag | _no help text_ |
@@ -598,7 +620,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task retry [OPTIONS] <RUN_ID>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Submit a fresh durable run from an existing run's plan
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -616,18 +638,20 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task fanout <COMMAND>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Cook, submit, and inspect batches of independent tasks.
+
+Each child declares its own target worktree and optional head branch, runs through the same cook-loop path as a single PR cook, and finalizes its own pull request when its deterministic gates pass.
 
 | Subcommand | Summary |
 | --- | --- |
 | `homeboy agent-task fanout cook-batch` | Cook a wave of independent tasks, one child cook per issue |
-| `homeboy agent-task fanout plan` | _no help text_ |
-| `homeboy agent-task fanout submit` | _no help text_ |
-| `homeboy agent-task fanout submit-batch` | _no help text_ |
-| `homeboy agent-task fanout status` | _no help text_ |
+| `homeboy agent-task fanout plan` | Normalize and inspect a batch-cook plan without submitting or running it |
+| `homeboy agent-task fanout submit` | Submit a batch of independent cooks and print the exact per-cook commands for runner or operator execution |
+| `homeboy agent-task fanout submit-batch` | Submit a durable batch of independent `AgentTaskPlan` tasks as one queued child run per packet |
+| `homeboy agent-task fanout status` | Read durable batch state and per-child run status |
 | `homeboy agent-task fanout resume` | Resume a durable fanout batch after coordinator loss: idempotently harvest terminal children through gates, commit, push, and PR finalization |
-| `homeboy agent-task fanout artifacts` | _no help text_ |
-| `homeboy agent-task fanout run-plan` | _no help text_ |
+| `homeboy agent-task fanout artifacts` | List artifacts recorded by a durable batch's child runs |
+| `homeboy agent-task fanout run-plan` | Execute each cook in a batch-cook plan through the cook-loop service and return a batch summary |
 
 ## `homeboy agent-task fanout cook-batch`
 
@@ -663,7 +687,9 @@ Requires at least one deterministic gate: pass `--verify` or `--private-verify`.
 | `--gate-execution-policy` | `<POLICY>` | Gate scheduling policy: `ordered-fail-fast` (default) skips downstream gates after the first failure; `continue-all` runs every declared gate Values: `ordered-fail-fast`, `continue-all`. |
 | `--gate-timeout-seconds` | `<SECONDS>` | Wall-clock timeout, in seconds, for each verification gate command (default 1800 = 30 min). A gate exceeding this fails |
 | `--gate-heartbeat-interval-seconds` | `<SECONDS>` | How often, in seconds, to emit a heartbeat while a gate runs so long gates are not mistaken for a stalled cook (default 5) |
+| `--gate-no-progress-timeout-seconds` | `<SECONDS>` | Maximum time, in seconds, a gate may run without a structured `HOMEBOY_PROGRESS` marker (default 300 = 5 min) |
 | `--rerun-completed-gates` | flag | Re-run gates that already recorded a passing result on a previous attempt instead of reusing the recorded pass. Off by default |
+| `--accept-inherited-failures` | flag | Finalize only when an inherited required-gate failure was reproduced on the immutable baseline. The gate remains reported as baseline-red |
 | `--gate-environment-mode` | `<MODE>` | Environment for gate commands: `inherit` (default) extends the current environment; `replace` starts from an empty environment plus `--gate-env` Values: `inherit`, `replace`. |
 | `--gate-env` | `<NAME=VALUE>` | Extra environment variable for gate commands, as `NAME=VALUE`. Repeatable |
 | `--gate-env-from` | `<NAME=SOURCE[/PATH]>` | Preserve a required toolchain setting from the host as `NAME=SOURCE` or `NAME=SOURCE/relative/path`. The mapping is retained in gate evidence |
@@ -681,7 +707,7 @@ Requires at least one deterministic gate: pass `--verify` or `--private-verify`.
 homeboy agent-task fanout plan [OPTIONS]
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Normalize and inspect a batch-cook plan without submitting or running it
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -697,7 +723,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task fanout submit [OPTIONS]
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Submit a batch of independent cooks and print the exact per-cook commands for runner or operator execution
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -714,7 +740,9 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task fanout submit-batch [OPTIONS]
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Submit a durable batch of independent `AgentTaskPlan` tasks as one queued child run per packet.
+
+Provider-neutral by design: drive execution with `agent-task run-next` or an existing runner queue loop, then reconcile with `fanout status` and `fanout artifacts`.
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -731,7 +759,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task fanout status <BATCH_ID>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Read durable batch state and per-child run status
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -755,7 +783,7 @@ Resume a durable fanout batch after coordinator loss: idempotently harvest termi
 homeboy agent-task fanout artifacts <BATCH_ID>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+List artifacts recorded by a durable batch's child runs
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -767,7 +795,9 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task fanout run-plan [OPTIONS]
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Execute each cook in a batch-cook plan through the cook-loop service and return a batch summary.
+
+Successful child cooks open or update their own pull requests.
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -784,7 +814,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task review [OPTIONS] <RUN_ID>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -802,7 +832,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task promote [OPTIONS] <SOURCE>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Promote a completed generic patch artifact into a managed worktree
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -823,7 +853,9 @@ _This command declares no clap help text, so no description can be generated for
 | `--gate-execution-policy` | `<POLICY>` | Gate scheduling policy: `ordered-fail-fast` (default) skips downstream gates after the first failure; `continue-all` runs every declared gate Values: `ordered-fail-fast`, `continue-all`. |
 | `--gate-timeout-seconds` | `<SECONDS>` | Wall-clock timeout, in seconds, for each verification gate command (default 1800 = 30 min). A gate exceeding this fails |
 | `--gate-heartbeat-interval-seconds` | `<SECONDS>` | How often, in seconds, to emit a heartbeat while a gate runs so long gates are not mistaken for a stalled cook (default 5) |
+| `--gate-no-progress-timeout-seconds` | `<SECONDS>` | Maximum time, in seconds, a gate may run without a structured `HOMEBOY_PROGRESS` marker (default 300 = 5 min) |
 | `--rerun-completed-gates` | flag | Re-run gates that already recorded a passing result on a previous attempt instead of reusing the recorded pass. Off by default |
+| `--accept-inherited-failures` | flag | Finalize only when an inherited required-gate failure was reproduced on the immutable baseline. The gate remains reported as baseline-red |
 | `--gate-environment-mode` | `<MODE>` | Environment for gate commands: `inherit` (default) extends the current environment; `replace` starts from an empty environment plus `--gate-env` Values: `inherit`, `replace`. |
 | `--gate-env` | `<NAME=VALUE>` | Extra environment variable for gate commands, as `NAME=VALUE`. Repeatable |
 | `--gate-env-from` | `<NAME=SOURCE[/PATH]>` | Preserve a required toolchain setting from the host as `NAME=SOURCE` or `NAME=SOURCE/relative/path`. The mapping is retained in gate evidence |
@@ -859,7 +891,9 @@ Adopt an immutable commit candidate through a tracked cook's normal gates and fi
 homeboy agent-task finalize-pr [OPTIONS]
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Finalize a green run, or recover publication from a durable Cook record.
+
+This is the core-owned publication boundary for external runtimes.
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -950,7 +984,7 @@ Record an independent, durable acceptance verdict for a candidate
 homeboy agent-task gate-feedback [OPTIONS]
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Convert deterministic gate results into a cook retry or stop decision
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -967,7 +1001,9 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task providers [OPTIONS]
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+List extension-declared executor providers and optional secret/backend readiness.
+
+`--backend X` filters the presentation to X so output stays within caller display limits; pass `--catalog` for the full multi-backend catalog.
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -987,7 +1023,9 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task prompts <COMMAND>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Manage markdown prompts in Homeboy-owned storage.
+
+Prompts are stored under Homeboy's data directory, not the current repo/worktree, and are referenced as `prompt:<id>` wherever a prompt string is accepted.
 
 | Subcommand | Summary |
 | --- | --- |
@@ -1050,7 +1088,7 @@ Remove a stored agent-task prompt
 homeboy agent-task contract [OPTIONS]
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Export Homeboy's machine-readable agent-task core contract metadata
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -1062,7 +1100,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task compile-loop [OPTIONS]
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Compile a declarative loop definition into an agent-task plan without submitting or running it
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -1074,7 +1112,7 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task auth <COMMAND>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Configure and inspect provider authentication secrets
 
 | Subcommand | Summary |
 | --- | --- |
@@ -1212,7 +1250,7 @@ Remove a provider secret source mapping
 homeboy agent-task controller <COMMAND>
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Create, inspect, and resume durable multi-agent loop controller state
 
 | Subcommand | Summary |
 | --- | --- |

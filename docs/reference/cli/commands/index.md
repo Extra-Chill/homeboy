@@ -6,7 +6,7 @@ Hand-written narrative for these commands lives in `docs/commands/`. -->
 
 # Homeboy CLI reference (generated)
 
-`homeboy` exposes 543 visible commands across 41 top-level command families. Every page below is generated from the clap command tree in `crates/homeboy-cli`, so it cannot drift from the binary.
+`homeboy` exposes 544 visible commands across 41 top-level command families. Every page below is generated from the clap command tree in `crates/homeboy-cli`, so it cannot drift from the binary.
 
 Hand-written narrative lives in the [commands index](../../../commands/commands-index.md). Global flags are documented in [the root command reference](../homeboy-root-command.md). Machine-readable safety, docs, output, and Lab metadata come from `homeboy contract manifest`.
 
@@ -56,45 +56,4 @@ Hand-written narrative lives in the [commands index](../../../commands/commands-
 
 ## Commands shipping without help text
 
-40 visible commands declare no clap `about`/`long_about`, so no description can be generated for them. The fix is a doc comment on the clap variant, not prose in this file.
-
-- `homeboy agent-task doctor`
-- `homeboy agent-task loop`
-- `homeboy agent-task loop define`
-- `homeboy agent-task loop status`
-- `homeboy agent-task loop resume`
-- `homeboy agent-task loop stop`
-- `homeboy agent-task run-plan`
-- `homeboy agent-task run`
-- `homeboy agent-task run-next`
-- `homeboy agent-task submit`
-- `homeboy agent-task status`
-- `homeboy agent-task list`
-- `homeboy agent-task active`
-- `homeboy agent-task reconcile-records`
-- `homeboy agent-task latest`
-- `homeboy agent-task logs`
-- `homeboy agent-task artifacts`
-- `homeboy agent-task evidence`
-- `homeboy agent-task diagnose`
-- `homeboy agent-task replay-provider-boundary`
-- `homeboy agent-task cancel`
-- `homeboy agent-task resume`
-- `homeboy agent-task retry`
-- `homeboy agent-task fanout`
-- `homeboy agent-task fanout plan`
-- `homeboy agent-task fanout submit`
-- `homeboy agent-task fanout submit-batch`
-- `homeboy agent-task fanout status`
-- `homeboy agent-task fanout artifacts`
-- `homeboy agent-task fanout run-plan`
-- `homeboy agent-task review`
-- `homeboy agent-task promote`
-- `homeboy agent-task finalize-pr`
-- `homeboy agent-task gate-feedback`
-- `homeboy agent-task providers`
-- `homeboy agent-task prompts`
-- `homeboy agent-task contract`
-- `homeboy agent-task compile-loop`
-- `homeboy agent-task auth`
-- `homeboy agent-task controller`
+None. Every visible command declares a clap `about` string.

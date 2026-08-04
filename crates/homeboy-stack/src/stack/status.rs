@@ -1,8 +1,8 @@
 //! `homeboy stack status` — read-only report on a stack's PR list and
 //! local target state.
 //!
-//! Performs ONE `git fetch <base.remote>` so ahead-counts are fresh; no
-//! other mutations.
+//! Performs read-only local git probes only. It never clones, fetches, or
+//! mutates a checkout.
 //!
 //! For each declared PR:
 //!   - `gh pr view <repo> <number> --json state,mergedAt,reviewDecision,title,url,headRefOid`
@@ -14,12 +14,13 @@
 //! to a per-PR error note; the rest of the report still renders.
 
 use serde::Serialize;
+use std::path::Path;
 
 use homeboy_core::error::Result;
 
 use super::git::run_git;
 use super::pr_meta::fetch_pr_meta;
-use super::spec::{resolve_existing_component_path, StackPrEntry, StackSpec};
+use super::spec::{expand_path, resolve_existing_component_path, StackPrEntry, StackSpec};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusOutput {
@@ -35,9 +36,20 @@ pub struct StatusOutput {
     /// `None` when the local target branch doesn't exist yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_behind: Option<usize>,
+    /// Why local branch evidence is unavailable. Omitted when the configured
+    /// checkout exists and can be inspected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_evidence_unavailable: Option<LocalEvidenceUnavailable>,
     pub prs: Vec<StatusPr>,
     pub merged_count: usize,
     pub success: bool,
+}
+
+/// Structured evidence for a status report whose configured checkout cannot be inspected.
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalEvidenceUnavailable {
+    pub reason: String,
+    pub recovery_commands: Vec<String>,
 }
 
 /// Per-PR row in the status report.
@@ -93,31 +105,46 @@ fn is_false(b: &bool) -> bool {
 
 /// Run `homeboy stack status <id>`.
 pub fn status(spec: &StackSpec) -> Result<StatusOutput> {
-    let path = resolve_existing_component_path(spec)?;
-
-    // Single fetch of the base, so ahead-counts are honest. Failure here is
-    // non-fatal — we want status to work offline.
-    let _ = run_git(&path, &["fetch", &spec.base.remote, &spec.base.branch]);
+    let component_path = expand_path(&spec.component_path);
+    let path = resolve_existing_component_path(spec)
+        .ok()
+        .filter(|path| is_git_checkout(path));
+    let local_evidence_reason = if path.is_some() {
+        None
+    } else if Path::new(&component_path).exists() {
+        Some(format!(
+            "Component path '{}' is not a Git checkout",
+            component_path
+        ))
+    } else {
+        Some(format!(
+            "Component path '{}' does not exist",
+            component_path
+        ))
+    };
 
     let base_ref = format!("{}/{}", spec.base.remote, spec.base.branch);
     let target_branch = &spec.target.branch;
 
-    let target_exists = git_ref_exists(&path, target_branch);
+    let target_exists = path
+        .as_deref()
+        .is_some_and(|path| git_ref_exists(path, target_branch));
 
-    let (target_ahead, target_behind) = if target_exists {
-        (
-            count_revs(&path, &base_ref, target_branch),
-            count_revs(&path, target_branch, &base_ref),
-        )
-    } else {
-        (None, None)
-    };
+    let (target_ahead, target_behind) =
+        if let Some(path) = path.as_deref().filter(|_| target_exists) {
+            (
+                count_revs(path, &base_ref, target_branch),
+                count_revs(path, target_branch, &base_ref),
+            )
+        } else {
+            (None, None)
+        };
 
     let mut prs: Vec<StatusPr> = Vec::with_capacity(spec.prs.len());
     let mut merged_count = 0usize;
 
     for pr in &spec.prs {
-        let row = build_status_row(&path, target_branch, &base_ref, target_exists, pr);
+        let row = build_status_row(path.as_deref(), target_branch, &base_ref, target_exists, pr);
         if row.upstream_state.as_deref() == Some("MERGED") {
             merged_count += 1;
         }
@@ -126,19 +153,33 @@ pub fn status(spec: &StackSpec) -> Result<StatusOutput> {
 
     Ok(StatusOutput {
         stack_id: spec.id.clone(),
-        component_path: path,
+        component_path: component_path.clone(),
         base: spec.base.display(),
         target: spec.target.display(),
         target_ahead,
         target_behind,
+        local_evidence_unavailable: local_evidence_reason.map(|reason| LocalEvidenceUnavailable {
+            reason,
+            recovery_commands: vec![
+                format!("git clone <repository-url> {}", component_path),
+                format!("homeboy stack status {}", spec.id),
+            ],
+        }),
         prs,
         merged_count,
         success: true,
     })
 }
 
+fn is_git_checkout(path: &str) -> bool {
+    let Ok(output) = run_git(path, &["rev-parse", "--is-inside-work-tree"]) else {
+        return false;
+    };
+    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+}
+
 fn build_status_row(
-    path: &str,
+    path: Option<&str>,
     target_branch: &str,
     base_ref: &str,
     target_exists: bool,
@@ -149,7 +190,11 @@ fn build_status_row(
             let local_state = if !target_exists {
                 LocalState::Unknown
             } else {
-                match commit_reachable(path, &meta.head_sha, target_branch) {
+                match commit_reachable(
+                    path.expect("target exists requires a checkout"),
+                    &meta.head_sha,
+                    target_branch,
+                ) {
                     Some(true) => LocalState::Applied,
                     Some(false) => {
                         // Squash-merge fallback: head SHA isn't reachable
@@ -159,7 +204,13 @@ fn build_status_row(
                         // deliberately uses the BASE ref (not target) — the
                         // question is "did upstream absorb this content?",
                         // not "is it on target?".
-                        if patch_in_base(path, &meta.head_sha, base_ref).unwrap_or(false) {
+                        if patch_in_base(
+                            path.expect("target exists requires a checkout"),
+                            &meta.head_sha,
+                            base_ref,
+                        )
+                        .unwrap_or(false)
+                        {
                             LocalState::Applied
                         } else {
                             LocalState::Missing

@@ -26,7 +26,6 @@ use super::manifest::{ExtensionManifest, RuntimeConfig};
 use super::runner_contract::RunnerStepFilter;
 use super::runtime_helper;
 use homeboy_core::extension_invocation_context::ResolvedExtensionInvocationContext;
-use homeboy_core::extension_update_check::read_source_revision;
 
 pub use action::execute_action;
 pub use homeboy_core::extension_readiness::{

@@ -146,6 +146,7 @@ pub(crate) fn materialize_git_dependency(
         Some(remote_url) if !remote_url.trim().is_empty() => remote_url,
         _ => git_output(&local_path, &["config", "--get", "remote.origin.url"]).unwrap_or_default(),
     };
+    crate::source_materialization::validate_sanitized_git_remote(&remote_url)?;
     let freshness = ensure_git_dependency_fresh(
         &local_path,
         options.pinned_ref.as_deref(),

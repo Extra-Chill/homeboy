@@ -100,6 +100,12 @@ pub struct StackSourceMetadata {
     pub linked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_dirty: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_content_hash: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -204,6 +210,9 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
             discovery_path: prepared.discovery_path.to_string_lossy().to_string(),
             linked: prepared.linked,
             source_revision: prepared.source_revision.clone(),
+            source_ref: prepared.source_ref.clone(),
+            source_dirty: prepared.source_dirty,
+            source_content_hash: Some(prepared.source_content_hash.clone()),
         };
         write_stack_source_metadata(&stack.id, &metadata)?;
 

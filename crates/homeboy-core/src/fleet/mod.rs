@@ -1,6 +1,5 @@
 use crate::config::{self, ConfigEntity};
 use crate::error::{Error, Result};
-use crate::output::{CreateOutput, MergeOutput, RemoveResult};
 use crate::project;
 use crate::project::ProjectComponentOverrides;
 use serde::{Deserialize, Serialize};

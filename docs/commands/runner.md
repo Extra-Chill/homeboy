@@ -163,13 +163,15 @@ and the configured workspace root are usable on the target machine.
 homeboy runner preflight homeboy-lab --workload-family bench --command "bench run"
 homeboy runner preflight homeboy-lab --workload-family agent-task --command "agent-task cook" --allow-queue --durable-workload
 homeboy runner preflight homeboy-lab --workload-family test --command "test" --require-tool node --require-capability browser
+homeboy runner preflight homeboy-lab --workload-family agent-task --command "agent-task cook" --provider openai --source-path ./provider.json
 ```
 
 `preflight` creates no run, rig lease, runner job, workspace, or connection. Its
 `homeboy/placement-readiness/v1` response is `ready`, `queueable`, or `blocked`
-with exact predicates and bounded recovery actions. Queueing is limited to a
+with exact predicates and typed executable recovery actions (including action
+ID, argv, safety, required confirmations, and evidence). Queueing is limited to a
 durable workload on a full reverse runner. Execution revalidates live admission
-facts before reserving a daemon admission, so this result is evidence, not a
+facts through the same compiled admission plan before reserving a daemon admission, so this result is evidence, not a
 reservation. Wrapper order is preflight, durable run persistence, then setup and
 materialization.
 

@@ -307,6 +307,7 @@ fn test_run_up_persists_step_order_source_and_component_snapshot() {
                 remote_url: None,
                 triage_remote_url: None,
                 stack: None,
+                lab_stack: None,
                 branch: None,
                 r#ref: None,
                 default_ref: None,

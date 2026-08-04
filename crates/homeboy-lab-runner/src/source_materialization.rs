@@ -23,23 +23,53 @@ pub(super) fn validate_runner_git_materialization(remote_url: &str, runner_id: &
     validate_runner_git_materialization_with_policy(remote_url, runner_id, &policy)
 }
 
+/// A declared Lab stack has no controller checkout to fall back to, so its
+/// repository transport must be explicit, encrypted, and free of credentials.
+pub(super) fn validate_lab_stack_repository(remote_url: &str, runner_id: &str) -> Result<()> {
+    validate_sanitized_git_remote(remote_url)?;
+    let remote = remote_url.trim();
+    let supported_transport = remote.starts_with("https://")
+        || remote.starts_with("ssh://")
+        || remote.starts_with("git@");
+    if supported_transport {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "lab_stack.repository",
+        "Lab stack repository must use sanitized HTTPS or SSH transport",
+        Some(runner_id.to_string()),
+        Some(vec![
+            "Use a credential-free HTTPS or SSH repository URL. Lab fetches only with runner-owned credentials and never receives controller Git credentials.".to_string(),
+        ]),
+    ))
+}
+
 /// A remote URL is restored as runner metadata after bundle materialization.
-/// Reject URL userinfo rather than risk persisting a token in that checkout.
+/// SSH URI usernames are valid, but passwords and non-SSH URI userinfo must
+/// not be persisted in the checkout metadata.
 pub(super) fn validate_sanitized_git_remote(remote_url: &str) -> Result<()> {
     let value = remote_url.trim();
-    let credential_bearing = ["https://", "http://"].iter().any(|scheme| {
-        value
-            .strip_prefix(scheme)
-            .and_then(|authority_and_path| authority_and_path.split('/').next())
-            .is_some_and(|authority| authority.contains('@'))
-    });
-    if !credential_bearing {
+    let has_query_or_fragment = value.contains('?') || value.contains('#');
+    let unsafe_uri_userinfo = value
+        .split_once("://")
+        .map(|(scheme, remainder)| {
+            remainder
+                .split(['/', '?', '#'])
+                .next()
+                .and_then(|authority| authority.split_once('@'))
+                .is_some_and(|(userinfo, _)| {
+                    userinfo.contains(':') || !scheme.eq_ignore_ascii_case("ssh")
+                })
+        })
+        .unwrap_or(false);
+    if !has_query_or_fragment && !unsafe_uri_userinfo {
         return Ok(());
     }
 
     Err(Error::validation_invalid_argument(
         "remote.origin.url",
-        "git workspace sync refuses credential-bearing remote.origin.url",
+        "git workspace sync refuses credential-bearing repository URL data in URI userinfo, query, or fragment",
         None,
         Some(vec![
             "Configure origin with a sanitized HTTPS or SSH URL; Homeboy never transfers Git credentials to a runner.".to_string(),
@@ -231,6 +261,38 @@ mod tests {
         assert!(error.message.contains("credential-bearing"));
         assert!(!error.message.contains("token-value"));
         assert!(!error.details.to_string().contains("token-value"));
+    }
+
+    #[test]
+    fn accepts_credential_free_uri_usernames_and_scp_style_ssh() {
+        for remote in [
+            "ssh://git@example.org/org/repo.git",
+            "git@example.org:org/repo.git",
+        ] {
+            validate_sanitized_git_remote(remote).expect("credential-free repository URL");
+        }
+    }
+
+    #[test]
+    fn rejects_password_bearing_uri_userinfo_without_echoing_the_secret() {
+        for remote in [
+            "https://example.test/repo.git?access_token=secret-value",
+            "https://example.test/repo.git#secret-value",
+            "ssh://git:secret-value@example.test/repo.git",
+        ] {
+            let error = validate_sanitized_git_remote(remote).expect_err("unsafe repository URL");
+            assert!(!error.to_string().contains("secret-value"));
+            assert!(!error.details.to_string().contains("secret-value"));
+        }
+    }
+
+    #[test]
+    fn lab_stack_requires_encrypted_credential_free_repository_transport() {
+        validate_lab_stack_repository("git@github.example.com:example/private.git", "lab")
+            .expect("SSH transport is supported");
+        let error = validate_lab_stack_repository("file:///tmp/private.git", "lab")
+            .expect_err("filesystem transport bypasses Lab network policy");
+        assert!(error.message.contains("sanitized HTTPS or SSH"));
     }
 
     #[test]

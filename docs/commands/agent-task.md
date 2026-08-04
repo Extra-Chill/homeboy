@@ -868,10 +868,29 @@ order and, by default, a failure records every remaining gate as `skipped` with
 its blocking gate ID without invoking its command; use
 `--gate-execution-policy continue-all` for independent or exhaustive suites.
 Promotion reports gate results as `deterministic_gates[]` using
-`homeboy/agent-task-gate-report/v2`. Failed visible gates set promotion
+`homeboy/agent-task-gate-report/v3`. Failed visible gates set promotion
 `status: "gate_failed"`, exit nonzero, and include
 `failure_evidence.agent_feedback` plus stdout/stderr tails so the next cook
 agent task can receive exact failure context instead of a generic shell error.
+
+Gate stdout and stderr retain only their final 64 KiB. Each report's `capture`
+contains per-stream `bytes_seen`, `bytes_retained`, `bytes_truncated`,
+`byte_limit`, `truncated`, and full-stream `sha256`, so reviewers can identify
+the complete command output without materializing it in the run record. The
+report keeps the exact shell argv, `termination` (`completed`, `timed_out`,
+`no_progress`, or `cancelled`), and failure tail as resolvable evidence.
+
+Supervised gates persist `gate_output_tail`, `gate_elapsed_ms`, and the age of
+their most recent structured progress update in the active adoption record. A
+portable gate may emit this ordinary output line on stdout or stderr to mark
+forward progress: `HOMEBOY_PROGRESS {"phase":"test","current":"case name"}`.
+`phase` is required and `current` is optional. The configured no-progress
+deadline applies from launch until the first marker and between later markers;
+ordinary output remains evidence but cannot mask a stalled test case. Markers
+add durable phase/current context to that liveness signal. It is separate from
+the wall-clock gate timeout. A nonzero command exit remains
+`termination: "completed"`, while controller deadline outcomes have distinct
+termination values.
 
 Use `--private-verify <command>` for orchestrator-only completion gates that
 should decide completion without exposing hidden evaluator details to the next

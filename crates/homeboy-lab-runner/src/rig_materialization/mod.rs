@@ -14,6 +14,121 @@ use super::{
     RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
 
+/// Provenance for a stack cloned and assembled entirely on a Lab runner.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct LabStackMaterializationProvenance {
+    pub source_kind: &'static str,
+    pub repository: String,
+    pub base: homeboy_rig::LabStackRef,
+    pub prs: Vec<homeboy_rig::LabStackPrSpec>,
+    pub resulting_revision: String,
+    pub source_digest: String,
+    pub network_scope: &'static str,
+    pub credential_scope: &'static str,
+}
+
+/// Clone and assemble an immutable declared stack on the runner. Ref names are
+/// only transport locators: every one must resolve to its declared SHA before
+/// it is used. Merge commits require an explicit mainline and are cherry-picked
+/// with it, matching the stack merge-head boundary owned by #11394.
+pub(crate) fn materialize_lab_stack(
+    runner: &super::Runner,
+    destination: &str,
+    stack: &homeboy_rig::LabStackSpec,
+) -> Result<LabStackMaterializationProvenance> {
+    stack
+        .validate()
+        .map_err(|message| Error::validation_invalid_argument("lab_stack", message, None, None))?;
+    crate::source_materialization::validate_lab_stack_repository(&stack.repository, &runner.id)?;
+    crate::source_materialization::validate_runner_git_materialization(
+        &stack.repository,
+        &runner.id,
+    )?;
+    materialize_lab_stack_from_repository(runner, destination, stack)
+}
+
+fn materialize_lab_stack_from_repository(
+    runner: &super::Runner,
+    destination: &str,
+    stack: &homeboy_rig::LabStackSpec,
+) -> Result<LabStackMaterializationProvenance> {
+    let digest = homeboy_engine_primitives::content_hash::sha256_hex(
+        serde_json::to_vec(stack)
+            .expect("Lab stack spec serializes")
+            .as_slice(),
+    );
+    let q = homeboy_core::engine::shell::quote_arg;
+    let verify = |reference: &homeboy_rig::LabStackRef| {
+        format!(
+            "git -C {destination} fetch --no-tags origin {reference}; actual=$(git -C {destination} rev-parse FETCH_HEAD^{{commit}}); test \"$actual\" = {sha}",
+            destination = q(destination),
+            reference = q(&reference.reference),
+            sha = q(&reference.sha),
+        )
+    };
+    let mut script = format!(
+        "set -eu; test ! -e {destination}; mkdir -p $(dirname {destination}); git clone --no-checkout {repository} {destination}; {base}; git -C {destination} checkout --detach {base_sha}",
+        destination = q(destination),
+        repository = q(&stack.repository),
+        base = verify(&stack.base),
+        base_sha = q(&stack.base.sha),
+    );
+    for pr in &stack.prs {
+        script.push_str(&format!("; {}", verify(&pr.head)));
+        script.push_str(&format!(
+            "; parents=$(git -C {destination} rev-list --parents -n 1 {sha} | wc -w | tr -d ' '); if test \"$parents\" -gt 2; then test -n {mainline}; git -C {destination} cherry-pick --quiet -m {mainline} {sha} >/dev/null; else git -C {destination} cherry-pick --quiet {sha} >/dev/null; fi",
+            destination = q(destination),
+            sha = q(&pr.head.sha),
+            mainline = q(&pr.merge_mainline.map(|value| value.to_string()).unwrap_or_default()),
+        ));
+    }
+    script.push_str(&format!("; git -C {} rev-parse HEAD", q(destination)));
+    let command = super::workspace::shell_command_for_runner(runner, &script)?;
+    let Some(resulting_revision) = super::workspace::run_shell_capture(&command) else {
+        remove_partial_lab_stack(runner, destination);
+        return Err(Error::validation_invalid_argument(
+            "lab_stack",
+            "Lab runner could not materialize the declared stack; a ref was unresolved, SHA mismatched, or stack application conflicted",
+            Some(stack.repository.clone()),
+            None,
+        ));
+    };
+    if resulting_revision.len() != 40
+        || !resulting_revision
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(Error::validation_invalid_argument(
+            "lab_stack",
+            "Lab runner returned an invalid resulting stack revision",
+            Some(resulting_revision),
+            None,
+        ));
+    }
+    Ok(LabStackMaterializationProvenance {
+        source_kind: "declared_git_stack",
+        repository: stack.repository.clone(),
+        base: stack.base.clone(),
+        prs: stack.prs.clone(),
+        resulting_revision,
+        source_digest: digest,
+        network_scope: "runner_git_fetch",
+        credential_scope: "runner_owned_only",
+    })
+}
+
+fn remove_partial_lab_stack(runner: &super::Runner, destination: &str) {
+    // Stack destinations are private children of the run workspace. Remove a
+    // partial clone or failed cherry-pick so a retry owns a clean destination.
+    let cleanup = format!(
+        "rm -rf -- {}",
+        homeboy_core::engine::shell::quote_arg(destination)
+    );
+    if let Ok(command) = super::workspace::shell_command_for_runner(runner, &cleanup) {
+        let _ = super::workspace::run_shell_capture(&command);
+    }
+}
+
 mod rig_source_install;
 use rig_source_install::{
     remote_package_path, remove_runner_installed_rig_source, rig_install_capability_preflight,
@@ -32,6 +147,15 @@ pub(super) struct RigComponentDependency {
     pub pinned_ref: Option<String>,
     pub component_ref: Option<String>,
     pub dependency_cache: Option<homeboy_rig::spec::DependencyCacheSpec>,
+    pub lab_stack: Option<homeboy_rig::LabStackSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(super) struct LabStackComponentMaterialization {
+    pub rig_id: String,
+    pub component_id: String,
+    pub remote_path: String,
+    pub provenance: LabStackMaterializationProvenance,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -543,6 +667,7 @@ fn has_path_arg(args: &[String]) -> bool {
 pub(super) struct LabOffloadRigComponentSync {
     /// Per-dependency materialization outputs (remote paths, freshness, etc.).
     pub materializations: Vec<RunnerGitDependencyMaterializationOutput>,
+    pub lab_stack_materializations: Vec<LabStackComponentMaterialization>,
     pub dependency_cache_saves: Vec<RunnerDependencyCacheSaveRequest>,
     /// Generic `${components.<id>.path}` override env vars mapping each rig
     /// component to its runner-side materialized path, so checks that execute
@@ -575,6 +700,7 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
     if dependencies.is_empty() {
         return Ok(LabOffloadRigComponentSync {
             materializations: Vec::new(),
+            lab_stack_materializations: Vec::new(),
             dependency_cache_saves: Vec::new(),
             component_path_env: Vec::new(),
             selected_component_path,
@@ -583,6 +709,7 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
 
     let runner = load(runner_id)?;
     let mut synced = Vec::new();
+    let mut lab_stack_materializations = Vec::new();
     let mut component_path_env = Vec::new();
     let mut seen = HashSet::new();
     for dependency in dependencies {
@@ -596,6 +723,19 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
             primary_remote_path,
         ));
 
+        if let Some(stack) = dependency.lab_stack.as_ref() {
+            lab_stack_materializations.push(LabStackComponentMaterialization {
+                rig_id: dependency.rig_id.clone(),
+                component_id: dependency.component_id.clone(),
+                remote_path: dependency.remote_checkout_root.clone(),
+                provenance: materialize_lab_stack(
+                    &runner,
+                    &dependency.remote_checkout_root,
+                    stack,
+                )?,
+            });
+            continue;
+        }
         if !should_materialize_dependency(&dependency, primary_remote_path) {
             continue;
         }
@@ -624,6 +764,7 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
 
     Ok(LabOffloadRigComponentSync {
         materializations: synced,
+        lab_stack_materializations,
         dependency_cache_saves,
         component_path_env,
         selected_component_path,
@@ -721,6 +862,30 @@ pub(super) fn lab_offload_rig_component_dependencies(
         let spec = homeboy_rig::load(&rig_id)?;
         let single_component = spec.components.len() == 1;
         for (component_id, component) in &spec.components {
+            if let Some(lab_stack) = &component.lab_stack {
+                lab_stack.validate().map_err(|message| {
+                    Error::validation_invalid_argument("lab_stack", message, None, None)
+                })?;
+                dependencies.push(RigComponentDependency {
+                    rig_id: rig_id.clone(),
+                    component_id: component_id.clone(),
+                    local_checkout_root: String::new(),
+                    declared_checkout_root: String::new(),
+                    remote_checkout_root: remote_checkout_root_for_lab_stack(
+                        &rig_id,
+                        component_id,
+                        lab_stack,
+                        primary_workspace.map(|(_, remote)| remote),
+                    ),
+                    required_subpath: None,
+                    remote_url: Some(lab_stack.repository.clone()),
+                    pinned_ref: Some(lab_stack.base.sha.clone()),
+                    component_ref: Some(lab_stack.base.sha.clone()),
+                    dependency_cache: None,
+                    lab_stack: Some(lab_stack.clone()),
+                });
+                continue;
+            }
             let (checkout_root, local_checkout_root, local_component_path) = if single_component {
                 if let Some(path_override) = component_path_override.as_deref() {
                     let declared_required_subpath = declared_required_component_subpath(
@@ -805,10 +970,33 @@ pub(super) fn lab_offload_rig_component_dependencies(
                 pinned_ref: homeboy_rig::component_ref(component),
                 component_ref: homeboy_rig::component_ref(component),
                 dependency_cache: component.dependency_cache.clone(),
+                lab_stack: None,
             });
         }
     }
     Ok(dependencies)
+}
+
+fn remote_checkout_root_for_lab_stack(
+    rig_id: &str,
+    component_id: &str,
+    stack: &homeboy_rig::LabStackSpec,
+    primary_remote_path: Option<&str>,
+) -> String {
+    let digest = homeboy_engine_primitives::content_hash::sha256_hex(
+        serde_json::to_vec(stack)
+            .expect("Lab stack spec serializes")
+            .as_slice(),
+    );
+    let root = primary_remote_path
+        .map(|primary| format!("{}/.homeboy/lab-stacks", primary.trim_end_matches('/')))
+        .unwrap_or_else(|| "/tmp/homeboy-lab/lab-stacks".to_string());
+    format!(
+        "{root}/lab-stacks/{}-{}-{}",
+        sanitize_path_segment(rig_id),
+        sanitize_path_segment(component_id),
+        &digest[..12],
+    )
 }
 
 fn declared_required_component_subpath(
@@ -1068,6 +1256,7 @@ fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
 #[cfg(test)]
 mod tests {
     use std::process::Command;
+    use std::sync::Arc;
 
     use super::*;
 
@@ -1078,6 +1267,167 @@ mod tests {
             .status()
             .expect("run git init");
         assert!(status.success(), "initialize git checkout");
+    }
+
+    fn git(path: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn local_runner() -> super::super::Runner {
+        super::super::Runner {
+            id: "local-stack-test".to_string(),
+            kind: super::super::RunnerKind::Local,
+            server_id: None,
+            workspace_root: None,
+            settings: homeboy_core::server::RunnerSettings::default(),
+            env: Default::default(),
+            secret_env: Default::default(),
+            resources: Default::default(),
+            policy: homeboy_core::server::RunnerPolicy::default(),
+        }
+    }
+
+    fn local_bare_stack_fixture() -> (tempfile::TempDir, homeboy_rig::LabStackSpec, String) {
+        let root = tempfile::tempdir().expect("temp root");
+        let source = root.path().join("source");
+        let bare = root.path().join("source.git");
+        std::fs::create_dir_all(&source).expect("source directory");
+        git(&source, &["init", "--quiet", "--initial-branch=main"]);
+        git(&source, &["config", "user.email", "test@example.test"]);
+        git(&source, &["config", "user.name", "Stack Test"]);
+        std::fs::write(source.join("base.txt"), "base\n").expect("base file");
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "--quiet", "-m", "base"]);
+        let base = git(&source, &["rev-parse", "HEAD"]);
+        git(
+            &source,
+            &[
+                "clone",
+                "--bare",
+                source.to_str().expect("source path"),
+                bare.to_str().expect("bare path"),
+            ],
+        );
+        std::fs::write(source.join("stack.txt"), "stack\n").expect("stack file");
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "--quiet", "-m", "stack"]);
+        let head = git(&source, &["rev-parse", "HEAD"]);
+        git(
+            &source,
+            &[
+                "push",
+                bare.to_str().expect("bare path"),
+                "HEAD:refs/pull/1/head",
+            ],
+        );
+        (
+            root,
+            homeboy_rig::LabStackSpec {
+                repository: bare.display().to_string(),
+                base: homeboy_rig::LabStackRef {
+                    reference: "refs/heads/main".to_string(),
+                    sha: base,
+                },
+                prs: vec![homeboy_rig::LabStackPrSpec {
+                    number: 1,
+                    head: homeboy_rig::LabStackRef {
+                        reference: "refs/pull/1/head".to_string(),
+                        sha: head.clone(),
+                    },
+                    merge_mainline: None,
+                }],
+            },
+            head,
+        )
+    }
+
+    #[test]
+    fn materializes_local_bare_stack_and_cleans_failed_attempt_before_retry() {
+        let (root, stack, _) = local_bare_stack_fixture();
+        let destination = root.path().join("run/.homeboy/lab-stacks/component");
+        let runner = local_runner();
+
+        let provenance = materialize_lab_stack_from_repository(
+            &runner,
+            destination.to_str().expect("destination path"),
+            &stack,
+        )
+        .expect("clone and cherry-pick local bare stack");
+        assert_eq!(
+            provenance.resulting_revision,
+            git(&destination, &["rev-parse", "HEAD"])
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination.join("stack.txt")).unwrap(),
+            "stack\n"
+        );
+
+        std::fs::remove_dir_all(&destination).expect("remove successful fixture checkout");
+        let mut invalid = stack.clone();
+        invalid.prs[0].head.sha = "0".repeat(40);
+        materialize_lab_stack_from_repository(
+            &runner,
+            destination.to_str().expect("destination path"),
+            &invalid,
+        )
+        .expect_err("mismatched SHA fails");
+        assert!(
+            !destination.exists(),
+            "failed materialization is rolled back"
+        );
+
+        materialize_lab_stack_from_repository(
+            &runner,
+            destination.to_str().expect("destination path"),
+            &stack,
+        )
+        .expect("retry gets a clean destination");
+        assert_eq!(
+            std::fs::read_to_string(destination.join("stack.txt")).unwrap(),
+            "stack\n"
+        );
+    }
+
+    #[test]
+    fn local_bare_stack_materializations_are_isolated_per_run_destination() {
+        let (root, stack, _) = local_bare_stack_fixture();
+        let root = Arc::new(root);
+        let stack = Arc::new(stack);
+        let handles = ["run-a", "run-b"].map(|run| {
+            let root = Arc::clone(&root);
+            let stack = Arc::clone(&stack);
+            std::thread::spawn(move || {
+                let destination = root
+                    .path()
+                    .join(format!("{run}/.homeboy/lab-stacks/component"));
+                materialize_lab_stack_from_repository(
+                    &local_runner(),
+                    destination.to_str().expect("destination path"),
+                    &stack,
+                )
+                .expect("isolated local stack materialization");
+                destination
+            })
+        });
+        let destinations = handles.map(|handle| handle.join().expect("stack thread"));
+        assert_ne!(destinations[0], destinations[1]);
+        for destination in destinations {
+            assert_eq!(
+                std::fs::read_to_string(destination.join("stack.txt")).unwrap(),
+                "stack\n"
+            );
+        }
     }
 
     fn write_checkout_root_rig(rig_id: &str, component_path: &Path, checkout_root: &str) {
@@ -1304,6 +1654,7 @@ mod tests {
                 pinned_ref: None,
                 component_ref: None,
                 dependency_cache: None,
+                lab_stack: None,
             },
             RigComponentDependency {
                 rig_id: "ambiguous".to_string(),
@@ -1316,6 +1667,7 @@ mod tests {
                 pinned_ref: None,
                 component_ref: None,
                 dependency_cache: None,
+                lab_stack: None,
             },
         ];
 
@@ -1347,6 +1699,7 @@ mod tests {
             pinned_ref: None,
             component_ref: None,
             dependency_cache: None,
+            lab_stack: None,
         }];
 
         let selected = selected_rig_component_remote_path(&args, &dependencies)
@@ -1395,6 +1748,7 @@ mod tests {
                     pinned_ref: None,
                     component_ref: None,
                     dependency_cache: None,
+                    lab_stack: None,
                 },
                 RigComponentDependency {
                     rig_id: "default-component".to_string(),
@@ -1407,6 +1761,7 @@ mod tests {
                     pinned_ref: None,
                     component_ref: None,
                     dependency_cache: None,
+                    lab_stack: None,
                 },
             ];
 
@@ -1470,6 +1825,76 @@ mod tests {
             assert_eq!(
                 dependencies[0].required_subpath.as_deref(),
                 Some("plugins/woocommerce")
+            );
+        });
+    }
+
+    #[test]
+    fn fresh_lab_fixture_routes_declared_stack_without_controller_component_path() {
+        // This fixture deliberately creates no component checkout or registry
+        // entry. Planning is network-free; the immutable fetch occurs only on
+        // the selected Lab runner during the later sync phase.
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let rig_dir = homeboy_core::paths::rigs().expect("rig dir");
+            std::fs::create_dir_all(&rig_dir).expect("create rig dir");
+            let base_sha = "0123456789abcdef0123456789abcdef01234567";
+            let pr_sha = "89abcdef0123456789abcdef0123456789abcdef";
+            std::fs::write(
+                rig_dir.join("fresh-lab-stack.json"),
+                serde_json::json!({
+                    "id": "fresh-lab-stack",
+                    "components": {
+                        "app": {
+                            "lab_stack": {
+                                "repository": "https://git.example.test/org/app.git",
+                                "base": { "reference": "refs/heads/main", "sha": base_sha },
+                                "prs": [{
+                                    "number": 42,
+                                    "head": { "reference": "refs/pull/42/head", "sha": pr_sha },
+                                    "merge_mainline": 1
+                                }]
+                            }
+                        }
+                    },
+                    "fuzz": { "default_component": "app" }
+                })
+                .to_string(),
+            )
+            .expect("save rig");
+            let args = vec![
+                "homeboy".to_string(),
+                "fuzz".to_string(),
+                "run".to_string(),
+                "--rig".to_string(),
+                "fresh-lab-stack".to_string(),
+            ];
+
+            let dependencies = lab_offload_rig_component_dependencies(
+                &args,
+                Some(("/controller/rigs", "/runner/work/rigs")),
+                Some("/runner/work"),
+            )
+            .expect("Lab stack dependency plan");
+
+            assert_eq!(dependencies.len(), 1);
+            assert!(dependencies[0].local_checkout_root.is_empty());
+            assert!(dependencies[0].declared_checkout_root.is_empty());
+            assert!(dependencies[0]
+                .remote_checkout_root
+                .starts_with("/runner/work/rigs/.homeboy/lab-stacks/"));
+            assert_eq!(
+                selected_rig_component_remote_path(&args, &dependencies)
+                    .expect("runner component binding"),
+                dependencies[0].remote_checkout_root
+            );
+            assert_eq!(
+                dependencies[0]
+                    .lab_stack
+                    .as_ref()
+                    .expect("declared stack")
+                    .base
+                    .sha,
+                base_sha
             );
         });
     }
@@ -1548,6 +1973,7 @@ mod tests {
             pinned_ref: None,
             component_ref: None,
             dependency_cache: None,
+            lab_stack: None,
         };
 
         let env = rig_component_env_overrides(
@@ -2330,6 +2756,7 @@ mod tests {
             pinned_ref: None,
             component_ref: None,
             dependency_cache: None,
+            lab_stack: None,
         };
         let remote = effective_remote_component_path(
             &dependency,
@@ -2357,6 +2784,7 @@ mod tests {
             pinned_ref: None,
             component_ref: None,
             dependency_cache: None,
+            lab_stack: None,
         };
         let remote = effective_remote_component_path(
             &dependency,
@@ -2438,6 +2866,7 @@ mod tests {
             pinned_ref: None,
             component_ref: None,
             dependency_cache: None,
+            lab_stack: None,
         }];
 
         assert!(dependencies

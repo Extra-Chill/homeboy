@@ -3,11 +3,15 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize)]
 pub struct RigSourceListResult {
     pub sources: Vec<RigSourceGroup>,
+    /// Installed stack specs with no source metadata. These are intentionally
+    /// separate from managed sources because their provenance is unknown.
+    pub orphaned_stacks: Vec<OrphanedRigSourceStack>,
     pub invalid: Vec<InvalidRigSourceMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RigSourceGroup {
+    pub source_status: &'static str,
     pub source: String,
     pub source_root: String,
     pub package_path: String,
@@ -17,6 +21,8 @@ pub struct RigSourceGroup {
     pub linked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_content_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_reason: Option<String>,
     pub rigs: Vec<RigSourceRig>,
@@ -44,7 +50,32 @@ pub struct RigSourceStack {
     pub config_present: bool,
     pub config_owned: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub component_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component_path_present: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OrphanedRigSourceStack {
+    pub id: String,
+    pub config_path: String,
+    pub content_identity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component_path_present: Option<bool>,
+    pub source_status: &'static str,
+    pub recovery_actions: Vec<RigSourceRecoveryAction>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RigSourceRecoveryAction {
+    pub kind: &'static str,
+    pub description: &'static str,
+    pub command: &'static str,
+    pub required_parameters: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize)]

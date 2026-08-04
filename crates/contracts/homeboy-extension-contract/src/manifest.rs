@@ -8,11 +8,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
-use crate::action_types::*;
 use crate::autofix_config::*;
 use crate::ci_config::*;
-use crate::core_compat::*;
-use crate::exec_context::*;
 use crate::extension_contract_producer::*;
 use crate::fuzz_config::*;
 use crate::manifest_action_config::*;
@@ -20,14 +17,11 @@ use crate::manifest_artifact_cleanup::*;
 use crate::manifest_capabilities::*;
 use crate::manifest_capability_config::*;
 use crate::manifest_deploy_config::*;
-use crate::manifest_test_config::*;
 use crate::manifest_toolchain_config::*;
 use crate::notification_transport_config::*;
-use crate::runner_contract::*;
 use crate::sidecar_config::*;
 use crate::test_drift::*;
 use crate::trace_config::*;
-use crate::version::*;
 use homeboy_audit_contract::*;
 
 /// Unified extension manifest decomposed into capability groups.

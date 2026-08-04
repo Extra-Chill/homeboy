@@ -55,10 +55,22 @@ pub struct VerifyGateArgs {
         value_name = "SECONDS"
     )]
     pub gate_heartbeat_interval_seconds: u64,
+    /// Maximum time, in seconds, a gate may run without a structured
+    /// `HOMEBOY_PROGRESS` marker (default 300 = 5 min).
+    #[arg(
+        long = "gate-no-progress-timeout-seconds",
+        default_value_t = 5 * 60,
+        value_name = "SECONDS"
+    )]
+    pub gate_no_progress_timeout_seconds: u64,
     /// Re-run gates that already recorded a passing result on a previous
     /// attempt instead of reusing the recorded pass. Off by default.
     #[arg(long = "rerun-completed-gates")]
     pub rerun_completed_gates: bool,
+    /// Finalize only when an inherited required-gate failure was reproduced on
+    /// the immutable baseline. The gate remains reported as baseline-red.
+    #[arg(long = "accept-inherited-failures")]
+    pub accept_inherited_failures: bool,
     /// Environment for gate commands: `inherit` (default) extends the current
     /// environment; `replace` starts from an empty environment plus `--gate-env`.
     #[arg(
@@ -122,7 +134,9 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
             },
             gate_timeout_seconds: args.gate_timeout_seconds,
             gate_heartbeat_interval_seconds: args.gate_heartbeat_interval_seconds,
+            gate_no_progress_timeout_seconds: args.gate_no_progress_timeout_seconds,
             rerun_completed_gates: args.rerun_completed_gates,
+            accept_inherited_failures: args.accept_inherited_failures,
             gate_environment: AgentTaskGateEnvironmentPolicy {
                 mode: match args.gate_environment_mode.as_str() {
                     "replace" => AgentTaskGateEnvironmentMode::Replace,
@@ -197,6 +211,7 @@ mod tests {
         let defaults: VerifyGateOptions = defaults.into();
         assert_eq!(defaults.gate_timeout_seconds, 30 * 60);
         assert_eq!(defaults.gate_heartbeat_interval_seconds, 5);
+        assert_eq!(defaults.gate_no_progress_timeout_seconds, 5 * 60);
         assert!(!defaults.rerun_completed_gates);
         assert!(defaults.hydrate_dependencies);
 
@@ -206,6 +221,8 @@ mod tests {
             "42",
             "--gate-heartbeat-interval-seconds",
             "7",
+            "--gate-no-progress-timeout-seconds",
+            "11",
             "--rerun-completed-gates",
         ])
         .expect("parse configured gate policy")
@@ -213,6 +230,7 @@ mod tests {
         .into();
         assert_eq!(options.gate_timeout_seconds, 42);
         assert_eq!(options.gate_heartbeat_interval_seconds, 7);
+        assert_eq!(options.gate_no_progress_timeout_seconds, 11);
         assert!(options.rerun_completed_gates);
         assert!(options.gate_environment.isolate_home);
         assert!(options.gate_environment.isolate_xdg);

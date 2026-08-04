@@ -2,7 +2,6 @@ use crate::component::ScopedExtensionConfig;
 use crate::config::{self, ConfigEntity};
 use crate::engine::local_files;
 use crate::error::{Error, Result};
-use crate::output::{CreateOutput, MergeOutput, RemoveResult};
 use crate::paths;
 use crate::server;
 use serde::{Deserialize, Serialize};

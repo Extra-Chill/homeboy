@@ -33,6 +33,12 @@ pub use cli_resolver::{
     LabRunnerHint,
 };
 mod command_path;
+#[allow(
+    dead_code,
+    unused_imports,
+    unused_assignments,
+    reason = "Connection recovery helpers serve optional runner lifecycle paths."
+)]
 mod connection;
 mod continuation_provider;
 mod daemon_exec_driver;
@@ -40,11 +46,32 @@ mod daemon_health;
 mod daemon_http_get;
 mod daemon_repair;
 pub use daemon_repair::codes as daemon_repair_codes;
+#[allow(
+    unused_imports,
+    reason = "Evidence helpers are re-exported for optional runner artifact flows."
+)]
 mod evidence;
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "Execution adapters support optional runner execution modes."
+)]
 mod execution;
 mod execution_bundle;
+#[allow(
+    dead_code,
+    reason = "Extension materialization supports runner recovery paths."
+)]
 mod extension_materialization;
+#[allow(
+    dead_code,
+    reason = "Generation-store recovery helpers support runner lifecycle reconciliation."
+)]
 mod generation_store;
+#[allow(
+    dead_code,
+    reason = "Staging compatibility states support optional Lab workflows."
+)]
 pub mod lab_staging_controller;
 pub fn runner_generation_inventory(runner_id: &str) -> Result<Vec<RunnerDaemonGenerationStatus>> {
     let report = connection::status(runner_id)?;
@@ -61,20 +88,34 @@ pub fn runner_generation_inventory_for_session(
     generation_store::status_projection(runner_id, session)
 }
 mod git_dependency_materialization;
+#[allow(
+    dead_code,
+    unused_assignments,
+    reason = "Refresh helpers support explicit runner refresh paths."
+)]
 mod homeboy_refresh;
 mod job_preparation;
+#[allow(dead_code, reason = "Lab hydration supports offload execution paths.")]
 mod lab;
 mod lab_apply;
 mod lab_args;
 mod lab_capabilities;
 mod lab_command;
+#[allow(
+    dead_code,
+    reason = "Lab environment bounds support optional metadata exports."
+)]
 mod lab_env;
 mod lab_offload_provider;
 pub(crate) mod lab_plan;
+#[allow(
+    dead_code,
+    reason = "Lab selection recovery helpers support contention handling."
+)]
 mod lab_selection;
 pub use lab_selection::{
-    placement_readiness, PlacementReadiness, PlacementReadinessPredicate,
-    PlacementReadinessRequest, PlacementReadinessState, PlacementRecoveryAction,
+    compile_lab_admission_plan, placement_readiness, LabAdmissionPlan, PlacementReadiness,
+    PlacementReadinessPredicate, PlacementReadinessRequest, PlacementReadinessState,
 };
 mod lab_workspace_provenance_provider;
 mod lab_workspaces;
@@ -96,6 +137,10 @@ mod runner_cache;
 mod runtime_materialization_status;
 pub mod runtime_materializer;
 mod runtime_overlay_freshness;
+#[allow(
+    dead_code,
+    reason = "Session recovery hints support daemon reconciliation."
+)]
 mod session;
 mod shell_quote;
 mod source_materialization;
@@ -108,12 +153,27 @@ pub use runner_cache::{
 };
 pub use validation_dependencies::RunnerValidationDependencySyncOutput;
 pub mod runners;
+#[allow(
+    dead_code,
+    reason = "Worker lease inspection supports runner recovery."
+)]
 mod worker;
+#[allow(
+    dead_code,
+    reason = "Workload constructors support labeled runner execution paths."
+)]
 pub(crate) mod workload;
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "Workspace synchronization supports optional cleanup and diagnostic paths."
+)]
 mod workspace;
 pub(crate) use extension_materialization::materialize_lab_job_extension_overlays;
 pub(crate) use workspace::copy_snapshot_to_directory;
 pub use workspace::register_workspace_snapshot_provider;
+#[cfg(test)]
+pub(crate) use workspace::verify_lab_workspace_from_env;
 
 /// Compute the same controller workspace identity used by Lab snapshot
 /// materialization before a detached command is admitted.
@@ -148,7 +208,6 @@ pub use capabilities::{
 pub(crate) use command_path::normalize_runner_command_env_for_homeboy_path;
 pub use command_path::preflight_remote_argv_path_translation;
 pub(crate) use connection::daemon_endpoint_identity;
-pub(crate) use connection::disconnect_with_force;
 pub use connection::{
     close_reconnected_job_log_owner, connect, connect_reverse, connect_with_live_lease_adoption,
     connect_with_orphan_adoption, diagnostic_status, disconnect, disconnect_local_recovery,
@@ -160,11 +219,14 @@ pub use connection::{
 pub(crate) use connection::{
     configured_runner_homeboy_build_identity, local_live_session, status_for_admission,
 };
+#[allow(
+    dead_code,
+    reason = "Runner upgrades support explicit orchestration paths."
+)]
 mod upgrade_runners;
 pub use availability_provider::register as register_runner_availability_provider;
 pub use continuation_provider::register as register_runner_continuation_provider;
 pub use daemon_exec_driver::register as register_runner_daemon_exec_driver;
-pub(crate) use evidence::artifact_store_locator_from_runner_artifact_id;
 pub use evidence::register_runner_evidence_provider;
 pub use evidence::runner_artifact_store_token;
 pub use evidence::runner_job_log_snapshot_for_session;
@@ -175,6 +237,7 @@ pub use evidence::{
     reportable_artifact_evidence_path, runner_job_log_snapshot, RemoteArtifactDownload,
     RunnerJobLogSnapshot,
 };
+pub(crate) use execution::exec_with_status_snapshot;
 pub use execution::{
     daemon_api_get, daemon_api_post, exec, promote_runner_exec_artifact_dirs,
     promote_runner_exec_artifacts, promote_runner_exec_summaries, promoted_output,
@@ -184,16 +247,12 @@ pub use execution::{
     RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput,
     RunnerExecStructuredSummary,
 };
-pub(crate) use execution::{
-    exec_with_status_snapshot, execute_runner_process_until_cancelled_with_progress,
-    prepare_daemon_local_process, RunnerProcessRequest,
-};
 pub use execution::{RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV};
 pub(crate) use extension_materialization::extension_source_content_hash;
 pub(crate) use extension_materialization::{
-    materialize_runner_extension, materialize_runner_extension_with_env,
-    materialize_runner_extension_with_exec, plan_controller_snapshot_extension,
-    RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
+    materialize_runner_extension_with_env, materialize_runner_extension_with_exec,
+    plan_controller_snapshot_extension, RunnerExtensionMaterializationRequest,
+    RunnerExtensionMaterializationSource,
 };
 pub(crate) use git_dependency_materialization::{
     dependency_cache_save, dependency_cache_save_request, materialize_git_dependency,
@@ -268,9 +327,8 @@ pub use workspace::{
     RunnerWorkspaceUpdateOutput, WorkspaceContentManifest, WorkspaceContentManifestEntry,
 };
 pub(crate) use workspace::{
-    verify_lab_workspace_from_env, workspace_content_hash, workspace_content_hash_algorithm,
-    workspace_content_manifest_for_policy, VerifiedLabWorkspaceProvenance,
-    WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+    workspace_content_hash, workspace_content_hash_algorithm,
+    workspace_content_manifest_for_policy, WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
 pub use workspace_root_provider::register as register_runner_workspace_root_provider;
 
