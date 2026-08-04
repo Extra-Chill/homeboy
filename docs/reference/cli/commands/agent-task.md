@@ -1,7 +1,7 @@
 <!-- GENERATED FILE. DO NOT EDIT BY HAND.
 Source of truth: the clap command tree in `crates/homeboy-cli`.
 Regenerate with:
-HOMEBOY_WRITE_CLI_REFERENCE=1 cargo test -p homeboy-cli --lib cli_surface::reference_docs
+cargo run -p homeboy-cli --bin generate-cli-reference
 Hand-written narrative for these commands lives in `docs/commands/`. -->
 
 # `homeboy agent-task` command reference

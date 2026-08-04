@@ -709,3 +709,41 @@ impl From<RunnerKindArg> for RunnerKind {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli_surface::{Cli, Commands};
+    use clap::Parser;
+
+    #[test]
+    fn preflight_accepts_only_the_request_json_flag() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "runner",
+            "preflight",
+            "--request",
+            r#"{"runner_id":"lab","allow_queue":false,"durable_workload":false,"invocation":{"kind":"capability_audit","source_path":"/workspace","capability_id":"capability.alpha"}}"#,
+        ])
+        .expect("parse typed preflight request");
+        assert!(matches!(
+            cli.command,
+            Commands::Runner(RunnerArgs {
+                command: RunnerCommand::Preflight { .. }
+            })
+        ));
+        assert!(
+            Cli::try_parse_from(["homeboy", "runner", "preflight", "--required-tool", "node"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "runner",
+            "preflight",
+            "--request",
+            "{}",
+            "--unknown"
+        ])
+        .is_err());
+    }
+}

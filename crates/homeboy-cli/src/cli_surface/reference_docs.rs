@@ -20,10 +20,10 @@
 //! every single compile of an already-slow workspace. Instead the tree is
 //! checked in and drift is not gated, so generation cost is paid only when
 //! someone deliberately regenerates via
-//! [`super::reference_docs_tests::cli_reference_docs_regenerate_on_demand`]:
+//! the focused `generate-cli-reference` binary:
 //!
 //! ```sh
-//! HOMEBOY_WRITE_CLI_REFERENCE=1 cargo test -p homeboy-cli --lib cli_surface::reference_docs
+//! cargo run -p homeboy-cli --bin generate-cli-reference
 //! ```
 //!
 //! # Why it does not call `Command::build`
@@ -55,15 +55,15 @@ use homeboy_command_contract::cli_reference::checked_in_cli_reference;
 use std::collections::BTreeMap;
 
 /// Repo-root-relative directory owned entirely by this generator.
-pub(super) const GENERATED_DIR: &str = "docs/reference/cli/commands";
+pub const GENERATED_DIR: &str = "docs/reference/cli/commands";
 
 /// Set to any value to rewrite [`GENERATED_DIR`] instead of asserting currency.
-pub(super) const WRITE_ENV: &str = "HOMEBOY_WRITE_CLI_REFERENCE";
+pub const WRITE_ENV: &str = "HOMEBOY_WRITE_CLI_REFERENCE";
 
 const BANNER: &str = "<!-- GENERATED FILE. DO NOT EDIT BY HAND.\n\
      Source of truth: the clap command tree in `crates/homeboy-cli`.\n\
      Regenerate with:\n\
-     HOMEBOY_WRITE_CLI_REFERENCE=1 cargo test -p homeboy-cli --lib cli_surface::reference_docs\n\
+     cargo run -p homeboy-cli --bin generate-cli-reference\n\
      Hand-written narrative for these commands lives in `docs/commands/`. -->\n\n";
 
 const MISSING_DESCRIPTION: &str =
@@ -72,13 +72,13 @@ const MISSING_DESCRIPTION: &str =
 const NO_HELP_CELL: &str = "_no help text_";
 
 /// Renders the full generated tree as `file name -> markdown body`.
-pub(super) fn generated_reference_docs() -> BTreeMap<String, String> {
+pub fn generated_reference_docs() -> BTreeMap<String, String> {
     checked_in_cli_reference().documents
 }
 
 /// Projects the live runtime Clap tree into the serializable reference contract.
 /// This remains the sole source used when deliberately updating the contract.
-pub(super) fn live_generated_reference_docs() -> BTreeMap<String, String> {
+pub fn live_generated_reference_docs() -> BTreeMap<String, String> {
     let root = Cli::command();
 
     let mut files = BTreeMap::new();
@@ -104,6 +104,28 @@ pub(super) fn live_generated_reference_docs() -> BTreeMap<String, String> {
         render_index(&summaries, node_count, &undocumented),
     );
     files
+}
+
+/// Write the checked-in CLI reference directly from the production clap tree.
+/// This binary-facing path intentionally avoids compiling test-only fixtures.
+pub fn write_cli_reference(workspace_root: &std::path::Path) -> std::io::Result<()> {
+    let directory = workspace_root.join(GENERATED_DIR);
+    let expected = live_generated_reference_docs();
+    if directory.exists() {
+        std::fs::remove_dir_all(&directory)?;
+    }
+    std::fs::create_dir_all(&directory)?;
+    for (name, body) in &expected {
+        std::fs::write(directory.join(name), body)?;
+    }
+    let contract = serde_json::to_string_pretty(
+        &homeboy_command_contract::cli_reference::CliReference::new(expected),
+    )
+    .expect("serialize CLI reference contract");
+    std::fs::write(
+        workspace_root.join("docs/reference/cli/command-surface.json"),
+        format!("{contract}\n"),
+    )
 }
 
 fn render_command_page(name: &str, command: &Command) -> String {

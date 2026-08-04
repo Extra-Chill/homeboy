@@ -1,7 +1,7 @@
 <!-- GENERATED FILE. DO NOT EDIT BY HAND.
 Source of truth: the clap command tree in `crates/homeboy-cli`.
 Regenerate with:
-HOMEBOY_WRITE_CLI_REFERENCE=1 cargo test -p homeboy-cli --lib cli_surface::reference_docs
+cargo run -p homeboy-cli --bin generate-cli-reference
 Hand-written narrative for these commands lives in `docs/commands/`. -->
 
 # `homeboy runner` command reference
@@ -213,25 +213,14 @@ Diagnose a local or configured SSH runner without mutating it
 ## `homeboy runner preflight`
 
 ```sh
-homeboy runner preflight [OPTIONS] <RUNNER_ID>
+homeboy runner preflight [OPTIONS]
 ```
 
 Evaluate workload placement without creating a run, rig lease, runner job, or connection
 
-| Argument | Required | Description |
-| --- | --- | --- |
-| `<RUNNER_ID>` | yes | Runner ID to evaluate |
-
 | Option | Value | Description |
 | --- | --- | --- |
-| `--workload-family` | `<WORKLOAD_FAMILY>` | Declared workload family, for example bench, test, or agent-task |
-| `--command` | `<COMMAND>` | Canonical intended command label |
-| `--allow-queue` | flag | Permit a durable reverse-runner workload to report queueable at capacity |
-| `--durable-workload` | flag | The wrapper will persist a durable workload identity before setup |
-| `--require-tool` | `<REQUIRED_TOOLS>` | Required executable tool on the selected runner. Repeat for each requirement |
-| `--require-capability` | `<REQUIRED_CAPABILITIES>` | Required runner capability. Repeat for each requirement |
-| `--provider` | `<PROVIDER>` | Selected provider identity, retained in the admission evidence |
-| `--source-path` | `<SOURCE_PATH_INPUTS>` | Source or path-bearing input that execution will materialize. Repeat for each input |
+| `--request` | `<REQUEST>` | Complete typed PlacementReadinessRequest JSON. It accepts only compiler-recognised invocations and never executable probe text |
 
 ## `homeboy runner connect`
 

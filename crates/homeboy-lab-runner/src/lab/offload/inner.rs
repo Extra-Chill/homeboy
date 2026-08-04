@@ -1528,13 +1528,15 @@ pub(crate) fn run_lab_offload_inner(
         &runner_homeboy,
         &runner_status,
     )?;
-    // Execution derives its capability contract from the trusted routed command.
-    // Public preflight uses only its safe invocation compiler and cannot inject
-    // a probe or widen this remote shell surface.
-    let execution_toolchain = toolchain_readiness_preflight(&contract)?;
-    let capability_plan =
-        lab_runner_capability_contract(&contract, &source_path, &command_prefix.required_tools)
-            .map(crate::prepare_lab_runner_capability);
+    // Public preflight constructs the same typed routed command before entering
+    // this compiler, so no admission requirement can diverge at this boundary.
+    let admission_plan = crate::lab_selection::compile_lab_admission_plan(
+        &contract,
+        &source_path,
+        &command_prefix.required_tools,
+    )?;
+    let execution_toolchain = admission_plan.toolchain;
+    let capability_plan = Some(admission_plan.capability);
     if let Some(capability_plan) = &capability_plan {
         // Capability/daemon preflight is runner setup overhead (#3001); time it
         // and record the elapsed duration on every exit path so a fallback-to-
