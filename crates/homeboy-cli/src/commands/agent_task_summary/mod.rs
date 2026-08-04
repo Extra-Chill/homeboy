@@ -126,7 +126,11 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         format!("Tasks planned: {tasks_planned}"),
         format!("Tasks attempted: {tasks_attempted}"),
     ];
-    lines.extend(code_production_lines(&metrics));
+    let mut production_lines = code_production_lines(&metrics);
+    if let Some(candidate) = string_value(payload, &["execution_states", "candidate", "state"]) {
+        production_lines[1] = format!("Candidate state: {candidate}");
+    }
+    lines.extend(production_lines);
     if let Some(diagnostic) = first_actionable_diagnostic(payload) {
         lines.push(format!("Diagnostic: {diagnostic}"));
     }
@@ -136,7 +140,13 @@ fn render_status_summary(payload: &Value) -> Option<String> {
             .map(|publication| format!("publication {publication}"))
             .unwrap_or_else(|| "publication outcome unknown".to_string());
         lines.push(format!("Cook: {cook_status} ({publication})"));
-        lines.push(format!("Next: homeboy agent-task diagnose {run_id} --full"));
+        if string_value(payload, &["cook", "publication"]) == Some("completed")
+            && metrics.candidate_state.is_available()
+        {
+            lines.push(format!("Next: homeboy agent-task review {run_id}"));
+        } else {
+            lines.push(format!("Next: homeboy agent-task diagnose {run_id} --full"));
+        }
     } else if metrics.candidate_state.is_available() {
         if let Some(path) = aggregate_path {
             lines.push(format!("Aggregate: {path}"));
