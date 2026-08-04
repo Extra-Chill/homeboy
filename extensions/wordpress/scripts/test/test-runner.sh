@@ -8,12 +8,22 @@ set -euo pipefail
 # environment in the component's test manifest.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:?HOMEBOY_RUNTIME_RUNNER_PRELUDE is required}"
 SHARED_LIB_DIR="${HOMEBOY_SHARED_LIB_DIR:-}"
 if [ -z "$SHARED_LIB_DIR" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" ]; then
     SHARED_LIB_DIR="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
 fi
 SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${SCRIPT_DIR}/../../../scripts/lib" && pwd)}"
+
+# Resolve the runner prelude the same way every other runtime helper is
+# resolved: explicit override, then HOMEBOY_CORE_DIR, then a sibling checkout.
+# Hard-requiring the environment variable made this runner unrunnable outside a
+# Homeboy-launched invocation, which is why its own self-check had to be skipped.
+RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-}"
+if [ -z "$RUNNER_PRELUDE" ]; then
+    # shellcheck source=../../../scripts/lib/runtime-helper-resolver.sh
+    source "${SHARED_LIB_DIR}/runtime-helper-resolver.sh"
+    RUNNER_PRELUDE="$(homeboy_runtime_helper "${SHARED_LIB_DIR%/scripts/lib}" HOMEBOY_RUNTIME_RUNNER_PRELUDE runner-prelude.sh)" || exit 1
+fi
 
 SMOKE_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE_WP:-${SCRIPT_DIR}/test-runner-host-smoke-wp.sh}"
 WP_CODEBOX_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX:-${SCRIPT_DIR}/test-runner-wp-codebox.sh}"

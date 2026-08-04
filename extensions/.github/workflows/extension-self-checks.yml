@@ -36,44 +36,40 @@ jobs:
           - swift
           - wordpress
         include:
-          # Some already-declared self_checks cannot pass in this job today.
-          # Every skip is reported by the runner as a GitHub Actions warning so
-          # it stays visible instead of rotting silently. Nothing is removed
-          # from any homeboy.json, so release-preflight coverage is unchanged.
-          #
-          #   rust tests/zero-test-scope-fallback-smoke.sh
-          #     Fails with "HOMEBOY_RUNTIME_RUNNER_PRELUDE is required" (run
-          #     30700539989). Same #2507 class as the WordPress entry below.
-          #     Note it self-skips with `SKIP: cargo is not installed`, so it is
-          #     silently green anywhere without a Rust toolchain and only fails
-          #     on a runner that has one.
-          - component: rust
-            self_check_skip: |
-              bash tests/zero-test-scope-fallback-smoke.sh
-
-          # Two WordPress self_checks cannot pass in this job today.
-          #
-          #   scripts/test/full-suite-no-phpunit-smoke.sh
-          #     Routes through scripts/test/test-runner.sh, which hard-requires
-          #     HOMEBOY_RUNTIME_RUNNER_PRELUDE. That path is materialized by the
-          #     Homeboy binary when it executes an extension runner; it does not
-          #     exist for a self-check, which Homeboy runs with a plain `sh -c`.
-          #     Tracked by #2507.
+          # #2507 is closed: runtime helpers now resolve through
+          # scripts/lib/runtime-helper-resolver.sh, which honours HOMEBOY_CORE_DIR
+          # (checked out below), so the rust zero-test-scope smoke and the
+          # WordPress full-suite smoke both run here now.
           #
           #   tests/wordpress-fuzz-runner-smoke.js
           #     Pre-existing failure, not an environment problem. Its own
           #     fake-wp-codebox.js fixture exits 1 with "expected public
           #     wp-codebox run-fuzz-suite command", so preflight readiness
           #     resolves to `blocked` and the run status is `skipped` instead of
-          #     the asserted success. Only discoverable once the self_checks were
-          #     wired to run at all.
+          #     the asserted success. Every skip is reported by the runner as a
+          #     GitHub Actions warning so it stays visible instead of rotting
+          #     silently, and nothing is removed from any homeboy.json.
           - component: wordpress
             self_check_skip: |
-              bash scripts/test/full-suite-no-phpunit-smoke.sh
               node tests/wordpress-fuzz-runner-smoke.js
 
     steps:
       - uses: actions/checkout@v4
+
+      # Extension runners source Homeboy's runtime helpers (runner-prelude.sh,
+      # sidecar-writer.sh, command-capture.sh and friends) from Homeboy's source
+      # tree. Without this the resolver falls back to a sibling checkout that
+      # only exists on a developer's disk, so a smoke passes or fails based on
+      # what happens to sit next to the repo. Same pattern as the WP Codebox
+      # canary workflow.
+      - name: Checkout Homeboy core
+        uses: actions/checkout@v4
+        with:
+          repository: Extra-Chill/homeboy
+          ref: main
+          path: .ci/homeboy
+          sparse-checkout: crates/homeboy-extension/src/runtime
+          sparse-checkout-cone-mode: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -91,9 +87,11 @@ jobs:
       - name: Run lint self-checks
         env:
           HOMEBOY_SELF_CHECK_SKIP: ${{ matrix.self_check_skip }}
+          HOMEBOY_CORE_DIR: ${{ github.workspace }}/.ci/homeboy
         run: bash scripts/ci/run-self-checks.sh "${{ matrix.component }}" lint
 
       - name: Run test self-checks
         env:
           HOMEBOY_SELF_CHECK_SKIP: ${{ matrix.self_check_skip }}
+          HOMEBOY_CORE_DIR: ${{ github.workspace }}/.ci/homeboy
         run: bash scripts/ci/run-self-checks.sh "${{ matrix.component }}" test

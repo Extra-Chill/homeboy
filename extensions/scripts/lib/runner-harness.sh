@@ -1,33 +1,44 @@
 #!/usr/bin/env bash
 # Shared shell-runner harness helpers for extension wrappers.
 
+# Runtime helpers live in Homeboy's source tree. There is exactly one place that
+# knows how to find them: runtime-helper-resolver.sh, which honours an explicit
+# override, then HOMEBOY_CORE_DIR, then a sibling checkout. This harness used to
+# carry its own copy of the sibling path and ignore HOMEBOY_CORE_DIR, so setting
+# it resolved some helpers and not others.
+homeboy_runner_harness_resolve_helper() {
+    local override_variable="$1"
+    local helper_name="$2"
+    local resolver_dir repo_root resolved
+
+    resolver_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    repo_root="$(cd "${resolver_dir}/.." && pwd)"
+
+    if ! type homeboy_runtime_helper >/dev/null 2>&1; then
+        # shellcheck source=./runtime-helper-resolver.sh
+        source "${resolver_dir}/runtime-helper-resolver.sh"
+    fi
+
+    if resolved="$(homeboy_runtime_helper "$repo_root" "$override_variable" "$helper_name" 2>/dev/null)"; then
+        printf '%s\n' "$resolved"
+        return 0
+    fi
+
+    echo "Error: ${override_variable} is required" >&2
+    return 1
+}
+
 homeboy_runner_harness_init() {
-    local prelude="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-}"
-    if [ -z "$prelude" ]; then
-        local repo_root
-        repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-        prelude="${repo_root}/../homeboy/crates/homeboy-extension/src/runtime/runner-prelude.sh"
-    fi
-    if [ ! -f "$prelude" ]; then
-        echo "Error: HOMEBOY_RUNTIME_RUNNER_PRELUDE is required" >&2
-        return 1
-    fi
+    local prelude
+    prelude="$(homeboy_runner_harness_resolve_helper HOMEBOY_RUNTIME_RUNNER_PRELUDE runner-prelude.sh)" || return 1
     # shellcheck source=/dev/null
     source "$prelude"
     homeboy_runner_init "$@"
 }
 
 homeboy_runner_harness_source_command_capture() {
-    local helper="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-}"
-    if [ -z "$helper" ]; then
-        local repo_root
-        repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-        helper="${repo_root}/../homeboy/crates/homeboy-extension/src/runtime/command-capture.sh"
-    fi
-    if [ ! -f "$helper" ]; then
-        echo "Error: HOMEBOY_RUNTIME_COMMAND_CAPTURE is required" >&2
-        return 1
-    fi
+    local helper
+    helper="$(homeboy_runner_harness_resolve_helper HOMEBOY_RUNTIME_COMMAND_CAPTURE command-capture.sh)" || return 1
     # shellcheck source=/dev/null
     source "$helper"
 }
