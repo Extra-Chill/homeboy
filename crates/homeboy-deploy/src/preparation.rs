@@ -465,10 +465,9 @@ fn prepare_payload(
         ) {
             ReleaseArtifactPlan::Reuse { tag, .. } => Some(match retained_release_artifact {
                 Some(artifact) => artifact,
-                None => resolve_planned_release_artifact(&component, &tag, release_artifacts)
-                    .map_err(|message| {
-                        Error::validation_invalid_argument("releaseArtifact", message, None, None)
-                    })?,
+                // `resolve_planned_release_artifact` already returns a coded,
+                // detailed, hinted error; re-wrapping it would flatten it.
+                None => resolve_planned_release_artifact(&component, &tag, release_artifacts)?,
             }),
             ReleaseArtifactPlan::LocalBuild { .. } => None,
         }

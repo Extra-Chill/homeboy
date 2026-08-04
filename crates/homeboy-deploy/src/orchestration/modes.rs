@@ -63,7 +63,8 @@ pub(super) fn run_check_mode(
                     ),
                     Err(error) => {
                         super::super::content_manifest::canonical_package_unavailable_for_artifact(
-                            error, package,
+                            super::super::content_manifest::diagnostic_text(&error),
+                            package,
                         )
                     }
                 }
@@ -93,7 +94,10 @@ pub(super) fn run_check_mode(
                         c.build_artifact.as_deref(),
                     ),
                     Err(error) => super::super::content_manifest::local_build_package_unavailable(
-                        format!("deployed-package receipt unavailable: {error}"),
+                        format!(
+                            "deployed-package receipt unavailable: {}",
+                            super::super::content_manifest::diagnostic_text(&error)
+                        ),
                         c.build_artifact.as_deref(),
                     ),
                 }

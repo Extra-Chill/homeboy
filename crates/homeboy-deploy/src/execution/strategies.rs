@@ -287,7 +287,7 @@ pub(super) fn execute_artifact_deploy(
                 base_path,
                 prepared.local_version.clone(),
                 prepared.remote_version.clone(),
-                error,
+                super::super::content_manifest::diagnostic_text(&error),
             )
             .with_remote_path(install_dir.to_string())
             .with_build_exit_code(prepared.build_exit_code);

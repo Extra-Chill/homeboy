@@ -281,7 +281,10 @@ pub(crate) fn prepare_component_deploy(
                     local_version,
                     remote_version,
                     build_exit_code,
-                    format!("unable to capture deployed package receipt: {error}"),
+                    format!(
+                        "unable to capture deployed package receipt: {}",
+                        super::super::content_manifest::diagnostic_text(&error)
+                    ),
                 ));
             }
             (_, Err(error)) => {

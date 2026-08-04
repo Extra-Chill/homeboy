@@ -438,11 +438,9 @@ pub(super) fn deploy_components(
             prepared.canonical_release_artifact.as_ref(),
         ) {
             (Some(archive), Some(artifact)) => {
-                super::content_manifest::verify_archive_hash(archive, artifact).map_err(
-                    |error| {
-                        Error::validation_invalid_argument("release_artifact", error, None, None)
-                    },
-                )?;
+                // Already a coded error naming `release_artifact` and carrying
+                // the offending archive; re-wrapping it would only re-flatten it.
+                super::content_manifest::verify_archive_hash(archive, artifact)?;
                 super::content_manifest::compare_archive(
                     archive,
                     &prepared.install_dir,
@@ -497,7 +495,10 @@ pub(super) fn deploy_components(
                     base_path,
                     prepared.local_version.clone(),
                     prepared.remote_version.clone(),
-                    format!("unable to invalidate prior deployed-package receipt: {error}"),
+                    format!(
+                        "unable to invalidate prior deployed-package receipt: {}",
+                        super::content_manifest::diagnostic_text(&error)
+                    ),
                 ));
                 continue;
             }
@@ -590,7 +591,8 @@ pub(super) fn deploy_components(
                 ) {
                     result.status = "failed".to_string();
                     result.error = Some(format!(
-                        "deployment completed but authoritative deployed-package receipt could not be persisted: {error}"
+                        "deployment completed but authoritative deployed-package receipt could not be persisted: {}",
+                        super::content_manifest::diagnostic_text(&error)
                     ));
                 }
             }
@@ -729,18 +731,15 @@ fn resolve_release_artifacts_for_deploy(
                             "Canonical release package unavailable for '{}' ({error})",
                             component.id
                         );
-                        unavailable_canonical_packages
-                            .insert(component.id.clone(), error.to_string());
+                        unavailable_canonical_packages.insert(
+                            component.id.clone(),
+                            super::content_manifest::diagnostic_text(&error),
+                        );
                         continue;
                     }
-                    Err(error) => {
-                        return Err(Error::validation_invalid_argument(
-                            "releaseArtifact",
-                            error,
-                            None,
-                            None,
-                        ))
-                    }
+                    // Already coded, detailed, and hinted by
+                    // `release_asset_download_error`; return it intact.
+                    Err(error) => return Err(error),
                 };
             homeboy_core::log_status!(
                 "deploy",
