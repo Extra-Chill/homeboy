@@ -113,11 +113,11 @@ use super::super::{
     prepare_lab_runner_capability, remote_runner_homeboy_path, reuse_compatible_snapshot_workspace,
     rig_materialization, status, status_for_admission, sync_workspace, LabRunnerGateDecision,
     MaterializedWorkspace, Runner, RunnerAvailability, RunnerCapabilityPreflight,
-    RunnerDependencyCacheSaveOutput,
-    RunnerDependencyCacheSaveRequest, RunnerExecOptions, RunnerFileTransfer,
-    RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceApplyOutput,
-    RunnerWorkspaceOutputPaths, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
-    RunnerWorkspaceSyncOutput, WorkspaceCleanupPolicy, WorkspaceTerminalOutcome,
+    RunnerDependencyCacheSaveOutput, RunnerDependencyCacheSaveRequest, RunnerExecOptions,
+    RunnerFileTransfer, RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode,
+    RunnerWorkspaceApplyOutput, RunnerWorkspaceOutputPaths, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, WorkspaceCleanupPolicy,
+    WorkspaceTerminalOutcome,
 };
 use crate::runtime_materializer::{
     resolve_lab_agent_runtime, runtime_execution_evidence, RunnerRuntimeMaterializerOperations,

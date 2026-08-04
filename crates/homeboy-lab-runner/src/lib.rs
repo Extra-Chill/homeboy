@@ -788,7 +788,11 @@ pub fn refresh_detached_queue_runner() -> Result<Option<String>> {
             connected: status.connected,
             capacity: runner.settings.concurrency_limit,
             stale_daemon: status.stale_daemon.is_some(),
-            active_jobs: status.active_jobs.len(),
+            admission_fresh: status.daemon_fresh_for_admission(),
+            admission_remediation: status
+                .admission_action()
+                .map(|action| action.render_command()),
+            active_jobs: status.active_job_count.max(status.active_jobs.len()),
             active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
             capabilities_ready,
         };
@@ -810,6 +814,7 @@ fn detached_queue_runner_from_candidates(
         (candidate.mode == RunnerTunnelMode::Reverse
             && candidate.connected
             && !candidate.stale_daemon
+            && candidate.admission_fresh
             && candidate.active_jobs_available
             && candidate.capabilities_ready
             && at_capacity)
