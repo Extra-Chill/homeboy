@@ -56,6 +56,12 @@ pub struct AgentTaskManagedService {
     /// command has an externally fixed endpoint and no port lease is required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_env: Option<String>,
+    /// The selected execution host binds the socket before exec and hands the
+    /// listener to a socket-activation-aware service on fd 3. This is the only
+    /// race-free dynamic-port mode; a service that binds its own port must use
+    /// an explicitly reserved fixed port.
+    #[serde(default)]
+    pub socket_handoff: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readiness: Option<AgentTaskManagedServiceReadiness>,
     /// An externally provisioned reviewer URL. Homeboy treats this as a
@@ -109,12 +115,15 @@ mod managed_service_contract_tests {
     fn managed_service_is_a_portable_lab_handoff_contract() {
         let service: AgentTaskManagedService = serde_json::from_value(serde_json::json!({
             "id": "neutral-http", "command": ["fixture", "--serve"],
-            "port": 8080, "readiness": { "kind": "http", "path": "/ready" },
-            "secret_env": ["FIXTURE_TOKEN"], "public_url": "https://preview.example.test/run"
+            "port": 0, "socket_handoff": true, "readiness": { "kind": "http", "path": "/ready" },
+            "secret_env": ["FIXTURE_TOKEN"], "public_url": "https://preview.example.test/run",
+            "target": "lab", "lifecycle": "target"
         }))
         .expect("service contract");
         assert_eq!(service.version, AgentTaskManagedService::VERSION);
         assert_eq!(service.host, "127.0.0.1");
+        assert!(service.socket_handoff);
+        assert_eq!(service.target.as_deref(), Some("lab"));
         assert_eq!(
             service.readiness.as_ref().unwrap().kind,
             AgentTaskManagedServiceReadinessKind::Http

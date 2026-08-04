@@ -34,9 +34,13 @@ pub(crate) struct AgentTaskManagedServiceRecord {
     pub process_identity: Option<ProcessStartIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_lease: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readiness_attempts: Vec<Value>,
 }
 
-pub(super) struct ManagedServices {
+/// Execution-host service supervisor. It is instantiated by whichever host
+/// executes the plan (controller or Lab runner), never by a remote caller.
+pub(crate) struct AgentTaskServiceSupervisor {
     services: Vec<RunningService>,
 }
 
@@ -46,6 +50,7 @@ struct RunningService {
     containment: homeboy_core::process::ProcessContainment,
     record: AgentTaskManagedServiceRecord,
     port_lease: Option<PortLease>,
+    listener: Option<TcpListener>,
 }
 
 struct PortLease {
@@ -59,7 +64,7 @@ impl Drop for PortLease {
     }
 }
 
-impl ManagedServices {
+impl AgentTaskServiceSupervisor {
     pub(super) fn start(specs: &[AgentTaskManagedService], run_id: &str) -> Result<Self, String> {
         let mut services = Self {
             services: Vec::new(),
@@ -73,7 +78,7 @@ impl ManagedServices {
                     AgentTaskManagedService::VERSION
                 ));
             }
-            if spec.id.trim().is_empty() || spec.command.is_empty() {
+            if !safe_service_id(&spec.id) || spec.command.is_empty() {
                 return Err("managed service requires a non-empty id and command argv".to_string());
             }
             if services
@@ -111,7 +116,7 @@ impl ManagedServices {
             .try_clone()
             .map_err(|error| format!("clone managed service log: {error}"))?;
         let mut spec = spec;
-        let (port, port_lease) = lease_port(&spec)?;
+        let (port, port_lease, listener) = lease_port(&spec)?;
         spec.port = port;
         let mut command = Command::new(&spec.command[0]);
         command
@@ -143,6 +148,7 @@ impl ManagedServices {
         if let Some(port) = spec.port {
             command.env(spec.port_env.as_deref().unwrap_or("PORT"), port.to_string());
         }
+        handoff_listener(&mut command, listener.as_ref())?;
         let mut containment = homeboy_core::process::ProcessContainment::prepare(&mut command)
             .map_err(|error| error.message)?;
         let child = command
@@ -158,15 +164,17 @@ impl ManagedServices {
             log_path: Some(log_path.display().to_string()),
             pid: Some(child.id()),
             cleanup: None,
-            provenance: json!({"schema":"homeboy/agent-task-managed-service/v2", "run_id": run_id, "argv": spec.command, "cwd": spec.cwd, "host": spec.host, "port": spec.port, "target": spec.target, "lifecycle": spec.lifecycle, "env_allowlist": spec.env_allowlist, "secret_env": spec.secret_env, "secret_env_plan": spec.secret_env_plan.as_ref().map(|plan| plan.redacted())}),
+            provenance: json!({"schema":"homeboy/agent-task-managed-service/v3", "run_id": run_id, "argv": spec.command, "cwd": spec.cwd, "host": spec.host, "port": spec.port, "target": spec.target, "lifecycle": spec.lifecycle, "socket_handoff": spec.socket_handoff, "env_allowlist": spec.env_allowlist, "secret_env": spec.secret_env, "secret_env_plan": spec.secret_env_plan.as_ref().map(|plan| plan.redacted()), "endpoint_ownership": { "host": spec.host, "port": spec.port, "lease": port_lease.as_ref().map(|lease| lease.path.display().to_string()) }}),
             process_identity: process_start_identity(child.id())
                 .map_err(|error| format!("inspect managed service process identity: {error}"))?,
             port_lease: port_lease
                 .as_ref()
                 .map(|lease| lease.path.display().to_string()),
+            readiness_attempts: Vec::new(),
         };
         persist_record(run_id, &record)?;
-        if let Err(error) = wait_ready(&spec, local_url.as_deref()) {
+        if let Err(error) = wait_ready(&spec, local_url.as_deref(), &mut record.readiness_attempts)
+        {
             let _ = containment.terminate_on_failure_bounded(Duration::from_secs(2), false);
             record.state = "failed".to_string();
             record.cleanup = Some("terminated_after_readiness_failure".to_string());
@@ -180,6 +188,7 @@ impl ManagedServices {
             containment,
             record,
             port_lease,
+            listener,
         });
         Ok(())
     }
@@ -241,19 +250,44 @@ impl ManagedServices {
     }
 }
 
-fn lease_port(spec: &AgentTaskManagedService) -> Result<(Option<u16>, Option<PortLease>), String> {
+// Keep the old scheduler-private name while callers migrate to the generic
+// execution-host supervisor API.
+pub(super) type ManagedServices = AgentTaskServiceSupervisor;
+
+fn lease_port(
+    spec: &AgentTaskManagedService,
+) -> Result<(Option<u16>, Option<PortLease>, Option<TcpListener>), String> {
     let Some(requested) = spec.port else {
-        return Ok((None, None));
+        return Ok((None, None, None));
     };
-    let port = if requested == 0 {
-        TcpListener::bind((spec.host.as_str(), 0))
-            .map_err(|error| format!("allocate managed service port: {error}"))?
-            .local_addr()
-            .map_err(|error| format!("read managed service port: {error}"))?
-            .port()
+    if requested == 0 && !spec.socket_handoff {
+        return Err(format!(
+            "managed service '{}' dynamic ports require socket_handoff",
+            spec.id
+        ));
+    }
+    let listener = if spec.socket_handoff {
+        Some(
+            TcpListener::bind((spec.host.as_str(), requested)).map_err(|error| {
+                format!(
+                    "managed service '{}' port allocation collision on {}:{requested}: {error}",
+                    spec.id, spec.host
+                )
+            })?,
+        )
     } else {
-        requested
+        None
     };
+    let port = listener
+        .as_ref()
+        .map(|listener| {
+            listener
+                .local_addr()
+                .map(|address| address.port())
+                .map_err(|error| format!("read managed service port: {error}"))
+        })
+        .transpose()?
+        .unwrap_or(requested);
     let lease_dir = homeboy_core::paths::homeboy_data()
         .map_err(|error| error.message)?
         .join("agent-task-service-ports");
@@ -273,7 +307,51 @@ fn lease_port(spec: &AgentTaskManagedService) -> Result<(Option<u16>, Option<Por
                 spec.id, spec.host
             )
         })?;
-    Ok((Some(port), Some(PortLease { path, _file: file })))
+    Ok((Some(port), Some(PortLease { path, _file: file }), listener))
+}
+
+fn safe_service_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn handoff_listener(command: &mut Command, listener: Option<&TcpListener>) -> Result<(), String> {
+    let Some(listener) = listener else {
+        return Ok(());
+    };
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        let descriptor = unsafe { libc::dup(listener.as_raw_fd()) };
+        if descriptor < 0 {
+            return Err(format!(
+                "duplicate service listener: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        command.env("HOMEBOY_LISTEN_FD", "3");
+        unsafe {
+            command.pre_exec(move || {
+                if libc::dup2(descriptor, 3) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if descriptor != 3 {
+                    libc::close(descriptor);
+                }
+                Ok(())
+            });
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = command;
+        Err("service socket handoff is unsupported on this execution host".to_string())
+    }
 }
 
 fn persist_record(run_id: &str, record: &AgentTaskManagedServiceRecord) -> Result<(), String> {
@@ -347,7 +425,11 @@ pub(crate) fn reconcile_run_services(
     Ok(records)
 }
 
-fn wait_ready(spec: &AgentTaskManagedService, local_url: Option<&str>) -> Result<(), String> {
+fn wait_ready(
+    spec: &AgentTaskManagedService,
+    local_url: Option<&str>,
+    attempts: &mut Vec<Value>,
+) -> Result<(), String> {
     let Some(port) = spec.port else {
         return Ok(());
     };
@@ -378,8 +460,10 @@ fn wait_ready(spec: &AgentTaskManagedService, local_url: Option<&str>) -> Result
                 .unwrap_or(false),
         };
         if ready {
+            attempts.push(json!({"status":"ready", "at":"observed", "endpoint": local_url}));
             return Ok(());
         }
+        attempts.push(json!({"status":"not_ready", "endpoint": local_url}));
         if Instant::now() >= deadline {
             return Err(format!("readiness probe timed out after {timeout}ms"));
         }
@@ -405,7 +489,7 @@ mod tests {
             id: "fixture".to_string(),
             command: vec![
                 "python3".to_string(), "-u".to_string(), "-c".to_string(),
-                "import http.server, os; http.server.HTTPServer(('127.0.0.1', int(os.environ['PORT'])), http.server.SimpleHTTPRequestHandler).serve_forever()".to_string(),
+                "import socket,http.server; s=socket.fromfd(3,socket.AF_INET,socket.SOCK_STREAM); h=http.server.HTTPServer(('127.0.0.1',0),http.server.SimpleHTTPRequestHandler,False); h.socket=s; h.server_address=s.getsockname(); h.server_activate(); h.serve_forever()".to_string(),
             ],
             cwd: None,
             env: HashMap::from([("PORT".to_string(), port.to_string())]),
@@ -415,6 +499,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: Some(port),
             port_env: Some("PORT".to_string()),
+            socket_handoff: true,
             readiness: Some(AgentTaskManagedServiceReadiness {
                 kind: AgentTaskManagedServiceReadinessKind::Http,
                 path: Some("/".to_string()), timeout_ms: Some(5_000),
@@ -449,6 +534,10 @@ mod tests {
             assert_eq!(records[0].state, "stopped");
             assert_eq!(records[0].cleanup.as_deref(), Some("cleaned_up:success"));
             assert!(std::path::Path::new(records[0].log_path.as_deref().unwrap()).exists());
+            assert_eq!(
+                records[0].readiness_attempts.last().unwrap()["status"],
+                "ready"
+            );
         });
     }
 
@@ -482,6 +571,23 @@ mod tests {
             };
             assert!(error.contains("port allocation collision"));
             first.cleanup("test");
+        });
+    }
+
+    #[test]
+    fn rejects_unsafe_service_ids_and_dynamic_ports_without_handoff() {
+        with_isolated_home(|_| {
+            let mut unsafe_id = fixture(0);
+            unsafe_id.id = "../escape".to_string();
+            assert!(ManagedServices::start(&[unsafe_id], "safe-id").is_err());
+
+            let mut unowned_socket = fixture(0);
+            unowned_socket.socket_handoff = false;
+            let error = match ManagedServices::start(&[unowned_socket], "socket-required") {
+                Ok(_) => panic!("dynamic port must stay owned by the supervisor"),
+                Err(error) => error,
+            };
+            assert!(error.contains("socket_handoff"));
         });
     }
 }
