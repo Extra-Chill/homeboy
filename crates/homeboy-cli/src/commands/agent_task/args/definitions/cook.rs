@@ -474,9 +474,15 @@ pub struct AgentTaskCookArgs {
     /// --prompt, it supplies the one provider task.
     #[arg(long, value_name = "TEXT")]
     pub goal: Option<String>,
-    /// Workspace handle the cook edits, verifies, and finalizes into (e.g.
-    /// `repo@branch-slug`). When omitted, --repo plus --task-url derives an
-    /// issue-owned destination through the configured workspace provider.
+    /// Workspace handle the cook edits, verifies, and finalizes into. The handle
+    /// is `<repo>@<branch-slug>`, where the slug replaces every character of
+    /// --head outside [A-Za-z0-9_-] with `-`, so branch `fix/1234-x` is handle
+    /// `repo@fix-1234-x`. Existing destinations are reused. Creating a missing
+    /// one is not a built-in capability: it requires an enabled worktree
+    /// provider with a `commands.ensure` argv template, and without one you must
+    /// create the destination first with `homeboy worktree create`. When
+    /// omitted, --repo plus --task-url derives an issue-owned destination
+    /// through that same configured provider.
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: Option<String>,
     #[arg(

@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn retry_hint_requires_persisted_materialization_identity() {
+fn retry_hint_is_suppressed_until_controller_replay_admission() {
     let missing =
         homeboy_agents::agent_task_scheduler::AgentTaskPlan::new("missing-workspace", Vec::new());
     let missing_error = super::super::inner::with_agent_task_retry_hint(
@@ -25,9 +25,7 @@ fn retry_hint_requires_persisted_materialization_identity() {
         "retryable-workspace",
         Some(&retryable),
     );
-    assert!(retryable_error.hints.iter().any(|hint| hint
-        .message
-        .contains("agent-task retry retryable-workspace --run")));
+    assert!(retryable_error.hints.is_empty());
 }
 
 #[test]

@@ -111,7 +111,7 @@ own arguments.
 - `shared_store_reserve_bytes` — Free bytes required on the shared Cargo target filesystem before a build starts (default: 5 GiB).
 - `shared_store_reserve_inodes` — Free inodes required on the shared Cargo target filesystem before a build starts (default: 100000).
 - `reconstructable_artifact_days` — Idle age required before automatic retention reclaims reconstructable per-worktree build artifacts (default: 7). Active task worktrees remain protected.
-- `reconstructable_artifact_reserve_bytes` — Free-space reserve that enables early reconstructable-artifact retention under pressure; `0` disables pressure cleanup (default).
+- `reconstructable_artifact_reserve_bytes` — Free-space reserve for reconstructable per-worktree artifacts (default: 20 GiB). Before managed work starts below this floor, Homeboy runs its bounded retention owner and admits work only when the reserve is restored. `0` explicitly disables this pressure admission.
 - `automatic_retention_max_run_seconds` — Cooperative wall-clock budget for one automatic pass (default: 60). The executor yields between stores; a category never interrupts an in-progress safe mutation.
 
 Runner-side age floors are deliberately *not* configuration keys. Both the

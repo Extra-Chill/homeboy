@@ -4,6 +4,7 @@
 //! runner-job composition that back `runs list/show/resume-plan/artifacts` and
 //! the `runs artifact` retrieval/cleanup subcommands.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use serde_json::Value;
@@ -30,7 +31,7 @@ use super::types::{
     RunsArtifactsOutput, RunsCancelOutput, RunsDirectoryArtifactPublicationGuidance,
     RunsEnvKeyOutput, RunsEnvOutput, RunsEnvSourceLayerOutput, RunsEnvSummary,
     RunsFieldSelectionOutput, RunsListArgs, RunsListOutput, RunsOutput, RunsResumePlanOutput,
-    RunsSelectedField, RunsShowOutput,
+    RunsSelectedField, RunsShowOutput, RunsStaleRunSummary,
 };
 use super::{reconcile, remote, remote_artifact, CmdResult};
 
@@ -88,19 +89,22 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
     let limit = args.limit.max(0) as usize;
     let run_records = run_records.into_iter().take(limit).collect::<Vec<_>>();
 
-    let mut runs = run_summaries_with_artifact_indexes(&store, run_records)?;
-
-    let runner_enrichment = args
+    let active_runner_jobs = args
         .include_active_runner_jobs
         .then(|| active_runner_job_summaries(status_filter.as_deref()))
-        .map(|enrichment| {
-            runs.extend(enrichment.runs);
-            enrichment.state
-        })
-        .flatten();
+        .unwrap_or_default();
+    let stale_runs = stale_run_summary(
+        &run_records,
+        &active_runner_jobs.durable_run_ids,
+        active_runner_jobs.complete,
+    );
+
+    let mut runs = run_summaries_with_artifact_indexes(&store, run_records)?;
+    runs.extend(active_runner_jobs.runs);
+    let runner_enrichment = active_runner_jobs.state;
 
     let matched_runs = runs.len();
-    let actionable = actionable_for_run_list(&runs);
+    let actionable = actionable_for_run_list(&runs, stale_runs.as_ref());
     Ok((
         RunsOutput::List(RunsListOutput {
             command,
@@ -111,6 +115,7 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
             // empty/short active-job list is never mistaken for an idle Lab.
             probe_degradations: readonly_probe::take_degradations(),
             runner_enrichment,
+            stale_runs,
             actionable,
         }),
         0,
@@ -267,9 +272,12 @@ fn run_correlates_with(run: &RunRecord, correlation: &str) -> bool {
 /// *reconciliation* that a read-only listing must never block on. The indexed
 /// snapshot answers the only question this listing asks ("what is running right
 /// now") with one bounded `/jobs` query per runner.
+#[derive(Default)]
 struct ActiveRunnerJobEnrichment {
     runs: Vec<RunSummary>,
     state: Option<super::types::RunsRunnerEnrichment>,
+    durable_run_ids: HashSet<String>,
+    complete: bool,
 }
 
 fn active_runner_job_summaries(status: Option<&str>) -> ActiveRunnerJobEnrichment {
@@ -298,6 +306,8 @@ fn active_runner_job_summaries_from_snapshots(
                         message: error.message,
                     }],
                 }),
+                durable_run_ids: HashSet::new(),
+                complete: false,
             };
         }
     };
@@ -314,7 +324,8 @@ fn active_runner_job_summaries_from_snapshots(
                 })
         })
         .collect::<Vec<_>>();
-    let runs = snapshots
+    let complete = unavailable.is_empty();
+    let active_jobs = snapshots
         .into_iter()
         .filter(|snapshot| snapshot.connected)
         .flat_map(|snapshot| snapshot.active_jobs)
@@ -322,6 +333,13 @@ fn active_runner_job_summaries_from_snapshots(
             Some(status) => status == job.status.run_status_label(),
             None => true,
         })
+        .collect::<Vec<_>>();
+    let durable_run_ids = active_jobs
+        .iter()
+        .filter_map(|job| job.durable_run_id.clone())
+        .collect();
+    let runs = active_jobs
+        .into_iter()
         .filter_map(active_runner_job_run_summary_if_durable)
         .collect();
     let state = Some(super::types::RunsRunnerEnrichment {
@@ -330,10 +348,48 @@ fn active_runner_job_summaries_from_snapshots(
         } else {
             "partial"
         },
-        partial: !unavailable.is_empty(),
+        partial: !complete,
         runner_unavailable: unavailable,
     });
-    ActiveRunnerJobEnrichment { runs, state }
+    ActiveRunnerJobEnrichment {
+        runs,
+        state,
+        durable_run_ids,
+        complete,
+    }
+}
+
+const STALE_RUN_SAMPLE_LIMIT: usize = 10;
+
+fn stale_run_summary(
+    runs: &[RunRecord],
+    active_durable_run_ids: &HashSet<String>,
+    active_runner_jobs_complete: bool,
+) -> Option<RunsStaleRunSummary> {
+    let stale_ids = runs
+        .iter()
+        .filter(|run| {
+            reconcile::stale_running_reason(run, &homeboy::core::process::pid_is_running).is_some()
+                // A direct daemon snapshot is authoritative for runner-backed
+                // rows. Never call one stale while that job is live or unknown.
+                && !active_durable_run_ids.contains(&run.id)
+                && (!reconcile::runner_backed_run(run) || active_runner_jobs_complete)
+        })
+        .map(|run| run.id.clone())
+        .collect::<Vec<_>>();
+    (!stale_ids.is_empty()).then(|| {
+        let run_ids = stale_ids
+            .iter()
+            .take(STALE_RUN_SAMPLE_LIMIT)
+            .cloned()
+            .collect::<Vec<_>>();
+        RunsStaleRunSummary {
+            count: stale_ids.len(),
+            omitted_run_count: stale_ids.len().saturating_sub(run_ids.len()),
+            run_ids,
+            action: super::types::stale_runs_reconcile_action(),
+        }
+    })
 }
 
 #[cfg(test)]
@@ -356,6 +412,64 @@ mod runner_enrichment_tests {
         assert!(state.runner_unavailable[0]
             .message
             .contains("wedged runner probe"));
+    }
+
+    fn dead_owned_run(id: &str, runner_backed: bool) -> RunRecord {
+        let mut metadata = serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } });
+        if runner_backed {
+            metadata["runner_job_id"] = serde_json::json!("job-1");
+        }
+        RunRecord {
+            id: id.to_string(),
+            kind: "bench".to_string(),
+            component_id: Some("homeboy".to_string()),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            finished_at: None,
+            status: RunStatus::Running.as_str().to_string(),
+            command: Some("homeboy bench".to_string()),
+            cwd: None,
+            homeboy_version: None,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: metadata,
+        }
+    }
+
+    #[test]
+    fn stale_summary_exposes_one_non_mutating_grouped_action() {
+        let summary = stale_run_summary(
+            &[dead_owned_run("stale-run", false)],
+            &HashSet::new(),
+            false,
+        )
+        .expect("stale summary");
+
+        assert_eq!(summary.count, 1);
+        assert_eq!(summary.run_ids, vec!["stale-run"]);
+        assert_eq!(summary.action.command, "homeboy runs reconcile --dry-run");
+        assert!(summary.action.kind.is_some());
+    }
+
+    #[test]
+    fn stale_summary_preserves_current_authoritative_runner_job() {
+        let mut active = HashSet::new();
+        active.insert("current-run".to_string());
+
+        assert!(
+            stale_run_summary(&[dead_owned_run("current-run", true)], &active, true,).is_none()
+        );
+    }
+
+    #[test]
+    fn stale_summary_bounds_large_displayed_sets() {
+        let runs = (0..100)
+            .map(|index| dead_owned_run(&format!("stale-{index}"), false))
+            .collect::<Vec<_>>();
+        let summary = stale_run_summary(&runs, &HashSet::new(), false).expect("stale summary");
+
+        assert_eq!(summary.count, 100);
+        assert_eq!(summary.run_ids.len(), STALE_RUN_SAMPLE_LIMIT);
+        assert_eq!(summary.omitted_run_count, 90);
     }
 }
 

@@ -7,14 +7,13 @@ use homeboy_core::secret_env_plan::SECRET_ENV_PLAN_ENV_DELTA_SOURCE;
 
 pub(super) fn with_agent_task_retry_hint(
     error: Error,
-    run_id: &str,
-    plan: Option<&homeboy_agents::agent_task_scheduler::AgentTaskPlan>,
+    _run_id: &str,
+    _plan: Option<&homeboy_agents::agent_task_scheduler::AgentTaskPlan>,
 ) -> Error {
-    if plan.is_some_and(agent_task_lifecycle::plan_has_retry_materialization_identity) {
-        error.with_hint(format!("Retry: homeboy agent-task retry {run_id} --run"))
-    } else {
-        error
-    }
+    // Only the controller can combine durable owner, placement, and current
+    // workspace identity. Its status projection emits a retry action when that
+    // complete contract is replayable.
+    error
 }
 
 /// Homeboy-owned Lab artifact directory for a given runner checkout root.
@@ -1532,10 +1531,14 @@ pub(crate) fn run_lab_offload_inner(
     )?;
     // Public preflight constructs the same typed routed command before entering
     // this compiler, so no admission requirement can diverge at this boundary.
-    let admission_plan = crate::lab_selection::compile_lab_admission_plan(
+    let mut admission_plan = crate::lab_selection::compile_lab_admission_plan(
         &contract,
         &source_path,
         &command_prefix.required_tools,
+    )?;
+    crate::lab_selection::project_durable_agent_task_capabilities(
+        &mut admission_plan,
+        request.durable_agent_task_plan,
     )?;
     let execution_toolchain = admission_plan.toolchain;
     let capability_plan = Some(admission_plan.capability);

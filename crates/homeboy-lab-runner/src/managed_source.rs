@@ -137,6 +137,11 @@ fn render_sync_script(path: &str, remote_url: Option<&str>, git_ref: Option<&str
         }
     }
 
+    // A declared managed source is a reconstructable cache. Clear injected
+    // context before Git changes refs, since untracked paths can block checkout
+    // or fast-forward operations.
+    script.push_str("git -C \"$dir\" reset --hard\n");
+    script.push_str("git -C \"$dir\" clean -ffdqx\n");
     script.push_str("git -C \"$dir\" fetch --prune origin\n");
 
     match git_ref {
@@ -203,6 +208,15 @@ fn render_sync_script(path: &str, remote_url: Option<&str>, git_ref: Option<&str
             script.push_str("fi\n");
         }
     }
+
+    // Clean again after the target is materialized, then include ignored files
+    // in the postcondition so repair cannot claim success for contaminated
+    // caches that ordinary porcelain output would hide.
+    script.push_str("git -C \"$dir\" clean -ffdqx\n");
+    script.push_str("if [ -n \"$(git -C \"$dir\" status --porcelain --ignored)\" ]; then\n");
+    script.push_str("  echo \"managed runner source remains dirty after refresh: $dir\" >&2\n");
+    script.push_str("  exit 1\n");
+    script.push_str("fi\n");
 
     script
 }
@@ -431,6 +445,92 @@ mod tests {
         assert!(
             reachable.success(),
             "release tag must be reachable from the materialized HEAD"
+        );
+    }
+
+    #[test]
+    fn generated_script_removes_injected_context_and_tracked_modifications() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let origin = fixture.path().join("origin");
+        let clone = fixture.path().join("clone");
+        std::fs::create_dir_all(&origin).expect("origin dir");
+
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+
+        git(&origin, &["init", "--quiet", "-b", "trunk"]);
+        git(&origin, &["config", "user.email", "test@example.test"]);
+        git(&origin, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(
+            origin.join(".gitignore"),
+            ".claude/\n.datamachine/\n.homeboy/\n",
+        )
+        .expect("write gitignore");
+        std::fs::write(origin.join("README.md"), "canonical\n").expect("write readme");
+        git(&origin, &["add", "."]);
+        git(&origin, &["commit", "--quiet", "-m", "initial"]);
+        let canonical_head = git(&origin, &["rev-parse", "HEAD"]);
+
+        git(
+            fixture.path(),
+            &[
+                "clone",
+                "--quiet",
+                origin.to_str().expect("origin path"),
+                clone.to_str().expect("clone path"),
+            ],
+        );
+        std::fs::write(clone.join("README.md"), "modified\n").expect("modify tracked file");
+        for path in [
+            ".claude/settings.json",
+            ".datamachine/context.json",
+            ".homeboy/context.json",
+            "AGENTS.md",
+        ] {
+            let path = clone.join(path);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("create context dir");
+            std::fs::write(path, "injected\n").expect("write injected context");
+        }
+        git(&clone, &["remote", "set-url", "origin", "/wrong/remote"]);
+
+        let mut decl = source("src", clone.to_str().expect("clone path"));
+        decl.remote_url = Some(origin.to_string_lossy().to_string());
+        decl.git_ref = Some("trunk".to_string());
+        let plan = plan_managed_runner_source_sync(&decl).expect("plan");
+        let output = std::process::Command::new("bash")
+            .args(["-c", &plan.script])
+            .output()
+            .expect("run managed source sync script");
+        assert!(
+            output.status.success(),
+            "sync script failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert_eq!(git(&clone, &["rev-parse", "HEAD"]), canonical_head);
+        assert_eq!(
+            git(&clone, &["config", "--get", "remote.origin.url"]),
+            origin.to_string_lossy()
+        );
+        assert_eq!(git(&clone, &["status", "--porcelain", "--ignored"]), "");
+        for path in [".claude", ".datamachine", ".homeboy", "AGENTS.md"] {
+            assert!(!clone.join(path).exists(), "{path} must be removed");
+        }
+        assert_eq!(
+            std::fs::read_to_string(clone.join("README.md")).expect("read restored file"),
+            "canonical\n"
         );
     }
 
