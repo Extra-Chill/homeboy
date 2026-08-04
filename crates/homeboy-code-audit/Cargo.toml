@@ -8,6 +8,13 @@ publish = false
 # Exposes code_audit's shared test fixtures (test_helpers) so other crates'
 # tests (e.g. homeboy-core's refactor tests) can build audit findings/results.
 test-support = []
+# Opts in to the deliberately slow test tier (docs/internals/test-tiers.md):
+# full-pipeline audit regressions that walk real fixture trees and need an
+# installed fingerprinting extension. Off by default, so the default unit gate
+# stays bounded; run with `cargo test -p homeboy-code-audit --lib --features
+# slow-tests`. Declared here (as in homeboy-core) so the `#[cfg(feature =
+# "slow-tests")]` gates in this crate are a known check-cfg condition.
+slow-tests = []
 
 [dependencies]
 homeboy-audit-contract = { version = "0.1.0", path = "../contracts/homeboy-audit-contract" }

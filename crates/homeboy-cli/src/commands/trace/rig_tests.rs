@@ -146,6 +146,7 @@ fn rig_component_path_and_trace_env_are_threaded() {
             remote_url: Some("https://github.com/example-org/studio".to_string()),
             triage_remote_url: None,
             stack: None,
+            lab_stack: None,
             branch: None,
             r#ref: None,
             default_ref: None,

@@ -4,7 +4,6 @@ use crate::daemon::controller_job_driver::{self, ControllerJobDriver};
 use crate::error::Result;
 use crate::observation::{ArtifactRecord, NewRunRecord, ObservationStore};
 use crate::test_support::HomeGuard;
-use base64::Engine;
 use serde_json::Value;
 #[cfg(unix)]
 use std::process::Command;
