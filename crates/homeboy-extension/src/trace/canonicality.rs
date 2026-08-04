@@ -1271,34 +1271,6 @@ mod tests {
         (source, remote, snapshot, lab)
     }
 
-    struct TraceEnvGuard(Vec<(String, Option<String>)>);
-
-    impl TraceEnvGuard {
-        fn set(env: std::collections::HashMap<String, String>) -> Self {
-            let previous = env
-                .into_iter()
-                .map(|(name, value)| {
-                    let previous = std::env::var(&name).ok();
-                    unsafe { std::env::set_var(&name, value) };
-                    (name, previous)
-                })
-                .collect();
-            Self(previous)
-        }
-    }
-
-    impl Drop for TraceEnvGuard {
-        fn drop(&mut self) {
-            for (name, value) in self.0.drain(..) {
-                if let Some(value) = value {
-                    unsafe { std::env::set_var(name, value) };
-                } else {
-                    unsafe { std::env::remove_var(name) };
-                }
-            }
-        }
-    }
-
     fn init_bare_repo(path: &std::path::Path) {
         git(path, &["init", "--bare", "-b", "main"]);
     }

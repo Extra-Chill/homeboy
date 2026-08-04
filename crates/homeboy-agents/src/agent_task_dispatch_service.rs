@@ -99,11 +99,17 @@ pub struct DispatchCoreInputs {
     /// Opaque client context JSON object, `@file`, or `-` for stdin.
     pub client_context: Option<String>,
     /// Total provider executions per task, including the first attempt.
-    pub attempts: u32,
+    /// `None` means the caller did not ask for a value, so the configured
+    /// provider rotation gets to fund its own reachability (#11082).
+    pub attempts: Option<u32>,
     /// Explicit same-provider retry budget after the initial execution.
-    pub same_provider_retries: u32,
+    /// `None` means unspecified, which resolves to zero: same-provider retries
+    /// fund Cook gate and review-form remediation and are never derived from a
+    /// rotation chain.
+    pub same_provider_retries: Option<u32>,
     /// Explicit cross-provider rotation budget after the initial execution.
-    pub provider_rotations: u32,
+    /// `None` means unspecified, which resolves from the configured rotation.
+    pub provider_rotations: Option<u32>,
     /// Persist the run for a daemon/runner but do not execute immediately.
     pub queue_only: bool,
     /// Optional provider wall-clock timeout in milliseconds.
@@ -393,7 +399,7 @@ pub fn controller_resolved_execution_policy(
         selector: request.selector.clone(),
         model: request.model.clone(),
         retry: AgentTaskRetryPolicy {
-            max_attempts: request.core.attempts.max(1),
+            max_attempts: request.core.attempts.unwrap_or(1).max(1),
             ..AgentTaskRetryPolicy::default()
         },
         liveness_timeout_ms: rotation

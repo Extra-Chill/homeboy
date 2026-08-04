@@ -1,9 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use crate::RunnerKind;
-use homeboy_core::command_invocation::CommandInvocation;
-use homeboy_core::server::{RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
+use homeboy_core::server::RunnerSecretEnvRef;
 
 #[test]
 fn declared_agent_task_secret_env_parses_repeated_and_equals_args() {

@@ -56,9 +56,7 @@ pub fn build_scenario_runner(options: ScenarioRunnerOptions<'_>) -> Result<Exten
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_core::component::{Component, ScopedExtensionConfig};
     use homeboy_core::extension_execution::resolve_execution_context_for_project;
-    use homeboy_core::project::Project;
     use homeboy_extension_contract::ExtensionCapability;
     use std::path::Path;
 
@@ -72,24 +70,6 @@ mod tests {
             ),
         )
         .expect("extension manifest");
-    }
-
-    fn component_with_extensions(extension_ids: &[&str]) -> Component {
-        let extensions = extension_ids
-            .iter()
-            .map(|extension_id| {
-                (
-                    (*extension_id).to_string(),
-                    ScopedExtensionConfig::default(),
-                )
-            })
-            .collect();
-
-        Component {
-            id: "consumer".to_string(),
-            extensions: Some(extensions),
-            ..Default::default()
-        }
     }
 
     #[test]
