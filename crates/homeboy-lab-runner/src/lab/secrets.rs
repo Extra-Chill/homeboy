@@ -461,7 +461,7 @@ fn declared_agent_task_secret_env_for_handoff(args: &[String]) -> Result<Vec<Str
     Ok(names)
 }
 
-pub(super) fn preflight_agent_task_runner_secret_env_plan(
+pub(crate) fn preflight_agent_task_runner_secret_env_plan(
     runner_id: &str,
     runner: &Runner,
     args: &[String],
@@ -530,7 +530,7 @@ pub(super) fn preflight_agent_task_runner_secret_env_plan(
     Err(error)
 }
 
-pub(super) fn preflight_lab_secret_env_handoff(
+pub(crate) fn preflight_lab_secret_env_handoff(
     runner_id: &str,
     runner: Option<&Runner>,
     env: &HashMap<String, String>,

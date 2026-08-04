@@ -454,6 +454,16 @@ fn terminalize_lost_accepted_lab_job(
     ))
     .with_hint(format!("Retry safely: homeboy agent-task retry {run_id} --run"));
     error.retryable = Some(true);
+    // The daemon no longer owns this accepted job, but its runner may still own
+    // a service supervisor. Resolve that owner before replacing the run record
+    // with a terminal failure so the cleanup proof remains durable.
+    let service_cleanup =
+        crate::agent_task_scheduler::managed_services::reconcile_run_services_on_owner(
+            &run_id,
+            record.metadata.get("managed_service_supervisor"),
+            "accepted_lab_runner_job_lost",
+        )
+        .map_err(Error::internal_unexpected)?;
     let mut terminal = crate::agent_task_lifecycle::record_pre_execution_failure(
         &run_id,
         &plan,
@@ -461,6 +471,9 @@ fn terminalize_lost_accepted_lab_job(
         &error,
     )?;
     let metadata = terminal.ensure_metadata_object();
+    if service_cleanup != serde_json::json!({ "transport": "local", "services": [] }) {
+        metadata.insert("managed_service_cleanup".to_string(), service_cleanup);
+    }
     metadata.insert("phase".to_string(), json!("accepted_lab_runner_job_lost"));
     metadata.insert(
         "phase_activity".to_string(),

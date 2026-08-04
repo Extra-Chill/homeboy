@@ -81,6 +81,8 @@ pub struct AgentTaskServiceWorkerState {
     pub worker_pid: u32,
     pub worker_identity: Option<ProcessStartIdentity>,
     pub parent_pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_identity: Option<ProcessStartIdentity>,
     pub heartbeat_unix_ms: u64,
     #[serde(default)]
     pub services: Vec<AgentTaskManagedServiceRecord>,
@@ -173,7 +175,18 @@ impl AgentTaskServiceSupervisor {
             .try_clone()
             .map_err(|error| format!("clone managed service log: {error}"))?;
         let mut spec = spec;
-        let (port, port_lease, listener) = lease_port(&spec)?;
+        if spec.socket_handoff
+            && matches!(
+                spec.readiness.as_ref().map(|readiness| readiness.kind),
+                None | Some(AgentTaskManagedServiceReadinessKind::Tcp)
+            )
+        {
+            return Err(format!(
+                "managed service '{}' socket handoff requires HTTP readiness so payload ownership is observed",
+                spec.id
+            ));
+        }
+        let (port, port_lease, mut listener) = lease_port(&spec)?;
         spec.port = port;
         let local_url = spec.port.map(|port| format!("http://{}:{port}", spec.host));
         let launch_token = uuid::Uuid::new_v4().to_string();
@@ -240,6 +253,10 @@ impl AgentTaskServiceSupervisor {
         let child = command
             .spawn()
             .map_err(|error| format!("start managed service '{}': {error}", spec.id))?;
+        // The child owns the duplicated FD after exec. Keeping the supervisor's
+        // copy open would let a TCP handshake succeed even when the payload
+        // ignored the handed-off listener.
+        drop(listener.take());
         containment.attach(&child).map_err(|error| error.message)?;
         record.state = "starting".to_string();
         record.pid = Some(child.id());
@@ -641,6 +658,13 @@ fn process_is_alive(pid: u32) -> bool {
     }
 }
 
+fn parent_process_identity(pid: u32) -> Result<Option<ProcessStartIdentity>, String> {
+    if pid == 0 {
+        return Ok(None);
+    }
+    process_start_identity(pid).map_err(|error| error.to_string())
+}
+
 pub fn read_service_worker_state(
     run_id: &str,
 ) -> Result<Option<AgentTaskServiceWorkerState>, String> {
@@ -689,6 +713,7 @@ pub fn run_service_worker(request_path: &Path) -> Result<(), String> {
                     worker_identity: process_start_identity(std::process::id())
                         .map_err(|error| error.to_string())?,
                     parent_pid: request.parent_pid,
+                    parent_identity: parent_process_identity(request.parent_pid)?,
                     heartbeat_unix_ms: now_unix_ms(),
                     services: records,
                     detail: Some("reconciled".to_string()),
@@ -710,6 +735,7 @@ pub fn run_service_worker(request_path: &Path) -> Result<(), String> {
         worker_identity: process_start_identity(std::process::id())
             .map_err(|error| error.to_string())?,
         parent_pid: request.parent_pid,
+        parent_identity: parent_process_identity(request.parent_pid)?,
         heartbeat_unix_ms: now_unix_ms(),
         services: Vec::new(),
         detail: None,
@@ -735,9 +761,18 @@ pub fn run_service_worker(request_path: &Path) -> Result<(), String> {
             .is_some_and(|latest| latest.state == "stop_requested");
         // PID liveness is authoritative when a scheduler process exists. A
         // process-less handoff (parent PID 0) is explicitly bounded by TTL.
-        let parent_lost = !process_is_alive(request.parent_pid)
-            || (request.parent_pid == 0
-                && now_unix_ms().saturating_sub(started_unix_ms) >= request.parent_ttl_ms);
+        let parent_lost = if request.parent_pid == 0 {
+            now_unix_ms().saturating_sub(started_unix_ms) >= request.parent_ttl_ms
+        } else {
+            !matches!(
+                process_identity_state_with_start_identity(
+                    request.parent_pid,
+                    None,
+                    state.parent_identity.as_ref(),
+                ),
+                ProcessIdentityState::Live
+            )
+        };
         if requested_stop || parent_lost {
             state.services = supervisor.cleanup(if requested_stop {
                 "stop"
@@ -1071,6 +1106,14 @@ mod tests {
                 Err(error) => error,
             };
             assert!(error.contains("socket_handoff"));
+
+            let mut tcp_only = fixture(free_port());
+            tcp_only.readiness = None;
+            let error = match ManagedServices::start(&[tcp_only], "tcp-payload-required") {
+                Ok(_) => panic!("socket handoff must observe the payload"),
+                Err(error) => error,
+            };
+            assert!(error.contains("requires HTTP readiness"));
         });
     }
 

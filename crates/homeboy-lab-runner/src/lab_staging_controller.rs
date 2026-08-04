@@ -3057,21 +3057,10 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             &request.recipe.normalized_args,
             public_env,
         )?;
-        // The runner executes the durable plan and its execution-host service
-        // supervisor. Its secret handoff must therefore include service
-        // requirements before the runner job is admitted.
-        for service in &request.durable_agent_task_plan.services {
-            if let Some(service_plan) = &service.secret_env_plan {
-                secret_handoff
-                    .secret_env_plan
-                    .merge_from(service_plan.clone());
-            } else {
-                secret_handoff
-                    .secret_env_plan
-                    .extend_secret_env_names(service.secret_env.clone());
-            }
-        }
-        secret_handoff.secret_env_names = secret_handoff.secret_env_plan.secret_env_names();
+        crate::lab::secrets::merge_managed_service_secret_env(
+            &mut secret_handoff,
+            Some(&request.durable_agent_task_plan),
+        );
         let mut env = secret_handoff.env_delta.clone();
         env.insert(
             "HOMEBOY_RUNNER_PLACEMENT_RESOLVED".to_string(),
@@ -3082,6 +3071,20 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             request.recipe.runner_id.clone(),
         );
         let runner_status = Self::status_for_recipe_transport(request)?;
+        let runner = crate::load(&request.recipe.runner_id)?;
+        crate::lab::secrets::preflight_lab_secret_env_handoff(
+            &request.recipe.runner_id,
+            Some(&runner),
+            &env,
+            &secret_handoff,
+        )?;
+        crate::lab::secrets::preflight_agent_task_runner_secret_env_plan(
+            &request.recipe.runner_id,
+            &runner,
+            &request.recipe.normalized_args,
+            &env,
+            &secret_handoff.secret_env_plan,
+        )?;
         let session = runner_status.session.as_ref().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "runner",
