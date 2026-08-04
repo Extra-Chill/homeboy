@@ -826,7 +826,11 @@ mod tests {
         git(source.path(), &["init", "-b", "main"]);
         fs::create_dir_all(source.path().join("src")).expect("source directory");
         fs::write(source.path().join("src/lib.rs"), "base").expect("source file");
-        git(source.path(), &["add", "src/lib.rs"]);
+        // Cleanup refuses to reclaim an artifact path holding untracked work
+        // that Git does not ignore, so the fixture has to ignore target/ the
+        // way a real Cargo checkout does.
+        fs::write(source.path().join(".gitignore"), "target/\n").expect("gitignore");
+        git(source.path(), &["add", "src/lib.rs", ".gitignore"]);
         git(
             source.path(),
             &[
