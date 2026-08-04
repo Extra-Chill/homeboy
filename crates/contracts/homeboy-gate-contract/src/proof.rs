@@ -337,6 +337,7 @@ pub fn gate_status_label(status: HomeboyGateStatus) -> &'static str {
     match status {
         HomeboyGateStatus::Passed => "passed",
         HomeboyGateStatus::Failed => "failed",
+        HomeboyGateStatus::AcceptedInheritedFailure => "accepted_inherited_failure",
         HomeboyGateStatus::Skipped => "skipped",
         HomeboyGateStatus::Blocked => "blocked",
     }

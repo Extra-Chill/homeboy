@@ -59,6 +59,10 @@ pub struct VerifyGateArgs {
     /// attempt instead of reusing the recorded pass. Off by default.
     #[arg(long = "rerun-completed-gates")]
     pub rerun_completed_gates: bool,
+    /// Finalize only when an inherited required-gate failure was reproduced on
+    /// the immutable baseline. The gate remains reported as baseline-red.
+    #[arg(long = "accept-inherited-failures")]
+    pub accept_inherited_failures: bool,
     /// Environment for gate commands: `inherit` (default) extends the current
     /// environment; `replace` starts from an empty environment plus `--gate-env`.
     #[arg(
@@ -123,6 +127,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
             gate_timeout_seconds: args.gate_timeout_seconds,
             gate_heartbeat_interval_seconds: args.gate_heartbeat_interval_seconds,
             rerun_completed_gates: args.rerun_completed_gates,
+            accept_inherited_failures: args.accept_inherited_failures,
             gate_environment: AgentTaskGateEnvironmentPolicy {
                 mode: match args.gate_environment_mode.as_str() {
                     "replace" => AgentTaskGateEnvironmentMode::Replace,

@@ -3206,6 +3206,50 @@ where
                     invocation_latest_run_id: Some(&run_id),
                 }));
             }
+            AgentTaskCookLoopStatus::BaselineRed => {
+                if options.gates.accept_inherited_failures && promotion.finalization_eligible(true)
+                {
+                    report_cook_progress(
+                        durable_observer,
+                        &cook_id,
+                        &run_id,
+                        "finalization",
+                        attempt,
+                        Some("accepted inherited baseline-red gate"),
+                    )?;
+                    let finalization = side_effects.finalize(&options, &run_id, &promotion)?;
+                    let final_status = finalization["status"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string();
+                    return Ok(cook_report(CookReportInput {
+                        cook_id,
+                        status: &final_status,
+                        disposition: CookDisposition::Terminal,
+                        attempts,
+                        finalization: Some(finalization),
+                        stop_reason: Some(
+                            "finalized under explicit accepted inherited baseline-red gate policy"
+                                .to_string(),
+                        ),
+                        exit_code: if final_status == "review_ready" { 0 } else { 1 },
+                        invocation_latest_run_id: Some(&run_id),
+                    }));
+                }
+                return Ok(cook_report(CookReportInput {
+                    cook_id,
+                    status: "baseline_red",
+                    disposition: CookDisposition::Terminal,
+                    attempts,
+                    finalization: None,
+                    stop_reason: Some(
+                        "candidate and immutable baseline failed the same required gate; repair the inherited infrastructure or gate environment before rerunning Cook"
+                            .to_string(),
+                    ),
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(&run_id),
+                }));
+            }
             AgentTaskCookLoopStatus::NoChanges => {
                 return Ok(cook_report(CookReportInput {
                     cook_id,

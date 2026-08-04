@@ -1916,6 +1916,7 @@ impl BatchCookSpec {
                     gate_timeout_seconds: self.gate_timeout_seconds,
                     gate_heartbeat_interval_seconds: self.gate_heartbeat_interval_seconds,
                     rerun_completed_gates: self.rerun_completed_gates,
+                    accept_inherited_failures: false,
                     gate_environment: self.gate_environment.clone(),
                     gate_toolchains: self.gate_toolchains.clone(),
                     gate_package_artifacts: self.gate_package_artifacts.clone(),

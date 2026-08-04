@@ -1272,10 +1272,10 @@ pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
 ) -> Result<Value> {
     let mut promotion = promotion.clone();
     promotion.normalize_gate_outcome();
-    if promotion.status != AgentTaskPromotionStatus::Applied {
+    if !promotion.finalization_eligible(options.gates.accept_inherited_failures) {
         return Err(Error::validation_invalid_argument(
             "promotion",
-            "agent-task cook finalization requires an applied promotion with green gates",
+            "agent-task cook finalization requires green gates or explicitly accepted inherited baseline failures",
             None,
             None,
         ));
@@ -1347,6 +1347,7 @@ pub(crate) fn cook_finalization_options(
         commit_message: options.commit_message.clone(),
         gate_results: Vec::new(),
         normalized_gate_results: promotion.gate_results.clone(),
+        accept_inherited_failures: options.gates.accept_inherited_failures,
         changed_files: promotion.changed_files.clone(),
         evidence: AgentTaskPrEvidence {
             source_refs,
@@ -1941,6 +1942,7 @@ fn manual_finalization_options(
         commit_message: "recovered manual finalization".to_string(),
         gate_results: report.gate_results,
         normalized_gate_results: report.normalized_gate_results,
+        accept_inherited_failures: report.accept_inherited_failures,
         changed_files: report.changed_files,
         evidence: report.evidence,
         ai_used_for: report.review_dossier.ai_assistance.used_for.clone(),

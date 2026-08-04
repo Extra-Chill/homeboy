@@ -75,6 +75,11 @@ pub struct VerifyGateOptions {
     /// rerunning them after restart.
     #[serde(default)]
     pub rerun_completed_gates: bool,
+    /// Allow finalization after a required gate is proven red on both candidate
+    /// and immutable baseline. The gate remains explicitly baseline-red in all
+    /// reports; this only authorizes the finalization policy boundary.
+    #[serde(default)]
+    pub accept_inherited_failures: bool,
     /// Declarative, non-secret process environment policy for every gate.
     #[serde(default)]
     pub gate_environment: AgentTaskGateEnvironmentPolicy,
@@ -248,6 +253,7 @@ impl Default for VerifyGateOptions {
             gate_timeout_seconds: default_gate_timeout_seconds(),
             gate_heartbeat_interval_seconds: default_gate_heartbeat_interval_seconds(),
             rerun_completed_gates: false,
+            accept_inherited_failures: false,
             gate_environment: AgentTaskGateEnvironmentPolicy::default(),
             gate_toolchains: Vec::new(),
             gate_package_artifacts: Vec::new(),
@@ -654,16 +660,17 @@ pub struct AgentTaskGateSkipReason {
 }
 
 /// Canonical bridge from the binary agent-task gate status to the shared
-/// `HomeboyGateStatus`. Both the report constructor and the
-/// `HomeboyGateResult` conversion route through this single mapping so the
-/// pass/fail projection cannot drift between call sites.
+/// `HomeboyGateStatus`. A matching red baseline explains a failure; it never
+/// makes the candidate's required gate pass.
 impl From<AgentTaskGateStatus> for HomeboyGateStatus {
     fn from(status: AgentTaskGateStatus) -> Self {
         match status {
             AgentTaskGateStatus::Succeeded => HomeboyGateStatus::Passed,
             AgentTaskGateStatus::Failed => HomeboyGateStatus::Failed,
             AgentTaskGateStatus::Skipped => HomeboyGateStatus::Skipped,
-            AgentTaskGateStatus::AcceptedInheritedFailure => HomeboyGateStatus::Passed,
+            AgentTaskGateStatus::AcceptedInheritedFailure => {
+                HomeboyGateStatus::AcceptedInheritedFailure
+            }
         }
     }
 }
@@ -863,10 +870,10 @@ impl AgentTaskGateReport {
             id.clone(),
             "agent_task.gate",
             match status {
-                AgentTaskGateStatus::Succeeded | AgentTaskGateStatus::AcceptedInheritedFailure => {
-                    PlanStepStatus::Success
+                AgentTaskGateStatus::Succeeded => PlanStepStatus::Success,
+                AgentTaskGateStatus::Failed | AgentTaskGateStatus::AcceptedInheritedFailure => {
+                    PlanStepStatus::Failed
                 }
-                AgentTaskGateStatus::Failed => PlanStepStatus::Failed,
                 AgentTaskGateStatus::Skipped => PlanStepStatus::Skipped,
             },
         )
@@ -949,34 +956,79 @@ impl AgentTaskGateReport {
             self.id.clone(),
             self.id.clone(),
             HomeboyGateKind::Command,
-            HomeboyGateStatus::Passed,
+            HomeboyGateStatus::AcceptedInheritedFailure,
         )
         .summary(
-            "candidate failure matches the immutable baseline; no candidate regression detected",
+            "candidate failure matches the immutable baseline; required gate remains failed because the shared environment is red",
         )
         .visibility(self.visibility)
         .reveal_policy(self.reveal_policy)
         .retryable(false);
-        self.step = PlanStep::builder(self.id.clone(), "agent_task.gate", PlanStepStatus::Success)
+        self.step = PlanStep::builder(self.id.clone(), "agent_task.gate", PlanStepStatus::Failed)
             .inputs(PlanValues::new().json("command", &self.command))
             .output_value("exit_code", serde_json::json!(self.exit_code))
             .output_value("accepted_inherited_failure", serde_json::json!(true))
             .output_value("baseline_red", serde_json::json!(true))
+            .output_value(
+                "failure_origin",
+                serde_json::json!("inherited_infrastructure"),
+            )
             .gate_result(gate_result)
             .build();
     }
 }
 
-/// Normalize only transport-noise that cannot identify a command failure. The
-/// comparison remains fail-closed: a changed substantive line is a regression.
-pub(crate) fn failure_fingerprint(stdout: &str, stderr: &str) -> String {
-    [stdout, stderr]
+/// Produce a stable failure identity from the exit status, structured diagnostic
+/// identities, and a digest of normalized output records. Output is evidence,
+/// not the sole authority for accepting an inherited failure.
+pub(crate) fn failure_fingerprint(
+    exit_code: i32,
+    stdout: &str,
+    stderr: &str,
+    diagnostics: &[AgentTaskGateDiagnosticRecord],
+) -> String {
+    let mut output_records = [stdout, stderr]
         .into_iter()
         .flat_map(str::lines)
-        .map(str::trim)
+        .map(normalize_failure_record)
         .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    output_records.sort();
+    output_records.dedup();
+    let mut diagnostic_ids = diagnostics
+        .iter()
+        .map(|diagnostic| format!("{}:{}", diagnostic.producer.id, diagnostic.identity))
+        .collect::<Vec<_>>();
+    diagnostic_ids.sort();
+    diagnostic_ids.dedup();
+    let payload = json!({
+        "exit_code": exit_code,
+        "diagnostic_ids": diagnostic_ids,
+        "output_records": output_records,
+    });
+    format!(
+        "sha256:{:x}",
+        Sha256::digest(payload.to_string().as_bytes())
+    )
+}
+
+fn normalize_failure_record(line: &str) -> String {
+    line.trim()
+        .split_whitespace()
+        .map(|token| {
+            if token.contains('T')
+                && token.contains(':')
+                && token.chars().any(|c| c.is_ascii_digit())
+            {
+                "<timestamp>"
+            } else if token.starts_with("0x") && token[2..].chars().all(|c| c.is_ascii_hexdigit()) {
+                "<address>"
+            } else {
+                token
+            }
+        })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -989,13 +1041,38 @@ mod baseline_tests {
 
     #[test]
     fn matching_baseline_failure_is_distinct_from_a_new_failure() {
-        let baseline = failure_fingerprint("test alpha ... FAILED\n", "");
-        let matching_candidate = failure_fingerprint("test alpha ... FAILED\n", "");
+        let baseline = failure_fingerprint(1, "test alpha ... FAILED\n", "", &[]);
+        let matching_candidate = failure_fingerprint(1, "test alpha ... FAILED\n", "", &[]);
         let regressed_candidate =
-            failure_fingerprint("test alpha ... FAILED\ntest beta ... FAILED\n", "");
+            failure_fingerprint(1, "test alpha ... FAILED\ntest beta ... FAILED\n", "", &[]);
 
         assert_eq!(baseline, matching_candidate);
         assert_ne!(baseline, regressed_candidate);
+    }
+
+    #[test]
+    fn failure_fingerprint_distinguishes_exit_codes_and_ignores_volatile_reordered_output() {
+        let baseline = failure_fingerprint(
+            1,
+            "error E42 at 2026-08-04T12:00:00Z\nworker 0xabc failed\n",
+            "",
+            &[],
+        );
+        let reordered = failure_fingerprint(
+            1,
+            "worker 0xdef failed\nerror E42 at 2027-01-01T00:00:00Z\n",
+            "",
+            &[],
+        );
+        let divergent_exit = failure_fingerprint(
+            2,
+            "worker 0xdef failed\nerror E42 at 2027-01-01T00:00:00Z\n",
+            "",
+            &[],
+        );
+
+        assert_eq!(baseline, reordered);
+        assert_ne!(baseline, divergent_exit);
     }
 
     #[test]
@@ -2477,8 +2554,10 @@ mod tests {
 
         assert_eq!(report.status, AgentTaskGateStatus::AcceptedInheritedFailure);
         let step = serde_json::to_value(&report.step).expect("serialize step");
-        assert_eq!(step["status"], "success");
+        assert_eq!(step["status"], "failed");
         assert_eq!(step["outputs"]["accepted_inherited_failure"], true);
+        assert_eq!(step["outputs"]["baseline_red"], true);
+        assert_eq!(step["outputs"]["gate_result"]["status"], "failed");
     }
 
     #[test]

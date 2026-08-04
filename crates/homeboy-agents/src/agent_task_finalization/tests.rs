@@ -2076,6 +2076,21 @@ fn validates_publication_intent_contract() {
     assert!(error.message.contains("target head ref"));
 }
 
+#[test]
+fn legacy_durable_finalization_report_defaults_inherited_failure_acceptance_to_false() {
+    let report =
+        finalize_pr_with_backend(options(), &mut MockBackend::default()).expect("finalized report");
+    let mut legacy = serde_json::to_value(report).expect("serialize report");
+    legacy
+        .as_object_mut()
+        .expect("report object")
+        .remove("accept_inherited_failures");
+
+    let restored: AgentTaskPrFinalizationReport =
+        serde_json::from_value(legacy).expect("legacy report remains readable");
+    assert!(!restored.accept_inherited_failures);
+}
+
 fn options() -> AgentTaskPrFinalizationOptions {
     let gate_results = vec![AgentTaskGateResult {
         name: "focused project check".to_string(),
@@ -2098,6 +2113,7 @@ fn options() -> AgentTaskPrFinalizationOptions {
         commit_message: "finalize cook loop PR plumbing".to_string(),
         gate_results,
         normalized_gate_results,
+        accept_inherited_failures: false,
         changed_files: Vec::new(),
         evidence: AgentTaskPrEvidence {
             source_refs: vec!["https://github.com/Extra-Chill/homeboy/issues/3678".to_string()],
