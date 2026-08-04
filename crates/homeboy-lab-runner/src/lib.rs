@@ -745,7 +745,11 @@ pub fn lab_runner_readiness() -> Result<LabRunnerReadiness> {
                 connected: status.connected,
                 capacity: runner.settings.concurrency_limit,
                 stale_daemon: status.stale_daemon.is_some(),
-                active_jobs: status.active_jobs.len(),
+                admission_fresh: status.daemon_fresh_for_admission(),
+                admission_remediation: status
+                    .admission_action()
+                    .map(|action| action.render_command()),
+                active_jobs: status.active_job_count.max(status.active_jobs.len()),
                 active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
                 capabilities_ready,
             })
@@ -836,7 +840,10 @@ fn lab_runner_readiness_from_candidates(
         LabRunnerReadinessState::Absent
     } else if !available_runner_ids.is_empty() {
         LabRunnerReadinessState::ConnectedReady
-    } else if reasons.iter().any(|reason| reason == "stale_daemon") {
+    } else if candidates
+        .iter()
+        .any(|candidate| candidate.stale_daemon || !candidate.admission_fresh)
+    {
         LabRunnerReadinessState::Stale
     } else if reasons.iter().any(|reason| reason == "capacity_reached") {
         LabRunnerReadinessState::CapacityBlocked
@@ -856,8 +863,12 @@ fn lab_runner_readiness_from_candidates(
         }
         LabRunnerReadinessState::Stale => candidates
             .iter()
-            .filter(|candidate| candidate.stale_daemon)
-            .map(|candidate| format!("homeboy runner doctor {} --scope lab-offload", candidate.id))
+            .filter(|candidate| candidate.stale_daemon || !candidate.admission_fresh)
+            .map(|candidate| {
+                candidate.admission_remediation.clone().unwrap_or_else(|| {
+                    format!("homeboy runner doctor {} --scope lab-offload", candidate.id)
+                })
+            })
             .collect(),
         LabRunnerReadinessState::Disconnected => candidates
             .iter()
@@ -880,6 +891,8 @@ struct DefaultLabRunnerCandidate {
     connected: bool,
     capacity: Option<usize>,
     stale_daemon: bool,
+    admission_fresh: bool,
+    admission_remediation: Option<String>,
     active_jobs: usize,
     active_jobs_available: bool,
     capabilities_ready: bool,
@@ -893,7 +906,7 @@ struct DefaultLabRunnerReadiness {
 
 impl DefaultLabRunnerCandidate {
     fn availability(&self) -> RunnerAvailability {
-        RunnerAvailability::from_status_parts(
+        let mut availability = RunnerAvailability::from_status_parts(
             self.id.clone(),
             self.connected,
             self.stale_daemon,
@@ -904,7 +917,14 @@ impl DefaultLabRunnerCandidate {
                 &RunnerActiveJobState::Unavailable
             },
             self.capacity,
-        )
+        );
+        if !self.admission_fresh && !self.stale_daemon {
+            availability
+                .reasons
+                .push("daemon_freshness_unavailable".to_string());
+            availability.accepts_jobs = false;
+        }
+        availability
     }
 
     fn readiness(&self) -> DefaultLabRunnerReadiness {
@@ -920,6 +940,7 @@ impl DefaultLabRunnerCandidate {
         if !self.capabilities_ready
             || !self.active_jobs_available
             || self.stale_daemon
+            || !self.admission_fresh
             || at_capacity
         {
             return DefaultLabRunnerReadiness {
@@ -971,7 +992,11 @@ pub(crate) fn default_lab_runner_availability() -> Result<Vec<RunnerAvailability
                 connected: status.connected,
                 capacity: runner.settings.concurrency_limit,
                 stale_daemon: status.stale_daemon.is_some(),
-                active_jobs: status.active_jobs.len(),
+                admission_fresh: status.daemon_fresh_for_admission(),
+                admission_remediation: status
+                    .admission_action()
+                    .map(|action| action.render_command()),
+                active_jobs: status.active_job_count.max(status.active_jobs.len()),
                 active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
                 capabilities_ready,
             };
@@ -1457,6 +1482,8 @@ mod tests {
             connected,
             capacity: None,
             stale_daemon: false,
+            admission_fresh: true,
+            admission_remediation: None,
             active_jobs: 0,
             active_jobs_available: true,
             capabilities_ready: true,
@@ -1537,6 +1564,30 @@ mod tests {
         assert_eq!(
             stale.remediation_commands,
             ["homeboy runner doctor stale --scope lab-offload"]
+        );
+
+        let mut version_mismatch =
+            default_lab_candidate("version-mismatch", RunnerTunnelMode::DirectSsh, true);
+        version_mismatch.admission_fresh = false;
+        version_mismatch.admission_remediation =
+            Some("homeboy runner refresh-homeboy version-mismatch --reconnect".to_string());
+        let version_mismatch = lab_runner_readiness_from_candidates(None, vec![version_mismatch]);
+        assert_eq!(version_mismatch.state, LabRunnerReadinessState::Stale);
+        assert_eq!(
+            version_mismatch.remediation_commands,
+            ["homeboy runner refresh-homeboy version-mismatch --reconnect"]
+        );
+
+        let mut lease_missing =
+            default_lab_candidate("lease-missing", RunnerTunnelMode::DirectSsh, true);
+        lease_missing.admission_fresh = false;
+        lease_missing.admission_remediation =
+            Some("homeboy runner doctor lease-missing --scope lab-offload".to_string());
+        let lease_missing = lab_runner_readiness_from_candidates(None, vec![lease_missing]);
+        assert_eq!(lease_missing.state, LabRunnerReadinessState::Stale);
+        assert_eq!(
+            lease_missing.remediation_commands,
+            ["homeboy runner doctor lease-missing --scope lab-offload"]
         );
 
         let mut full = default_lab_candidate("full", RunnerTunnelMode::DirectSsh, true);
