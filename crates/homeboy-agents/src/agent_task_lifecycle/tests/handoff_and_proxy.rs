@@ -1535,6 +1535,10 @@ fn detached_runner_failure_transitions_parent_and_task_terminal() {
         candidate_adoption: None,
         adoption_run_id: None,
         acceptance: None,
+        workspace_identity: None,
+        workspace_lifecycle_revision: 0,
+        workspace_owner_lease: None,
+        workspace_claim: None,
         metadata: json!({ "runner_id": "homeboy-lab", "runner_job_id": "job-123" }),
     };
     record.tasks[0].state = AgentTaskState::Running;

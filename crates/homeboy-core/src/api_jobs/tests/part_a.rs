@@ -98,7 +98,12 @@ fn admission_leases_create_renew_expire_and_release_capacity_with_an_injected_cl
     let store = JobStore::open_without_reconciliation(&path).expect("open store");
     let now = 10_000;
     let reservation = store
-        .create_admission_at(json!({ "admission": { "state": "reserved" } }), now)
+        .create_admission_at(
+            json!({ "admission": { "state": "reserved" } }),
+            now,
+            None,
+            None,
+        )
         .expect("create admission");
     assert!(reservation.created);
     assert_eq!(store.active_runner_jobs().len(), 1);
@@ -140,7 +145,12 @@ fn status_excludes_an_expired_admission_before_daemon_restart_reconciles_it() {
     let path = temp.path().join("jobs.json");
     let store = JobStore::open_without_reconciliation(&path).expect("open store");
     store
-        .create_admission_at(json!({ "admission": { "state": "reserved" } }), 0)
+        .create_admission_at(
+            json!({ "admission": { "state": "reserved" } }),
+            0,
+            None,
+            None,
+        )
         .expect("create already-expired admission");
 
     assert_eq!(
@@ -155,10 +165,10 @@ fn admission_lease_rejects_wrong_tokens_and_terminal_idempotency_replays() {
     let store = JobStore::default();
     let now = 10_000;
     let reservation = store
-        .create_or_renew_admission_at(json!({}), "attempt-1", now)
+        .create_or_renew_admission_at(json!({}), "attempt-1", now, None, None)
         .expect("create keyed admission");
     let replay = store
-        .create_or_renew_admission_at(json!({}), "attempt-1", now + 1)
+        .create_or_renew_admission_at(json!({}), "attempt-1", now + 1, None, None)
         .expect("renew live idempotency replay");
     assert_eq!(replay.job.id, reservation.job.id);
     assert!(!replay.created);
@@ -177,7 +187,7 @@ fn admission_lease_rejects_wrong_tokens_and_terminal_idempotency_replays() {
         JobStatus::Cancelled
     );
     assert!(store
-        .create_or_renew_admission_at(json!({}), "attempt-1", now + 4)
+        .create_or_renew_admission_at(json!({}), "attempt-1", now + 4, None, None)
         .is_err());
 }
 
@@ -186,7 +196,7 @@ fn admission_lease_races_have_one_terminal_outcome() {
     let store = JobStore::default();
     let now = 10_000;
     let reservation = store
-        .create_admission_at(json!({}), now)
+        .create_admission_at(json!({}), now, None, None)
         .expect("create admission");
     let store_for_renew = store.clone();
     let token = reservation.token.clone();
@@ -327,6 +337,8 @@ fn runner_capacity_is_claimed_before_reserving_an_agent_task_child() {
             active_child_count: None,
             active_cell_count: None,
         }),
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
     };
     let first = store.create_test_local_runner_job(Some(local_runner()));
     let second = store.create_test_local_runner_job(Some(local_runner()));
@@ -390,6 +402,8 @@ fn capacity_queued_agent_task_spawns_once_after_claiming_an_idle_slot() {
         command: vec!["homeboy".to_string(), "agent-task".to_string()],
         cwd: Some("/runner/worktree".to_string()),
         lifecycle: None,
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
     };
     let starts = Arc::new(AtomicUsize::new(0));
     let (first_started_tx, first_started_rx) = mpsc::channel();
@@ -478,6 +492,8 @@ fn capacity_queued_agent_task_persists_typed_failure_before_child_identity() {
             command: vec!["homeboy".to_string(), "agent-task".to_string()],
             cwd: Some("/runner/worktree".to_string()),
             lifecycle: None,
+            workspace_claim_binding: None,
+            workspace_owner_lease: None,
         },
         None,
         1,
@@ -699,6 +715,8 @@ fn local_runner_jobs_retain_durable_identity_in_active_projection() {
                     active_child_count: None,
                     active_cell_count: None,
                 }),
+                workspace_claim_binding: None,
+                workspace_owner_lease: None,
             }),
             move |_job| {
                 let _ = wait.recv();
@@ -740,6 +758,8 @@ fn active_runner_job_for_durable_run_id_finds_the_enqueued_job_for_idempotent_re
                     active_child_count: None,
                     active_cell_count: None,
                 }),
+                workspace_claim_binding: None,
+                workspace_owner_lease: None,
             }),
             move |_job| {
                 let _ = wait.recv();
@@ -789,6 +809,8 @@ fn capacity_queued_local_runner_enqueue_dedupes_on_durable_run_id() {
             active_child_count: None,
             active_cell_count: None,
         }),
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
     };
 
     let first = store

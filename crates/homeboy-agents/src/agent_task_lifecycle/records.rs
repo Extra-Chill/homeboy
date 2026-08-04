@@ -120,6 +120,14 @@ pub struct AgentTaskRunRecord {
     /// promotion, and gate state. It is the only acceptance authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance: Option<AgentTaskAcceptanceRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_identity: Option<homeboy_core::workspace_claim::WorkspaceIdentity>,
+    #[serde(default)]
+    pub workspace_lifecycle_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_owner_lease: Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_claim: Option<homeboy_core::workspace_claim::WorkspaceClaim>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
 }
@@ -308,6 +316,14 @@ pub struct AgentTaskLabHandoff {
     pub accepted_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expired_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_identity: Option<homeboy_core::workspace_claim::WorkspaceIdentity>,
+    #[serde(default)]
+    pub workspace_lifecycle_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_owner_lease: Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_claim: Option<homeboy_core::workspace_claim::WorkspaceClaim>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -664,6 +680,10 @@ impl AgentTaskLabHandoff {
             acceptance_deadline_at: Some(acceptance_deadline_at),
             accepted_at: None,
             expired_at: None,
+            workspace_identity: None,
+            workspace_lifecycle_revision: 0,
+            workspace_owner_lease: None,
+            workspace_claim: None,
         }
     }
 
@@ -679,6 +699,10 @@ impl AgentTaskLabHandoff {
             acceptance_deadline_at: self.acceptance_deadline_at.clone(),
             accepted_at: Some(accepted_at),
             expired_at: None,
+            workspace_identity: self.workspace_identity.clone(),
+            workspace_lifecycle_revision: self.workspace_lifecycle_revision,
+            workspace_owner_lease: self.workspace_owner_lease.clone(),
+            workspace_claim: self.workspace_claim.clone(),
         }
     }
 
@@ -694,6 +718,10 @@ impl AgentTaskLabHandoff {
             acceptance_deadline_at: self.acceptance_deadline_at.clone(),
             accepted_at: None,
             expired_at: Some(expired_at),
+            workspace_identity: self.workspace_identity.clone(),
+            workspace_lifecycle_revision: self.workspace_lifecycle_revision,
+            workspace_owner_lease: self.workspace_owner_lease.clone(),
+            workspace_claim: self.workspace_claim.clone(),
         }
     }
 
@@ -793,6 +821,10 @@ impl AgentTaskLabHandoff {
                         .and_then(optional_timestamp),
                     accepted_at: Some(accepted_at),
                     expired_at: None,
+                    workspace_identity: None,
+                    workspace_lifecycle_revision: 0,
+                    workspace_owner_lease: None,
+                    workspace_claim: None,
                 })
             }
             "expired"
@@ -810,6 +842,10 @@ impl AgentTaskLabHandoff {
                     acceptance_deadline_at: None,
                     accepted_at: None,
                     expired_at: required_timestamp(acceptance.get("expired_at")),
+                    workspace_identity: None,
+                    workspace_lifecycle_revision: 0,
+                    workspace_owner_lease: None,
+                    workspace_claim: None,
                 })
             }
             _ => None,

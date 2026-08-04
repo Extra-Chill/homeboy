@@ -290,6 +290,10 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
             None,
         ));
     }
+    // The accepted handoff is the controller-side attachment authority. Capture
+    // the exact durable run binding here so later attachment writes cannot be
+    // authorized by a substituted workspace claim.
+    require_record_workspace_owner(&record)?;
     if let Some(accepted) = record.lab_handoff.as_ref().filter(|handoff| {
         handoff.state == AgentTaskLabHandoffState::Accepted
             && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
@@ -409,7 +413,12 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
             accepted_at.clone(),
         )
     });
-    record.lab_handoff = Some(pending_handoff.accepted(input.runner_job_id, accepted_at.clone()));
+    let mut accepted_handoff = pending_handoff.accepted(input.runner_job_id, accepted_at.clone());
+    accepted_handoff.workspace_identity = record.workspace_identity.clone();
+    accepted_handoff.workspace_lifecycle_revision = record.workspace_lifecycle_revision;
+    accepted_handoff.workspace_owner_lease = record.workspace_owner_lease.clone();
+    accepted_handoff.workspace_claim = record.workspace_claim.clone();
+    record.lab_handoff = Some(accepted_handoff);
     let metadata = record.ensure_metadata_object();
     metadata.insert("kind".to_string(), json!("lab_offload_detached_handoff"));
     if let Some(intent) = metadata.get_mut("runner_submission_intent") {

@@ -85,6 +85,14 @@ pub struct RemoteRunnerJobRequest {
     pub lab_runner_workload: Option<LabRunnerWorkload>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<RunnerJobLifecycleMetadata>,
+    /// Exact reconciliation authority required to mutate this workspace. It is
+    /// absent for ordinary runner jobs, preserving the original wire contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
+    /// Exact active-work authority for portable workspace jobs. Unlike a
+    /// reconciliation fence this remains live while the worker executes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
 }
@@ -95,6 +103,14 @@ impl RemoteRunnerJobRequest {
     /// must never be handed a job that would make this boundary fail open.
     pub fn requires_execution_context(&self) -> bool {
         !self.extension_env_providers.is_empty()
+    }
+
+    pub fn requires_workspace_claim_protocol(&self) -> bool {
+        self.workspace_claim_binding.is_some()
+    }
+
+    pub fn requires_workspace_owner_lease_protocol(&self) -> bool {
+        self.workspace_owner_lease.is_some()
     }
 
     /// A caller-owned identity makes a retried POST safe across a lost response.
@@ -137,6 +153,8 @@ impl RemoteRunnerJobRequest {
             "require_paths": request.require_paths,
             "extension_env_providers": request.extension_env_providers,
             "runner_workload": request.lab_runner_workload,
+            "workspace_claim_binding": request.workspace_claim_binding,
+            "workspace_owner_lease": request.workspace_owner_lease,
             "command_assets": request
                 .metadata
                 .as_ref()
@@ -425,6 +443,12 @@ pub struct RemoteRunnerJobClaim {
     /// Echoed by compatible workers and verified before they execute a claim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_protocol: Option<crate::runner_job_execution_context::RunnerJobExecutionProtocol>,
+    /// Echoed only for workspace-owning jobs. A worker must reject a missing or
+    /// malformed value before it materializes the claimed workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_claim_protocol: Option<crate::workspace_claim::WorkspaceClaimProtocol>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_owner_lease_protocol: Option<crate::workspace_claim::WorkspaceOwnerLeaseProtocol>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -597,6 +621,36 @@ fn execution_context_id_from_evidence(stored: &StoredJob) -> Result<Option<Strin
 }
 
 impl JobStore {
+    pub fn remote_runner_workspace_claim_binding(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<crate::workspace_claim::WorkspaceClaimBinding>> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = inner
+            .jobs
+            .get(&job_id)
+            .ok_or_else(|| job_not_found(job_id))?;
+        Ok(stored
+            .remote_runner
+            .as_ref()
+            .and_then(|remote| remote.request.workspace_claim_binding.clone()))
+    }
+
+    pub fn remote_runner_workspace_owner_lease(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<crate::workspace_claim::WorkspaceOwnerLease>> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = inner
+            .jobs
+            .get(&job_id)
+            .ok_or_else(|| job_not_found(job_id))?;
+        Ok(stored
+            .remote_runner
+            .as_ref()
+            .and_then(|remote| remote.request.workspace_owner_lease.clone()))
+    }
+
     pub fn lookup_remote_runner_submission(
         &self,
         submission_key: &str,
@@ -635,6 +689,12 @@ impl JobStore {
             ));
         }
         request.validate_command_assets()?;
+        if let Some(binding) = request.workspace_claim_binding.as_ref() {
+            binding.verify()?;
+        }
+        if let Some(lease) = request.workspace_owner_lease.as_ref() {
+            lease.verify_shape(timestamp_ms())?;
+        }
         let secret_env_plan = request.normalize();
         reject_inline_durable_secret_env(&request, &secret_env_plan)?;
         super::with_runner_job_preparation(|p| {
@@ -858,6 +918,33 @@ impl JobStore {
             &crate::runner_job_execution_context::RunnerJobExecutionProtocol,
         >,
     ) -> Result<Option<RemoteRunnerJobClaim>> {
+        self.claim_remote_runner_job_with_protocols(
+            runner_id,
+            project_id,
+            lease_ms,
+            concurrency_limit,
+            execution_protocol,
+            Some(&crate::workspace_claim::WorkspaceClaimProtocol::current()),
+            Some(&crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current()),
+        )
+    }
+
+    /// Claim a reverse-runner job only when every optional authority carried by
+    /// the job was explicitly negotiated by the worker.
+    pub fn claim_remote_runner_job_with_protocols(
+        &self,
+        runner_id: &str,
+        project_id: Option<&str>,
+        lease_ms: u64,
+        concurrency_limit: Option<usize>,
+        execution_protocol: Option<
+            &crate::runner_job_execution_context::RunnerJobExecutionProtocol,
+        >,
+        workspace_claim_protocol: Option<&crate::workspace_claim::WorkspaceClaimProtocol>,
+        workspace_owner_lease_protocol: Option<
+            &crate::workspace_claim::WorkspaceOwnerLeaseProtocol,
+        >,
+    ) -> Result<Option<RemoteRunnerJobClaim>> {
         if runner_id.trim().is_empty() {
             return Err(Error::validation_invalid_argument(
                 "runner_id",
@@ -950,6 +1037,20 @@ impl JobStore {
                     }
                     None => None,
                 };
+                if request.requires_workspace_claim_protocol() {
+                    workspace_claim_protocol
+                        .ok_or_else(|| crate::runner_job_execution_context::rejected(
+                            "worker did not advertise the required workspace-claim protocol",
+                        ))?
+                        .verify()?;
+                }
+                if request.requires_workspace_owner_lease_protocol() {
+                    workspace_owner_lease_protocol
+                        .ok_or_else(|| crate::runner_job_execution_context::rejected(
+                            "worker did not advertise the required workspace-owner-lease protocol",
+                        ))?
+                        .verify()?;
+                }
                 if let Some(context) = execution_context.as_ref() {
                     inner
                         .jobs
@@ -986,11 +1087,19 @@ impl JobStore {
             .as_ref()
             .map(|_| execution_protocol.cloned())
             .flatten();
+        let workspace_claim_protocol = request
+            .requires_workspace_claim_protocol()
+            .then(crate::workspace_claim::WorkspaceClaimProtocol::current);
+        let workspace_owner_lease_protocol = request
+            .requires_workspace_owner_lease_protocol()
+            .then(crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current);
         Ok(Some(RemoteRunnerJobClaim {
             job,
             request,
             execution_context,
             execution_protocol,
+            workspace_claim_protocol,
+            workspace_owner_lease_protocol,
         }))
     }
 
@@ -1124,6 +1233,55 @@ impl JobStore {
             Ok(())
         })?;
         self.get(job_id)
+    }
+
+    /// Commit a broker claim renewal and the owner epoch returned by the
+    /// authority store together. Callers renew the authority first; this
+    /// replacement prevents a stale worker token from being accepted later.
+    pub(crate) fn renew_remote_runner_claim_with_workspace_owner_lease(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+        claim_id: &str,
+        lease_ms: u64,
+        expected_owner_lease: Option<&crate::workspace_claim::WorkspaceOwnerLease>,
+        renewed_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
+    ) -> Result<Job> {
+        let now = timestamp_ms();
+        self.durable_transaction(|inner| {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            if stored.job.claimed_by_runner_id.as_deref() != Some(runner_id)
+                || stored.job.claim_id.as_deref() != Some(claim_id)
+                || stored.job.status != JobStatus::Running
+                || stored
+                    .job
+                    .claim_expires_at_ms
+                    .is_none_or(|expires| expires <= now)
+            {
+                return Err(crate::runner_job_execution_context::rejected(
+                    "durable runner claim is no longer live",
+                ));
+            }
+            let remote = stored
+                .remote_runner
+                .as_mut()
+                .expect("checked remote runner");
+            if remote.request.workspace_owner_lease.as_ref() != expected_owner_lease {
+                return Err(Error::validation_invalid_argument(
+                    "workspace_owner_lease",
+                    "heartbeat owner lease does not match the durable job",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            remote.request.workspace_owner_lease = renewed_owner_lease;
+            stored.job.updated_at_ms = now;
+            stored.job.claim_expires_at_ms = Some(now.saturating_add(lease_ms.max(1)));
+            Ok(stored.job.clone())
+        })
     }
 
     /// Atomically revalidate and consume a claim immediately before provider
@@ -1359,7 +1517,7 @@ impl JobStore {
         Ok(reconciled)
     }
 
-    fn ensure_remote_runner_claim(
+    pub(crate) fn ensure_remote_runner_claim(
         &self,
         job_id: Uuid,
         runner_id: &str,

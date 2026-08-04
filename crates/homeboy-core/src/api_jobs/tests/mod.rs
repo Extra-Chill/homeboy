@@ -61,6 +61,8 @@ pub(super) fn remote_runner_request(
         require_paths: Vec::new(),
         lab_runner_workload: None,
         lifecycle: None,
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
         metadata: Some(json!({ "submitted_by": "controller" })),
     }
 }

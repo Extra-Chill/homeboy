@@ -217,6 +217,7 @@ pub(super) fn create_with_store(
         worktree_path: worktree_path.to_string_lossy().to_string(),
         branch: options.branch,
         base_ref,
+        workspace_identity: None,
         task_url: options.task_url,
         run_id: options.run_id.clone(),
         cleanup_policy: options
@@ -225,7 +226,11 @@ pub(super) fn create_with_store(
         branch_cleanup_intent: BranchCleanupIntent::DeleteWhenMerged,
         created_at: chrono::Utc::now().to_rfc3339(),
         state: TaskWorktreeState::Active,
+        lifecycle_revision: 0,
+        terminal_workspace_authority: None,
     };
+    let mut record = record;
+    record.workspace_identity = Some(record.effective_workspace_identity()?);
     write_record(store_dir, &record)?;
     Ok(WorktreeCreateOutput { record })
 }
@@ -664,6 +669,7 @@ pub(super) fn record_path(store_dir: &Path, id: &str) -> PathBuf {
 }
 
 pub(super) fn write_record(store_dir: &Path, record: &TaskWorktreeRecord) -> Result<()> {
+    record.effective_workspace_identity()?;
     with_task_worktree_registry_write_lock(|| {
         let store_owner = ownership::owner_for_path_or_ancestor(store_dir)?;
         fs::create_dir_all(store_dir).map_err(|err| {

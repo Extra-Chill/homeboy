@@ -389,6 +389,9 @@ pub fn build_dispatch_plan_with_provider_requirements(
         "runtime_dependency_graph": runtime_dependency_graph_evidence,
     });
 
+    plan.workspace_identity = workspace_target
+        .as_ref()
+        .and_then(|target| target.workspace_identity.clone());
     Ok(plan)
 }
 
@@ -524,7 +527,7 @@ fn resolve_dispatch_workspace(
                 None,
             ));
         }
-        return Ok(Some(DispatchWorkspaceTarget::workspace_ref(record)));
+        return DispatchWorkspaceTarget::workspace_ref(record).map(Some);
     }
 
     let resolution = worktree_providers::resolve_worktree_provider(workspace).map_err(|error| {
@@ -577,6 +580,7 @@ pub(crate) struct DispatchWorkspaceTarget {
     component_id: Option<String>,
     branch: Option<String>,
     base_ref: Option<String>,
+    workspace_identity: Option<homeboy_core::workspace_claim::WorkspaceIdentity>,
     pub(crate) metadata: Value,
 }
 
@@ -593,6 +597,7 @@ impl DispatchWorkspaceTarget {
             component_id: None,
             branch: None,
             base_ref: None,
+            workspace_identity: None,
             metadata: serde_json::json!({
                 "kind": kind,
                 "root": root.display().to_string(),
@@ -600,9 +605,9 @@ impl DispatchWorkspaceTarget {
         }
     }
 
-    fn workspace_ref(record: worktree::WorkspaceRefRecord) -> Self {
-        match record {
-            worktree::WorkspaceRefRecord::Task(record) => Self::record(record),
+    fn workspace_ref(record: worktree::WorkspaceRefRecord) -> Result<Self> {
+        Ok(match record {
+            worktree::WorkspaceRefRecord::Task(record) => Self::record(record)?,
             worktree::WorkspaceRefRecord::Adopted(record) => {
                 let root = std::path::PathBuf::from(&record.path);
                 Self {
@@ -612,6 +617,7 @@ impl DispatchWorkspaceTarget {
                     component_id: None,
                     branch: None,
                     base_ref: None,
+                    workspace_identity: None,
                     metadata: serde_json::json!({
                         "kind": "adopted-workspace",
                         "handle": record.handle,
@@ -621,18 +627,20 @@ impl DispatchWorkspaceTarget {
                     }),
                 }
             }
-        }
+        })
     }
 
-    fn record(record: worktree::TaskWorktreeRecord) -> Self {
+    fn record(record: worktree::TaskWorktreeRecord) -> Result<Self> {
         let root = std::path::PathBuf::from(&record.worktree_path);
-        Self {
+        let workspace_identity = record.effective_workspace_identity()?;
+        Ok(Self {
             root,
             slug: Some(record.component_id.clone()),
             kind: Some("homeboy-worktree".to_string()),
             component_id: Some(record.component_id.clone()),
             branch: Some(record.branch.clone()),
             base_ref: Some(record.base_ref.clone()),
+            workspace_identity: Some(workspace_identity),
             metadata: serde_json::json!({
                 "kind": "homeboy-worktree",
                 "id": record.id,
@@ -643,7 +651,7 @@ impl DispatchWorkspaceTarget {
                 "source_checkout": record.source_checkout,
                 "task_url": record.task_url,
             }),
-        }
+        })
     }
 
     fn provider(resolution: worktree_providers::WorktreeProviderResolution) -> Self {
@@ -655,6 +663,7 @@ impl DispatchWorkspaceTarget {
             component_id: None,
             branch: Some(resolution.worktree.branch.clone()),
             base_ref: None,
+            workspace_identity: None,
             metadata: serde_json::json!({
                 "kind": "worktree-provider",
                 "provider_id": resolution.provider_id,

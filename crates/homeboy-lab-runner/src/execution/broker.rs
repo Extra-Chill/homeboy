@@ -4,7 +4,10 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use homeboy_core::api_jobs::{Job, JobStatus, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata};
+use homeboy_core::api_jobs::{
+    Job, JobStatus, RemoteRunnerJobRequest, RemoteRunnerSubmissionLookup,
+    RunnerJobLifecycleMetadata,
+};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::lab_contract::LabRunnerWorkload;
 use homeboy_core::redaction::redact_argv;
@@ -80,6 +83,45 @@ pub(super) fn exec_via_reverse_broker(
             env.insert("HOMEBOY_COMMAND".to_string(), homeboy_path.to_string());
         }
     }
+    // Reverse jobs hold a renewable owner lease while queued/running. A
+    // reconciliation claim is a separate exclusive fence and is never used as
+    // ordinary execution ownership.
+    let workspace_owner_lease = run_id
+        .as_deref()
+        .map(homeboy_agents::agent_task_lifecycle::workspace_owner_registration_if_present)
+        .transpose()?
+        .flatten()
+        .map(|(workspace, owner_id)| {
+            let token = homeboy_core::broker_auth::broker_submit_token_for_runner(&runner.id)?;
+            let data = broker_http::post_json(
+                &client,
+                broker_url,
+                "/runner/workspace-owners/register",
+                serde_json::json!({
+                    "workspace": workspace,
+                    "owner_id": owner_id,
+                    "ttl_ms": homeboy_core::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
+                }),
+                "register reverse broker workspace owner",
+                token.as_deref(),
+            )?;
+            let lease: homeboy_core::workspace_claim::WorkspaceOwnerLease = serde_json::from_value(
+                data.get("workspace_owner_lease")
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "workspace_owner_lease",
+                    format!("malformed reverse broker owner lease: {error}"),
+                    None,
+                    None,
+                )
+            })?;
+            lease.verify_shape(chrono::Utc::now().timestamp_millis().max(0) as u64)?;
+            Ok::<_, Error>(lease)
+        })
+        .transpose()?;
     let mut request = RemoteRunnerJobRequest {
         runner_id: runner.id.clone(),
         project_id,
@@ -109,6 +151,8 @@ pub(super) fn exec_via_reverse_broker(
             durable_run_id: run_id.clone(),
             ..Default::default()
         }),
+        workspace_claim_binding: None,
+        workspace_owner_lease: workspace_owner_lease.clone(),
         require_paths: require_paths.clone(),
         extension_env_providers,
     };
@@ -142,7 +186,82 @@ pub(super) fn exec_via_reverse_broker(
         })?,
         "submit reverse runner job",
         broker_token.as_deref(),
-    )?;
+    );
+    let data = match data {
+        Ok(data) => data,
+        Err(error) => {
+            let submission_key = request.submission_key().map(str::to_string);
+            let accepted =
+                submission_key.as_deref().map(|submission_key| {
+                    broker_http::post_json(
+                    &client,
+                    broker_url,
+                    "/runner/jobs/submissions/lookup",
+                    serde_json::json!({ "runner_id": runner.id, "submission_key": submission_key }),
+                    "look up ambiguous reverse broker submission",
+                    broker_token.as_deref(),
+                )
+                .and_then(|data| {
+                    serde_json::from_value::<RemoteRunnerSubmissionLookup>(
+                        data.get("result").cloned().unwrap_or_default(),
+                    )
+                    .map_err(|parse_error| Error::internal_json(
+                        parse_error.to_string(),
+                        Some("parse reverse broker submission lookup".to_string()),
+                    ))
+                })
+                });
+            if let Some(Ok(RemoteRunnerSubmissionLookup::Accepted { job })) = accepted.as_ref() {
+                // The broker accepted this exact immutable request. Keep its
+                // original owner lease and continue through normal binding.
+                serde_json::json!({ "job": job })
+            } else {
+                let non_acceptance = matches!(
+                    accepted.as_ref(),
+                    Some(Ok(RemoteRunnerSubmissionLookup::Absent
+                        | RemoteRunnerSubmissionLookup::Expired { .. }))
+                );
+                if !non_acceptance {
+                    return Err(Error::new(
+                        error.code,
+                        error.message,
+                        serde_json::json!({
+                            "workspace_owner_lease_recovery": {
+                                "schema": homeboy_core::workspace_claim::WORKSPACE_OWNER_RELEASE_RECOVERY_SCHEMA,
+                                "lease": workspace_owner_lease,
+                                "submission_key": submission_key,
+                                "lookup": accepted.as_ref().and_then(|result| result.as_ref().err()).map(ToString::to_string),
+                            }
+                        }),
+                    ));
+                }
+                if let Some(lease) = workspace_owner_lease.as_ref() {
+                    let cleanup = broker_http::post_json(
+                        &client,
+                        broker_url,
+                        "/runner/workspace-owners/release",
+                        serde_json::json!({ "workspace_owner_lease": lease }),
+                        "rollback reverse broker workspace owner",
+                        broker_token.as_deref(),
+                    );
+                    if let Err(cleanup_error) = cleanup {
+                        return Err(Error::new(
+                            error.code,
+                            error.message,
+                            serde_json::json!({
+                                "workspace_owner_lease_cleanup": {
+                                    "schema": homeboy_core::workspace_claim::WORKSPACE_OWNER_RELEASE_RECOVERY_SCHEMA,
+                                    "lease": lease,
+                                    "error": cleanup_error.message,
+                                }
+                            }),
+                        ));
+                    }
+                }
+                return Err(error);
+            }
+        }
+    };
     let job_value = data
         .get("job")
         .ok_or_else(|| Error::internal_unexpected("reverse broker submit returned no job"))?;

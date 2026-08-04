@@ -17,14 +17,16 @@ static TASK_WORKTREE_REGISTRY_GATE: OnceLock<RwLock<()>> = OnceLock::new();
 const MALFORMED_RECORD_REPAIR_LIMIT: usize = 20;
 
 pub use types::{
-    AdoptedWorkspaceRecord, BranchCleanupIntent, BranchCleanupStatus, CleanupPolicy,
-    TaskWorktreeRecord, TaskWorktreeState, WorkspaceRefRecord, WorktreeAdoptOptions,
-    WorktreeAdoptOutput, WorktreeBranchCleanupReport, WorktreeCleanupCandidate,
-    WorktreeCleanupCounts, WorktreeCleanupOptions, WorktreeCleanupOutput, WorktreeCleanupSkipped,
-    WorktreeCreateOptions, WorktreeCreateOutput, WorktreeListOutput, WorktreeQueueCreateOptions,
-    WorktreeQueueCreateOutput, WorktreeQueueCreateRow, WorktreeQueueCreateStatus,
-    WorktreeQueueLockHolder, WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeSafetyReport,
-    WorktreeStatusOutput,
+    authority_set_fingerprint, task_worktree_workspace_identity, AdoptedWorkspaceRecord,
+    BranchCleanupIntent, BranchCleanupStatus, CleanupPolicy, TaskWorktreeRecord, TaskWorktreeState,
+    TerminalWorkspaceAuthorityObservation, TerminalWorkspaceAuthorityProof, WorkspaceRefRecord,
+    WorktreeAdoptOptions, WorktreeAdoptOutput, WorktreeBranchCleanupReport,
+    WorktreeCleanupCandidate, WorktreeCleanupCounts, WorktreeCleanupOptions, WorktreeCleanupOutput,
+    WorktreeCleanupSkipped, WorktreeCreateOptions, WorktreeCreateOutput, WorktreeListOutput,
+    WorktreeQueueCreateOptions, WorktreeQueueCreateOutput, WorktreeQueueCreateRow,
+    WorktreeQueueCreateStatus, WorktreeQueueLockHolder, WorktreeRemoveOptions,
+    WorktreeRemoveOutput, WorktreeSafetyReport, WorktreeStatusOutput,
+    TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY, TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
 };
 
 pub fn create(options: WorktreeCreateOptions) -> Result<WorktreeCreateOutput> {
@@ -37,6 +39,42 @@ pub fn adopt(options: WorktreeAdoptOptions) -> Result<WorktreeAdoptOutput> {
 
 pub fn list() -> Result<WorktreeListOutput> {
     with_task_worktree_registry_read_lock(list_unlocked)
+}
+
+/// Cache exact terminal authority evidence before a reconciliation claim is
+/// acquired. The receipt binds the manifest revision that was observed.
+pub fn persist_terminal_workspace_authority(
+    id: &str,
+    expected_revision: u64,
+    proof: TerminalWorkspaceAuthorityProof,
+) -> Result<()> {
+    with_task_worktree_registry_write_lock(|| {
+        let store = metadata_dir()?;
+        let mut record = read_record(&store, id)?;
+        if record.lifecycle_revision != expected_revision
+            || !proof.exact_for(&record, record.run_id.as_deref())
+        {
+            return Err(Error::validation_invalid_argument(
+                "terminal_workspace_authority",
+                "terminal workspace authority proof does not exactly bind the current manifest",
+                Some(id.to_string()),
+                None,
+            ));
+        }
+        match &record.terminal_workspace_authority {
+            Some(existing) if existing != &proof => Err(Error::validation_invalid_argument(
+                "terminal_workspace_authority",
+                "terminal workspace authority proof conflicts with immutable manifest evidence",
+                Some(id.to_string()),
+                None,
+            )),
+            Some(_) => Ok(()),
+            None => {
+                record.terminal_workspace_authority = Some(proof);
+                write_record(&store, &record)
+            }
+        }
+    })
 }
 
 pub(crate) fn list_unlocked() -> Result<WorktreeListOutput> {
@@ -390,12 +428,15 @@ pub(crate) fn record_active_for_test(id: &str, worktree_path: &Path) {
         worktree_path: worktree_path.to_string_lossy().to_string(),
         branch: format!("task/{id}"),
         base_ref: "main".to_string(),
+        workspace_identity: None,
         task_url: None,
         run_id: None,
         cleanup_policy: CleanupPolicy::RemoveWhenSafe,
         branch_cleanup_intent: BranchCleanupIntent::default(),
         created_at: "2026-01-01T00:00:00Z".to_string(),
         state: TaskWorktreeState::Active,
+        lifecycle_revision: 0,
+        terminal_workspace_authority: None,
     };
     let store = metadata_dir().expect("task worktree store");
     write_record(&store, &record).expect("write task worktree record");

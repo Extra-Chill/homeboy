@@ -69,6 +69,8 @@ fn reverse_worker_executes_claimed_job_and_finishes_it() {
                 extension_env_providers: Vec::new(),
                 lab_runner_workload: None,
                 lifecycle: None,
+                workspace_claim_binding: None,
+                workspace_owner_lease: None,
                 metadata: None,
             })
             .expect("submit job");
@@ -363,6 +365,8 @@ fn reverse_worker_verifies_private_at_file_then_cleans_it_up() {
                 extension_env_providers: Vec::new(),
                 lab_runner_workload: None,
                 lifecycle: None,
+                workspace_claim_binding: None,
+                workspace_owner_lease: None,
                 metadata: None,
             })
             .expect("submit private file job");
@@ -415,6 +419,8 @@ fn reverse_worker_rejects_tampered_private_at_file() {
                 extension_env_providers: Vec::new(),
                 lab_runner_workload: None,
                 lifecycle: None,
+                workspace_claim_binding: None,
+                workspace_owner_lease: None,
                 metadata: None,
             })
             .expect("submit tampered file job");
@@ -466,6 +472,8 @@ fn private_at_file_snapshot_survives_source_replacement_before_exec() {
         extension_env_providers: Vec::new(),
         lab_runner_workload: None,
         lifecycle: None,
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
         metadata: None,
     };
     let mut envelope = request.execution_envelope();
@@ -616,6 +624,8 @@ fn private_at_file_request(path: &std::path::Path) -> RemoteRunnerJobRequest {
         extension_env_providers: Vec::new(),
         lab_runner_workload: None,
         lifecycle: None,
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
         metadata: None,
     }
 }
@@ -979,6 +989,8 @@ fn reverse_worker_reports_execution_failure_to_broker() {
                 extension_env_providers: Vec::new(),
                 lab_runner_workload: None,
                 lifecycle: None,
+                workspace_claim_binding: None,
+                workspace_owner_lease: None,
                 metadata: None,
             })
             .expect("submit job");
@@ -1024,6 +1036,8 @@ fn reverse_worker_loop_reports_failed_job_status() {
                 extension_env_providers: Vec::new(),
                 lab_runner_workload: None,
                 lifecycle: None,
+                workspace_claim_binding: None,
+                workspace_owner_lease: None,
                 metadata: None,
             })
             .expect("submit job");
@@ -1100,6 +1114,8 @@ fn reverse_worker_skips_execution_when_claim_is_cancelled_before_start() {
                 extension_env_providers: Vec::new(),
                 lab_runner_workload: None,
                 lifecycle: None,
+                workspace_claim_binding: None,
+                workspace_owner_lease: None,
                 metadata: None,
             })
             .expect("submit job");
@@ -1166,6 +1182,8 @@ fn reverse_worker_skips_finish_when_cancelled_after_execution() {
                 extension_env_providers: Vec::new(),
                 lab_runner_workload: None,
                 lifecycle: None,
+                workspace_claim_binding: None,
+                workspace_owner_lease: None,
                 metadata: None,
             })
             .expect("submit job");
@@ -1241,6 +1259,8 @@ fn reverse_worker_interrupts_running_job_when_broker_cancel_is_observed() {
                 extension_env_providers: Vec::new(),
                 lab_runner_workload: None,
                 lifecycle: None,
+                workspace_claim_binding: None,
+                workspace_owner_lease: None,
                 metadata: None,
             })
             .expect("submit job");
@@ -1313,6 +1333,8 @@ fn run_id_echo_request() -> RemoteRunnerJobRequest {
         extension_env_providers: Vec::new(),
         lab_runner_workload: None,
         lifecycle: None,
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
         metadata: None,
     }
 }
@@ -1387,6 +1409,8 @@ fn provider_request(
         extension_env_providers: Vec::new(),
         lab_runner_workload: None,
         lifecycle: None,
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
         metadata: Some(serde_json::json!({
             "controller_run_id": controller_run_id,
             "controller_attempt_id": attempt_id,

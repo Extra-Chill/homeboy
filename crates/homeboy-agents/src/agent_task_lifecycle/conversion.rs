@@ -43,6 +43,9 @@ pub(crate) fn aggregate_evidence_refs(
             .flat_map(AgentTaskLatestExecutorEvidence::refs),
     );
     dedup_evidence_refs(&mut refs);
+    // Failure-specific evidence is the primary actionable record for a
+    // pre-dispatch failure, ahead of generic executor context.
+    refs.sort_by_key(|reference| reference.kind != "lab-offload-pre-dispatch-failure");
     refs
 }
 

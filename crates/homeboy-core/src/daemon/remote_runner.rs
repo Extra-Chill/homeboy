@@ -65,6 +65,10 @@ struct ClaimRequest {
     concurrency_limit: Option<usize>,
     #[serde(default)]
     execution_protocol: Option<crate::runner_job_execution_context::RunnerJobExecutionProtocol>,
+    #[serde(default)]
+    workspace_claim_protocol: Option<crate::workspace_claim::WorkspaceClaimProtocol>,
+    #[serde(default)]
+    workspace_owner_lease_protocol: Option<crate::workspace_claim::WorkspaceOwnerLeaseProtocol>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -76,6 +80,10 @@ struct EventRequest {
     message: Option<String>,
     #[serde(default)]
     data: Option<Value>,
+    #[serde(default)]
+    workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
+    #[serde(default)]
+    workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -83,6 +91,10 @@ struct FinishRequest {
     runner_id: String,
     claim_id: String,
     result: RemoteRunnerJobResult,
+    #[serde(default)]
+    workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
+    #[serde(default)]
+    workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -91,6 +103,10 @@ struct HeartbeatRequest {
     claim_id: String,
     #[serde(default)]
     lease_ms: Option<u64>,
+    #[serde(default)]
+    workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
+    #[serde(default)]
+    workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -98,6 +114,17 @@ struct ConsumeRequest {
     runner_id: String,
     claim_id: String,
     context_id: String,
+    #[serde(default)]
+    workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
+    #[serde(default)]
+    workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OwnerValidationRequest {
+    runner_id: String,
+    claim_id: String,
+    workspace_owner_lease: crate::workspace_claim::WorkspaceOwnerLease,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -126,6 +153,46 @@ pub(in crate::daemon) fn route(
     auth: &BrokerAuthContext,
 ) -> HttpResponse {
     match (method, path) {
+        ("GET", "/runner/workspace-claims/capabilities") => {
+            match workspace_claim_capabilities(auth) {
+                Ok(body) => daemon_endpoint_response("runner.workspace_claims.capabilities", body),
+                Err(err) => auth_or_bad_request(err),
+            }
+        }
+        ("POST", "/runner/workspace-claims/acquire") => match acquire_workspace_claim(body, auth) {
+            Ok(body) => daemon_endpoint_response("runner.workspace_claims.acquire", body),
+            Err(err) => auth_or_bad_request(err),
+        },
+        ("POST", "/runner/workspace-claims/validate") => match validate_workspace_claim(body, auth) {
+            Ok(body) => daemon_endpoint_response("runner.workspace_claims.validate", body),
+            Err(err) => auth_or_bad_request(err),
+        },
+        ("POST", "/runner/workspace-claims/release") => match release_workspace_claim(body, auth) {
+            Ok(body) => daemon_endpoint_response("runner.workspace_claims.release", body),
+            Err(err) => auth_or_bad_request(err),
+        },
+        ("POST", "/runner/workspace-claims/authority") => {
+            match workspace_claim_authority_status(body, auth) {
+                Ok(body) => daemon_endpoint_response("runner.workspace_claims.authority", body),
+                Err(err) => auth_or_bad_request(err),
+            }
+        }
+        ("POST", "/runner/workspace-owners/register") => match register_workspace_owner(body, auth) {
+            Ok(body) => daemon_endpoint_response("runner.workspace_owners.register", body),
+            Err(err) => auth_or_bad_request(err),
+        },
+        ("POST", "/runner/workspace-owners/validate") => match validate_workspace_owner(body, auth) {
+            Ok(body) => daemon_endpoint_response("runner.workspace_owners.validate", body),
+            Err(err) => auth_or_bad_request(err),
+        },
+        ("POST", "/runner/workspace-owners/renew") => match renew_workspace_owner(body, auth) {
+            Ok(body) => daemon_endpoint_response("runner.workspace_owners.renew", body),
+            Err(err) => auth_or_bad_request(err),
+        },
+        ("POST", "/runner/workspace-owners/release") => match release_workspace_owner(body, auth) {
+            Ok(body) => daemon_endpoint_response("runner.workspace_owners.release", body),
+            Err(err) => auth_or_bad_request(err),
+        },
         ("POST", "/runner/sessions") => match register_session(body, auth) {
             Ok(body) => daemon_endpoint_response("runner.sessions.register", body),
             Err(err) => auth_or_bad_request(err),
@@ -424,6 +491,9 @@ fn reconcile(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext
         now_ms,
         grant.as_ref().map(|grant| grant.runner_id.as_str()),
     )?;
+    for job in &reconciled {
+        release_terminal_workspace_owner(job_store, job.id);
+    }
     Ok(json!({
         "command": "api.runner.jobs.reconcile",
         "reconciled": reconciled,
@@ -493,6 +563,8 @@ fn register_session(body: Option<Value>, auth: &BrokerAuthContext) -> Result<Val
 fn enqueue(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) -> Result<Value> {
     let mut request: RemoteRunnerJobRequest = parse_body(body, "remote runner job request")?;
     auth.authorize(BrokerScope::Submit, Some(request.runner_id.as_str()))?;
+    authorize_workspace_claim_binding(request.workspace_claim_binding.as_ref())?;
+    authorize_workspace_owner_lease(request.workspace_owner_lease.as_ref())?;
     request.normalize();
     let public_request = request.public_metadata();
     let job = job_store.submit_remote_runner_job(request)?;
@@ -545,12 +617,14 @@ fn claim(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) ->
     let concurrency_limit = request
         .concurrency_limit
         .or_else(|| super::runner_workspace_root::runner_concurrency_limit(&request.runner_id));
-    let claim = job_store.claim_remote_runner_job_with_execution_protocol(
+    let claim = job_store.claim_remote_runner_job_with_protocols(
         &request.runner_id,
         request.project_id.as_deref(),
         request.lease_ms.unwrap_or(30_000),
         concurrency_limit,
         request.execution_protocol.as_ref(),
+        request.workspace_claim_protocol.as_ref(),
+        request.workspace_owner_lease_protocol.as_ref(),
     )?;
     Ok(json!({
         "command": "api.runner.jobs.claim",
@@ -572,7 +646,7 @@ fn update(
                 "unknown remote runner job path",
                 Some(path.to_string()),
                 Some(vec![
-                    "Use /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, /runner/jobs/<job-id>/consume, or /runner/jobs/<job-id>/cancel.".to_string(),
+                    "Use /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, /runner/jobs/<job-id>/validate-owner, /runner/jobs/<job-id>/consume, or /runner/jobs/<job-id>/cancel.".to_string(),
                 ]),
             ),
         );
@@ -593,6 +667,10 @@ fn update(
         },
         "consume" => match consume(job_id, body, job_store, auth) {
             Ok(body) => daemon_endpoint_response("runner.jobs.consume", body),
+            Err(err) => auth_or_bad_request(err),
+        },
+        "validate-owner" => match validate_owner(job_id, body, job_store, auth) {
+            Ok(body) => daemon_endpoint_response("runner.jobs.owner.validate", body),
             Err(err) => auth_or_bad_request(err),
         },
         "cancel" => match cancel(job_id, job_store, auth) {
@@ -650,6 +728,16 @@ fn append_event(
     let request: EventRequest = parse_body(body, "remote runner event request")?;
     auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
     touch_reverse_session(&request.runner_id)?;
+    authorize_exact_workspace_claim_binding(
+        job_store,
+        job_id,
+        request.workspace_claim_binding.as_ref(),
+    )?;
+    authorize_exact_workspace_owner_lease(
+        job_store,
+        job_id,
+        request.workspace_owner_lease.as_ref(),
+    )?;
     let event = job_store.append_remote_runner_event(
         job_id,
         &request.runner_id,
@@ -673,12 +761,23 @@ fn finish(
     let request: FinishRequest = parse_body(body, "remote runner finish request")?;
     auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
     touch_reverse_session(&request.runner_id)?;
+    authorize_exact_workspace_claim_binding(
+        job_store,
+        job_id,
+        request.workspace_claim_binding.as_ref(),
+    )?;
+    authorize_exact_workspace_owner_lease(
+        job_store,
+        job_id,
+        request.workspace_owner_lease.as_ref(),
+    )?;
     let job = job_store.finish_remote_runner_job(
         job_id,
         &request.runner_id,
         &request.claim_id,
         request.result,
     )?;
+    release_terminal_workspace_owner(job_store, job_id);
     Ok(json!({
         "command": "api.runner.jobs.finish",
         "job": job,
@@ -694,15 +793,46 @@ fn heartbeat(
     let request: HeartbeatRequest = parse_body(body, "remote runner heartbeat request")?;
     auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
     touch_reverse_session(&request.runner_id)?;
-    let job = job_store.renew_remote_runner_claim(
+    authorize_exact_workspace_claim_binding(
+        job_store,
+        job_id,
+        request.workspace_claim_binding.as_ref(),
+    )?;
+    authorize_exact_workspace_owner_lease(
+        job_store,
+        job_id,
+        request.workspace_owner_lease.as_ref(),
+    )?;
+    let lease_ms = request.lease_ms.unwrap_or(30_000);
+    let renewed_owner_lease = request
+        .workspace_owner_lease
+        .as_ref()
+        .map(|lease| {
+            workspace_claim_store()?.renew_owner(lease, lease_ms, workspace_claim_now_ms())
+        })
+        .transpose()?;
+    let job = match job_store.renew_remote_runner_claim_with_workspace_owner_lease(
         job_id,
         &request.runner_id,
         &request.claim_id,
-        request.lease_ms.unwrap_or(30_000),
-    )?;
+        lease_ms,
+        request.workspace_owner_lease.as_ref(),
+        renewed_owner_lease.clone(),
+    ) {
+        Ok(job) => job,
+        Err(error) => {
+            // The authority has advanced but the queue did not. Preserve typed
+            // recovery work rather than accepting either epoch ambiguously.
+            if let Some(lease) = renewed_owner_lease.as_ref() {
+                let _ = workspace_claim_store()?.record_owner_release_failure(lease, &error);
+            }
+            return Err(error);
+        }
+    };
     Ok(json!({
         "command": "api.runner.jobs.heartbeat",
         "job": job,
+        "workspace_owner_lease": renewed_owner_lease,
     }))
 }
 
@@ -715,6 +845,16 @@ fn consume(
     let request: ConsumeRequest = parse_body(body, "remote runner execution consume request")?;
     auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
     touch_reverse_session(&request.runner_id)?;
+    authorize_exact_workspace_claim_binding(
+        job_store,
+        job_id,
+        request.workspace_claim_binding.as_ref(),
+    )?;
+    authorize_exact_workspace_owner_lease(
+        job_store,
+        job_id,
+        request.workspace_owner_lease.as_ref(),
+    )?;
     let job = job_store.consume_remote_runner_execution(
         job_id,
         &request.runner_id,
@@ -728,9 +868,30 @@ fn consume(
     }))
 }
 
+/// This is deliberately separate from consume: the worker uses it immediately
+/// before input materialization, while the receipt remains one-time at provider
+/// invocation.
+fn validate_owner(
+    job_id: Uuid,
+    body: Option<Value>,
+    job_store: &JobStore,
+    auth: &BrokerAuthContext,
+) -> Result<Value> {
+    let request: OwnerValidationRequest =
+        parse_body(body, "remote runner owner validation request")?;
+    auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
+    touch_reverse_session(&request.runner_id)?;
+    authorize_exact_workspace_owner_lease(job_store, job_id, Some(&request.workspace_owner_lease))?;
+    job_store.ensure_remote_runner_claim(job_id, &request.runner_id, &request.claim_id)?;
+    let valid = workspace_claim_store()?
+        .validate_owner(&request.workspace_owner_lease, workspace_claim_now_ms())?;
+    Ok(json!({ "valid": valid }))
+}
+
 fn cancel(job_id: Uuid, job_store: &JobStore, auth: &BrokerAuthContext) -> Result<Value> {
     authorize_job_submit(job_id, job_store, auth)?;
     let job = job_store.cancel_remote_runner_job(job_id, "cancel requested via broker API")?;
+    release_terminal_workspace_owner(job_store, job_id);
     let events = job_store.events(job_id)?;
     Ok(json!({
         "command": "api.runner.jobs.cancel",
@@ -758,6 +919,21 @@ fn authorize_job_submit(
     Ok(())
 }
 
+fn release_terminal_workspace_owner(job_store: &JobStore, job_id: Uuid) {
+    let Ok(Some(lease)) = job_store.remote_runner_workspace_owner_lease(job_id) else {
+        return;
+    };
+    if let Err(error) = workspace_claim_store().and_then(|store| {
+        if let Err(release_error) = store.release_owner(&lease, workspace_claim_now_ms()) {
+            store.record_owner_release_failure(&lease, &release_error)?;
+            return Err(release_error);
+        }
+        Ok(())
+    }) {
+        let _ = job_store.record_workspace_owner_cleanup_failure(job_id, &error);
+    }
+}
+
 /// Map a handler error to an HTTP response. Broker auth rejections become
 /// `401 Unauthorized` (so unauthenticated callers see a distinct status), all
 /// other errors keep the existing `400 Bad Request` contract.
@@ -773,6 +949,202 @@ fn parse_body<T: for<'de> Deserialize<'de>>(body: Option<Value>, label: &str) ->
     serde_json::from_value(body.unwrap_or_else(|| json!({}))).map_err(|err| {
         Error::validation_invalid_argument("body", format!("invalid {label}: {err}"), None, None)
     })
+}
+
+fn workspace_claim_store() -> Result<crate::workspace_claim::WorkspaceClaimStore> {
+    Ok(crate::workspace_claim::WorkspaceClaimStore::new(
+        paths::homeboy_data()?.join("reverse-broker-workspace-claims"),
+    ))
+}
+
+fn workspace_claim_now_ms() -> u64 {
+    chrono::Utc::now().timestamp_millis().max(0) as u64
+}
+
+#[derive(Deserialize)]
+struct WorkspaceClaimAcquireRequest {
+    workspace: crate::workspace_claim::WorkspaceIdentity,
+    ttl_ms: u64,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceClaimRequest {
+    claim: crate::workspace_claim::WorkspaceClaim,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceAuthorityStatusRequest {
+    workspace: crate::workspace_claim::WorkspaceIdentity,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceOwnerRegisterRequest {
+    workspace: crate::workspace_claim::WorkspaceIdentity,
+    owner_id: String,
+    ttl_ms: u64,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceOwnerRequest {
+    workspace_owner_lease: crate::workspace_claim::WorkspaceOwnerLease,
+    #[serde(default = "default_workspace_owner_ttl_ms")]
+    ttl_ms: u64,
+}
+
+fn default_workspace_owner_ttl_ms() -> u64 {
+    crate::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS
+}
+
+fn workspace_claim_capabilities(auth: &BrokerAuthContext) -> Result<Value> {
+    auth.authorize(BrokerScope::Submit, None)?;
+    Ok(json!({ "capabilities": [
+        crate::workspace_claim::WorkspaceClaimProtocol::current(),
+        crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current(),
+    ] }))
+}
+
+fn register_workspace_owner(body: Option<Value>, auth: &BrokerAuthContext) -> Result<Value> {
+    auth.authorize(BrokerScope::Submit, None)?;
+    let request: WorkspaceOwnerRegisterRequest =
+        parse_body(body, "reverse broker workspace owner register request")?;
+    let lease = workspace_claim_store()?.register_owner(
+        request.workspace,
+        request.owner_id,
+        request.ttl_ms,
+        workspace_claim_now_ms(),
+    )?;
+    Ok(json!({ "workspace_owner_lease": lease }))
+}
+
+fn validate_workspace_owner(body: Option<Value>, auth: &BrokerAuthContext) -> Result<Value> {
+    auth.authorize(BrokerScope::Submit, None)?;
+    let request: WorkspaceOwnerRequest =
+        parse_body(body, "reverse broker workspace owner validate request")?;
+    Ok(
+        json!({ "valid": workspace_claim_store()?.validate_owner(&request.workspace_owner_lease, workspace_claim_now_ms())? }),
+    )
+}
+
+fn renew_workspace_owner(body: Option<Value>, auth: &BrokerAuthContext) -> Result<Value> {
+    auth.authorize(BrokerScope::Submit, None)?;
+    let request: WorkspaceOwnerRequest =
+        parse_body(body, "reverse broker workspace owner renew request")?;
+    let lease = workspace_claim_store()?.renew_owner(
+        &request.workspace_owner_lease,
+        request.ttl_ms,
+        workspace_claim_now_ms(),
+    )?;
+    Ok(json!({ "workspace_owner_lease": lease }))
+}
+
+fn release_workspace_owner(body: Option<Value>, auth: &BrokerAuthContext) -> Result<Value> {
+    auth.authorize(BrokerScope::Submit, None)?;
+    let request: WorkspaceOwnerRequest =
+        parse_body(body, "reverse broker workspace owner release request")?;
+    workspace_claim_store()?
+        .release_owner(&request.workspace_owner_lease, workspace_claim_now_ms())?;
+    Ok(json!({ "released": true }))
+}
+
+fn acquire_workspace_claim(body: Option<Value>, auth: &BrokerAuthContext) -> Result<Value> {
+    auth.authorize(BrokerScope::Submit, None)?;
+    let request: WorkspaceClaimAcquireRequest =
+        parse_body(body, "reverse broker workspace claim acquire request")?;
+    let claim = workspace_claim_store()?.acquire(
+        request.workspace,
+        request.ttl_ms,
+        workspace_claim_now_ms(),
+    )?;
+    Ok(json!({ "claim": claim }))
+}
+
+fn validate_workspace_claim(body: Option<Value>, auth: &BrokerAuthContext) -> Result<Value> {
+    auth.authorize(BrokerScope::Submit, None)?;
+    let request: WorkspaceClaimRequest =
+        parse_body(body, "reverse broker workspace claim validate request")?;
+    Ok(
+        json!({ "valid": workspace_claim_store()?.validate(&request.claim, workspace_claim_now_ms())? }),
+    )
+}
+
+fn release_workspace_claim(body: Option<Value>, auth: &BrokerAuthContext) -> Result<Value> {
+    auth.authorize(BrokerScope::Submit, None)?;
+    let request: WorkspaceClaimRequest =
+        parse_body(body, "reverse broker workspace claim release request")?;
+    workspace_claim_store()?.release(&request.claim, workspace_claim_now_ms())?;
+    Ok(json!({ "released": true }))
+}
+
+fn workspace_claim_authority_status(
+    body: Option<Value>,
+    auth: &BrokerAuthContext,
+) -> Result<Value> {
+    auth.authorize(BrokerScope::Submit, None)?;
+    let request: WorkspaceAuthorityStatusRequest =
+        parse_body(body, "reverse broker workspace claim authority request")?;
+    Ok(json!({ "status": workspace_claim_store()?.authority_status(
+        &request.workspace,
+        workspace_claim_now_ms(),
+    )? }))
+}
+
+fn authorize_workspace_claim_binding(
+    binding: Option<&crate::workspace_claim::WorkspaceClaimBinding>,
+) -> Result<()> {
+    if let Some(binding) = binding {
+        workspace_claim_store()?.authorize_binding(binding, workspace_claim_now_ms())?;
+    }
+    Ok(())
+}
+
+fn authorize_exact_workspace_claim_binding(
+    job_store: &JobStore,
+    job_id: Uuid,
+    presented: Option<&crate::workspace_claim::WorkspaceClaimBinding>,
+) -> Result<()> {
+    let persisted = job_store.remote_runner_workspace_claim_binding(job_id)?;
+    if persisted.as_ref() != presented {
+        return Err(Error::validation_invalid_argument(
+            "workspace_claim_binding",
+            "reverse runner workspace claim binding does not match the durable job",
+            Some(job_id.to_string()),
+            None,
+        ));
+    }
+    authorize_workspace_claim_binding(presented)
+}
+
+fn authorize_workspace_owner_lease(
+    lease: Option<&crate::workspace_claim::WorkspaceOwnerLease>,
+) -> Result<()> {
+    if let Some(lease) = lease {
+        if !workspace_claim_store()?.validate_owner(lease, workspace_claim_now_ms())? {
+            return Err(Error::validation_invalid_argument(
+                "workspace_owner_lease",
+                "reverse runner workspace owner lease is stale or no longer live",
+                Some(lease.owner_id.clone()),
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn authorize_exact_workspace_owner_lease(
+    job_store: &JobStore,
+    job_id: Uuid,
+    presented: Option<&crate::workspace_claim::WorkspaceOwnerLease>,
+) -> Result<()> {
+    let persisted = job_store.remote_runner_workspace_owner_lease(job_id)?;
+    if persisted.as_ref() != presented {
+        return Err(Error::validation_invalid_argument(
+            "workspace_owner_lease",
+            "reverse runner workspace owner lease does not match the durable job",
+            Some(job_id.to_string()),
+            None,
+        ));
+    }
+    authorize_workspace_owner_lease(presented)
 }
 
 fn touch_reverse_session(runner_id: &str) -> Result<()> {
@@ -1018,6 +1390,41 @@ mod auth_tests {
             "homeboy/remote-runner-observation-run-detail/v1"
         );
         assert_eq!(response.body["body"]["run"]["run"]["id"], "run-1");
+    }
+
+    #[test]
+    fn workspace_claim_authority_requires_submit_auth_and_reports_live_owner() {
+        let _home = HomeGuard::new();
+        let token = pair("runner-a", BrokerScope::Submit);
+        let workspace = crate::workspace_claim::WorkspaceIdentity::new("test", "reverse-authority")
+            .expect("workspace identity");
+        let denied = route(
+            "POST",
+            "/runner/workspace-claims/authority",
+            Some(json!({ "workspace": workspace })),
+            &JobStore::default(),
+            &enforcing_auth(None),
+        );
+        assert_eq!(denied.status_code, 401);
+        let owner = route(
+            "POST",
+            "/runner/workspace-owners/register",
+            Some(json!({ "workspace": workspace, "owner_id": "reverse-owner", "ttl_ms": 30_000 })),
+            &JobStore::default(),
+            &enforcing_auth(Some(&token)),
+        );
+        assert_eq!(owner.status_code, 200, "owner: {}", owner.body);
+        let status = route(
+            "POST",
+            "/runner/workspace-claims/authority",
+            Some(json!({ "workspace": workspace })),
+            &JobStore::default(),
+            &enforcing_auth(Some(&token)),
+        );
+        assert_eq!(status.status_code, 200, "status: {}", status.body);
+        assert_eq!(status.body["body"]["status"]["clear"], false);
+        assert_eq!(status.body["body"]["status"]["live_owner_count"], 1);
+        assert!(!status.body.to_string().contains("reverse-owner"));
     }
 
     #[test]

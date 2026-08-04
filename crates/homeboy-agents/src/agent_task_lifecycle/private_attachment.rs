@@ -202,7 +202,22 @@ pub fn persist_private_run_attachment<T: Serialize + DeserializeOwned + Clone + 
 ) -> Result<PrivateRunAttachment<T>> {
     let run_id = validated_run_id(run_id)?;
     // Prove the authoritative lifecycle exists before creating side data.
-    store::read_record(&run_id)?;
+    let record = store::read_record(&run_id)?;
+    super::require_record_workspace_owner(&record)?;
+    if let Some(handoff) = record.lab_handoff.as_ref() {
+        if handoff.state == super::AgentTaskLabHandoffState::Accepted
+            && (handoff.workspace_identity != record.workspace_identity
+                || handoff.workspace_lifecycle_revision != record.workspace_lifecycle_revision
+                || handoff.workspace_owner_lease != record.workspace_owner_lease)
+        {
+            return Err(Error::validation_invalid_argument(
+                "workspace_claim_binding",
+                "accepted Lab handoff binding does not match the durable run",
+                Some(run_id),
+                None,
+            ));
+        }
+    }
     let path = attachment_path(&run_id, kind)?;
     let attachment = PrivateRunAttachment {
         schema: PRIVATE_RUN_ATTACHMENT_SCHEMA.to_string(),

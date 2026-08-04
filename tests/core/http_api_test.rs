@@ -357,6 +357,8 @@ fn queued_local_runner_job(store: &JobStore, durable_run_id: Option<&str>) -> cr
             active_child_count: None,
             active_cell_count: None,
         }),
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
     }))
 }
 
@@ -590,6 +592,8 @@ fn runs_list_includes_active_runner_jobs() {
                 require_paths: Vec::new(),
                 lab_runner_workload: None,
                 lifecycle: None,
+                workspace_claim_binding: None,
+                workspace_owner_lease: None,
                 metadata: Some(serde_json::json!({
                     "source": "lab",
                     "kind": "agent-task-cook",

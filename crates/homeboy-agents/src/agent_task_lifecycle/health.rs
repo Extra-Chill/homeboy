@@ -180,6 +180,12 @@ fn reconstruct_record(run: &RunRecord) -> Result<AgentTaskRunRecord> {
         candidate_adoption: None,
         adoption_run_id: None,
         acceptance: None,
+        // Reconstructed legacy records have no durable admission fence. Do not
+        // invent workspace ownership from a plan-only projection.
+        workspace_identity: None,
+        workspace_lifecycle_revision: 0,
+        workspace_owner_lease: None,
+        workspace_claim: None,
         metadata: json!({
             "lifecycle_reconstruction": {
                 "source": "observation_status_and_durable_plan",

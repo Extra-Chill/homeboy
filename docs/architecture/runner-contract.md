@@ -117,6 +117,37 @@ The envelope accepts only these fields and never controls job lifecycle. Lines
 that are malformed, use another schema, or include terminal-state fields stay
 ordinary bounded stdout and cannot change the runner job status.
 
+## Workspace authority
+
+Workspace mutation uses two distinct, durable authorities. A queued or running
+job holds a `workspace-owner-lease`; the daemon renews it before its five-minute
+maximum TTL and durably replaces the exact token and epoch on the job record.
+Terminal cleanup releases that latest exact lease. A renewal that cannot be
+persisted cancels or fails the job with typed recovery evidence, which daemon
+startup retries before accepting conflicting work.
+
+Reconciliation uses short exclusive `workspace-claim` fences only after no
+owner lease remains live. Composite reconciliation acquires local and remote
+components independently. Each authority validates its own opaque token and
+store-issued epoch; a composite generation identifies the composition but is
+not an authority epoch. Reverse brokers expose the same owner operations at
+`/runner/workspace-owners/register`, `validate`, `renew`, and `release`.
+
+Managed task worktrees use the portable `task-worktree` workspace identity with
+the registry component and handle as its locator. The task-worktree manifest
+persists that identity when created; legacy manifests derive it from those same
+stable fields. Paths, inodes, runner hosts, and agent plan/task IDs are not part
+of this identity. Controllers copy the exact manifest identity into the
+agent-task plan and durable run record before local, direct, or reverse owner
+registration, so every authority blocks reconciliation on the same workspace.
+An active legacy run that has no durable owner lease fails closed for ownership
+mutations; terminal reconciliation is the authority for historical recovery.
+
+Reverse submission transport failures are ambiguous until the broker's
+submission-key lookup reports `accepted`, `absent`, or `expired`. Controllers
+retain the original owner lease for accepted or unresolved submissions and
+release it only after authoritative non-acceptance.
+
 ## Failure context
 
 Runner exec results expose a generic `failure_context` object when the executed

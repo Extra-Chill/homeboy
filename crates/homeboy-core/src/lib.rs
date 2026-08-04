@@ -207,6 +207,7 @@ pub(crate) mod transient_workspace_policy;
 pub mod test_support;
 pub mod update_check_cache;
 pub mod validation_progress;
+pub mod workspace_claim;
 pub mod workspace_snapshot;
 pub mod worktree;
 pub mod worktree_providers;
