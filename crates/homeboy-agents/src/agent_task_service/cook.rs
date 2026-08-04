@@ -2032,7 +2032,8 @@ where
     );
     let required_toolchains = options.gates.required_toolchains();
     let preflight = (required_toolchains.is_empty()
-        && options.gates.gate_package_artifacts.is_empty())
+        && options.gates.gate_package_artifacts.is_empty()
+        && options.gates.gate_environment.extension_inputs.is_empty())
     .then_some(Ok(()))
     .unwrap_or_else(|| {
         let gate_workspace = options.source_worktree_path.as_deref().ok_or_else(|| {
@@ -2193,6 +2194,7 @@ where
             if !agent_task_lifecycle::run_record_exists(&run_id)? {
                 agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
             }
+            let mut failed_dispatch_plan = None;
             let execution = (|| {
                 let initial_baseline = if attempt == 1 {
                     materialize_initial_candidate_baseline(
@@ -2296,6 +2298,7 @@ where
                 if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
                     bind_dispatch_workspace_attestations(&mut dispatch_plan)?;
                 }
+                failed_dispatch_plan = Some(dispatch_plan.clone());
                 if let Some(dispatcher) = &options.attempt_dispatcher {
                     if options.source_worktree_path.is_some() {
                         validate_cook_workspace(&options)?;
@@ -2339,6 +2342,12 @@ where
                 }
             })();
             if let Err(error) = execution {
+                if let Some(dispatch_plan) = failed_dispatch_plan.as_ref() {
+                    // Baseline cleanup runs when the dispatch scope exits. Restore
+                    // the exact continuation contract only after that cleanup so
+                    // retry never loses its controller-owned plan.
+                    agent_task_lifecycle::persist_controller_plan(&run_id, dispatch_plan)?;
+                }
                 let record = match agent_task_lifecycle::status(&run_id) {
                     Ok(record)
                         if record.state == agent_task_lifecycle::AgentTaskRunState::Queued =>

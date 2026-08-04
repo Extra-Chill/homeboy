@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy"
-version = "0.328.0"
+version = "0.328.1"
 dependencies = [
  "base64",
  "chrono",
@@ -816,6 +816,7 @@ dependencies = [
  "serde_path_to_error",
  "sha2",
  "shellexpand",
+ "shlex",
  "tempfile",
  "uuid",
  "windows-sys 0.61.2",
@@ -1085,6 +1086,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "shellexpand",
+ "shlex",
  "tempfile",
  "uuid",
 ]

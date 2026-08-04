@@ -18,62 +18,53 @@ pub fn resolve_project_component_with_standalone_snapshot(
     component_id: &str,
     standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
 ) -> Result<crate::component::Component> {
-    let (
-        mut component,
-        attachment_local_path,
+    let (component, attachment_local_path, attachment_remote_path, attachment_deployment_provider) =
+        if let Some(attachment) = project
+            .components
+            .iter()
+            .find(|component| component.id == component_id)
+        {
+            super::super::validate_component_local_path(project, component_id)?;
+            crate::component::resolution::validate_duplicate_portable_component_ids(
+                component_id,
+                Path::new(&attachment.local_path),
+                None,
+            )?;
+            (
+                discover_from_portable(Path::new(&attachment.local_path)).ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "components.local_path",
+                        format!(
+                            "Project component '{}' points to '{}' but no homeboy.json was found",
+                            component_id, attachment.local_path
+                        ),
+                        Some(project.id.clone()),
+                        None,
+                    )
+                })?,
+                attachment.local_path.clone(),
+                attachment.remote_path.clone(),
+                attachment.deployment_provider.clone(),
+            )
+        } else {
+            return Err(Error::validation_invalid_argument(
+                "components",
+                format!(
+                    "Project '{}' has no attached component '{}'",
+                    project.id, component_id
+                ),
+                Some(project.id.clone()),
+                None,
+            ));
+        };
+
+    let mut resolved = bind_materialized_component_to_project(
+        component,
+        project,
+        standalone_snapshot,
         attachment_remote_path,
         attachment_deployment_provider,
-    ) = if let Some(attachment) = project
-        .components
-        .iter()
-        .find(|component| component.id == component_id)
-    {
-        super::super::validate_component_local_path(project, component_id)?;
-        crate::component::resolution::validate_duplicate_portable_component_ids(
-            component_id,
-            Path::new(&attachment.local_path),
-            None,
-        )?;
-        (
-            discover_from_portable(Path::new(&attachment.local_path)).ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "components.local_path",
-                    format!(
-                        "Project component '{}' points to '{}' but no homeboy.json was found",
-                        component_id, attachment.local_path
-                    ),
-                    Some(project.id.clone()),
-                    None,
-                )
-            })?,
-            attachment.local_path.clone(),
-            attachment.remote_path.clone(),
-            attachment.deployment_provider.clone(),
-        )
-    } else {
-        return Err(Error::validation_invalid_argument(
-            "components",
-            format!(
-                "Project '{}' has no attached component '{}'",
-                project.id, component_id
-            ),
-            Some(project.id.clone()),
-            None,
-        ));
-    };
-
-    if let Some(remote_path) = attachment_remote_path {
-        if !remote_path.trim().is_empty() {
-            component.remote_path = remote_path;
-        }
-    }
-    if attachment_deployment_provider.is_some() {
-        component.deployment_provider = attachment_deployment_provider;
-    }
-
-    apply_standalone_component_fallbacks(&mut component, standalone_snapshot);
-
-    let mut resolved = apply_component_overrides(&component, project);
+    );
     // Normalize the attachment `local_path` to an absolute path before it becomes
     // the resolved component's machine-local checkout. Deploy resolves components
     // directly through this function, while `release` reaches the same attachment
@@ -106,6 +97,27 @@ pub fn resolve_project_component_with_standalone_snapshot(
     crate::component::resolve_remote_path(&mut resolved);
 
     Ok(resolved)
+}
+
+/// Apply the project-owned layers to component configuration discovered from a
+/// materialized source tree. Exact-ref and isolated tag checkouts use this so
+/// their source-owned fields come from the selected commit while attachment and
+/// fleet/project policy keeps its normal precedence.
+pub fn bind_materialized_component_to_project(
+    mut component: crate::component::Component,
+    project: &Project,
+    standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
+    attachment_remote_path: Option<String>,
+    attachment_deployment_provider: Option<crate::component::DeploymentProviderAttachment>,
+) -> crate::component::Component {
+    if let Some(remote_path) = attachment_remote_path.filter(|path| !path.trim().is_empty()) {
+        component.remote_path = remote_path;
+    }
+    if attachment_deployment_provider.is_some() {
+        component.deployment_provider = attachment_deployment_provider;
+    }
+    apply_standalone_component_fallbacks(&mut component, standalone_snapshot);
+    apply_component_overrides(&component, project)
 }
 
 fn apply_standalone_component_fallbacks(
@@ -216,8 +228,10 @@ pub fn resolve_project_components(project: &Project) -> Result<Vec<crate::compon
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::Component;
     use crate::project::{ProjectComponentAttachment, ProjectComponentOverrides};
     use crate::test_support::with_isolated_home;
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     fn repo_with_portable_remote_path(remote_path: &str) -> TempDir {
@@ -356,6 +370,79 @@ mod tests {
                 Some("custom-extract {{artifact}}")
             );
         });
+    }
+
+    #[test]
+    fn materialized_source_binding_reapplies_all_explicit_project_overrides() {
+        let source = Component {
+            id: "fixture".to_string(),
+            remote_path: "source/path".to_string(),
+            build_artifact: Some("source.zip".to_string()),
+            extract_command: Some("source-extract".to_string()),
+            hooks: HashMap::from([("post:deploy".to_string(), vec!["source-hook".to_string()])]),
+            scopes: Some(crate::component::ScopeConfig::default()),
+            artifact_inputs: vec![crate::component::ArtifactInput {
+                component: "source".to_string(),
+                artifact: "source.zip".to_string(),
+                target: "vendor".to_string(),
+                sha256: None,
+            }],
+            cli_path: Some("source-cli".to_string()),
+            ..Component::default()
+        };
+        let project = Project {
+            id: "site".to_string(),
+            component_overrides: HashMap::from([(
+                "fixture".to_string(),
+                ProjectComponentOverrides {
+                    build_artifact: Some("project.zip".to_string()),
+                    extract_command: Some("project-extract".to_string()),
+                    hooks: HashMap::from([(
+                        "post:deploy".to_string(),
+                        vec!["project-hook".to_string()],
+                    )]),
+                    scopes: Some(crate::component::ScopeConfig {
+                        deploy: Some(crate::component::CommandScopeConfig {
+                            exclude: vec!["project-only".to_string()],
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    artifact_inputs: vec![crate::component::ArtifactInput {
+                        component: "project".to_string(),
+                        artifact: "project.zip".to_string(),
+                        target: "vendor".to_string(),
+                        sha256: None,
+                    }],
+                    cli_path: Some("project-cli".to_string()),
+                    ..ProjectComponentOverrides::default()
+                },
+            )]),
+            ..Project::default()
+        };
+
+        let bound = bind_materialized_component_to_project(
+            source,
+            &project,
+            None,
+            Some("project/path".to_string()),
+            None,
+        );
+
+        assert_eq!(bound.remote_path, "project/path");
+        assert_eq!(bound.build_artifact.as_deref(), Some("project.zip"));
+        assert_eq!(bound.extract_command.as_deref(), Some("project-extract"));
+        assert_eq!(bound.hooks["post:deploy"], ["project-hook"]);
+        assert_eq!(
+            bound
+                .scopes
+                .as_ref()
+                .and_then(|scopes| scopes.deploy.as_ref())
+                .map(|scope| scope.exclude.as_slice()),
+            Some(["project-only".to_string()].as_slice())
+        );
+        assert_eq!(bound.artifact_inputs[0].component, "project");
+        assert_eq!(bound.cli_path.as_deref(), Some("project-cli"));
     }
 
     #[test]

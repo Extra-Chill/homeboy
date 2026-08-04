@@ -137,6 +137,10 @@ pub struct AgentTaskGateEnvironmentPolicy {
     pub isolate_home: bool,
     #[serde(default)]
     pub isolate_xdg: bool,
+    /// Selected extension sources are copied under the isolated HOME. Gates
+    /// never receive a writable path to the controller-owned source.
+    #[serde(default)]
+    pub extension_inputs: Vec<AgentTaskGateExtensionInput>,
 }
 
 /// A required executable and its non-mutating initialization probe.
@@ -156,6 +160,18 @@ pub struct AgentTaskGatePackageArtifactRequirement {
     pub required_paths: Vec<AgentTaskGateArtifactPathRequirement>,
     /// Opaque caller metadata returned with failures and gate provenance.
     pub remediation: serde_json::Value,
+}
+
+/// An extension directory selected as a gate input. `source` is deliberately
+/// explicit so gate execution cannot broaden to ambient inputs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateExtensionInput {
+    pub id: String,
+    pub source: String,
+    /// Optional identity pinned by a prior candidate gate when replaying a
+    /// baseline. A changed source must fail rather than compare different input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
 }
 
 /// An explicit environment mapping for a package resource. `source` reads a
@@ -189,6 +205,7 @@ impl Default for AgentTaskGateEnvironmentPolicy {
             preserve: BTreeMap::new(),
             isolate_home: true,
             isolate_xdg: true,
+            extension_inputs: Vec::new(),
         }
     }
 }
@@ -537,6 +554,8 @@ pub struct AgentTaskGateEnvironment {
     pub sanitized: Vec<AgentTaskGateEnvironmentVariable>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub package_artifacts: Vec<AgentTaskGatePackageArtifactProvenance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_inputs: Vec<AgentTaskGateExtensionInputProvenance>,
 }
 
 /// Generic provenance for caller-declared package resources.
@@ -558,6 +577,18 @@ pub struct AgentTaskGateArtifactPathProvenance {
     pub sha256: Option<String>,
 }
 
+/// Identity and source provenance for an extension directory made available to
+/// a gate. The destination is stable beneath the gate's isolated HOME.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateExtensionInputProvenance {
+    pub id: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+    pub identity: String,
+    pub destination: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateEnvironmentVariable {
     pub name: String,
@@ -571,6 +602,7 @@ impl AgentTaskGateEnvironment {
             && self.preserved.is_empty()
             && self.sanitized.is_empty()
             && self.package_artifacts.is_empty()
+            && self.extension_inputs.is_empty()
     }
 
     pub(crate) fn replay_policy(&self) -> AgentTaskGateEnvironmentPolicy {
@@ -591,6 +623,15 @@ impl AgentTaskGateEnvironment {
                 .sanitized
                 .iter()
                 .any(|variable| XDG_ENV_VARS.contains(&variable.name.as_str())),
+            extension_inputs: self
+                .extension_inputs
+                .iter()
+                .map(|input| AgentTaskGateExtensionInput {
+                    id: input.id.clone(),
+                    source: input.source.clone(),
+                    identity: Some(input.identity.clone()),
+                })
+                .collect(),
         }
     }
 }
@@ -1384,7 +1425,15 @@ fn selected_gate_environment(
                 Some(format!("create {}", home.display())),
             )
         })?;
+        materialize_extension_inputs(&mut report, &home, &policy.extension_inputs)?;
         set_isolated_environment_variable(&mut report, &mut values, "HOME", home);
+    } else if !policy.extension_inputs.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "gate_environment.extension_inputs",
+            "extension inputs require HOME isolation",
+            None,
+            None,
+        ));
     }
     if policy.isolate_xdg {
         let root = root.expect("isolated gate environment scratch root");
@@ -1404,6 +1453,139 @@ fn selected_gate_environment(
         values,
         _scratch: scratch,
     })
+}
+
+fn materialize_extension_inputs(
+    report: &mut AgentTaskGateEnvironment,
+    home: &Path,
+    inputs: &[AgentTaskGateExtensionInput],
+) -> Result<()> {
+    let extensions = home.join(".config/homeboy/extensions");
+    let mut ids = std::collections::BTreeSet::new();
+    for input in inputs {
+        if input.id.trim().is_empty()
+            || input.id.contains(['/', '\\'])
+            || input.id == "."
+            || input.id == ".."
+        {
+            return Err(Error::validation_invalid_argument(
+                "gate_environment.extension_inputs",
+                "extension input ids must be non-empty path-free names",
+                Some(input.id.clone()),
+                None,
+            ));
+        }
+        if !ids.insert(&input.id) {
+            return Err(Error::validation_invalid_argument(
+                "gate_environment.extension_inputs",
+                "extension input ids must be unique",
+                Some(input.id.clone()),
+                None,
+            ));
+        }
+        let source = Path::new(&input.source);
+        if !source.is_absolute() || !source.is_dir() {
+            return Err(Error::validation_invalid_argument(
+                "gate_environment.extension_inputs",
+                "extension input sources must be existing absolute directories",
+                Some(input.source.clone()),
+                None,
+            ));
+        }
+        let identity = extension_tree_identity(source)?;
+        let source_revision = homeboy_core::extension_update_check::read_source_revision_at(source);
+        if input
+            .identity
+            .as_deref()
+            .is_some_and(|expected| expected != identity)
+        {
+            return Err(Error::validation_invalid_argument(
+                "gate_environment.extension_inputs",
+                "extension input no longer matches the candidate gate identity",
+                Some(input.id.clone()),
+                None,
+            ));
+        }
+        let destination = extensions.join(&input.id);
+        copy_extension_input(source, &destination)?;
+        report
+            .extension_inputs
+            .push(AgentTaskGateExtensionInputProvenance {
+                id: input.id.clone(),
+                source: input.source.clone(),
+                source_revision,
+                identity,
+                destination: destination
+                    .strip_prefix(home)
+                    .unwrap_or(&destination)
+                    .display()
+                    .to_string(),
+            });
+    }
+    Ok(())
+}
+
+fn extension_tree_identity(source: &Path) -> Result<String> {
+    fn visit(root: &Path, path: &Path, files: &mut Vec<(String, Vec<u8>)>) -> Result<()> {
+        for entry in fs::read_dir(path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("read extension input {}", path.display())),
+            )
+        })? {
+            let entry = entry.map_err(|error| Error::internal_io(error.to_string(), None))?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(path.display().to_string()))
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Err(Error::validation_invalid_argument(
+                    "gate_environment.extension_inputs",
+                    "extension inputs cannot contain symlinks",
+                    Some(path.display().to_string()),
+                    None,
+                ));
+            }
+            if metadata.is_dir() {
+                visit(root, &path, files)?;
+            } else if metadata.is_file() {
+                files.push((
+                    path.strip_prefix(root)
+                        .unwrap_or(&path)
+                        .display()
+                        .to_string(),
+                    fs::read(&path).map_err(|error| {
+                        Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                    })?,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    visit(source, source, &mut files)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut hasher = Sha256::new();
+    for (path, bytes) in files {
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(bytes);
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn copy_extension_input(source: &Path, destination: &Path) -> Result<()> {
+    // A private copy is the security boundary: the controller source is never
+    // exposed to the gate. The copy is gate-owned because file permissions do
+    // not provide a portable immutable boundary (and privileged processes can
+    // always change them).
+    homeboy_core::io::copy_tree::copy_tree(
+        source,
+        destination,
+        "gate.extension_input.copy",
+        homeboy_core::io::copy_tree::EntryPolicy::CopyRegularFilesOnly,
+    )
 }
 
 fn preserved_environment_value(source: &str) -> Result<String> {
@@ -2512,6 +2694,209 @@ mod tests {
     }
 
     #[test]
+    fn isolated_gate_discovers_only_selected_extension_copies_with_replayable_provenance() {
+        let _guard = env_mutex();
+        let worktree = tempfile::tempdir().expect("worktree");
+        let ambient = tempfile::tempdir().expect("ambient home");
+        let extensions = ambient.path().join(".config/homeboy/extensions");
+        let selected = extensions.join("selected-fixture");
+        let unselected = extensions.join("ambient-fixture");
+        fs::create_dir_all(&selected).expect("selected extension");
+        fs::create_dir_all(&unselected).expect("unselected extension");
+        fs::write(
+            selected.join("selected-fixture.json"),
+            r#"{"id":"selected-fixture","name":"Selected","version":"1.0.0"}"#,
+        )
+        .expect("selected manifest");
+        fs::write(selected.join(".source-revision"), "revision-123\n").expect("selected revision");
+        fs::write(
+            unselected.join("ambient-fixture.json"),
+            r#"{"id":"ambient-fixture","name":"Ambient","version":"1.0.0"}"#,
+        )
+        .expect("ambient manifest");
+        let _env = EnvVarGuard::set(&[("HOME", ambient.path())]);
+        let policy = AgentTaskGateEnvironmentPolicy {
+            extension_inputs: vec![AgentTaskGateExtensionInput {
+                id: "selected-fixture".to_string(),
+                source: selected.display().to_string(),
+                identity: None,
+            }],
+            ..AgentTaskGateEnvironmentPolicy::default()
+        };
+        let command = "test -f \"$HOME/.config/homeboy/extensions/selected-fixture/selected-fixture.json\" && test ! -e \"$HOME/.config/homeboy/extensions/ambient-fixture\" && printf gate-owned > \"$HOME/.config/homeboy/extensions/selected-fixture/gate-owned\"";
+
+        let candidate = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+            worktree.path(),
+            1,
+            command,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            Some(worktree.path()),
+            &policy,
+            &[],
+        )
+        .expect("selected extension gate");
+        let baseline = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+            worktree.path(),
+            1,
+            command,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            Some(worktree.path()),
+            &candidate.environment.replay_policy(),
+            &[],
+        )
+        .expect("replayed selected extension gate");
+
+        assert_eq!(candidate.status, AgentTaskGateStatus::Succeeded);
+        assert_eq!(candidate.environment.extension_inputs.len(), 1);
+        assert_eq!(
+            candidate.environment.extension_inputs[0].id,
+            "selected-fixture"
+        );
+        assert!(candidate.environment.extension_inputs[0]
+            .identity
+            .starts_with("sha256:"));
+        assert_eq!(
+            candidate.environment.extension_inputs[0]
+                .source_revision
+                .as_deref(),
+            Some("revision-123")
+        );
+        let copied = worktree
+            .path()
+            .join("tmp/gate-home/.config/homeboy/extensions/selected-fixture");
+        assert!(!fs::symlink_metadata(&copied)
+            .expect("copied extension metadata")
+            .file_type()
+            .is_symlink());
+        assert!(copied.join("gate-owned").exists());
+        assert!(!selected.join("gate-owned").exists());
+        let gate_home = worktree.path().join("tmp/gate-home");
+        let _gate_home = EnvVarGuard::set(&[("HOME", gate_home.as_path())]);
+        assert_eq!(
+            homeboy_core::extension_store::available_extension_ids(),
+            vec!["selected-fixture"]
+        );
+        assert_eq!(
+            candidate.environment.extension_inputs,
+            baseline.environment.extension_inputs
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolated_gate_resolves_a_symlinked_extension_root_with_source_provenance() {
+        let _guard = env_mutex();
+        let worktree = tempfile::tempdir().expect("worktree");
+        let source_root = tempfile::tempdir().expect("extension source root");
+        let source = source_root.path().join("selected-fixture");
+        let linked_root = tempfile::tempdir().expect("linked extension root");
+        let link = linked_root.path().join("selected-fixture");
+        fs::create_dir_all(&source).expect("selected extension");
+        fs::write(
+            source.join("selected-fixture.json"),
+            r#"{"id":"selected-fixture","name":"Selected","version":"1.0.0"}"#,
+        )
+        .expect("selected manifest");
+        fs::write(
+            linked_root.path().join(".selected-fixture.source-revision"),
+            "revision-123\n",
+        )
+        .expect("linked source revision");
+        std::os::unix::fs::symlink(&source, &link).expect("linked extension root");
+        let policy = AgentTaskGateEnvironmentPolicy {
+            extension_inputs: vec![AgentTaskGateExtensionInput {
+                id: "selected-fixture".to_string(),
+                source: link.display().to_string(),
+                identity: None,
+            }],
+            ..AgentTaskGateEnvironmentPolicy::default()
+        };
+
+        let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+            worktree.path(),
+            1,
+            "test -f \"$HOME/.config/homeboy/extensions/selected-fixture/selected-fixture.json\"",
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            Some(worktree.path()),
+            &policy,
+            &[],
+        )
+        .expect("symlinked extension gate");
+
+        let input = &report.environment.extension_inputs[0];
+        assert_eq!(input.source_revision.as_deref(), Some("revision-123"));
+        assert_eq!(
+            input.identity,
+            extension_tree_identity(&source).expect("source identity")
+        );
+        let copied = worktree
+            .path()
+            .join("tmp/gate-home/.config/homeboy/extensions/selected-fixture");
+        assert!(!fs::symlink_metadata(&copied)
+            .expect("copied extension metadata")
+            .file_type()
+            .is_symlink());
+        assert!(copied.join("selected-fixture.json").is_file());
+    }
+
+    #[test]
+    fn replay_policy_rejects_extension_content_drift_after_candidate_evidence() {
+        let _guard = env_mutex();
+        let worktree = tempfile::tempdir().expect("worktree");
+        let source = tempfile::tempdir().expect("extension source");
+        fs::write(
+            source.path().join("selected-fixture.json"),
+            "candidate content",
+        )
+        .expect("candidate content");
+        let policy = AgentTaskGateEnvironmentPolicy {
+            extension_inputs: vec![AgentTaskGateExtensionInput {
+                id: "selected-fixture".to_string(),
+                source: source.path().display().to_string(),
+                identity: None,
+            }],
+            ..AgentTaskGateEnvironmentPolicy::default()
+        };
+        let candidate = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+            worktree.path(),
+            1,
+            "true",
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            Some(worktree.path()),
+            &policy,
+            &[],
+        )
+        .expect("candidate gate evidence");
+        fs::write(
+            source.path().join("selected-fixture.json"),
+            "drifted content",
+        )
+        .expect("drifted content");
+
+        let error = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+            worktree.path(),
+            1,
+            "true",
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            Some(worktree.path()),
+            &candidate.environment.replay_policy(),
+            &[],
+        )
+        .expect_err("replay must reject source content drift");
+
+        assert_eq!(
+            error.message,
+            "Invalid argument 'gate_environment.extension_inputs': extension input no longer matches the candidate gate identity"
+        );
+        assert_eq!(error.details["field"], "gate_environment.extension_inputs");
+    }
+
+    #[test]
     fn replacing_gate_environment_preserves_declared_variables_and_reports_policy() {
         let temp = tempfile::tempdir().expect("tempdir");
         let policy = AgentTaskGateEnvironmentPolicy {
@@ -2520,6 +2905,7 @@ mod tests {
             preserve: BTreeMap::new(),
             isolate_home: false,
             isolate_xdg: false,
+            extension_inputs: Vec::new(),
         };
         let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
             temp.path(),

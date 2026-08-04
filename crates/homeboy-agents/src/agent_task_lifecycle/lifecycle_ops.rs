@@ -730,6 +730,10 @@ where
     Ok(record)
 }
 
+pub(crate) fn persist_controller_plan(run_id: &str, plan: &AgentTaskPlan) -> Result<()> {
+    store::write_plan(run_id, plan).map(|_| ())
+}
+
 pub(crate) fn controller_runtime_for_runner_execution(
     existing: &AgentTaskRunRecord,
     execution_runner_id: Option<&str>,

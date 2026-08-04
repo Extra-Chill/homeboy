@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use clap::Parser;
 use homeboy::core::agent_runtime_manifest::{
     AgentRuntimeExecutableRequirement, AgentRuntimePackageDiagnosticDeclaration,
     AgentRuntimeProbeDiagnosticDeclaration, AgentRuntimeRuntimeDiagnosticDeclaration,
@@ -19,6 +20,7 @@ use super::super::status::{
     lab_runner_homeboy_output, operator_summary, runner_artifact_feature_diagnostics,
     runner_followups, runner_status_operator_commands,
 };
+use crate::cli_surface::Cli;
 
 #[test]
 fn runner_job_event_format_includes_sequence_kind_message_and_data() {
@@ -54,6 +56,7 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
             local_port: None,
             local_url: None,
             tunnel_pid: None,
+            tunnel_process_start_identity: None,
             remote_daemon_pid: None,
             remote_daemon_lease_id: None,
             homeboy_version: "test".to_string(),
@@ -176,6 +179,7 @@ fn direct_runner_status_exposes_the_explicit_generation_reconcile_command() {
             local_port: Some(4000),
             local_url: Some("http://127.0.0.1:4000".to_string()),
             tunnel_pid: Some(42),
+            tunnel_process_start_identity: None,
             remote_daemon_pid: Some(43),
             remote_daemon_lease_id: Some("lease-active".to_string()),
             homeboy_version: "test".to_string(),
@@ -225,6 +229,7 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
             local_port: Some(7331),
             local_url: Some("http://127.0.0.1:7331".to_string()),
             tunnel_pid: Some(12345),
+            tunnel_process_start_identity: None,
             remote_daemon_pid: Some(23456),
             remote_daemon_lease_id: Some("lease-23456".to_string()),
             homeboy_version: "homeboy old".to_string(),
@@ -631,6 +636,7 @@ fn runner_status_artifact_diagnostics_surface_controller_runner_checks_and_drift
             local_port: None,
             local_url: None,
             tunnel_pid: None,
+            tunnel_process_start_identity: None,
             remote_daemon_pid: None,
             remote_daemon_lease_id: None,
             homeboy_version: "old".to_string(),
@@ -693,6 +699,7 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
             local_port: Some(7357),
             local_url: Some("http://127.0.0.1:7357".to_string()),
             tunnel_pid: Some(123),
+            tunnel_process_start_identity: None,
             remote_daemon_pid: Some(456),
             remote_daemon_lease_id: Some("lease-456".to_string()),
             homeboy_version: "0.262.0".to_string(),
@@ -753,6 +760,7 @@ fn compact_status_prioritizes_dirty_controller_before_runner_convergence() {
             local_port: Some(7357),
             local_url: Some("http://127.0.0.1:7357".to_string()),
             tunnel_pid: Some(123),
+            tunnel_process_start_identity: None,
             remote_daemon_pid: Some(456),
             remote_daemon_lease_id: Some("lease-456".to_string()),
             homeboy_version: "0.321.0".to_string(),
@@ -846,6 +854,104 @@ fn compact_status_prioritizes_dirty_controller_before_runner_convergence() {
         !admission.accepting_jobs,
         "a live daemon is not necessarily compatible"
     );
+}
+
+#[test]
+fn runner_status_actions_preserve_runner_ids_for_every_admission_state() {
+    let cases = [
+        ("disconnected", disconnected_report(), None),
+        ("stale", stale_report(), Some("c8a6673b6abc")),
+        ("active-job", active_job_report(), None),
+        ("connected", connected_report(), None),
+        ("version-skew", version_skew_report(), Some("c8a6673b6abc")),
+    ];
+
+    for (state, report, pinned_ref) in cases {
+        let admission = report.admission_summary(0);
+        let operator = operator_summary(&report);
+
+        if let Some(compact_action) = admission.next_action.as_deref() {
+            assert_eq!(operator.next_action, compact_action, "{state}");
+            assert_rendered_runner_action_parses(state, compact_action, pinned_ref);
+        }
+        assert_rendered_runner_action_parses(state, &operator.next_action, pinned_ref);
+    }
+}
+
+fn assert_rendered_runner_action_parses(state: &str, command: &str, pinned_ref: Option<&str>) {
+    let argv = shlex::split(command)
+        .unwrap_or_else(|| panic!("{state} action must be valid shell text: {command}"));
+    assert_eq!(argv.first().map(String::as_str), Some("homeboy"), "{state}");
+    assert!(argv.iter().any(|arg| arg == "homeboy lab"), "{state}");
+    if let Some(pinned_ref) = pinned_ref {
+        assert!(
+            argv.windows(2).any(|args| args == ["--ref", pinned_ref]),
+            "{state}"
+        );
+    }
+    Cli::try_parse_from(&argv)
+        .unwrap_or_else(|error| panic!("{state} action must satisfy the CLI contract: {error}"));
+}
+
+fn connected_report() -> RunnerStatusReport {
+    RunnerStatusReport {
+        runner_id: "homeboy lab".to_string(),
+        connected: true,
+        state: runner::RunnerSessionState::Connected,
+        session: None,
+        stale_daemon: None,
+        daemon_freshness: None,
+        active_jobs: Vec::new(),
+        active_runner_jobs: Vec::new(),
+        stale_runner_jobs: Vec::new(),
+        active_job_count: 0,
+        stale_runner_job_count: 0,
+        active_job_state: RunnerActiveJobState::Available,
+        active_job_source: None,
+        active_job_error: None,
+        active_job_recovery_evidence: None,
+        session_path: "test".to_string(),
+    }
+}
+
+fn disconnected_report() -> RunnerStatusReport {
+    let mut report = connected_report();
+    report.connected = false;
+    report.state = runner::RunnerSessionState::Disconnected;
+    report
+}
+
+fn active_job_report() -> RunnerStatusReport {
+    let mut report = connected_report();
+    report.active_job_count = 1;
+    report
+}
+
+fn stale_report() -> RunnerStatusReport {
+    let mut report = connected_report();
+    report.stale_daemon = Some(homeboy::runner::runners::RunnerStaleDaemonWarning::new(
+        "homeboy lab",
+        "0.327.7".to_string(),
+        "0.327.8".to_string(),
+        None,
+        Some("homeboy 0.327.8+c8a6673b6abc".to_string()),
+    ));
+    report
+}
+
+fn version_skew_report() -> RunnerStatusReport {
+    let mut report = stale_report();
+    report.stale_daemon = report.stale_daemon.map(|warning| {
+        warning.with_controller_compatibility(
+            "homeboy lab",
+            "0.327.9".to_string(),
+            "homeboy 0.327.9+abcdef123456".to_string(),
+            false,
+            true,
+            false,
+        )
+    });
+    report
 }
 
 fn selected_runtime_tool_declaration() -> AgentRuntimeToolDiagnosticDeclaration {

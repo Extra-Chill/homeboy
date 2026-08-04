@@ -672,14 +672,15 @@ pub(crate) fn exec_lab_context(
         Ok(output) => output,
         Err(err) => {
             if let Some(run_id) = context.agent_task_run_id.as_deref() {
-                if let Some(job_id) = accepted_runner_job_id(runner_id, run_id) {
+                if let Some(job) = accepted_runner_job_id(runner_id, run_id) {
                     if let Some(workspace) = context.materialized_workspace.as_mut() {
-                        workspace.preserve();
+                        workspace
+                            .retain_for_reconciliation(&job.id, job.daemon_generation.as_deref());
                     }
                     return in_flight_daemon_disconnect_outcome(
                         context.plan,
                         runner_id,
-                        &job_id,
+                        &job.id,
                         run_id,
                         &remote_cwd,
                         &context.remote_command,
@@ -716,10 +717,17 @@ pub(crate) fn exec_lab_context(
                         .build(),
                 );
                 if let Some(job_id) = in_flight_job_id.as_deref() {
+                    if let Some(workspace) = context.materialized_workspace.as_mut() {
+                        workspace.retain_for_reconciliation(
+                            job_id,
+                            context
+                                .runner_status
+                                .session
+                                .as_ref()
+                                .and_then(|session| session.remote_daemon_lease_id.as_deref()),
+                        );
+                    }
                     if let Some(run_id) = context.agent_task_run_id.as_deref() {
-                        if let Some(workspace) = context.materialized_workspace.as_mut() {
-                            workspace.preserve();
-                        }
                         return in_flight_daemon_disconnect_outcome(
                             context.plan,
                             runner_id,
@@ -782,10 +790,17 @@ pub(crate) fn exec_lab_context(
                 };
             }
             if let Some(job_id) = in_flight_job_id.as_deref() {
+                if let Some(workspace) = context.materialized_workspace.as_mut() {
+                    workspace.retain_for_reconciliation(
+                        job_id,
+                        context
+                            .runner_status
+                            .session
+                            .as_ref()
+                            .and_then(|session| session.remote_daemon_lease_id.as_deref()),
+                    );
+                }
                 if let Some(run_id) = context.agent_task_run_id.as_deref() {
-                    if let Some(workspace) = context.materialized_workspace.as_mut() {
-                        workspace.preserve();
-                    }
                     return in_flight_daemon_disconnect_outcome(
                         context.plan,
                         runner_id,
@@ -1044,7 +1059,13 @@ pub(crate) fn exec_lab_context(
 /// `/exec` is not an idempotent operation. When its response is lost, query the
 /// daemon's durable active-job projection by the preassigned run ID rather than
 /// submitting the workload again.
-fn accepted_runner_job_id(runner_id: &str, run_id: &str) -> Option<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AcceptedRunnerJob {
+    pub(crate) id: String,
+    pub(crate) daemon_generation: Option<String>,
+}
+
+fn accepted_runner_job_id(runner_id: &str, run_id: &str) -> Option<AcceptedRunnerJob> {
     accepted_runner_job_id_with(runner_id, run_id, || crate::status(runner_id))
 }
 
@@ -1052,7 +1073,7 @@ pub(crate) fn accepted_runner_job_id_with<F>(
     runner_id: &str,
     run_id: &str,
     status: F,
-) -> Option<String>
+) -> Option<AcceptedRunnerJob>
 where
     F: FnOnce() -> Result<crate::RunnerStatusReport>,
 {
@@ -1060,6 +1081,10 @@ where
     if status.runner_id != runner_id {
         return None;
     }
+    let daemon_generation = status
+        .session
+        .as_ref()
+        .and_then(|session| session.remote_daemon_lease_id.clone());
     let mut matching = status
         .active_runner_jobs
         .into_iter()
@@ -1067,7 +1092,10 @@ where
         .map(|job| job.job_id)
         .collect::<Vec<_>>();
     matching.sort();
-    (matching.len() == 1).then(|| matching.remove(0))
+    (matching.len() == 1).then(|| AcceptedRunnerJob {
+        id: matching.remove(0),
+        daemon_generation,
+    })
 }
 
 fn promotion_handoff_intent(args: &[String], stdout: &str) -> Result<Option<PromotionPatchIntent>> {
@@ -3069,6 +3097,7 @@ mod tests {
             local_port: None,
             local_url: local_url.map(str::to_string),
             tunnel_pid: None,
+            tunnel_process_start_identity: None,
             remote_daemon_pid: None,
             remote_daemon_lease_id: lease_id.map(str::to_string),
             homeboy_version: "test".to_string(),

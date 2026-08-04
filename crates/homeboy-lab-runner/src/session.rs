@@ -26,6 +26,7 @@ mod session_enums {
     // runner-internal call sites resolve unchanged.
     pub use homeboy_lab_runner_contract::{
         RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerTunnelMode,
+        RunnerTunnelProcessStartIdentity,
     };
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -631,9 +632,9 @@ impl RunnerGenerationLedgerSummary {
 /// (#9478/#9522): `runner status` embedded every draining daemon generation
 /// with full owner counts, and non-authoritative per-generation
 /// `active_job_count` values made stale ownership look like current load. This
-/// summary is derived only from the authoritative selected-daemon state plus a
-/// bounded count of draining generations, so it stays small and fast no matter
-/// how much history accumulates. The full generation list remains available
+/// summary is derived from selected-daemon state plus unresolved draining
+/// ownership, so it stays small and fast without hiding work that can still
+/// mutate shared runner resources. The full generation list remains available
 /// behind an explicit detail view.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RunnerAdmissionSummary {
@@ -654,8 +655,10 @@ pub struct RunnerAdmissionSummary {
     /// The exact build identity of the selected daemon, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daemon_build_identity: Option<String>,
-    /// Number of historical draining generations, summarized rather than
-    /// expanded. Never presented as active load.
+    /// The unresolved non-admission generation that currently fences new work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocking_generation: Option<String>,
+    /// Number of draining generations, summarized rather than expanded.
     pub draining_generation_count: usize,
     /// Whether it is safe to rotate the runner now — true only when no
     /// authoritative current job is active on the selected daemon.
@@ -677,34 +680,50 @@ impl RunnerStatusReport {
     /// `draining_generation_count` is supplied by the caller from the same
     /// generation inventory used for the detail view, so the summary and detail
     /// derive from one source. Only the authoritative selected-daemon
-    /// `active_job_count` drives `active_job_count`/`safe_to_rotate` — historical
-    /// per-generation counts (non-authoritative) never contribute.
+    /// `active_job_count` and `safe_to_rotate` include unresolved generation
+    /// ownership when the caller supplies the ledger projection.
     pub fn admission_summary(&self, draining_generation_count: usize) -> RunnerAdmissionSummary {
+        self.admission_summary_with_generations(&[], draining_generation_count)
+    }
+
+    /// Include unresolved draining generations in the headline safety state.
+    /// Their persisted counts are conservative ownership claims, not merely
+    /// historical load, so changing admission owner cannot erase them.
+    pub fn admission_summary_with_generations(
+        &self,
+        generations: &[RunnerDaemonGenerationStatus],
+        draining_generation_count: usize,
+    ) -> RunnerAdmissionSummary {
         let connected = self.is_connected();
         let daemon_fresh = self.stale_daemon.is_none();
+        let blocking_generation = generations
+            .iter()
+            .find(|generation| !generation.admission_owner && generation.active_job_count > 0)
+            .map(|generation| generation.generation.clone());
+        // `connection::status` already includes unresolved draining ownership
+        // in this headline field. Reusing it avoids counting the same ledger
+        // entries once here and once in the connection projection.
         let active_job_count = self.active_job_count;
         // A persisted session proves neither current daemon liveness nor its
         // active-job count. Admission and rotation remain fail-closed until a
         // current job view is available.
         let active_jobs_available = self.active_job_state == RunnerActiveJobState::Available;
-        let accepting_jobs = connected && daemon_fresh && active_jobs_available;
+        let accepting_jobs =
+            connected && daemon_fresh && active_jobs_available && blocking_generation.is_none();
         let safe_to_rotate = active_jobs_available && active_job_count == 0;
         let daemon_build_identity = self
             .session
             .as_ref()
             .and_then(|session| session.homeboy_build_identity.clone());
 
-        let next_action = if !connected {
-            Some("homeboy runner connect".to_string())
-        } else if !daemon_fresh {
-            Some("homeboy runner refresh-homeboy --reconnect".to_string())
-        } else if !active_jobs_available {
-            Some("homeboy runner status --full".to_string())
-        } else if active_job_count > 0 {
-            None
-        } else {
-            None
-        };
+        let next_action = self
+            .admission_action()
+            .or_else(|| {
+                blocking_generation
+                    .as_ref()
+                    .map(|_| reconcile_action(&self.runner_id))
+            })
+            .map(|action| action.render_command());
 
         RunnerAdmissionSummary {
             runner_id: self.runner_id.clone(),
@@ -714,10 +733,37 @@ impl RunnerStatusReport {
             active_job_count,
             stale_job_count: self.stale_runner_job_count,
             daemon_build_identity,
+            blocking_generation,
             draining_generation_count,
             safe_to_rotate,
             next_action,
         }
+    }
+
+    /// Typed action for a state that blocks runner admission.
+    ///
+    /// The compact status projection renders this action, while the full
+    /// operator projection uses [`Self::status_action`] below. Keeping argv as
+    /// the source prevents either surface from dropping the runner id.
+    pub fn admission_action(&self) -> Option<ExecutableAction> {
+        if !self.is_connected() {
+            Some(crate::daemon_repair::connect_action(&self.runner_id))
+        } else if let Some(warning) = &self.stale_daemon {
+            warning.primary_recovery_action()
+        } else if self.active_job_state != RunnerActiveJobState::Available {
+            Some(status_action(&self.runner_id))
+        } else {
+            None
+        }
+    }
+
+    /// Typed next action for an operator status row.
+    ///
+    /// A healthy or busy runner has no admission remediation, so re-inspecting
+    /// its full status is the safe operator follow-up.
+    pub fn status_action(&self) -> ExecutableAction {
+        self.admission_action()
+            .unwrap_or_else(|| status_action(&self.runner_id))
     }
 
     pub fn recovery_state(&self) -> RunnerRecoveryState {
@@ -735,6 +781,35 @@ impl RunnerStatusReport {
             RunnerRecoveryState::Idle
         }
     }
+}
+
+fn status_action(runner_id: &str) -> ExecutableAction {
+    ExecutableAction::new(
+        "runner.status",
+        format!("inspect runner {runner_id} status"),
+        "homeboy",
+        [
+            "runner".to_string(),
+            "status".to_string(),
+            runner_id.to_string(),
+            "--full".to_string(),
+        ],
+        ActionSafety::ReadOnly,
+    )
+}
+
+fn reconcile_action(runner_id: &str) -> ExecutableAction {
+    ExecutableAction::new(
+        "runner.reconcile",
+        format!("reconcile runner {runner_id} generations"),
+        "homeboy",
+        [
+            "runner".to_string(),
+            "reconcile".to_string(),
+            runner_id.to_string(),
+        ],
+        ActionSafety::Mutating,
+    )
 }
 
 #[cfg(test)]
@@ -887,7 +962,7 @@ mod status_serialization_tests {
         assert!(!summary.safe_to_rotate);
         assert_eq!(
             summary.next_action.as_deref(),
-            Some("homeboy runner status --full")
+            Some("homeboy runner status homeboy-lab --full")
         );
     }
 
@@ -924,7 +999,9 @@ mod status_serialization_tests {
             job_command_binary_version: "0.299.0".to_string(),
             active_daemon_control_plane_build_identity: None,
             job_command_binary_build_identity: None,
-            refresh_command: "homeboy runner refresh-homeboy homeboy-lab".to_string(),
+            refresh_command:
+                "homeboy runner refresh-homeboy homeboy-lab --ref c8a6673b6abc --reconnect"
+                    .to_string(),
             stale_runtime_paths: Vec::new(),
             changed_runtime_paths: Vec::new(),
             message: "stale".to_string(),
@@ -937,13 +1014,10 @@ mod status_serialization_tests {
             !summary.accepting_jobs,
             "a stale daemon must not admit work"
         );
-        assert!(
-            summary
-                .next_action
-                .as_deref()
-                .is_some_and(|a| a.contains("refresh-homeboy")),
-            "stale daemon points at refresh: {:?}",
-            summary.next_action
+        assert_eq!(
+            summary.next_action.as_deref(),
+            Some("homeboy runner refresh-homeboy homeboy-lab --ref c8a6673b6abc --reconnect"),
+            "the legacy serialized recovery remains the action source when argv is unavailable"
         );
     }
 
@@ -1019,6 +1093,56 @@ mod status_serialization_tests {
             "draining history is not current load"
         );
         assert!(summary.safe_to_rotate);
+    }
+
+    #[test]
+    fn admission_summary_keeps_unresolved_draining_generation_work_visible() {
+        let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Available;
+        report.active_job_count = 2;
+        let generations = vec![
+            RunnerDaemonGenerationStatus {
+                generation: "lease-active".to_string(),
+                admission_owner: false,
+                drain_state: crate::RollingDrainState::Draining,
+                active_job_count: 2,
+                observed_active_job_count: Some(2),
+                active_job_count_authoritative: true,
+                job_owner_count: 2,
+                run_owner_count: 0,
+                artifact_owner_count: 0,
+                homeboy_build_identity: None,
+                remote_daemon_lease_id: Some("lease-active".to_string()),
+                remote_daemon_address: None,
+                local_url: None,
+            },
+            RunnerDaemonGenerationStatus {
+                generation: "lease-new".to_string(),
+                admission_owner: true,
+                drain_state: crate::RollingDrainState::Admitting,
+                active_job_count: 0,
+                observed_active_job_count: Some(0),
+                active_job_count_authoritative: true,
+                job_owner_count: 0,
+                run_owner_count: 0,
+                artifact_owner_count: 0,
+                homeboy_build_identity: None,
+                remote_daemon_lease_id: Some("lease-new".to_string()),
+                remote_daemon_address: None,
+                local_url: None,
+            },
+        ];
+
+        let summary = report.admission_summary_with_generations(&generations, 1);
+
+        assert_eq!(summary.active_job_count, 2);
+        assert_eq!(summary.blocking_generation.as_deref(), Some("lease-active"));
+        assert!(!summary.accepting_jobs);
+        assert!(!summary.safe_to_rotate);
+        assert_eq!(
+            summary.next_action.as_deref(),
+            Some("homeboy runner reconcile homeboy-lab")
+        );
     }
 }
 
@@ -1140,6 +1264,18 @@ impl RunnerStaleDaemonWarning {
         self.recovery_actions = actions;
     }
 
+    /// The first recovery step expressed as an executable action.
+    ///
+    /// Older persisted warnings can have only `refresh_command`. Preserve that
+    /// serialized command, including a pinned ref, by tokenizing it into argv
+    /// instead of replacing it with a newly composed recovery command.
+    fn primary_recovery_action(&self) -> Option<ExecutableAction> {
+        self.recovery_actions
+            .first()
+            .cloned()
+            .or_else(|| action_from_refresh_command(&self.refresh_command))
+    }
+
     pub fn with_controller_compatibility(
         mut self,
         runner_id: &str,
@@ -1228,11 +1364,9 @@ impl RunnerStaleDaemonWarning {
                 "connected runner daemon build identity could not be verified against configured executable `{configured_executable}`; run `{} self identity` on the runner and ensure it reports `git_commit` or an exact `display`, then run recovery_commands if needed",
                 shell::quote_arg(configured_executable),
             );
-            self.recovery_commands = vec![format!(
-                "homeboy runner refresh-homeboy {} --reconnect",
-                shell::quote_arg(runner_id),
-            )];
-            self.refresh_command = self.recovery_commands.join(" && ");
+            self.set_recovery(vec![crate::daemon_repair::refresh_homeboy_action(
+                runner_id,
+            )]);
         }
         self
     }
@@ -1269,6 +1403,39 @@ impl RunnerStaleDaemonWarning {
         }
         self
     }
+}
+
+fn action_from_refresh_command(command: &str) -> Option<ExecutableAction> {
+    if command.trim().is_empty() {
+        return None;
+    }
+    if let Some(argv) = shlex::split(command) {
+        if let Some((program, args)) = argv.split_first() {
+            if program == "homeboy"
+                && !args
+                    .iter()
+                    .any(|arg| matches!(arg.as_str(), "&&" | ";" | "|"))
+            {
+                return Some(ExecutableAction::new(
+                    "runner.stale_recovery",
+                    "recover stale runner daemon",
+                    program,
+                    args.iter().cloned(),
+                    ActionSafety::Mutating,
+                ));
+            }
+        }
+    }
+    // Preserve a legacy chained recovery verbatim. Its shell form is already
+    // the published recovery contract; wrapping it avoids silently selecting a
+    // new, unpinned command when no typed steps were persisted.
+    Some(ExecutableAction::new(
+        "runner.stale_recovery",
+        "recover stale runner daemon",
+        "sh",
+        ["-lc", command],
+        ActionSafety::Mutating,
+    ))
 }
 
 /// The recovery for an identity-drifted runner daemon, as argv.

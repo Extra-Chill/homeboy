@@ -10,6 +10,252 @@ use std::sync::{
 };
 
 use super::*;
+use homeboy_core::test_support;
+
+#[cfg(unix)]
+struct FakeRecoveryOperations {
+    jobs: std::sync::Mutex<HashMap<String, RunnerSession>>,
+    reconnects: AtomicUsize,
+    closed: std::sync::Mutex<Vec<u32>>,
+    fail_persist: bool,
+}
+
+#[cfg(unix)]
+impl FakeRecoveryOperations {
+    fn new(jobs: impl IntoIterator<Item = (String, RunnerSession)>) -> Arc<Self> {
+        Arc::new(Self {
+            jobs: std::sync::Mutex::new(jobs.into_iter().collect()),
+            reconnects: AtomicUsize::new(0),
+            closed: std::sync::Mutex::new(Vec::new()),
+            fail_persist: false,
+        })
+    }
+
+    fn recover(
+        self: &Arc<Self>,
+        runner_id: &str,
+        generation: &str,
+        job_id: &str,
+    ) -> Result<RunnerSession> {
+        let operations = Arc::clone(self);
+        let job_id = job_id.to_string();
+        reconnect_generation_for_polling_with(
+            runner_id,
+            generation,
+            || Ok(operations.jobs.lock().expect("jobs").get(&job_id).cloned()),
+            |session| session.local_url.as_deref() == Some("http://live"),
+            || {
+                let mut session = operations
+                    .jobs
+                    .lock()
+                    .expect("jobs")
+                    .get(&job_id)
+                    .cloned()
+                    .expect("durable job");
+                let sequence = operations.reconnects.fetch_add(1, Ordering::SeqCst);
+                session.local_url = Some("http://live".to_string());
+                session.tunnel_pid = Some(80_000 + sequence as u32);
+                Ok(session)
+            },
+            |session| {
+                if operations.fail_persist {
+                    return Err(Error::internal_unexpected("persist failed"));
+                }
+                let mut jobs = operations.jobs.lock().expect("jobs");
+                let replaced = jobs.get(&job_id).cloned().expect("durable job");
+                let lease = session.remote_daemon_lease_id.clone();
+                for persisted in jobs.values_mut() {
+                    if persisted.remote_daemon_lease_id == lease {
+                        *persisted = session.clone();
+                    }
+                }
+                Ok(replaced)
+            },
+            |session| {
+                if let Some(pid) = session.tunnel_pid {
+                    operations.closed.lock().expect("closed").push(pid);
+                }
+            },
+        )
+    }
+}
+
+#[cfg(unix)]
+fn stale_recovery_session(lease: &str, pid: u32) -> RunnerSession {
+    let mut session = direct_ssh_session(lease);
+    session.local_url = Some("http://stale".to_string());
+    session.tunnel_pid = Some(pid);
+    session
+}
+
+#[cfg(unix)]
+#[test]
+fn generation_recovery_deduplicates_two_jobs_to_one_physical_tunnel() {
+    test_support::with_isolated_home(|_| {
+        let operations = FakeRecoveryOperations::new([
+            ("job-a".to_string(), stale_recovery_session("lease-a", 101)),
+            ("job-b".to_string(), stale_recovery_session("lease-a", 102)),
+        ]);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let workers = ["job-a", "job-b"].map(|job_id| {
+            let operations = Arc::clone(&operations);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                operations
+                    .recover("runner-a", "lease-a", job_id)
+                    .expect("recover")
+            })
+        });
+        barrier.wait();
+        let recovered = workers.map(|worker| worker.join().expect("worker"));
+
+        assert_eq!(operations.reconnects.load(Ordering::SeqCst), 1);
+        assert_eq!(recovered[0].tunnel_pid, recovered[1].tunnel_pid);
+        let closed = operations.closed.lock().expect("closed");
+        assert_eq!(closed.len(), 1, "only the replaced tunnel is retired");
+        assert!(matches!(closed.as_slice(), [101] | [102]));
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn generation_recovery_serializes_same_job_contention() {
+    test_support::with_isolated_home(|_| {
+        let operations = FakeRecoveryOperations::new([(
+            "job-a".to_string(),
+            stale_recovery_session("lease-a", 101),
+        )]);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let workers = (0..2)
+            .map(|_| {
+                let operations = Arc::clone(&operations);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    operations
+                        .recover("runner-a", "lease-a", "job-a")
+                        .expect("recover")
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        for worker in workers {
+            worker.join().expect("worker");
+        }
+
+        assert_eq!(operations.reconnects.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn generation_recovery_allows_different_generations_to_progress() {
+    test_support::with_isolated_home(|_| {
+        let operations = FakeRecoveryOperations::new([
+            ("job-a".to_string(), stale_recovery_session("lease-a", 101)),
+            ("job-b".to_string(), stale_recovery_session("lease-b", 102)),
+        ]);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let workers = [("lease-a", "job-a"), ("lease-b", "job-b")].map(|(generation, job_id)| {
+            let operations = Arc::clone(&operations);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                operations
+                    .recover("runner-a", generation, job_id)
+                    .expect("recover")
+            })
+        });
+        barrier.wait();
+        for worker in workers {
+            worker.join().expect("worker");
+        }
+
+        assert_eq!(operations.reconnects.load(Ordering::SeqCst), 2);
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_recovery_persistence_closes_only_the_new_tunnel() {
+    test_support::with_isolated_home(|_| {
+        let operations = Arc::new(FakeRecoveryOperations {
+            jobs: std::sync::Mutex::new(HashMap::from([(
+                "job-a".to_string(),
+                stale_recovery_session("lease-a", 101),
+            )])),
+            reconnects: AtomicUsize::new(0),
+            closed: std::sync::Mutex::new(Vec::new()),
+            fail_persist: true,
+        });
+
+        assert!(operations.recover("runner-a", "lease-a", "job-a").is_err());
+        assert_eq!(
+            operations.closed.lock().expect("closed").as_slice(),
+            [80_000]
+        );
+    });
+}
+
+#[test]
+fn pid_reuse_never_signals_a_temporary_tunnel() {
+    let expected = RunnerTunnelProcessStartIdentity::Macos {
+        start_seconds: 1,
+        start_microseconds: 2,
+    };
+    let reused = homeboy_core::process::ProcessStartIdentity::Macos {
+        start_seconds: 3,
+        start_microseconds: 4,
+    };
+    let signaled = std::cell::Cell::new(false);
+
+    terminate_tunnel_with_identity(
+        42,
+        Some(&expected),
+        |_| Ok(Some(reused.clone())),
+        |_| signaled.set(true),
+    );
+
+    assert!(!signaled.get(), "a reused PID must never be signaled");
+}
+
+#[test]
+fn missing_or_uninspectable_tunnel_identity_never_signals() {
+    let signaled = std::cell::Cell::new(false);
+    terminate_tunnel_with_identity(42, None, |_| Ok(None), |_| signaled.set(true));
+    terminate_tunnel_with_identity(
+        42,
+        None,
+        |_| Err("inspection failed".to_string()),
+        |_| signaled.set(true),
+    );
+
+    assert!(!signaled.get());
+}
+
+#[test]
+fn persisted_tunnel_identity_roundtrips_and_old_sessions_default_to_none() {
+    let mut session = direct_ssh_session("lease-persisted");
+    session.tunnel_process_start_identity = Some(RunnerTunnelProcessStartIdentity::Macos {
+        start_seconds: 1,
+        start_microseconds: 2,
+    });
+    let persisted = serde_json::to_value(&session).expect("serialize session");
+    let restored: RunnerSession = serde_json::from_value(persisted).expect("restore session");
+    assert_eq!(
+        restored.tunnel_process_start_identity,
+        session.tunnel_process_start_identity
+    );
+
+    let mut legacy = serde_json::to_value(&session).expect("serialize legacy session");
+    legacy
+        .as_object_mut()
+        .expect("session object")
+        .remove("tunnel_process_start_identity");
+    let restored: RunnerSession = serde_json::from_value(legacy).expect("restore legacy session");
+    assert_eq!(restored.tunnel_process_start_identity, None);
+}
 
 #[test]
 fn rejects_non_loopback_remote_daemon_address() {
@@ -44,6 +290,78 @@ fn reads_remote_active_job_count_from_daemon_freshness() {
     });
 
     assert_eq!(remote_daemon_active_jobs(&status), 2);
+}
+
+/// A lost controller tunnel must not turn durable active work into permission
+/// to start another daemon generation.
+#[cfg(unix)]
+#[test]
+fn connect_fences_two_active_jobs_before_starting_a_new_daemon_generation() {
+    test_support::with_isolated_home(|home| {
+        let daemon = home.path().join("remote-homeboy");
+        let ensure_running = home.path().join("ensure-running");
+        std::fs::write(
+            &daemon,
+            format!(
+                r#"#!/bin/sh
+case "$1 $2" in
+  "self identity")
+    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test"}}}}'
+    ;;
+  "daemon status")
+    printf '%s\n' '{{"success":true,"data":{{"running":false,"fresh":false,"reachable":false,"freshness":{{"active_jobs":0}}}}}}'
+    ;;
+  "daemon ensure-running")
+    : > "{}"
+    ;;
+esac
+"#,
+                ensure_running.display()
+            ),
+        )
+        .expect("write remote Homeboy shim");
+        let mut permissions = std::fs::metadata(&daemon).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&daemon, permissions).expect("make shim executable");
+        server::create(
+            &serde_json::json!({ "id": "homeboy-lab", "host": "localhost", "user": "test" })
+                .to_string(),
+            false,
+        )
+        .expect("create local server");
+        crate::create(
+            &serde_json::json!({
+                "id": "homeboy-lab",
+                "kind": "ssh",
+                "homeboy_path": daemon,
+            })
+            .to_string(),
+            false,
+        )
+        .expect("create runner");
+        let active = direct_ssh_session("lease-active");
+        crate::generation_store::record_job("homeboy-lab", &active, "job-a")
+            .expect("record first active job");
+        crate::generation_store::record_job("homeboy-lab", &active, "job-b")
+            .expect("record second active job");
+
+        let (report, exit_code) = connect("homeboy-lab").expect("connect result");
+
+        assert_eq!(exit_code, 20);
+        assert!(!report.connected);
+        assert!(report
+            .failure_message
+            .as_deref()
+            .is_some_and(|message| message.contains("2 unresolved active job(s)")));
+        assert!(
+            !ensure_running.exists(),
+            "active generation fence must prevent daemon ensure-running"
+        );
+        let generations = crate::generation_store::status_projection("homeboy-lab", Some(&active))
+            .expect("generation projection");
+        assert_eq!(generations.len(), 1);
+        assert_eq!(generations[0].active_job_count, 2);
+    });
 }
 
 #[test]
@@ -1785,6 +2103,8 @@ fn idle_stale_replacement_uses_actual_endpoint_envelopes_and_reprobes_the_new_ow
                 &[],
                 None,
                 None,
+                None,
+                false,
             )
             .expect("replacement succeeds");
             assert_eq!(daemon.lease_id.as_deref(), Some("lease-new"));
@@ -1815,6 +2135,8 @@ fn idle_stale_replacement_refuses_a_post_stop_owner_or_identity_change() {
                 &[],
                 None,
                 None,
+                None,
+                false,
             )
             .expect_err("concurrent stale daemon is refused");
             assert!(error.contains("ownership changed"));
@@ -1839,6 +2161,8 @@ fn idle_stale_replacement_refuses_a_post_stop_identity_change() {
                 &[],
                 None,
                 None,
+                None,
+                false,
             )
             .expect_err("stale replacement identity is refused");
             assert!(error.contains("does not match configured runner binary"));

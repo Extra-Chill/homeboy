@@ -1440,6 +1440,16 @@ fn append_resume_contract(command: &mut Vec<String>, contract: &Value) {
                 command.push(format!("{flag}={value}"));
             }
         }
+        if let Some(inputs) = environment
+            .get("extension_inputs")
+            .and_then(Value::as_array)
+        {
+            for input in inputs {
+                if let Ok(input) = serde_json::to_string(input) {
+                    command.extend(["--gate-extension-input".to_string(), input]);
+                }
+            }
+        }
     }
 }
 
@@ -1875,7 +1885,12 @@ mod tests {
                         "mode": "replace",
                         "variables": { "MODE": "test" },
                         "isolate_home": true,
-                        "isolate_xdg": false
+                        "isolate_xdg": false,
+                        "extension_inputs": [{
+                            "id": "wordpress",
+                            "source": "/opt/extensions/wordpress",
+                            "identity": "sha256:content"
+                        }]
                     }
                 }
             }),
@@ -1904,6 +1919,8 @@ mod tests {
                 "MODE=test",
                 "--isolate-gate-home=true",
                 "--isolate-gate-xdg=false",
+                "--gate-extension-input",
+                "{\"id\":\"wordpress\",\"identity\":\"sha256:content\",\"source\":\"/opt/extensions/wordpress\"}",
             ]
         );
     }

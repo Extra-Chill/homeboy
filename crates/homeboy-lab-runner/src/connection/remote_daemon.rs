@@ -612,10 +612,18 @@ pub(super) fn ensure_remote_daemon(
     confirmed_no_pid_job_ids: &[uuid::Uuid],
     live_lease_expectation: Option<(&str, u32)>,
     replacement_operation_id: Option<&str>,
+    admission_fence: Option<&crate::generation_store::AdmissionFence>,
+    registry_lock_held: bool,
 ) -> std::result::Result<RemoteDaemon, String> {
     let mut status = remote_daemon_status(client, homeboy)?;
     probe_remote_daemon_endpoint(client, &mut status);
     if let Some(lease_id) = orphan_lease_id {
+        if let Some(fence) = admission_fence {
+            return Err(format!(
+                "runner `{runner_id}` generation `{}` has {} unresolved active job(s); refusing orphan adoption before terminal job evidence is available",
+                fence.generation, fence.active_job_count,
+            ));
+        }
         if status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
             && status
                 .daemon
@@ -636,13 +644,15 @@ pub(super) fn ensure_remote_daemon(
     // carries an executable repair plan, and a plan naming a command that does
     // not exist is worse than no plan at all (#10302).
     let inspected_freshness = remote_daemon_recovery_freshness_from_status(runner_id, &status);
-    match remote_daemon_connect_action_for_runner(
+    let action = remote_daemon_connect_action_for_runner(
         previous_session,
         &status,
         configured_identity,
         runner_id,
         live_lease_expectation,
-    )? {
+    )?;
+    let action = fence_generation_admission(action, admission_fence, runner_id)?;
+    match action {
         RemoteDaemonConnectAction::Reattach => {
             let mut daemon = status.daemon.ok_or_else(|| {
                 "remote daemon reattach selected without a daemon lease".to_string()
@@ -652,7 +662,12 @@ pub(super) fn ensure_remote_daemon(
         }
         RemoteDaemonConnectAction::Start => {
             negotiate_ensure_running_operation_id(client, homeboy, replacement_operation_id)?;
-            journal_ensure_running_replay(runner_id, homeboy, replacement_operation_id)?;
+            journal_ensure_running_replay(
+                runner_id,
+                homeboy,
+                replacement_operation_id,
+                registry_lock_held,
+            )?;
             return remote_daemon_ensure_running(client, homeboy, replacement_operation_id);
         }
         RemoteDaemonConnectAction::ReplaceIdleStale
@@ -662,7 +677,12 @@ pub(super) fn ensure_remote_daemon(
             negotiate_ensure_running_operation_id(client, homeboy, replacement_operation_id)?;
             // Persist B's idempotent receipt key before removing A. A retry then
             // replays this command before inspecting or replacing any lease.
-            journal_ensure_running_replay(runner_id, homeboy, replacement_operation_id)?;
+            journal_ensure_running_replay(
+                runner_id,
+                homeboy,
+                replacement_operation_id,
+                registry_lock_held,
+            )?;
             let daemon = status.daemon.as_ref().expect("replacement requires daemon");
             let lease_id = daemon
                 .lease_id
@@ -681,20 +701,47 @@ pub(super) fn ensure_remote_daemon(
     }
 }
 
+pub(super) fn fence_generation_admission(
+    action: RemoteDaemonConnectAction,
+    fence: Option<&crate::generation_store::AdmissionFence>,
+    runner_id: &str,
+) -> std::result::Result<RemoteDaemonConnectAction, String> {
+    let Some(fence) = fence else {
+        return Ok(action);
+    };
+    if action == RemoteDaemonConnectAction::Reattach {
+        return Ok(action);
+    }
+    Err(format!(
+        "runner `{runner_id}` generation `{}` has {} unresolved active job(s); refusing to create or replace an admission daemon. Reattach the live generation when available, or run `homeboy runner reconcile {runner_id}` after terminal job evidence is available",
+        fence.generation, fence.active_job_count,
+    ))
+}
+
 fn journal_ensure_running_replay(
     runner_id: &str,
     homeboy: &str,
     replacement_operation_id: Option<&str>,
+    registry_lock_held: bool,
 ) -> std::result::Result<(), String> {
     if replacement_operation_id.is_none() {
         return Ok(());
     }
-    crate::generation_store::record_replacement_operation_replay(
-        runner_id,
-        "ensure-running",
-        &remote_daemon_ensure_running_command(homeboy, replacement_operation_id),
-    )
-    .map_err(|error| error.to_string())
+    let command = remote_daemon_ensure_running_command(homeboy, replacement_operation_id);
+    let write = if registry_lock_held {
+        crate::generation_store::record_replacement_operation_replay_locked(
+            runner_id,
+            "ensure-running",
+            &command,
+        )
+    } else {
+        crate::generation_store::record_replacement_operation_replay(
+            runner_id,
+            "ensure-running",
+            &command,
+        )
+    };
+    write.map_err(|error| error.to_string())
 }
 
 pub(super) fn negotiate_ensure_running_operation_id(

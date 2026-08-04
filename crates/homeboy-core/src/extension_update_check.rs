@@ -77,6 +77,12 @@ pub struct UpdateAvailable {
 
 pub fn read_source_revision(extension_id: &str) -> Option<String> {
     let extension_dir = paths::extension(extension_id).ok()?;
+    read_source_revision_at(&extension_dir)
+}
+
+/// Read provenance for an extension at an explicit path. This supports callers
+/// that materialize a selected extension outside the ambient extension store.
+pub fn read_source_revision_at(extension_dir: &Path) -> Option<String> {
     if !extension_dir.exists() {
         return None;
     }

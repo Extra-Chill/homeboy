@@ -30,7 +30,7 @@ use super::session::{
     RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
     RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence, RunnerSession,
     RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath,
-    RunnerStatusReport, RunnerTunnelMode,
+    RunnerStatusReport, RunnerTunnelMode, RunnerTunnelProcessStartIdentity,
 };
 use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
 use homeboy_core::broker_auth;
@@ -202,6 +202,7 @@ pub(crate) fn rotate_daemon_generation(
         local_port: Some(local_port),
         local_url: Some(local_url),
         tunnel_pid,
+        tunnel_process_start_identity: capture_tunnel_process_start_identity(tunnel_pid)?,
         remote_daemon_pid: daemon.pid,
         remote_daemon_lease_id: daemon.lease_id,
         homeboy_version: current.homeboy_version.clone(),
@@ -259,14 +260,8 @@ fn rollback_rotated_candidate(
         );
         let _ = client.execute(&command);
     }
-    if let Some(pid) = candidate.tunnel_pid {
-        terminate_generation_tunnel(pid);
-    }
+    terminate_tunnel_if_owned(candidate);
     let _ = super::generation_store::rollback_activation(runner_id, current, generation);
-}
-
-pub(crate) fn terminate_generation_tunnel(pid: u32) {
-    terminate_pid(pid);
 }
 
 fn cleanup_direct_generation_with<Fallback, Tunnel>(
@@ -494,7 +489,14 @@ fn connect_with_orphan_adoption_and_live_lease(
             } else {
                 command
             };
-            let output = client.execute_with_timeout(&command, REMOTE_LEASELESS_RECOVERY_TIMEOUT);
+            let output = fenced_remote_mutation(
+                runner_id,
+                previous_session.as_ref(),
+                "replay_replacement_operation",
+                &client,
+                &command,
+                REMOTE_LEASELESS_RECOVERY_TIMEOUT,
+            );
             if !output.success {
                 return Ok(failed_connect(
                     runner_id,
@@ -613,7 +615,14 @@ fn connect_with_orphan_adoption_and_live_lease(
                 "state-loss",
                 &command,
             )?;
-            let recovery = client.execute_with_timeout(&command, REMOTE_LEASELESS_RECOVERY_TIMEOUT);
+            let recovery = fenced_remote_mutation(
+                runner_id,
+                previous_session.as_ref(),
+                "recover_missing_lease_state",
+                &client,
+                &command,
+                REMOTE_LEASELESS_RECOVERY_TIMEOUT,
+            );
             if !recovery.success {
                 return Ok(failed_connect(
                     runner_id,
@@ -683,7 +692,14 @@ fn connect_with_orphan_adoption_and_live_lease(
                         child_resource: None,
                     };
                 }
-                client.execute_with_timeout(&command, REMOTE_LEASELESS_RECOVERY_TIMEOUT)
+                fenced_remote_mutation(
+                    runner_id,
+                    previous_session.as_ref(),
+                    "reconcile_leaseless_orphans",
+                    &client,
+                    &command,
+                    REMOTE_LEASELESS_RECOVERY_TIMEOUT,
+                )
             },
         );
         let (contract, recovery) = match recovery {
@@ -756,18 +772,28 @@ fn connect_with_orphan_adoption_and_live_lease(
         // Normal reconnects must inspect the live daemon first: a reachable,
         // compatible generation reattaches, while an idle stale generation
         // follows ReplaceIdleStale instead of bypassing its fenced lifecycle.
-        None => ensure_remote_daemon(
-            &client,
-            homeboy,
+        None => super::generation_store::with_admission_fence(
             runner_id,
             previous_session.as_ref(),
-            &configured_build_identity,
-            orphan_lease_id,
-            confirmed_no_pid_job_ids,
-            live_lease_expectation,
-            Some(&replacement_operation_id),
+            "ensure_remote_daemon",
+            |admission_fence| {
+                ensure_remote_daemon(
+                    &client,
+                    homeboy,
+                    runner_id,
+                    previous_session.as_ref(),
+                    &configured_build_identity,
+                    orphan_lease_id,
+                    confirmed_no_pid_job_ids,
+                    live_lease_expectation,
+                    Some(&replacement_operation_id),
+                    admission_fence,
+                    false,
+                )
+                .map_err(Error::internal_unexpected)
+            },
         )
-        .map(|daemon| daemon),
+        .map_err(|error| error.message),
     };
     let Ok(daemon) = daemon else {
         let (mut report, exit_code) = failed_connect_after_recovery(
@@ -858,6 +884,7 @@ fn connect_with_orphan_adoption_and_live_lease(
         local_port: Some(local_port),
         local_url: Some(local_url),
         tunnel_pid,
+        tunnel_process_start_identity: capture_tunnel_process_start_identity(tunnel_pid)?,
         remote_daemon_pid: daemon.pid,
         remote_daemon_lease_id,
         homeboy_version: expected_version,
@@ -984,6 +1011,7 @@ fn pending_replacement_session(
         local_port: None,
         local_url: None,
         tunnel_pid: None,
+        tunnel_process_start_identity: None,
         remote_daemon_pid: daemon.pid,
         remote_daemon_lease_id: daemon.lease_id.clone(),
         homeboy_version: version.to_string(),
@@ -1273,6 +1301,45 @@ fn remote_state_loss_recovery_command(
     )
 }
 
+fn fenced_remote_mutation(
+    runner_id: &str,
+    previous_session: Option<&RunnerSession>,
+    operation_name: &str,
+    client: &SshClient,
+    command: &str,
+    timeout: Duration,
+) -> homeboy_core::server::CommandOutput {
+    match super::generation_store::with_admission_fence(
+        runner_id,
+        previous_session,
+        operation_name,
+        |fence| {
+            if let Some(fence) = fence {
+                return Err(Error::validation_invalid_argument(
+                    "reconnect",
+                    format!(
+                        "runner `{runner_id}` generation `{}` has {} unresolved active job(s); refusing daemon recovery before terminal job evidence is available",
+                        fence.generation, fence.active_job_count,
+                    ),
+                    Some(runner_id.to_string()),
+                    None,
+                ));
+            }
+            Ok(client.execute_with_timeout(command, timeout))
+        },
+    ) {
+        Ok(output) => output,
+        Err(error) => homeboy_core::server::CommandOutput {
+            success: false,
+            stdout: String::new(),
+            stderr: error.message,
+            exit_code: 1,
+            timed_out: false,
+            child_resource: None,
+        },
+    }
+}
+
 pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerConnectReport, i32)> {
     if options.runner_id.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -1307,6 +1374,7 @@ pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerCo
         local_port: None,
         local_url: None,
         tunnel_pid: None,
+        tunnel_process_start_identity: None,
         remote_daemon_pid: None,
         remote_daemon_lease_id: None,
         homeboy_version,
@@ -1466,7 +1534,17 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     {
         freshness.active_jobs = active_jobs;
     }
-    let active_job_count = direct_daemon_active_jobs.unwrap_or(active_jobs.len());
+    let selected_active_job_count = direct_daemon_active_jobs.unwrap_or(active_jobs.len());
+    // A connected admission daemon is not the only generation that can own
+    // mutable work. Keep the full status headline consistent with the
+    // admission summary by retaining unresolved draining ownership too.
+    let unresolved_generation_jobs =
+        super::generation_store::status_projection(runner_id, session.as_ref())?
+            .into_iter()
+            .filter(|generation| !generation.admission_owner)
+            .map(|generation| generation.active_job_count)
+            .sum::<usize>();
+    let active_job_count = selected_active_job_count + unresolved_generation_jobs;
     let active_job_error = match (active_job_error, direct_daemon_active_jobs) {
         (Some(error), _) => Some(error),
         (None, Some(authoritative_count)) if authoritative_count != active_jobs.len() => {
@@ -1613,7 +1691,7 @@ fn recover_dead_direct_tunnel(runner_id: &str, session: Option<&RunnerSession>) 
 /// tunnel can have its port reused by an unrelated process. Instead it opens a
 /// fresh ephemeral tunnel and accepts it only when `/health` proves the exact
 /// persisted daemon lease and PID for the job-owning generation.
-pub fn reconnect_job_log_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
+fn reconnect_job_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
     let runner = load(runner_id)?;
     let legacy = read_session_or_live_peer(runner_id)?;
     let owner = super::generation_store::endpoint_session(
@@ -1677,23 +1755,178 @@ pub fn reconnect_job_log_owner(runner_id: &str, job_id: &str) -> Result<RunnerSe
             None,
         )
     })?;
-    Ok(RunnerSession {
+    let tunnel_process_start_identity = match capture_tunnel_process_start_identity(tunnel_pid) {
+        Ok(identity) => identity,
+        Err(error) => {
+            if let Some(pid) = tunnel_pid {
+                terminate_pid(pid);
+            }
+            return Err(error);
+        }
+    };
+    let session = RunnerSession {
         local_port: Some(local_port),
         local_url: Some(local_url),
         tunnel_pid,
+        tunnel_process_start_identity,
         remote_daemon_address: Some(daemon.address),
         remote_daemon_pid: daemon.pid,
         remote_daemon_lease_id: daemon.lease_id,
         ..owner
+    };
+    Ok(session)
+}
+
+/// Reopen and retain the direct tunnel for the durable generation which owns a
+/// foreground-polled job. This updates only that generation's endpoint; it
+/// never changes the admission generation used for new work.
+pub(crate) fn reconnect_job_owner_for_polling(
+    runner_id: &str,
+    job_id: &str,
+) -> Result<RunnerSession> {
+    let legacy = read_session_or_live_peer(runner_id)?;
+    let owner = super::generation_store::job_session(runner_id, job_id, legacy.as_ref())?
+        .or(legacy)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "runner",
+                "runner has no durable daemon generation binding for this job",
+                Some(runner_id.to_string()),
+                None,
+            )
+        })?;
+    let generation = owner.remote_daemon_lease_id.clone().ok_or_else(|| {
+        Error::internal_unexpected("job-owning daemon generation has no lease ID")
+    })?;
+    reconnect_generation_for_polling_with(
+        runner_id,
+        &generation,
+        || {
+            let legacy = read_session_or_live_peer(runner_id)?;
+            super::generation_store::job_session(runner_id, job_id, legacy.as_ref())
+        },
+        session_is_live,
+        || reconnect_job_owner(runner_id, job_id),
+        |session| super::generation_store::record_reconnected_job_owner(runner_id, session, job_id),
+        close_reconnected_job_log_owner,
+    )
+}
+
+/// Run the durable recovery transaction while holding the owning generation's
+/// lock. The operation boundary keeps the coordination policy testable without
+/// opening SSH tunnels in unit tests.
+fn reconnect_generation_for_polling_with<Session, IsLive, Reconnect, Persist, Close>(
+    runner_id: &str,
+    generation: &str,
+    session_for_job: Session,
+    is_live: IsLive,
+    reconnect: Reconnect,
+    persist: Persist,
+    close: Close,
+) -> Result<RunnerSession>
+where
+    Session: Fn() -> Result<Option<RunnerSession>>,
+    IsLive: Fn(&RunnerSession) -> bool,
+    Reconnect: Fn() -> Result<RunnerSession>,
+    Persist: Fn(&RunnerSession) -> Result<RunnerSession>,
+    Close: Fn(&RunnerSession),
+{
+    super::generation_store::with_generation_recovery_lock(runner_id, generation, || {
+        if let Some(session) = session_for_job()? {
+            if is_live(&session) {
+                return Ok(session);
+            }
+        }
+        let session = reconnect()?;
+        let replaced = match persist(&session) {
+            Ok(replaced) => replaced,
+            Err(error) => {
+                close(&session);
+                return Err(error);
+            }
+        };
+        close(&replaced);
+        Ok(session)
     })
+}
+
+fn capture_tunnel_process_start_identity(
+    pid: Option<u32>,
+) -> Result<Option<RunnerTunnelProcessStartIdentity>> {
+    let Some(pid) = pid else {
+        return Ok(None);
+    };
+    let identity = homeboy_core::process::process_start_identity(pid)
+        .map_err(|error| {
+            Error::internal_unexpected(format!("capture tunnel process identity: {error}"))
+        })?
+        .ok_or_else(|| {
+            Error::internal_unexpected("new tunnel exited before its process identity was captured")
+        })?;
+    Ok(Some(match identity {
+        homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks } => {
+            RunnerTunnelProcessStartIdentity::Linux { starttime_ticks }
+        }
+        homeboy_core::process::ProcessStartIdentity::Macos {
+            start_seconds,
+            start_microseconds,
+        } => RunnerTunnelProcessStartIdentity::Macos {
+            start_seconds,
+            start_microseconds,
+        },
+    }))
+}
+
+pub(crate) fn terminate_tunnel_if_owned(session: &RunnerSession) {
+    let Some(pid) = session.tunnel_pid else {
+        return;
+    };
+    terminate_tunnel_with_identity(
+        pid,
+        session.tunnel_process_start_identity.as_ref(),
+        homeboy_core::process::process_start_identity,
+        terminate_pid,
+    );
+}
+
+fn terminate_tunnel_with_identity<Inspect, Terminate>(
+    pid: u32,
+    expected_identity: Option<&RunnerTunnelProcessStartIdentity>,
+    inspect: Inspect,
+    terminate: Terminate,
+) where
+    Inspect:
+        Fn(u32) -> std::result::Result<Option<homeboy_core::process::ProcessStartIdentity>, String>,
+    Terminate: Fn(u32),
+{
+    let actual_identity = inspect(pid).ok().flatten().map(|identity| match identity {
+        homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks } => {
+            RunnerTunnelProcessStartIdentity::Linux { starttime_ticks }
+        }
+        homeboy_core::process::ProcessStartIdentity::Macos {
+            start_seconds,
+            start_microseconds,
+        } => RunnerTunnelProcessStartIdentity::Macos {
+            start_seconds,
+            start_microseconds,
+        },
+    });
+    if matches!((expected_identity, actual_identity.as_ref()), (Some(expected), Some(actual)) if expected == actual)
+    {
+        terminate(pid);
+    }
+}
+
+/// Reopen a temporary tunnel to the durable generation which owns `job_id`.
+/// Callers must close the returned tunnel when the one-shot read completes.
+pub fn reconnect_job_log_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
+    reconnect_job_owner(runner_id, job_id)
 }
 
 /// Close the local tunnel opened exclusively for job log/cancel recovery. This
 /// never stops the remote daemon generation that owns the durable job.
 pub fn close_reconnected_job_log_owner(session: &RunnerSession) {
-    if let Some(pid) = session.tunnel_pid {
-        terminate_pid(pid);
-    }
+    terminate_tunnel_if_owned(session);
 }
 
 /// Resolve a direct-SSH session for work admission. A readiness observation can

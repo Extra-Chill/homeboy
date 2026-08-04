@@ -426,6 +426,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                 ],
                 gates: VerifyGateArgs {
                     gate_package_artifacts: Vec::new(),
+                    gate_extension_inputs: Vec::new(),
                     verify: vec!["cargo test --lib".to_string()],
                     private_verify: Vec::new(),
                     private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
@@ -794,6 +795,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 provider_argv: vec!["sh".to_string(), provider.display().to_string()],
                 gates: VerifyGateArgs {
                     gate_package_artifacts: Vec::new(),
+                    gate_extension_inputs: Vec::new(),
                     verify: vec!["true".to_string()],
                     private_verify: Vec::new(),
                     private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
