@@ -2294,7 +2294,9 @@ fn enrich_with_diagnostic_summary(value: &mut Value, run_id: &str) -> homeboy::c
     let Some(aggregate) = completed_run_aggregate(run_id).transpose()? else {
         return Ok(());
     };
-    if let Some(summary) = diagnostic_summary_from_aggregate(&aggregate) {
+    if let Some(summary) = diagnostic_summary_from_aggregate(&aggregate)
+        .or_else(|| diagnostic_summary_from_evidence(&aggregate))
+    {
         value["diagnostic_summary"] = summary;
     }
     let failure_reasons = failure_reasons_from_aggregate(&aggregate);
@@ -2304,6 +2306,31 @@ fn enrich_with_diagnostic_summary(value: &mut Value, run_id: &str) -> homeboy::c
     value["execution_states"] = execution_states_from_aggregate(&aggregate, value);
     value["aggregate"] = serde_json::to_value(&aggregate).unwrap_or(Value::Null);
     Ok(())
+}
+
+/// Executor evidence can carry the only typed diagnostic for a provider
+/// failure. Surface the same bounded root cause as `diagnose` without exposing
+/// the evidence payload itself in `status`.
+fn diagnostic_summary_from_evidence(aggregate: &AgentTaskAggregate) -> Option<Value> {
+    let mut diagnostics = Vec::new();
+    for outcome in &aggregate.outcomes {
+        for evidence in &outcome.evidence_refs {
+            if let Some(summary) =
+                agent_task_service::hydrate_evidence_summary(&outcome.task_id, evidence)
+            {
+                collect_nested_diagnostics(
+                    &outcome.task_id,
+                    summary.get("summary").unwrap_or(&Value::Null),
+                    "hydrated_evidence",
+                    &mut diagnostics,
+                );
+            }
+        }
+    }
+    ranked_diagnostics(diagnostics)
+        .into_iter()
+        .map(collected_diagnostic_value)
+        .next()
 }
 
 pub(crate) fn completed_run_aggregate(
