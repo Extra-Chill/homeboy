@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+fail() { echo "::error::$1" >&2; exit 1; }
+digest() { printf '%s' "$1" | shasum -a 256 | awk '{print $1}'; }
+
+plan() {
+  local inventory="${TEST_INVENTORY_FILE:?TEST_INVENTORY_FILE is required}"
+  local output="${TEST_SHARD_PLAN_FILE:?TEST_SHARD_PLAN_FILE is required}"
+  local count="${TEST_SHARD_COUNT:?TEST_SHARD_COUNT is required}"
+  local unknown="${TEST_SHARD_UNKNOWN_DURATION_MS:-60000}"
+  [[ "${count}" =~ ^[1-9][0-9]*$ && "${unknown}" =~ ^[1-9][0-9]*$ ]] || fail "Test shard count and unknown duration must be positive integers."
+  [ -f "${inventory}" ] || fail "Test inventory is missing: ${inventory}"
+  jq -e '
+    .schema == "homeboy/test-inventory/v1"
+    and (.runner | type == "string" and length > 0)
+    and (.runner_fingerprint | type == "string" and length > 0)
+    and (.workspace_fingerprint | type == "string" and length > 0)
+    and (.inventory_fingerprint | type == "string" and length > 0)
+    and (.tests | type == "array" and length > 0)
+    and all(.tests[]; (.id | type == "string" and length > 0) and ((.duration_ms? == null) or (.duration_ms | type == "number" and . > 0)))
+    and ([.tests[].id] | length == (unique | length))
+  ' "${inventory}" >/dev/null || fail "Test inventory must satisfy homeboy/test-inventory/v1."
+  [ "${count}" -le "$(jq '.tests | length' "${inventory}")" ] || fail "Test shard count exceeds the test inventory; empty shards are not allowed."
+
+  local canonical inventory_digest plan_digest
+  canonical="$(jq -cS '{schema,runner,runner_fingerprint,workspace_fingerprint,inventory_fingerprint,tests:(.tests | sort_by(.id))}' "${inventory}")"
+  inventory_digest="$(digest "${canonical}")"
+  jq -cn --argjson inventory "${canonical}" --arg inventory_digest "${inventory_digest}" --argjson count "${count}" --argjson unknown "${unknown}" '
+    [range(0; $count) | {index:., duration_ms:0, tests:[]}] as $empty
+    | reduce ($inventory.tests | map(. + {weight:(.duration_ms // $unknown)}) | sort_by(-.weight, .id))[] as $test
+        ($empty; (min_by(.duration_ms, .index).index) as $index | .[$index].duration_ms += $test.weight | .[$index].tests += [$test.id])
+    | {schema:"homeboy/test-shard-plan/v1", inventory_digest:$inventory_digest, inventory_fingerprint:$inventory.inventory_fingerprint,
+       shards:(map({schema:"homeboy/test-shard-manifest/v1", id:("shard-" + ((.index + 1)|tostring)), runner:$inventory.runner,
+         runner_fingerprint:$inventory.runner_fingerprint, workspace_fingerprint:$inventory.workspace_fingerprint,
+         inventory_fingerprint:$inventory.inventory_fingerprint, tests:.tests, estimated_duration_ms:.duration_ms}))}
+  ' > "${output}.tmp"
+  plan_digest="$(digest "$(jq -cS . "${output}.tmp")")"
+  jq --arg digest "${plan_digest}" '. + {plan_digest:$digest}' "${output}.tmp" > "${output}"
+  rm -f "${output}.tmp"
+}
+
+aggregate() {
+  local root="${TEST_SHARD_ARTIFACT_ROOT:?TEST_SHARD_ARTIFACT_ROOT is required}"
+  local plan="${TEST_SHARD_PLAN_FILE:?TEST_SHARD_PLAN_FILE is required}"
+  local inventory="${TEST_INVENTORY_FILE:?TEST_INVENTORY_FILE is required}"
+  local phase="${TEST_SHARD_PHASE:?TEST_SHARD_PHASE is required}"
+  local command="${TEST_SHARD_COMMAND:?TEST_SHARD_COMMAND is required}"
+  local output="${TEST_SHARD_OUTPUT_DIR:?TEST_SHARD_OUTPUT_DIR is required}"
+  local attempt="${RUN_ATTEMPT:?RUN_ATTEMPT is required}"
+  local inventory_digest plan_digest canonical
+  inventory_digest="$(jq -r .inventory_digest "${plan}")"
+  plan_digest="$(jq -r .plan_digest "${plan}")"
+  canonical="$(jq -cS '{schema,runner,runner_fingerprint,workspace_fingerprint,inventory_fingerprint,tests:(.tests | sort_by(.id))}' "${inventory}")"
+  [ "$(digest "${canonical}")" = "${inventory_digest}" ] || fail "Test inventory does not match this immutable shard plan."
+  [ "$(digest "$(jq -cS 'del(.plan_digest)' "${plan}")")" = "${plan_digest}" ] || fail "Test shard plan digest does not match its immutable contents."
+  mkdir -p "${output}"
+
+  local shard id manifest payload status aggregate_status="pass" expected_total
+  local -a payloads=()
+  while IFS= read -r shard; do
+    id="$(jq -r .id <<< "${shard}")"; matches=()
+    while IFS= read -r manifest; do
+      if jq -e --arg phase "${phase}" --arg command "${command}" --arg id "${id}" --arg inventory_digest "${inventory_digest}" --arg plan_digest "${plan_digest}" --argjson attempt "${attempt}" '
+        .phase == $phase and .command == $command and .shard_id == $id and .inventory_digest == $inventory_digest and .plan_digest == $plan_digest and .run_attempt == $attempt and (.results[$command] == "pass" or .results[$command] == "fail" or .results[$command] == "timeout")
+      ' "${manifest}" >/dev/null 2>&1; then matches+=("${manifest}"); fi
+    done < <(find "${root}" -path "*/${phase}/manifest.json" -type f -print | sort)
+    [ "${#matches[@]}" -eq 1 ] || fail "Expected exactly one valid ${phase} shard evidence manifest for ${id}."
+    manifest="${matches[0]}"; status="$(jq -r --arg command "${command}" '.results[$command]' "${manifest}")"; payload="$(dirname "${manifest}")/homeboy-ci-results/review-test.json"
+    case "${status}" in
+      timeout) aggregate_status="timeout" ;;
+      fail) [ "${aggregate_status}" = timeout ] || aggregate_status="fail" ;;
+    esac
+    if [ ! -f "${payload}" ]; then
+      [ "${status}" = timeout ] || fail "${phase} shard ${id} is ${status} but has no structured review-test.json result."
+      continue
+    fi
+    expected_total="$(jq '.tests | length' <<< "${shard}")"
+    jq -e --arg root "${command%% *}" --arg phase_status "${status}" '
+      .schema == "homeboy/command-result/v3" and .command == $root and (.success | type == "boolean") and (.status | type == "string") and (.exit_code | type == "number")
+      and (.data.test_counts | type == "object") and all(.data.test_counts.passed, .data.test_counts.failed, .data.test_counts.errors, .data.test_counts.total; type == "number" and . >= 0)
+      and (.data.test_counts.passed + .data.test_counts.failed + .data.test_counts.errors <= .data.test_counts.total)
+      and (if $phase_status == "pass" then .success == true and .exit_code == 0 and (.data.test_counts.failed + .data.test_counts.errors == 0)
+           elif $phase_status == "fail" then .success == false and .exit_code != 0
+           else true end)
+    ' "${payload}" >/dev/null 2>&1 || fail "${phase} shard ${id} has invalid structured review-test.json counts."
+    [ "$(jq '.data.test_counts.total' "${payload}")" = "${expected_total}" ] || fail "${phase} shard ${id} structured total does not match its planned membership."
+    cp "${payload}" "${output}/${id}-review-test.json"
+    payloads+=("${payload}")
+  done < <(jq -c '.shards[]' "${plan}")
+  local payload_json='[]'
+  [ "${#payloads[@]}" -eq 0 ] || payload_json="$(jq -s '.' "${payloads[@]}")"
+  local inventory_total aggregate_total
+  inventory_total="$(jq '.tests | length' "${inventory}")"
+  aggregate_total="$(jq '[.[].data.test_counts.total] | add // 0' <<< "${payload_json}")"
+  if [ "${aggregate_status}" != timeout ] && [ "${aggregate_total}" != "${inventory_total}" ]; then
+    fail "${phase} shard totals do not cover the complete inventory."
+  fi
+  jq -n --arg root "${command%% *}" --arg plan_digest "${plan_digest}" --arg status "${aggregate_status}" --argjson payloads "${payload_json}" '
+    {schema:"homeboy/command-result/v3",command:$root,success:($status == "pass"),status:(if $status == "pass" then "succeeded" else "failed" end),exit_code:(if $status == "pass" then 0 elif $status == "timeout" then 124 else 1 end),
+     data:{test_counts:{passed:([$payloads[].data.test_counts.passed] | add // 0),failed:([$payloads[].data.test_counts.failed] | add // 0),errors:([$payloads[].data.test_counts.errors] | add // 0),total:([$payloads[].data.test_counts.total] | add // 0)},shard_plan_digest:$plan_digest,shard_count:($payloads|length)}}
+  ' > "${output}/review-test.json"
+  printf '{"%s":"%s"}\n' "${command}" "${aggregate_status}" > "${output}/results.json"
+}
+
+case "${1:-}" in plan) plan ;; aggregate) aggregate ;; *) echo "usage: $0 plan|aggregate" >&2; exit 2 ;; esac

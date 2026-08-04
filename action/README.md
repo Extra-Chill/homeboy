@@ -34,6 +34,12 @@ command, component, action revision, CLI revision, and phase identity. Missing
 or mismatched evidence fails closed. This DAG behavior is specific to the
 reusable workflow; direct composite-action callers keep the combined behavior.
 
+Set `test-shards` above `1` to use the generic Homeboy test inventory contract.
+The candidate Test command is first invoked with `HOMEBOY_TEST_INVENTORY_ONLY=1`;
+the selected extension writes `homeboy-test-inventory.json` with schema
+`homeboy/test-inventory/v1`, stable test IDs, and optional `duration_ms` values.
+Each shard then receives a digest-bound `HOMEBOY_TEST_SHARD_MANIFEST`.
+
 ```yaml
 name: CI
 on: [pull_request]

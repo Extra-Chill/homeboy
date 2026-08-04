@@ -117,6 +117,10 @@ on:
         description: 'Maximum wall-clock time for the Homeboy test child. Must leave cleanup margin below the command phase timeout.'
         type: string
         default: '1500'
+      test-shards:
+        description: 'Optional number of deterministic Test shards. Values above one require the Homeboy test inventory contract.'
+        type: string
+        default: '1'
       cleanup-timeout-seconds:
         description: 'Maximum wall-clock time to terminate command descendants.'
         type: string
@@ -247,16 +251,68 @@ jobs:
 
   plan:
     name: Plan
+    needs: binary
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      test-matrix: ${{ steps.plan.outputs.test-matrix }}
+      test-shards-enabled: ${{ steps.plan.outputs.test-shards-enabled }}
+      test-command: ${{ steps.plan.outputs.test-command }}
     steps:
+      - id: resolved-test-command
+        if: inputs.test-shards != '1'
+        env:
+          COMMANDS: ${{ inputs.commands }}
+        run: |
+          IFS=',' read -ra commands <<< "${COMMANDS}"
+          for command in "${commands[@]}"; do
+            command="$(printf '%s' "${command}" | xargs)"
+            case "${command}" in review\ test*|test*) echo "value=${command}" >> "${GITHUB_OUTPUT}"; exit 0 ;; esac
+          done
+          echo '::error::test-shards requires a requested Test command.'
+          exit 1
+      - uses: actions/checkout@v6
+        if: inputs.test-shards != '1'
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/checkout@v6
+        if: inputs.test-shards != '1'
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ inputs.action-ref }}
+          path: .homeboy-action
+      - name: Download candidate Homeboy binary for test inventory
+        if: inputs.test-shards != '1'
+        id: candidate-binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
+      - name: Materialize canonical Test inventory
+        if: inputs.test-shards != '1'
+        env:
+          HOMEBOY_TEST_INVENTORY_ONLY: '1'
+          HOMEBOY_TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
+        uses: ./.homeboy-action
+        with:
+          binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
+          extension: ${{ inputs.extension }}
+          extension-source: ${{ inputs.extension-source }}
+          commands: ${{ steps.resolved-test-command.outputs.value }}
+          component: ${{ inputs.component }}
+          args: ${{ inputs.args }}
+          scope: full
+          auto-setup: ${{ inputs.auto-setup }}
+          php-version: ${{ inputs.php-version }}
+          node-version: ${{ inputs.node-version }}
+          pr-comment: 'false'
+          auto-issue: 'false'
       - name: Plan quality checks
         id: plan
         shell: bash
         env:
           COMMANDS: ${{ inputs.commands }}
           BASELINE_COMMANDS: ${{ inputs.baseline-commands }}
+          TEST_SHARDS: ${{ inputs.test-shards }}
         run: |
           declare -A selected_commands=()
           unknown_commands=()
@@ -348,7 +404,43 @@ jobs:
           done
 
           matrix="$(printf '%s\n' "${rows[@]}" | jq -sc '{include:.}')"
-          echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+          test_matrix='{"include":[]}'
+          test_shards_enabled=false
+          test_command=''
+          if [ "${TEST_SHARDS}" != '1' ] && [ -n "${TEST_SHARDS}" ]; then
+            if ! [[ "${TEST_SHARDS}" =~ ^[2-9][0-9]*$|^[1-9][0-9]+$ ]]; then
+              echo '::error::test-shards must be a positive integer.'
+              exit 1
+            fi
+            # The inventory is materialized by the candidate binary in the step below.
+            test_row="$(printf '%s' "${matrix}" | jq -c '.include[] | select(.section_key == "test")')"
+            if [ -n "${test_row}" ]; then
+              test_command="$(jq -r .command <<< "${test_row}")"
+              TEST_INVENTORY_FILE="${GITHUB_WORKSPACE}/homeboy-test-inventory.json" \
+              TEST_SHARD_PLAN_FILE="${GITHUB_WORKSPACE}/homeboy-test-shard-plan.json" \
+              TEST_SHARD_COUNT="${TEST_SHARDS}" \
+                bash "${GITHUB_WORKSPACE}/.homeboy-action/scripts/core/shard-tests.sh" plan
+              test_matrix="$(jq -cn --argjson row "${test_row}" --slurpfile plan "${GITHUB_WORKSPACE}/homeboy-test-shard-plan.json" '{include:[$plan[0].shards[] | $row + {shard_id:.id}]}')"
+              test_shards_enabled=true
+              matrix="$(printf '%s' "${matrix}" | jq -c '{include:[.include[] | select(.section_key != "test")]}')"
+            fi
+          fi
+          {
+            echo "matrix=${matrix}"
+            echo "test-matrix=${test_matrix}"
+            echo "test-shards-enabled=${test_shards_enabled}"
+            echo "test-command=${test_command}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Upload immutable Test shard plan
+        if: inputs.test-shards != '1'
+        uses: actions/upload-artifact@v7
+        with:
+          name: homeboy-test-shard-plan-${{ github.run_attempt }}
+          path: |
+            homeboy-test-inventory.json
+            homeboy-test-shard-plan.json
+          if-no-files-found: error
 
   candidate:
     name: Candidate ${{ matrix.title }}
@@ -560,6 +652,256 @@ jobs:
           path: differential-phase
           if-no-files-found: warn
 
+  candidate-test-shards:
+    name: Candidate Test shard ${{ matrix.shard_id }}
+    needs: [binary, plan]
+    if: ${{ always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.test-matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ inputs.action-ref }}
+          path: .homeboy-action
+      - id: candidate-binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
+      - uses: actions/download-artifact@v7
+        with:
+          name: homeboy-test-shard-plan-${{ github.run_attempt }}
+      - name: Materialize assigned Test shard
+        run: jq --arg id '${{ matrix.shard_id }}' '.shards[] | select(.id == $id)' homeboy-test-shard-plan.json > homeboy-test-shard.json
+      - id: phase
+        continue-on-error: true
+        env:
+          HOMEBOY_TEST_SHARD_MANIFEST: ${{ github.workspace }}/homeboy-test-shard.json
+        uses: ./.homeboy-action
+        with:
+          binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
+          extension: ${{ inputs.extension }}
+          extension-source: ${{ inputs.extension-source }}
+          commands: ${{ matrix.command }}
+          component: ${{ inputs.component }}
+          args: ${{ inputs.args }}
+          scope: ${{ inputs.scope }}
+          auto-setup: ${{ inputs.auto-setup }}
+          php-version: ${{ inputs.php-version }}
+          node-version: ${{ inputs.node-version }}
+          differential-gating: ${{ inputs.differential-gating }}
+          baseline-commands: none
+          pr-comment: 'false'
+          auto-issue: 'false'
+      - name: Write candidate Test shard provenance
+        if: always()
+        env:
+          RESULTS: ${{ steps.phase.outputs.results }}
+          SHARD_ID: ${{ matrix.shard_id }}
+          COMMAND: ${{ matrix.command }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          mkdir -p differential-phase/candidate
+          results="${RESULTS:-}"; [ -n "${results}" ] || results='{}'
+          jq -cn --arg phase candidate --arg shard_id "${SHARD_ID}" --arg command "${COMMAND}" --arg inventory_digest "$(jq -r .inventory_digest homeboy-test-shard-plan.json)" --arg plan_digest "$(jq -r .plan_digest homeboy-test-shard-plan.json)" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${results}" '{phase:$phase,shard_id:$shard_id,command:$command,inventory_digest:$inventory_digest,plan_digest:$plan_digest,run_attempt:$run_attempt,results:$results}' > differential-phase/candidate/manifest.json
+          cp -R homeboy-ci-results differential-phase/candidate/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-ci-results
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: homeboy-test-shard-candidate-${{ matrix.shard_id }}-${{ github.run_attempt }}
+          path: differential-phase
+
+  reconcile-test-shards:
+    name: Test
+    needs: [candidate-test-shards, baseline-test-shards, baseline-test-plan, plan]
+    if: ${{ always() && needs.plan.outputs.test-shards-enabled == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ inputs.action-ref }}
+          path: .homeboy-action
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: homeboy-test-shard-*
+          path: test-shard-artifacts
+      - uses: actions/download-artifact@v7
+        with:
+          name: homeboy-test-shard-plan-${{ github.run_attempt }}
+      - uses: actions/download-artifact@v7
+        if: github.event_name == 'pull_request' && inputs.differential-gating == 'true'
+        with:
+          name: homeboy-baseline-test-shard-plan-${{ github.run_attempt }}
+          path: baseline-test-plan
+      - name: Aggregate complete candidate Test shard evidence
+        env:
+          TEST_SHARD_ARTIFACT_ROOT: test-shard-artifacts
+          TEST_SHARD_PLAN_FILE: homeboy-test-shard-plan.json
+          TEST_INVENTORY_FILE: homeboy-test-inventory.json
+          TEST_SHARD_PHASE: candidate
+          TEST_SHARD_COMMAND: ${{ needs.plan.outputs.test-command }}
+          TEST_SHARD_OUTPUT_DIR: homeboy-ci-results
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: bash .homeboy-action/scripts/core/shard-tests.sh aggregate
+      - name: Aggregate complete baseline Test shard evidence
+        if: github.event_name == 'pull_request' && inputs.differential-gating == 'true'
+        env:
+          TEST_SHARD_ARTIFACT_ROOT: test-shard-artifacts
+          TEST_SHARD_PLAN_FILE: baseline-test-plan/homeboy-test-shard-plan.json
+          TEST_INVENTORY_FILE: baseline-test-plan/homeboy-test-inventory.json
+          TEST_SHARD_PHASE: baseline
+          TEST_SHARD_COMMAND: ${{ needs.plan.outputs.test-command }}
+          TEST_SHARD_OUTPUT_DIR: homeboy-baseline-results
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: bash .homeboy-action/scripts/core/shard-tests.sh aggregate
+      - name: Apply differential Test result
+        if: github.event_name == 'pull_request' && inputs.differential-gating == 'true'
+        env:
+          COMMAND: ${{ needs.plan.outputs.test-command }}
+        run: |
+          baseline_result="$(jq -r --arg command "${COMMAND}" '.[$command]' homeboy-baseline-results/results.json)"
+          case "${baseline_result}" in
+            pass) baseline_exit=0 ;;
+            timeout) baseline_exit=124 ;;
+            *) baseline_exit=1 ;;
+          esac
+          structured_output=false
+          [ ! -f homeboy-baseline-results/review-test.json ] || structured_output=true
+          jq -cn --arg command "${COMMAND}" --arg status "${baseline_result}" --argjson exit_code "${baseline_exit}" --argjson structured_output "${structured_output}" \
+            '{($command):{status:$status,exit_code:$exit_code,command:$command,structured_output:$structured_output}}' > homeboy-baseline-results/baseline-status.json
+          python3 .homeboy-action/scripts/core/apply-differential-gate.py "$(cat homeboy-ci-results/results.json)" homeboy-ci-results homeboy-baseline-results > reconciled-results.json
+          RESULTS="$(cat reconciled-results.json)" COMMANDS="${COMMAND}" OPERATIONS_RESULTS='' PR_ACTIVE='' bash .homeboy-action/scripts/core/enforce-final-status.sh
+      - name: Enforce sharded Test result
+        if: github.event_name != 'pull_request' || inputs.differential-gating != 'true'
+        env:
+          COMMAND: ${{ needs.plan.outputs.test-command }}
+        run: RESULTS="$(cat homeboy-ci-results/results.json)" COMMANDS="${COMMAND}" OPERATIONS_RESULTS='' PR_ACTIVE='' bash .homeboy-action/scripts/core/enforce-final-status.sh
+
+  baseline-test-plan:
+    name: Plan baseline Test shards
+    needs: [binary, plan]
+    if: ${{ always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      test-matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+      - uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ inputs.action-ref }}
+          path: .homeboy-action
+      - id: candidate-binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
+      - name: Materialize canonical baseline Test inventory
+        env:
+          HOMEBOY_TEST_INVENTORY_ONLY: '1'
+          HOMEBOY_TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
+        uses: ./.homeboy-action
+        with:
+          binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
+          extension: ${{ inputs.extension }}
+          extension-source: ${{ inputs.extension-source }}
+          commands: ${{ needs.plan.outputs.test-command }}
+          component: ${{ inputs.component }}
+          args: ${{ inputs.args }}
+          scope: full
+          auto-setup: ${{ inputs.auto-setup }}
+          php-version: ${{ inputs.php-version }}
+          node-version: ${{ inputs.node-version }}
+          pr-comment: 'false'
+          auto-issue: 'false'
+      - id: plan
+        env:
+          TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
+          TEST_SHARD_PLAN_FILE: ${{ github.workspace }}/homeboy-test-shard-plan.json
+          TEST_SHARD_COUNT: ${{ inputs.test-shards }}
+          TEST_COMMAND: ${{ needs.plan.outputs.test-command }}
+        run: |
+          bash .homeboy-action/scripts/core/shard-tests.sh plan
+          jq -cn --arg command "${TEST_COMMAND}" --slurpfile plan homeboy-test-shard-plan.json '{include:[$plan[0].shards[] | {command:$command,shard_id:.id}]}' >> /dev/null
+          echo "matrix=$(jq -cn --arg command "${TEST_COMMAND}" --slurpfile plan homeboy-test-shard-plan.json '{include:[$plan[0].shards[] | {command:$command,shard_id:.id}]}')" >> "${GITHUB_OUTPUT}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: homeboy-baseline-test-shard-plan-${{ github.run_attempt }}
+          path: |
+            homeboy-test-inventory.json
+            homeboy-test-shard-plan.json
+          if-no-files-found: error
+
+  baseline-test-shards:
+    name: Baseline Test shard ${{ matrix.shard_id }}
+    needs: [binary, plan, baseline-test-plan]
+    if: ${{ always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.baseline-test-plan.outputs.test-matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+      - uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ inputs.action-ref }}
+          path: .homeboy-action
+      - id: candidate-binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
+      - uses: actions/download-artifact@v7
+        with:
+          name: homeboy-baseline-test-shard-plan-${{ github.run_attempt }}
+      - run: jq --arg id '${{ matrix.shard_id }}' '.shards[] | select(.id == $id)' homeboy-test-shard-plan.json > homeboy-test-shard.json
+      - id: phase
+        continue-on-error: true
+        env:
+          HOMEBOY_TEST_SHARD_MANIFEST: ${{ github.workspace }}/homeboy-test-shard.json
+        uses: ./.homeboy-action
+        with:
+          binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
+          extension: ${{ inputs.extension }}
+          extension-source: ${{ inputs.extension-source }}
+          commands: ${{ matrix.command }}
+          component: ${{ inputs.component }}
+          args: ${{ inputs.args }}
+          scope: ${{ inputs.scope }}
+          auto-setup: ${{ inputs.auto-setup }}
+          php-version: ${{ inputs.php-version }}
+          node-version: ${{ inputs.node-version }}
+          differential-gating: 'true'
+          baseline-commands: none
+          pr-comment: 'false'
+          auto-issue: 'false'
+      - name: Write baseline Test shard provenance
+        if: always()
+        env:
+          RESULTS: ${{ steps.phase.outputs.results }}
+          SHARD_ID: ${{ matrix.shard_id }}
+          COMMAND: ${{ matrix.command }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          mkdir -p differential-phase/baseline
+          results="${RESULTS:-}"; [ -n "${results}" ] || results='{}'
+          jq -cn --arg phase baseline --arg shard_id "${SHARD_ID}" --arg command "${COMMAND}" --arg inventory_digest "$(jq -r .inventory_digest homeboy-test-shard-plan.json)" --arg plan_digest "$(jq -r .plan_digest homeboy-test-shard-plan.json)" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${results}" '{phase:$phase,shard_id:$shard_id,command:$command,inventory_digest:$inventory_digest,plan_digest:$plan_digest,run_attempt:$run_attempt,results:$results}' > differential-phase/baseline/manifest.json
+          cp -R homeboy-ci-results differential-phase/baseline/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/baseline/homeboy-ci-results
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: homeboy-test-shard-baseline-${{ matrix.shard_id }}-${{ github.run_attempt }}
+          path: differential-phase
+
   reconcile:
     # This is the sole verdict and retains the established required-check name.
     name: ${{ matrix.title }}
@@ -632,8 +974,8 @@ jobs:
 
   policy:
     name: PR Policy
-    needs: reconcile
-    if: ${{ github.event_name == 'pull_request' && inputs.pr-policy != '' }}
+    needs: [reconcile, reconcile-test-shards]
+    if: ${{ always() && github.event_name == 'pull_request' && inputs.pr-policy != '' && needs.reconcile.result == 'success' && (inputs.test-shards == '1' || needs.reconcile-test-shards.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
