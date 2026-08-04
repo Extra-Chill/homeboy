@@ -98,6 +98,44 @@ where
             .unwrap_or_else(|| format!("ephemeral-{}", uuid::Uuid::new_v4()));
         let max_concurrency = plan.options.max_concurrency.max(1);
         let total_tasks = plan.tasks.len();
+        let services = match super::managed_services::ManagedServices::start(
+            &plan.services,
+            &scratch_run_id,
+        ) {
+            Ok(services) => Some(services),
+            Err(error) => {
+                let outcomes = plan
+                    .tasks
+                    .iter()
+                    .map(|request| AgentTaskOutcome {
+                        task_id: request.task_id.clone(),
+                        status: AgentTaskOutcomeStatus::Failed,
+                        summary: Some(error.clone()),
+                        failure_classification: Some(
+                            AgentTaskFailureClassification::ExecutionFailed,
+                        ),
+                        diagnostics: vec![AgentTaskDiagnostic {
+                            class: "managed_service_startup".to_string(),
+                            message: error.clone(),
+                            data: serde_json::Value::Null,
+                        }],
+                        ..Default::default()
+                    })
+                    .collect::<Vec<_>>();
+                return AgentTaskAggregate {
+                    schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                    plan_id: plan.plan_id,
+                    status: AgentTaskScheduleSupport::aggregate_status(&outcomes),
+                    totals: AgentTaskScheduleSupport::totals(total_tasks, &outcomes),
+                    outcomes,
+                    events: Vec::new(),
+                    artifact_lineage: Vec::new(),
+                    child_runs: Vec::new(),
+                    artifact_bindings: Vec::new(),
+                    queue: Default::default(),
+                };
+            }
+        };
         let max_queue_depth = plan.options.max_queue_depth.or(plan.options.max_tasks);
         let retry_budget_total = plan.options.retry.max_retries_total;
         let output_dependencies = plan.output_dependencies.clone();
@@ -367,6 +405,9 @@ where
                 };
                 let scheduled = queued.remove(next_index).expect("queued task");
                 let mut request = scheduled.request;
+                if let Some(services) = services.as_ref() {
+                    services.bind_into(&mut request.inputs, &mut request.metadata);
+                }
                 if let Err(outcome) = AgentTaskScheduleSupport::render_output_dependencies(
                     &mut request,
                     &completed_by_task,
@@ -1095,6 +1136,22 @@ where
             }
         }
 
+        let services = services
+            .map(|services| {
+                services.cleanup(if cancellation.is_cancelled() {
+                    "cancelled"
+                } else {
+                    "terminal"
+                })
+            })
+            .unwrap_or_default();
+        for outcome in &mut outcomes {
+            if !outcome.metadata.is_object() {
+                outcome.metadata = serde_json::json!({});
+            }
+            outcome.metadata["managed_services"] =
+                serde_json::to_value(&services).unwrap_or(serde_json::Value::Null);
+        }
         AgentTaskAggregate {
             schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: plan.plan_id,

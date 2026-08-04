@@ -17,6 +17,88 @@ use serde_json::Value;
 
 use crate::agent_task_outcome::{AgentTaskFailureClassification, AgentTaskOutcomeStatus};
 
+fn default_managed_service_version() -> u32 {
+    AgentTaskManagedService::VERSION
+}
+
+fn default_managed_service_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+/// A generic process owned by an agent-task plan. Values in `env` are durable
+/// configuration; `secret_env` names inherited environment variables without
+/// serializing their values into a plan or run record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskManagedService {
+    #[serde(default = "default_managed_service_version")]
+    pub version: u32,
+    pub id: String,
+    pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_env: Vec<String>,
+    #[serde(default = "default_managed_service_host")]
+    pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<AgentTaskManagedServiceReadiness>,
+    /// An externally provisioned reviewer URL. Homeboy treats this as a
+    /// reference and never assumes a particular tunnel or preview provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
+}
+
+impl AgentTaskManagedService {
+    pub const VERSION: u32 = 1;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskManagedServiceReadiness {
+    #[serde(default)]
+    pub kind: AgentTaskManagedServiceReadinessKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskManagedServiceReadinessKind {
+    #[default]
+    Tcp,
+    Http,
+}
+
+#[cfg(test)]
+mod managed_service_contract_tests {
+    use super::*;
+
+    #[test]
+    fn managed_service_is_a_portable_lab_handoff_contract() {
+        let service: AgentTaskManagedService = serde_json::from_value(serde_json::json!({
+            "id": "neutral-http", "command": ["fixture", "--serve"],
+            "port": 8080, "readiness": { "kind": "http", "path": "/ready" },
+            "secret_env": ["FIXTURE_TOKEN"], "public_url": "https://preview.example.test/run"
+        }))
+        .expect("service contract");
+        assert_eq!(service.version, AgentTaskManagedService::VERSION);
+        assert_eq!(service.host, "127.0.0.1");
+        assert_eq!(
+            service.readiness.as_ref().unwrap().kind,
+            AgentTaskManagedServiceReadinessKind::Http
+        );
+        assert!(serde_json::to_value(&service)
+            .expect("serialize")
+            .get("secret_env")
+            .is_some());
+    }
+}
+
 fn default_max_concurrency() -> usize {
     1
 }
