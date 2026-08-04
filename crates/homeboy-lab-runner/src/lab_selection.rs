@@ -65,14 +65,15 @@ pub struct PlacementReadinessRequest {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PlacementReadinessInvocation {
     AgentTaskCook {
         provider: String,
         source_path: String,
     },
-    BrowserAudit {
+    CapabilityAudit {
         source_path: String,
+        capability_id: String,
     },
 }
 
@@ -106,12 +107,15 @@ pub fn compile_lab_admission_plan(request: PlacementReadinessRequest) -> Result<
             vec!["extension_parity".to_string()],
             vec![provider.clone()],
         ),
-        PlacementReadinessInvocation::BrowserAudit { source_path } => (
+        PlacementReadinessInvocation::CapabilityAudit {
+            source_path,
+            capability_id,
+        } => (
             "audit".to_string(),
-            "audit browser".to_string(),
+            "audit capability".to_string(),
             None,
             vec![source_path.clone()],
-            vec!["playwright".to_string()],
+            vec![capability_id.clone()],
             Vec::new(),
         ),
     };
@@ -181,7 +185,7 @@ pub struct PlacementReadiness {
     pub recovery_action_projections: Vec<PlacementRecoveryAction>,
     /// A complete typed input emitted by the same compiler execution uses.
     /// Passing it back to `runner preflight --request` cannot silently drop a
-    /// provider, source, toolchain, browser, or capability requirement.
+    /// provider, source, toolchain, or capability requirement.
     pub compiled_request: PlacementReadinessRequest,
     pub revalidate_before_execution: bool,
 }
@@ -352,9 +356,9 @@ fn admission_identity(
             Some(provider.clone()),
             vec![source_path.clone()],
         ),
-        PlacementReadinessInvocation::BrowserAudit { source_path } => (
+        PlacementReadinessInvocation::CapabilityAudit { source_path, .. } => (
             "audit".to_string(),
-            "audit browser".to_string(),
+            "audit capability".to_string(),
             None,
             vec![source_path.clone()],
         ),
@@ -1567,8 +1571,9 @@ mod placement_readiness_tests {
             runner_id: "lab".to_string(),
             allow_queue: false,
             durable_workload: false,
-            invocation: PlacementReadinessInvocation::BrowserAudit {
+            invocation: PlacementReadinessInvocation::CapabilityAudit {
                 source_path: "/workspace/source".to_string(),
+                capability_id: "capability.alpha".to_string(),
             },
         }
     }
@@ -1626,7 +1631,7 @@ mod placement_readiness_tests {
         assert_eq!(preflight.toolchain, execution.toolchain);
         assert_eq!(
             preflight.capability.required_capabilities,
-            vec!["playwright".to_string()]
+            vec!["capability.alpha".to_string()]
         );
     }
 
@@ -1639,7 +1644,7 @@ mod placement_readiness_tests {
             serde_json::from_value(encoded.clone()).expect("decode complete request");
         assert!(matches!(
             decoded.invocation,
-            PlacementReadinessInvocation::BrowserAudit { .. }
+            PlacementReadinessInvocation::CapabilityAudit { .. }
         ));
         let mut adversarial = encoded;
         adversarial.as_object_mut().expect("request object").insert(
@@ -1722,8 +1727,8 @@ mod placement_readiness_tests {
             runner_id: "lab".to_string(),
             command: "runner preflight",
             missing_tools: Vec::new(),
-            reason: "missing browser".to_string(),
-            remediation: vec!["install browser".to_string()],
+            reason: "missing capability.alpha".to_string(),
+            remediation: vec!["configure capability.alpha".to_string()],
         };
         let result = decide(
             &request(),
@@ -1742,11 +1747,11 @@ mod placement_readiness_tests {
                 ["runner", "doctor", "lab"],
                 ActionSafety::ReadOnly,
             )
-            .with_evidence(serde_json::json!({ "remediation": "install browser" }))
+            .with_evidence(serde_json::json!({ "remediation": "configure capability.alpha" }))
         );
         assert_eq!(
             result.recovery_actions[0].evidence,
-            Some(serde_json::json!({ "remediation": "install browser" }))
+            Some(serde_json::json!({ "remediation": "configure capability.alpha" }))
         );
     }
 
@@ -1773,8 +1778,8 @@ mod placement_readiness_tests {
                 runner_id: "lab".to_string(),
                 command: "runner preflight",
                 missing_tools: Vec::new(),
-                reason: "missing browser".to_string(),
-                remediation: vec!["install browser".to_string()],
+                reason: "missing capability.alpha".to_string(),
+                remediation: vec!["configure capability.alpha".to_string()],
             },
         );
         assert_eq!(result.state, PlacementReadinessState::Blocked);

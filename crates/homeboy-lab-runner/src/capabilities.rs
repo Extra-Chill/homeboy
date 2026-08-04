@@ -52,14 +52,6 @@ pub fn prepare_lab_runner_capability(
     for tool in contract.required_tools {
         push_unique(&mut required_tools, tool);
     }
-    for capability in &contract.required_capabilities {
-        let capability = capability.trim();
-        if !capability.is_empty()
-            && !homeboy_core::lab_contract::lab_capability_is_pipeline_enforced(capability)
-        {
-            push_unique(&mut required_tools, RunnerRequiredTool::new(capability));
-        }
-    }
 
     PreparedLabRunnerCapability {
         command: contract.command,

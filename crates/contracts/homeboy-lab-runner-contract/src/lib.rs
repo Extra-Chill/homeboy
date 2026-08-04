@@ -280,7 +280,9 @@ impl From<PreparedLabRunnerCapability> for RunnerCapabilityPreflight {
             required_commands: Vec::new(),
             required_tool_capabilities: Vec::new(),
             required_toolchain_probes: Vec::new(),
-            required_components: Vec::new(),
+            // Capability IDs are opaque to the runner core. Providers and
+            // extensions advertise their IDs through the runner inventory.
+            required_components: plan.required_capabilities,
             required_env: Vec::new(),
             timeout: None,
         }
