@@ -273,6 +273,12 @@ pub struct AgentTaskCandidateAdoptionAttempt {
     pub gate_timeout_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub gate_output_tail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_elapsed_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_last_progress_ms_ago: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_progress: Option<homeboy_engine_primitives::command::CommandProgress>,
     #[serde(default)]
     pub resume_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]

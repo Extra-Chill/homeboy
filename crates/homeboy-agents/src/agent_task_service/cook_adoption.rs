@@ -417,6 +417,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         None => crate::agent_task_promotion::with_gate_supervision(
             crate::agent_task_gate::GateSupervision {
                 timeout: options.gates.gate_timeout(),
+                no_progress_timeout: options.gates.gate_no_progress_timeout(),
                 heartbeat_interval: options.gates.gate_heartbeat_interval(),
                 on_spawn: Arc::new({
                     let run_id = gate_run_id.clone();
@@ -431,8 +432,13 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
                 }),
                 on_heartbeat: Arc::new({
                     let run_id = gate_run_id.clone();
-                    move |tail| {
-                        agent_task_lifecycle::heartbeat_candidate_adoption_gate(&run_id, tail)
+                    move |status| {
+                        agent_task_lifecycle::heartbeat_candidate_adoption_gate(
+                            &run_id,
+                            status.visibility,
+                            status.reveal_policy,
+                            status,
+                        )
                     }
                 }),
                 is_cancelled: Arc::new(move || {
