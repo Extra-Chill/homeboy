@@ -269,6 +269,13 @@ mod provider_rotation_tests {
         plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
         enable_rotation(&mut plan);
 
+        // Scheduling against a run id needs that run to exist durably:
+        // `reserve_provider_execution` reads the record before it will let a
+        // provider execute, so without this every task fails admission with
+        // "agent-task run record not found" instead of rotating.
+        crate::agent_tasks::lifecycle::submit_plan(&plan, Some("run-8081")).expect("submit plan");
+        crate::agent_tasks::lifecycle::mark_running("run-8081").expect("mark running");
+
         let aggregate = scheduler.run(plan);
 
         assert_eq!(
