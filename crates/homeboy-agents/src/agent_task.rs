@@ -10,6 +10,7 @@ pub use super::agent_task_fanout::{
 
 mod artifacts;
 pub mod bench_matrix_provider;
+mod capabilities;
 mod command_policy;
 mod executor;
 mod matrix;
@@ -30,6 +31,12 @@ pub use matrix::{
 pub use artifacts::{
     AgentTaskArtifact, AgentTaskArtifactDeclaration, AgentTaskDiagnostic, AgentTaskEvidenceRef,
     AgentTaskFollowUp, AgentTaskTypedArtifact,
+};
+pub(crate) use capabilities::ready_attached_tools_from_metadata;
+pub use capabilities::{
+    AgentTaskAttachedToolCapability, AgentTaskCapabilityEvidence, AgentTaskCapabilityRequirements,
+    AgentTaskToolCapabilityContribution, AGENT_TASK_CAPABILITY_EVIDENCE_SCHEMA,
+    AGENT_TASK_CAPABILITY_REQUIREMENTS_SCHEMA,
 };
 pub use command_policy::{
     AgentCommandDecision, AgentCommandDenial, AgentCommandPolicy, AgentCommandPolicyMode,

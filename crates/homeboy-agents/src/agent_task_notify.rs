@@ -26,6 +26,7 @@ use homeboy_core::notification_payload::{
 };
 use homeboy_core::notification_route::{self, NotificationRoute};
 use homeboy_core::notify::{self, NotifyEvent};
+use std::collections::HashSet;
 
 use crate::agent_task_service::AgentTaskCookReport;
 
@@ -245,7 +246,11 @@ fn terminal_payload(
             .with_fact("Phase", context.phase.clone())
             .with_fact("Reason code", context.reason_code.clone())
             .with_fact("Recovery", context.recovery_reason.clone());
+        let mut forwarded = HashSet::new();
         for action in context.next_actions.iter().chain(&context.legal_actions) {
+            if !forwarded.insert((action.action.as_str(), action.command.as_str())) {
+                continue;
+            }
             payload = payload.with_action(
                 NotifyAction::new(action.action.clone(), action.command.clone())
                     .with_kind("repair"),
@@ -403,6 +408,32 @@ mod tests {
         assert!(payload
             .render_body()
             .contains("Reason code: validation_invalid_argument"));
+    }
+
+    #[test]
+    fn failed_cook_forwards_a_recovery_action_once_when_report_sections_overlap() {
+        let mut failed = report("pre_execution_failure", None);
+        let recovery = AgentTaskCookRecoveryAction {
+            action: "refresh_lab_runtime".to_string(),
+            command: "homeboy runner refresh-homeboy homeboy-lab --ref required --reconnect"
+                .to_string(),
+        };
+        let mut context = failure_context();
+        context.legal_actions = vec![recovery.clone()];
+        context.next_actions = vec![recovery.clone()];
+        failed.failure_context = Some(context);
+
+        let payload = terminal_payload(&failed, None, 1);
+        assert_eq!(
+            payload
+                .actions
+                .iter()
+                .filter(
+                    |action| action.label == recovery.action && action.command == recovery.command
+                )
+                .count(),
+            1
+        );
     }
 
     #[test]

@@ -208,7 +208,7 @@ fn runner_exec_rejects_a_live_daemon_with_an_incompatible_build_identity() {
         ..authoritative_drained_freshness()
     });
 
-    assert!(refuses_stale_daemon_execution(
+    assert!(refuses_nonfresh_daemon_execution(
         &RunnerExecOptions::raw_command(vec!["cargo".to_string()]),
         &status,
     ));
@@ -216,9 +216,41 @@ fn runner_exec_rejects_a_live_daemon_with_an_incompatible_build_identity() {
 
 #[test]
 fn runner_exec_keeps_stale_session_projections_fail_closed_without_fresh_daemon_evidence() {
-    assert!(refuses_stale_daemon_execution(
+    assert!(refuses_nonfresh_daemon_execution(
         &RunnerExecOptions::raw_command(vec!["cargo".to_string()]),
         &stale_direct_daemon_status(),
+    ));
+}
+
+#[test]
+fn raw_execution_rejects_version_mismatch_without_a_legacy_stale_warning() {
+    let mut status = stale_direct_daemon_status();
+    status.stale_daemon = None;
+    status.daemon_freshness = Some(authoritative_drained_freshness());
+
+    assert!(!status.daemon_fresh_for_admission());
+    assert!(refuses_nonfresh_daemon_execution(
+        &RunnerExecOptions::raw_command(vec!["cargo".to_string()]),
+        &status,
+    ));
+}
+
+#[test]
+fn raw_execution_rejects_ambiguous_lease_missing_without_a_legacy_stale_warning() {
+    let mut status = stale_direct_daemon_status();
+    status.stale_daemon = None;
+    status.daemon_freshness = Some(homeboy_core::daemon::DaemonFreshnessReport {
+        stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing),
+        restartable: false,
+        lease_id: None,
+        pid: None,
+        ..authoritative_drained_freshness()
+    });
+
+    assert!(!status.daemon_fresh_for_admission());
+    assert!(refuses_nonfresh_daemon_execution(
+        &RunnerExecOptions::raw_command(vec!["cargo".to_string()]),
+        &status,
     ));
 }
 
@@ -231,12 +263,12 @@ fn read_only_artifact_retrieval_is_not_blocked_by_a_stale_admission_daemon() {
     let read_only =
         RunnerExecOptions::raw_command(vec!["node".to_string()]).read_only_artifact_access();
 
-    assert!(!refuses_stale_daemon_execution(
+    assert!(!refuses_nonfresh_daemon_execution(
         &read_only,
         &stale_direct_daemon_status(),
     ));
     // A normal (mutating) exec against the same stale daemon still fails closed.
-    assert!(refuses_stale_daemon_execution(
+    assert!(refuses_nonfresh_daemon_execution(
         &RunnerExecOptions::raw_command(vec!["node".to_string()]),
         &stale_direct_daemon_status(),
     ));

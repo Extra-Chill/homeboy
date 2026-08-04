@@ -436,3 +436,49 @@ mod repair_dispatch {
         );
     }
 }
+
+mod repair_readiness {
+    use super::super::super::repair::daemon_admission_ready;
+    use homeboy::runner::runners::{
+        RunnerActiveJobState, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
+    };
+
+    fn status(stale_daemon: Option<RunnerStaleDaemonWarning>) -> RunnerStatusReport {
+        RunnerStatusReport {
+            runner_id: "homeboy-lab".to_string(),
+            connected: true,
+            state: RunnerSessionState::Connected,
+            session: None,
+            stale_daemon,
+            daemon_freshness: None,
+            active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
+            stale_runner_jobs: Vec::new(),
+            active_job_count: 0,
+            stale_runner_job_count: 0,
+            active_job_state: RunnerActiveJobState::Available,
+            active_job_source: None,
+            active_job_error: None,
+            active_job_recovery_evidence: None,
+            session_path: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn reachable_incompatible_daemon_is_not_admission_ready() {
+        let stale = RunnerStaleDaemonWarning::new(
+            "homeboy-lab",
+            "0.329.1".to_string(),
+            "0.329.1".to_string(),
+            Some("homeboy 0.329.1+ea98b7e9b4cc".to_string()),
+            Some("homeboy 0.329.1+98cc7876dd71".to_string()),
+        );
+
+        assert!(!daemon_admission_ready(&status(Some(stale))));
+    }
+
+    #[test]
+    fn repair_success_postcondition_requires_open_admission() {
+        assert!(daemon_admission_ready(&status(None)));
+    }
+}

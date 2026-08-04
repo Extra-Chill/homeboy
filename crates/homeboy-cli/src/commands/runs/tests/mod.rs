@@ -161,6 +161,16 @@ fn run_list_reads_durable_record_without_reconciliation() {
         assert_eq!(output.runs[0].id, "dead-owned-run");
         assert_eq!(output.runs[0].status, "running");
         assert!(output.runs[0].finished_at.is_none());
+        let stale_runs = output.stale_runs.as_ref().expect("stale-run summary");
+        assert_eq!(stale_runs.count, 1);
+        assert_eq!(
+            stale_runs.action.command,
+            "homeboy runs reconcile --dry-run"
+        );
+        assert_eq!(
+            output.actionable.next_actions[0].command,
+            "homeboy runs reconcile --dry-run"
+        );
         assert_eq!(
             output.runs[0].status_note.as_deref(),
             Some("owner process is not running; run may be stale; run `homeboy runs reconcile`")

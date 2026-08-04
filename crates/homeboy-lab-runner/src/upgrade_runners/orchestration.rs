@@ -11,6 +11,68 @@ use homeboy_upgrade::upgrade::InstallMethod;
 use homeboy_upgrade::upgrade::RunnerUpgradeEntry;
 use std::path::Path;
 
+pub fn preflight_configured_runners_for_upgrade(
+    method_override: Option<InstallMethod>,
+    source_path: Option<&Path>,
+    explicit_source_path: bool,
+    runner_targets: &[String],
+) -> Result<Vec<RunnerUpgradeEntry>> {
+    if method_override != Some(InstallMethod::Source) || source_path.is_none() {
+        return Ok(Vec::new());
+    }
+
+    let runners = runner_upgrade_targets(runner_targets)?;
+    let mut failures = Vec::new();
+    for runner in &runners {
+        if runner.kind != RunnerKind::Ssh {
+            continue;
+        }
+
+        let homeboy_path = runner
+            .settings
+            .homeboy_path
+            .clone()
+            .unwrap_or_else(|| "homeboy".to_string());
+        let materialized = if explicit_source_path {
+            materialize_explicit_runner_source_path(
+                runner,
+                source_path.expect("source path checked"),
+            )
+        } else {
+            materialize_runner_source_path(runner, source_path.expect("source path checked"))
+        };
+        let source_path = match materialized {
+            Ok(path) => path,
+            Err(error) => {
+                failures.push(runner_upgrade_failure_entry(
+                    &runner.id,
+                    homeboy_path,
+                    None,
+                    1,
+                    format!("runner preflight materialization failed: {}", error.message),
+                ));
+                continue;
+            }
+        };
+        if let Some(detail) = prepare_runner_source_checkout_for_upgrade(
+            runner,
+            method_override,
+            Some(&source_path),
+            &mut runner::exec,
+        ) {
+            failures.push(runner_upgrade_failure_entry(
+                &runner.id,
+                homeboy_path,
+                None,
+                1,
+                format!("runner preflight source checkout failed: {detail}"),
+            ));
+        }
+    }
+
+    Ok(failures)
+}
+
 pub fn upgrade_configured_runners(
     force: bool,
     method_override: Option<InstallMethod>,

@@ -73,6 +73,10 @@ pub enum PlacementReadinessInvocation {
     AgentTaskCook {
         provider: String,
         source_path: String,
+        /// Optional serialized durable plan. v2 callers omit this; v3 callers
+        /// let mutation-free preflight compile the same runner requirements as execution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        durable_plan: Option<serde_json::Value>,
     },
     CapabilityAudit {
         source_path: String,
@@ -125,13 +129,43 @@ pub fn compile_lab_admission_plan(
     })
 }
 
+/// Add controller-owned durable task requirements to an already routed plan.
+/// This is shared by public preflight and execution, so a ready snapshot cannot
+/// omit a runner capability that execution will later reject.
+pub fn project_durable_agent_task_capabilities(
+    plan: &mut LabAdmissionPlan,
+    durable_plan: Option<&homeboy_agents::agent_task_scheduler::AgentTaskPlan>,
+) -> Result<()> {
+    let Some(durable_plan) = durable_plan else {
+        return Ok(());
+    };
+    for task in &durable_plan.tasks {
+        let requirements = task.capability_requirements().map_err(|message| {
+            Error::validation_invalid_argument(
+                "capability_requirements",
+                message,
+                Some(task.task_id.clone()),
+                Some(vec!["Use homeboy/agent-task-capability-requirements/v1 with explicit provider, runner, and attached-tool declarations.".to_string()]),
+            )
+        })?;
+        plan.capability
+            .required_capabilities
+            .extend(requirements.runner);
+    }
+    plan.capability.required_capabilities.sort();
+    plan.capability.required_capabilities.dedup();
+    Ok(())
+}
+
 fn compile_placement_readiness_plan(
     request: &PlacementReadinessRequest,
 ) -> Result<LabAdmissionPlan> {
-    if request.schema != "homeboy/placement-readiness/v2" {
+    if request.schema != "homeboy/placement-readiness/v2"
+        && request.schema != "homeboy/placement-readiness/v3"
+    {
         return Err(Error::validation_invalid_argument(
             "schema",
-            "placement readiness accepts homeboy/placement-readiness/v2 requests",
+            "placement readiness accepts homeboy/placement-readiness/v2 or v3 requests",
             Some(request.schema.clone()),
             None,
         ));
@@ -143,10 +177,12 @@ fn compile_placement_readiness_plan(
         source_path_inputs,
         required_capabilities,
         extensions,
+        durable_plan,
     ) = match &request.invocation {
         PlacementReadinessInvocation::AgentTaskCook {
             provider,
             source_path,
+            durable_plan,
         } => (
             "agent-task".to_string(),
             "agent-task cook",
@@ -154,6 +190,7 @@ fn compile_placement_readiness_plan(
             vec![source_path.clone()],
             vec!["extension_parity".to_string()],
             vec![provider.clone()],
+            durable_plan.as_ref(),
         ),
         PlacementReadinessInvocation::CapabilityAudit {
             source_path,
@@ -165,6 +202,7 @@ fn compile_placement_readiness_plan(
             vec![source_path.clone()],
             vec![capability_id.clone()],
             Vec::new(),
+            None,
         ),
     };
     if source_path_inputs.iter().any(|path| path.trim().is_empty())
@@ -197,6 +235,18 @@ fn compile_placement_readiness_plan(
         std::path::Path::new(source_path),
         &[super::RunnerRequiredTool::homeboy()],
     )?;
+    let durable_plan = durable_plan
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "durable_plan",
+                format!("invalid durable agent-task plan: {error}"),
+                None,
+                None,
+            )
+        })?;
+    project_durable_agent_task_capabilities(&mut plan, durable_plan.as_ref())?;
     // Public preflight is mutation-free: it never invokes extension programs.
     // Execution reuses the same compiled probes through the bounded runner
     // diagnostic transport immediately before dispatch.
@@ -287,14 +337,7 @@ fn placement_readiness_from_status(
     capability: super::LabRunnerGateDecision,
 ) -> PlacementReadiness {
     let (workload_family, command, provider, source_path_inputs) = admission_identity(request);
-    let availability = RunnerAvailability::from_status_parts(
-        request.runner_id.clone(),
-        status.connected,
-        status.stale_daemon.is_some(),
-        status.active_jobs.len(),
-        &status.active_job_state,
-        capacity,
-    );
+    let availability = status.admission_availability(capacity);
     let queueable = request.allow_queue
         && request.durable_workload
         && mode == RunnerTunnelMode::Reverse
@@ -365,7 +408,7 @@ fn placement_readiness_from_status(
             },
             PlacementReadinessPredicate {
                 id: "daemon_fresh",
-                satisfied: status.stale_daemon.is_none(),
+                satisfied: status.daemon_fresh_for_admission(),
             },
             PlacementReadinessPredicate {
                 id: "active_jobs_authoritative",
@@ -416,6 +459,7 @@ fn admission_identity(
         PlacementReadinessInvocation::AgentTaskCook {
             provider,
             source_path,
+            ..
         } => (
             "agent-task".to_string(),
             "agent-task cook".to_string(),
@@ -527,14 +571,8 @@ fn preflight_lab_runner_availability_with(
     status_fn: impl Fn(&str) -> Result<RunnerStatusReport>,
 ) -> Result<(RunnerAvailability, RunnerStatusReport)> {
     let status = status_fn(&selection.runner_id)?;
-    let availability = RunnerAvailability::from_status_parts(
-        selection.runner_id.clone(),
-        status.connected,
-        status.stale_daemon.is_some(),
-        status.active_jobs.len(),
-        &status.active_job_state,
-        load(&selection.runner_id)?.settings.concurrency_limit,
-    );
+    let availability =
+        status.admission_availability(load(&selection.runner_id)?.settings.concurrency_limit);
     Ok((availability, status))
 }
 
@@ -601,6 +639,9 @@ pub(super) fn lab_runner_availability_error(
     let stale_daemon_recovery = selected_status
         .and_then(|status| status.stale_daemon.as_ref())
         .map(|warning| warning.refresh_command.clone());
+    let admission_recovery = selected_status
+        .and_then(RunnerStatusReport::admission_action)
+        .map(|action| action.render_command());
     let mut tried = vec![
         "Wait for an active Lab runner job to finish, then retry.".to_string(),
         "Choose another available runner with --runner <runner-id>.".to_string(),
@@ -610,6 +651,15 @@ pub(super) fn lab_runner_availability_error(
         tried.insert(
             0,
             format!("Refresh the connected stale runner: `{recovery}`."),
+        );
+    }
+    if let Some(recovery) = admission_recovery
+        .as_ref()
+        .filter(|recovery| Some(*recovery) != stale_daemon_recovery.as_ref())
+    {
+        tried.insert(
+            0,
+            format!("Apply the authoritative runner admission recovery: `{recovery}`."),
         );
     }
 
@@ -627,6 +677,7 @@ pub(super) fn lab_runner_availability_error(
             },
             "runner_status": selected_status,
             "stale_daemon_recovery_command": stale_daemon_recovery,
+            "admission_recovery_command": admission_recovery,
             "tried": tried,
         }),
     )
@@ -922,7 +973,10 @@ pub(super) fn prepare_lab_runner_for_offload_with(
                     "Lab offload runner `{}` is connected but is not ready for remote execution",
                     selection.runner_id
                 ),
-                daemon_repair_command(&selection.runner_id, &status),
+                status
+                    .admission_action()
+                    .map(|action| action.render_command())
+                    .unwrap_or_else(|| daemon_repair_command(&selection.runner_id, &status)),
                 daemon_repair_action(&selection.runner_id, &status),
             );
         }
@@ -1029,6 +1083,9 @@ fn connected_runner_not_ready_reason(
     runner_id: &str,
     status: &RunnerStatusReport,
 ) -> Option<String> {
+    if status.daemon_fresh_for_admission() {
+        return None;
+    }
     if let Some(warning) = status.stale_daemon.as_ref() {
         let restart = daemon_repair_command(runner_id, status);
         if !warning.stale_runtime_paths.is_empty() || !warning.changed_runtime_paths.is_empty() {
@@ -1039,6 +1096,16 @@ fn connected_runner_not_ready_reason(
         return Some(format!(
             "connected runner `{runner_id}` daemon is stale (severity={}): {}; refresh with `{restart}`",
             warning.severity, warning.message
+        ));
+    }
+
+    if !status.daemon_fresh_for_admission() {
+        let recovery = status
+            .admission_action()
+            .map(|action| action.render_command())
+            .unwrap_or_else(|| format!("homeboy runner status {runner_id} --full"));
+        return Some(format!(
+            "connected runner `{runner_id}` daemon freshness is not proven for admission; inspect or recover with `{recovery}`"
         ));
     }
 
@@ -1490,6 +1557,48 @@ mod daemon_repair_step_tests {
             "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"
         );
     }
+
+    #[test]
+    fn non_fresh_lease_ambiguity_is_ineligible_for_connected_selection() {
+        let mut report = status_report("homeboy-lab", Some(freshness_with_plan(Vec::new())), None);
+        report.active_job_state = RunnerActiveJobState::Available;
+        let freshness = report.daemon_freshness.as_mut().expect("freshness");
+        freshness.stale_reason_code =
+            Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing);
+        freshness.lease_id = None;
+        freshness.pid = None;
+        freshness.active_jobs = 0;
+
+        let availability = report.admission_availability(None);
+        let reason = connected_runner_not_ready_reason("homeboy-lab", &report);
+
+        assert!(!availability.accepts_jobs);
+        assert_eq!(availability.reasons, ["daemon_freshness_unavailable"]);
+        assert!(reason.is_some_and(|reason| reason.contains("runner doctor homeboy-lab")));
+    }
+
+    #[test]
+    fn known_version_mismatch_requires_its_convergence_action_not_admission() {
+        let mut report = status_report(
+            "homeboy-lab",
+            Some(freshness_with_plan(vec![daemon_repair::action_step(
+                daemon_repair::RUNNER_REFRESH_HOMEBOY,
+                daemon_repair::refresh_homeboy_action("homeboy-lab"),
+            )])),
+            None,
+        );
+        report.active_job_state = RunnerActiveJobState::Available;
+        let freshness = report.daemon_freshness.as_mut().expect("freshness");
+        freshness.stale_reason_code =
+            Some(homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch);
+        freshness.active_jobs = 0;
+
+        let availability = report.admission_availability(None);
+        let reason = connected_runner_not_ready_reason("homeboy-lab", &report);
+
+        assert!(!availability.accepts_jobs);
+        assert!(reason.is_some_and(|reason| reason.contains("refresh-homeboy homeboy-lab")));
+    }
 }
 
 #[cfg(test)]
@@ -1757,6 +1866,55 @@ mod placement_readiness_tests {
     }
 
     #[test]
+    fn v3_durable_plan_projects_the_same_runner_requirements_as_execution() {
+        let durable_plan: homeboy_agents::agent_task_scheduler::AgentTaskPlan =
+            serde_json::from_value(serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "plan_id": "capability-plan",
+                "tasks": [{
+                    "schema": "homeboy/agent-task-request/v1",
+                    "task_id": "task",
+                    "executor": { "backend": "fixture" },
+                    "instructions": "test",
+                    "metadata": {
+                        "capability_requirements": {
+                            "schema": "homeboy/agent-task-capability-requirements/v1",
+                            "runner": ["browser"]
+                        }
+                    }
+                }]
+            }))
+            .expect("durable plan");
+        let routed = homeboy_core::lab_routing::lab_offload_command_from_contract(
+            homeboy_core::lab_contract::LabCommandContract::portable(
+                "audit capability",
+                None,
+                false,
+                &[],
+            )
+            .with_extra_required_capabilities(vec!["extension_parity".to_string()]),
+            Vec::new(),
+        );
+        let mut preflight = compile_lab_admission_plan(
+            &routed,
+            std::path::Path::new("/workspace/source"),
+            &[super::super::RunnerRequiredTool::homeboy()],
+        )
+        .expect("preflight plan");
+        let mut execution = preflight.clone();
+        project_durable_agent_task_capabilities(&mut preflight, Some(&durable_plan))
+            .expect("project preflight requirements");
+        project_durable_agent_task_capabilities(&mut execution, Some(&durable_plan))
+            .expect("project execution requirements");
+
+        assert_eq!(preflight.capability, execution.capability);
+        assert!(preflight
+            .capability
+            .required_capabilities
+            .contains(&"browser".to_string()));
+    }
+
+    #[test]
     fn public_json_cannot_supply_probe_commands_or_capabilities() {
         let request = request();
         let encoded = serde_json::to_value(&request).expect("encode compiled request");
@@ -1780,6 +1938,7 @@ mod placement_readiness_tests {
         request.invocation = PlacementReadinessInvocation::AgentTaskCook {
             provider: " ".to_string(),
             source_path: " ".to_string(),
+            durable_plan: None,
         };
         assert!(compile_placement_readiness_plan(&request).is_err());
     }
@@ -1816,6 +1975,7 @@ mod placement_readiness_tests {
             }))
             .expect("job"),
         );
+        observed.active_job_count = 1;
         let mut request = request();
         request.allow_queue = true;
         request.durable_workload = true;

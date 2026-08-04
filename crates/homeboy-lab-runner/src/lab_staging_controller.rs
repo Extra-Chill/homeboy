@@ -500,12 +500,13 @@ fn handoff_build_reference(identity: &str) -> String {
         .unwrap_or_else(|| format!("v{}", identity.split('+').next().unwrap_or(identity)))
 }
 
-fn immutable_handoff_recovery_command(runner_id: &str, requested: &str) -> String {
+fn immutable_handoff_recovery_action(
+    runner_id: &str,
+    requested: &str,
+) -> homeboy_agents::agent_task_lifecycle::AgentTaskLabRuntimeRecovery {
     let reference = handoff_build_reference(requested);
-    format!(
-        "homeboy runner refresh-homeboy {} --ref {} --reconnect",
-        homeboy_core::engine::shell::quote_arg(runner_id),
-        homeboy_core::engine::shell::quote_arg(&reference),
+    homeboy_agents::agent_task_lifecycle::AgentTaskLabRuntimeRecovery::refresh_homeboy(
+        runner_id, requested, reference,
     )
 }
 
@@ -515,7 +516,8 @@ fn handoff_identity_error(
     configured: Option<&str>,
     daemon: Option<&str>,
 ) -> Error {
-    let recovery = immutable_handoff_recovery_command(runner_id, requested);
+    let recovery_action = immutable_handoff_recovery_action(runner_id, requested);
+    let recovery = recovery_action.command();
     let mut error = Error::validation_invalid_argument(
         "runner",
         format!(
@@ -534,6 +536,8 @@ fn handoff_identity_error(
         "recovery_command": recovery,
         "preserved_invocation": preserved_invocation(),
     });
+    error.details["lab_handoff_runtime_recovery"] =
+        serde_json::to_value(recovery_action).expect("Lab runtime recovery serializes");
     error
 }
 
@@ -677,8 +681,8 @@ fn handoff_convergence_action(
             enforce_latest_stable: false,
             controller_is_source_build: true,
             allow_convergence: automatic_handoff_convergence_allowed(runner)
-                && status.active_jobs.is_empty()
                 && status.active_job_state == crate::RunnerActiveJobState::Available
+                && status.rotation_evidence_is_unambiguous()
                 && status
                     .session
                     .as_ref()
@@ -4784,7 +4788,25 @@ mod tests {
                 leaseless_recovery_evidence: None,
             }),
             stale_daemon: None,
-            daemon_freshness: None,
+            daemon_freshness: Some(homeboy_core::daemon::DaemonFreshnessReport {
+                fresh: false,
+                stale_reason_code: Some(
+                    homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch,
+                ),
+                restartable: false,
+                lease_id: Some("known-lease".to_string()),
+                pid: Some(1234),
+                recovery_evidence: None,
+                ownership_evidence: Some("reachable daemon lease and PID verified".to_string()),
+                adoption_command: None,
+                binary_hash: None,
+                daemon_version: None,
+                daemon_build_identity: Some(daemon_identity.to_string()),
+                runtime_paths: None,
+                active_jobs: 0,
+                termination_evidence: None,
+                repair_plan: Vec::new(),
+            }),
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
             stale_runner_jobs: Vec::new(),
@@ -4802,6 +4824,62 @@ mod tests {
     fn stale_daemon_converges_before_provider_work() {
         let runner = convergence_runner(true);
         let status = convergence_status("homeboy 1.2.2+stale");
+
+        assert!(matches!(
+            handoff_convergence_action(
+                &runner,
+                &status,
+                "homeboy 1.2.3+required",
+                Some("homeboy 1.2.3+required"),
+                Some("homeboy 1.2.2+stale"),
+                "/runner/homeboy",
+            ),
+            HandoffConvergenceAction::Refresh(crate::HomeboyBinaryRefreshMode::Select { .. })
+        ));
+    }
+
+    #[test]
+    fn lease_ambiguous_daemon_refuses_handoff_convergence() {
+        let runner = convergence_runner(true);
+        let mut status = convergence_status("homeboy 1.2.2+stale");
+        let freshness = status.daemon_freshness.as_mut().expect("freshness");
+        freshness.stale_reason_code =
+            Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing);
+        freshness.lease_id = None;
+        freshness.pid = None;
+        assert!(matches!(
+            handoff_convergence_action(
+                &runner,
+                &status,
+                "homeboy 1.2.3+required",
+                Some("homeboy 1.2.3+required"),
+                Some("homeboy 1.2.2+stale"),
+                "/runner/homeboy",
+            ),
+            HandoffConvergenceAction::Refuse
+        ));
+    }
+
+    #[test]
+    fn busy_stale_daemon_rotates_to_a_draining_generation_before_provider_work() {
+        let runner = convergence_runner(true);
+        let mut status = convergence_status("homeboy 1.2.2+stale");
+        status.active_jobs.push(
+            serde_json::from_value(json!({
+                "runner_id": "lab-identity",
+                "job_id": "owned-job",
+                "operation": "runner.exec",
+                "source": "direct-daemon",
+                "kind": "test",
+                "status": "running",
+                "command": "homeboy test",
+                "started_at_ms": 0,
+                "updated_at_ms": 0,
+                "elapsed_ms": 0,
+                "heartbeat_age_ms": 0
+            }))
+            .expect("active runner job"),
+        );
 
         assert!(matches!(
             handoff_convergence_action(
@@ -4931,6 +5009,14 @@ mod tests {
         assert_eq!(
             error.details["homeboy_handoff_identity"]["executed_command_build_identity"],
             serde_json::Value::Null
+        );
+        let recovery: homeboy_agents::agent_task_lifecycle::AgentTaskLabRuntimeRecovery =
+            serde_json::from_value(error.details["lab_handoff_runtime_recovery"].clone())
+                .expect("typed runtime recovery");
+        assert!(recovery.is_valid());
+        assert_eq!(
+            recovery.command(),
+            "homeboy runner refresh-homeboy lab-identity --ref required --reconnect"
         );
     }
 

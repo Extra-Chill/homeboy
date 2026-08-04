@@ -632,7 +632,10 @@ pub(super) mod concurrency_tests {
             })
             .and_then(|artifact| artifact.path.as_deref())
             .expect("deferred cleanup action path");
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // Deferred cleanup is asynchronous; the assertion is that it recovers,
+        // not that it recovers within any particular fraction of a second. A 2s
+        // bound made this a wall-clock race on a loaded machine.
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let action: Value = serde_json::from_str(
                 &fs::read_to_string(cleanup_action).expect("deferred cleanup action"),

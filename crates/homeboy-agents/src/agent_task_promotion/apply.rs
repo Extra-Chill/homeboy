@@ -605,6 +605,27 @@ pub(crate) fn run_provider_command(
     run_provider_command_with_timeout(invocation, request, PROMOTION_PROVIDER_TIMEOUT)
 }
 
+/// Terminate a promotion provider and every descendant it spawned.
+///
+/// Killing only the direct child leaves an escaped grandchild holding the
+/// inherited stdout/stderr pipes, so the capture threads never see EOF and the
+/// bounded timeout becomes as long as the grandchild runs.
+#[cfg(unix)]
+fn kill_provider_process_group(process: &mut std::process::Child) {
+    if process.id() <= i32::MAX as u32 {
+        unsafe {
+            libc::kill(-(process.id() as i32), libc::SIGKILL);
+        }
+    } else {
+        let _ = process.kill();
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_provider_process_group(process: &mut std::process::Child) {
+    let _ = process.kill();
+}
+
 pub(super) fn run_provider_command_with_timeout(
     invocation: &CommandInvocation,
     request: &AgentTaskPromotionApplyRequest,
@@ -635,6 +656,15 @@ pub(super) fn run_provider_command_with_timeout(
     command_builder.args(&args);
     if let Some(cwd) = invocation.cwd.as_deref() {
         command_builder.current_dir(cwd);
+    }
+    // A provider owns its whole process tree. Give it its own process group so
+    // a timeout can reap descendants: killing only the direct child leaves an
+    // escaped grandchild holding the stdout/stderr pipes, and the capture
+    // threads then block until *it* exits, which defeats the timeout entirely.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command_builder.process_group(0);
     }
 
     let mut process = command_builder
@@ -701,12 +731,7 @@ pub(super) fn run_provider_command_with_timeout(
             })? {
                 break status;
             }
-            process.kill().map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some("terminate oversized agent-task promotion provider response".to_string()),
-                )
-            })?;
+            kill_provider_process_group(&mut process);
             break process.wait().map_err(|error| {
                 Error::internal_io(
                     error.to_string(),
@@ -724,12 +749,7 @@ pub(super) fn run_provider_command_with_timeout(
         }
         if started_at.elapsed() >= timeout {
             timed_out = true;
-            process.kill().map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some("terminate timed out agent-task promotion provider command".to_string()),
-                )
-            })?;
+            kill_provider_process_group(&mut process);
             break process.wait().map_err(|error| {
                 Error::internal_io(
                     error.to_string(),
