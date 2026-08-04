@@ -6,8 +6,10 @@
 
 use std::fs::{File, OpenOptions};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use homeboy_core::agent_task_config::AgentTaskManagedServiceReadiness;
 use homeboy_core::process::{
@@ -21,7 +23,7 @@ use super::{
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct AgentTaskManagedServiceRecord {
+pub struct AgentTaskManagedServiceRecord {
     pub id: String,
     pub state: String,
     /// Generated before exec. A stale reconciler can distinguish a planned
@@ -49,6 +51,48 @@ pub(crate) struct AgentTaskManagedServiceRecord {
     pub readiness_attempts: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_origin_evidence: Option<Value>,
+}
+
+/// Durable input for the independently running service supervisor.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentTaskServiceWorkerRequest {
+    pub schema: String,
+    pub operation: String,
+    pub run_id: String,
+    #[serde(default)]
+    pub services: Vec<AgentTaskManagedService>,
+    pub parent_pid: u32,
+    #[serde(default = "default_worker_ttl_ms")]
+    pub parent_ttl_ms: u64,
+}
+
+impl AgentTaskServiceWorkerRequest {
+    pub const SCHEMA: &'static str = "homeboy/agent-task-service-worker-request/v1";
+}
+
+/// Worker-owned state. The identity is committed before a payload process can
+/// be spawned, allowing reconciliation to distinguish a crashed worker from a
+/// scheduler that never managed to invoke one.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentTaskServiceWorkerState {
+    pub schema: String,
+    pub run_id: String,
+    pub state: String,
+    pub worker_pid: u32,
+    pub worker_identity: Option<ProcessStartIdentity>,
+    pub parent_pid: u32,
+    pub heartbeat_unix_ms: u64,
+    #[serde(default)]
+    pub services: Vec<AgentTaskManagedServiceRecord>,
+    pub detail: Option<String>,
+}
+
+impl AgentTaskServiceWorkerState {
+    pub const SCHEMA: &'static str = "homeboy/agent-task-service-worker-state/v1";
+}
+
+fn default_worker_ttl_ms() -> u64 {
+    30_000
 }
 
 /// Execution-host service supervisor. It is instantiated by whichever host
@@ -313,9 +357,120 @@ fn observe_browser_origin(spec: &AgentTaskManagedService) -> Option<Value> {
     }
 }
 
-// Keep the old scheduler-private name while callers migrate to the generic
-// execution-host supervisor API.
-pub(super) type ManagedServices = AgentTaskServiceSupervisor;
+/// Scheduler-side handle. In production it owns no payload process: it only
+/// invokes and polls the durable worker. The local variant keeps hermetic unit
+/// fixtures independent of the compiled CLI binary.
+pub(crate) enum ManagedServices {
+    Local(AgentTaskServiceSupervisor),
+    Worker { run_id: String },
+}
+
+impl ManagedServices {
+    #[cfg(test)]
+    pub(super) fn start(specs: &[AgentTaskManagedService], run_id: &str) -> Result<Self, String> {
+        AgentTaskServiceSupervisor::start(specs, run_id).map(Self::Local)
+    }
+
+    #[cfg(not(test))]
+    pub(super) fn start(specs: &[AgentTaskManagedService], run_id: &str) -> Result<Self, String> {
+        let request = AgentTaskServiceWorkerRequest {
+            schema: AgentTaskServiceWorkerRequest::SCHEMA.to_string(),
+            operation: "start".to_string(),
+            run_id: run_id.to_string(),
+            services: specs.to_vec(),
+            parent_pid: std::process::id(),
+            parent_ttl_ms: default_worker_ttl_ms(),
+        };
+        let request_path = service_worker_request_path(run_id)?;
+        write_json_atomically(&request_path, &request)?;
+        let worker = std::env::var_os("HOMEBOY_SERVICE_SUPERVISOR_WORKER")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_exe().expect("current Homeboy executable"));
+        Command::new(worker)
+            .args(["self", "service-supervisor-worker", "--request"])
+            .arg(&request_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("start managed service worker: {error}"))?;
+        for _ in 0..600 {
+            if let Some(state) = read_service_worker_state(run_id)? {
+                match state.state.as_str() {
+                    "ready" => {
+                        return Ok(Self::Worker {
+                            run_id: run_id.to_string(),
+                        })
+                    }
+                    "failed" => {
+                        return Err(state
+                            .detail
+                            .unwrap_or_else(|| "managed service worker failed".to_string()))
+                    }
+                    _ => {}
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Err("managed service worker did not become ready".to_string())
+    }
+
+    pub(super) fn bind_into(&self, inputs: &mut Value, metadata: &mut Value) {
+        let records = self.records();
+        let values = records.into_iter().map(|record| (record.id.clone(), json!({
+            "local_url": record.local_url, "public_url": record.public_url,
+            "browser_origin_probe": record.browser_origin_evidence,
+            "lease_ref": format!("managed-service:{}", record.id),
+            "readiness_attempts": record.readiness_attempts,
+            "endpoint_ownership": record.provenance["endpoint_ownership"],
+            "service_owner": { "pid": record.pid, "process_group_id": record.process_group_id, "runner_id": record.owner_runner_id, "runner_job_id": record.owner_runner_job_id },
+        }))).collect::<serde_json::Map<_, _>>();
+        if !inputs.is_object() {
+            *inputs = json!({});
+        }
+        inputs["services"] = Value::Object(values.clone());
+        if !metadata.is_object() {
+            *metadata = json!({});
+        }
+        metadata["managed_services"] = Value::Object(values);
+    }
+
+    pub(super) fn records(&self) -> Vec<AgentTaskManagedServiceRecord> {
+        match self {
+            Self::Local(supervisor) => supervisor.records(),
+            Self::Worker { run_id } => read_service_worker_state(run_id)
+                .ok()
+                .flatten()
+                .map(|state| state.services)
+                .unwrap_or_default(),
+        }
+    }
+
+    pub(super) fn cleanup(self, reason: &str) -> Vec<AgentTaskManagedServiceRecord> {
+        match self {
+            Self::Local(supervisor) => supervisor.cleanup(reason),
+            Self::Worker { run_id } => {
+                if let Ok(Some(mut state)) = read_service_worker_state(&run_id) {
+                    state.state = "stop_requested".to_string();
+                    state.heartbeat_unix_ms = now_unix_ms();
+                    let _ = write_json_atomically(
+                        &service_worker_state_path(&run_id).unwrap_or_default(),
+                        &state,
+                    );
+                }
+                for _ in 0..600 {
+                    if let Ok(Some(state)) = read_service_worker_state(&run_id) {
+                        if state.state == "stopped" {
+                            return state.services;
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                reconcile_run_services(&run_id, reason).unwrap_or_default()
+            }
+        }
+    }
+}
 
 fn lease_port(
     spec: &AgentTaskManagedService,
@@ -430,6 +585,180 @@ fn persist_record(run_id: &str, record: &AgentTaskManagedServiceRecord) -> Resul
         .map_err(|error| format!("persist managed service ownership: {error}"))?;
     std::fs::rename(temporary, path)
         .map_err(|error| format!("commit managed service ownership: {error}"))
+}
+
+fn worker_root(run_id: &str) -> Result<PathBuf, String> {
+    Ok(homeboy_core::paths::homeboy_data()
+        .map_err(|error| error.message)?
+        .join("agent-task-runs")
+        .join(run_id)
+        .join("service-supervisor"))
+}
+
+pub fn service_worker_request_path(run_id: &str) -> Result<PathBuf, String> {
+    Ok(worker_root(run_id)?.join("request.json"))
+}
+
+pub fn service_worker_state_path(run_id: &str) -> Result<PathBuf, String> {
+    Ok(worker_root(run_id)?.join("state.json"))
+}
+
+fn write_json_atomically<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    std::fs::create_dir_all(
+        path.parent()
+            .ok_or_else(|| "worker path has no parent".to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    std::fs::write(
+        &temporary,
+        serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    std::fs::rename(temporary, path).map_err(|error| error.to_string())
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        pid > 0
+            && pid <= i32::MAX as u32
+            && unsafe {
+                libc::kill(pid as libc::pid_t, 0) == 0
+                    || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+            }
+    }
+    #[cfg(not(unix))]
+    {
+        pid == std::process::id()
+    }
+}
+
+pub fn read_service_worker_state(
+    run_id: &str,
+) -> Result<Option<AgentTaskServiceWorkerState>, String> {
+    match std::fs::read(service_worker_state_path(run_id)?) {
+        Ok(raw) => {
+            let state: AgentTaskServiceWorkerState =
+                serde_json::from_slice(&raw).map_err(|error| error.to_string())?;
+            (state.schema == AgentTaskServiceWorkerState::SCHEMA)
+                .then_some(state)
+                .ok_or_else(|| "unsupported service worker state schema".to_string())
+                .map(Some)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Run an internal service supervisor operation. A `start` invocation stays
+/// resident and owns payload creation, readiness, logs, and containment.
+pub fn run_service_worker(request_path: &Path) -> Result<(), String> {
+    let request: AgentTaskServiceWorkerRequest =
+        serde_json::from_slice(&std::fs::read(request_path).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    if request.schema != AgentTaskServiceWorkerRequest::SCHEMA {
+        return Err("unsupported service worker request schema".to_string());
+    }
+    let state_path = service_worker_state_path(&request.run_id)?;
+    match request.operation.as_str() {
+        "status" => return read_service_worker_state(&request.run_id).map(|_| ()),
+        "stop" => {
+            let mut state = read_service_worker_state(&request.run_id)?
+                .ok_or_else(|| "service worker state is absent".to_string())?;
+            state.state = "stop_requested".to_string();
+            state.heartbeat_unix_ms = now_unix_ms();
+            return write_json_atomically(&state_path, &state);
+        }
+        "reconcile" => {
+            let records = reconcile_run_services(&request.run_id, "worker_reconcile")?;
+            return write_json_atomically(
+                &state_path,
+                &AgentTaskServiceWorkerState {
+                    schema: AgentTaskServiceWorkerState::SCHEMA.to_string(),
+                    run_id: request.run_id,
+                    state: "stopped".to_string(),
+                    worker_pid: std::process::id(),
+                    worker_identity: process_start_identity(std::process::id())
+                        .map_err(|error| error.to_string())?,
+                    parent_pid: request.parent_pid,
+                    heartbeat_unix_ms: now_unix_ms(),
+                    services: records,
+                    detail: Some("reconciled".to_string()),
+                },
+            );
+        }
+        "start" => {}
+        _ => {
+            return Err(
+                "service worker operation must be start, status, stop, or reconcile".to_string(),
+            )
+        }
+    }
+    let mut state = AgentTaskServiceWorkerState {
+        schema: AgentTaskServiceWorkerState::SCHEMA.to_string(),
+        run_id: request.run_id.clone(),
+        state: "starting".to_string(),
+        worker_pid: std::process::id(),
+        worker_identity: process_start_identity(std::process::id())
+            .map_err(|error| error.to_string())?,
+        parent_pid: request.parent_pid,
+        heartbeat_unix_ms: now_unix_ms(),
+        services: Vec::new(),
+        detail: None,
+    };
+    write_json_atomically(&state_path, &state)?;
+    let supervisor = match AgentTaskServiceSupervisor::start(&request.services, &request.run_id) {
+        Ok(supervisor) => supervisor,
+        Err(error) => {
+            state.state = "failed".to_string();
+            state.detail = Some(error);
+            state.heartbeat_unix_ms = now_unix_ms();
+            return write_json_atomically(&state_path, &state);
+        }
+    };
+    state.state = "ready".to_string();
+    state.services = supervisor.records();
+    state.heartbeat_unix_ms = now_unix_ms();
+    write_json_atomically(&state_path, &state)?;
+    let started_unix_ms = state.heartbeat_unix_ms;
+    loop {
+        thread::sleep(Duration::from_millis(50));
+        let requested_stop = read_service_worker_state(&request.run_id)?
+            .is_some_and(|latest| latest.state == "stop_requested");
+        // PID liveness is authoritative when a scheduler process exists. A
+        // process-less handoff (parent PID 0) is explicitly bounded by TTL.
+        let parent_lost = !process_is_alive(request.parent_pid)
+            || (request.parent_pid == 0
+                && now_unix_ms().saturating_sub(started_unix_ms) >= request.parent_ttl_ms);
+        if requested_stop || parent_lost {
+            state.services = supervisor.cleanup(if requested_stop {
+                "stop"
+            } else {
+                "parent_lost"
+            });
+            state.state = "stopped".to_string();
+            state.heartbeat_unix_ms = now_unix_ms();
+            state.detail = Some(
+                if requested_stop {
+                    "stopped by request"
+                } else {
+                    "parent lost"
+                }
+                .to_string(),
+            );
+            return write_json_atomically(&state_path, &state);
+        }
+        state.heartbeat_unix_ms = now_unix_ms();
+        write_json_atomically(&state_path, &state)?;
+    }
 }
 
 /// Reap service leaders left by an interrupted controller. The persisted kernel
@@ -670,6 +999,109 @@ mod tests {
                 Err(error) => error,
             };
             assert!(error.contains("socket_handoff"));
+        });
+    }
+
+    fn worker_request(
+        run_id: &str,
+        operation: &str,
+        services: Vec<AgentTaskManagedService>,
+        parent_pid: u32,
+    ) -> PathBuf {
+        let request = AgentTaskServiceWorkerRequest {
+            schema: AgentTaskServiceWorkerRequest::SCHEMA.to_string(),
+            operation: operation.to_string(),
+            run_id: run_id.to_string(),
+            services,
+            parent_pid,
+            parent_ttl_ms: 10,
+        };
+        let path = service_worker_request_path(run_id).expect("worker request path");
+        write_json_atomically(&path, &request).expect("write worker request");
+        path
+    }
+
+    fn wait_for_worker_state(run_id: &str, expected: &str) -> AgentTaskServiceWorkerState {
+        for _ in 0..200 {
+            if let Some(state) = read_service_worker_state(run_id).expect("read worker state") {
+                if state.state == expected {
+                    return state;
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("worker did not reach {expected}");
+    }
+
+    #[test]
+    fn worker_persists_identity_before_a_payload_spawn_failure() {
+        with_isolated_home(|_| {
+            let mut broken = fixture(free_port());
+            broken.command = vec!["homeboy-command-that-does-not-exist".to_string()];
+            let request =
+                worker_request("payload-crash", "start", vec![broken], std::process::id());
+            run_service_worker(&request).expect("worker records startup failure");
+            let state = wait_for_worker_state("payload-crash", "failed");
+            assert!(
+                state.worker_identity.is_some(),
+                "worker identity precedes payload spawn"
+            );
+            assert!(state
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("start managed service"));
+        });
+    }
+
+    #[test]
+    fn worker_stop_operation_publishes_terminal_service_state() {
+        with_isolated_home(|_| {
+            let request = worker_request(
+                "worker-stop",
+                "start",
+                vec![fixture(free_port())],
+                std::process::id(),
+            );
+            let worker = thread::spawn(move || run_service_worker(&request));
+            let state = wait_for_worker_state("worker-stop", "ready");
+            assert_eq!(state.services[0].state, "ready");
+            let stop = worker_request("worker-stop", "stop", Vec::new(), std::process::id());
+            run_service_worker(&stop).expect("stop operation");
+            worker.join().expect("worker joins").expect("worker stops");
+            let stopped = wait_for_worker_state("worker-stop", "stopped");
+            assert_eq!(stopped.services[0].state, "stopped");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_self_cleans_when_its_scheduler_parent_is_gone() {
+        with_isolated_home(|_| {
+            let request = worker_request(
+                "orphaned-worker",
+                "start",
+                vec![fixture(free_port())],
+                999_999,
+            );
+            run_service_worker(&request).expect("worker exits after parent loss");
+            let stopped = wait_for_worker_state("orphaned-worker", "stopped");
+            assert_eq!(stopped.detail.as_deref(), Some("parent lost"));
+            assert_eq!(stopped.services[0].state, "stopped");
+        });
+    }
+
+    #[test]
+    fn processless_worker_handoff_expires_at_its_ttl() {
+        with_isolated_home(|_| {
+            let request = worker_request("ttl-worker", "start", Vec::new(), 0);
+            run_service_worker(&request).expect("worker expires processless handoff");
+            assert_eq!(
+                wait_for_worker_state("ttl-worker", "stopped")
+                    .detail
+                    .as_deref(),
+                Some("parent lost")
+            );
         });
     }
 

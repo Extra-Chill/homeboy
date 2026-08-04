@@ -7,6 +7,7 @@ use homeboy::core::{api_jobs::JobStore, paths};
 use homeboy::runner::runners::{self as runner, Runner, RunnerKind, RunnerStatusReport};
 use homeboy_upgrade::self_status::{self, ControllerRuntimeInput, RunnerRuntimeInput};
 use serde_json::Value;
+use std::path::PathBuf;
 
 use crate::commands::utils::args::MutationArgs;
 use crate::commands::{docs, resources, CmdResult};
@@ -30,6 +31,9 @@ pub enum SelfCommand {
     Doctor(SelfDoctorArgs),
     /// Plan or delete orphaned Homeboy runtime temp entries
     CleanupRuntimeTmp(SelfCleanupRuntimeTmpArgs),
+    /// Internal durable worker for agent-task managed services
+    #[command(hide = true)]
+    ServiceSupervisorWorker(ServiceSupervisorWorkerArgs),
     /// Display CLI documentation
     Docs(docs::DocsArgs),
 }
@@ -71,6 +75,12 @@ pub struct SelfCleanupRuntimeTmpArgs {
     /// Continue bounded runtime-run inspection from a prior next_cursor.
     #[arg(long)]
     pub cursor: Option<String>,
+}
+
+#[derive(Args)]
+pub struct ServiceSupervisorWorkerArgs {
+    #[arg(long)]
+    pub request: PathBuf,
 }
 
 pub fn run(args: SelfArgs) -> CmdResult<Value> {
@@ -169,6 +179,13 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
                 );
             }
             Ok((json, 0))
+        }
+        SelfCommand::ServiceSupervisorWorker(args) => {
+            homeboy_agents::agent_task_scheduler::managed_services::run_service_worker(
+                &args.request,
+            )
+            .map_err(homeboy::core::Error::internal_unexpected)?;
+            Ok((serde_json::json!({ "request": args.request }), 0))
         }
         SelfCommand::Docs(args) => {
             let (output, exit_code) = docs::run(args)?;

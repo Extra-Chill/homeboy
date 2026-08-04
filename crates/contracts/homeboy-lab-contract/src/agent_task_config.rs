@@ -138,7 +138,10 @@ mod managed_service_contract_tests {
         assert_eq!(service.version, AgentTaskManagedService::VERSION);
         assert_eq!(service.host, "127.0.0.1");
         assert!(service.socket_handoff);
-        assert_eq!(service.browser_origin_probe.unwrap().provider, "fixture-browser");
+        assert_eq!(
+            service.browser_origin_probe.unwrap().provider,
+            "fixture-browser"
+        );
         assert_eq!(service.target.as_deref(), Some("lab"));
         assert_eq!(
             service.readiness.as_ref().unwrap().kind,
