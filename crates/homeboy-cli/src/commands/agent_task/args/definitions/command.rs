@@ -38,6 +38,7 @@ pub struct AgentTaskArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentTaskCommand {
+    /// Diagnose provider and runtime readiness on a runner, and optionally repair it.
     Doctor(AgentTaskDoctorArgs),
     /// Submit an agent task, run its gates, and open a pull request.
     ///
@@ -69,50 +70,115 @@ pub enum AgentTaskCommand {
     /// The persisted recipe supplies the original prompt, transport, gates,
     /// worktree, and disclosure policy.
     CookContinue(CookContinueArgs),
+    /// Operate durable defined multi-agent loops: define, inspect, resume, and stop.
+    ///
+    /// A loop is not a one-shot PR cook. It persists controller state, tracks
+    /// whether it is on or off, counts revolutions, and records its continuation
+    /// policy. Use `agent-task cook` for single-PR work.
     Loop(AgentTaskLoopArgs),
+    /// Run an `AgentTaskPlan` through extension-declared executor providers.
     RunPlan(RunPlanArgs),
+    /// Execute a previously submitted durable run.
     Run(RunArgs),
+    /// Claim and execute the oldest queued durable run.
     RunNext,
+    /// Persist an agent-task plan and return a durable run id without executing it.
     Submit(SubmitArgs),
+    /// Read durable run status.
     Status(StatusArgs),
+    /// List durable runs, newest first.
+    ///
+    /// Discovery returns a finite agent-facing page by default; use `--limit` for
+    /// a different page or `--full` for every matching record.
     List(ListArgs),
+    /// List queued and running durable runs, newest first.
+    ///
+    /// `--reconcile` turns this into an explicit fleet operation: it previews
+    /// every candidate by default and requires `--apply` to mutate the set.
     Active(ActiveArgs),
     /// Preview or apply reconciliation for one durable run.
     Reconcile(ReconcileArgs),
+    /// Reconcile stored durable run records against authoritative provider state.
     ReconcileRecords(ReconcileRecordsArgs),
+    /// Show the latest durable run.
     Latest(LatestArgs),
+    /// Read the canonical durable event stream for a run.
+    ///
+    /// `--raw` additionally emits transport frames for diagnostics.
     Logs(LogsArgs),
+    /// List artifacts and evidence refs recorded for a completed run.
     Artifacts(StatusArgs),
     /// Discover or attach selected outputs retained in a terminal Lab Cook workspace.
     RetainedArtifacts(RetainedArtifactsArgs),
+    /// Retrieve selected durable evidence recorded for a run.
+    ///
+    /// Narrow the result with `--task` or `--kind`; `--full` returns the
+    /// unprojected evidence.
     Evidence(EvidenceArgs),
+    /// Compute a root cause, causal chain, and next actions for a failed run.
+    ///
+    /// Next actions are derived from the failure classification, not from prose.
     Diagnose(DiagnoseArgs),
     /// Recover a missing or corrupted immutable controller runtime pin.
     RuntimeRecover(RuntimeRecoverArgs),
     /// Validate controller runtime eligibility without executing provider work.
     RuntimeValidate(RuntimeValidateArgs),
+    /// Hydrate the latest raw executor input and print provider-boundary fields
+    /// without relaunching a provider.
+    ///
+    /// Persists the inspection as `provider-boundary-replay` evidence. Use
+    /// `--task <task-id>` for multi-task runs.
     ReplayProviderBoundary(ReplayProviderBoundaryArgs),
+    /// Mark a queued or stale-running durable run as cancelled.
     Cancel(CancelArgs),
+    /// Resume a queued or stale-running durable run.
     Resume(StatusArgs),
+    /// Submit a fresh durable run from an existing run's plan.
     Retry(RetryArgs),
+    /// Cook, submit, and inspect batches of independent tasks.
+    ///
+    /// Each child declares its own target worktree and optional head branch, runs
+    /// through the same cook-loop path as a single PR cook, and finalizes its own
+    /// pull request when its deterministic gates pass.
     Fanout(AgentTaskFanoutArgs),
+    /// Build a durable aggregate review envelope from run state, logs, artifacts,
+    /// and promotion hints.
     Review(ReviewArgs),
+    /// Promote a completed generic patch artifact into a managed worktree.
     Promote(PromoteArgs),
     /// Adopt an immutable commit candidate through a tracked cook's normal gates and finalization.
     Adopt(AdoptArgs),
     #[command(hide = true)]
     PromotionProvider(PromotionProviderArgs),
+    /// Finalize a green run, or recover publication from a durable Cook record.
+    ///
+    /// This is the core-owned publication boundary for external runtimes.
     FinalizePr(FinalizePrArgs),
     /// Attach authorized candidate-bound replacement gate proof after an infrastructure gate failure.
     RecordReplacementGateProof(RecordReplacementGateProofArgs),
     /// Record an independent, durable acceptance verdict for a candidate.
     Accept(AcceptArgs),
+    /// Convert deterministic gate results into a cook retry or stop decision.
     GateFeedback(GateFeedbackArgs),
+    /// List extension-declared executor providers and optional secret/backend readiness.
+    ///
+    /// `--backend X` filters the presentation to X so output stays within caller
+    /// display limits; pass `--catalog` for the full multi-backend catalog.
     Providers(ProvidersArgs),
+    /// Manage markdown prompts in Homeboy-owned storage.
+    ///
+    /// Prompts are stored under Homeboy's data directory, not the current
+    /// repo/worktree, and are referenced as `prompt:<id>` wherever a prompt
+    /// string is accepted.
     Prompts(AgentTaskPromptsArgs),
+    /// Export Homeboy's machine-readable agent-task core contract metadata.
     Contract(ContractArgs),
+    /// Compile a declarative loop definition into an agent-task plan without
+    /// submitting or running it.
     CompileLoop(CompileLoopArgs),
+    /// Configure and inspect provider authentication secrets.
     Auth(AgentTaskAuthArgs),
+    /// Create, inspect, and resume durable multi-agent loop controller state.
     Controller(AgentTaskControllerArgs),
     #[command(hide = true)]
     Tool(AgentTaskToolArgs),

@@ -546,9 +546,17 @@ pub struct AgentTaskLoopArgs {
 }
 #[derive(Subcommand, Debug)]
 pub enum AgentTaskLoopCommand {
+    /// Define or update a durable loop from a spec.
+    ///
+    /// `--on`/`--off` set whether the loop runs; `--revolution-limit` bounds how
+    /// many revolutions it may take before it stops on its own.
     Define(AgentTaskLoopDefineArgs),
+    /// Read durable loop state: on/off, revolutions taken, and continuation policy.
     Status(AgentTaskLoopStatusArgs),
+    /// Resume a stopped or exhausted durable loop, optionally raising its
+    /// revolution limit.
     Resume(AgentTaskLoopResumeArgs),
+    /// Stop a durable loop and record the handoff.
     Stop(AgentTaskLoopStatusArgs),
 }
 #[derive(Args, Debug)]

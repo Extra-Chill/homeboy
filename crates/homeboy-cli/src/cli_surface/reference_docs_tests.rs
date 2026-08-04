@@ -89,13 +89,12 @@ fn generated_reference_covers_every_visible_top_level_command() {
 /// A command with no clap `about` is invisible in `--help`, in the generated
 /// reference, and to any agent reading the command surface.
 ///
-/// `agent-task` is the one family that still ships subcommands without help
-/// text (#10324). Pinning the *shape* of that debt rather than a count keeps
-/// the guard honest: no other family may acquire the same gap, and the exact
-/// remaining paths are listed in the generated index, so shrinking the set
-/// shows up as a reviewed docs diff.
+/// `agent-task` used to be the one family shipping subcommands without help
+/// text, so this guard could only pin the *shape* of that debt (#10324). All 40
+/// of those variants now carry doc comments (#11147), so the guard is exact: any
+/// new visible command node without help text fails here.
 #[test]
-fn commands_without_help_text_are_confined_to_agent_task() {
+fn every_visible_command_ships_help_text() {
     let root = Cli::command();
 
     let mut undocumented = Vec::new();
@@ -107,16 +106,10 @@ fn commands_without_help_text_are_confined_to_agent_task() {
         );
     }
 
-    let stray = undocumented
-        .iter()
-        .filter(|path| !path.starts_with("agent-task"))
-        .cloned()
-        .collect::<Vec<_>>();
-
     assert!(
-        stray.is_empty(),
-        "these commands ship without clap help text: {stray:?}. Add a doc comment to \
-         the clap variant instead of widening this guard."
+        undocumented.is_empty(),
+        "these commands ship without clap help text: {undocumented:?}. Add a doc \
+         comment to the clap variant instead of widening this guard."
     );
 }
 
