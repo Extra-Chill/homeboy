@@ -2691,6 +2691,10 @@ fn cook_failure_context(
         .as_ref()
         .filter(|claim| claim.state == agent_task_lifecycle::ClaimState::Failed)
         .and_then(|claim| claim.result.clone());
+    let continuation_admission = record
+        .as_ref()
+        .and_then(|record| record.metadata.get("cook_continuation_admission"))
+        .cloned();
     let (phase, reason_code) = if blocking_claim.is_some() {
         ("promotion".to_string(), "operation_in_progress".to_string())
     } else if let Some(diagnostic) = diagnostic.as_ref() {
@@ -2809,6 +2813,7 @@ fn cook_failure_context(
         phase,
         reason_code,
         diagnostic,
+        continuation_admission,
         blocking_claim,
         provider_budget_consumed: provider_executions_consumed > 0,
         provider_executions_consumed,

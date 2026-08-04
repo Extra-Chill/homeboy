@@ -344,6 +344,7 @@ mod tests {
             phase: "controller".to_string(),
             reason_code: "validation_invalid_argument".to_string(),
             diagnostic: None,
+            continuation_admission: None,
             blocking_claim: None,
             provider_budget_consumed: true,
             provider_executions_consumed: 1,

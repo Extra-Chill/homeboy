@@ -6507,6 +6507,15 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             error.details["workspace"]["classification"],
             "workspace.resolved_but_dirty"
         );
+        let trace = agent_task_lifecycle::status(&historical.initial_run_id)
+            .unwrap()
+            .metadata["cook_continuation_admission"]
+            .clone();
+        assert_eq!(
+            trace["first_authoritative_denial"],
+            "provider_baseline_verification"
+        );
+        assert_eq!(trace["predicates"][4]["outcome"], "fail");
         assert_eq!(executions.load(Ordering::SeqCst), 0);
 
         std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
@@ -6530,6 +6539,15 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             error.details["workspace"]["classification"],
             "workspace.resolved_but_dirty"
         );
+        let trace = agent_task_lifecycle::status(&historical.initial_run_id)
+            .unwrap()
+            .metadata["cook_continuation_admission"]
+            .clone();
+        assert_eq!(
+            trace["first_authoritative_denial"],
+            "terminal_review_form_eligibility"
+        );
+        assert_eq!(trace["predicates"][1]["outcome"], "fail");
         assert_eq!(executions.load(Ordering::SeqCst), 0);
 
         agent_task_lifecycle::rewrite_record_for_test(&historical.initial_run_id, |record| {
@@ -6559,6 +6577,15 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             error.details["workspace"]["classification"],
             "workspace.resolved_but_dirty"
         );
+        let trace = agent_task_lifecycle::status(&historical.initial_run_id)
+            .unwrap()
+            .metadata["cook_continuation_admission"]
+            .clone();
+        assert_eq!(
+            trace["first_authoritative_denial"],
+            "terminal_review_form_eligibility"
+        );
+        assert_eq!(trace["predicates"][1]["outcome"], "fail");
         assert_eq!(executions.load(Ordering::SeqCst), 0);
         agent_task_lifecycle::record_promotion(&historical.initial_run_id, copied_promotion)
             .unwrap();
@@ -6579,6 +6606,14 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             result.value.failure_context
         );
         assert_ne!(result.value.status, "durable_failure");
+        let trace = agent_task_lifecycle::status(&historical.initial_run_id)
+            .unwrap()
+            .metadata["cook_continuation_admission"]
+            .clone();
+        assert_eq!(trace["schema"], "homeboy/cook-continuation-admission/v1");
+        assert_eq!(trace["first_authoritative_denial"], serde_json::Value::Null);
+        assert_eq!(trace["predicates"].as_array().unwrap().len(), 8);
+        assert!(trace.to_string().len() < 2048, "trace remains bounded");
     });
 }
 
