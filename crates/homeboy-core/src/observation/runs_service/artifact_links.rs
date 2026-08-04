@@ -67,6 +67,7 @@ pub fn related_lab_artifacts_for_runner_job(
         status: None,
         rig_id: None,
         limit: Some(1000),
+        ..RunListFilter::default()
     })? {
         if candidate.id == run.id {
             continue;

@@ -13,7 +13,7 @@ use crate::api_jobs::{self, ActiveRunnerJobSummary, JobStore, RunnerJobProjectio
 use crate::error::{Error, Result};
 use crate::observation::{
     run_owner_pid, running_status_note, FindingListFilter, ObservationStore, RunListFilter,
-    RunRecord, RunStatus,
+    RunRecord, RunStatus, MAX_RUN_PAGE_LIMIT,
 };
 use crate::{activity, component, git, paths};
 
@@ -575,7 +575,13 @@ fn list_runs(
         rig_id: query_value(path, "rig").or_else(|| query_value(path, "rig_id")),
         limit: query_value(path, "limit")
             .and_then(|value| value.parse::<i64>().ok())
-            .map(|limit| limit.clamp(1, 1000)),
+            .map(|limit| limit.clamp(1, MAX_RUN_PAGE_LIMIT)),
+        // A page ceiling with no way past it is a hard wall; an offset makes
+        // the rows beyond it reachable (#11177).
+        offset: query_value(path, "offset")
+            .and_then(|value| value.parse::<i64>().ok())
+            .map(|offset| offset.max(0)),
+        ..RunListFilter::default()
     };
 
     let mut runs: Vec<RunSummary> = store

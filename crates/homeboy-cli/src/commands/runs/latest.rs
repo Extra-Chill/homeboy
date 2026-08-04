@@ -81,5 +81,6 @@ pub(crate) fn run_filter_from_latest_args(args: RunsLatestRunArgs) -> RunListFil
         status: args.status,
         rig_id: args.rig,
         limit: Some(1),
+        ..RunListFilter::default()
     }
 }

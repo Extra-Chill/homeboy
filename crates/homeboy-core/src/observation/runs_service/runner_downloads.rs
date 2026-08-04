@@ -681,23 +681,23 @@ impl LivenessVeto {
         let Ok(store) = ObservationStore::open_initialized() else {
             return Self { running: None };
         };
-        // One row over the bound is read so truncation is detectable rather
-        // than silently dropping vetoes.
-        let probe = i64::try_from(RUNNING_RUN_SCAN_LIMIT.saturating_add(1)).unwrap_or(i64::MAX);
-        let Ok(running) = store.list_runs(RunListFilter {
+        // Truncation must be detectable: an unseen running run could own any
+        // candidate. The store reports it directly now, so the bound is asked
+        // for as itself rather than hand-probed one row over (#11177).
+        let scan_limit = i64::try_from(RUNNING_RUN_SCAN_LIMIT).unwrap_or(i64::MAX);
+        let Ok(page) = store.list_runs_page(RunListFilter {
             status: Some(RunStatus::Running.as_str().to_string()),
-            limit: Some(probe),
+            limit: Some(scan_limit),
             ..RunListFilter::default()
         }) else {
             return Self { running: None };
         };
-        if running.len() > RUNNING_RUN_SCAN_LIMIT {
-            // An unseen running run could own any candidate, so degrade to
-            // "retain everything" rather than to "veto nothing".
+        if page.truncated {
+            // Degrade to "retain everything" rather than to "veto nothing".
             return Self { running: None };
         }
         Self {
-            running: Some(running),
+            running: Some(page.runs),
         }
     }
 

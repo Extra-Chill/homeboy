@@ -85,6 +85,7 @@ pub fn runs_distribution(
             status: args.status.clone(),
             rig_id: args.rig.clone(),
             limit: Some(limit),
+            ..RunListFilter::default()
         })?
         .into_iter()
         .filter(|run| {

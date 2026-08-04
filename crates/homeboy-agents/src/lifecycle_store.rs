@@ -476,13 +476,30 @@ pub(super) fn read_records() -> Result<Vec<AgentTaskRunRecord>> {
     Ok(read_records_with_health()?.0)
 }
 
+/// Bound on a single source run's retry lineage. Deliberately far above any
+/// plausible retry count: an exceeded lineage is reported as an error, and this
+/// is the threshold at which "this is a runaway, not a lineage" becomes true.
+const RETRY_SUCCESSOR_SCAN_LIMIT: usize = 256;
+
+/// Read every retry successor of `source_run_id`.
+///
+/// Callers treat an empty or non-matching result as "no reservation exists"
+/// and then create one, so a truncated lineage would silently double-book a
+/// retry. The page is therefore read with an explicit truncation signal and a
+/// truncated lineage fails loudly rather than answering wrongly (#11177).
 pub(super) fn read_retry_successors(source_run_id: &str) -> Result<Vec<AgentTaskRunRecord>> {
-    let runs = ObservationStore::open_initialized()?.list_runs_by_retry_of(
+    let page = ObservationStore::open_initialized()?.list_runs_by_retry_of_page(
         "agent-task",
         source_run_id,
-        16,
+        RETRY_SUCCESSOR_SCAN_LIMIT,
     )?;
-    runs.iter().map(record_from_run).collect()
+    if page.truncated {
+        return Err(Error::internal_unexpected(format!(
+            "retry lineage for {source_run_id} exceeded {RETRY_SUCCESSOR_SCAN_LIMIT} successors; \
+             refusing to answer from a truncated lineage"
+        )));
+    }
+    page.runs.iter().map(record_from_run).collect()
 }
 
 pub(super) fn read_records_with_health(

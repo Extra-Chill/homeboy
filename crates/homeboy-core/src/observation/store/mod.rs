@@ -18,12 +18,13 @@ pub use super::context::{
 use super::records::{
     ArtifactCleanupCandidateRecord, ArtifactCleanupFilter, ArtifactRecord, FindingListFilter,
     FindingRecord, NewFindingRecord, NewRunRecord, NewTraceRunRecord, NewTraceSpanRecord,
-    NewTriageItemRecord, RunListFilter, RunRecord, RunStatus, TraceRunRecord, TraceSpanRecord,
-    TriageItemRecord, TriagePullRequestSignals,
+    NewTriageItemRecord, RunCursor, RunListFilter, RunPage, RunRecord, RunStatus, TraceRunRecord,
+    TraceSpanRecord, TriageItemRecord, TriagePullRequestSignals,
 };
 use crate::{paths, Error, Result};
 pub use artifacts::directory_tree_sha256;
 pub use artifacts::{ArtifactPublication, ArtifactPublicationType};
+pub use runs::{DEFAULT_RUN_PAGE_LIMIT, MAX_EXHAUSTIVE_RUN_ROWS, MAX_RUN_PAGE_LIMIT};
 
 pub(crate) use helpers::*;
 
