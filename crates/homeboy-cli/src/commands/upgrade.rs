@@ -341,6 +341,7 @@ mod tests {
             new_build_identity: None,
             source_revision: None,
             upgraded: true,
+            outcome: None,
             controller: None,
             extensions: None,
             runners: None,

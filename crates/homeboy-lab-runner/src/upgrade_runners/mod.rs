@@ -39,6 +39,21 @@ use homeboy_upgrade::upgrade::{
 pub struct RunnerUpgrade;
 
 impl RunnerUpgradeProvider for RunnerUpgrade {
+    fn preflight_configured_runners_for_upgrade(
+        &self,
+        method_override: Option<InstallMethod>,
+        source_path: Option<&Path>,
+        explicit_source_path: bool,
+        runner_targets: &[String],
+    ) -> Result<Vec<RunnerUpgradeEntry>> {
+        preflight_configured_runners_for_upgrade(
+            method_override,
+            source_path,
+            explicit_source_path,
+            runner_targets,
+        )
+    }
+
     fn upgrade_configured_runners_with_explicit_source_path(
         &self,
         force: bool,
