@@ -745,7 +745,7 @@ pub fn lab_runner_readiness() -> Result<LabRunnerReadiness> {
                 connected: status.connected,
                 capacity: runner.settings.concurrency_limit,
                 stale_daemon: status.stale_daemon.is_some(),
-                active_jobs: status.active_jobs.len(),
+                active_jobs: status.active_job_count,
                 active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
                 capabilities_ready,
             })
@@ -917,10 +917,12 @@ impl DefaultLabRunnerCandidate {
         // connectivity gate that IS hard is a disconnected reverse tunnel,
         // which cannot be woken on demand — handled explicitly below.
         let at_capacity = matches!(self.capacity, Some(capacity) if self.active_jobs >= capacity);
+        let capacity_unknown = self.capacity.is_none() && self.active_jobs > 0;
         if !self.capabilities_ready
             || !self.active_jobs_available
             || self.stale_daemon
             || at_capacity
+            || capacity_unknown
         {
             return DefaultLabRunnerReadiness {
                 eligible: false,
@@ -971,7 +973,7 @@ pub(crate) fn default_lab_runner_availability() -> Result<Vec<RunnerAvailability
                 connected: status.connected,
                 capacity: runner.settings.concurrency_limit,
                 stale_daemon: status.stale_daemon.is_some(),
-                active_jobs: status.active_jobs.len(),
+                active_jobs: status.active_job_count,
                 active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
                 capabilities_ready,
             };
