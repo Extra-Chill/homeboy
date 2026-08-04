@@ -715,10 +715,10 @@ struct ScanFrame {
 /// Report keys declared more than once inside the same JSON object.
 ///
 /// `serde_json` accepts duplicate object keys and silently keeps the last one,
-/// so a rig spec can lose an entire declaration with no signal at all. In
-/// chubes4/homeboy-rigs, `woocommerce-wp-codebox-target.base.json` declares
-/// `"lifecycle"` twice and the first block's `intent: "external"` is dropped,
-/// changing that rig's cleanup contract invisibly.
+/// so a rig spec can lose an entire declaration with no signal at all. Observed
+/// in a published rig package: a base spec declares `"lifecycle"` twice and the
+/// first block's `intent: "external"` is dropped, changing that rig's cleanup
+/// contract invisibly.
 ///
 /// This is a raw token pass rather than a `serde` visitor because the visitor
 /// API cannot report where in the source each declaration sits, and "the key
@@ -1146,9 +1146,9 @@ const IMPORT_KEYWORDS: &[&str] = &["from", "import", "require"];
 ///
 /// A workload is only ever loaded by its runner, so a wrong relative depth is
 /// invisible to every other check in this lint: the JSON is valid, the path in
-/// the rig spec exists, and the profile reference resolves. In
-/// chubes4/homeboy-rigs, four Gutenberg `.trace.mjs` workloads import
-/// `'../shared/wp-codebox/recipe.mjs'` where the correct depth is
+/// the rig spec exists, and the profile reference resolves. Observed in a
+/// published rig package: four `.trace.mjs` workloads import
+/// `'../shared/<package>/recipe.mjs'` where the correct depth is
 /// `'../../../shared/...'`, and CI lints that package green.
 ///
 /// Scope is intentionally narrow. Only static relative specifiers (`./`, `../`)

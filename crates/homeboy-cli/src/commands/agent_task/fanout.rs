@@ -1299,7 +1299,7 @@ fn cook_batch_inner(
     apply_provider_profile(&mut args);
     // Resolve the effective backend (explicit --backend or the configured
     // default) and validate it up front (#7717). Otherwise an omitted
-    // --backend silently rode a config default like `codebox` all the way to
+    // --backend silently rode a configured default all the way to
     // provider execution, where each child cook failed late with a
     // provider-shaped `no extension agent-task provider found for backend`
     // error instead of an early, actionable configuration failure. Making the

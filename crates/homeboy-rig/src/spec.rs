@@ -442,7 +442,7 @@ impl RigRequirementsSpec {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunnerToolRequirementSpec {
-    /// Logical tool id, e.g. `wp-codebox`.
+    /// Logical tool id, as declared by the extension that requires the tool.
     pub tool: String,
 
     /// Binary/command name used when no configured env path is present.
