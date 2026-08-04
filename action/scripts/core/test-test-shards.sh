@@ -32,6 +32,14 @@ if TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PLAN_FILE="${
   printf 'FAIL: empty shard plans must be rejected\n'; exit 1
 fi
 jq -e 'all(.shards[]; .schema == "homeboy/test-shard-manifest/v1" and (.runner == "fixture") and (.tests | all(type == "string")))' "${tmp}/one.json" >/dev/null || { printf 'FAIL: emitted shard manifests do not match the extension contract\n'; exit 1; }
+jq -n '{schema:"homeboy/test-inventory/v1",runner:"fixture",runner_fingerprint:"runner-a",workspace_fingerprint:"workspace-a",inventory_fingerprint:"large-inventory-a",tests:[range(0; 12000) | {id:("test-" + tostring + ("x" * 160)),duration_ms:1}]}' > "${tmp}/large-inventory.json"
+[ "$(wc -c < "${tmp}/large-inventory.json")" -gt 1048576 ] || { printf 'FAIL: large inventory must exceed a conservative argv-sized payload\n'; exit 1; }
+for output in large-one large-two; do
+  TEST_INVENTORY_FILE="${tmp}/large-inventory.json" TEST_SHARD_PLAN_FILE="${tmp}/${output}.json" TEST_SHARD_COUNT=2 \
+    bash "${ROOT}/scripts/core/shard-tests.sh" plan
+done
+cmp "${tmp}/large-one.json" "${tmp}/large-two.json" || { printf 'FAIL: large inventories must produce byte-identical plans\n'; exit 1; }
+jq -e '[.shards[].tests[]] | length == 12000' "${tmp}/large-one.json" >/dev/null || { printf 'FAIL: large plan membership is not exact\n'; exit 1; }
 jq '.workspace_fingerprint = "workspace-base"' "${tmp}/captured-inventory.json" > "${tmp}/base-inventory.json"
 TEST_INVENTORY_FILE="${tmp}/base-inventory.json" TEST_SHARD_PLAN_FILE="${tmp}/base-plan.json" TEST_SHARD_COUNT=2 bash "${ROOT}/scripts/core/shard-tests.sh" plan
 [ "$(jq -r .plan_digest "${tmp}/one.json")" != "$(jq -r .plan_digest "${tmp}/base-plan.json")" ] || { printf 'FAIL: candidate and baseline inventories must produce distinct plans\n'; exit 1; }
