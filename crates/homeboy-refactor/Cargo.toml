@@ -10,6 +10,12 @@ publish = false
 name = "homeboy_refactor"
 path = "src/lib.rs"
 
+[features]
+# Opt-in tier for the full-pipeline audit/refactor regressions that scan real
+# fixture checkouts. Excluded from the default unit gate; see
+# docs/internals/test-tiers.md.
+slow-tests = []
+
 [dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
 homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }
