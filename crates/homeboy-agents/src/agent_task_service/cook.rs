@@ -1768,8 +1768,11 @@ pub fn terminal_review_form_continuation_is_eligible(
     plan: &AgentTaskPlan,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<bool> {
-    if record.state != agent_task_lifecycle::AgentTaskRunState::Failed
-        || !review_form_attempt_is_ready_for_cook_continuation(plan, record)?
+    if !matches!(
+        record.state,
+        agent_task_lifecycle::AgentTaskRunState::Failed
+            | agent_task_lifecycle::AgentTaskRunState::PartialFailure
+    ) || !review_form_attempt_is_ready_for_cook_continuation(plan, record)?
     {
         return Ok(false);
     }

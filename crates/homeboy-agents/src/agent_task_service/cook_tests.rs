@@ -6472,7 +6472,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         .unwrap();
         seed_timeout_review_form_aggregate(&historical.initial_run_id, &historical.initial_plan);
         agent_task_lifecycle::rewrite_record_for_test(&historical.initial_run_id, |record| {
-            record.state = agent_task_lifecycle::AgentTaskRunState::Failed;
+            record.state = agent_task_lifecycle::AgentTaskRunState::PartialFailure;
         })
         .unwrap();
 
@@ -6529,7 +6529,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         assert_eq!(executions.load(Ordering::SeqCst), 0);
 
         agent_task_lifecycle::rewrite_record_for_test(&historical.initial_run_id, |record| {
-            record.state = agent_task_lifecycle::AgentTaskRunState::Failed;
+            record.state = agent_task_lifecycle::AgentTaskRunState::PartialFailure;
         })
         .unwrap();
         agent_task_lifecycle::rewrite_record_for_test(&historical.initial_run_id, |record| {
