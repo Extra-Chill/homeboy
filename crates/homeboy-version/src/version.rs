@@ -1,16 +1,21 @@
+pub mod component_version;
 mod default_pattern_for_file;
 mod types;
 
+// The single component-version read spine (#11144). Everything that reads a
+// declared version target goes through `component_version`; the names below are
+// the historical spellings every caller already uses.
+pub use component_version::{
+    read as read_component_version, read_by_id as read_version,
+    read_snapshot as read_component_snapshot, read_target, require_targets, TargetRead,
+};
 // These were `pub(crate)` while version lived inside the release crate. They
 // are now read across a crate boundary by `homeboy-release` (version_guard,
 // planner) and `homeboy-deploy` (preflight, planning), so they must be `pub`.
+use default_pattern_for_file::replace_since_tag_placeholders;
+pub use default_pattern_for_file::{build_init_warnings, resolve_version_file_path};
 pub use default_pattern_for_file::{
-    build_init_warnings, read_component_snapshot, resolve_version_file_path,
-};
-use default_pattern_for_file::{build_version_parse_error, replace_since_tag_placeholders};
-pub use default_pattern_for_file::{
-    default_pattern_for_file, parse_versions, read_component_version, read_version,
-    resolve_target_pattern,
+    default_pattern_for_file, parse_versions, resolve_target_pattern,
 };
 #[cfg(test)]
 use types::DEFAULT_SINCE_PLACEHOLDER;
@@ -20,7 +25,7 @@ pub use types::{
 };
 
 use crate::changelog;
-use homeboy_core::component::{self, Component, VersionTarget};
+use homeboy_core::component::{Component, VersionTarget};
 use homeboy_core::error::{Error, Result};
 
 use homeboy_core::config::{from_str, set_json_pointer, to_string_pretty};
@@ -99,16 +104,11 @@ pub fn get_component_version(component: &Component) -> Option<String> {
 
 pub fn validate_component_versions(components: &[Component]) -> Result<()> {
     for component in components {
-        let Some(targets) = component.version_targets.as_ref() else {
+        // The lenient half of the shared reader: an unversioned component is
+        // skipped, an explicitly empty `versionTargets` is still rejected.
+        let Some(targets) = component_version::declared_targets(component)? else {
             continue;
         };
-        if targets.is_empty() {
-            return Err(Error::config_invalid_value(
-                "versionTargets",
-                None,
-                format!("Component '{}' has empty versionTargets", component.id),
-            ));
-        }
 
         let mut observed = Vec::new();
         for target in targets {
@@ -282,20 +282,7 @@ pub fn validate_version_targets_at(
     component: &Component,
     expected_version: &str,
 ) -> Result<Vec<VersionTargetInfo>> {
-    component::validate_local_path(component)?;
-
-    let targets = component
-        .version_targets
-        .as_ref()
-        .ok_or_else(|| Error::config_missing_key("versionTargets", Some(component.id.clone())))?;
-
-    if targets.is_empty() {
-        return Err(Error::config_invalid_value(
-            "versionTargets",
-            None,
-            format!("Component '{}' has empty versionTargets", component.id),
-        ));
-    }
+    let targets = component_version::require_targets(component)?;
 
     validate_version_targets(targets, &component.local_path, expected_version)
 }
@@ -308,20 +295,12 @@ fn validate_version_targets(
     let mut target_infos = Vec::new();
 
     for target in targets {
-        let version_pattern = resolve_target_pattern(target)?;
-        let full_path = resolve_version_file_path(local_path, &target.file);
-        let content = local_files::local().read(Path::new(&full_path))?;
+        let read = component_version::read_target(local_path, target)?;
 
-        let versions = parse_versions(&content, &version_pattern).ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "versionPattern",
-                format!("Invalid version regex pattern '{}'", version_pattern),
-                None,
-                Some(vec![version_pattern.clone()]),
-            )
-        })?;
-
-        if versions.is_empty() {
+        // This path keeps its own terse diagnostic: it is validating a version
+        // the caller already knows, so the detailed file-preview error the
+        // primary-target readers use would be noise here.
+        if read.is_empty() {
             return Err(Error::internal_unexpected(format!(
                 "Could not find version in {}",
                 target.file
@@ -329,7 +308,7 @@ fn validate_version_targets(
         }
 
         // Validate all versions in this file match expected
-        let found = text::require_identical(&versions, &target.file)?;
+        let found = read.require_identical()?;
         if found != expected_version {
             return Err(Error::validation_invalid_argument(
                 "version",
@@ -351,13 +330,7 @@ fn validate_version_targets(
             ));
         }
 
-        target_infos.push(VersionTargetInfo {
-            file: target.file.clone(),
-            pattern: version_pattern,
-            full_path,
-            match_count: versions.len(),
-            warning: None,
-        });
+        target_infos.push(read.into_target_info(None));
     }
 
     Ok(target_infos)
@@ -533,46 +506,18 @@ pub fn bump_component_version_with_changelog(
     changelog_entries: Option<&std::collections::HashMap<String, Vec<String>>>,
     finalized_changelog: Option<&ChangelogValidationResult>,
 ) -> Result<BumpResult> {
-    // Validate local_path is absolute and exists before any file operations
-    component::validate_local_path(component)?;
-
-    let targets = component
-        .version_targets
-        .as_ref()
-        .ok_or_else(|| Error::config_missing_key("versionTargets", Some(component.id.clone())))?;
-
-    if targets.is_empty() {
-        return Err(Error::config_invalid_value(
-            "versionTargets",
-            None,
-            format!("Component '{}' has empty versionTargets", component.id),
-        ));
-    }
+    // Validates local_path before any file operation, then requires a
+    // non-empty versionTargets — the same guard every version read uses.
+    let targets = component_version::require_targets(component)?;
 
     // Read current version from primary target
-    let primary = &targets[0];
-    let primary_pattern = resolve_target_pattern(primary)?;
-    let primary_full_path = resolve_version_file_path(&component.local_path, &primary.file);
+    let primary = component_version::read_target(&component.local_path, &targets[0])?;
 
-    let primary_content = local_files::local().read(Path::new(&primary_full_path))?;
-    let primary_versions = parse_versions(&primary_content, &primary_pattern).ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "versionPattern",
-            format!("Invalid version regex pattern '{}'", primary_pattern),
-            None,
-            Some(vec![primary_pattern.clone()]),
-        )
-    })?;
-
-    if primary_versions.is_empty() {
-        return Err(build_version_parse_error(
-            &primary.file,
-            &primary_pattern,
-            &primary_content,
-        ));
+    if primary.is_empty() {
+        return Err(primary.parse_error());
     }
 
-    let old_version = text::require_identical(&primary_versions, &primary.file)?;
+    let old_version = primary.require_identical()?;
     let new_version = increment_version(&old_version, bump_type).ok_or_else(|| {
         Error::validation_invalid_argument(
             "version",
