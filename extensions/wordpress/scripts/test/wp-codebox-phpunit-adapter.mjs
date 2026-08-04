@@ -528,6 +528,7 @@ async function publishPhpunitArtifacts(artifactDirectory, status) {
     return { directory: artifactDirectory, status, failuresPath: '' };
   }
 
+  const controllerRunDirectory = process.env.HOMEBOY_RUN_DIR;
   const publishedDirectory = path.join(invocationArtifacts, 'wp-codebox-phpunit');
   const publishedFilesDirectory = path.join(publishedDirectory, 'files');
   const files = [
@@ -541,6 +542,14 @@ async function publishPhpunitArtifacts(artifactDirectory, status) {
     await assertDirectoryTree(artifactDirectory, ['files']);
     for (const file of files.filter((entry) => entry.copy)) {
       await atomicCopy(path.join(artifactDirectory, 'files', file.name), path.join(publishedFilesDirectory, file.name));
+    }
+    // artifact://files locators resolve from HOMEBOY_RUN_DIR, not from the
+    // invocation tree that Homeboy preserves after the extension exits.
+    if (controllerRunDirectory) {
+      await assertDirectoryTree(controllerRunDirectory, ['files']);
+      for (const file of files.filter((entry) => entry.copy)) {
+        await atomicCopy(path.join(publishedFilesDirectory, file.name), path.join(controllerRunDirectory, 'files', file.name));
+      }
     }
     // The parser replaces this valid fallback atomically. Its registration and
     // aggregate counts survive a parser crash without poisoning Homeboy's sidecar.

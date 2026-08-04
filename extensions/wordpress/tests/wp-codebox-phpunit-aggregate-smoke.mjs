@@ -109,9 +109,11 @@ try {
     const artifacts = path.join(root, `${testCase.name}-artifacts`);
     const results = path.join(root, `${testCase.name}-results.json`);
     const invocationArtifacts = path.join(root, `${testCase.name}-invocation-artifacts`);
+    const controllerRun = path.join(root, `${testCase.name}-controller-run`);
     await mkdir(invocationArtifacts, { recursive: true });
+    await mkdir(controllerRun, { recursive: true });
     await writeFile(path.join(invocationArtifacts, 'homeboy-artifact-manifest.json'), '{"schema":"homeboy/artifact-manifest/v1"}\n');
-    const run = spawnSync(runner, [], { env: { ...process.env, FIXTURE: JSON.stringify(testCase.fixture), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: artifacts, HOMEBOY_INVOCATION_ARTIFACT_DIR: invocationArtifacts, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: results, HOMEBOY_SETTINGS_JSON: JSON.stringify({ validation_dependencies: [dependency], ...testCase.settings }) }, encoding: 'utf8' });
+    const run = spawnSync(runner, [], { env: { ...process.env, FIXTURE: JSON.stringify(testCase.fixture), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: artifacts, HOMEBOY_INVOCATION_ARTIFACT_DIR: invocationArtifacts, HOMEBOY_RUN_DIR: controllerRun, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: results, HOMEBOY_SETTINGS_JSON: JSON.stringify({ validation_dependencies: [dependency], ...testCase.settings }) }, encoding: 'utf8' });
     assert.equal(run.status, testCase.status, `${testCase.name}: ${run.stderr}`);
     assert.deepEqual(JSON.parse(await readFile(results, 'utf8')), testCase.expected, testCase.name);
     const runArtifact = path.join(artifacts, (await readdir(artifacts)).find((entry) => entry.startsWith('wp-codebox-phpunit.')));
@@ -126,9 +128,21 @@ try {
       'wp-codebox-phpunit/files/test-failures.json',
     ], testCase.name);
     const durableSummary = JSON.parse(await readFile(path.join(invocationArtifacts, 'wp-codebox-phpunit/files/test-results.json'), 'utf8')).summary;
+    const controllerResults = JSON.parse(await readFile(path.join(controllerRun, 'files/test-results.json'), 'utf8'));
     assert.deepEqual(
       Object.fromEntries(['total', 'passed', 'failed', 'skipped'].map((key) => [key, durableSummary[key]])),
       testCase.expected,
+      testCase.name,
+    );
+    assert.equal(controllerResults.status, testCase.artifactStatus, testCase.name);
+    assert.equal(
+      await readFile(path.join(controllerRun, 'files/phpunit-output.log'), 'utf8'),
+      await readFile(path.join(invocationArtifacts, 'wp-codebox-phpunit/files/phpunit-output.log'), 'utf8'),
+      testCase.name,
+    );
+    assert.deepEqual(
+      JSON.parse(await readFile(path.join(controllerRun, 'files/phpunit-execution-diagnosis.json'), 'utf8')),
+      JSON.parse(await readFile(path.join(invocationArtifacts, 'wp-codebox-phpunit/files/phpunit-execution-diagnosis.json'), 'utf8')),
       testCase.name,
     );
     const options = JSON.parse(await readFile(path.join(runArtifact, 'wp-codebox-phpunit-recipe-options.json'), 'utf8'));
