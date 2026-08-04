@@ -4,7 +4,9 @@ use super::super::dispatch::{
 use super::super::exec::{
     exec, exec_workspace_context, prepare_runner_exec_command, prepare_runner_exec_env,
     prepare_runner_exec_secret_env_plan, read_bounded, read_runner_exec_script,
-    should_print_handoff, validate_runner_exec_public_env, RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
+    read_runner_exec_script_from_reader, should_print_handoff,
+    validate_runner_exec_invocation_shape, validate_runner_exec_public_env,
+    RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
 };
 
 use homeboy::core::observation::{NewRunRecord, ObservationStore};
@@ -317,6 +319,57 @@ fn read_runner_exec_script_rejects_oversized_script() {
 }
 
 #[test]
+fn script_file_stdin_rejects_zero_bytes_before_command_construction() {
+    let err = read_runner_exec_script_from_reader(&b""[..], "stdin")
+        .expect_err("zero-byte stdin must be rejected");
+
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert_eq!(err.details["field"], "script_file");
+    assert!(err.to_string().contains("stdin is empty"));
+}
+
+#[test]
+fn empty_script_cannot_emit_a_runner_execution_plan() {
+    let err = prepare_runner_exec_command(Some(&String::new()), Vec::new())
+        .expect_err("empty scripts must not construct a bash command");
+
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert_eq!(err.details["field"], "script_file");
+    assert!(err.to_string().contains("script is empty"));
+}
+
+#[test]
+fn script_file_accepts_whitespace_only_and_preserves_non_empty_newlines() {
+    let whitespace_only = " \n\t\n";
+    let whitespace_script =
+        read_runner_exec_script_from_reader(whitespace_only.as_bytes(), "stdin")
+            .expect("whitespace-only stdin script");
+    let whitespace_command =
+        prepare_runner_exec_command(Some(&whitespace_script), Vec::new()).expect("script command");
+    let whitespace_output = std::process::Command::new(&whitespace_command[0])
+        .args(&whitespace_command[1..])
+        .output()
+        .expect("run whitespace-only constructed command");
+
+    assert_eq!(whitespace_script, whitespace_only);
+    assert!(whitespace_output.status.success());
+    assert!(whitespace_output.stdout.is_empty());
+
+    let source = " \n\t\nprintf '%s' 'first line\nsecond line'\n";
+    let script = read_runner_exec_script_from_reader(source.as_bytes(), "stdin")
+        .expect("non-empty stdin script");
+    let command = prepare_runner_exec_command(Some(&script), Vec::new()).expect("script command");
+    let output = std::process::Command::new(&command[0])
+        .args(&command[1..])
+        .output()
+        .expect("run constructed command");
+
+    assert_eq!(script, source);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"first line\nsecond line");
+}
+
+#[test]
 fn script_file_prepares_bash_stdin_command() {
     let command = prepare_runner_exec_command(Some(&"echo '$GREETING'".to_string()), Vec::new())
         .expect("script command");
@@ -337,6 +390,20 @@ fn script_file_rejects_extra_argv() {
     assert!(err
         .to_string()
         .contains("either --script-file or a command"));
+}
+
+#[test]
+fn script_stdin_and_command_are_rejected_before_stdin_can_be_read() {
+    let command = vec!["printf".to_string(), "unexpected".to_string()];
+
+    let err = validate_runner_exec_invocation_shape(Some("-"), &command)
+        .expect_err("the invalid shape must be rejected before opening stdin");
+
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert_eq!(err.details["field"], "command");
+    assert!(err
+        .to_string()
+        .contains("either --script-file or a command argv"));
 }
 
 #[test]
