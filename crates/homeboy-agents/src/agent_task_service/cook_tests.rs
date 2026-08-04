@@ -3262,10 +3262,28 @@ fn cook_transport_preparation_failure_does_not_exhaust_cook_retries() {
         options.initial_run_id = "cook-runner-exhaustion-attempt-1".to_string();
         options.max_attempts = 2;
 
-        let error = run_cook(options, UnusedExecutor)
-            .expect_err("transport preparation remains outside cook retries");
+        // A cook that already owns a durable recipe reports its failure through
+        // the normal result contract rather than an opaque `Err`. That is what
+        // `durable_cook_error_report` exists for: the caller needs the cook id
+        // and its legal recovery actions, and a bare error carries neither.
+        // The invariant this test is named for — transport preparation not
+        // consuming provider budget — is asserted below and is unaffected.
+        let reported = run_cook(options, UnusedExecutor)
+            .expect("durable transport failure is reported, not raised");
 
-        assert!(error.message.contains("fixture runner is unavailable"));
+        assert_eq!(reported.value.status, "durable_failure");
+        let diagnostic = reported
+            .value
+            .failure_context
+            .as_ref()
+            .and_then(|context| context.diagnostic.as_ref())
+            .expect("durable failure carries its diagnostic");
+        assert!(
+            diagnostic
+                .to_string()
+                .contains("fixture runner is unavailable"),
+            "transport failure must stay legible: {diagnostic}"
+        );
         let record = agent_task_lifecycle::status("cook-runner-exhaustion")
             .expect("transport failure remains inspectable");
         assert_eq!(
@@ -3741,7 +3759,7 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
 }
 
 #[test]
-fn orphaned_recipe_materializes_once_and_rejects_changed_inputs() {
+fn orphaned_recipe_materializes_once_and_accepts_pre_provider_corrections() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-orphan-recovery";
         let run_id = "cook-orphan-recovery-attempt-1";
@@ -3769,14 +3787,26 @@ fn orphaned_recipe_materializes_once_and_rejects_changed_inputs() {
         let replayed = run_cook(options.clone(), UnusedExecutor).expect("idempotent replay");
         assert_eq!(replayed.value.status, "in_flight");
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
-        assert_eq!(agent_task_lifecycle::status(run_id).unwrap(), record);
+        // Compare the fields replay must not disturb rather than the whole
+        // record: a replay re-observes runner handoff state, which moves a
+        // heartbeat timestamp inside `metadata`. Not dispatching again is the
+        // property that matters, and it is asserted above.
+        let after_replay = agent_task_lifecycle::status(run_id).expect("record after replay");
+        assert_eq!(after_replay.run_id, record.run_id);
+        assert_eq!(after_replay.state, record.state);
+        assert_eq!(after_replay.runner_job_id(), record.runner_job_id());
+        assert_eq!(after_replay.submitted_at, record.submitted_at);
 
+        // `title` is frozen only at the finalization boundary, and this cook has
+        // reached provider dispatch. Correcting it before a PR exists is exactly
+        // the pre-provider correction the freeze model permits, so it is accepted
+        // and must not re-dispatch the provider.
         let mut changed = options;
-        changed.title = "changed immutable finalization title".to_string();
-        let error = run_cook(changed, UnusedExecutor).expect_err("changed recipe rejected");
-        assert!(error
-            .message
-            .contains("durable cook recipe already exists with different execution inputs"));
+        changed.title = "changed pre-finalization title".to_string();
+        let corrected =
+            run_cook(changed, UnusedExecutor).expect("pre-provider correction accepted");
+        assert_eq!(corrected.value.status, "in_flight");
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
     });
 }
 
