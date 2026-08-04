@@ -82,15 +82,44 @@ pub enum PlacementReadinessInvocation {
 /// it again against its fresh runner snapshot before reserving daemon capacity.
 #[derive(Debug, Clone)]
 pub struct LabAdmissionPlan {
-    pub request: PlacementReadinessRequest,
     pub capability: super::PreparedLabRunnerCapability,
     pub toolchain: Option<super::RunnerCapabilityPreflight>,
 }
 
-pub fn compile_lab_admission_plan(request: PlacementReadinessRequest) -> Result<LabAdmissionPlan> {
+/// Compile every runner admission requirement from the trusted routed command.
+/// Both execution and public preflight use this boundary so neither can omit a
+/// command-prefix tool, extension probe, or opaque capability.
+pub fn compile_lab_admission_plan(
+    command: &LabOffloadCommand,
+    source_path: &std::path::Path,
+    command_prefix_required_tools: &[super::RunnerRequiredTool],
+) -> Result<LabAdmissionPlan> {
+    let capability = crate::lab_capabilities::lab_runner_capability_contract(
+        command,
+        source_path,
+        command_prefix_required_tools,
+    )
+    .map(super::prepare_lab_runner_capability)
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "invocation",
+            "placement invocation must compile to a portable Lab command",
+            None,
+            None,
+        )
+    })?;
+    Ok(LabAdmissionPlan {
+        toolchain: crate::lab_capabilities::toolchain_readiness_preflight(command)?,
+        capability,
+    })
+}
+
+fn compile_placement_readiness_plan(
+    request: &PlacementReadinessRequest,
+) -> Result<LabAdmissionPlan> {
     let (
         _workload_family,
-        command,
+        hot_label,
         provider,
         source_path_inputs,
         required_capabilities,
@@ -101,7 +130,7 @@ pub fn compile_lab_admission_plan(request: PlacementReadinessRequest) -> Result<
             source_path,
         } => (
             "agent-task".to_string(),
-            "agent-task cook".to_string(),
+            "agent-task cook",
             Some(provider.clone()),
             vec![source_path.clone()],
             vec!["extension_parity".to_string()],
@@ -112,7 +141,7 @@ pub fn compile_lab_admission_plan(request: PlacementReadinessRequest) -> Result<
             capability_id,
         } => (
             "audit".to_string(),
-            "audit capability".to_string(),
+            "audit capability",
             None,
             vec![source_path.clone()],
             vec![capability_id.clone()],
@@ -131,20 +160,24 @@ pub fn compile_lab_admission_plan(request: PlacementReadinessRequest) -> Result<
             None,
         ));
     }
-    let toolchain = crate::lab_capabilities::toolchain_readiness_preflight_for_extensions(
+    let command = homeboy_core::lab_routing::lab_offload_command_from_contract(
+        homeboy_core::lab_contract::LabCommandContract::portable(
+            hot_label,
+            None,
+            !extensions.is_empty(),
+            &[],
+        )
+        .with_extra_required_capabilities(required_capabilities),
+        extensions,
+    );
+    let source_path = source_path_inputs
+        .first()
+        .expect("validated invocation has one source path");
+    compile_lab_admission_plan(
         &command,
-        &extensions,
-    )?;
-    let capability = super::prepare_lab_runner_capability(super::LabRunnerCapabilityContract {
-        command: "runner preflight",
-        required_tools: Vec::new(),
-        required_capabilities,
-    });
-    Ok(LabAdmissionPlan {
-        request,
-        capability,
-        toolchain,
-    })
+        std::path::Path::new(source_path),
+        &[super::RunnerRequiredTool::homeboy()],
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -193,7 +226,7 @@ pub struct PlacementReadiness {
 pub fn placement_readiness(request: &PlacementReadinessRequest) -> Result<PlacementReadiness> {
     let runner = load(&request.runner_id)?;
     let status = status(&request.runner_id)?;
-    let plan = compile_lab_admission_plan(request.clone())?;
+    let plan = compile_placement_readiness_plan(request)?;
     if let Some(toolchain) = plan.toolchain.as_ref() {
         // This probe only observes runner toolchain state; unlike execution it
         // neither creates a workspace nor reserves daemon admission.
@@ -205,7 +238,7 @@ pub fn placement_readiness(request: &PlacementReadinessRequest) -> Result<Placem
         super::LabRunnerGateMode::Explicit,
     )?;
     Ok(placement_readiness_from_status(
-        &plan.request,
+        request,
         &status,
         runner.settings.concurrency_limit,
         status_tunnel_mode(&status),
@@ -1625,8 +1658,8 @@ mod placement_readiness_tests {
 
     #[test]
     fn repeated_typed_invocations_compile_the_same_capability_plan() {
-        let preflight = compile_lab_admission_plan(request()).expect("compile preflight");
-        let execution = compile_lab_admission_plan(request()).expect("compile execution");
+        let preflight = compile_placement_readiness_plan(&request()).expect("compile preflight");
+        let execution = compile_placement_readiness_plan(&request()).expect("compile execution");
         assert_eq!(preflight.capability, execution.capability);
         assert_eq!(preflight.toolchain, execution.toolchain);
         assert_eq!(
@@ -1636,10 +1669,63 @@ mod placement_readiness_tests {
     }
 
     #[test]
+    fn routed_preflight_and_execution_share_command_prefix_tool_requirements() {
+        let routed = homeboy_core::lab_routing::lab_offload_command_from_contract(
+            homeboy_core::lab_contract::LabCommandContract::portable(
+                "audit capability",
+                None,
+                false,
+                &[],
+            )
+            .with_extra_required_capabilities(vec!["capability.alpha".to_string()]),
+            Vec::new(),
+        );
+        let execution = compile_lab_admission_plan(
+            &routed,
+            std::path::Path::new("/workspace/source"),
+            &[super::super::RunnerRequiredTool::homeboy()],
+        )
+        .expect("compile execution admission");
+        let preflight = compile_placement_readiness_plan(&request()).expect("compile preflight");
+
+        assert_eq!(preflight.capability, execution.capability);
+        assert!(preflight
+            .capability
+            .required_tools
+            .contains(&super::super::RunnerRequiredTool::homeboy()));
+    }
+
+    #[test]
+    fn routed_preflight_and_execution_share_opaque_capability_requirements() {
+        let routed = homeboy_core::lab_routing::lab_offload_command_from_contract(
+            homeboy_core::lab_contract::LabCommandContract::portable(
+                "audit capability",
+                None,
+                false,
+                &[],
+            )
+            .with_extra_required_capabilities(vec!["capability.alpha".to_string()]),
+            Vec::new(),
+        );
+        let execution = compile_lab_admission_plan(
+            &routed,
+            std::path::Path::new("/workspace/source"),
+            &[super::super::RunnerRequiredTool::homeboy()],
+        )
+        .expect("compile execution admission");
+        let preflight = compile_placement_readiness_plan(&request()).expect("compile preflight");
+
+        assert_eq!(preflight.capability, execution.capability);
+        assert_eq!(
+            preflight.capability.required_capabilities,
+            vec!["capability.alpha".to_string()]
+        );
+    }
+
+    #[test]
     fn public_json_cannot_supply_probe_commands_or_capabilities() {
         let request = request();
-        let plan = compile_lab_admission_plan(request.clone()).expect("compile safe request");
-        let encoded = serde_json::to_value(&plan.request).expect("encode compiled request");
+        let encoded = serde_json::to_value(&request).expect("encode compiled request");
         let decoded: PlacementReadinessRequest =
             serde_json::from_value(encoded.clone()).expect("decode complete request");
         assert!(matches!(
@@ -1661,7 +1747,7 @@ mod placement_readiness_tests {
             provider: " ".to_string(),
             source_path: " ".to_string(),
         };
-        assert!(compile_lab_admission_plan(request).is_err());
+        assert!(compile_placement_readiness_plan(&request).is_err());
     }
 
     #[test]
