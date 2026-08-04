@@ -33,10 +33,19 @@ const optionsPath = path.join(directory, 'options.json');
 const recipePath = path.join(directory, 'recipe.json');
 const artifacts = process.env.HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR || path.join(directory, 'artifacts');
 const runArtifacts = path.join(artifacts, `wp-codebox-phpunit.${process.pid}`);
-const dependencies = await Promise.all((await dependencyPaths(settings, [componentPath, pluginSourceDirectory])).map(async (source) => {
+// Validation dependencies are external checkouts nobody built, so the recipe
+// declares that they may need Composer preparation. It does not decide whether
+// they do: WP Codebox owns the detection (no composer.json, or an existing
+// vendor/autoload.php, are both no-ops) and owns running composer. This runner
+// never inspects a dependency's vendor state and never shells out to composer.
+//
+// The component under review is deliberately absent from this: its vendor/ is
+// produced by the declared dependency-materialization phase before the runner
+// is ever invoked.
+const dependencies = (await dependencyPaths(settings, [componentPath, pluginSourceDirectory])).map((source) => {
   const dependencySlug = path.basename(source).replace(/@[^/]+$/, '');
-  return { source, slug: dependencySlug, sandboxDirectory: sandboxPluginDirectory(dependencySlug), composer: await composerPreparation(source) };
-}));
+  return { source, slug: dependencySlug, sandboxDirectory: sandboxPluginDirectory(dependencySlug), composer: 'install' };
+});
 const selectedTestFile = (process.env.HOMEBOY_WORDPRESS_PHPUNIT_TEST_FILE || '').trim();
 const changedTestFiles = phpunitChangedTestFiles();
 // Validation dependencies activate before the plugin under review so the
@@ -276,19 +285,6 @@ async function dependencyPaths(configuration, primarySources) {
   return resolved
     .filter(({ canonicalSource }) => !primary.has(canonicalSource) && !seen.has(canonicalSource) && Boolean(seen.add(canonicalSource)))
     .map(({ source }) => source);
-}
-async function composerPreparation(source) {
-  try {
-    await access(path.join(source, 'composer.json'));
-  } catch {
-    return undefined;
-  }
-  try {
-    await access(path.join(source, 'vendor/autoload.php'));
-    return undefined;
-  } catch {
-    return 'install';
-  }
 }
 function sandboxPluginDirectory(pluginSlug) {
   return `/wordpress/wp-content/plugins/${pluginSlug}`;
@@ -830,6 +826,15 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
     await writeFile(managedRuntimeServicesPath, `${JSON.stringify(managedRuntimeServices, null, 2)}\n`);
   }
 
+  // A failed bootstrap stage means PHPUnit never got to run. Trust that over an
+  // optimistic structured sidecar: reporting a pass because the sidecar claims
+  // one is exactly how a red run shows up green.
+  const stageLog = await readPhpunitStageLog(artifactDirectory);
+  const stageFailure = (stageLog || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => /^(STAGE_FAIL|STAGE_FATAL|STAGE_DIE):/.test(line)) || '';
+
   const aggregate = phpunitAggregate(output);
   let results;
   try { results = json(await readFile(testResultsPath, 'utf8'), null); } catch { results = null; }
@@ -842,7 +847,7 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
     if (aggregate) {
       results.summary = { ...summary, ...aggregate };
     }
-    results.status = normalizedTestStatus(results, aggregate, execution.status, validResults);
+    results.status = stageFailure ? 'failed' : normalizedTestStatus(results, aggregate, execution.status, validResults);
     const references = Array.isArray(results.rawLogReferences) ? results.rawLogReferences : [];
     results.rawLogReferences = [
       ...references.filter((reference) => reference?.path !== 'files/phpunit-output.log'),
@@ -862,12 +867,15 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
     await writeFile(testResultsPath, `${JSON.stringify(results, null, 2)}\n`);
   }
 
-  const diagnosis = await phpunitExecutionDiagnosis(artifactDirectory, results, execution);
+  const diagnosis = await phpunitExecutionDiagnosis(artifactDirectory, results, execution, stageLog);
   await writeFile(path.join(filesDirectory, 'phpunit-execution-diagnosis.json'), `${JSON.stringify(diagnosis, null, 2)}\n`);
 
   process.stdout.write('Structured PHPUnit evidence: artifact://files/test-results.json\n');
   process.stdout.write('Full PHPUnit output: artifact://files/phpunit-output.log\n');
   process.stdout.write('PHPUnit execution diagnosis: artifact://files/phpunit-execution-diagnosis.json\n');
+  if (stageFailure) {
+    process.stdout.write(`BOOTSTRAP FAILURE: ${stageFailure.replace(/^STAGE_(FAIL|FATAL|DIE):/, '')}\n`);
+  }
   if (diagnosis.executed_tests === 0) {
     process.stdout.write(`PHPUNIT_ZERO_TESTS cause=${diagnosis.cause}\n`);
     process.stdout.write(`  ${diagnosis.detail}\n`);
@@ -881,10 +889,9 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
 // A selected test set must either execute or say why it did not. The sandbox
 // bootstrap logs stage markers to a diagnostic file; classify them so a zero
 // count names the failing seam instead of reporting an empty pass.
-async function phpunitExecutionDiagnosis(artifactDirectory, results, execution) {
+async function phpunitExecutionDiagnosis(artifactDirectory, results, execution, stageLog) {
   const summary = isObject(results?.summary) ? results.summary : {};
   const executed = Number.isInteger(summary.total) ? summary.total : 0;
-  const stageLog = await readPhpunitStageLog(artifactDirectory);
   const markers = stageLog === null
     ? []
     : stageLog.split('\n').filter((line) => /^(STAGE_FAIL|STAGE_FATAL|STAGE_DIE|NO_TEST_FILES|DISCOVERY:|SCOPED_TEST_FILES|PLUGIN_DETECTED|THEME_DETECTED|PLUGIN_ACTIVATE|NOTICE:no plugin entry file)/.test(line.trim()));
@@ -904,6 +911,22 @@ async function phpunitExecutionDiagnosis(artifactDirectory, results, execution) 
   };
 
   const classification = (() => {
+    if (has(/^STAGE_FAIL:activation/)) {
+      return {
+        cause: 'activation_failed',
+        detail: 'Plugin activation raised a throwable before PHPUnit discovery.',
+        remediation: 'Read the STAGE_FAIL:activation trace in the stage log; a validation dependency may be missing from validation_dependencies.',
+      };
+    }
+    if (has(/^(STAGE_FAIL|STAGE_FATAL|STAGE_DIE)/)) {
+      const marker = markers.find((line) => /^(STAGE_FAIL|STAGE_FATAL|STAGE_DIE)/.test(line)) || '';
+      const stage = marker.split(':')[1] || 'unknown';
+      return {
+        cause: 'bootstrap_failed',
+        detail: `The sandbox bootstrap failed at stage '${stage}': ${marker}`,
+        remediation: 'Read the failing stage trace in the stage log excerpt below and in artifact://files/phpunit-output.log.',
+      };
+    }
     if (executed > 0) {
       return { cause: 'tests_executed', detail: `PHPUnit executed ${executed} test(s).`, remediation: 'No execution diagnosis is required.' };
     }
@@ -919,21 +942,6 @@ async function phpunitExecutionDiagnosis(artifactDirectory, results, execution) 
         cause: 'target_component_not_mounted',
         detail: `The sandbox never loaded an entry file for the component under review (${slug}); its mount or plugin header is missing.`,
         remediation: 'Confirm wp_codebox_source_root/wp_codebox_source_subpath resolve to a directory containing the plugin entry file.',
-      };
-    }
-    if (has(/^STAGE_FAIL:activation/)) {
-      return {
-        cause: 'activation_failed',
-        detail: 'Plugin activation raised a throwable before PHPUnit discovery.',
-        remediation: 'Read the STAGE_FAIL:activation trace in the stage log; a validation dependency may be missing from validation_dependencies.',
-      };
-    }
-    if (has(/^(STAGE_FAIL|STAGE_FATAL|STAGE_DIE)/)) {
-      const stage = (markers.find((line) => /^(STAGE_FAIL|STAGE_FATAL|STAGE_DIE)/.test(line)) || '').split(':')[1] || 'unknown';
-      return {
-        cause: 'bootstrap_failed',
-        detail: `The sandbox bootstrap failed at stage '${stage}' before any test executed.`,
-        remediation: 'Read the failing stage trace in the stage log excerpt below and in artifact://files/phpunit-output.log.',
       };
     }
     if (scoped && Number(scoped[1]) > 0 && Number(scoped[2]) === 0) {

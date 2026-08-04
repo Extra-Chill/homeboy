@@ -208,7 +208,11 @@ try {
   }, 'recipe build receives administrative names without host values');
   assert.equal(options.databaseType, 'mysql');
   assert.equal(options.multisite, true, 'external MySQL remains compatible with multisite PHPUnit');
-  assert.equal(options.extra_plugins[0].composer, 'install', 'source-form validation dependencies explicitly request staged Composer preparation');
+  // The recipe declares that a validation dependency may need Composer
+  // preparation; WP Codebox owns detecting whether it does and running it. This
+  // runner never inspects vendor state, so the declaration is unconditional.
+  assert.equal(options.extra_plugins[0].composer, 'install', 'validation dependencies declare Composer preparation for the substrate to own');
+  assert.equal('composer' in options.extra_plugins.at(-1), false, 'the component under review carries no Composer preparation instruction');
   assert.equal('secretEnv' in options, false, 'administrative credentials are not forwarded into the sandbox runtime');
   assert.deepEqual(options.services, [{
     id: 'wordpress-database',

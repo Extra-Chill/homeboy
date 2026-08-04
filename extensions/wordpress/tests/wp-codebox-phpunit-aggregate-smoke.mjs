@@ -185,7 +185,7 @@ printf '%s\\n' '${JSON.stringify({ data: { entity: { local_path: conflictingData
   const metadataOptions = JSON.parse(await readFile(path.join(metadataRunArtifact, 'wp-codebox-phpunit-recipe-options.json'), 'utf8'));
   const metadataProvenance = JSON.parse(await readFile(path.join(metadataRunArtifact, 'wp-codebox-phpunit-provenance.json'), 'utf8'));
   assert.deepEqual(metadataOptions.extra_plugins, [
-    { source: dataMachine, slug: 'data-machine', activate: true },
+    { source: dataMachine, slug: 'data-machine', activate: true, composer: 'install' },
     { source: component, slug: 'component', activate: true },
   ]);
   assert.deepEqual(metadataProvenance.source_refs.slice(1), [{ slug: 'data-machine', source: dataMachine }]);

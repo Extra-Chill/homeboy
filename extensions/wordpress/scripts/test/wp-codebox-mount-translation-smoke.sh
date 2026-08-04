@@ -16,6 +16,7 @@ ARTIFACTS_DIR="${TMPDIR}/artifacts"
 WRITABLE_DIR="${TMPDIR}/writable"
 STUBS_DIR="${TMPDIR}/stubs"
 COMPOSER_LOG="${TMPDIR}/composer.log"
+: > "$COMPOSER_LOG"
 RESOLVE_CONTEXT_HELPER="${TMPDIR}/resolve-context-helper.sh"
 WRITE_RESULTS_HELPER="${TMPDIR}/write-test-results-helper.sh"
 RESULTS_FILE="${TMPDIR}/parsed-results.json"
@@ -78,7 +79,7 @@ if (args[0] === 'recipe' && args[1] === 'build' && args[2] === 'phpunit') {
   const recipe = {
     schema: 'wp-codebox/workspace-recipe/v1',
     runtime: { wp: options.wordpressVersion, blueprint: { steps: [] } },
-    inputs: { mounts: options.mounts || [] },
+    inputs: { mounts: options.mounts || [], extra_plugins: options.extra_plugins || [] },
     workflow: {
       steps: [{
         command: 'wordpress.phpunit',
@@ -90,7 +91,6 @@ if (args[0] === 'recipe' && args[1] === 'build' && args[2] === 'phpunit') {
           `env-json=${JSON.stringify(options.env || {})}`,
           `wp-config-defines-json=${JSON.stringify(options.wpConfigDefines || {})}`,
           `autoload-file=${options.autoloadFile}`,
-          `tests-dir=${options.testsDir}`,
           `dependency-mounts=${(options.dependencyMounts || []).filter(Boolean).join(',')}`,
           `multisite=${options.multisite ? '1' : '0'}`,
         ],
@@ -138,14 +138,13 @@ if (step?.command !== 'wordpress.phpunit') {
 const mounts = recipe.inputs?.mounts || []
 for (const expected of [
   'plugin-slug=example',
-  'test-file=OnlyTest.php',
+  'test-file=tests/OnlyTest.php',
   'changed-tests-json=["tests/OnlyTest.php"]',
-  'phpunit-args-json=["--filter","OnlyTest"]',
-  'env-json={}',
+  'phpunit-args-json=["tests/OnlyTest.php","--filter","OnlyTest"]',
+  'env-json={"HOMEBOY_FLAG":"yes"}',
   'wp-config-defines-json={"WP_DEBUG":true,"CUSTOM_NUMBER":7}',
   'autoload-file=/wp-codebox-vendor/autoload.php',
-  'tests-dir=/wp-codebox-vendor/wp-phpunit/wp-phpunit',
-  'dependency-mounts=/wordpress/wp-content/plugins/dep-plugin',
+  'dependency-mounts=/wordpress/wp-content/plugins/example,/wordpress/wp-content/plugins/dep-plugin',
   'multisite=1',
 ]) {
   if (!(step.args || []).includes(expected)) {
@@ -162,14 +161,20 @@ for (const mount of requiredMounts) {
   }
 }
 
-const componentMountSuffix = ':/wordpress/wp-content/plugins/example:readonly'
-const componentMount = mountStrings.find((mount) => mount.endsWith(componentMountSuffix))
-if (!componentMount) {
-  throw new Error('component mount missing')
+const pluginSources = (recipe.inputs?.extra_plugins || []).map((plugin) => plugin.source)
+const requiredPluginSources = JSON.parse(process.env.REQUIRED_PLUGIN_SOURCES_JSON)
+if (JSON.stringify(pluginSources) !== JSON.stringify(requiredPluginSources)) {
+  throw new Error(`unexpected recipe plugin sources:\nexpected:\n${requiredPluginSources.join('\n')}\nactual:\n${pluginSources.join('\n')}`)
 }
-const componentPath = componentMount.slice(0, -componentMountSuffix.length)
-if (!fs.existsSync(path.join(componentPath, 'vendor/autoload.php'))) {
-  throw new Error(`component Composer autoload was not prepared before mount: ${componentPath}`)
+// The recipe may declare that a validation dependency needs Composer
+// preparation, but the component under review never carries that instruction:
+// its vendor/ comes from the declared dependency-materialization phase.
+const target = (recipe.inputs?.extra_plugins || []).at(-1)
+if (target?.composer !== undefined) {
+  throw new Error(`component under review must not carry a Composer preparation instruction: ${JSON.stringify(target)}`)
+}
+if ((recipe.inputs?.extra_plugins || []).slice(0, -1).some((plugin) => plugin.composer !== 'install')) {
+  throw new Error('validation dependencies must declare Composer preparation for the substrate to own')
 }
 
 const artifactRoot = argValue('--artifacts') || path.join(path.dirname(process.env.FAKE_WP_CODEBOX_ARGS_FILE), 'artifacts')
@@ -227,24 +232,24 @@ SETTINGS_JSON=$(jq -nc \
         bench_env: $benchEnv,
         wp_codebox_phpunit_mounts: [
             {source: $writable, target: "/tmp/writable-workspace", mode: "readwrite"}
-        ],
-        wp_codebox_file_mounts: [
-            {from: "config/component-extra.php", to: "/wordpress/wp-content/component-extra.php"},
-            {from_dependency: "dep-plugin", from: "fixtures/dep-extra.php", to: "/wordpress/wp-content/dep-extra.php"}
         ]
     }')
 
 REQUIRED_MOUNTS_JSON=$(jq -nc \
-    --arg component "${PLUGIN_PATH}:/wordpress/wp-content/plugins/example:readonly" \
-    --arg dep "${REMOTE_DEP_PATH}:/wordpress/wp-content/plugins/dep-plugin:readonly" \
-    --arg dropin "${PLUGIN_PATH}/db.php:/wordpress/wp-content/db.php:readonly" \
-    --arg componentExtra "${PLUGIN_PATH}/config/component-extra.php:/wordpress/wp-content/component-extra.php:readonly" \
-    --arg depExtra "${REMOTE_DEP_PATH}/fixtures/dep-extra.php:/wordpress/wp-content/dep-extra.php:readonly" \
     --arg writableWorkspace "${WRITABLE_DIR}:/tmp/writable-workspace" \
     --arg vendor "${EXTENSION_PATH}/vendor:/wp-codebox-vendor:readonly" \
-    --arg extension "${EXTENSION_PATH}:/homeboy-extension:readonly" \
-    '[$component, $dep, $dropin, $componentExtra, $depExtra, $writableWorkspace, $vendor, $extension]')
+    '[$writableWorkspace, $vendor]')
 export REQUIRED_MOUNTS_JSON
+
+# Declared settings mounts and the PHPUnit harness are what this runner still
+# translates. The component and its dependencies are carried as extra_plugins,
+# and Lab offload must have rewritten the dependency's local workspace path to
+# its remote path before the recipe is built.
+REQUIRED_PLUGIN_SOURCES_JSON=$(jq -nc \
+    --arg component "$PLUGIN_PATH" \
+    --arg dep "$REMOTE_DEP_PATH" \
+    '[$dep, $component]')
+export REQUIRED_PLUGIN_SOURCES_JSON
 
 LAB_OFFLOAD_JSON=$(jq -nc \
     --arg depLocal "$DEP_PATH" \
@@ -261,6 +266,7 @@ run_runner() {
         HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
         HOMEBOY_COMPONENT_PATH="$PLUGIN_PATH" \
         HOMEBOY_COMPONENT_ID="example" \
+        COMPONENT_ID="example" \
         HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
         HOMEBOY_RUNTIME_RUNNER_STEPS="${TMPDIR}/missing-runner-steps.sh" \
         HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WRITE_RESULTS_HELPER" \
@@ -270,6 +276,7 @@ run_runner() {
         HOMEBOY_LAB_OFFLOAD_JSON="$LAB_OFFLOAD_JSON" \
         HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
         HOMEBOY_CHANGED_TEST_FILES="tests/OnlyTest.php" \
+        HOMEBOY_WORDPRESS_PHPUNIT_TEST_FILE="tests/OnlyTest.php" \
         HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR="$ARTIFACTS_DIR" \
         bash "$RUNNER" tests/OnlyTest.php --filter OnlyTest
 }
@@ -295,8 +302,11 @@ if [ ! -f "$FAILURES_FILE" ] || grep -q 'stale-caller-sidecar' "$FAILURES_FILE";
     exit 1
 fi
 
-if ! grep -q -- 'install --no-dev --no-interaction --no-progress --prefer-dist' "$COMPOSER_LOG"; then
-    echo "Expected WP Codebox runner to prepare missing component Composer autoload" >&2
+# The runner must not perform dependency materialization. WP Codebox prepares
+# Composer autoload for every recipe plugin itself, so a `composer` invocation
+# from this runner is a layering regression.
+if [ -s "$COMPOSER_LOG" ]; then
+    echo "WP Codebox runner must not invoke composer; dependency materialization is not its concern" >&2
     cat "$COMPOSER_LOG" >&2 || true
     exit 1
 fi
@@ -332,55 +342,10 @@ if [ -e "${PLUGIN_PATH}/.pg-test-result.txt" ]; then
     exit 1
 fi
 
-mkdir -p "${ARTIFACTS_DIR}/files/phpunit"
-printf 'NO_TEST_FILES\n' > "${ARTIFACTS_DIR}/files/phpunit/.pg-test-result.txt"
-printf '{"schema":"stale-caller-sidecar"}\n' > "${ARTIFACTS_DIR}/files/test-results.json"
-printf '{"source":"stale-caller-sidecar"}\n' > "$RESULTS_FILE"
-printf '{"source":"stale-caller-sidecar"}\n' > "$FAILURES_FILE"
-printf 'fail-before-diagnostic\n' > "${ARTIFACTS_DIR}/runtime-smoke-result-mode"
-set +e
-stale_output=$(run_runner 2>&1)
-stale_status=$?
-set -e
-if [ "$stale_status" -eq 0 ]; then
-    echo "Expected a runtime failure without a current diagnostic to fail the runner" >&2
-    exit 1
-fi
-if [[ "$stale_output" == *"Skipping PHPUnit tests"* ]]; then
-    echo "Runner consumed a stale no-test diagnostic from a previous invocation" >&2
-    echo "$stale_output" >&2
-    exit 1
-fi
-if ! grep -q '^NO_TEST_FILES' "${ARTIFACTS_DIR}/files/phpunit/.pg-test-result.txt"; then
-    echo "Runner must preserve unrelated caller artifacts" >&2
-    exit 1
-fi
-if ! grep -q 'stale-caller-sidecar' "${ARTIFACTS_DIR}/files/test-results.json"; then
-    echo "Runner must not consume or replace stale caller test-result sidecars" >&2
-    exit 1
-fi
-if ! grep -q 'stale-caller-sidecar' "$RESULTS_FILE"; then
-    echo "Runner must not overwrite exported results from stale caller sidecars" >&2
-    exit 1
-fi
-if ! grep -q 'stale-caller-sidecar' "$FAILURES_FILE"; then
-    echo "Runner must not overwrite exported failures from stale caller sidecars" >&2
-    exit 1
-fi
-
-printf 'invalid-pointer\n' > "${ARTIFACTS_DIR}/runtime-smoke-result-mode"
-set +e
-pointer_output=$(run_runner 2>&1)
-pointer_status=$?
-set -e
-if [ "$pointer_status" -eq 0 ]; then
-    echo "Expected malformed runtime artifact pointer to fail the runner" >&2
-    exit 1
-fi
-if [[ "$pointer_output" != *"Invalid runtime directory"* ]]; then
-    echo "Expected actionable malformed runtime pointer diagnostic" >&2
-    echo "$pointer_output" >&2
-    exit 1
-fi
+# Runtime-artifact pointer handling (crashed runtime, malformed pointer, stale
+# caller sidecars) is owned by tests/wp-codebox-phpunit-aggregate-smoke.mjs,
+# which asserts the current contract: preserve and parse the captured aggregate
+# at the stable artifact root rather than report a zero-test run. Those
+# scenarios previously lived here asserting the pre-hardening behaviour.
 
 echo "WP Codebox mount translation smoke passed"

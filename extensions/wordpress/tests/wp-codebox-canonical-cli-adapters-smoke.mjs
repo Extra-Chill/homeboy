@@ -74,7 +74,7 @@ try {
   // excluded from WP Codebox's activation phase and Composer autoloader
   // preloading, which produces a sandbox where nothing can execute.
   assert.deepEqual(options[1].extra_plugins, [
-    { source: dependency, slug: 'db-touching-dependency', activate: true },
+    { source: dependency, slug: 'db-touching-dependency', activate: true, composer: 'install' },
     { source: '/workspace/monorepo', sourceSubpath: 'plugins/canonical-plugin', slug: 'canonical-plugin', activate: true },
   ]);
   assert.deepEqual(options[1].dependencyMounts, [
