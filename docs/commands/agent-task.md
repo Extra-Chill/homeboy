@@ -26,7 +26,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `run <run-id>` | Execute a previously submitted durable run. |
 | `run-next` | Claim and execute the oldest queued durable run. |
 | `submit` | Persist an agent-task plan and return a durable run id without executing it. |
-| `status <run-id>` | Read durable run status. |
+| `status <run-id> [--exact]` | Read durable run status; `--exact` bypasses Cook alias resolution to inspect that concrete lifecycle record. |
 | `list [--limit <n>]` | List durable runs, newest first. |
 | `active [--limit <n>] [--reconcile [--dry-run\|--apply]]` | List queued and running durable runs, newest first, or preview/reconcile the explicit fleet mutation set. |
 | `reconcile <run-id> [--dry-run\|--apply]` | Preview or reconcile one durable run after refreshing its authoritative provider state. |

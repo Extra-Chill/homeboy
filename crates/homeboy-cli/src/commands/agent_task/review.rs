@@ -181,7 +181,7 @@ impl TryFrom<FinalizePrEvidenceArgs> for AgentTaskPrEvidence {
 }
 
 pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
-    let target = super::status::resolve_cook_reader_target(&args.run_id)?;
+    let target = super::status::resolve_cook_reader_target(&args.run_id, false)?;
     let run_id = &target.run_id;
     // Review is an aggregate reader. Its durable controller projection remains
     // useful even when an unrelated runner is unavailable.

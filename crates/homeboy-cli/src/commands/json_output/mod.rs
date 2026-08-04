@@ -339,6 +339,7 @@ mod tests {
         let args = AgentTaskArgs {
             command: AgentTaskCommand::Status(StatusArgs {
                 run_id: "run-1".to_string(),
+                exact: false,
                 bridge: false,
                 since_cursor: None,
                 full: false,
