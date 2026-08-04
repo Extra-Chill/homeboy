@@ -7,7 +7,6 @@ use homeboy::core::{api_jobs::JobStore, paths};
 use homeboy::runner::runners::{self as runner, Runner, RunnerKind, RunnerStatusReport};
 use homeboy_upgrade::self_status::{self, ControllerRuntimeInput, RunnerRuntimeInput};
 use serde_json::Value;
-use std::path::PathBuf;
 
 use crate::commands::utils::args::MutationArgs;
 use crate::commands::{docs, resources, CmdResult};
@@ -31,10 +30,6 @@ pub enum SelfCommand {
     Doctor(SelfDoctorArgs),
     /// Plan or delete orphaned Homeboy runtime temp entries
     CleanupRuntimeTmp(SelfCleanupRuntimeTmpArgs),
-    /// Execute one persisted artifact-postprocess request. This is an internal
-    /// durable worker entrypoint used by the scheduler, not an operator workflow.
-    #[command(hide = true)]
-    PostprocessWorker(PostprocessWorkerArgs),
     /// Display CLI documentation
     Docs(docs::DocsArgs),
 }
@@ -76,12 +71,6 @@ pub struct SelfCleanupRuntimeTmpArgs {
     /// Continue bounded runtime-run inspection from a prior next_cursor.
     #[arg(long)]
     pub cursor: Option<String>,
-}
-
-#[derive(Args)]
-pub struct PostprocessWorkerArgs {
-    #[arg(long, value_name = "PATH")]
-    pub request: PathBuf,
 }
 
 pub fn run(args: SelfArgs) -> CmdResult<Value> {
@@ -180,13 +169,6 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
                 );
             }
             Ok((json, 0))
-        }
-        SelfCommand::PostprocessWorker(args) => {
-            homeboy::agents::agent_task_scheduler::run_postprocess_worker(&args.request)?;
-            Ok((
-                serde_json::json!({ "request": args.request, "completed": true }),
-                0,
-            ))
         }
         SelfCommand::Docs(args) => {
             let (output, exit_code) = docs::run(args)?;
