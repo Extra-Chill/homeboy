@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.33] - 2026-08-04
+
+### Fixed
+- stop the test runner owning Composer preparation
+
 ## [3.34.32] - 2026-08-04
 
 ### Changed
