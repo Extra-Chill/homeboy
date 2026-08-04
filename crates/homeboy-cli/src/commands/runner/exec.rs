@@ -36,6 +36,7 @@ pub(super) fn exec(
     command: Vec<String>,
     extension_env_providers: Vec<String>,
 ) -> CmdResult<RunnerExecOutput> {
+    validate_runner_exec_invocation_shape(script_file.as_deref(), &command)?;
     let script = script_file
         .as_deref()
         .map(read_runner_exec_script)
@@ -384,13 +385,8 @@ pub(super) fn read_bounded(
 }
 
 pub(super) fn read_runner_exec_script(path: &str) -> homeboy::core::Result<String> {
-    let (bytes, capture) = if path == "-" {
-        read_bounded(io::stdin().lock(), RUNNER_EXEC_SCRIPT_LIMIT_BYTES).map_err(|err| {
-            homeboy::core::Error::internal_io(
-                err.to_string(),
-                Some("read runner exec script from stdin".to_string()),
-            )
-        })?
+    if path == "-" {
+        read_runner_exec_script_from_reader(io::stdin().lock(), "stdin")
     } else {
         let file = fs::File::open(path).map_err(|err| {
             homeboy::core::Error::internal_io(
@@ -398,13 +394,20 @@ pub(super) fn read_runner_exec_script(path: &str) -> homeboy::core::Result<Strin
                 Some(format!("read runner exec script {path}")),
             )
         })?;
-        read_bounded(file, RUNNER_EXEC_SCRIPT_LIMIT_BYTES).map_err(|err| {
-            homeboy::core::Error::internal_io(
-                err.to_string(),
-                Some(format!("read runner exec script {path}")),
-            )
-        })?
-    };
+        read_runner_exec_script_from_reader(file, path)
+    }
+}
+
+pub(super) fn read_runner_exec_script_from_reader(
+    reader: impl Read,
+    source: &str,
+) -> homeboy::core::Result<String> {
+    let (bytes, capture) = read_bounded(reader, RUNNER_EXEC_SCRIPT_LIMIT_BYTES).map_err(|err| {
+        homeboy::core::Error::internal_io(
+            err.to_string(),
+            Some(format!("read runner exec script from {source}")),
+        )
+    })?;
 
     if capture.truncated {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -413,7 +416,16 @@ pub(super) fn read_runner_exec_script(path: &str) -> homeboy::core::Result<Strin
                 "runner exec script exceeds the {} byte limit (retained {} of {}+ bytes); refusing to execute a truncated script",
                 capture.limit_bytes, capture.retained_bytes, capture.seen_bytes
             ),
-            Some(path.to_string()),
+            Some(source.to_string()),
+            None,
+        ));
+    }
+
+    if bytes.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "script_file",
+            format!("runner exec script from {source} is empty; provide at least one byte"),
+            Some(source.to_string()),
             None,
         ));
     }
@@ -421,7 +433,7 @@ pub(super) fn read_runner_exec_script(path: &str) -> homeboy::core::Result<Strin
     String::from_utf8(bytes).map_err(|err| {
         homeboy::core::Error::internal_io(
             err.to_string(),
-            Some(format!("decode runner exec script {path}")),
+            Some(format!("decode runner exec script from {source}")),
         )
     })
 }
@@ -430,6 +442,15 @@ pub(super) fn prepare_runner_exec_command(
     script: Option<&String>,
     command: Vec<String>,
 ) -> homeboy::core::Result<Vec<String>> {
+    if script.is_some_and(String::is_empty) {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "script_file",
+            "runner exec script is empty; provide at least one byte",
+            None,
+            None,
+        ));
+    }
+
     match (script.is_some(), command.is_empty()) {
         (true, false) => Err(homeboy::core::Error::validation_invalid_argument(
             "command",
@@ -452,6 +473,30 @@ pub(super) fn prepare_runner_exec_command(
             ),
         ]),
         (false, false) => Ok(command),
+    }
+}
+
+/// Validate only CLI-provided shape before a script source is opened. In
+/// particular, `--script-file -` must not consume or block on stdin for an
+/// invocation that already has a command argv.
+pub(super) fn validate_runner_exec_invocation_shape(
+    script_file: Option<&str>,
+    command: &[String],
+) -> homeboy::core::Result<()> {
+    match (script_file.is_some(), command.is_empty()) {
+        (true, false) => Err(homeboy::core::Error::validation_invalid_argument(
+            "command",
+            "runner exec accepts either --script-file or a command argv, not both",
+            None,
+            None,
+        )),
+        (false, true) => Err(homeboy::core::Error::validation_invalid_argument(
+            "command",
+            "runner exec requires a command after -- or --script-file <path>",
+            None,
+            None,
+        )),
+        _ => Ok(()),
     }
 }
 

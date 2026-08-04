@@ -389,7 +389,7 @@ Execute a command on a configured runner. Use `homeboy runner exec [HOMEBOY_OPTI
 | `--ssh` | flag | Allow diagnostic-only SSH command execution when no daemon session is connected |
 | `--capture-patch` | flag | Capture the file delta produced by the remote command as a patch artifact |
 | `--require-path` | `<REQUIRE_PATHS>` | Runner-side path that must exist before executing the command. Repeat for multiple paths |
-| `--script-file` | `<SCRIPT_FILE>` | Read a shell script from this path and execute it on the runner with bash. Use `-` to read the script from stdin |
+| `--script-file` | `<SCRIPT_FILE>` | Read a shell script from this path and execute it on the runner with bash. Use `-` to read the script from stdin; stdin must contain at least one byte. Whitespace-only scripts are executed verbatim |
 | `--env` | `<ENV>` | Environment variable to inject into the runner process as KEY=VALUE. Repeat for multiple values |
 | `--secret-env` | `<NAME>` | Secret environment variable name to resolve through the runner secret-env contract. Repeat for multiple names |
 | `--secret-env-plan` | `<JSON>` | Secret-env plan JSON to apply to the runner process |

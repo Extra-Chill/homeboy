@@ -3239,6 +3239,7 @@ fi
             secret_env: vec!["AI_PROVIDER_OPENAI_CODEX_TOKEN".to_string()],
             provider_config: Some(r#"{"runtime":"opencode"}"#.to_string()),
             gates: super::super::args::VerifyGateArgs {
+                accept_inherited_failures: false,
                 gate_package_artifacts: Vec::new(),
                 gate_extension_inputs: Vec::new(),
                 verify: vec!["cargo test --lib".to_string()],
