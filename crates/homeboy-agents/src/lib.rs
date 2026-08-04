@@ -43,6 +43,7 @@ pub mod agent_task_loop_controller;
 pub mod agent_task_loop_definition;
 pub mod agent_task_loop_runner_policy;
 mod agent_task_notify;
+mod agent_task_process_containment;
 #[allow(
     dead_code,
     unused_imports,
