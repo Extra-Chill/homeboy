@@ -6639,7 +6639,7 @@ fn adopted_baseline_gate_outcome_is_candidate_bound_and_recovery_safe() {
 }
 
 #[test]
-fn normal_cook_finalizes_an_inherited_gate_failure_without_provider_retry() {
+fn closed_observer_pipe_does_not_stop_promotion_or_finalization() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("repository");
         let root = temp.path();
@@ -6713,10 +6713,22 @@ fn normal_cook_finalizes_an_inherited_gate_failure_without_provider_retry() {
         let finalization_count = Arc::clone(&finalized);
         let expected_base = base.clone();
         let expected_run_id = run_id.clone();
-        let result = run_cook_with_finalizer(
+        let observer_calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&observer_calls);
+        let observer = move |phase: &str, _: &str, _: &str| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            if phase == "promotion" {
+                return Err(Error::internal_io(
+                    "Broken pipe (os error 32)",
+                    Some("write submitting client stdout".to_string()),
+                ));
+            }
+            Ok(())
+        };
+        let result = run_cook_with_boundaries_observed(
             options,
             UnusedExecutor,
-            move |_, received_run, promotion| {
+            DefaultCookSideEffects::new(move |_, received_run, promotion| {
                 finalization_count.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(received_run, expected_run_id);
                 assert_eq!(promotion.verified_base.as_ref().unwrap().sha, expected_base);
@@ -6729,13 +6741,28 @@ fn normal_cook_finalizes_an_inherited_gate_failure_without_provider_retry() {
                     crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed
                 );
                 Ok(serde_json::json!({"status": "review_ready"}))
-            },
+            }),
+            Some(&observer),
         )
         .unwrap();
         assert_eq!(result.value.status, "review_ready", "{:#?}", result.value);
         assert_eq!(finalized.load(Ordering::SeqCst), 1);
+        assert!(observer_calls.load(Ordering::SeqCst) >= 1);
         let record = agent_task_lifecycle::status(&run_id).unwrap();
         assert_eq!(record.metadata["provider_executions_consumed"], 1);
+        assert_eq!(
+            record.metadata["cook_observer_events"][0]["kind"],
+            "delivery_failed"
+        );
+        assert_eq!(
+            record.metadata["cook_observer_events"][0]["phase"],
+            "promotion"
+        );
+        assert_eq!(
+            record.metadata["cook_progress"]["terminal_success"],
+            serde_json::json!(true),
+            "the disconnected observer can reconnect to the terminal durable result"
+        );
         let persisted = persisted_promotion_for_attempt(&run_id).unwrap().unwrap();
         assert_eq!(persisted.status, AgentTaskPromotionStatus::Applied);
         assert_eq!(persisted.deterministic_gates[0].exit_code, 1);

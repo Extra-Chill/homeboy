@@ -264,7 +264,16 @@ fn report_cook_progress(
 ) -> Result<()> {
     agent_task_lifecycle::record_cook_progress(run_id, phase, attempt, detail)?;
     if let Some(observer) = observer {
-        observer(phase, cook_id, run_id)?;
+        if let Err(error) = observer(phase, cook_id, run_id) {
+            // The observer is the submitting client's output channel. Once the
+            // progress record exists, a broken client pipe is evidence about
+            // observation, never authority to stop promotion or finalization.
+            let _ = agent_task_lifecycle::record_cook_observer_event(
+                run_id,
+                phase,
+                bounded_error_diagnostic(&error),
+            );
+        }
     }
     Ok(())
 }
