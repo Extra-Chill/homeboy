@@ -648,7 +648,8 @@ pub struct RunnerAdmissionSummary {
     /// Whether the runner can admit a new workload now: connected, fresh, and
     /// not otherwise blocked.
     pub accepting_jobs: bool,
-    /// Authoritative count of jobs the selected daemon is currently running.
+    /// Authoritative aggregate count of jobs owned by the selected and draining
+    /// daemon generations. Admission must retain this load through rotation.
     pub active_job_count: usize,
     /// Count of runner jobs whose liveness can no longer be confirmed.
     pub stale_job_count: usize,
@@ -661,7 +662,7 @@ pub struct RunnerAdmissionSummary {
     /// Number of draining generations, summarized rather than expanded.
     pub draining_generation_count: usize,
     /// Whether it is safe to rotate the runner now — true only when no
-    /// authoritative current job is active on the selected daemon.
+    /// authoritative job is owned by the selected or draining generations.
     pub safe_to_rotate: bool,
     /// The single next actionable step, state-sensitive and executable.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -684,9 +685,8 @@ impl RunnerStatusReport {
     ///
     /// `draining_generation_count` is supplied by the caller from the same
     /// generation inventory used for the detail view, so the summary and detail
-    /// derive from one source. Only the authoritative selected-daemon
-    /// `active_job_count` and `safe_to_rotate` include unresolved generation
-    /// ownership when the caller supplies the ledger projection.
+    /// derive from one source. The authoritative aggregate `active_job_count`
+    /// and `safe_to_rotate` retain unresolved generation ownership.
     pub fn admission_summary(&self, draining_generation_count: usize) -> RunnerAdmissionSummary {
         self.admission_summary_with_generations(&[], draining_generation_count)
     }

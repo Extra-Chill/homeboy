@@ -341,7 +341,7 @@ fn placement_readiness_from_status(
         request.runner_id.clone(),
         status.connected,
         status.stale_daemon.is_some(),
-        status.active_jobs.len(),
+        status.active_job_count,
         &status.active_job_state,
         capacity,
     );
@@ -582,7 +582,7 @@ fn preflight_lab_runner_availability_with(
         selection.runner_id.clone(),
         status.connected,
         status.stale_daemon.is_some(),
-        status.active_jobs.len(),
+        status.active_job_count,
         &status.active_job_state,
         load(&selection.runner_id)?.settings.concurrency_limit,
     );
@@ -1920,6 +1920,7 @@ mod placement_readiness_tests {
             }))
             .expect("job"),
         );
+        observed.active_job_count = 1;
         let mut request = request();
         request.allow_queue = true;
         request.durable_workload = true;

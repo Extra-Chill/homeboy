@@ -1243,19 +1243,14 @@ pub(crate) fn run_lab_offload_inner(
         });
     }
 
-    require_available_lab_runner(
-        runner_id,
-        &runner_status,
-        runner.settings.concurrency_limit,
-        contract.hot_label,
-    )?;
-
     // A detached Cook must converge before deriving any provider-preflight
     // input. Refresh can select a new runner executable, so the runner config,
     // daemon session, and every command prefix below must come from a fresh
     // observation rather than the stale pre-convergence snapshot.
     let mut converged_homeboy_path = None;
-    if request.detach_after_handoff && request.durable_agent_task_plan.is_some() {
+    let durable_detached_handoff =
+        request.detach_after_handoff && request.durable_agent_task_plan.is_some();
+    if durable_detached_handoff {
         let converged = crate::lab_staging_controller::converge_lab_handoff_runtime(
             runner_id,
             selection.mode.clone(),
@@ -1264,6 +1259,13 @@ pub(crate) fn run_lab_offload_inner(
         runner = converged.runner;
         runner_status = converged.status;
         converged_homeboy_path = Some(converged.homeboy_path);
+        require_available_lab_runner(
+            runner_id,
+            &runner_status,
+            runner.settings.concurrency_limit,
+            contract.hot_label,
+        )?;
+    } else {
         require_available_lab_runner(
             runner_id,
             &runner_status,
@@ -2390,7 +2392,7 @@ fn require_available_lab_runner(
         runner_id.to_string(),
         runner_status.connected,
         runner_status.stale_daemon.is_some(),
-        runner_status.active_jobs.len(),
+        runner_status.active_job_count,
         &runner_status.active_job_state,
         concurrency_limit,
     );
@@ -2825,6 +2827,32 @@ mod tests {
             "cook"
         )
         .is_err());
+    }
+
+    #[test]
+    fn post_rotation_admission_counts_draining_generation_capacity() {
+        // The replacement daemon is idle after a generation rotation, but the
+        // authoritative aggregate retains work owned by the draining daemon.
+        let mut post_rotation = runner_status(true);
+        post_rotation.active_job_count = 1;
+        assert!(post_rotation.active_jobs.is_empty());
+
+        let blocked = require_available_lab_runner("homeboy-lab", &post_rotation, Some(1), "cook")
+            .expect_err("a full runner must not admit over the draining generation");
+        assert_eq!(
+            blocked.details["runner_availability"]["reasons"],
+            serde_json::json!(["capacity_reached"])
+        );
+
+        require_available_lab_runner("homeboy-lab", &post_rotation, Some(2), "cook")
+            .expect("an explicit higher limit retains capacity after rotation");
+
+        let unknown = require_available_lab_runner("homeboy-lab", &post_rotation, None, "cook")
+            .expect_err("unbounded runners retain capacity_unknown blocking while draining");
+        assert_eq!(
+            unknown.details["runner_availability"]["reasons"],
+            serde_json::json!(["capacity_unknown"])
+        );
     }
 
     #[test]

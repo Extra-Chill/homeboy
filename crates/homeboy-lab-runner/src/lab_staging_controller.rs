@@ -677,7 +677,6 @@ fn handoff_convergence_action(
             enforce_latest_stable: false,
             controller_is_source_build: true,
             allow_convergence: automatic_handoff_convergence_allowed(runner)
-                && status.active_jobs.is_empty()
                 && status.active_job_state == crate::RunnerActiveJobState::Available
                 && status
                     .session
@@ -4802,6 +4801,40 @@ mod tests {
     fn stale_daemon_converges_before_provider_work() {
         let runner = convergence_runner(true);
         let status = convergence_status("homeboy 1.2.2+stale");
+
+        assert!(matches!(
+            handoff_convergence_action(
+                &runner,
+                &status,
+                "homeboy 1.2.3+required",
+                Some("homeboy 1.2.3+required"),
+                Some("homeboy 1.2.2+stale"),
+                "/runner/homeboy",
+            ),
+            HandoffConvergenceAction::Refresh(crate::HomeboyBinaryRefreshMode::Select { .. })
+        ));
+    }
+
+    #[test]
+    fn busy_stale_daemon_rotates_to_a_draining_generation_before_provider_work() {
+        let runner = convergence_runner(true);
+        let mut status = convergence_status("homeboy 1.2.2+stale");
+        status.active_jobs.push(
+            serde_json::from_value(json!({
+                "runner_id": "lab-identity",
+                "job_id": "owned-job",
+                "operation": "runner.exec",
+                "source": "direct-daemon",
+                "kind": "test",
+                "status": "running",
+                "command": "homeboy test",
+                "started_at_ms": 0,
+                "updated_at_ms": 0,
+                "elapsed_ms": 0,
+                "heartbeat_age_ms": 0
+            }))
+            .expect("active runner job"),
+        );
 
         assert!(matches!(
             handoff_convergence_action(
