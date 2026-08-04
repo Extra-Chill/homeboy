@@ -130,6 +130,31 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
                 repair,
             },
         )),
+        RunnerCommand::Preflight {
+            runner_id,
+            workload_family,
+            command,
+            allow_queue,
+            durable_workload,
+            required_tools,
+            required_capabilities,
+        } => Ok((
+            RunnerCommandOutput::Preflight(runner::placement_readiness(
+                &runner::PlacementReadinessRequest {
+                    runner_id,
+                    workload_family,
+                    command,
+                    allow_queue,
+                    durable_workload,
+                    required_tools: required_tools
+                        .into_iter()
+                        .map(runner::RunnerRequiredTool::new)
+                        .collect(),
+                    required_capabilities,
+                },
+            )?),
+            0,
+        )),
         RunnerCommand::Connect {
             id,
             reverse,

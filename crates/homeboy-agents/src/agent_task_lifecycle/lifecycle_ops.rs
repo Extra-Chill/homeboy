@@ -1178,6 +1178,39 @@ pub fn record_cook_progress(
     record.ok_or_else(|| Error::internal_unexpected("Cook progress record was unchanged"))
 }
 
+/// Persist a failed foreground observer delivery without changing the Cook's
+/// controller-owned progress. Observers are notification sinks, so their
+/// transport lifetime cannot determine whether a durable operation continues.
+pub fn record_cook_observer_event(
+    run_id: &str,
+    phase: &str,
+    diagnostic: Value,
+) -> Result<AgentTaskRunRecord> {
+    const MAX_EVENTS: usize = 16;
+
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        let metadata = record.ensure_metadata_object();
+        let events = metadata
+            .entry("cook_observer_events".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        let events = events
+            .as_array_mut()
+            .expect("cook observer events are an array");
+        events.push(json!({
+            "kind": "delivery_failed",
+            "phase": phase,
+            "at": now_timestamp(),
+            "diagnostic": diagnostic,
+        }));
+        if events.len() > MAX_EVENTS {
+            events.drain(..events.len() - MAX_EVENTS);
+        }
+        true
+    })?;
+    record.ok_or_else(|| Error::internal_unexpected("Cook observer event record was unchanged"))
+}
+
 /// Bind the Cook's authoritative command result to its terminal progress
 /// record. Provider and gate state alone cannot establish whether publication
 /// completed, so readers use this positive completion fact rather than a list
@@ -2436,6 +2469,17 @@ pub struct AgentTaskDurableReadUnavailable {
 /// read-only store budget, without runner liveness reconciliation.
 pub fn durable_local_read(run_id: &str) -> Result<AgentTaskDurableLocalRead> {
     let record = persisted_status(run_id)?;
+    durable_local_read_record(record)
+}
+
+/// Read one concrete durable record without resolving a Cook ID through its
+/// latest attempt. This is the inspection counterpart to [`exact_record`].
+pub fn exact_durable_local_read(run_id: &str) -> Result<AgentTaskDurableLocalRead> {
+    let record = store::read_record_bounded(&sanitize_run_id(run_id))?;
+    durable_local_read_record(record)
+}
+
+fn durable_local_read_record(record: AgentTaskRunRecord) -> Result<AgentTaskDurableLocalRead> {
     let aggregate = match store::read_aggregate_bounded(&record.run_id) {
         Ok(aggregate) => Some(aggregate),
         Err(error) => {

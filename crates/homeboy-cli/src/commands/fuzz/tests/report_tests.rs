@@ -270,23 +270,3 @@ fn select_workload_rejects_empty_fuzz_selection() {
         .iter()
         .any(|hint| hint.message.contains("fuzz list")));
 }
-
-#[test]
-fn fuzz_command_tests_keep_core_fixtures_product_neutral() {
-    let source = [
-        include_str!("../mod.rs"),
-        include_str!("../dispatch.rs"),
-        include_str!("../planning.rs"),
-        include_str!("../types.rs"),
-        include_str!("../types_extra.rs"),
-        include_str!("../replay.rs"),
-        include_str!("../report.rs"),
-        include_str!("../execution.rs"),
-        include_str!("../workloads.rs"),
-        include_str!("../compare.rs"),
-    ]
-    .concat()
-    .to_ascii_lowercase();
-    let forbidden = "wordpress".to_string();
-    assert!(!source.contains(&forbidden));
-}

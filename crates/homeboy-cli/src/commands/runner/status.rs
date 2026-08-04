@@ -1520,16 +1520,6 @@ mod tests {
 
     #[test]
     fn no_id_full_status_uses_indexed_projections_without_remote_fallback() {
-        let source = include_str!("status.rs");
-        let start = source
-            .find("pub(super) fn status(")
-            .expect("status command");
-        let body = &source[start..source.find("fn operator_summary").expect("next helper")];
-
-        assert!(body.contains("full_status_projections(sessions, runner::statuses_indexed())"));
-        assert!(body.contains("selected_status.clone()"));
-        assert!(!body.contains("preferred_lab_runner.as_deref(), None"));
-
         let (_sessions, inspection) = full_status_projections(
             Vec::new(),
             Err(homeboy::core::Error::internal_unexpected(

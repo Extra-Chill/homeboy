@@ -272,6 +272,7 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
 
         let (status_value, _) = status(StatusArgs {
             run_id: cook_id.to_string(),
+            exact: false,
             bridge: false,
             since_cursor: None,
             full: false,
@@ -336,6 +337,7 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
 
         let (bridge_value, _) = status(StatusArgs {
             run_id: cook_id.to_string(),
+            exact: false,
             bridge: true,
             since_cursor: Some(0),
             full: false,
@@ -351,6 +353,7 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
 
         let (attempt_status, _) = status(StatusArgs {
             run_id: retry_run_id.to_string(),
+            exact: false,
             bridge: false,
             since_cursor: None,
             full: false,
@@ -358,6 +361,65 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
         })
         .expect("exact attempt remains directly addressable");
         assert_eq!(attempt_status["run_id"], retry_run_id);
+    });
+}
+
+#[test]
+fn exact_status_inspects_initial_cook_record_after_alias_advances() {
+    with_temp_home(|| {
+        let cook_id = "cook-exact-initial-record";
+        let retry_run_id = "cook-exact-initial-record-attempt-2";
+        run_loaded_plan(
+            test_plan(),
+            Some(cook_id),
+            InspectingExecutor::noop(cook_id),
+        )
+        .expect("initial Cook record completed");
+        run_loaded_plan(
+            test_plan(),
+            Some(retry_run_id),
+            InspectingExecutor::noop(retry_run_id),
+        )
+        .expect("retry Cook record completed");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, cook_id)
+            .expect("record initial Cook attempt");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 2, retry_run_id)
+            .expect("record later Cook attempt");
+
+        let (default_status, _) = status(StatusArgs {
+            run_id: cook_id.to_string(),
+            exact: false,
+            bridge: false,
+            since_cursor: None,
+            full: true,
+            no_runner_probe: false,
+        })
+        .expect("default status resolves Cook alias");
+        assert_eq!(default_status["run_id"], retry_run_id);
+        assert_eq!(default_status["identity"]["requested_run_id"], cook_id);
+        assert_eq!(default_status["identity"]["resolved_run_id"], retry_run_id);
+        assert_eq!(
+            default_status["identity"]["cook_alias"]["latest_attempt_run_id"],
+            retry_run_id
+        );
+
+        let (exact_status, _) = status(StatusArgs {
+            run_id: cook_id.to_string(),
+            exact: true,
+            bridge: false,
+            since_cursor: None,
+            full: true,
+            no_runner_probe: false,
+        })
+        .expect("exact status reads initial Cook record");
+        assert_eq!(exact_status["run_id"], cook_id);
+        assert_eq!(exact_status["identity"]["requested_run_id"], cook_id);
+        assert_eq!(exact_status["identity"]["resolved_run_id"], cook_id);
+        assert_eq!(exact_status["identity"]["resolution"], "exact_record");
+        assert_eq!(
+            exact_status["identity"]["cook_alias"]["latest_attempt_run_id"],
+            retry_run_id
+        );
     });
 }
 

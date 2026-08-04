@@ -314,13 +314,6 @@ mod tests {
         count: u8,
     }
 
-    #[derive(Serialize)]
-    struct LegacyCommandReport<T> {
-        command: &'static str,
-        #[serde(flatten)]
-        report: T,
-    }
-
     #[test]
     fn command_report_matches_legacy_envelope_snapshot() {
         let output = CommandReport {
@@ -330,19 +323,8 @@ mod tests {
                 count: 2,
             },
         };
-        let legacy_output = LegacyCommandReport {
-            command: "stack.status",
-            report: SnapshotReport {
-                status: "clean",
-                count: 2,
-            },
-        };
 
         let serialized = serde_json::to_string(&output).expect("serialize command report");
-        assert_eq!(
-            serialized,
-            serde_json::to_string(&legacy_output).expect("serialize legacy command report")
-        );
         assert_eq!(
             serialized,
             r#"{"command":"stack.status","status":"clean","count":2}"#

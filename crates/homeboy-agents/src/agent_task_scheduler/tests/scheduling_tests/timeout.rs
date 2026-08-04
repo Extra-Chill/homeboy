@@ -178,6 +178,86 @@ mod timeout_tests {
     }
 
     #[test]
+    fn timeout_after_writing_patch_reconciles_required_artifacts_and_authenticates_candidate() {
+        struct PatchThenTimeout;
+
+        impl AgentTaskExecutorAdapter for PatchThenTimeout {
+            fn execute(
+                &self,
+                request: AgentTaskRequest,
+                _context: AgentTaskExecutionContext,
+            ) -> AgentTaskOutcome {
+                let artifact_root = request.metadata["artifact_root"]
+                    .as_str()
+                    .expect("artifact root");
+                fs::write(
+                    std::path::Path::new(artifact_root).join("fix.patch"),
+                    "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+                )
+                .expect("write patch before timeout");
+                fs::write(
+                    std::path::Path::new(artifact_root).join("transcript.log"),
+                    "patch written before provider timeout",
+                )
+                .expect("write transcript before timeout");
+                thread::sleep(Duration::from_millis(25));
+                AgentTaskOutcome {
+                    task_id: request.task_id,
+                    status: AgentTaskOutcomeStatus::Succeeded,
+                    summary: Some("provider completed late".to_string()),
+                    ..Default::default()
+                }
+            }
+        }
+
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let artifact_root = temp.path().join("task-1-artifacts");
+            fs::create_dir_all(&artifact_root).expect("artifact root");
+            let mut plan = plan_with_required_artifacts(&["patch", "agent_result", "transcript"]);
+            plan.tasks[0].limits.timeout_ms = Some(1);
+            plan.tasks[0].metadata = json!({ "artifact_root": artifact_root });
+            crate::agent_task_lifecycle::submit_plan(&plan, Some("timeout-patch-run"))
+                .expect("submit run");
+            crate::agent_task_service::run_submitted(
+                "timeout-patch-run".to_string(),
+                PatchThenTimeout,
+            )
+            .expect("run timed-out provider");
+            let aggregate = crate::agent_task_lifecycle::read_aggregate("timeout-patch-run")
+                .expect("persisted aggregate");
+
+            assert_eq!(
+                aggregate.status,
+                crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable
+            );
+            let outcome = &aggregate.outcomes[0];
+            assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+            let mut typed = outcome
+                .typed_artifacts
+                .iter()
+                .map(|artifact| artifact.name.as_str())
+                .collect::<Vec<_>>();
+            typed.sort_unstable();
+            assert_eq!(typed, vec!["agent_result", "patch", "transcript"]);
+            let patch = outcome
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.kind == "patch")
+                .expect("captured patch");
+            assert!(patch
+                .sha256
+                .as_deref()
+                .is_some_and(|sha256| !sha256.is_empty()));
+            assert_eq!(patch.metadata["task_id"], "task-1");
+            assert_eq!(patch.metadata["run_id"], "timeout-patch-run");
+            assert!(!outcome.diagnostics.iter().any(|diagnostic| {
+                diagnostic.class == "agent_task.required_typed_artifacts_missing"
+            }));
+        });
+    }
+
+    #[test]
     fn timeout_with_empty_patch_artifacts_and_actionable_false_stays_timed_out() {
         let temp = tempfile::tempdir().expect("tempdir");
         let artifact_root = temp.path().join("task-1-artifacts");

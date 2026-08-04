@@ -1113,6 +1113,15 @@ impl AgentTaskScheduleSupport {
 
         append_unique_artifacts(&mut outcome.artifacts, discovery.artifacts);
         append_unique_evidence_refs(&mut outcome.evidence_refs, discovery.evidence_refs);
+        // Required-artifact validation runs before timeout discovery. Re-run its
+        // materialization after merging late evidence so a captured patch cannot
+        // coexist with a false missing-artifact diagnosis.
+        Self::normalize_required_typed_artifacts(outcome, request);
+        if missing_required_typed_artifacts(outcome, request).is_empty() {
+            outcome.diagnostics.retain(|diagnostic| {
+                diagnostic.class != "agent_task.required_typed_artifacts_missing"
+            });
+        }
 
         let actionable_patch = outcome.metadata.get("actionable").and_then(Value::as_bool)
             != Some(false)

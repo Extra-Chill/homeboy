@@ -72,6 +72,10 @@ mod lab_env;
 mod lab_offload_provider;
 pub(crate) mod lab_plan;
 mod lab_selection;
+pub use lab_selection::{
+    placement_readiness, PlacementReadiness, PlacementReadinessPredicate,
+    PlacementReadinessRequest, PlacementReadinessState, PlacementRecoveryAction,
+};
 mod lab_workspace_provenance_provider;
 mod lab_workspaces;
 mod lab_workspaces_deps;

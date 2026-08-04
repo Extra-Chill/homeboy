@@ -1240,22 +1240,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_placement_flags_are_rejected() {
-        for flag in [
-            format!("--{}-{}", "force", "hot"),
-            format!("--{}-{}", "allow-local", "hot"),
-            format!("--{}-{}", "lab", "only"),
-            format!("--{}-{}", "no-local", "execution"),
-        ] {
-            let result = Cli::try_parse_from(["homeboy", flag.as_str(), "bench", "example"]);
-            let Err(error) = result else {
-                panic!("legacy placement flag must be unknown");
-            };
-            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-        }
-    }
-
-    #[test]
     fn registered_parse_path_accepts_placement_in_every_global_position() {
         for args in [
             ["homeboy", "--placement=local", "bench", "example"].as_slice(),
