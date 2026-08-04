@@ -53,20 +53,27 @@ pub(super) enum LabRunnerPreparation {
 
 /// A side-effect-free placement question. Wrappers call this before durable run
 /// creation and setup; execution rechecks the same live admission facts.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlacementReadinessRequest {
     pub runner_id: String,
-    pub workload_family: String,
-    pub command: String,
     pub allow_queue: bool,
     pub durable_workload: bool,
-    pub required_tools: Vec<super::RunnerRequiredTool>,
-    pub required_capabilities: Vec<String>,
-    /// Provider, toolchain, browser, and source/path requirements are part of
-    /// the admission identity, rather than wrapper-only diagnostics.
-    pub provider: Option<String>,
-    pub required_toolchain_probes: Vec<super::RunnerToolchainReadinessProbe>,
-    pub source_path_inputs: Vec<String>,
+    /// Only compiler-recognised invocations are accepted at the public
+    /// boundary. Requirements are derived below, never supplied by callers.
+    pub invocation: PlacementReadinessInvocation,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlacementReadinessInvocation {
+    AgentTaskCook {
+        provider: String,
+        source_path: String,
+    },
+    BrowserAudit {
+        source_path: String,
+    },
 }
 
 /// The immutable admission contract shared by mutation-free preflight and the
@@ -79,25 +86,61 @@ pub struct LabAdmissionPlan {
     pub toolchain: Option<super::RunnerCapabilityPreflight>,
 }
 
-pub fn compile_lab_admission_plan(request: PlacementReadinessRequest) -> LabAdmissionPlan {
+pub fn compile_lab_admission_plan(request: PlacementReadinessRequest) -> Result<LabAdmissionPlan> {
+    let (
+        _workload_family,
+        command,
+        provider,
+        source_path_inputs,
+        required_capabilities,
+        extensions,
+    ) = match &request.invocation {
+        PlacementReadinessInvocation::AgentTaskCook {
+            provider,
+            source_path,
+        } => (
+            "agent-task".to_string(),
+            "agent-task cook".to_string(),
+            Some(provider.clone()),
+            vec![source_path.clone()],
+            vec!["extension_parity".to_string()],
+            vec![provider.clone()],
+        ),
+        PlacementReadinessInvocation::BrowserAudit { source_path } => (
+            "audit".to_string(),
+            "audit browser".to_string(),
+            None,
+            vec![source_path.clone()],
+            vec!["playwright".to_string()],
+            Vec::new(),
+        ),
+    };
+    if source_path_inputs.iter().any(|path| path.trim().is_empty())
+        || provider
+            .as_ref()
+            .is_some_and(|provider| provider.trim().is_empty())
+    {
+        return Err(Error::validation_invalid_argument(
+            "invocation",
+            "placement invocation requires a non-empty provider and source path",
+            None,
+            None,
+        ));
+    }
+    let toolchain = crate::lab_capabilities::toolchain_readiness_preflight_for_extensions(
+        &command,
+        &extensions,
+    )?;
     let capability = super::prepare_lab_runner_capability(super::LabRunnerCapabilityContract {
-        // The shared contract currently retains a static diagnostic label. The
-        // caller command remains on `request` and is serialized in the result.
         command: "runner preflight",
-        required_tools: request.required_tools.clone(),
-        required_capabilities: request.required_capabilities.clone(),
+        required_tools: Vec::new(),
+        required_capabilities,
     });
-    let toolchain =
-        (!request.required_toolchain_probes.is_empty()).then(|| super::RunnerCapabilityPreflight {
-            command: request.command.clone(),
-            required_toolchain_probes: request.required_toolchain_probes.clone(),
-            ..Default::default()
-        });
-    LabAdmissionPlan {
+    Ok(LabAdmissionPlan {
         request,
         capability,
         toolchain,
-    }
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -114,6 +157,15 @@ pub struct PlacementReadinessPredicate {
     pub satisfied: bool,
 }
 
+/// The stable v1 recovery-action projection. Typed executable metadata is
+/// additive so existing readers retain their `{command, requires_confirmation}`
+/// contract.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PlacementRecoveryAction {
+    pub command: String,
+    pub requires_confirmation: bool,
+}
+
 /// A snapshot, not a reservation. It cannot create a rig/run/runner mutation.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PlacementReadiness {
@@ -123,14 +175,20 @@ pub struct PlacementReadiness {
     pub runner_id: String,
     pub state: PlacementReadinessState,
     pub predicates: Vec<PlacementReadinessPredicate>,
-    pub recovery_actions: Vec<ExecutableAction>,
+    pub recovery_actions: Vec<PlacementRecoveryAction>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recovery_action_metadata: Vec<ExecutableAction>,
+    /// A complete typed input emitted by the same compiler execution uses.
+    /// Passing it back to `runner preflight --request` cannot silently drop a
+    /// provider, source, toolchain, browser, or capability requirement.
+    pub compiled_request: PlacementReadinessRequest,
     pub revalidate_before_execution: bool,
 }
 
 pub fn placement_readiness(request: &PlacementReadinessRequest) -> Result<PlacementReadiness> {
     let runner = load(&request.runner_id)?;
     let status = status(&request.runner_id)?;
-    let plan = compile_lab_admission_plan(request.clone());
+    let plan = compile_lab_admission_plan(request.clone())?;
     if let Some(toolchain) = plan.toolchain.as_ref() {
         // This probe only observes runner toolchain state; unlike execution it
         // neither creates a workspace nor reserves daemon admission.
@@ -157,6 +215,7 @@ fn placement_readiness_from_status(
     mode: RunnerTunnelMode,
     capability: super::LabRunnerGateDecision,
 ) -> PlacementReadiness {
+    let (workload_family, command, provider, source_path_inputs) = admission_identity(request);
     let availability = RunnerAvailability::from_status_parts(
         request.runner_id.clone(),
         status.connected,
@@ -170,14 +229,20 @@ fn placement_readiness_from_status(
         && mode == RunnerTunnelMode::Reverse
         && availability.is_capacity_exhausted();
     let compatible = matches!(capability, super::LabRunnerGateDecision::Eligible);
-    let state = if availability.accepts_jobs && compatible {
+    let inputs_declared = source_path_inputs
+        .iter()
+        .all(|path| !path.trim().is_empty())
+        && provider
+            .as_ref()
+            .is_none_or(|provider| !provider.trim().is_empty());
+    let state = if availability.accepts_jobs && compatible && inputs_declared {
         PlacementReadinessState::Ready
-    } else if queueable && compatible {
+    } else if queueable && compatible && inputs_declared {
         PlacementReadinessState::Queueable
     } else {
         PlacementReadinessState::Blocked
     };
-    let recovery_actions = if !compatible {
+    let recovery_action_metadata = if !compatible {
         match capability {
             super::LabRunnerGateDecision::Missing { remediation, .. } => remediation
                 .into_iter()
@@ -208,10 +273,18 @@ fn placement_readiness_from_status(
             ActionSafety::ReadOnly,
         )]
     };
+    let recovery_actions = recovery_action_metadata
+        .iter()
+        .map(|action| PlacementRecoveryAction {
+            command: action.render_command(),
+            requires_confirmation: !action.required_confirmations.is_empty()
+                || !matches!(action.safety, ActionSafety::ReadOnly),
+        })
+        .collect();
     PlacementReadiness {
         schema: "homeboy/placement-readiness/v1",
-        workload_family: request.workload_family.clone(),
-        command: request.command.clone(),
+        workload_family,
+        command,
         runner_id: request.runner_id.clone(),
         state,
         predicates: vec![
@@ -247,21 +320,43 @@ fn placement_readiness_from_status(
             },
             PlacementReadinessPredicate {
                 id: "source_path_inputs_declared",
-                satisfied: request
-                    .source_path_inputs
+                satisfied: source_path_inputs
                     .iter()
                     .all(|path| !path.trim().is_empty()),
             },
             PlacementReadinessPredicate {
                 id: "provider_declared",
-                satisfied: request
-                    .provider
+                satisfied: provider
                     .as_ref()
                     .is_none_or(|provider| !provider.trim().is_empty()),
             },
         ],
         recovery_actions,
+        recovery_action_metadata,
+        compiled_request: request.clone(),
         revalidate_before_execution: true,
+    }
+}
+
+fn admission_identity(
+    request: &PlacementReadinessRequest,
+) -> (String, String, Option<String>, Vec<String>) {
+    match &request.invocation {
+        PlacementReadinessInvocation::AgentTaskCook {
+            provider,
+            source_path,
+        } => (
+            "agent-task".to_string(),
+            "agent-task cook".to_string(),
+            Some(provider.clone()),
+            vec![source_path.clone()],
+        ),
+        PlacementReadinessInvocation::BrowserAudit { source_path } => (
+            "audit".to_string(),
+            "audit browser".to_string(),
+            None,
+            vec![source_path.clone()],
+        ),
     }
 }
 
@@ -1469,15 +1564,11 @@ mod placement_readiness_tests {
     fn request() -> PlacementReadinessRequest {
         PlacementReadinessRequest {
             runner_id: "lab".to_string(),
-            workload_family: "bench".to_string(),
-            command: "bench run".to_string(),
             allow_queue: false,
             durable_workload: false,
-            required_tools: Vec::new(),
-            required_capabilities: Vec::new(),
-            provider: None,
-            required_toolchain_probes: Vec::new(),
-            source_path_inputs: Vec::new(),
+            invocation: PlacementReadinessInvocation::BrowserAudit {
+                source_path: "/workspace/source".to_string(),
+            },
         }
     }
 
@@ -1527,28 +1618,48 @@ mod placement_readiness_tests {
     }
 
     #[test]
-    fn execution_and_preflight_compile_the_same_capability_and_toolchain_plan() {
-        let mut request = request();
-        request.required_tools = vec![super::super::RunnerRequiredTool::new("node")];
-        request.required_capabilities = vec!["browser".to_string()];
-        request.provider = Some("openai".to_string());
-        request.source_path_inputs = vec!["/workspace/provider.json".to_string()];
-        request.required_toolchain_probes = vec![super::super::RunnerToolchainReadinessProbe {
-            extension_id: "fixture".to_string(),
-            id: "fixture:node".to_string(),
-            command: "node --version".to_string(),
-            repair_command: None,
-            diagnostic_env: Vec::new(),
-        }];
-
-        let preflight = compile_lab_admission_plan(request.clone());
-        let execution = compile_lab_admission_plan(request);
+    fn repeated_typed_invocations_compile_the_same_capability_plan() {
+        let preflight = compile_lab_admission_plan(request()).expect("compile preflight");
+        let execution = compile_lab_admission_plan(request()).expect("compile execution");
         assert_eq!(preflight.capability, execution.capability);
         assert_eq!(preflight.toolchain, execution.toolchain);
         assert_eq!(
             preflight.capability.required_capabilities,
-            vec!["browser".to_string()]
+            vec!["playwright".to_string()]
         );
+        assert!(preflight
+            .capability
+            .required_tools
+            .contains(&super::super::RunnerRequiredTool::new("playwright")));
+    }
+
+    #[test]
+    fn public_json_cannot_supply_probe_commands_or_capabilities() {
+        let request = request();
+        let plan = compile_lab_admission_plan(request.clone()).expect("compile safe request");
+        let encoded = serde_json::to_value(&plan.request).expect("encode compiled request");
+        let decoded: PlacementReadinessRequest =
+            serde_json::from_value(encoded.clone()).expect("decode complete request");
+        assert!(matches!(
+            decoded.invocation,
+            PlacementReadinessInvocation::BrowserAudit { .. }
+        ));
+        let mut adversarial = encoded;
+        adversarial.as_object_mut().expect("request object").insert(
+            "required_toolchain_probes".to_string(),
+            serde_json::json!([{ "command": "touch /tmp/pwned" }]),
+        );
+        assert!(serde_json::from_value::<PlacementReadinessRequest>(adversarial).is_err());
+    }
+
+    #[test]
+    fn incomplete_provider_or_source_input_cannot_compile_ready() {
+        let mut request = request();
+        request.invocation = PlacementReadinessInvocation::AgentTaskCook {
+            provider: " ".to_string(),
+            source_path: " ".to_string(),
+        };
+        assert!(compile_lab_admission_plan(request).is_err());
     }
 
     #[test]
@@ -1626,7 +1737,14 @@ mod placement_readiness_tests {
         );
         assert_eq!(result.state, PlacementReadinessState::Blocked);
         assert_eq!(
-            result.recovery_actions[0].evidence,
+            result.recovery_actions[0],
+            PlacementRecoveryAction {
+                command: "homeboy runner doctor lab".to_string(),
+                requires_confirmation: false,
+            }
+        );
+        assert_eq!(
+            result.recovery_action_metadata[0].evidence,
             Some(serde_json::json!({ "remediation": "install browser" }))
         );
     }
@@ -1678,13 +1796,33 @@ mod placement_readiness_tests {
             .predicates
             .iter()
             .any(|predicate| predicate.id == "runner_connected" && !predicate.satisfied));
-        let action = &result.recovery_actions[0];
+        let action = &result.recovery_action_metadata[0];
         assert_eq!(action.id, "runner.connect");
         assert_eq!(action.safety, ActionSafety::Mutating);
         assert_eq!(
             serde_json::to_value(&result).expect("serialized v1 envelope")["recovery_actions"][0]
-                ["program"],
-            "homeboy"
+                ["command"],
+            action.render_command()
         );
+    }
+
+    #[test]
+    fn v1_recovery_actions_keep_the_legacy_shape_with_additive_metadata() {
+        let mut observed = status();
+        observed.connected = false;
+        observed.state = RunnerSessionState::Disconnected;
+        let result = decide(
+            &request(),
+            &observed,
+            Some(1),
+            RunnerTunnelMode::DirectSsh,
+            super::super::LabRunnerGateDecision::Eligible,
+        );
+        let value = serde_json::to_value(&result).expect("serialize v1 result");
+        let legacy = &value["recovery_actions"][0];
+        assert!(legacy.get("command").is_some());
+        assert!(legacy.get("requires_confirmation").is_some());
+        assert!(legacy.get("program").is_none());
+        assert_eq!(value["recovery_action_metadata"][0]["program"], "homeboy");
     }
 }
