@@ -6799,6 +6799,14 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         )
         .expect("the exact promoted candidate reaches local review dispatch");
         assert_eq!(
+            result.value.attempts[0]
+                .feedback
+                .as_ref()
+                .expect("historical applied promotion requests a form-only retry")
+                .status,
+            AgentTaskCookLoopStatus::RetryRequested
+        );
+        assert_eq!(
             executions.load(Ordering::SeqCst),
             1,
             "continuation status: {}; stop reason: {:?}",

@@ -3018,9 +3018,26 @@ where
             .and_then(|request| request.inputs.pointer("/cook_loop/failure_set"))
             .cloned()
             .unwrap_or(Value::Null);
+        let feedback_promotion =
+            if review_form_continuation && promotion.status == AgentTaskPromotionStatus::Applied {
+                // Historical terminal review-form continuations can carry the
+                // source attempt's failed gate entries even though their copied,
+                // authenticated promotion is already applied. The applied status
+                // is the durable gate authority for this form-only retry.
+                let mut feedback_promotion = promotion.clone();
+                feedback_promotion.deterministic_gates.retain(|gate| {
+                    gate.status != crate::agent_task_gate::AgentTaskGateStatus::Failed
+                });
+                feedback_promotion
+                    .gate_results
+                    .retain(|gate| gate.status != homeboy_core::gate::HomeboyGateStatus::Failed);
+                feedback_promotion
+            } else {
+                promotion.clone()
+            };
         let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request.clone(),
-            promotion_report: promotion.clone(),
+            promotion_report: feedback_promotion,
             attempt,
             max_attempts: attempt_limit,
             source_run_id: Some(run_id.clone()),
