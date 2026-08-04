@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+use super::command_policy::{AgentCommandDecision, AgentCommandPolicy};
 use super::schema::{
     agent_tool_policy_schema, agent_tool_request_schema, agent_tool_result_schema,
     default_agent_tool_execution_location, default_apply_policy, default_read_policy,
@@ -130,6 +131,16 @@ pub struct AgentToolPolicy {
     pub default_location: AgentToolExecutionLocation,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tools: BTreeMap<String, AgentToolPolicyRule>,
+    /// Which *commands* the agent may run, independent of which tool runs them.
+    /// The per-tool rules above choose an execution location for a tool name;
+    /// this constrains the command a shell-shaped tool is about to execute
+    /// (#11481).
+    #[serde(
+        default,
+        alias = "commandPolicy",
+        skip_serializing_if = "AgentCommandPolicy::is_default"
+    )]
+    pub commands: AgentCommandPolicy,
 }
 
 impl AgentToolPolicy {
@@ -138,6 +149,11 @@ impl AgentToolPolicy {
             .get(tool)
             .map(|rule| rule.execution_location)
             .unwrap_or(self.default_location)
+    }
+
+    /// Decide whether a command line the agent wants to run is permitted.
+    pub fn evaluate_command(&self, command: &str) -> AgentCommandDecision {
+        self.commands.evaluate(command)
     }
 
     fn is_default(&self) -> bool {
@@ -151,6 +167,7 @@ impl Default for AgentToolPolicy {
             schema: AGENT_TOOL_POLICY_SCHEMA.to_string(),
             default_location: default_agent_tool_execution_location(),
             tools: BTreeMap::new(),
+            commands: AgentCommandPolicy::default(),
         }
     }
 }

@@ -6,10 +6,10 @@ use homeboy_core::agent_runtime_manifest::{
 
 use crate::agent_task::{
     AgentTaskExecutionState, AgentTaskFailureClassification, AgentTaskOutcomeStatus,
-    AgentTaskWorkflowStepStatus, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_MATRIX_AGGREGATE_SCHEMA,
-    AGENT_TASK_MATRIX_PLAN_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
-    AGENT_TASK_WORKFLOW_SCHEMA, AGENT_TOOL_POLICY_SCHEMA, AGENT_TOOL_REQUEST_SCHEMA,
-    AGENT_TOOL_RESULT_SCHEMA,
+    AgentTaskWorkflowStepStatus, AGENT_COMMAND_POLICY_SCHEMA, AGENT_TASK_ARTIFACT_SCHEMA,
+    AGENT_TASK_MATRIX_AGGREGATE_SCHEMA, AGENT_TASK_MATRIX_PLAN_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
+    AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA, AGENT_TOOL_POLICY_SCHEMA,
+    AGENT_TOOL_REQUEST_SCHEMA, AGENT_TOOL_RESULT_SCHEMA,
 };
 use crate::agent_task_aggregate::AGENT_TASK_AGGREGATE_SCHEMA;
 use crate::agent_task_cook_loop::AGENT_TASK_COOK_FEEDBACK_REPORT_SCHEMA;
@@ -83,6 +83,10 @@ pub struct AgentTaskCoreContractSchemas {
     pub tool_request: String,
     pub tool_result: String,
     pub tool_policy: String,
+    /// Declarative command policy carried inside the tool policy. A runtime
+    /// that executes shell commands in its own process is expected to honour
+    /// this rather than leaving resource safety to prompt text (#11481).
+    pub command_policy: String,
     pub tool_dispatch_evidence: String,
     pub gate_report: String,
     pub promotion_report: String,
@@ -191,6 +195,7 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             tool_request: AGENT_TOOL_REQUEST_SCHEMA.to_string(),
             tool_result: AGENT_TOOL_RESULT_SCHEMA.to_string(),
             tool_policy: AGENT_TOOL_POLICY_SCHEMA.to_string(),
+            command_policy: AGENT_COMMAND_POLICY_SCHEMA.to_string(),
             tool_dispatch_evidence: AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA.to_string(),
             gate_report: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
             promotion_report: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
@@ -565,6 +570,7 @@ mod tests {
         assert_eq!(contract.schemas.tool_request, AGENT_TOOL_REQUEST_SCHEMA);
         assert_eq!(contract.schemas.tool_result, AGENT_TOOL_RESULT_SCHEMA);
         assert_eq!(contract.schemas.tool_policy, AGENT_TOOL_POLICY_SCHEMA);
+        assert_eq!(contract.schemas.command_policy, AGENT_COMMAND_POLICY_SCHEMA);
         assert_eq!(
             contract.provider_capability.tool_request_schema,
             AGENT_TOOL_REQUEST_SCHEMA

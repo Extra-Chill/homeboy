@@ -1036,6 +1036,9 @@ mod prompt_input_tests {
                 queue_only: false,
                 timeout_ms: None,
                 resolved_provider_policy: None,
+                deny_command: Vec::new(),
+                allow_command: Vec::new(),
+                command_policy_reason: None,
             },
         }
     }

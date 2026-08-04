@@ -68,6 +68,33 @@ pub struct DispatchCoreArgs {
     #[arg(long = "timeout-ms", value_name = "MS")]
     pub timeout_ms: Option<u64>,
 
+    /// Command pattern the provider agent must not run. Repeatable, and
+    /// additive to the host-level `agent_task.command_policy` config.
+    ///
+    /// A pattern is a token sequence matched anywhere in the command line, so
+    /// `--deny-command 'cargo test'` also refuses
+    /// `timeout 1200 cargo test -p foo`. `*` globs within a token
+    /// (`'cargo *'`) and `**` spans whole tokens (`'cargo ** test'`).
+    ///
+    /// Refusals are structured: the agent receives a `denied` tool result
+    /// carrying the reason and the alternative, and the refusal is recorded in
+    /// run evidence.
+    #[arg(long = "deny-command", value_name = "PATTERN")]
+    pub deny_command: Vec<String>,
+
+    /// Command pattern the provider agent may run. Supplying any
+    /// `--allow-command` switches the policy to allow-list mode: every command
+    /// that does not match one of these patterns is refused.
+    #[arg(long = "allow-command", value_name = "PATTERN")]
+    pub allow_command: Vec<String>,
+
+    /// Why the command policy exists, returned verbatim to the agent with every
+    /// refusal. Telling the agent what to do instead (e.g. "this host routes
+    /// builds to CI; make your edits and push") converts a refused command into
+    /// correct behaviour rather than a wasted budget.
+    #[arg(long = "command-policy-reason", value_name = "TEXT")]
+    pub command_policy_reason: Option<String>,
+
     #[arg(
         long = "resolved-provider-policy",
         hide = true,
@@ -97,6 +124,9 @@ impl From<DispatchCoreArgs> for DispatchCoreInputs {
             queue_only: args.queue_only,
             timeout_ms: args.timeout_ms,
             resolved_provider_policy: args.resolved_provider_policy,
+            deny_command: args.deny_command,
+            allow_command: args.allow_command,
+            command_policy_reason: args.command_policy_reason,
         }
     }
 }
@@ -308,6 +338,9 @@ mod tests {
                     queue_only: false,
                     timeout_ms: None,
                     resolved_provider_policy: None,
+                    deny_command: Vec::new(),
+                    allow_command: Vec::new(),
+                    command_policy_reason: None,
                 },
             }
             .into(),
@@ -345,6 +378,9 @@ mod tests {
                     queue_only: false,
                     timeout_ms: None,
                     resolved_provider_policy: None,
+                    deny_command: Vec::new(),
+                    allow_command: Vec::new(),
+                    command_policy_reason: None,
                 },
             }
             .into(),
@@ -458,6 +494,9 @@ mod tests {
                 queue_only: overrides.core.queue_only,
                 timeout_ms: overrides.core.timeout_ms,
                 resolved_provider_policy: overrides.core.resolved_provider_policy,
+                deny_command: overrides.core.deny_command,
+                allow_command: overrides.core.allow_command,
+                command_policy_reason: overrides.core.command_policy_reason,
             },
         }
     }

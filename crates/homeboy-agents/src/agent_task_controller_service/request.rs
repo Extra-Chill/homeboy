@@ -55,6 +55,9 @@ pub fn controller_request_dispatch_command(
             queue_only: optional_bool(dispatch, "queue_only").unwrap_or(false),
             timeout_ms: optional_u64(dispatch, "timeout_ms")?,
             resolved_provider_policy: None,
+            deny_command: optional_string_array(dispatch, "deny_command")?,
+            allow_command: optional_string_array(dispatch, "allow_command")?,
+            command_policy_reason: optional_string(dispatch, "command_policy_reason"),
         },
     };
 

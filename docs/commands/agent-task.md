@@ -112,6 +112,73 @@ execution flag. Plan and
 `agent-task status` output show the resolved defaults before provider execution;
 an exhausted run records which budget stopped further execution.
 
+### Command Policy
+
+An execution budget bounds *how long* a provider may run. A command policy
+bounds *what it may run*. On a resource-constrained host the two are not
+interchangeable: an agent that spends its whole budget compiling produces zero
+edits, and prompt text prohibiting the compile is a request the agent is free to
+ignore — it has been, twice, escalating (#11481).
+
+```bash
+# Refuse the heavy commands for this cook, and say why.
+homeboy agent-task cook --prompt @task.md \
+  --deny-command 'cargo test' \
+  --deny-command 'cargo build' \
+  --command-policy-reason 'this host routes builds to CI; make your edits and push'
+
+# Allow-list mode: only these patterns may run.
+homeboy agent-task cook --prompt @task.md \
+  --allow-command 'cargo fmt' --allow-command 'git *'
+```
+
+Set it once for the whole machine so every cook inherits it without a flag:
+
+```bash
+homeboy config set /agent_task/command_policy '{
+  "deny": [
+    { "pattern": "cargo test", "reason": "this host routes builds to CI" },
+    { "pattern": "cargo build" }
+  ],
+  "reason": "shared host; heavy compiles OOM the box"
+}' --json
+```
+
+Per-cook flags **extend** the host policy rather than replacing it, so a
+host-level refusal cannot be dropped by forgetting a flag.
+
+**Pattern matching.** A pattern is a token sequence matched anywhere in the
+command line, so `cargo test` also refuses
+`timeout 1200 cargo test -q -p homeboy-agents`. Shell operators are token
+separators, so `make deps && cargo build` still matches `cargo build`. `*` globs
+within a token (`cargo *`); `**` spans whole tokens (`cargo ** test` matches
+`cargo --quiet test`). In deny-list mode an `--allow-command` is an explicit
+exemption that beats a deny rule; in allow-list mode a deny rule wins.
+
+**What a refusal looks like.** The agent receives an
+`homeboy/agent-tool-result/v1` with status `denied`, an
+`agent_tool.command_denied` diagnostic carrying the matched pattern, the
+operator's reason, and the alternative to take instead. The denial is also
+recorded on the `homeboy/agent-tool-dispatch-evidence/v1` record, so "the agent
+tried to compile and was refused" is visible in run evidence afterwards rather
+than being invisible or indistinguishable from a command that silently failed.
+
+**Where it is enforced — read this before trusting it.** Homeboy structurally
+enforces the policy at the boundary it owns: every request reaching
+`homeboy agent-task tool dispatch` (and the in-process control-plane dispatcher)
+is evaluated and refused before it runs, including for tools whose policy
+execution location is `runner`. The policy travels to the provider inside
+`request.policy.tools.commands` and via `HOMEBOY_AGENT_TOOL_POLICY_JSON`, and its
+`homeboy/agent-command-policy/v1` schema is advertised in the core contract.
+
+A provider runtime that executes shell commands **inside its own process** never
+crosses that boundary. For those runtimes — which is most coding-agent runtimes
+today — this is a declaration the runtime is expected to honour, plus a hard
+constraint restated in the provider prompt. It is not containment. That gap is
+deliberate and stated here rather than papered over; closing it requires the
+runtime to route its shell tool through the dispatch command Homeboy already
+hands it in `HOMEBOY_AGENT_TOOL_DISPATCH_COMMAND`.
+
 | Subcommand | Purpose |
 |---|---|
 | `cook` | Run one workspace task through the patch-artifact handoff workflow. |

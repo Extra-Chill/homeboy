@@ -940,6 +940,37 @@ fn provider_command_env_exposes_generic_agent_tool_contracts() {
     );
 }
 
+/// The command policy must reach the provider process through the same env
+/// handshake the tool policy already uses, so a runtime that calls back into
+/// `homeboy agent-task tool dispatch` inherits the refusals (#11481).
+#[test]
+fn provider_command_env_carries_the_command_policy() {
+    let (mut request, provider) = request("task-1", "minimal-provider".to_string());
+    request.policy.tools.commands = crate::agent_task::AgentCommandPolicy {
+        deny: vec![crate::agent_task::AgentCommandRule::with_reason(
+            "cargo test",
+            "this host routes builds to CI",
+        )],
+        ..crate::agent_task::AgentCommandPolicy::default()
+    };
+
+    let env = provider_command_env(&request, &provider).expect("provider env");
+    let env: BTreeMap<String, String> = env.into_iter().collect();
+
+    let policy: crate::agent_task::AgentToolPolicy = serde_json::from_str(
+        env.get("HOMEBOY_AGENT_TOOL_POLICY_JSON")
+            .expect("tool policy env"),
+    )
+    .expect("tool policy json");
+
+    let denial = policy
+        .evaluate_command("timeout 1200 cargo test -p homeboy-agents")
+        .denial()
+        .cloned()
+        .expect("denied");
+    assert_eq!(denial.reason, "this host routes builds to CI");
+}
+
 #[test]
 fn provider_command_env_strips_git_push_credentials() {
     // The provider environment must deny git push credentials so an executor
