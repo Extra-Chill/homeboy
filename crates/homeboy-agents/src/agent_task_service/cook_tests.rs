@@ -3364,8 +3364,11 @@ fn cook_claims_its_durable_attempt_before_slow_baseline_materialization() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().expect("temp source root");
+        // Cook refuses provider execution against a primary checkout, so the
+        // candidate workspace has to be a linked worktree of a primary.
+        let primary = temp.path().join("primary");
         let source = temp.path().join("source");
-        std::fs::create_dir(&source).expect("create source repository");
+        std::fs::create_dir(&primary).expect("create primary repository");
         for args in [
             vec!["init"],
             vec!["config", "user.email", "agent@example.test"],
@@ -3373,20 +3376,32 @@ fn cook_claims_its_durable_attempt_before_slow_baseline_materialization() {
         ] {
             assert!(Command::new("git")
                 .args(args)
-                .current_dir(&source)
+                .current_dir(&primary)
                 .status()
                 .expect("run git")
                 .success());
         }
-        std::fs::write(source.join("lib.rs"), "base\n").expect("write base");
+        std::fs::write(primary.join("lib.rs"), "base\n").expect("write base");
         for args in [vec!["add", "lib.rs"], vec!["commit", "-m", "base"]] {
             assert!(Command::new("git")
                 .args(args)
-                .current_dir(&source)
+                .current_dir(&primary)
                 .status()
                 .expect("run git")
                 .success());
         }
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "--detach",
+                source.to_str().expect("UTF-8 source path"),
+                "HEAD",
+            ])
+            .current_dir(&primary)
+            .status()
+            .expect("run git")
+            .success());
         std::fs::write(source.join("lib.rs"), "candidate\n").expect("dirty candidate");
 
         let entered = temp.path().join("baseline-entered");
@@ -3428,7 +3443,18 @@ fn cook_claims_its_durable_attempt_before_slow_baseline_materialization() {
         );
         options.initial_run_id = "cook-slow-baseline-attempt-1".to_string();
         options.provider_command = Some("fixture-provider".to_string());
-        options.source_worktree_path = Some(source);
+        options.source_worktree_path = Some(source.clone());
+        // Cook validates the destination before it stages a baseline, so the
+        // fixture has to declare a real workspace rather than a bare handle.
+        options.to_worktree = source.display().to_string();
+        options.initial_plan.tasks[0].workspace.root = Some(source.display().to_string());
+        options.initial_plan.tasks[0].workspace.kind = Some("homeboy-worktree".to_string());
+        options.initial_plan.tasks[0].workspace.materialization = serde_json::json!({
+            "kind": "homeboy-worktree",
+            "id": "source@cook-slow-baseline",
+            "root": source,
+            "branch": "fix/cook-slow-baseline",
+        });
         let resume_options = options.clone();
         let controller = std::thread::spawn(move || run_cook(options, UnusedExecutor));
         let entered_staging = (0..500).any(|_| {
@@ -8437,6 +8463,9 @@ fn fanout_resume_prefers_immutable_verification_checkpoint_over_later_failed_att
         options.gates.verify = vec!["true".to_string()];
         options.no_finalize = false;
         options.head = Some("fix/8058".to_string());
+        // Finalization authenticates the disclosure lineage against a concrete
+        // executed model, and the seeded aggregate takes its model from the plan.
+        options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
         super::super::persist_initial_recipe(&options).unwrap();
         let run_id = options.initial_run_id.clone();
         agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&run_id)).unwrap();
