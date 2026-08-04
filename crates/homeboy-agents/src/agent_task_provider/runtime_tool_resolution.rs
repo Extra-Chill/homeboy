@@ -1,8 +1,8 @@
 use super::runner_readiness::resolve_executable_candidate;
 use super::*;
 use crate::agent_task::{
-    AgentCommandDecision, AgentTaskRuntimeTool, AgentToolExecutionLocation,
-    ResolvedAgentTaskRuntimeTool, AGENT_TASK_RUNTIME_TOOL_SCHEMA,
+    AgentCommandDecision, AgentTaskRuntimeTool, AgentTaskRuntimeToolProbeEvidence,
+    AgentToolExecutionLocation, ResolvedAgentTaskRuntimeTool, AGENT_TASK_RUNTIME_TOOL_SCHEMA,
     RESOLVED_AGENT_TASK_RUNTIME_TOOL_SCHEMA,
 };
 use crate::agent_task_process_containment::AgentTaskProcessContainment;
@@ -68,6 +68,8 @@ pub(crate) fn resolve_runtime_tools(
             }
         })?;
         let version = probe_version(tool, &executable)?;
+        let capability_probe =
+            probe_capabilities(tool, &executable, &request.request.policy.tools)?;
         for secret in &tool.secret_env {
             if !request.request.executor.secret_env.contains(secret) {
                 request.request.executor.secret_env.push(secret.clone());
@@ -83,7 +85,11 @@ pub(crate) fn resolve_runtime_tools(
                 .collect(),
             env: tool.env.clone(),
             version,
-            capabilities: tool.required_capabilities.clone(),
+            capabilities: capability_probe
+                .as_ref()
+                .map(|_| tool.required_capabilities.clone())
+                .unwrap_or_default(),
+            capability_probe,
             env_names: tool.env.keys().cloned().collect(),
             secret_env_names: tool.secret_env.clone(),
             readiness: "ready".to_string(),
@@ -110,6 +116,17 @@ pub(crate) fn resolve_runtime_tools(
             "runtime_tool_attachment".to_string(),
             json!({ "count": resolved.len() }),
         );
+        let readiness = resolved
+            .iter()
+            .filter(|tool| !tool.capabilities.is_empty() && tool.capability_probe.is_some())
+            .map(|tool| (tool.id.clone(), json!({ "state": "ready" })))
+            .collect::<serde_json::Map<String, Value>>();
+        if !readiness.is_empty() {
+            metadata.insert(
+                "attached_tool_readiness".to_string(),
+                Value::Object(readiness),
+            );
+        }
         request.resolved_runtime_tools = resolved;
     }
     Ok(())
@@ -127,6 +144,7 @@ fn validate_tool(tool: &AgentTaskRuntimeTool) -> Result<(), RuntimeToolResolutio
             .env
             .keys()
             .any(|name| !valid_env_name(name) || sensitive_name(name))
+        || (!tool.required_capabilities.is_empty() && tool.readiness.capability_probe.is_none())
     {
         return Err(RuntimeToolResolutionError {
             class: "agent_task.runtime_tool_invalid",
@@ -136,6 +154,99 @@ fn validate_tool(tool: &AgentTaskRuntimeTool) -> Result<(), RuntimeToolResolutio
         });
     }
     Ok(())
+}
+
+fn probe_capabilities(
+    tool: &AgentTaskRuntimeTool,
+    executable: &str,
+    policy: &crate::agent_task::AgentToolPolicy,
+) -> Result<Option<AgentTaskRuntimeToolProbeEvidence>, RuntimeToolResolutionError> {
+    let Some(probe) = &tool.readiness.capability_probe else {
+        return Ok(None);
+    };
+    let command = std::iter::once(executable)
+        .chain(probe.argv.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if let AgentCommandDecision::Denied(denial) = policy.evaluate_command(&command) {
+        return Err(RuntimeToolResolutionError {
+            class: "agent_task.runtime_tool_command_denied",
+            message: denial.message(),
+            data: json!({ "tool": tool.id, "command": denial.command, "reason": denial.reason }),
+            failure_classification: AgentTaskFailureClassification::InvalidInput,
+        });
+    }
+    let mut command = Command::new(executable);
+    command
+        .args(&probe.argv)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut containment = AgentTaskProcessContainment::prepare(&mut command).map_err(|error| {
+        RuntimeToolResolutionError {
+            class: "agent_task.runtime_tool_capability_probe_failed",
+            message: format!(
+                "could not contain capability probe for runtime tool '{}': {error}",
+                tool.id
+            ),
+            data: json!({ "tool": tool.id }),
+            failure_classification: AgentTaskFailureClassification::Provider,
+        }
+    })?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| RuntimeToolResolutionError {
+            class: "agent_task.runtime_tool_capability_probe_failed",
+            message: format!(
+                "could not start capability probe for runtime tool '{}': {error}",
+                tool.id
+            ),
+            data: json!({ "tool": tool.id }),
+            failure_classification: AgentTaskFailureClassification::Provider,
+        })?;
+    if let Err(error) = containment.attach(&child) {
+        let _ = containment.terminate_live(&mut child);
+        return Err(RuntimeToolResolutionError {
+            class: "agent_task.runtime_tool_capability_probe_failed",
+            message: format!(
+                "could not guard capability probe for runtime tool '{}': {error}",
+                tool.id
+            ),
+            data: json!({ "tool": tool.id }),
+            failure_classification: AgentTaskFailureClassification::Provider,
+        });
+    }
+    let timeout = std::time::Duration::from_millis(tool.timeout_ms.unwrap_or(20_000));
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let _ = containment.reap_after_exit();
+                return Ok(Some(AgentTaskRuntimeToolProbeEvidence {
+                    status: "succeeded".to_string(),
+                    argv: probe.argv.clone(),
+                }));
+            }
+            Ok(Some(_)) | Err(_) => {
+                let _ = containment.reap_after_exit();
+                return Err(RuntimeToolResolutionError {
+                    class: "agent_task.runtime_tool_capability_probe_failed",
+                    message: format!("capability probe failed for runtime tool '{}'", tool.id),
+                    data: json!({ "tool": tool.id }),
+                    failure_classification: AgentTaskFailureClassification::CapabilityMissing,
+                });
+            }
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = containment.terminate_live(&mut child);
+                return Err(RuntimeToolResolutionError {
+                    class: "agent_task.runtime_tool_capability_probe_timeout",
+                    message: format!("capability probe timed out for runtime tool '{}'", tool.id),
+                    data: json!({ "tool": tool.id, "timeout_ms": timeout.as_millis() }),
+                    failure_classification: AgentTaskFailureClassification::Timeout,
+                });
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    }
 }
 
 fn probe_version(

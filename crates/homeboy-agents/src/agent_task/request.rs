@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use super::schema::request_schema;
 use super::{
-    AgentTaskArtifactDeclaration, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits,
+    AgentTaskArtifactDeclaration, AgentTaskAttachedToolCapability, AgentTaskCapabilityEvidence,
+    AgentTaskCapabilityRequirements, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits,
     AgentTaskOutcome, AgentTaskPolicy, AgentTaskRuntimeTool, AgentTaskSourceRef,
     AgentTaskWorkspace, ResolvedAgentTaskRuntimeTool,
 };
@@ -174,19 +175,48 @@ pub struct AgentTaskRequest {
 }
 
 /// Provider-facing request materialized on the host that executes the task.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct AgentTaskExecutorRequest {
-    #[serde(flatten)]
     pub request: AgentTaskRequest,
     pub artifacts_path: PathBuf,
     pub artifacts_path_provenance: AgentTaskArtifactsPathProvenance,
     /// Host-resolved runtime attachments for the provider adapter. This is
     /// distinct from the caller declaration carried in the flattened request.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolved_runtime_tools: Vec<ResolvedAgentTaskRuntimeTool>,
-    #[serde(skip)]
     pub(crate) artifacts_root_identity:
         crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity,
+}
+
+impl Serialize for AgentTaskExecutorRequest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut value = serde_json::to_value(&self.request).map_err(serde::ser::Error::custom)?;
+        let object = value.as_object_mut().ok_or_else(|| {
+            serde::ser::Error::custom("agent task request must serialize as an object")
+        })?;
+        // Callers retain declarations for durable planning, but providers receive
+        // only Homeboy's validated, host-resolved projection.
+        object.remove("runtime_tools");
+        object.insert(
+            "artifacts_path".to_string(),
+            serde_json::to_value(&self.artifacts_path).map_err(serde::ser::Error::custom)?,
+        );
+        object.insert(
+            "artifacts_path_provenance".to_string(),
+            serde_json::to_value(&self.artifacts_path_provenance)
+                .map_err(serde::ser::Error::custom)?,
+        );
+        if !self.resolved_runtime_tools.is_empty() {
+            object.insert(
+                "resolved_runtime_tools".to_string(),
+                serde_json::to_value(&self.resolved_runtime_tools)
+                    .map_err(serde::ser::Error::custom)?,
+            );
+        }
+        value.serialize(serializer)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -209,6 +239,44 @@ impl std::ops::Deref for AgentTaskExecutorRequest {
 }
 
 impl AgentTaskRequest {
+    pub fn capability_requirements(&self) -> Result<AgentTaskCapabilityRequirements, String> {
+        let mut requirements = super::capabilities::requirements_from_metadata(
+            &self.metadata,
+            &self.executor.required_capabilities,
+        )?;
+        for tool in &self.runtime_tools {
+            if tool.required_capabilities.is_empty() {
+                continue;
+            }
+            if let Some(attached) = requirements
+                .attached_tools
+                .iter_mut()
+                .find(|attached| attached.id == tool.id)
+            {
+                attached
+                    .contributes
+                    .extend(tool.required_capabilities.clone());
+            } else {
+                requirements
+                    .attached_tools
+                    .push(AgentTaskAttachedToolCapability {
+                        id: tool.id.clone(),
+                        contributes: tool.required_capabilities.clone(),
+                    });
+            }
+        }
+        let requirements = requirements.normalized();
+        requirements.validate()?;
+        Ok(requirements)
+    }
+
+    pub fn record_capability_evidence(&mut self, evidence: AgentTaskCapabilityEvidence) {
+        if !self.metadata.is_object() {
+            self.metadata = Value::Object(Default::default());
+        }
+        self.metadata["capability_evidence"] =
+            serde_json::to_value(evidence).unwrap_or(Value::Null);
+    }
     pub fn canonical_artifact_declarations(&self) -> Vec<AgentTaskArtifactDeclaration> {
         let mut declarations = Vec::new();
         for declaration in &self.artifact_declarations {

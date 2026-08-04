@@ -1,7 +1,6 @@
 use super::command_runner::{failure_outcome, run_materialized_provider_command};
 use super::fixtures::run_fixture_provider;
 use super::*;
-use std::borrow::Cow;
 
 impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
     fn execute(
@@ -37,20 +36,72 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             return run_repo_local_gate_task(&request);
         }
 
+        let requirements = match request.capability_requirements() {
+            Ok(requirements) => requirements,
+            Err(message) => {
+                return failure_outcome(
+                    &request,
+                    AgentTaskOutcomeStatus::Failed,
+                    AgentTaskFailureClassification::CapabilityMissing,
+                    "agent_task.capability_requirements_invalid",
+                    message,
+                    json!({ "layer": "declaration" }),
+                )
+            }
+        };
         let provider = match resolved_provider_from_request(&request) {
-            Ok(Some(provider)) => Cow::Owned(provider),
+            Ok(Some(provider)) => provider,
             Ok(None) => match resolve_provider_for_backend(
-                self.providers(),
+                &self
+                    .providers()
+                    .iter()
+                    .filter(|provider| {
+                        requirements
+                            .provider
+                            .iter()
+                            .all(|capability| provider.capabilities.contains(capability))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>(),
                 &request.executor.backend,
                 request.executor.selector.as_deref(),
             ) {
-                ProviderResolution::Resolved(provider) => Cow::Borrowed(provider),
+                ProviderResolution::Resolved(provider) => provider.clone(),
                 resolution => {
+                    if self
+                        .providers()
+                        .iter()
+                        .any(|provider| provider.backend == request.executor.backend)
+                        && requirements.provider.iter().any(|capability| {
+                            !self.providers().iter().any(|provider| {
+                                provider.backend == request.executor.backend
+                                    && provider.capabilities.contains(capability)
+                            })
+                        })
+                    {
+                        return failure_outcome(
+                            &request,
+                            AgentTaskOutcomeStatus::Failed,
+                            AgentTaskFailureClassification::CapabilityMissing,
+                            "agent_task.provider_capability_unavailable",
+                            format!(
+                                "no provider for backend '{}' advertises required capabilities: {}",
+                                request.executor.backend,
+                                requirements.provider.join(", ")
+                            ),
+                            json!({
+                                "layer": "provider",
+                                "required_capabilities": requirements.provider,
+                                "candidates": self.providers().iter().filter(|provider| provider.backend == request.executor.backend).map(|provider| json!({ "id": provider.id, "advertised_capabilities": provider.capabilities })).collect::<Vec<_>>(),
+                                "remediation": "Select a provider that advertises every required provider capability or change the provider requirement."
+                            }),
+                        );
+                    }
                     return provider_resolution_failure_outcome(
                         &request,
                         resolution,
                         self.diagnostics(),
-                    )
+                    );
                 }
             },
             Err(message) => {
@@ -76,21 +127,10 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             );
         }
 
-        let available_capabilities: Vec<&String> = provider
-            .capabilities
+        let missing_capabilities: Vec<String> = requirements
+            .provider
             .iter()
-            .chain(
-                request
-                    .resolved_runtime_tools
-                    .iter()
-                    .flat_map(|tool| tool.capabilities.iter()),
-            )
-            .collect();
-        let missing_capabilities: Vec<String> = request
-            .executor
-            .required_capabilities
-            .iter()
-            .filter(|capability| !available_capabilities.contains(capability))
+            .filter(|capability| !provider.capabilities.contains(capability))
             .cloned()
             .collect();
         if !missing_capabilities.is_empty() {
@@ -104,9 +144,64 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                     provider.id,
                     missing_capabilities.join(", ")
                 ),
-                json!({ "provider": provider.id, "missing_capabilities": missing_capabilities }),
+                json!({
+                    "layer": "provider",
+                    "provider": provider.id,
+                    "missing_capabilities": missing_capabilities,
+                    "advertised_capabilities": provider.capabilities,
+                }),
             );
         }
+
+        let unavailable_attached_tools = requirements
+            .attached_tools
+            .iter()
+            .filter_map(|required| {
+                let resolved = request
+                    .resolved_runtime_tools
+                    .iter()
+                    .find(|tool| tool.id == required.id);
+                let missing = required
+                    .contributes
+                    .iter()
+                    .filter(|capability| {
+                        resolved.is_none_or(|tool| !tool.capabilities.contains(capability))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                (!missing.is_empty()).then(|| {
+                    json!({
+                        "tool_id": required.id,
+                        "missing_capabilities": missing,
+                        "readiness": resolved.map_or("missing", |tool| tool.readiness.as_str()),
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        if !unavailable_attached_tools.is_empty() {
+            return failure_outcome(
+                &request,
+                AgentTaskOutcomeStatus::Failed,
+                AgentTaskFailureClassification::CapabilityMissing,
+                "agent_task.attached_tool_capability_unavailable",
+                "attached runtime tools did not satisfy their required capabilities".to_string(),
+                json!({
+                    "layer": "attached_tools",
+                    "tools": unavailable_attached_tools,
+                }),
+            );
+        }
+
+        // Readiness is owned by the attached runtime tool. A declaration alone
+        // cannot contribute capabilities; only its persisted ready observation can.
+        let ready_tools = crate::agent_task::ready_attached_tools_from_metadata(&request.metadata);
+        request
+            .request
+            .record_capability_evidence(requirements.evidence(
+                provider.capabilities.clone(),
+                Vec::new(),
+                &ready_tools,
+            ));
 
         run_materialized_provider_command(&request, &provider, context.run_id.as_deref())
     }

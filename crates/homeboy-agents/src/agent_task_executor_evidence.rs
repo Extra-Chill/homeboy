@@ -411,6 +411,10 @@ mod tests {
                 .collect(),
             version: None,
             capabilities: vec!["browser".to_string()],
+            capability_probe: Some(crate::agent_task::AgentTaskRuntimeToolProbeEvidence {
+                status: "succeeded".to_string(),
+                argv: Vec::new(),
+            }),
             env_names: vec!["FIXTURE_MODE".to_string()],
             secret_env_names: Vec::new(),
             readiness: "ready".to_string(),
@@ -419,10 +423,7 @@ mod tests {
 
         let value = redacted_request_value(&request, &RedactionPolicy::default());
 
-        assert_eq!(
-            value["runtime_tools"][0]["env"]["FIXTURE_MODE"],
-            "[redacted]"
-        );
+        assert!(value.get("runtime_tools").is_none());
         assert_eq!(
             value["resolved_runtime_tools"][0]["env"]["FIXTURE_MODE"],
             "[redacted]"

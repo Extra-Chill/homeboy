@@ -101,6 +101,9 @@ fn attach_runtime_tool_provenance(
             )
             .expect("resolved runtime tool provenance serializes"),
         );
+        if let Some(evidence) = request.request.metadata.get("capability_evidence") {
+            metadata.insert("capability_evidence".to_string(), evidence.clone());
+        }
     }
 }
 
@@ -2021,10 +2024,6 @@ pub(super) fn provider_command_env(
         (
             "HOMEBOY_AGENT_TOOL_POLICY_JSON".to_string(),
             serde_json::to_string(&request.policy.tools).unwrap_or_else(|_| "null".to_string()),
-        ),
-        (
-            "HOMEBOY_AGENT_TASK_RUNTIME_TOOLS_JSON".to_string(),
-            serde_json::to_string(&request.runtime_tools).unwrap_or_else(|_| "[]".to_string()),
         ),
         (
             "HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA".to_string(),

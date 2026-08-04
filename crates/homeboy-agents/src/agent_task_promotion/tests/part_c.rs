@@ -256,9 +256,11 @@ fn configured_command_provider_is_resolved_lazily_with_provenance() {
 #[test]
 fn configured_provider_accepts_only_the_unpushed_immutable_candidate_destination() {
     let (_temp, repo, _base, candidate) = adopted_commit_repo();
-    let provider = tempfile::NamedTempFile::new().expect("provider command");
+    let provider = tempfile::NamedTempFile::new()
+        .expect("provider command")
+        .into_temp_path();
     std::fs::write(
-        provider.path(),
+        &provider,
         format!(
             "#!/bin/sh\nprintf '%s\\n' '{}'\n",
             serde_json::json!({
@@ -275,11 +277,11 @@ fn configured_provider_accepts_only_the_unpushed_immutable_candidate_destination
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(provider.path())
+        let mut permissions = std::fs::metadata(&provider)
             .expect("provider metadata")
             .permissions();
         permissions.set_mode(0o755);
-        std::fs::set_permissions(provider.path(), permissions).expect("make provider executable");
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
     }
     let mut config = HomeboyConfig::default();
     config.worktree_providers.insert(
@@ -291,10 +293,7 @@ fn configured_provider_accepts_only_the_unpushed_immutable_candidate_destination
             lookup_timeout_ms: 10_000,
             lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands {
-                resolve: Some(vec![
-                    provider.path().display().to_string(),
-                    "{handle}".to_string(),
-                ]),
+                resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
                 ..Default::default()
             },
             list_result_mapping: Some(WorktreeProviderListResultMapping {

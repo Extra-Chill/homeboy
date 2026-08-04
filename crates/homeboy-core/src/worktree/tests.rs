@@ -1,5 +1,20 @@
 use super::*;
 
+/// A caller reading a "missing handle" error needs the handle creation would
+/// actually produce, so the slug rule has to be reachable outside this module.
+#[test]
+fn handle_for_branch_slugifies_the_branch_the_way_creation_does() {
+    assert_eq!(
+        handle_for_branch("homeboy", "fix/11168-wire-compiler-warning-provider"),
+        "homeboy@fix-11168-wire-compiler-warning-provider"
+    );
+    assert_eq!(handle_for_branch("homeboy", "main"), "homeboy@main");
+    assert_eq!(
+        handle_for_branch("homeboy", "feat/a_b.c"),
+        "homeboy@feat-a_b-c"
+    );
+}
+
 #[test]
 fn registry_read_lease_blocks_active_worktree_publication() {
     crate::test_support::with_isolated_home(|_| {

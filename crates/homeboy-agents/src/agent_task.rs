@@ -10,6 +10,7 @@ pub use super::agent_task_fanout::{
 
 mod artifacts;
 pub mod bench_matrix_provider;
+mod capabilities;
 mod command_policy;
 mod executor;
 mod matrix;
@@ -31,6 +32,12 @@ pub use matrix::{
 pub use artifacts::{
     AgentTaskArtifact, AgentTaskArtifactDeclaration, AgentTaskDiagnostic, AgentTaskEvidenceRef,
     AgentTaskFollowUp, AgentTaskTypedArtifact,
+};
+pub(crate) use capabilities::ready_attached_tools_from_metadata;
+pub use capabilities::{
+    AgentTaskAttachedToolCapability, AgentTaskCapabilityEvidence, AgentTaskCapabilityRequirements,
+    AgentTaskToolCapabilityContribution, AGENT_TASK_CAPABILITY_EVIDENCE_SCHEMA,
+    AGENT_TASK_CAPABILITY_REQUIREMENTS_SCHEMA,
 };
 pub use command_policy::{
     AgentCommandDecision, AgentCommandDenial, AgentCommandPolicy, AgentCommandPolicyMode,
@@ -58,9 +65,9 @@ pub use request::{
     AgentTaskStart,
 };
 pub use runtime_tools::{
-    AgentTaskRuntimeTool, AgentTaskRuntimeToolLifecycle, AgentTaskRuntimeToolReadiness,
-    ResolvedAgentTaskRuntimeTool, AGENT_TASK_RUNTIME_TOOL_SCHEMA,
-    RESOLVED_AGENT_TASK_RUNTIME_TOOL_SCHEMA,
+    AgentTaskRuntimeTool, AgentTaskRuntimeToolCapabilityProbe, AgentTaskRuntimeToolLifecycle,
+    AgentTaskRuntimeToolProbeEvidence, AgentTaskRuntimeToolReadiness, ResolvedAgentTaskRuntimeTool,
+    AGENT_TASK_RUNTIME_TOOL_SCHEMA, RESOLVED_AGENT_TASK_RUNTIME_TOOL_SCHEMA,
 };
 pub use schema::{
     AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_MATRIX_AGGREGATE_SCHEMA, AGENT_TASK_MATRIX_PLAN_SCHEMA,

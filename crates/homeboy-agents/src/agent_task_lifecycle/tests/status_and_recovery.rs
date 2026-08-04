@@ -1967,9 +1967,15 @@ fn cancel_run_signals_live_running_record() {
 fn record_health_migrates_legacy_and_quarantines_conflicting_projections() {
     with_isolated_home(|_| {
         submit_plan(&test_plan(), Some("legacy-record")).expect("submitted");
-        rewrite_record_for_test("legacy-record", |record| {
-            record.schema = "homeboy/agent-task-run/v0".to_string();
-        })
+        // #11446 made the typed writer reject unsupported schemas, which is the
+        // point of the guard but also blocks planting the very legacy record
+        // this test migrates. Use the raw injector built for that.
+        crate::agent_task_lifecycle::inject_raw_record_metadata_for_corruption_test(
+            "legacy-record",
+            |value| {
+                value["agent_task_run"]["schema"] = json!("homeboy/agent-task-run/v0");
+            },
+        )
         .expect("legacy stored");
         let legacy = reconcile_record_health(false).expect("legacy migrated");
         assert_eq!(legacy.migrated, 1);

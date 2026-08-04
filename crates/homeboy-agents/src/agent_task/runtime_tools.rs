@@ -35,6 +35,16 @@ pub struct AgentTaskRuntimeToolReadiness {
     /// Arguments used to collect a stable executable version before dispatch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub version_command: Vec<String>,
+    /// Required before this declaration can contribute capabilities. The probe
+    /// runs the resolved executable with this argv and must exit successfully.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_probe: Option<AgentTaskRuntimeToolCapabilityProbe>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskRuntimeToolCapabilityProbe {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argv: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -63,12 +73,21 @@ pub struct ResolvedAgentTaskRuntimeTool {
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_probe: Option<AgentTaskRuntimeToolProbeEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env_names: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_env_names: Vec<String>,
     pub readiness: String,
     pub lifecycle: AgentTaskRuntimeToolLifecycle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskRuntimeToolProbeEvidence {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argv: Vec<String>,
 }
 
 #[cfg(test)]
