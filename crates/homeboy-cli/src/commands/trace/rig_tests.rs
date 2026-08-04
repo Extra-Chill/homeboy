@@ -150,6 +150,7 @@ fn rig_component_path_and_trace_env_are_threaded() {
             r#ref: None,
             default_ref: None,
             extensions: Some(extensions),
+            lab_stack: None,
             dependency_cache: None,
         },
     );

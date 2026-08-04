@@ -3255,6 +3255,7 @@ fi
                 gate_toolchains: Vec::new(),
                 isolate_gate_home: true,
                 isolate_gate_xdg: true,
+                accept_inherited_failures: false,
             },
             dry_run: true,
             run_plan: false,
