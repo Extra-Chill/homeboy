@@ -661,8 +661,10 @@ pub struct RunnerAdmissionSummary {
     pub blocking_generation: Option<String>,
     /// Number of draining generations, summarized rather than expanded.
     pub draining_generation_count: usize,
-    /// Whether it is safe to rotate the runner now — true only when no
-    /// authoritative job is owned by the selected or draining generations.
+    /// Whether the selected daemon can be safely replaced now. A known stale
+    /// version is rotatable after its typed job view proves idle; ambiguous
+    /// lease ownership is not. Draining generation ownership also keeps this
+    /// false until aggregate work has settled.
     pub safe_to_rotate: bool,
     /// The single next actionable step, state-sensitive and executable.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -676,9 +678,39 @@ impl RunnerStatusReport {
         self.state == RunnerSessionState::Connected
     }
 
-    /// Shared daemon compatibility predicate for Lab admission and repair.
-    pub fn daemon_ready_for_admission(&self) -> bool {
-        self.is_connected() && self.stale_daemon.is_none()
+    /// The daemon freshness fence shared by status, placement, and dispatch.
+    /// A compatibility warning or a daemon's own non-fresh observation both
+    /// prohibit new work; rotation safety is evaluated separately.
+    pub fn daemon_fresh_for_admission(&self) -> bool {
+        self.stale_daemon.is_none()
+            && self
+                .daemon_freshness
+                .as_ref()
+                .is_none_or(|freshness| freshness.fresh)
+    }
+
+    /// Capacity remains owned by `RunnerAvailability`; this method only adds
+    /// the daemon freshness fact so placement does not duplicate capacity logic
+    /// introduced by the aggregate runner accounting path (#9474).
+    pub fn admission_availability(&self, capacity: Option<usize>) -> RunnerAvailability {
+        let mut availability = RunnerAvailability::from_status_parts(
+            self.runner_id.clone(),
+            self.is_connected(),
+            self.stale_daemon.is_some(),
+            // Aggregate accounting can retain unresolved generations while the
+            // typed view can transiently be ahead of it. Capacity must respect
+            // either owner without duplicating #9474's accounting policy.
+            self.active_job_count.max(self.active_jobs.len()),
+            &self.active_job_state,
+            capacity,
+        );
+        if !self.daemon_fresh_for_admission() && self.stale_daemon.is_none() {
+            availability
+                .reasons
+                .push("daemon_freshness_unavailable".to_string());
+            availability.accepts_jobs = false;
+        }
+        availability
     }
 
     /// Project the authoritative current-state admission summary.
@@ -700,7 +732,11 @@ impl RunnerStatusReport {
         draining_generation_count: usize,
     ) -> RunnerAdmissionSummary {
         let connected = self.is_connected();
-        let daemon_fresh = self.daemon_ready_for_admission();
+        // A compatibility warning and the daemon's own freshness probe both
+        // fence admission. The latter is especially important after losing a
+        // direct SSH session: no warning exists, but a missing lease can still
+        // make replacement unsafe.
+        let daemon_fresh = self.daemon_fresh_for_admission();
         let blocking_generation = generations
             .iter()
             .find(|generation| !generation.admission_owner && generation.active_job_count > 0)
@@ -715,7 +751,11 @@ impl RunnerStatusReport {
         let active_jobs_available = self.active_job_state == RunnerActiveJobState::Available;
         let accepting_jobs =
             connected && daemon_fresh && active_jobs_available && blocking_generation.is_none();
-        let safe_to_rotate = active_jobs_available && active_job_count == 0;
+        let safe_to_rotate = connected
+            && self.rotation_evidence_is_unambiguous()
+            && active_jobs_available
+            && active_job_count == 0
+            && blocking_generation.is_none();
         let daemon_build_identity = self
             .session
             .as_ref()
@@ -751,14 +791,65 @@ impl RunnerStatusReport {
     /// operator projection uses [`Self::status_action`] below. Keeping argv as
     /// the source prevents either surface from dropping the runner id.
     pub fn admission_action(&self) -> Option<ExecutableAction> {
-        if !self.is_connected() {
-            Some(crate::daemon_repair::connect_action(&self.runner_id))
-        } else if let Some(warning) = &self.stale_daemon {
+        if let Some(freshness) = self.daemon_freshness.as_ref() {
+            if let Some(action) = freshness
+                .repair_plan
+                .first()
+                .and_then(|step| step.action.clone())
+            {
+                return Some(action);
+            }
+            if !freshness.fresh {
+                // Missing lease evidence without an authorized repair must be
+                // reprobed, not replaced with a generic reconnect.
+                return Some(crate::daemon_repair::diagnose_action(&self.runner_id));
+            }
+        }
+        if let Some(warning) = &self.stale_daemon {
             warning.primary_recovery_action()
+        } else if !self.is_connected() {
+            Some(crate::daemon_repair::connect_action(&self.runner_id))
         } else if self.active_job_state != RunnerActiveJobState::Available {
             Some(status_action(&self.runner_id))
         } else {
             None
+        }
+    }
+
+    /// Admission freshness and replacement safety are intentionally distinct:
+    /// version drift blocks new work but an identified, authoritatively idle
+    /// daemon may be rotated to converge. Missing or corrupt lease state has no
+    /// such owner proof and must remain fenced.
+    pub(crate) fn rotation_evidence_is_unambiguous(&self) -> bool {
+        let Some(freshness) = self.daemon_freshness.as_ref() else {
+            return false;
+        };
+        match (freshness.fresh, freshness.stale_reason_code) {
+            // A current daemon observation with no stale predicate is an
+            // explicit proof that rotation may proceed once the job view is
+            // drained.
+            (true, None) => true,
+            // These identity/runtime mismatches identify a live daemon without
+            // undermining its lease ownership. Require both coordinates before
+            // allowing the stale-but-idle convergence path (#9474).
+            (
+                false,
+                Some(
+                    homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch
+                    | homeboy_core::daemon::DaemonStaleReasonCode::BuildIdentityMismatch
+                    | homeboy_core::daemon::DaemonStaleReasonCode::BinaryHashMismatch
+                    | homeboy_core::daemon::DaemonStaleReasonCode::RuntimePathsDrift,
+                ),
+            ) => {
+                freshness
+                    .lease_id
+                    .as_deref()
+                    .is_some_and(|lease_id| !lease_id.is_empty())
+                    && freshness.pid.is_some()
+            }
+            // A missing code on a non-fresh report and every present or future
+            // code not allowlisted above leave ownership ambiguous.
+            _ => false,
         }
     }
 
@@ -946,10 +1037,31 @@ mod status_serialization_tests {
         }
     }
 
+    fn fresh_daemon_freshness() -> DaemonFreshnessReport {
+        DaemonFreshnessReport {
+            fresh: true,
+            stale_reason_code: None,
+            restartable: true,
+            lease_id: Some("known-lease".to_string()),
+            pid: Some(1234),
+            recovery_evidence: None,
+            ownership_evidence: None,
+            adoption_command: None,
+            binary_hash: None,
+            daemon_version: None,
+            daemon_build_identity: None,
+            runtime_paths: None,
+            active_jobs: 0,
+            termination_evidence: None,
+            repair_plan: Vec::new(),
+        }
+    }
+
     #[test]
     fn admission_summary_fresh_idle_accepts_and_is_safe_to_rotate() {
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
+        report.daemon_freshness = Some(fresh_daemon_freshness());
         let summary = report.admission_summary(0);
         assert!(summary.connected);
         assert!(summary.daemon_fresh);
@@ -975,6 +1087,7 @@ mod status_serialization_tests {
     fn admission_summary_busy_is_not_safe_to_rotate_but_still_accepting() {
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
+        report.daemon_freshness = Some(fresh_daemon_freshness());
         report.active_job_count = 3;
         let summary = report.admission_summary(0);
         assert!(
@@ -991,6 +1104,7 @@ mod status_serialization_tests {
     #[test]
     fn admission_summary_stale_daemon_refuses_and_points_to_refresh() {
         let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Available;
         report.stale_daemon = Some(RunnerStaleDaemonWarning {
             severity: "error",
             mismatch_predicate: "active_daemon_control_plane_version != job_command_binary_version",
@@ -1025,6 +1139,7 @@ mod status_serialization_tests {
             Some("homeboy runner refresh-homeboy homeboy-lab --ref c8a6673b6abc --reconnect"),
             "the legacy serialized recovery remains the action source when argv is unavailable"
         );
+        assert!(!summary.safe_to_rotate, "missing daemon evidence is unsafe");
     }
 
     #[test]
@@ -1087,11 +1202,91 @@ mod status_serialization_tests {
     }
 
     #[test]
+    fn admission_summary_lease_missing_without_repair_plan_requires_diagnosis() {
+        let mut report = base_report();
+        report.connected = false;
+        report.state = RunnerSessionState::Disconnected;
+        report.active_job_state = RunnerActiveJobState::Available;
+        report.daemon_freshness = Some(DaemonFreshnessReport {
+            fresh: false,
+            stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing),
+            restartable: false,
+            lease_id: None,
+            pid: None,
+            recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Unavailable),
+            ownership_evidence: Some("ambiguous foreground daemon candidates".to_string()),
+            adoption_command: None,
+            binary_hash: None,
+            daemon_version: None,
+            daemon_build_identity: None,
+            runtime_paths: None,
+            active_jobs: 0,
+            termination_evidence: None,
+            repair_plan: Vec::new(),
+        });
+
+        let summary = report.admission_summary(0);
+
+        assert!(!summary.daemon_fresh);
+        assert!(!summary.accepting_jobs);
+        assert!(!summary.safe_to_rotate);
+        assert_eq!(
+            summary.next_action.as_deref(),
+            Some("homeboy runner doctor homeboy-lab --scope lab-offload")
+        );
+    }
+
+    #[test]
+    fn admission_summary_known_stale_version_is_safe_to_rotate_when_idle() {
+        let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Available;
+        report.daemon_freshness = Some(DaemonFreshnessReport {
+            fresh: false,
+            stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch),
+            restartable: false,
+            lease_id: Some("known-lease".to_string()),
+            pid: Some(1234),
+            recovery_evidence: None,
+            ownership_evidence: Some("reachable daemon lease and PID verified".to_string()),
+            adoption_command: None,
+            binary_hash: None,
+            daemon_version: Some("0.1.0".to_string()),
+            daemon_build_identity: None,
+            runtime_paths: None,
+            active_jobs: 0,
+            termination_evidence: None,
+            repair_plan: Vec::new(),
+        });
+
+        let summary = report.admission_summary(0);
+
+        assert!(!summary.daemon_fresh);
+        assert!(!summary.accepting_jobs);
+        assert!(summary.safe_to_rotate);
+    }
+
+    #[test]
+    fn admission_summary_missing_or_unclassified_freshness_is_not_safe_to_rotate() {
+        let mut missing_report = base_report();
+        missing_report.active_job_state = RunnerActiveJobState::Available;
+        assert!(!missing_report.admission_summary(0).safe_to_rotate);
+
+        let mut unclassified_report = missing_report;
+        unclassified_report.daemon_freshness = Some(DaemonFreshnessReport {
+            fresh: false,
+            stale_reason_code: None,
+            ..fresh_daemon_freshness()
+        });
+        assert!(!unclassified_report.admission_summary(0).safe_to_rotate);
+    }
+
+    #[test]
     fn admission_summary_summarizes_draining_generations_by_count_not_as_load() {
         // The historical draining generations are reported only as a count and
         // never contribute to active_job_count (the #9522 confusion).
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
+        report.daemon_freshness = Some(fresh_daemon_freshness());
         let summary = report.admission_summary(7);
         assert_eq!(summary.draining_generation_count, 7);
         assert_eq!(

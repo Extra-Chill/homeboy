@@ -980,11 +980,11 @@ pub(crate) fn exec_with_status_snapshot(
     }
 
     let connected = connected.expect("diagnostic SSH returned before daemon admission");
-    if refuses_stale_daemon_execution(&options, &connected) {
+    if refuses_nonfresh_daemon_execution(&options, &connected) {
         return Err(Error::validation_invalid_argument(
             "runner",
             format!(
-                "runner `{runner_id}` has a stale daemon session; refusing to rotate its shared tunnel during execution"
+                "runner `{runner_id}` has a non-fresh daemon admission session; refusing to rotate its shared tunnel during execution"
             ),
             Some(runner_id.to_string()),
             Some(vec![format!(
@@ -1148,12 +1148,12 @@ fn allows_idle_stale_daemon_refresh(
                 && status.active_job_error.is_none()))
 }
 
-fn refuses_stale_daemon_execution(
+fn refuses_nonfresh_daemon_execution(
     options: &RunnerExecOptions,
     status: &RunnerStatusReport,
 ) -> bool {
     status.connected
-        && status.stale_daemon.is_some()
+        && !status.daemon_fresh_for_admission()
         && !allows_idle_stale_daemon_refresh(options, status)
         // A read-only retrieval routes to the generation that retains the run or
         // artifact and never rotates the shared tunnel, so admission-daemon

@@ -337,14 +337,7 @@ fn placement_readiness_from_status(
     capability: super::LabRunnerGateDecision,
 ) -> PlacementReadiness {
     let (workload_family, command, provider, source_path_inputs) = admission_identity(request);
-    let availability = RunnerAvailability::from_status_parts(
-        request.runner_id.clone(),
-        status.connected,
-        status.stale_daemon.is_some(),
-        status.active_job_count,
-        &status.active_job_state,
-        capacity,
-    );
+    let availability = status.admission_availability(capacity);
     let queueable = request.allow_queue
         && request.durable_workload
         && mode == RunnerTunnelMode::Reverse
@@ -415,7 +408,7 @@ fn placement_readiness_from_status(
             },
             PlacementReadinessPredicate {
                 id: "daemon_fresh",
-                satisfied: status.stale_daemon.is_none(),
+                satisfied: status.daemon_fresh_for_admission(),
             },
             PlacementReadinessPredicate {
                 id: "active_jobs_authoritative",
@@ -578,14 +571,8 @@ fn preflight_lab_runner_availability_with(
     status_fn: impl Fn(&str) -> Result<RunnerStatusReport>,
 ) -> Result<(RunnerAvailability, RunnerStatusReport)> {
     let status = status_fn(&selection.runner_id)?;
-    let availability = RunnerAvailability::from_status_parts(
-        selection.runner_id.clone(),
-        status.connected,
-        status.stale_daemon.is_some(),
-        status.active_job_count,
-        &status.active_job_state,
-        load(&selection.runner_id)?.settings.concurrency_limit,
-    );
+    let availability =
+        status.admission_availability(load(&selection.runner_id)?.settings.concurrency_limit);
     Ok((availability, status))
 }
 
@@ -652,6 +639,9 @@ pub(super) fn lab_runner_availability_error(
     let stale_daemon_recovery = selected_status
         .and_then(|status| status.stale_daemon.as_ref())
         .map(|warning| warning.refresh_command.clone());
+    let admission_recovery = selected_status
+        .and_then(RunnerStatusReport::admission_action)
+        .map(|action| action.render_command());
     let mut tried = vec![
         "Wait for an active Lab runner job to finish, then retry.".to_string(),
         "Choose another available runner with --runner <runner-id>.".to_string(),
@@ -661,6 +651,15 @@ pub(super) fn lab_runner_availability_error(
         tried.insert(
             0,
             format!("Refresh the connected stale runner: `{recovery}`."),
+        );
+    }
+    if let Some(recovery) = admission_recovery
+        .as_ref()
+        .filter(|recovery| Some(*recovery) != stale_daemon_recovery.as_ref())
+    {
+        tried.insert(
+            0,
+            format!("Apply the authoritative runner admission recovery: `{recovery}`."),
         );
     }
 
@@ -678,6 +677,7 @@ pub(super) fn lab_runner_availability_error(
             },
             "runner_status": selected_status,
             "stale_daemon_recovery_command": stale_daemon_recovery,
+            "admission_recovery_command": admission_recovery,
             "tried": tried,
         }),
     )
@@ -973,7 +973,10 @@ pub(super) fn prepare_lab_runner_for_offload_with(
                     "Lab offload runner `{}` is connected but is not ready for remote execution",
                     selection.runner_id
                 ),
-                daemon_repair_command(&selection.runner_id, &status),
+                status
+                    .admission_action()
+                    .map(|action| action.render_command())
+                    .unwrap_or_else(|| daemon_repair_command(&selection.runner_id, &status)),
                 daemon_repair_action(&selection.runner_id, &status),
             );
         }
@@ -1080,7 +1083,7 @@ fn connected_runner_not_ready_reason(
     runner_id: &str,
     status: &RunnerStatusReport,
 ) -> Option<String> {
-    if status.daemon_ready_for_admission() {
+    if status.daemon_fresh_for_admission() {
         return None;
     }
     if let Some(warning) = status.stale_daemon.as_ref() {
@@ -1093,6 +1096,16 @@ fn connected_runner_not_ready_reason(
         return Some(format!(
             "connected runner `{runner_id}` daemon is stale (severity={}): {}; refresh with `{restart}`",
             warning.severity, warning.message
+        ));
+    }
+
+    if !status.daemon_fresh_for_admission() {
+        let recovery = status
+            .admission_action()
+            .map(|action| action.render_command())
+            .unwrap_or_else(|| format!("homeboy runner status {runner_id} --full"));
+        return Some(format!(
+            "connected runner `{runner_id}` daemon freshness is not proven for admission; inspect or recover with `{recovery}`"
         ));
     }
 
@@ -1543,6 +1556,48 @@ mod daemon_repair_step_tests {
             daemon_repair_command("homeboy-lab", &report),
             "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"
         );
+    }
+
+    #[test]
+    fn non_fresh_lease_ambiguity_is_ineligible_for_connected_selection() {
+        let mut report = status_report("homeboy-lab", Some(freshness_with_plan(Vec::new())), None);
+        report.active_job_state = RunnerActiveJobState::Available;
+        let freshness = report.daemon_freshness.as_mut().expect("freshness");
+        freshness.stale_reason_code =
+            Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing);
+        freshness.lease_id = None;
+        freshness.pid = None;
+        freshness.active_jobs = 0;
+
+        let availability = report.admission_availability(None);
+        let reason = connected_runner_not_ready_reason("homeboy-lab", &report);
+
+        assert!(!availability.accepts_jobs);
+        assert_eq!(availability.reasons, ["daemon_freshness_unavailable"]);
+        assert!(reason.is_some_and(|reason| reason.contains("runner doctor homeboy-lab")));
+    }
+
+    #[test]
+    fn known_version_mismatch_requires_its_convergence_action_not_admission() {
+        let mut report = status_report(
+            "homeboy-lab",
+            Some(freshness_with_plan(vec![daemon_repair::action_step(
+                daemon_repair::RUNNER_REFRESH_HOMEBOY,
+                daemon_repair::refresh_homeboy_action("homeboy-lab"),
+            )])),
+            None,
+        );
+        report.active_job_state = RunnerActiveJobState::Available;
+        let freshness = report.daemon_freshness.as_mut().expect("freshness");
+        freshness.stale_reason_code =
+            Some(homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch);
+        freshness.active_jobs = 0;
+
+        let availability = report.admission_availability(None);
+        let reason = connected_runner_not_ready_reason("homeboy-lab", &report);
+
+        assert!(!availability.accepts_jobs);
+        assert!(reason.is_some_and(|reason| reason.contains("refresh-homeboy homeboy-lab")));
     }
 }
 

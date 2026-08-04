@@ -678,6 +678,7 @@ fn handoff_convergence_action(
             controller_is_source_build: true,
             allow_convergence: automatic_handoff_convergence_allowed(runner)
                 && status.active_job_state == crate::RunnerActiveJobState::Available
+                && status.rotation_evidence_is_unambiguous()
                 && status
                     .session
                     .as_ref()
@@ -4783,7 +4784,25 @@ mod tests {
                 leaseless_recovery_evidence: None,
             }),
             stale_daemon: None,
-            daemon_freshness: None,
+            daemon_freshness: Some(homeboy_core::daemon::DaemonFreshnessReport {
+                fresh: false,
+                stale_reason_code: Some(
+                    homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch,
+                ),
+                restartable: false,
+                lease_id: Some("known-lease".to_string()),
+                pid: Some(1234),
+                recovery_evidence: None,
+                ownership_evidence: Some("reachable daemon lease and PID verified".to_string()),
+                adoption_command: None,
+                binary_hash: None,
+                daemon_version: None,
+                daemon_build_identity: Some(daemon_identity.to_string()),
+                runtime_paths: None,
+                active_jobs: 0,
+                termination_evidence: None,
+                repair_plan: Vec::new(),
+            }),
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
             stale_runner_jobs: Vec::new(),
@@ -4812,6 +4831,28 @@ mod tests {
                 "/runner/homeboy",
             ),
             HandoffConvergenceAction::Refresh(crate::HomeboyBinaryRefreshMode::Select { .. })
+        ));
+    }
+
+    #[test]
+    fn lease_ambiguous_daemon_refuses_handoff_convergence() {
+        let runner = convergence_runner(true);
+        let mut status = convergence_status("homeboy 1.2.2+stale");
+        let freshness = status.daemon_freshness.as_mut().expect("freshness");
+        freshness.stale_reason_code =
+            Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing);
+        freshness.lease_id = None;
+        freshness.pid = None;
+        assert!(matches!(
+            handoff_convergence_action(
+                &runner,
+                &status,
+                "homeboy 1.2.3+required",
+                Some("homeboy 1.2.3+required"),
+                Some("homeboy 1.2.2+stale"),
+                "/runner/homeboy",
+            ),
+            HandoffConvergenceAction::Refuse
         ));
     }
 
