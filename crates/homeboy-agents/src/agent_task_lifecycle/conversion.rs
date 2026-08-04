@@ -173,7 +173,8 @@ pub(crate) fn tasks_for_aggregate(
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
 ) -> Vec<AgentTaskRunTask> {
-    plan.tasks
+    let mut tasks: Vec<_> = plan
+        .tasks
         .iter()
         .map(|request| {
             let mut task = queued_task(request);
@@ -196,7 +197,24 @@ pub(crate) fn tasks_for_aggregate(
             }
             task
         })
-        .collect()
+        .collect();
+    tasks.extend(plan.postprocess_steps.iter().map(|step| {
+        let outcome = aggregate
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.task_id == step.id);
+        AgentTaskRunTask {
+            task_id: step.id.clone(),
+            state: outcome
+                .map(|outcome| task_state_for_outcome_status(outcome.status))
+                .unwrap_or(AgentTaskState::Queued),
+            backend: "artifact-postprocess".to_string(),
+            selector: None,
+            model: None,
+            provider_ref: None,
+        }
+    }));
+    tasks
 }
 
 pub(crate) fn task_state_for_outcome_status(status: AgentTaskOutcomeStatus) -> AgentTaskState {

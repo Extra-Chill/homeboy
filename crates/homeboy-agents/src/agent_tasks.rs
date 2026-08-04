@@ -93,11 +93,12 @@ pub use super::agent_task_schedule::{
     AgentTaskAdaptiveConcurrencyInputs, AgentTaskAdaptiveConcurrencyPolicy,
     AgentTaskAdaptiveConcurrencyStatus, AgentTaskAggregate, AgentTaskAggregateStatus,
     AgentTaskAggregateTotals, AgentTaskArtifactBinding, AgentTaskArtifactLineage,
-    AgentTaskArtifactOutputDeclaration, AgentTaskArtifactRunBinding, AgentTaskBackpressureStatus,
-    AgentTaskCancellationToken, AgentTaskChildRun, AgentTaskExecutionContext,
-    AgentTaskOutputBinding, AgentTaskOutputDependencies, AgentTaskPlan, AgentTaskQueueStatus,
-    AgentTaskResourceBudget, AgentTaskResourceBudgetStatus, AgentTaskResourcePressure,
-    AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState, AGENT_TASK_PLAN_SCHEMA,
+    AgentTaskArtifactOutputDeclaration, AgentTaskArtifactPostprocessStep,
+    AgentTaskArtifactRunBinding, AgentTaskBackpressureStatus, AgentTaskCancellationToken,
+    AgentTaskChildRun, AgentTaskExecutionContext, AgentTaskOutputBinding,
+    AgentTaskOutputDependencies, AgentTaskPlan, AgentTaskQueueStatus, AgentTaskResourceBudget,
+    AgentTaskResourceBudgetStatus, AgentTaskResourcePressure, AgentTaskRetryPolicy,
+    AgentTaskScheduleOptions, AgentTaskState, AGENT_TASK_PLAN_SCHEMA,
 };
 
 // `AgentTaskProgressEvent` is defined in both `agent_task` and
