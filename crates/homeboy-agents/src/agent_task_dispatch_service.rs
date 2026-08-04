@@ -456,6 +456,42 @@ fn config_default_backend() -> Option<String> {
         .filter(|backend| !backend.trim().is_empty())
 }
 
+/// The validation error raised when `agent-task cook` was given no `--backend`
+/// and no policy layer supplies a default.
+///
+/// The error enumerates the backends the discovered provider catalog declares
+/// so the operator gets a usable value from the failing command itself (#11478).
+/// Enumeration is *declaration*, not readiness — a listed backend can still fail
+/// its runner/config preflight at dispatch — so the message points at
+/// `agent-task providers --validate-readiness` rather than promising usability.
+fn missing_default_backend_error(available_backends: &[String]) -> Error {
+    const PROBLEM: &str =
+        "agent-task cook requires --backend because no default backend policy is configured";
+
+    let mut tried = vec![
+        "Set agent_task.default_backend in component, extension, or Homeboy config policy, or pass --backend explicitly.".to_string(),
+    ];
+
+    let problem = if available_backends.is_empty() {
+        tried.push(
+            "No agent-task executor providers were discovered here; run `homeboy agent-task providers` to diagnose runtime discovery."
+                .to_string(),
+        );
+        PROBLEM.to_string()
+    } else {
+        tried.push(
+            "Listed backends are declared, not verified: run `homeboy agent-task providers --backend <backend> --validate-readiness` to confirm one is usable."
+                .to_string(),
+        );
+        format!(
+            "{PROBLEM}; available backends: {}",
+            available_backends.join(", ")
+        )
+    };
+
+    Error::validation_invalid_argument("backend", problem, None, Some(tried))
+}
+
 /// Resolution core that also takes the Homeboy-config default resolver so tests
 /// can drive deterministic source classification (#5685).
 fn resolve_dispatch_request_with_default_and_config(
@@ -471,15 +507,13 @@ fn resolve_dispatch_request_with_default_and_config(
             Some(backend) => (backend, BackendSelectionSource::Cli),
             None => {
                 let resolved = default_backend(command.repo.as_deref())?.ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "backend",
-                    "agent-task cook requires --backend because no default backend policy is configured",
-                    None,
-                    Some(vec![
-                        "Set agent_task.default_backend in component, extension, or Homeboy config policy, or pass --backend explicitly.".to_string(),
-                    ]),
-                )
-            })?;
+                    // The provider catalog already knows every dispatchable
+                    // backend at this point, so discover it rather than making
+                    // the operator run `agent-task providers` and parse JSON to
+                    // answer a question this command can answer (#11478).
+                    // Discovery only happens on the failure path.
+                    missing_default_backend_error(&AgentTaskProviderCatalog::discover().backends())
+                })?;
                 // The policy resolver prefers component/extension defaults over the
                 // Homeboy config default; if the resolved value matches the config
                 // default we attribute it to config, otherwise to higher-priority
@@ -573,6 +607,77 @@ mod tests {
             backend: backend.map(str::to_string),
             ..AgentTaskDispatchCommand::default()
         }
+    }
+
+    #[test]
+    fn missing_default_backend_error_enumerates_available_backends() {
+        let error = missing_default_backend_error(&[
+            "claude-code".to_string(),
+            "codex".to_string(),
+            "opencode".to_string(),
+        ]);
+
+        assert!(
+            error
+                .message
+                .contains("requires --backend because no default backend policy is configured"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error
+                .message
+                .contains("available backends: claude-code, codex, opencode"),
+            "the failing command must name the values it will accept: {}",
+            error.message
+        );
+        // The configuration fix stays first; readiness is a caveat, not a promise.
+        assert_eq!(
+            error.details["tried"][0].as_str(),
+            Some("Set agent_task.default_backend in component, extension, or Homeboy config policy, or pass --backend explicitly.")
+        );
+        assert!(error.details["tried"][1]
+            .as_str()
+            .expect("readiness caveat")
+            .contains("--validate-readiness"));
+    }
+
+    #[test]
+    fn missing_default_backend_error_without_providers_points_at_discovery() {
+        let error = missing_default_backend_error(&[]);
+
+        assert!(
+            !error.message.contains("available backends"),
+            "an empty catalog must not advertise an empty list: {}",
+            error.message
+        );
+        assert!(error.details["tried"][1]
+            .as_str()
+            .expect("discovery hint")
+            .contains("homeboy agent-task providers"));
+    }
+
+    #[test]
+    fn missing_default_backend_is_raised_when_no_policy_resolves_a_backend() {
+        // Isolated home so catalog discovery on the failure path cannot read the
+        // developer's real runtimes.
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let error = resolve_dispatch_request_with_default_and_config(
+                command_with_backend(None),
+                |_| Ok(None),
+                || None,
+            )
+            .expect_err("no backend and no default policy");
+
+            assert_eq!(
+                error.code,
+                homeboy_core::ErrorCode::ValidationInvalidArgument
+            );
+            assert_eq!(error.details["field"].as_str(), Some("backend"));
+            assert!(error
+                .message
+                .contains("requires --backend because no default backend policy is configured"));
+        });
     }
 
     #[test]
