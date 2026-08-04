@@ -1,35 +1,4 @@
-use std::path::Path;
-
-use super::{LabOffloadCommand, LabRunnerCapabilityContract, RunnerRequiredTool};
-use super::{RunnerCapabilityPreflight, RunnerToolchainReadinessProbe};
-
-pub(super) fn lab_runner_capability_contract(
-    command: &LabOffloadCommand,
-    source_path: &Path,
-    command_prefix_required_tools: &[RunnerRequiredTool],
-) -> Option<LabRunnerCapabilityContract> {
-    if !command.is_portable() {
-        return None;
-    }
-
-    let mut required_tools = Vec::new();
-
-    for tool in command_prefix_required_tools {
-        push_unique(&mut required_tools, tool.clone());
-    }
-
-    let _ = source_path;
-
-    Some(LabRunnerCapabilityContract {
-        command: command.hot_label,
-        required_tools,
-        required_capabilities: command
-            .required_capabilities
-            .iter()
-            .map(|capability| capability.name.clone())
-            .collect(),
-    })
-}
+use super::{LabOffloadCommand, RunnerCapabilityPreflight, RunnerToolchainReadinessProbe};
 
 /// Resolve extension-owned usable-toolchain probes before any Lab workspace is
 /// hydrated. The operation label is generic Homeboy command metadata; extension
@@ -37,15 +6,31 @@ pub(super) fn lab_runner_capability_contract(
 pub(super) fn toolchain_readiness_preflight(
     command: &LabOffloadCommand,
 ) -> homeboy_core::Result<Option<RunnerCapabilityPreflight>> {
-    let operation = command
-        .hot_label
-        .split_whitespace()
-        .last()
-        .unwrap_or_default();
+    toolchain_readiness_preflight_for_extensions(command.hot_label, &command.required_extensions)
+}
+
+/// Compile probes from extension manifests only. This is deliberately crate
+/// private: public preflight inputs select a typed workload, never probe text.
+pub(crate) fn toolchain_readiness_preflight_for_extensions(
+    command: &str,
+    extensions: &[String],
+) -> homeboy_core::Result<Option<RunnerCapabilityPreflight>> {
+    let operation = command.split_whitespace().last().unwrap_or_default();
     let mut probes = Vec::new();
-    for extension_id in &command.required_extensions {
+    for extension_id in extensions {
         let manifest = homeboy_core::extension_store::load_extension(extension_id)?;
         for probe in &manifest.toolchain_readiness {
+            if probe.is_legacy_non_executable() {
+                return Err(homeboy_core::Error::validation_invalid_argument(
+                    "toolchain_readiness",
+                    format!(
+                        "extension `{extension_id}` declares legacy command probe `{}`; extension upgrade required",
+                        probe.id
+                    ),
+                    None,
+                    Some(vec![format!("Upgrade extension `{extension_id}` to structured program/args readiness probes.")]),
+                ));
+            }
             if !probe.capabilities.is_empty()
                 && !probe
                     .capabilities
@@ -57,21 +42,16 @@ pub(super) fn toolchain_readiness_preflight(
             probes.push(RunnerToolchainReadinessProbe {
                 extension_id: extension_id.clone(),
                 id: format!("{extension_id}:{}", probe.id),
-                command: probe.command.clone(),
+                program: probe.program.clone(),
+                args: probe.args.clone(),
                 repair_command: probe.repair_command.clone(),
                 diagnostic_env: probe.diagnostic_env.clone(),
             });
         }
     }
     Ok((!probes.is_empty()).then(|| RunnerCapabilityPreflight {
-        command: command.hot_label.to_string(),
+        command: command.to_string(),
         required_toolchain_probes: probes,
         ..Default::default()
     }))
-}
-
-fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
-    if !items.contains(&item) {
-        items.push(item);
-    }
 }

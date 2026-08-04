@@ -46,8 +46,11 @@ pub fn run_command_output(
                                 .with_output_file_already_written();
                         }
                     };
-                    let progress = |phase: &str, cook_id: Option<&str>, run_id: Option<&str>| {
-                        lease.progress(phase, cook_id, run_id)
+                    let progress = |phase: &str,
+                                    cook_id: Option<&str>,
+                                    run_id: Option<&str>,
+                                    activity: Option<&str>| {
+                        lease.progress(phase, cook_id, run_id, activity)
                     };
                     let (result, exit_code) = map(
                         crate::commands::agent_task::run_with_cook_progress_and_provenance(

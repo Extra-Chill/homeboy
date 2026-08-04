@@ -114,6 +114,74 @@ fn agent_tool_dispatch_handles_workspace_write_and_read() {
     assert_eq!(read_stdout["output"]["content"], "hello dispatcher\n");
 }
 
+/// A denied command must be refused at the `homeboy agent-task tool dispatch`
+/// boundary itself — the one command-execution boundary Homeboy actually owns —
+/// and the refusal must tell the agent why and what to do instead (#11481).
+#[test]
+fn agent_tool_dispatch_refuses_a_denied_command_with_a_reason() {
+    let output = run_tool_dispatch(
+        json!({
+            "schema": "homeboy/agent-tool-policy/v1",
+            "default_location": "control_plane",
+            "commands": {
+                "deny": [{ "pattern": "cargo test" }, { "pattern": "cargo build" }],
+                "reason": "this host routes builds to CI; make your edits and push"
+            }
+        }),
+        json!({
+            "schema": "homeboy/agent-tool-request/v1",
+            "request_id": "request-denied",
+            "task_id": "task-1",
+            "tool": "bash",
+            "input": { "command": "timeout 1200 cargo test -q -j3 -p homeboy-agents" }
+        }),
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout: Value = serde_json::from_slice(&output.stdout).expect("raw result json");
+    assert_eq!(stdout["status"], "denied");
+    let diagnostic = &stdout["diagnostics"][0];
+    assert_eq!(diagnostic["class"], "agent_tool.command_denied");
+    assert_eq!(diagnostic["data"]["matched_pattern"], "cargo test");
+    assert_eq!(
+        diagnostic["data"]["reason"],
+        "this host routes builds to CI; make your edits and push"
+    );
+    assert!(diagnostic["data"]["remediation"]
+        .as_str()
+        .expect("remediation")
+        .contains("Make your edits"));
+}
+
+/// A command the policy does not refuse must still execute normally, so the
+/// policy constrains rather than blocks.
+#[test]
+fn agent_tool_dispatch_permits_a_command_outside_the_deny_list() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output = run_tool_dispatch(
+        json!({
+            "schema": "homeboy/agent-tool-policy/v1",
+            "default_location": "control_plane",
+            "commands": { "deny": [{ "pattern": "cargo *" }] }
+        }),
+        json!({
+            "schema": "homeboy/agent-tool-request/v1",
+            "request_id": "request-permitted",
+            "task_id": "task-1",
+            "tool": "workspace_write",
+            "input": {
+                "workspace_path": dir.path(),
+                "path": "notes/allowed.txt",
+                "content": "not a cargo command\n"
+            }
+        }),
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout: Value = serde_json::from_slice(&output.stdout).expect("raw result json");
+    assert_eq!(stdout["status"], "succeeded");
+}
+
 #[test]
 fn agent_tool_dispatch_outputs_raw_control_plane_validation_result() {
     let output = run_tool_dispatch(

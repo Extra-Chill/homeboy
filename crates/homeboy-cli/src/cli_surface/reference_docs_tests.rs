@@ -12,16 +12,15 @@
 //! the tree on demand with:
 //!
 //! ```text
-//! HOMEBOY_WRITE_CLI_REFERENCE=1 cargo test -p homeboy-cli --lib cli_surface::reference_docs
+//! cargo run -p homeboy-cli --bin generate-cli-reference
 //! ```
 
 use super::reference_docs::{
     commands_without_description, documented_subcommands, generated_reference_docs,
-    live_generated_reference_docs, GENERATED_DIR, WRITE_ENV,
+    write_cli_reference, WRITE_ENV,
 };
 use super::Cli;
 use clap::CommandFactory;
-use homeboy_command_contract::cli_reference::CliReference;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
@@ -46,24 +45,7 @@ fn cli_reference_docs_regenerate_on_demand() {
         return;
     }
 
-    let directory = workspace_root().join(GENERATED_DIR);
-    let expected = live_generated_reference_docs();
-    if directory.exists() {
-        std::fs::remove_dir_all(&directory).expect("failed to clear the generated CLI reference");
-    }
-    std::fs::create_dir_all(&directory)
-        .expect("failed to create the generated CLI reference directory");
-    for (name, body) in &expected {
-        std::fs::write(directory.join(name), body)
-            .unwrap_or_else(|error| panic!("failed to write {GENERATED_DIR}/{name}: {error}"));
-    }
-    let contract = serde_json::to_string_pretty(&CliReference::new(expected))
-        .expect("serialize CLI reference contract");
-    std::fs::write(
-        workspace_root().join("docs/reference/cli/command-surface.json"),
-        format!("{contract}\n"),
-    )
-    .expect("write CLI reference contract");
+    write_cli_reference(&workspace_root()).expect("write CLI reference");
 }
 
 /// One generated page per visible top-level command, plus the index.

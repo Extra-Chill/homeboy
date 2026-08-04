@@ -115,7 +115,8 @@ pub(crate) mod lab_plan;
 mod lab_selection;
 pub use lab_selection::{
     compile_lab_admission_plan, placement_readiness, LabAdmissionPlan, PlacementReadiness,
-    PlacementReadinessPredicate, PlacementReadinessRequest, PlacementReadinessState,
+    PlacementReadinessInvocation, PlacementReadinessPredicate, PlacementReadinessRequest,
+    PlacementReadinessState,
 };
 mod lab_workspace_provenance_provider;
 mod lab_workspaces;
@@ -182,11 +183,7 @@ pub fn controller_workspace_materialization_identity(
 ) -> homeboy_core::error::Result<String> {
     workspace::snapshot_identity(path, &[], &[])
 }
-// Only test code (extension::trace::canonicality) still calls verify_lab_workspace
-// directly; production goes through the LabWorkspaceProvenanceProvider hook.
 pub(crate) use workspace::update_workspace_resource_lifecycle;
-#[cfg(test)]
-pub(crate) use workspace::verify_lab_workspace;
 #[cfg(test)]
 pub(crate) use workspace::workspace_resource_lifecycle;
 
@@ -270,8 +267,6 @@ pub use lab::{
     execute_lab_offload, LabJobOverrides, LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest,
     LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy, LabRunnerSelectionSource,
 };
-#[cfg(test)]
-pub(crate) use lab_env::build_lab_offload_env;
 pub use lab_offload_provider::register as register_runner_lab_offload_provider;
 pub use lab_selection::prepare_explicit_lab_runner_for_offload;
 pub use lab_staging_controller::enable_production_routing as enable_production_lab_staging;

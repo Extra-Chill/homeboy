@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use homeboy::agents::agent_tasks::dispatch_service;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
+use homeboy::agents::agent_tasks::provider;
 use homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::agents::agent_tasks::scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan,
@@ -700,6 +701,36 @@ pub(crate) fn validate_cook_request(args: &AgentTaskCookArgs) -> homeboy::core::
     validate_cook_request_with_provenance(args, None)
 }
 
+/// Reject a Cook whose selected backend cannot execute, before the destination
+/// worktree is provisioned.
+///
+/// `agent-task providers` reporting `available` used to mean only "declared",
+/// so a Cook could be dispatched to a backend with no credential, materialize a
+/// workspace, and burn its whole execution budget discovering the gap inside
+/// the provider — while other configured backends were sitting there usable
+/// (#11479). The backend's declared credentials are knowable here, so the
+/// remediation is reported instead of a spent budget.
+///
+/// A backend that cannot be resolved at all is left to the resolution
+/// validators; this only speaks about credentials.
+pub(crate) fn preflight_cook_provider_credentials(
+    args: &AgentTaskCookArgs,
+) -> homeboy::core::Result<()> {
+    let dispatch = dispatch_args_for_cook(args);
+    let backend = match dispatch.backend.clone() {
+        Some(backend) => Some(backend),
+        None => provider::default_backend_for_component(dispatch.repo.as_deref())?,
+    };
+    let Some(backend) = backend else {
+        // No backend is resolvable yet; dispatch resolution reports that.
+        return Ok(());
+    };
+    provider::preflight_discovered_provider_credentials_for_backend(
+        &backend,
+        dispatch.selector.as_deref(),
+    )
+}
+
 /// Validates Cook input authority before destination provisioning, provider
 /// discovery, or any other external effect starts.
 pub(crate) fn validate_cook_request_with_provenance(
@@ -835,7 +866,9 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress<E>(
         Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>,
     >,
     progress: Option<
-        &(dyn Fn(&str, Option<&str>, Option<&str>) -> homeboy::core::Result<()> + Send + Sync),
+        &(dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
+              + Send
+              + Sync),
     >,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value>
@@ -844,6 +877,10 @@ where
 {
     let args = resolve_cook_destination(args)?;
     validate_cook_request_with_provenance(&args, provenance)?;
+    // Before any external effect: a backend that cannot execute must say so now
+    // rather than after a workspace exists and an execution has been spent
+    // (#11479).
+    preflight_cook_provider_credentials(&args)?;
     let no_progress = args.no_progress;
     // Deterministic gates exist to make *publication* safe: a green gate is the
     // proof a cook may commit, push, and open a PR. A `--no-finalize` cook does
@@ -876,7 +913,7 @@ where
     let cook_id = requested_cook_id.clone().unwrap_or_else(|| run_id.clone());
     if !no_progress {
         if let Some(progress) = progress {
-            progress("preparing", None, None)?;
+            progress("preparing", None, None, None)?;
         }
     }
     let (run_id, mut initial_plan) = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
@@ -950,12 +987,23 @@ where
         .first()
         .and_then(|task| task.executor.model())
         .map(str::to_string);
-    let durable_observer = |phase: &str, cook_id: &str, run_id: &str| {
-        if no_progress && phase != "durable_identity" {
+    let durable_observer = |event: &agent_task_service::CookProgressEvent<'_>| {
+        if no_progress && event.phase != "durable_identity" {
             return Ok(());
         }
+        // The observer renders the activity sample here rather than passing the
+        // struct on, so foreground clients (TTY, machine log, `--output` file)
+        // all describe a running provider with the same bounded sentence.
+        let activity = event.activity_summary();
         progress
-            .map(|progress| progress(phase, Some(cook_id), Some(run_id)))
+            .map(|progress| {
+                progress(
+                    event.phase,
+                    Some(event.cook_id),
+                    Some(event.run_id),
+                    activity.as_deref(),
+                )
+            })
             .unwrap_or(Ok(()))
     };
     let result = agent_task_service::run_cook_with_durable_observer(
@@ -1140,6 +1188,9 @@ mod prompt_input_tests {
                 queue_only: false,
                 timeout_ms: None,
                 resolved_provider_policy: None,
+                deny_command: Vec::new(),
+                allow_command: Vec::new(),
+                command_policy_reason: None,
             },
         }
     }

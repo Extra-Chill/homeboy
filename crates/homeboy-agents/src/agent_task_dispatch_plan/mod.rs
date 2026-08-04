@@ -9,9 +9,9 @@
 use serde_json::Value;
 
 use crate::agent_task::{
-    AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest,
+    AgentCommandPolicy, AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest,
     AgentTaskRuntimeSelection, AgentTaskSourceRef, AgentTaskWorkspace, AgentTaskWorkspaceMode,
-    AGENT_TASK_REQUEST_SCHEMA,
+    AgentToolPolicy, AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::agent_task_provider::provider_requires_cwd_git_checkout;
 use crate::agent_task_runtime_dependency_graph;
@@ -25,6 +25,9 @@ use super::agent_task_dispatch_service::{
     AgentTaskDispatchRequest, AgentTaskModelSelection, AgentTaskModelSelectionReason,
     DispatchCoreInputs,
 };
+
+mod command_policy;
+use command_policy::resolve_dispatch_command_policy;
 
 mod prompt_spec;
 use prompt_spec::{
@@ -211,11 +214,15 @@ pub fn build_dispatch_plan_with_provider_requirements(
     let secret_env = dispatch_secret_env(request, &provider_config);
     let runtime_dependency_graph_evidence = (!runtime_dependency_graph.is_empty())
         .then(|| runtime_dependency_graph.to_evidence_value());
+    let command_policy = resolve_dispatch_command_policy(request)?;
     let mut tasks = Vec::new();
     for (index, prompt_spec) in prompt_specs.iter().enumerate() {
         let resolved_prompt = read_prompt_spec(&prompt_spec.prompt)?;
-        let instructions =
-            dispatch_instructions(resolved_prompt.content.clone(), request.task_url.as_deref());
+        let instructions = dispatch_instructions(
+            resolved_prompt.content.clone(),
+            request.task_url.as_deref(),
+            &command_policy,
+        );
         let task_id = prompt_spec.task_id.clone().unwrap_or_else(|| {
             request
                 .task_id
@@ -310,7 +317,10 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 read: "workspace".to_string(),
                 write: "patch".to_string(),
                 apply: "manual".to_string(),
-                tools: Default::default(),
+                tools: AgentToolPolicy {
+                    commands: command_policy.clone(),
+                    ..AgentToolPolicy::default()
+                },
             },
             limits: AgentTaskLimits::default(),
             expected_artifacts: vec![
@@ -510,7 +520,24 @@ pub fn preflight_dispatch_provider_secrets(plan: &AgentTaskPlan) -> Result<()> {
     })
 }
 
-fn dispatch_instructions(instructions: String, task_url: Option<&str>) -> String {
+fn dispatch_instructions(
+    instructions: String,
+    task_url: Option<&str>,
+    command_policy: &AgentCommandPolicy,
+) -> String {
+    // The command policy is stated in the prompt as well as enforced. Homeboy
+    // structurally refuses a denied command at its own tool boundary, but a
+    // provider runtime that runs shell commands inside its own process never
+    // crosses that boundary — for those runtimes the agent has to be told, in
+    // terms it cannot miss, what it may not run and what to do instead.
+    let constraints = command_policy.prompt_constraints();
+    let instructions = match constraints {
+        Some(constraints) if !instructions.contains("Command policy (declared by the operator") => {
+            format!("{instructions}\n\n{constraints}")
+        }
+        _ => instructions,
+    };
+
     if task_url.is_none() || instructions.contains("Generated change guardrails") {
         return instructions;
     }
@@ -769,6 +796,7 @@ fn dispatch_client_context(request: &AgentTaskDispatchRequest) -> Result<Value> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_task::{AgentCommandPolicyMode, AgentCommandRule};
     use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA};
     use crate::agent_task_dispatch_service::{
         dispatch, DispatchCoreInputs, DISPATCH_RESULT_SCHEMA,
@@ -785,11 +813,171 @@ mod tests {
         let instructions = dispatch_instructions(
             "Implement the tracked change.".to_string(),
             Some("https://example.test/issues/1"),
+            &AgentCommandPolicy::default(),
         );
 
         assert!(instructions.contains("successful gates remain authoritative"));
         assert!(instructions.contains("prefer evidence-only or test-only output"));
         assert!(instructions.contains("the evidence boundary for each runtime change"));
+    }
+
+    /// An unconstrained policy must not add noise to the prompt.
+    #[test]
+    fn default_command_policy_adds_no_prompt_constraints() {
+        let instructions = dispatch_instructions(
+            "Implement the tracked change.".to_string(),
+            None,
+            &AgentCommandPolicy::default(),
+        );
+
+        assert_eq!(instructions, "Implement the tracked change.");
+    }
+
+    #[test]
+    fn command_policy_is_stated_in_the_provider_prompt() {
+        let policy = AgentCommandPolicy {
+            deny: vec![AgentCommandRule::new("cargo test")],
+            reason: Some("this host routes builds to CI".to_string()),
+            ..AgentCommandPolicy::default()
+        };
+
+        let instructions =
+            dispatch_instructions("Implement the tracked change.".to_string(), None, &policy);
+
+        assert!(instructions.contains("`cargo test`"));
+        assert!(instructions.contains("this host routes builds to CI"));
+        assert!(instructions.contains("Make your edits, commit"));
+    }
+
+    #[test]
+    fn deny_command_flags_land_on_every_dispatched_task_policy() {
+        with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().expect("workspace");
+
+            let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+                prompt: Some("Fix the bug.".to_string()),
+                cwd: Some(workspace.path().display().to_string()),
+                repo: Some("sample-plugin".to_string()),
+                core: DispatchCoreInputs {
+                    deny_command: vec!["cargo test".to_string(), "cargo build".to_string()],
+                    command_policy_reason: Some("this host routes builds to CI".to_string()),
+                    ..DispatchCoreInputs::default()
+                },
+                ..DispatchRequestOverrides::default()
+            }))
+            .expect("dispatch plan");
+
+            let commands = &plan.tasks[0].policy.tools.commands;
+            assert_eq!(commands.mode, AgentCommandPolicyMode::DenyList);
+            assert_eq!(
+                commands
+                    .deny
+                    .iter()
+                    .map(|rule| rule.pattern.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["cargo test", "cargo build"]
+            );
+            assert_eq!(
+                commands.reason.as_deref(),
+                Some("this host routes builds to CI")
+            );
+            assert!(commands
+                .evaluate("timeout 1200 cargo test -p homeboy-agents")
+                .denial()
+                .is_some());
+            assert!(plan.tasks[0].instructions.contains("`cargo test`"));
+        });
+    }
+
+    #[test]
+    fn allow_command_flags_switch_the_plan_to_allow_list_mode() {
+        with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().expect("workspace");
+
+            let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+                prompt: Some("Fix the bug.".to_string()),
+                cwd: Some(workspace.path().display().to_string()),
+                repo: Some("sample-plugin".to_string()),
+                core: DispatchCoreInputs {
+                    allow_command: vec!["cargo fmt".to_string(), "git *".to_string()],
+                    ..DispatchCoreInputs::default()
+                },
+                ..DispatchRequestOverrides::default()
+            }))
+            .expect("dispatch plan");
+
+            let commands = &plan.tasks[0].policy.tools.commands;
+            assert_eq!(commands.mode, AgentCommandPolicyMode::AllowList);
+            assert!(commands.evaluate("git status").denial().is_none());
+            assert!(commands.evaluate("cargo build").denial().is_some());
+        });
+    }
+
+    /// A host-level config policy must reach every cook on the machine without
+    /// a per-invocation flag, and per-dispatch flags must extend it rather than
+    /// replace it.
+    #[test]
+    fn host_config_command_policy_is_inherited_and_extended_by_flags() {
+        with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            let mut config = homeboy_core::defaults::load_config();
+            config.agent_task.command_policy = Some(serde_json::json!({
+                "deny": [{ "pattern": "cargo build", "reason": "builds go to CI on this host" }],
+                "reason": "shared 15Gi VPS"
+            }));
+            homeboy_core::defaults::save_config(&config).expect("save config");
+
+            let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+                prompt: Some("Fix the bug.".to_string()),
+                cwd: Some(workspace.path().display().to_string()),
+                repo: Some("sample-plugin".to_string()),
+                core: DispatchCoreInputs {
+                    deny_command: vec!["cargo test".to_string()],
+                    ..DispatchCoreInputs::default()
+                },
+                ..DispatchRequestOverrides::default()
+            }))
+            .expect("dispatch plan");
+
+            let commands = &plan.tasks[0].policy.tools.commands;
+            assert_eq!(
+                commands
+                    .deny
+                    .iter()
+                    .map(|rule| rule.pattern.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["cargo build", "cargo test"]
+            );
+            assert_eq!(commands.reason.as_deref(), Some("shared 15Gi VPS"));
+            assert_eq!(
+                commands
+                    .evaluate("cargo build --release")
+                    .denial()
+                    .expect("denied")
+                    .reason,
+                "builds go to CI on this host"
+            );
+        });
+    }
+
+    #[test]
+    fn malformed_host_command_policy_fails_dispatch_with_a_pointed_error() {
+        with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            let mut config = homeboy_core::defaults::load_config();
+            config.agent_task.command_policy = Some(serde_json::json!({ "deny": "cargo test" }));
+            homeboy_core::defaults::save_config(&config).expect("save config");
+
+            let error = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+                prompt: Some("Fix the bug.".to_string()),
+                cwd: Some(workspace.path().display().to_string()),
+                repo: Some("sample-plugin".to_string()),
+                ..DispatchRequestOverrides::default()
+            }))
+            .expect_err("malformed policy rejected");
+
+            assert!(error.to_string().contains("agent-command-policy/v1"));
+        });
     }
 
     #[test]
@@ -2070,6 +2258,9 @@ mod tests {
                 queue_only: overrides.core.queue_only,
                 timeout_ms: overrides.core.timeout_ms,
                 resolved_provider_policy: overrides.core.resolved_provider_policy,
+                deny_command: overrides.core.deny_command,
+                allow_command: overrides.core.allow_command,
+                command_policy_reason: overrides.core.command_policy_reason,
             },
             backend_selection: None,
         }

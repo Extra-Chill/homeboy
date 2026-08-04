@@ -307,7 +307,6 @@ fn safe_join(root: &Path, relative: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_core::source_snapshot::SourceSnapshot;
 
     #[test]
     fn test_apply_workspace_patch() {

@@ -57,15 +57,16 @@ pub fn run(args: AgentTaskArgs) -> CmdResult<Value> {
     let announced_identity = std::sync::atomic::AtomicBool::new(false);
     let no_progress = matches!(&args.command, AgentTaskCommand::Cook(cook) if cook.no_progress);
     let reporter = CookProgressReporter::new(no_progress);
-    let progress = |phase: &str, cook_id: Option<&str>, run_id: Option<&str>| {
-        if let Some(run_id) = run_id {
-            if !announced_identity.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                run::announce_durable_cook_identity(cook_id, run_id);
+    let progress =
+        |phase: &str, cook_id: Option<&str>, run_id: Option<&str>, activity: Option<&str>| {
+            if let Some(run_id) = run_id {
+                if !announced_identity.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    run::announce_durable_cook_identity(cook_id, run_id);
+                }
             }
-        }
-        reporter.report(phase, cook_id, run_id);
-        Ok(())
-    };
+            reporter.report(phase, cook_id, run_id, activity);
+            Ok(())
+        };
     run_with_cook_progress(args, Some(&progress))
 }
 
@@ -91,6 +92,9 @@ struct CookProgressState {
     emitted_lines: usize,
     heartbeat_count: usize,
     last_phase: Option<String>,
+    /// Last provider-activity sentence emitted, so an unchanged sample stays
+    /// silent while a genuinely new one gets a line.
+    last_activity: Option<String>,
 }
 
 /// Bounds foreground Cook progress independently from durable lifecycle events.
@@ -109,23 +113,34 @@ impl CookProgressReporter {
         }
     }
 
-    pub(crate) fn report(&self, phase: &str, cook_id: Option<&str>, run_id: Option<&str>) {
+    pub(crate) fn report(
+        &self,
+        phase: &str,
+        cook_id: Option<&str>,
+        run_id: Option<&str>,
+        activity: Option<&str>,
+    ) {
         if self.no_progress {
             return;
         }
         if crate::commands::utils::tty::is_stdout_tty() {
             crate::commands::utils::tty::status(&format!(
-                "cook: {phase}{}",
+                "cook: {phase}{}{}",
                 run_id
                     .map(|run_id| format!(" [{run_id}]"))
                     .or_else(|| cook_id.map(|cook_id| format!(" [{cook_id}]")))
+                    .unwrap_or_default(),
+                activity
+                    .map(|activity| format!(" — {activity}"))
                     .unwrap_or_default()
             ));
             return;
         }
 
         let mut state = self.state.lock().expect("cook progress state");
-        if let Some(message) = next_machine_progress_message(&mut state, phase, cook_id, run_id) {
+        if let Some(message) =
+            next_machine_progress_message(&mut state, phase, cook_id, run_id, activity)
+        {
             eprintln!("{message}");
         }
     }
@@ -136,6 +151,7 @@ fn next_machine_progress_message(
     phase: &str,
     cook_id: Option<&str>,
     run_id: Option<&str>,
+    activity: Option<&str>,
 ) -> Option<String> {
     if state.emitted_lines >= MAX_MACHINE_PROGRESS_LINES {
         return None;
@@ -146,12 +162,26 @@ fn next_machine_progress_message(
         .unwrap_or_default();
     if phase == "heartbeat" {
         state.heartbeat_count += 1;
-        if !matches!(state.heartbeat_count, 1 | 4 | 8) {
+        // Sampled liveness is emitted on a fixed schedule; a *changed* provider
+        // activity earns an extra line because it is new information, not
+        // repetition. Both stay under `MAX_MACHINE_PROGRESS_LINES`, so this
+        // cannot become the heartbeat flood that cap exists to prevent — but it
+        // does mean an operator watching a stalled cook sees the moment it
+        // started compiling instead of a wall of byte-identical lines (#11482).
+        let activity_changed = activity.is_some() && state.last_activity.as_deref() != activity;
+        if activity_changed {
+            state.last_activity = activity.map(str::to_string);
+        }
+        if !matches!(state.heartbeat_count, 1 | 4 | 8) && !activity_changed {
             return None;
         }
         state.emitted_lines += 1;
+        let detail = match activity {
+            Some(activity) => format!(" {activity}."),
+            None => String::new(),
+        };
         return Some(format!(
-            "Cook heartbeat{identity}: still running (liveness sample {}).",
+            "Cook heartbeat{identity}: still running (liveness sample {}).{detail}",
             state.heartbeat_count
         ));
     }
@@ -172,7 +202,9 @@ fn next_machine_progress_message(
 pub(crate) fn run_with_cook_progress(
     args: AgentTaskArgs,
     progress: Option<
-        &(dyn Fn(&str, Option<&str>, Option<&str>) -> homeboy::core::Result<()> + Send + Sync),
+        &(dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
+              + Send
+              + Sync),
     >,
 ) -> CmdResult<Value> {
     run_with_cook_progress_and_provenance(args, progress, None)
@@ -181,7 +213,9 @@ pub(crate) fn run_with_cook_progress(
 pub(crate) fn run_with_cook_progress_and_provenance(
     args: AgentTaskArgs,
     progress: Option<
-        &(dyn Fn(&str, Option<&str>, Option<&str>) -> homeboy::core::Result<()> + Send + Sync),
+        &(dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
+              + Send
+              + Sync),
     >,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value> {
@@ -290,7 +324,10 @@ pub(crate) fn run_with_cook_progress_and_provenance(
 
 #[cfg(test)]
 mod progress_tests {
-    use super::{cook_progress_message, next_machine_progress_message, CookProgressState};
+    use super::{
+        cook_progress_message, next_machine_progress_message, CookProgressState,
+        MAX_MACHINE_PROGRESS_LINES,
+    };
 
     #[test]
     fn non_tty_cook_progress_includes_durable_reconnect_commands() {
@@ -307,7 +344,7 @@ mod progress_tests {
         let mut messages = Vec::new();
         for _ in 0..100 {
             if let Some(message) =
-                next_machine_progress_message(&mut state, "heartbeat", None, Some("run-123"))
+                next_machine_progress_message(&mut state, "heartbeat", None, Some("run-123"), None)
             {
                 messages.push(message);
             }
@@ -317,6 +354,76 @@ mod progress_tests {
         assert!(messages
             .iter()
             .all(|message| message.contains("still running")));
+    }
+
+    #[test]
+    fn heartbeats_carry_the_provider_activity_that_diagnoses_a_stalled_cook() {
+        // The whole point of #11482: the heartbeat has to say what the agent is
+        // doing, not merely that something is running.
+        let mut state = CookProgressState::default();
+
+        let message = next_machine_progress_message(
+            &mut state,
+            "heartbeat",
+            None,
+            Some("run-123"),
+            Some("no files written yet, 6m12s in `cargo test -p homeboy-agents`"),
+        )
+        .expect("first heartbeat is emitted");
+
+        assert!(message.contains("no files written yet"));
+        assert!(message.contains("cargo test -p homeboy-agents"));
+    }
+
+    #[test]
+    fn an_unchanged_activity_sample_does_not_add_heartbeat_lines() {
+        // Repeating the same sentence is the flood the sampling cap exists to
+        // prevent (#10455, #11087); only new information earns a line.
+        let mut state = CookProgressState::default();
+        let mut messages = Vec::new();
+        for _ in 0..100 {
+            if let Some(message) = next_machine_progress_message(
+                &mut state,
+                "heartbeat",
+                None,
+                Some("run-123"),
+                Some("no files written yet"),
+            ) {
+                messages.push(message);
+            }
+        }
+
+        assert_eq!(
+            messages.len(),
+            3,
+            "a static sample keeps the sampled cadence"
+        );
+    }
+
+    #[test]
+    fn a_changed_activity_earns_a_line_but_stays_bounded() {
+        // An operator watching a cook must see the moment it stopped editing
+        // and started compiling — bounded by the same total line budget.
+        let mut state = CookProgressState::default();
+        let mut messages = Vec::new();
+        for sample in 0..100 {
+            let activity = format!("no files written yet, {sample}s in `cargo test`");
+            if let Some(message) = next_machine_progress_message(
+                &mut state,
+                "heartbeat",
+                None,
+                Some("run-123"),
+                Some(&activity),
+            ) {
+                messages.push(message);
+            }
+        }
+
+        assert_eq!(
+            messages.len(),
+            MAX_MACHINE_PROGRESS_LINES,
+            "changing activity is still capped by the machine progress budget"
+        );
     }
 }
 

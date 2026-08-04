@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+use crate::agent_task_process_containment::AgentTaskProcessContainment;
 
 use crate::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
@@ -206,12 +208,47 @@ fn run_execution(
         command.env(key, value);
     }
 
-    let output = command.output().map_err(|error| {
+    // A repo-local gate is arbitrary repo-owned tooling: it forks build and
+    // test processes that outlive it. Contain the tree so this controller's
+    // death — or an early return from this function — reaps them instead of
+    // leaving them running against a terminal run (#11477).
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut containment = AgentTaskProcessContainment::prepare(&mut command).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "contain repo-local gate {}",
+                execution.argv.join(" ")
+            )),
+        )
+    })?;
+    let mut child = command.spawn().map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some(format!("run repo-local gate {}", execution.argv.join(" "))),
         )
     })?;
+    if let Err(error) = containment.attach(&child) {
+        let _ = containment.terminate_live(&mut child);
+        return Err(Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "guard repo-local gate {}",
+                execution.argv.join(" ")
+            )),
+        ));
+    }
+    let output = child.wait_with_output().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("run repo-local gate {}", execution.argv.join(" "))),
+        )
+    })?;
+    // The direct child is reaped; anything it left in the group is not.
+    let _ = containment.reap_after_exit();
     let exit_code = output.status.code().unwrap_or(1);
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();

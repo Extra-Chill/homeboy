@@ -124,6 +124,73 @@ Cook states the effective rotation on submission, e.g.
 `cook: rotation: 2 fallback provider(s), up to 3 provider execution(s)` or
 `cook: rotation: disabled (1 provider execution(s))`.
 
+### Command Policy
+
+An execution budget bounds *how long* a provider may run. A command policy
+bounds *what it may run*. On a resource-constrained host the two are not
+interchangeable: an agent that spends its whole budget compiling produces zero
+edits, and prompt text prohibiting the compile is a request the agent is free to
+ignore — it has been, twice, escalating (#11481).
+
+```bash
+# Refuse the heavy commands for this cook, and say why.
+homeboy agent-task cook --prompt @task.md \
+  --deny-command 'cargo test' \
+  --deny-command 'cargo build' \
+  --command-policy-reason 'this host routes builds to CI; make your edits and push'
+
+# Allow-list mode: only these patterns may run.
+homeboy agent-task cook --prompt @task.md \
+  --allow-command 'cargo fmt' --allow-command 'git *'
+```
+
+Set it once for the whole machine so every cook inherits it without a flag:
+
+```bash
+homeboy config set /agent_task/command_policy '{
+  "deny": [
+    { "pattern": "cargo test", "reason": "this host routes builds to CI" },
+    { "pattern": "cargo build" }
+  ],
+  "reason": "shared host; heavy compiles OOM the box"
+}' --json
+```
+
+Per-cook flags **extend** the host policy rather than replacing it, so a
+host-level refusal cannot be dropped by forgetting a flag.
+
+**Pattern matching.** A pattern is a token sequence matched anywhere in the
+command line, so `cargo test` also refuses
+`timeout 1200 cargo test -q -p homeboy-agents`. Shell operators are token
+separators, so `make deps && cargo build` still matches `cargo build`. `*` globs
+within a token (`cargo *`); `**` spans whole tokens (`cargo ** test` matches
+`cargo --quiet test`). In deny-list mode an `--allow-command` is an explicit
+exemption that beats a deny rule; in allow-list mode a deny rule wins.
+
+**What a refusal looks like.** The agent receives an
+`homeboy/agent-tool-result/v1` with status `denied`, an
+`agent_tool.command_denied` diagnostic carrying the matched pattern, the
+operator's reason, and the alternative to take instead. The denial is also
+recorded on the `homeboy/agent-tool-dispatch-evidence/v1` record, so "the agent
+tried to compile and was refused" is visible in run evidence afterwards rather
+than being invisible or indistinguishable from a command that silently failed.
+
+**Where it is enforced — read this before trusting it.** Homeboy structurally
+enforces the policy at the boundary it owns: every request reaching
+`homeboy agent-task tool dispatch` (and the in-process control-plane dispatcher)
+is evaluated and refused before it runs, including for tools whose policy
+execution location is `runner`. The policy travels to the provider inside
+`request.policy.tools.commands` and via `HOMEBOY_AGENT_TOOL_POLICY_JSON`, and its
+`homeboy/agent-command-policy/v1` schema is advertised in the core contract.
+
+A provider runtime that executes shell commands **inside its own process** never
+crosses that boundary. For those runtimes — which is most coding-agent runtimes
+today — this is a declaration the runtime is expected to honour, plus a hard
+constraint restated in the provider prompt. It is not containment. That gap is
+deliberate and stated here rather than papered over; closing it requires the
+runtime to route its shell tool through the dispatch command Homeboy already
+hands it in `HOMEBOY_AGENT_TOOL_DISPATCH_COMMAND`.
+
 | Subcommand | Purpose |
 |---|---|
 | `cook` | Run one workspace task through the patch-artifact handoff workflow. |
@@ -352,6 +419,24 @@ heartbeats with the durable run id. Reconnect and retrieve durable state with:
 homeboy agent-task status <run-id>
 homeboy agent-task evidence <run-id> --full
 ```
+
+#### Provider activity
+
+A locally executed Cook samples what the provider is actually doing and carries
+it on both the heartbeat line and `agent-task status`, under
+`liveness.provider_activity`:
+
+| Field | Meaning |
+|---|---|
+| `files_changed` | Uncommitted files in the destination worktree, untracked included. `0` after several minutes is the clearest sign a cook is not producing work. Homeboy's own `.homeboy/` run state is excluded, so this counts provider edits only. |
+| `commits_written` | Commits made in that worktree since the provider started. A provider that commits leaves a clean tree, so this is what distinguishes "finished" from "did nothing". |
+| `command` / `command_elapsed_seconds` | The longest-running command the provider has spawned, and its age — `cargo test -p homeboy-agents`, six minutes in. |
+| `elapsed_seconds` | Time since provider execution began. |
+| `observed_at` | When the sample was taken. A retained sample keeps its own observation time, so a stale reading is visible as stale. |
+
+Each field is absent when it could not be sampled; an unsampled cook reports no
+activity rather than a zero that would read as a measurement. Lab-offloaded
+attempts run the provider on the runner and therefore report no local activity.
 
 `--placement local` is safe only when local execution on this
 controller is intentional. For agent-task waves with concurrency greater than 1

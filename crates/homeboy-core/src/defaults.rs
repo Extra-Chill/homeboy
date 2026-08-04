@@ -530,6 +530,20 @@ pub struct AgentTaskConfig {
     /// `AgentTaskProviderRotationPolicy` when building a plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation: Option<serde_json::Value>,
+    /// Host-level command policy every agent-task dispatch on this machine
+    /// inherits, settable via
+    /// `homeboy config set /agent_task/command_policy <json> --json`. Per-cook
+    /// `--deny-command` / `--allow-command` flags extend it (#11481).
+    ///
+    /// A resource-constrained host needs "do not compile here" to be a
+    /// constraint rather than a per-invocation flag an operator can forget.
+    ///
+    /// Carried opaquely as JSON for the same reason as `rotation`: core config
+    /// does not depend on the agent-task subsystem. The agent-task dispatch
+    /// layer deserializes it into `AgentCommandPolicy`
+    /// (`homeboy/agent-command-policy/v1`) when building a plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_policy: Option<serde_json::Value>,
     /// Optional independent acceptance authority. The command receives a typed
     /// request on stdin and returns a signed verdict on stdout.
     #[serde(default, skip_serializing_if = "Option::is_none")]

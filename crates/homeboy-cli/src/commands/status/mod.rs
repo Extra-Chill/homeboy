@@ -14,6 +14,7 @@ use homeboy::core::context;
 use homeboy::core::scope::{self, Scope};
 use homeboy_deploy::ReleaseStateStatus;
 use homeboy_release::release::version;
+use homeboy_upgrade::controller_staleness::{self, ControllerStaleness};
 use std::collections::HashMap;
 
 use super::CmdResult;
@@ -42,24 +43,33 @@ pub fn run(args: StatusArgs) -> CmdResult<StatusResult> {
         .then(|| homeboy::core::runtime_promotion::acquire("status refresh", "status"))
         .transpose()?;
 
+    // Every component freshness signal below takes this binary as its reference
+    // point, so resolve the reference's own freshness first and say so. Read
+    // once from the daily update-check cache — no network, no per-path
+    // re-resolution (#11483).
+    let controller = controller_staleness::current();
+    log_controller_staleness(&controller);
+
     // Explicit scope selection. `--path` and `--project` keep their historical
     // routes (checkout inspection and the project dashboard); the remaining
     // selectors resolve through the shared scope resolver into the same
     // component summary the default view builds.
     match args.scope.selection() {
-        Some(Scope::Path { .. }) => return run_path_status(&args),
-        Some(Scope::Project(ref project_id)) => return run_project_dashboard(project_id, &args),
+        Some(Scope::Path { .. }) => return run_path_status(&args, controller),
+        Some(Scope::Project(ref project_id)) => {
+            return run_project_dashboard(project_id, &args, controller)
+        }
         Some(selected) => {
             let timer = StatusTimer::new(args.timings);
             let components = scope::resolve_scope_component_records(&selected)?;
-            return summarize_components(components, &args, timer);
+            return summarize_components(components, &args, timer, controller);
         }
         None => {}
     }
 
     // Project dashboard mode: `homeboy status <project-id>`
     if let Some(ref project_id) = args.target {
-        return run_project_dashboard(project_id, &args);
+        return run_project_dashboard(project_id, &args, controller);
     }
 
     if !args.full && !args.all {
@@ -119,13 +129,26 @@ pub fn run(args: StatusArgs) -> CmdResult<StatusResult> {
             .collect()
     };
 
-    summarize_components(components, &args, timer)
+    summarize_components(components, &args, timer, controller)
+}
+
+/// Emit the controller-staleness warning to the status channel.
+///
+/// Reporting only, never fatal: a stale controller still runs the command it
+/// was asked to run. `ControllerStaleness` yields a line only when staleness is
+/// *established*, so an offline host or a disabled update check stays silent
+/// rather than warning on a verdict it does not have.
+fn log_controller_staleness(controller: &ControllerStaleness) {
+    if let Some(line) = controller.warning_line() {
+        homeboy::log_status!("status", "{}", line);
+    }
 }
 
 fn summarize_components(
     components: Vec<component::Component>,
     args: &StatusArgs,
     mut timer: StatusTimer,
+    controller: ControllerStaleness,
 ) -> CmdResult<StatusResult> {
     let total = components.len();
 
@@ -241,13 +264,14 @@ fn summarize_components(
             unreleased_merges_note,
             timings: timer.into_timings(),
             clean,
+            controller,
         }),
         0,
     ))
 }
 
 /// Path override mode: inspect one checkout without requiring registry membership.
-fn run_path_status(args: &StatusArgs) -> CmdResult<StatusResult> {
+fn run_path_status(args: &StatusArgs, controller: ControllerStaleness) -> CmdResult<StatusResult> {
     let path = args.scope.path.as_deref();
     let mut timer = StatusTimer::new(args.timings);
     timer.begin("resolve_path_component");
@@ -260,14 +284,18 @@ fn run_path_status(args: &StatusArgs) -> CmdResult<StatusResult> {
         return Ok((StatusResult::Full(report), 0));
     }
 
-    summarize_components(vec![component], args, timer)
+    summarize_components(vec![component], args, timer, controller)
 }
 
 /// Project dashboard: show version drift across all components in a project.
 ///
 /// Combines local version, remote (deployed) version, release state, upstream
 /// drift, and unreleased commit count into a single view per component.
-fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<StatusResult> {
+fn run_project_dashboard(
+    project_id: &str,
+    args: &StatusArgs,
+    controller: ControllerStaleness,
+) -> CmdResult<StatusResult> {
     let mut timer = StatusTimer::new(args.timings);
 
     timer.begin("resolve_project_components");
@@ -477,6 +505,7 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
             components: rows,
             summary,
             timings: timer.into_timings(),
+            controller,
         }),
         0,
     ))
@@ -602,7 +631,61 @@ mod tests {
             unreleased_merges_note: None,
             timings: Vec::new(),
             clean: 0,
+            controller: controller_staleness::current(),
         }
+    }
+
+    fn stale_controller() -> ControllerStaleness {
+        controller_staleness::assess(
+            &homeboy::core::build_identity::BuildIdentity {
+                version: "0.327.0".to_string(),
+                git_commit: Some("ed33954781a9".to_string()),
+                git_dirty: None,
+                display: "homeboy 0.327.0+ed33954781a9".to_string(),
+            },
+            Some("0.329.1"),
+            Some(1_000),
+            1_100,
+        )
+    }
+
+    /// The controller's own freshness is part of the status contract, not an
+    /// optional extra: every other freshness signal in this report is measured
+    /// against this binary (#11483).
+    #[test]
+    fn status_output_always_carries_controller_freshness() {
+        let output = StatusOutput {
+            controller: stale_controller(),
+            ..empty_status_output()
+        };
+        let json = serde_json::to_value(&output).expect("serialize status output");
+
+        assert_eq!(json["controller"]["status"], "behind_minor");
+        assert_eq!(json["controller"]["stale"], true);
+        assert_eq!(json["controller"]["escalated"], true);
+        assert_eq!(json["controller"]["minor_releases_behind"], 2);
+        assert_eq!(json["controller"]["latest_version"], "0.329.1");
+        assert_eq!(json["controller"]["remediation"], "homeboy upgrade");
+    }
+
+    /// A current or unestablished controller must still emit the field, so a
+    /// reader can distinguish "checked, current" from "never checked" instead
+    /// of reading silence as health.
+    #[test]
+    fn status_output_emits_controller_freshness_when_not_stale() {
+        let json = serde_json::to_value(empty_status_output()).expect("serialize status output");
+
+        let controller = json.get("controller").expect("controller field is present");
+        assert!(controller.get("status").and_then(|v| v.as_str()).is_some());
+        assert!(controller.get("detail").and_then(|v| v.as_str()).is_some());
+    }
+
+    /// Reporting only: the staleness warning is emitted, never turned into a
+    /// non-zero exit or an error.
+    #[test]
+    fn controller_staleness_logging_is_advisory_only() {
+        log_controller_staleness(&stale_controller());
+        log_controller_staleness(&empty_status_output().controller);
     }
 
     #[test]

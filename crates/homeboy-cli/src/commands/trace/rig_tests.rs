@@ -139,7 +139,6 @@ fn rig_component_path_and_trace_env_are_threaded() {
     components.insert(
         "studio".to_string(),
         ComponentSpec {
-            lab_stack: None,
             path: component_dir.path().to_string_lossy().to_string(),
             component_id: None,
             path_setting: None,
@@ -147,11 +146,11 @@ fn rig_component_path_and_trace_env_are_threaded() {
             remote_url: Some("https://github.com/example-org/studio".to_string()),
             triage_remote_url: None,
             stack: None,
+            lab_stack: None,
             branch: None,
             r#ref: None,
             default_ref: None,
             extensions: Some(extensions),
-            lab_stack: None,
             dependency_cache: None,
         },
     );

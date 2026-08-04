@@ -52,10 +52,22 @@ pub fn route_after_parse_with_provenance(
     // recursively route back through a runner-side controller daemon.
     let managed_runner_placement =
         crate::commands::utils::resource_policy::is_managed_runner_placement_context();
-    if lab_routing::is_lab_offload_subprocess()
+    let runner_side = lab_routing::is_lab_offload_subprocess()
         || managed_runner_placement
-        || runner_resident_execution(cli)
+        || runner_resident_execution(cli);
+
+    // A locally-placed Cook asking to detach is served by re-executing it in
+    // its own session, so the durable run id means what Cook's help says it
+    // means on every placement (#11476). This is evaluated before the
+    // runner-side bail-out because the request needs a verdict — detach here,
+    // or an explicit rejection there — in both contexts.
+    if let Some(exit_code) =
+        local_detach::intercept_local_detached_cook(cli, normalized_args, runner_side)?
     {
+        return Ok(Some(exit_code));
+    }
+
+    if runner_side {
         return Ok(None);
     }
 
@@ -839,9 +851,14 @@ fn run_split_placement_fanout(
 /// controller-transport variable let a contradictory cook through to real
 /// worktree and provider work instead of a fast rejection (#10917).
 ///
-/// This is the only place these two rejections live. `run_split_placement_cook`
-/// deliberately does not repeat them: duplicated validation drifts, and which
+/// This is the only place this rejection lives. `run_split_placement_cook`
+/// deliberately does not repeat it: duplicated validation drifts, and which
 /// message an operator sees should never depend on the path taken to reach it.
+///
+/// `--placement local --detach-after-handoff` used to be rejected here too. It
+/// is not a contradiction — it is a request this controller can now serve by
+/// re-executing the Cook in its own session, so its verdict belongs to
+/// [`local_detach::intercept_local_detached_cook`] (#11476).
 fn reject_contradictory_cook_arguments(cli: &Cli) -> homeboy::core::Result<()> {
     let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
         command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),
@@ -857,21 +874,6 @@ fn reject_contradictory_cook_arguments(cli: &Cli) -> homeboy::core::Result<()> {
             None,
             Some(vec![
                 "Use `homeboy agent-task run-plan --plan <materialized-plan> --record-run-id <run-id> --queue-only` only when a controller owns the corresponding continuation.".to_string(),
-            ]),
-        ));
-    }
-
-    // `--runner` implies Lab placement and is mutually exclusive with an
-    // explicit `--placement` at argument parsing, so `--placement local` here
-    // always means a fully local cook with no pinned runner, and no runner
-    // daemon can own the attempt to detach from.
-    if cli.placement == homeboy::cli_surface::Placement::Local && cli.detach_after_handoff {
-        return Err(Error::validation_invalid_argument(
-            "detach-after-handoff",
-            "agent-task cook cannot detach after handoff with --placement local because no runner daemon owns the provider attempt",
-            None,
-            Some(vec![
-                "Use --placement lab or --runner <runner-id> to detach after a runner daemon accepts the provider attempt.".to_string(),
             ]),
         ));
     }
@@ -1016,13 +1018,16 @@ fn run_split_placement_cook(
         job_overrides: lab_job_overrides(cli)?,
         progress_reporter: progress_reporter.clone(),
     });
-    let progress = |phase: &str, cook_id: Option<&str>, run_id: Option<&str>| {
+    let progress = |phase: &str,
+                    cook_id: Option<&str>,
+                    run_id: Option<&str>,
+                    activity: Option<&str>| {
         if cook.no_progress && phase == "durable_identity" {
             if let Some(run_id) = run_id {
                 crate::commands::agent_task::run::announce_durable_cook_identity(cook_id, run_id);
             }
         } else {
-            progress_reporter.report(phase, cook_id, run_id);
+            progress_reporter.report(phase, cook_id, run_id, activity);
         }
         Ok(())
     };
@@ -1265,7 +1270,17 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                 while let Err(mpsc::RecvTimeoutError::Timeout) =
                     heartbeat_wait.recv_timeout(Duration::from_secs(15))
                 {
-                    heartbeat_progress_reporter.report("heartbeat", None, Some(&heartbeat_run_id));
+                    // A Lab-offloaded attempt runs the provider on the runner,
+                    // so neither the local process tree nor a local worktree
+                    // describes it. Report liveness without activity rather
+                    // than sampling this host and reporting someone else's
+                    // work as the provider's (#11482).
+                    heartbeat_progress_reporter.report(
+                        "heartbeat",
+                        None,
+                        Some(&heartbeat_run_id),
+                        None,
+                    );
                 }
             });
             let outcome = lab_routing::dispatch_lab_offload(
@@ -3022,6 +3037,7 @@ fn agent_task_fanout_cook_batch_dispatch_id(
     })
 }
 
+mod local_detach;
 mod rig_source;
 use rig_source::*;
 fn is_runs_list_runner_option(args: &[String]) -> bool {

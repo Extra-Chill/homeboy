@@ -77,9 +77,6 @@ use super::super::lab_args::{
     remap_provider_config_with_materialization_plan_in_args, rewrite_lab_offload_args,
     rewrite_runner_resident_lab_offload_args, LabAtFileSpec, LabPathRemap,
 };
-use super::super::lab_capabilities::{
-    lab_runner_capability_contract, toolchain_readiness_preflight,
-};
 use super::super::lab_command::lab_offload_command_prefix;
 use super::super::lab_env::{
     build_lab_offload_env_with_passthroughs, forward_declared_dependency_paths_env,
@@ -113,14 +110,13 @@ use super::super::{
     lab_offload_changed_since_ref, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping, load, plan_managed_runner_source_syncs,
     preflight_lab_offload_changed_since, prepare_git_lab_offload_changed_since,
-    prepare_lab_runner_capability, remote_runner_homeboy_path, reuse_compatible_snapshot_workspace,
-    rig_materialization, status, status_for_admission, sync_workspace, LabRunnerGateDecision,
-    MaterializedWorkspace, Runner, RunnerAvailability, RunnerCapabilityPreflight,
-    RunnerDependencyCacheSaveOutput, RunnerDependencyCacheSaveRequest, RunnerExecOptions,
-    RunnerFileTransfer, RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode,
-    RunnerWorkspaceApplyOutput, RunnerWorkspaceOutputPaths, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, WorkspaceCleanupPolicy,
-    WorkspaceTerminalOutcome,
+    remote_runner_homeboy_path, reuse_compatible_snapshot_workspace, rig_materialization, status,
+    status_for_admission, sync_workspace, LabRunnerGateDecision, MaterializedWorkspace, Runner,
+    RunnerAvailability, RunnerCapabilityPreflight, RunnerDependencyCacheSaveOutput,
+    RunnerDependencyCacheSaveRequest, RunnerExecOptions, RunnerFileTransfer,
+    RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceApplyOutput,
+    RunnerWorkspaceOutputPaths, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    RunnerWorkspaceSyncOutput, WorkspaceCleanupPolicy, WorkspaceTerminalOutcome,
 };
 use crate::runtime_materializer::{
     resolve_lab_agent_runtime, runtime_execution_evidence, RunnerRuntimeMaterializerOperations,

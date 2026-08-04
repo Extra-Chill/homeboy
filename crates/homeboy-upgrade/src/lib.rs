@@ -4,6 +4,7 @@
 //!
 //! Depends on homeboy-core; core does not depend on it.
 
+pub mod controller_staleness;
 pub mod self_status;
 pub mod upgrade;
 

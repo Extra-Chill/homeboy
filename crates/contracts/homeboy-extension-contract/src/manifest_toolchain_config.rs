@@ -6,18 +6,49 @@ use homeboy_engine_primitives::output_parse::ParseSpec;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
-/// An extension-owned executable readiness probe for portable operations.
+/// An extension-owned readiness probe for portable operations.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ToolchainReadinessProbe {
     pub id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
-    pub command: String,
+    /// Executed as an argv vector, never through a shell.
+    #[serde(default)]
+    pub program: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repair_command: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostic_env: Vec<String>,
+    /// A recognized mixed-version manifest form. It is retained only to return
+    /// a typed upgrade diagnostic; Homeboy never executes this shell text.
+    #[serde(default, rename = "command", skip_serializing_if = "Option::is_none")]
+    pub legacy_command: Option<String>,
+}
+
+impl ToolchainReadinessProbe {
+    pub fn is_legacy_non_executable(&self) -> bool {
+        self.legacy_command.is_some()
+    }
+}
+
+#[cfg(test)]
+mod legacy_probe_tests {
+    use super::ToolchainReadinessProbe;
+
+    #[test]
+    fn legacy_shell_command_probe_is_recognized_but_non_executable() {
+        let legacy = serde_json::json!({
+            "id": "legacy",
+            "command": "tool; touch /tmp/owned"
+        });
+        let probe = serde_json::from_value::<ToolchainReadinessProbe>(legacy)
+            .expect("recognize legacy manifest for an upgrade diagnostic");
+        assert!(probe.is_legacy_non_executable());
+        assert!(probe.program.is_empty());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

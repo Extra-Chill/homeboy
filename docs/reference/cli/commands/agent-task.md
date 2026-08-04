@@ -1,7 +1,7 @@
 <!-- GENERATED FILE. DO NOT EDIT BY HAND.
 Source of truth: the clap command tree in `crates/homeboy-cli`.
 Regenerate with:
-HOMEBOY_WRITE_CLI_REFERENCE=1 cargo test -p homeboy-cli --lib cli_surface::reference_docs
+cargo run -p homeboy-cli --bin generate-cli-reference
 Hand-written narrative for these commands lives in `docs/commands/`. -->
 
 # `homeboy agent-task` command reference
@@ -95,7 +95,7 @@ WAIT POLICY: Cook always persists a durable run id before materialization, so a 
 
 `--wait` observes until the lifecycle is terminal and returns the terminal Cook report. This is the default when neither flag is passed.
 
-`--detach-after-handoff` returns once the run is durably accepted. Its result describes a submission, not an outcome.
+`--detach-after-handoff` returns once the run is durably accepted. Its result describes a submission, not an outcome. It is honored on every placement: with `--placement local` the Cook is re-executed in its own session, so it survives a client that is interrupted or times out.
 
 Do not infer the wait policy from client interactivity. An orchestration client that needs one predictable contract should pass the flag rather than rely on the default, and read the terminal outcome from `agent-task status <run-id>` in either case.
 
@@ -119,6 +119,9 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--max-provider-rotations` | `<N>` | Cross-provider rotations allowed after the first provider execution. Rotations are distinct from same-provider Cook remediation and do not satisfy its required review-form retry budget. When omitted, defaults to the number of entries in the configured provider rotation, or 0 when no rotation is configured |
 | `--queue-only` | flag | Persist the run for a daemon/runner but do not execute immediately |
 | `--timeout-ms` | `<MS>` | Provider wall-clock timeout in milliseconds. Defaults to Homeboy's provider timeout |
+| `--deny-command` | `<PATTERN>` | Command pattern the provider agent must not run. Repeatable, and additive to the host-level `agent_task.command_policy` config |
+| `--allow-command` | `<PATTERN>` | Command pattern the provider agent may run. Supplying any `--allow-command` switches the policy to allow-list mode: every command that does not match one of these patterns is refused |
+| `--command-policy-reason` | `<TEXT>` | Why the command policy exists, returned verbatim to the agent with every refusal. Telling the agent what to do instead (e.g. "this host routes builds to CI; make your edits and push") converts a refused command into correct behaviour rather than a wasted budget |
 | `--candidate-completion` | `<POLICY>` | Completion rule for isolated candidates: wait for all results (default) or promote the first successful candidate |
 | `--goal` | `<TEXT>` | One-line statement of what a successful cook must achieve. Recorded as framing metadata for the provider task and used for review. Without --prompt, it supplies the one provider task |
 | `--to-worktree` | `<HANDLE>` | Workspace handle the cook edits, verifies, and finalizes into (e.g. `repo@branch-slug`). When omitted, --repo plus --task-url derives an issue-owned destination through the configured workspace provider |
@@ -1010,7 +1013,7 @@ List extension-declared executor providers and optional secret/backend readiness
 | `--backend` | `<BACKEND>` | _no help text_ |
 | `--selector` | `<PROVIDER_ID>` | _no help text_ |
 | `--runtime` | `<RUNTIME>` | Restrict results to the runtime that owns the provider |
-| `--status` | `<STATUS>` | Restrict results to `default` or `available` providers |
+| `--status` | `<STATUS>` | Restrict results to `default`, `available`, or `unavailable` providers |
 | `--secret-env` | `<ENV>` | _no help text_ |
 | `--validate-readiness` | flag | _no help text_ |
 | `--refresh` | flag | _no help text_ |

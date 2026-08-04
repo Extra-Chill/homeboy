@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::agent_task::{
-    AgentTaskDiagnostic, AgentToolExecutionLocation, AgentToolPolicy, AgentToolRequest,
-    AgentToolResult, AgentToolResultStatus, AGENT_TOOL_RESULT_SCHEMA,
+    AgentCommandDecision, AgentCommandDenial, AgentTaskDiagnostic, AgentToolExecutionLocation,
+    AgentToolPolicy, AgentToolRequest, AgentToolResult, AgentToolResultStatus,
+    AGENT_TOOL_RESULT_SCHEMA,
 };
 use homeboy_core::stream_capture::StreamCaptureMetadata;
 use homeboy_core::{git, worktree};
@@ -92,6 +93,12 @@ mod dispatch {
         pub location: AgentToolExecutionLocation,
         pub request: AgentToolRequest,
         pub result: AgentToolResult,
+        /// The structured refusal, when the command policy refused this
+        /// request. Recorded on the evidence rather than only in the result so
+        /// "the agent tried to compile and was refused" survives into run
+        /// evidence (#11481).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub command_denial: Option<AgentCommandDenial>,
     }
 
     pub fn dispatch_agent_tool_request(
@@ -100,16 +107,32 @@ mod dispatch {
         dispatcher: &impl AgentToolControlPlaneDispatcher,
     ) -> AgentToolDispatchOutcome {
         let location = policy.execution_location_for(&request.tool);
-        let result = match location {
-            AgentToolExecutionLocation::Disabled => disabled_tool_result(request),
-            AgentToolExecutionLocation::ControlPlane => dispatcher.dispatch(request),
-            AgentToolExecutionLocation::Runner => runner_owned_tool_result(request),
+
+        // The command policy is evaluated before the execution location is
+        // honoured: a refused command must not run anywhere, including in the
+        // control plane, and the agent must be told why rather than left to
+        // infer it from a silent failure.
+        let denial = requested_command(request).and_then(|command| {
+            match policy.evaluate_command(&command) {
+                AgentCommandDecision::Denied(denial) => Some(denial),
+                AgentCommandDecision::Allowed => None,
+            }
+        });
+
+        let result = match &denial {
+            Some(denial) => command_denied_tool_result(request, denial, location),
+            None => match location {
+                AgentToolExecutionLocation::Disabled => disabled_tool_result(request),
+                AgentToolExecutionLocation::ControlPlane => dispatcher.dispatch(request),
+                AgentToolExecutionLocation::Runner => runner_owned_tool_result(request),
+            },
         };
         let evidence = AgentToolDispatchEvidence {
             schema: AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA.to_string(),
             location,
             request: request.redacted(),
             result: result.redacted(),
+            command_denial: denial.clone(),
         };
 
         AgentToolDispatchOutcome {
@@ -117,6 +140,36 @@ mod dispatch {
             result,
             evidence,
         }
+    }
+
+    /// Extract the command line a tool request is asking Homeboy to run.
+    ///
+    /// Deliberately keyed on the *input shape* rather than a fixed list of tool
+    /// names: runtimes spell their shell tool `bash`, `shell`, `exec`,
+    /// `run_command`, `run_terminal_cmd`, and more. Any request carrying a
+    /// command/cmd/script/argv payload is a command execution request and is
+    /// evaluated as one.
+    pub(crate) fn requested_command(request: &AgentToolRequest) -> Option<String> {
+        let input = request.input.as_object()?;
+        for key in ["command", "cmd", "script", "command_line", "commandLine"] {
+            match input.get(key) {
+                Some(Value::String(command)) if !command.trim().is_empty() => {
+                    return Some(command.clone())
+                }
+                Some(Value::Array(parts)) => {
+                    let joined = parts
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if !joined.trim().is_empty() {
+                        return Some(joined);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 }
 
@@ -137,6 +190,42 @@ mod results {
                 data: json!({ "tool": request.tool }),
             }],
             metadata: json!({ "execution_location": "disabled" }),
+        }
+    }
+
+    /// A structured refusal returned to the agent. Status `denied` (not
+    /// `failed`) so the agent can distinguish "the operator forbids this" from
+    /// "this broke", and the diagnostic carries the reason plus the alternative
+    /// so a refused attempt turns into correct behaviour rather than a retry
+    /// loop (#11481).
+    pub(crate) fn command_denied_tool_result(
+        request: &AgentToolRequest,
+        denial: &AgentCommandDenial,
+        location: AgentToolExecutionLocation,
+    ) -> AgentToolResult {
+        AgentToolResult {
+            schema: AGENT_TOOL_RESULT_SCHEMA.to_string(),
+            request_id: request.request_id.clone(),
+            task_id: request.task_id.clone(),
+            tool: request.tool.clone(),
+            status: AgentToolResultStatus::Denied,
+            output: Value::Null,
+            diagnostics: vec![AgentTaskDiagnostic {
+                class: "agent_tool.command_denied".to_string(),
+                message: denial.message(),
+                data: json!({
+                    "tool": request.tool,
+                    "command": denial.command,
+                    "matched_pattern": denial.matched_pattern,
+                    "policy_mode": denial.mode.as_str(),
+                    "reason": denial.reason,
+                    "remediation": denial.remediation,
+                }),
+            }],
+            metadata: json!({
+                "execution_location": location,
+                "command_policy": "denied",
+            }),
         }
     }
 
@@ -847,7 +936,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::agent_task::{
-        AgentToolPolicyRule, AGENT_TOOL_POLICY_SCHEMA, AGENT_TOOL_REQUEST_SCHEMA,
+        AgentCommandPolicy, AgentCommandRule, AgentToolPolicyRule, AGENT_TOOL_POLICY_SCHEMA,
+        AGENT_TOOL_REQUEST_SCHEMA,
     };
 
     #[test]
@@ -936,7 +1026,143 @@ mod tests {
             schema: AGENT_TOOL_POLICY_SCHEMA.to_string(),
             default_location,
             tools: BTreeMap::new(),
+            commands: AgentCommandPolicy::default(),
         }
+    }
+
+    fn shell_request(command: &str) -> AgentToolRequest {
+        AgentToolRequest {
+            schema: AGENT_TOOL_REQUEST_SCHEMA.to_string(),
+            request_id: "request-shell".to_string(),
+            task_id: "task-1".to_string(),
+            tool: "bash".to_string(),
+            input: json!({ "command": command }),
+            timeout_ms: None,
+            metadata: Value::Null,
+        }
+    }
+
+    fn build_denying_policy(patterns: &[&str], reason: &str) -> AgentToolPolicy {
+        let mut policy = policy(AgentToolExecutionLocation::ControlPlane);
+        policy.commands = AgentCommandPolicy {
+            deny: patterns
+                .iter()
+                .map(|pattern| AgentCommandRule::new(*pattern))
+                .collect(),
+            reason: Some(reason.to_string()),
+            ..AgentCommandPolicy::default()
+        };
+        policy
+    }
+
+    #[test]
+    fn denied_command_is_refused_before_the_dispatcher_runs() {
+        let policy = build_denying_policy(&["cargo test", "cargo build"], "builds run in CI here");
+
+        let outcome = dispatch_agent_tool_request(
+            &policy,
+            &shell_request("timeout 1200 cargo test -q -p homeboy-agents"),
+            &EchoDispatcher,
+        );
+
+        assert_eq!(outcome.result.status, AgentToolResultStatus::Denied);
+        assert_eq!(
+            outcome.result.diagnostics[0].class,
+            "agent_tool.command_denied"
+        );
+        // The dispatcher would have returned `succeeded`; it was never reached.
+        assert!(outcome.result.output.is_null());
+    }
+
+    #[test]
+    fn denial_tells_the_agent_why_and_what_to_do_instead() {
+        let policy = build_denying_policy(&["cargo build"], "this host routes builds to CI");
+
+        let outcome =
+            dispatch_agent_tool_request(&policy, &shell_request("cargo build"), &EchoDispatcher);
+
+        let data = &outcome.result.diagnostics[0].data;
+        assert_eq!(data["reason"], "this host routes builds to CI");
+        assert_eq!(data["matched_pattern"], "cargo build");
+        assert_eq!(data["policy_mode"], "deny_list");
+        assert!(data["remediation"]
+            .as_str()
+            .expect("remediation")
+            .contains("Make your edits"));
+        assert!(outcome.result.diagnostics[0]
+            .message
+            .contains("this host routes builds to CI"));
+    }
+
+    #[test]
+    fn command_denial_is_recorded_in_dispatch_evidence() {
+        let policy = build_denying_policy(&["cargo test"], "shared host");
+
+        let outcome =
+            dispatch_agent_tool_request(&policy, &shell_request("cargo test"), &EchoDispatcher);
+
+        let evidence = outcome.evidence;
+        assert_eq!(evidence.result.status, AgentToolResultStatus::Denied);
+        let denial = evidence.command_denial.expect("evidence denial");
+        assert_eq!(denial.matched_pattern.as_deref(), Some("cargo test"));
+        assert_eq!(denial.command, "cargo test");
+    }
+
+    #[test]
+    fn permitted_command_still_reaches_the_dispatcher() {
+        let policy = build_denying_policy(&["cargo test"], "shared host");
+
+        let outcome =
+            dispatch_agent_tool_request(&policy, &shell_request("cargo fmt"), &EchoDispatcher);
+
+        assert_eq!(outcome.result.status, AgentToolResultStatus::Succeeded);
+        assert!(outcome.evidence.command_denial.is_none());
+    }
+
+    #[test]
+    fn command_policy_refuses_even_a_runner_located_tool() {
+        let mut policy = build_denying_policy(&["cargo build"], "shared host");
+        policy.default_location = AgentToolExecutionLocation::Runner;
+
+        let outcome =
+            dispatch_agent_tool_request(&policy, &shell_request("cargo build"), &EchoDispatcher);
+
+        assert_eq!(outcome.location, AgentToolExecutionLocation::Runner);
+        assert_eq!(outcome.result.status, AgentToolResultStatus::Denied);
+        assert_eq!(
+            outcome.result.diagnostics[0].class,
+            "agent_tool.command_denied"
+        );
+    }
+
+    #[test]
+    fn requested_command_reads_every_supported_input_shape() {
+        assert_eq!(
+            requested_command(&shell_request("cargo test")).as_deref(),
+            Some("cargo test")
+        );
+
+        let mut argv = shell_request("unused");
+        argv.input = json!({ "cmd": ["cargo", "build", "--release"] });
+        assert_eq!(
+            requested_command(&argv).as_deref(),
+            Some("cargo build --release")
+        );
+
+        let mut script = shell_request("unused");
+        script.input = json!({ "script": "cargo clippy" });
+        assert_eq!(requested_command(&script).as_deref(), Some("cargo clippy"));
+
+        assert_eq!(requested_command(&request("lookup")), None);
+    }
+
+    #[test]
+    fn requests_without_a_command_payload_are_unaffected_by_the_command_policy() {
+        let policy = build_denying_policy(&["cargo *"], "shared host");
+
+        let outcome = dispatch_agent_tool_request(&policy, &request("lookup"), &EchoDispatcher);
+
+        assert_eq!(outcome.result.status, AgentToolResultStatus::Succeeded);
     }
 
     #[test]

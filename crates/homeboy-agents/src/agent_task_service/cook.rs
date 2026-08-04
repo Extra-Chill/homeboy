@@ -23,6 +23,7 @@ use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
 use homeboy_core::{Error, Result};
 
+use super::cook_activity::{CookActivityProbe, CookProviderActivity};
 use super::cook_baseline::{
     compare_gate_failures_to_verified_base, cook_attempt_harvest_context,
     materialize_follow_up_baseline, materialize_initial_candidate_baseline,
@@ -252,7 +253,36 @@ const FINALIZATION_CLAIM_LEASE: std::time::Duration = std::time::Duration::from_
 /// wins when available; this durable heartbeat covers quiet providers.
 const COOK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
-pub type CookProgressObserver<'a> = dyn Fn(&str, &str, &str) -> Result<()> + Send + Sync + 'a;
+/// One Cook progress event, as delivered to a foreground observer.
+///
+/// This used to be three bare `&str`s — `(phase, cook_id, run_id)` — which is
+/// why every heartbeat an operator saw was byte-identical and carried nothing
+/// about the run it described. `report_cook_progress` already received the
+/// attempt and a detail string and recorded them durably; both were thrown away
+/// at the observer boundary. Passing a struct means adding a fact is an
+/// additive change here rather than a signature change at every call site, so
+/// the boundary stops being the place state goes to die (#11482).
+#[derive(Clone, Copy, Debug)]
+pub struct CookProgressEvent<'a> {
+    pub phase: &'a str,
+    pub cook_id: &'a str,
+    pub run_id: &'a str,
+    /// Which provider attempt this event belongs to.
+    pub attempt: u32,
+    /// Controller-owned description of the phase.
+    pub detail: Option<&'a str>,
+    /// What the provider is doing right now, when it is observable.
+    pub activity: Option<&'a CookProviderActivity>,
+}
+
+impl CookProgressEvent<'_> {
+    /// Bounded one-line rendering of the provider's current activity.
+    pub fn activity_summary(&self) -> Option<String> {
+        self.activity.and_then(CookProviderActivity::summary_line)
+    }
+}
+
+pub type CookProgressObserver<'a> = dyn Fn(&CookProgressEvent<'_>) -> Result<()> + Send + Sync + 'a;
 
 fn report_cook_progress(
     observer: Option<&CookProgressObserver<'_>>,
@@ -262,9 +292,35 @@ fn report_cook_progress(
     attempt: u32,
     detail: Option<&str>,
 ) -> Result<()> {
-    agent_task_lifecycle::record_cook_progress(run_id, phase, attempt, detail)?;
+    report_cook_progress_with_activity(observer, cook_id, run_id, phase, attempt, detail, None)
+}
+
+fn report_cook_progress_with_activity(
+    observer: Option<&CookProgressObserver<'_>>,
+    cook_id: &str,
+    run_id: &str,
+    phase: &str,
+    attempt: u32,
+    detail: Option<&str>,
+    activity: Option<&CookProviderActivity>,
+) -> Result<()> {
+    agent_task_lifecycle::record_cook_progress_with_activity(
+        run_id,
+        phase,
+        attempt,
+        detail,
+        activity.and_then(CookProviderActivity::to_record_value),
+    )?;
+    let event = CookProgressEvent {
+        phase,
+        cook_id,
+        run_id,
+        attempt,
+        detail,
+        activity,
+    };
     if let Some(observer) = observer {
-        if let Err(error) = observer(phase, cook_id, run_id) {
+        if let Err(error) = observer(&event) {
             // The observer is the submitting client's output channel. Once the
             // progress record exists, a broken client pipe is evidence about
             // observation, never authority to stop promotion or finalization.
@@ -2637,18 +2693,37 @@ where
                     let (heartbeat_stop, heartbeat_wait) = mpsc::channel();
                     let heartbeat_run_id = run_id.clone();
                     let heartbeat_cook_id = cook_id.clone();
+                    // Bind the probe to the workspace this dispatch actually
+                    // hands the provider, not to the cook's configured
+                    // destination: a follow-up attempt runs in a baseline
+                    // worktree, and measuring the wrong tree would report
+                    // "no files written" while the provider was editing.
+                    let heartbeat_activity = CookActivityProbe::new(
+                        dispatch_plan
+                            .tasks
+                            .first()
+                            .and_then(|task| task.workspace.root.as_deref())
+                            .map(PathBuf::from)
+                            .or_else(|| options.source_worktree_path.clone()),
+                    );
+                    // The provider runs as a descendant of this controller
+                    // process, so the controller pid is the root of the tree to
+                    // sample.
+                    let heartbeat_owner_pid = std::process::id();
                     std::thread::scope(|scope| {
                         scope.spawn(move || {
                             while let Err(mpsc::RecvTimeoutError::Timeout) =
                                 heartbeat_wait.recv_timeout(COOK_HEARTBEAT_INTERVAL)
                             {
-                                let _ = report_cook_progress(
+                                let activity = heartbeat_activity.sample(heartbeat_owner_pid);
+                                let _ = report_cook_progress_with_activity(
                                     durable_observer,
                                     &heartbeat_cook_id,
                                     &heartbeat_run_id,
                                     "heartbeat",
                                     attempt,
                                     Some("provider execution is still running"),
+                                    (!activity.is_empty()).then_some(&activity),
                                 );
                             }
                         });

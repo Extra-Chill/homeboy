@@ -2983,6 +2983,7 @@ fn liveness_summary(record: &Value, run_id: &str, candidate_state: CandidateStat
             "active_executions": active_provider_executions,
             "local_owner": local_provider_ownership,
         },
+        "provider_activity": provider_activity_summary(metadata),
         "stale_reason": metadata.get("stale_running_reason"),
         "runner_queue": metadata.get("runner_queue"),
         "next_action": if terminal && candidate_recoverable {
@@ -2995,6 +2996,44 @@ fn liveness_summary(record: &Value, run_id: &str, candidate_state: CandidateStat
             "homeboy agent-task status <run-id> --full".to_string()
         },
     })
+}
+
+/// Project the durably recorded provider-activity sample into the status
+/// summary.
+///
+/// This is the answer to "what is the agent actually doing?" — the question
+/// `agent-task status` could not answer, which is why diagnosing a stalled cook
+/// meant `ps aux | grep` plus `git status` on a worktree path the operator had
+/// to already know (#11482). `files_changed` leads because "zero files written
+/// after N minutes" is the single most actionable fact about a running cook.
+///
+/// Absent when nothing was sampled: a fabricated zero would read as a
+/// measurement and send an operator to kill a healthy run.
+fn provider_activity_summary(metadata: &Value) -> Value {
+    let Some(activity) = metadata
+        .pointer("/cook_progress/activity")
+        .filter(|activity| !activity.is_null())
+    else {
+        return Value::Null;
+    };
+    let mut summary = activity.clone();
+    let Some(object) = summary.as_object_mut() else {
+        return Value::Null;
+    };
+    if let Some(observed_at) = metadata
+        .pointer("/cook_progress/activity_observed_at")
+        .filter(|observed_at| !observed_at.is_null())
+    {
+        object.insert("observed_at".to_string(), observed_at.clone());
+    }
+    if let Ok(activity) =
+        serde_json::from_value::<agent_task_service::CookProviderActivity>(activity.clone())
+    {
+        if let Some(line) = activity.summary_line() {
+            object.insert("summary".to_string(), json!(line));
+        }
+    }
+    summary
 }
 
 /// Project the durable `provider_executions` metadata into a compact list of the
@@ -3684,6 +3723,61 @@ mod tests {
             accepted_handoff["liveness"]["provider_boundary"]["runner_job_id"],
             "accepted-daemon-job"
         );
+    }
+
+    #[test]
+    fn compact_status_answers_what_the_provider_is_doing_right_now() {
+        // #11482: this is the question `agent-task status` could not answer, so
+        // diagnosing a stalled cook meant `ps aux | grep` and `git status` on a
+        // path the operator had to already know.
+        let summary = compact_status_summary(
+            &json!({
+                "run_id": "agent-task-working",
+                "state": "running",
+                "tasks": [],
+                "metadata": {
+                    "cook_progress": {
+                        "phase": "heartbeat",
+                        "attempt": 1,
+                        "detail": "provider execution is still running",
+                        "activity": {
+                            "worktree_root": "/tmp/wt/11482",
+                            "files_changed": 0,
+                            "command": "cargo test -q -p homeboy-agents",
+                            "command_elapsed_seconds": 372,
+                            "elapsed_seconds": 400
+                        },
+                        "activity_observed_at": "2026-08-04T17:16:58Z"
+                    }
+                }
+            }),
+            "agent-task-working",
+        );
+
+        let activity = &summary["liveness"]["provider_activity"];
+        assert_eq!(activity["files_changed"], 0);
+        assert_eq!(activity["command"], "cargo test -q -p homeboy-agents");
+        assert_eq!(activity["observed_at"], "2026-08-04T17:16:58Z");
+        let rendered = activity["summary"].as_str().expect("rendered summary");
+        assert!(rendered.contains("no files written yet"));
+        assert!(rendered.contains("6m12s in `cargo test -q -p homeboy-agents`"));
+    }
+
+    #[test]
+    fn compact_status_reports_no_provider_activity_rather_than_a_fabricated_zero() {
+        // An unsampled cook must not read as "the agent has written nothing" —
+        // that is the signal an operator kills a run on.
+        let summary = compact_status_summary(
+            &json!({
+                "run_id": "agent-task-unsampled",
+                "state": "running",
+                "tasks": [],
+                "metadata": { "cook_progress": { "phase": "provider_start", "attempt": 1 } }
+            }),
+            "agent-task-unsampled",
+        );
+
+        assert!(summary["liveness"]["provider_activity"].is_null());
     }
 
     #[test]

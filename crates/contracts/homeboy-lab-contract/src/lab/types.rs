@@ -109,7 +109,7 @@ pub enum LabSecretEnvSource {
     Tunnel,
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct LabCommandContract {
     pub hot_label: &'static str,
     pub portability: LabCommandPortability,
@@ -117,52 +117,53 @@ pub struct LabCommandContract {
     pub workspace_mode_policy: LabWorkspaceModePolicy,
     pub capture_mutation_patch: bool,
     pub mutation_flag: Option<&'static str>,
-    pub extra_required_capabilities: &'static [&'static str],
+    pub extra_required_capabilities: Vec<String>,
     pub secret_env_sources: &'static [LabSecretEnvSource],
     /// Routing-policy flags shared across the Lab command layers.
     pub routing_policy: LabRoutingPolicy,
 }
 
-#[derive(Debug, Clone, Copy, Default, serde::Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, serde::Serialize, PartialEq, Eq)]
 pub struct CommandPortabilityContract {
     lab_command: Option<LabCommandContract>,
     resource_intensive: bool,
 }
 
 impl CommandPortabilityContract {
-    pub const fn none() -> Self {
+    pub fn none() -> Self {
         Self {
             lab_command: None,
             resource_intensive: false,
         }
     }
 
-    pub const fn lab(command: LabCommandContract) -> Self {
+    pub fn lab(command: LabCommandContract) -> Self {
         Self {
             lab_command: Some(command),
             resource_intensive: true,
         }
     }
 
-    pub const fn lightweight_lab(command: LabCommandContract) -> Self {
+    pub fn lightweight_lab(command: LabCommandContract) -> Self {
         Self {
             lab_command: Some(command),
             resource_intensive: false,
         }
     }
 
-    pub const fn lab_optional(command: Option<LabCommandContract>) -> Self {
+    pub fn lab_optional(command: Option<LabCommandContract>) -> Self {
+        let resource_intensive = command.is_some();
         Self {
             lab_command: command,
-            resource_intensive: command.is_some(),
+            resource_intensive,
         }
     }
 
-    pub const fn lab_command(self) -> Option<LabCommandContract> {
-        self.lab_command
+    pub fn lab_command(&self) -> Option<LabCommandContract> {
+        self.lab_command.clone()
     }
 
-    pub const fn is_resource_intensive(self) -> bool {
+    pub const fn is_resource_intensive(&self) -> bool {
         self.resource_intensive
     }
 }
@@ -188,7 +189,7 @@ pub enum LabWorkspaceModePolicy {
 }
 
 impl LabCommandContract {
-    pub const fn is_portable(self) -> bool {
+    pub const fn is_portable(&self) -> bool {
         matches!(self.portability, LabCommandPortability::Portable)
     }
 
@@ -213,7 +214,7 @@ impl LabCommandContract {
         hot_label: &'static str,
         mutation_flag: Option<&'static str>,
         requires_extension_parity: bool,
-        extra_required_capabilities: &'static [&'static str],
+        extra_required_capabilities: &[&str],
     ) -> Self {
         Self {
             hot_label,
@@ -222,7 +223,10 @@ impl LabCommandContract {
             workspace_mode_policy: LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
             capture_mutation_patch: mutation_flag.is_some(),
             mutation_flag,
-            extra_required_capabilities,
+            extra_required_capabilities: extra_required_capabilities
+                .iter()
+                .map(|capability| (*capability).to_string())
+                .collect(),
             secret_env_sources: LAB_NO_SECRET_ENV_SOURCES,
             routing_policy: LabRoutingPolicy {
                 default_lab_offload: true,
@@ -235,11 +239,17 @@ impl LabCommandContract {
         }
     }
 
+    /// Attach runtime-derived opaque capabilities to the owned command contract.
+    pub fn with_extra_required_capabilities(mut self, capabilities: Vec<String>) -> Self {
+        self.extra_required_capabilities = capabilities;
+        self
+    }
+
     pub fn portable_workload(
         hot_label: &'static str,
         mutation_flag: Option<&'static str>,
         requires_extension_parity: bool,
-        extra_required_capabilities: &'static [&'static str],
+        extra_required_capabilities: &[&str],
     ) -> Self {
         let base = Self::portable(
             hot_label,
@@ -260,7 +270,7 @@ impl LabCommandContract {
         hot_label: &'static str,
         mutation_flag: Option<&'static str>,
         requires_extension_parity: bool,
-        extra_required_capabilities: &'static [&'static str],
+        extra_required_capabilities: &[&str],
     ) -> Self {
         let base = Self::portable_workload(
             hot_label,
@@ -308,7 +318,7 @@ impl LabCommandContract {
             workspace_mode_policy: LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
             capture_mutation_patch: false,
             mutation_flag: None,
-            extra_required_capabilities: LAB_NO_EXTRA_CAPABILITIES,
+            extra_required_capabilities: Vec::new(),
             secret_env_sources: LAB_NO_SECRET_ENV_SOURCES,
             routing_policy: LabRoutingPolicy {
                 default_lab_offload: false,

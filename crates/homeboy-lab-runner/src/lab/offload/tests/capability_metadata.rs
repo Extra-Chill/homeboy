@@ -1,5 +1,15 @@
 use super::*;
 
+fn admission_capability(
+    command: &LabOffloadCommand,
+    source_path: &std::path::Path,
+    required_tools: Vec<RunnerRequiredTool>,
+) -> crate::PreparedLabRunnerCapability {
+    compile_lab_admission_plan(command, source_path, &required_tools)
+        .expect("compile routed admission")
+        .capability
+}
+
 fn expected_controller_refresh_ref() -> String {
     homeboy_product_identity::build_identity()
         .git_commit
@@ -9,12 +19,11 @@ fn expected_controller_refresh_ref() -> String {
 #[test]
 fn command_prefix_tools_are_included_in_capability_contract() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let contract = lab_runner_capability_contract(
+    let contract = admission_capability(
         &portable_lab_command("lint"),
         dir.path(),
-        &[RunnerRequiredTool::new("compiler")],
-    )
-    .expect("capability contract");
+        vec![RunnerRequiredTool::new("compiler")],
+    );
 
     assert!(contract
         .required_tools
@@ -27,17 +36,16 @@ fn full_workspace_lab_contract_uses_declared_tools_only() {
     std::fs::write(dir.path().join("package.json"), "{}").expect("package signal");
     std::fs::write(dir.path().join("docker-compose.yml"), "services: {}").expect("docker signal");
 
-    let contract = lab_runner_capability_contract(
+    let contract = admission_capability(
         &portable_lab_command("test"),
         dir.path(),
-        &[RunnerRequiredTool::homeboy()],
-    )
-    .expect("capability contract");
+        vec![RunnerRequiredTool::homeboy()],
+    );
 
     assert!(contract
         .required_tools
         .contains(&RunnerRequiredTool::homeboy()));
-    assert_eq!(contract.required_tools.len(), 1);
+    assert_eq!(contract.required_tools.len(), 2);
 }
 
 #[test]
@@ -48,14 +56,12 @@ fn workload_scoped_lab_contract_ignores_source_path_docker_signal() {
     let mut command = portable_lab_command("trace");
     command.routing_policy.infer_source_path_tools = false;
 
-    let contract =
-        lab_runner_capability_contract(&command, dir.path(), &[RunnerRequiredTool::homeboy()])
-            .expect("capability contract");
+    let contract = admission_capability(&command, dir.path(), vec![RunnerRequiredTool::homeboy()]);
 
     assert!(contract
         .required_tools
         .contains(&RunnerRequiredTool::homeboy()));
-    assert_eq!(contract.required_tools.len(), 1);
+    assert_eq!(contract.required_tools.len(), 2);
 }
 
 #[test]

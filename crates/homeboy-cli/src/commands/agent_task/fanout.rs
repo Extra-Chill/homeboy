@@ -1880,6 +1880,9 @@ impl BatchCookSpec {
                 queue_only: false,
                 timeout_ms: None,
                 resolved_provider_policy: None,
+                deny_command: Vec::new(),
+                allow_command: Vec::new(),
+                command_policy_reason: None,
             },
         };
         let title = self
@@ -3255,7 +3258,6 @@ fi
                 gate_toolchains: Vec::new(),
                 isolate_gate_home: true,
                 isolate_gate_xdg: true,
-                accept_inherited_failures: false,
             },
             dry_run: true,
             run_plan: false,

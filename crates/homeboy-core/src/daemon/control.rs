@@ -2339,24 +2339,9 @@ fn spawn_and_wait_for_lease_attempt(
 
 /// Keep the daemon and its workload children alive when a transient launcher
 /// connection, such as direct SSH, disconnects.
-#[cfg(unix)]
 fn detach_from_launcher_session(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
-
-    // SAFETY: `pre_exec` runs in the child immediately before exec. `setsid`
-    // only changes that child process's session and reports failure via errno.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    crate::process::detach_from_caller_session(command);
 }
-
-#[cfg(not(unix))]
-fn detach_from_launcher_session(_command: &mut Command) {}
 
 /// Resolve the daemon base URL, falling back to the running daemon's address.
 fn resolve_daemon_url(daemon_url: Option<String>) -> Result<String> {
