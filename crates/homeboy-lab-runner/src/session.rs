@@ -648,7 +648,8 @@ pub struct RunnerAdmissionSummary {
     /// Whether the runner can admit a new workload now: connected, fresh, and
     /// not otherwise blocked.
     pub accepting_jobs: bool,
-    /// Authoritative count of jobs the selected daemon is currently running.
+    /// Authoritative aggregate count of jobs owned by the selected and draining
+    /// daemon generations. Admission must retain this load through rotation.
     pub active_job_count: usize,
     /// Count of runner jobs whose liveness can no longer be confirmed.
     pub stale_job_count: usize,
@@ -662,7 +663,8 @@ pub struct RunnerAdmissionSummary {
     pub draining_generation_count: usize,
     /// Whether the selected daemon can be safely replaced now. A known stale
     /// version is rotatable after its typed job view proves idle; ambiguous
-    /// lease ownership is not.
+    /// lease ownership is not. Draining generation ownership also keeps this
+    /// false until aggregate work has settled.
     pub safe_to_rotate: bool,
     /// The single next actionable step, state-sensitive and executable.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -715,9 +717,8 @@ impl RunnerStatusReport {
     ///
     /// `draining_generation_count` is supplied by the caller from the same
     /// generation inventory used for the detail view, so the summary and detail
-    /// derive from one source. Only the authoritative selected-daemon
-    /// `active_job_count` and `safe_to_rotate` include unresolved generation
-    /// ownership when the caller supplies the ledger projection.
+    /// derive from one source. The authoritative aggregate `active_job_count`
+    /// and `safe_to_rotate` retain unresolved generation ownership.
     pub fn admission_summary(&self, draining_generation_count: usize) -> RunnerAdmissionSummary {
         self.admission_summary_with_generations(&[], draining_generation_count)
     }
@@ -819,7 +820,7 @@ impl RunnerStatusReport {
     /// version drift blocks new work but an identified, authoritatively idle
     /// daemon may be rotated to converge. Missing or corrupt lease state has no
     /// such owner proof and must remain fenced.
-    fn rotation_evidence_is_unambiguous(&self) -> bool {
+    pub(crate) fn rotation_evidence_is_unambiguous(&self) -> bool {
         let Some(freshness) = self.daemon_freshness.as_ref() else {
             return false;
         };

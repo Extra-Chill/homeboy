@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::commands::test::{run as run_test, TestArgs};
@@ -86,6 +86,10 @@ fn script_component(root: &Path, command: &str) -> Component {
     component
 }
 
+fn homeboy_manifest() -> Component {
+    serde_json::from_str(include_str!("../../../homeboy.json")).expect("homeboy.json parses")
+}
+
 #[test]
 fn test_run_component_scripts() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -148,6 +152,45 @@ fn component_config_env_is_available_to_component_scripts_and_extra_env_wins() {
         fs::read_to_string(dir.path().join("marker")).unwrap(),
         "/tmp/homeboy-shared-cache:runtime"
     );
+}
+
+#[test]
+fn homeboy_manifest_preserves_shared_cargo_target_resolution_across_checkouts() {
+    let manifest = homeboy_manifest();
+    assert!(
+        !manifest.env.contains_key("CARGO_TARGET_DIR"),
+        "Homeboy's manifest must not bypass the caller-selected shared Cargo target"
+    );
+
+    let caller_target = PathBuf::from("/shared/homeboy/cargo-target");
+    for checkout in [
+        "/workspace/homeboy",
+        "/workspace/homeboy@dmc-worktree",
+        "/workspace/homeboy@task-worktree",
+    ] {
+        let dir = tempfile::tempdir().expect("checkout dir");
+        let mut component = manifest.clone();
+        component.local_path = checkout.to_string();
+        component.scripts = Some(ComponentScriptsConfig {
+            test: vec!["printf '%s' \"$CARGO_TARGET_DIR\" > cargo-target".to_string()],
+            ..Default::default()
+        });
+        component.env.insert(
+            "CARGO_TARGET_DIR".to_string(),
+            caller_target.to_string_lossy().to_string(),
+        );
+
+        let output =
+            run_component_scripts(&component, ExtensionCapability::Test, dir.path(), false)
+                .expect("component script should run");
+
+        assert!(output.success, "build environment resolves for {checkout}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("cargo-target")).expect("resolved target"),
+            caller_target.to_string_lossy(),
+            "explicit caller target must be preserved for {checkout}"
+        );
+    }
 }
 
 #[test]

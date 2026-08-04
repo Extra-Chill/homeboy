@@ -288,11 +288,27 @@ pub struct RunsListOutput {
     pub probe_degradations: Vec<ReadOnlyProbeDegradation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_enrichment: Option<RunsRunnerEnrichment>,
+    /// Bounded stale-run recovery guidance for the displayed selection. This is
+    /// observational only; the action always previews reconciliation first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_runs: Option<RunsStaleRunSummary>,
     #[serde(
         rename = "_homeboy_actionable",
         skip_serializing_if = "CommandActionableMetadata::is_empty"
     )]
     pub actionable: CommandActionableMetadata,
+}
+
+#[derive(Clone, Serialize)]
+pub struct RunsStaleRunSummary {
+    /// Number of displayed rows that are provably stale.
+    pub count: usize,
+    /// A bounded sample for operators who need to inspect individual rows.
+    pub run_ids: Vec<String>,
+    /// Number of stale displayed rows omitted from `run_ids`.
+    pub omitted_run_count: usize,
+    /// The same non-mutating action promoted into the command envelope.
+    pub action: CommandNextAction,
 }
 
 #[derive(Serialize)]
@@ -833,20 +849,27 @@ pub(super) fn actionable_for_run_summary(run: &RunSummary) -> CommandActionableM
         )
 }
 
-pub(super) fn actionable_for_run_list(runs: &[RunSummary]) -> CommandActionableMetadata {
+pub(super) fn actionable_for_run_list(
+    runs: &[RunSummary],
+    stale_runs: Option<&RunsStaleRunSummary>,
+) -> CommandActionableMetadata {
     let run_refs = runs.iter().map(run_ref_from_summary).collect::<Vec<_>>();
-    let next_actions = runs
-        .iter()
-        .take(10)
-        .flat_map(|run| {
-            [
-                CommandNextAction::new("show run", format!("homeboy runs show {}", run.id))
-                    .with_kind(CommandNextActionKind::Show),
-                CommandNextAction::new("watch run", format!("homeboy runs watch {}", run.id))
-                    .with_kind(CommandNextActionKind::Watch),
-            ]
-        })
-        .collect();
+    let mut next_actions = stale_runs
+        .map(|stale_runs| vec![stale_runs.action.clone()])
+        .unwrap_or_default();
+    next_actions.extend(
+        runs.iter()
+            .take(10)
+            .flat_map(|run| {
+                [
+                    CommandNextAction::new("show run", format!("homeboy runs show {}", run.id))
+                        .with_kind(CommandNextActionKind::Show),
+                    CommandNextAction::new("watch run", format!("homeboy runs watch {}", run.id))
+                        .with_kind(CommandNextActionKind::Watch),
+                ]
+            })
+            .collect::<Vec<_>>(),
+    );
 
     CommandActionableMetadata {
         run: run_refs.first().cloned(),
@@ -857,6 +880,14 @@ pub(super) fn actionable_for_run_list(runs: &[RunSummary]) -> CommandActionableM
         next_actions,
         ..Default::default()
     }
+}
+
+pub(super) fn stale_runs_reconcile_action() -> CommandNextAction {
+    CommandNextAction::new(
+        "preview stale-run reconciliation (non-mutating)",
+        "homeboy runs reconcile --dry-run",
+    )
+    .with_kind(CommandNextActionKind::Repair)
 }
 
 pub(super) fn actionable_for_run_detail(run: &RunDetail) -> CommandActionableMetadata {

@@ -1343,9 +1343,12 @@ fn cleanup_runtime_tmp_root(
     let unmanaged_end = unmanaged_start
         .saturating_add(unmanaged_capacity)
         .min(unmanaged_len);
-    let unmanaged_last_name = unmanaged
-        .get(unmanaged_end.saturating_sub(1))
-        .map(|entry| entry.file_name().to_string_lossy().to_string());
+    let unmanaged_last_name = (unmanaged_end > unmanaged_start).then(|| {
+        unmanaged[unmanaged_end - 1]
+            .file_name()
+            .to_string_lossy()
+            .to_string()
+    });
     for entry in unmanaged
         .into_iter()
         .skip(unmanaged_start)
@@ -1744,6 +1747,20 @@ fn ensure_runtime_tmp_dir() -> Result<PathBuf> {
             Some("create homeboy runtime tmp directory".to_string()),
         )
     })?;
+    let preflight = crate::capacity::preflight_capacity(
+        &runtime_dir,
+        "runtime temporary storage",
+        crate::capacity::CapacityReserve::configured(),
+    );
+    if preflight.status != crate::capacity::CapacityStatus::Ok {
+        crate::cleanup::run_automatic_runtime_temp_retention()?;
+    }
+    crate::capacity::preflight_capacity(
+        &runtime_dir,
+        "runtime temporary storage",
+        crate::capacity::CapacityReserve::configured(),
+    )
+    .into_result()?;
     Ok(runtime_dir)
 }
 

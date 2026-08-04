@@ -2,6 +2,21 @@ use super::*;
 
 pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    // Service ownership is independent of the scheduler process. Reconcile the
+    // durable ledger before terminalizing so an interrupted controller cannot
+    // leave a runner-local preview alive after its run is cancelled.
+    let service_cleanup = crate::agent_task_scheduler::managed_services::reconcile_run_services(
+        &record.run_id,
+        reason.unwrap_or("cancelled"),
+    )
+    .map_err(Error::internal_unexpected)?;
+    if !service_cleanup.is_empty() {
+        record.ensure_metadata_object().insert(
+            "managed_service_cleanup".to_string(),
+            serde_json::to_value(&service_cleanup).unwrap_or(serde_json::Value::Null),
+        );
+        store::write_record(&record)?;
+    }
     if record
         .candidate_adoption
         .as_ref()

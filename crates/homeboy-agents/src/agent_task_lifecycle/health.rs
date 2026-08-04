@@ -13,15 +13,20 @@ pub(crate) fn diagnose_run(
     } else {
         "run `homeboy agent-task reconcile-records --dry-run` to inspect repair evidence"
     };
-    let record = store::record_from_run(run).map_err(|_| AgentTaskRecordHealthItem {
-        run_id: run.id.clone(),
-        reason: if run.metadata_json.get("agent_task_run").is_none() {
-            AgentTaskRecordHealthReason::MissingMetadata
-        } else {
-            AgentTaskRecordHealthReason::MalformedMetadata
-        },
-        quarantined,
-        remediation: remediation.to_string(),
+    // Diagnosis must be able to read a legacy record in order to classify it as
+    // LegacySchema; the strict guard would report it as malformed metadata and
+    // send it to quarantine instead of migration.
+    let record = store::record_from_run_allowing_legacy_schema(run).map_err(|_| {
+        AgentTaskRecordHealthItem {
+            run_id: run.id.clone(),
+            reason: if run.metadata_json.get("agent_task_run").is_none() {
+                AgentTaskRecordHealthReason::MissingMetadata
+            } else {
+                AgentTaskRecordHealthReason::MalformedMetadata
+            },
+            quarantined,
+            remediation: remediation.to_string(),
+        }
     })?;
     let reason = if record.lab_handoff_validation_error().is_some() {
         Some(AgentTaskRecordHealthReason::MalformedMetadata)
@@ -118,7 +123,7 @@ pub fn reconcile_record_health(dry_run: bool) -> Result<AgentTaskRecordReconcili
             store::write_record(&reconstruct_record(&run)?)?;
             report.migrated += 1;
         } else if item.reason == AgentTaskRecordHealthReason::LegacySchema {
-            let mut record = store::record_from_run(&run)?;
+            let mut record = store::record_from_run_allowing_legacy_schema(&run)?;
             let original = serde_json::to_value(&record).unwrap_or(Value::Null);
             record.schema = schemas::RUN.to_string();
             record.lifecycle.schema = RUN_LIFECYCLE_RECORD_SCHEMA.to_string();

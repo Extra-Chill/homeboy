@@ -35,6 +35,15 @@ pub use types::{
     TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY, TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
 };
 
+/// The managed handle a repo and branch pair resolves to. Creation slugifies the
+/// branch, so `fix/1234-x` becomes `repo@fix-1234-x` and the handle a caller must
+/// pass is not the branch it typed. Callers that report a missing destination use
+/// this to name the handle they actually looked for instead of leaving the reader
+/// to guess the slug rule.
+pub fn handle_for_branch(repo: &str, branch: &str) -> String {
+    queue_ops::worktree_handle(repo, branch)
+}
+
 pub fn create(options: WorktreeCreateOptions) -> Result<WorktreeCreateOutput> {
     create_with_store(options, &metadata_dir()?)
 }

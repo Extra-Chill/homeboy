@@ -936,11 +936,13 @@ impl DefaultLabRunnerCandidate {
         // connectivity gate that IS hard is a disconnected reverse tunnel,
         // which cannot be woken on demand — handled explicitly below.
         let at_capacity = matches!(self.capacity, Some(capacity) if self.active_jobs >= capacity);
+        let capacity_unknown = self.capacity.is_none() && self.active_jobs > 0;
         if !self.capabilities_ready
             || !self.active_jobs_available
             || self.stale_daemon
             || !self.admission_fresh
             || at_capacity
+            || capacity_unknown
         {
             return DefaultLabRunnerReadiness {
                 eligible: false,

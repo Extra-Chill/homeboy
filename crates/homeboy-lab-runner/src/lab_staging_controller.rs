@@ -677,7 +677,8 @@ fn handoff_convergence_action(
             enforce_latest_stable: false,
             controller_is_source_build: true,
             allow_convergence: automatic_handoff_convergence_allowed(runner)
-                && status.admission_summary(0).safe_to_rotate
+                && status.active_job_state == crate::RunnerActiveJobState::Available
+                && status.rotation_evidence_is_unambiguous()
                 && status
                     .session
                     .as_ref()
@@ -4842,7 +4843,6 @@ mod tests {
             Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing);
         freshness.lease_id = None;
         freshness.pid = None;
-
         assert!(matches!(
             handoff_convergence_action(
                 &runner,
@@ -4853,6 +4853,40 @@ mod tests {
                 "/runner/homeboy",
             ),
             HandoffConvergenceAction::Refuse
+        ));
+    }
+
+    #[test]
+    fn busy_stale_daemon_rotates_to_a_draining_generation_before_provider_work() {
+        let runner = convergence_runner(true);
+        let mut status = convergence_status("homeboy 1.2.2+stale");
+        status.active_jobs.push(
+            serde_json::from_value(json!({
+                "runner_id": "lab-identity",
+                "job_id": "owned-job",
+                "operation": "runner.exec",
+                "source": "direct-daemon",
+                "kind": "test",
+                "status": "running",
+                "command": "homeboy test",
+                "started_at_ms": 0,
+                "updated_at_ms": 0,
+                "elapsed_ms": 0,
+                "heartbeat_age_ms": 0
+            }))
+            .expect("active runner job"),
+        );
+
+        assert!(matches!(
+            handoff_convergence_action(
+                &runner,
+                &status,
+                "homeboy 1.2.3+required",
+                Some("homeboy 1.2.3+required"),
+                Some("homeboy 1.2.2+stale"),
+                "/runner/homeboy",
+            ),
+            HandoffConvergenceAction::Refresh(crate::HomeboyBinaryRefreshMode::Select { .. })
         ));
     }
 
