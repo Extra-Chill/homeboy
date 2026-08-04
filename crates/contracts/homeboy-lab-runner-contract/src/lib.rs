@@ -659,17 +659,17 @@ pub fn negotiate_lab_capability_handshake(
     let daemon = advertised_capability_versions(&handshake.daemon_capabilities);
     let negotiated_capabilities = required
         .iter()
-        .filter_map(|(id, version)| {
-            (command
+        .filter(|&(id, version)| {
+            command
                 .get(id)
                 .is_some_and(|versions| versions.contains(version))
                 && daemon
                     .get(id)
-                    .is_some_and(|versions| versions.contains(version)))
-            .then(|| LabCapabilityVersion {
-                id: id.clone(),
-                version: *version,
-            })
+                    .is_some_and(|versions| versions.contains(version))
+        })
+        .map(|(id, version)| LabCapabilityVersion {
+            id: id.clone(),
+            version: *version,
         })
         .collect();
 

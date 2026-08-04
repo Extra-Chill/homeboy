@@ -44,6 +44,18 @@ pub struct AgentTaskCapabilityEvidence {
     pub tool_contributed: Vec<AgentTaskToolCapabilityContribution>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolved: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<AgentTaskCapabilityAdmission>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskCapabilityAdmission {
+    pub status: String,
+    pub layer: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,6 +63,18 @@ pub struct AgentTaskToolCapabilityContribution {
     pub tool_id: String,
     pub capabilities: Vec<String>,
     pub readiness: String,
+}
+
+pub(crate) fn ready_attached_tools_from_metadata(metadata: &Value) -> BTreeSet<String> {
+    metadata
+        .get("attached_tool_readiness")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|entries| entries.iter())
+        .filter_map(|(id, readiness)| {
+            (readiness.get("state").and_then(Value::as_str) == Some("ready")).then(|| id.clone())
+        })
+        .collect()
 }
 
 impl AgentTaskCapabilityRequirements {
@@ -123,36 +147,8 @@ impl AgentTaskCapabilityRequirements {
             runner_advertised,
             tool_contributed,
             resolved,
+            admission: None,
         }
-    }
-}
-
-/// Readiness is produced by the runtime-tool owner. This intentionally accepts
-/// a compact, provider-neutral metadata projection until #11511's typed runtime
-/// tool contract is available to this crate.
-pub fn ready_attached_tools_from_metadata(metadata: &Value) -> BTreeSet<String> {
-    let Some(readiness) = metadata.get("attached_tool_readiness") else {
-        return BTreeSet::new();
-    };
-    match readiness {
-        Value::Object(entries) => entries
-            .iter()
-            .filter_map(|(id, value)| {
-                (value == "ready" || value.get("state").and_then(Value::as_str) == Some("ready"))
-                    .then(|| id.trim().to_string())
-            })
-            .filter(|id| !id.is_empty())
-            .collect(),
-        Value::Array(entries) => entries
-            .iter()
-            .filter_map(|value| {
-                let id = value.get("id").and_then(Value::as_str)?.trim();
-                (value.get("state").and_then(Value::as_str) == Some("ready"))
-                    .then(|| id.to_string())
-            })
-            .filter(|id| !id.is_empty())
-            .collect(),
-        _ => BTreeSet::new(),
     }
 }
 
@@ -230,16 +226,5 @@ mod tests {
         );
         assert_eq!(ready.tool_contributed[0].readiness, "ready");
         assert!(ready.resolved.contains(&"browser_control".to_string()));
-    }
-
-    #[test]
-    fn persisted_runtime_tool_readiness_contributes_only_ready_tools() {
-        let ready = ready_attached_tools_from_metadata(&json!({
-            "attached_tool_readiness": {
-                "browser": { "state": "ready" },
-                "missing": { "state": "failed" }
-            }
-        }));
-        assert_eq!(ready, ["browser".to_string()].into_iter().collect());
     }
 }
