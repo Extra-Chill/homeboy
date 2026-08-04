@@ -24,11 +24,13 @@ use crate::agent_task_secrets::{
     AgentTaskSecretResolutionError,
 };
 use crate::agent_task_timeout::timeout_with_grace;
+#[cfg(test)]
+use homeboy_core::agent_runtime_manifest;
 use homeboy_core::agent_runtime_manifest::AgentRuntimeDiscoveryDiagnostic;
 pub(crate) use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::engine::shell;
 pub(crate) use homeboy_core::secret_env_plan::{SecretEnvPlan, SecretEnvStatus};
-use homeboy_core::{agent_runtime_manifest, component, defaults, Error};
+use homeboy_core::{component, defaults, Error};
 use homeboy_extension as extension;
 
 pub(crate) mod artifact_finalization;

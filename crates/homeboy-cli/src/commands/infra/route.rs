@@ -648,12 +648,6 @@ fn split_placement_coordinator_label(command: &Commands) -> Option<&'static str>
                     command: AgentTaskFanoutCommand::CookBatch(args),
                 }),
         }) if args.run_plan => Some("agent-task fanout cook-batch --run-plan"),
-        Commands::AgentTask(AgentTaskArgs {
-            command:
-                AgentTaskCommand::Fanout(AgentTaskFanoutArgs {
-                    command: AgentTaskFanoutCommand::SubmitBatch(_),
-                }),
-        }) => Some("agent-task fanout submit-batch"),
         _ => None,
     }
 }

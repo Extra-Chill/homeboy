@@ -1,9 +1,5 @@
 //! Generic diagnostics emitted by bench workloads.
 
-use std::collections::BTreeMap;
-
-use serde::{Deserialize, Serialize};
-
 use super::parsing::BenchResults;
 pub use homeboy_extension_contract::bench_diagnostics::{BenchDiagnostic, BenchDiagnosticSource};
 

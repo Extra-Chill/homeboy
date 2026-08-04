@@ -1,15 +1,12 @@
-use crate::test::drift::{detect_drift, generate_transform_rules, DriftReport};
+use crate::test::drift::{detect_drift, generate_transform_rules};
 use crate::test::resolve_drift_options;
-use crate::test::TestScopeOutput;
-use crate::test::{ChangeType, TestAnalysis};
-use crate::test::{TestBaselineComparison, TestCounts};
+use crate::test::ChangeType;
 use homeboy_core::component::Component;
 pub use homeboy_extension_contract::test_results::{
     AutoFixDriftWorkflowResult, DriftWorkflowResult, MainTestWorkflowResult,
 };
 pub use homeboy_extension_contract::test_workflow::AutoFixDriftOutput;
-use homeboy_refactor_contract::{AppliedRefactor, TransformSet};
-use serde::Serialize;
+use homeboy_refactor_contract::TransformSet;
 
 pub fn detect_test_drift(
     component_id: &str,

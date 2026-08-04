@@ -1,5 +1,4 @@
 use super::*;
-use crate::*;
 
 #[test]
 fn priority_actions_use_default_labels_when_unconfigured() {

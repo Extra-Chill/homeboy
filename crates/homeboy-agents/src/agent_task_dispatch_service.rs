@@ -4,7 +4,7 @@
 //! typed dispatch request, plan construction, provider preflight, durable
 //! lifecycle transitions, and scheduler orchestration.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::agent_task_dispatch_plan::{

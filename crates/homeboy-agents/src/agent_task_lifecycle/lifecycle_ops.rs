@@ -2,7 +2,6 @@ use super::acceptance_verifier::{
     validate_acceptance_requirement, validate_attestation, with_acceptance_verifier,
 };
 use super::*;
-use homeboy_core::api_jobs::RemoteRunnerJobRequest;
 use homeboy_engine_primitives::content_hash;
 use std::fs::{self, File, OpenOptions};
 

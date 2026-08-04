@@ -47,6 +47,10 @@ pub mod activity;
 pub mod agent_runtime_manifest;
 pub mod agent_task_secret_provider;
 pub use homeboy_lab_contract::agent_task_config;
+#[allow(
+    dead_code,
+    reason = "Recovery operations are exercised outside the default CLI path."
+)]
 pub mod api_jobs;
 pub mod artifact_address;
 pub mod artifact_contract;
@@ -60,6 +64,10 @@ pub mod artifact_postprocess;
 pub mod artifact_preview;
 pub mod artifact_ref;
 pub mod broker_auth;
+#[allow(
+    dead_code,
+    reason = "Browser evidence is an optional runtime capability."
+)]
 pub mod browser_evidence;
 pub mod build_identity;
 pub mod capacity;
@@ -78,6 +86,10 @@ pub mod context;
 pub mod controller_pin_reference;
 pub mod controller_runtime;
 pub use homeboy_lifecycle_contract::cook_status;
+#[allow(
+    dead_code,
+    reason = "Daemon recovery helpers are invoked by lifecycle paths."
+)]
 pub mod daemon;
 pub mod deferred_workload;
 pub mod deps;
@@ -107,6 +119,10 @@ pub use homeboy_finding as finding;
 pub mod fleet;
 pub use homeboy_gate_contract::gate;
 pub mod gate_feedback_baseline;
+#[allow(
+    dead_code,
+    reason = "Git landing diagnostics are retained for optional PR workflows."
+)]
 pub mod git;
 pub mod harvest;
 pub mod host_mutation_lifecycle;
@@ -188,6 +204,10 @@ pub mod lab_contract {
     pub use homeboy_lab_contract::lab::types::*;
     pub use homeboy_lab_contract::lab::workload::*;
 }
+#[allow(
+    dead_code,
+    reason = "Platform-specific server client code is compiled on every host."
+)]
 pub mod server;
 pub mod setup;
 pub mod source_snapshot;
@@ -209,7 +229,15 @@ pub mod update_check_cache;
 pub mod validation_progress;
 pub mod workspace_claim;
 pub mod workspace_snapshot;
+#[allow(
+    dead_code,
+    reason = "Store-backed worktree inventory supports recovery providers."
+)]
 pub mod worktree;
+#[allow(
+    dead_code,
+    reason = "Provider parsing supports optional worktree providers."
+)]
 pub mod worktree_providers;
 
 // Internal path resolution helpers.

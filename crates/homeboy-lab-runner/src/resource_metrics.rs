@@ -5,7 +5,6 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use homeboy_core::engine::command::{

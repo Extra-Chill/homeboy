@@ -1,18 +1,10 @@
 //! Trace runner JSON output parsing.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
-
 use homeboy_core::error::{Error, Result};
-use homeboy_core::observation::timeline::{
-    ObservationEvent, ObservationSpanDefinition, ObservationSpanResult, ObservationSpanStatus,
-};
 use homeboy_core::structured_sidecar;
-use homeboy_lifecycle_contract::RigStateSnapshot;
 
-use super::preview::TracePreviewMetadata;
 pub use homeboy_extension_contract::trace_parsing::{
     TraceArtifact, TraceAssertion, TraceAssertionStatus, TraceCanonicalCheck,
     TraceComponentsProvenance, TraceDependencyProvenance, TraceEvent, TraceEvidenceMetadata,

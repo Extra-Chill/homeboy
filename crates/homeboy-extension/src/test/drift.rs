@@ -8,7 +8,6 @@
 //! Phase 1: symbol-level cross-reference (method names, class names, strings).
 
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;

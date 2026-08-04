@@ -9,7 +9,6 @@ pub use homeboy_extension_contract::FormattingFindings;
 pub use homeboy_extension_contract::LintSummaryOutput;
 use homeboy_refactor_contract::AppliedRefactor;
 use serde::Serialize;
-use std::collections::BTreeMap;
 
 /// Sniff-selection filters shared by every lint entry point.
 ///

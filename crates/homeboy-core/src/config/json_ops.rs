@@ -140,7 +140,7 @@ pub(crate) struct RemoveFields {
 }
 
 /// Remove items from arrays in any serializable config type.
-pub fn remove_config<T: Serialize + DeserializeOwned>(
+pub(crate) fn remove_config<T: Serialize + DeserializeOwned>(
     existing: &mut T,
     spec: Value,
 ) -> Result<RemoveFields> {

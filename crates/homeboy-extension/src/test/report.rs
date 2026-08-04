@@ -4,23 +4,18 @@
 //! produce domain-specific result types. This module provides the unified output
 //! envelope and builder functions that assemble results into command-ready output.
 
-use crate::test::{
-    CoverageOutput, DriftReport, TestAnalysis, TestBaselineComparison, TestCounts, TestScopeOutput,
-    TestSummaryOutput,
-};
+use crate::test::TestCounts;
 use crate::{
     phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
     PhaseFailureCategory, PhaseReport, PhaseStatus, VerificationPhase,
 };
 use homeboy_core::ci_profile::CiContext;
+#[cfg(test)]
 use homeboy_core::finding::HomeboyFinding;
 pub use homeboy_extension_contract::test_results::TestCommandOutput;
-use homeboy_refactor_contract::AppliedRefactor;
-use serde::Serialize;
-use serde_json::Value;
 
-use super::run::{test_timeout, RawTestOutput, TestRunWorkflowResult};
-use super::workflow::{AutoFixDriftOutput, AutoFixDriftWorkflowResult, DriftWorkflowResult};
+use super::run::{test_timeout, TestRunWorkflowResult};
+use super::workflow::{AutoFixDriftWorkflowResult, DriftWorkflowResult};
 
 /// Exit status Homeboy assigns when it terminates a child that exhausted its
 /// execution budget (`timed_out_exit_code` in `homeboy-core`).

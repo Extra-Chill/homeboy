@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::test::analyze::{TestAnalysis, TestAnalysisInput, TestFailure};
 use crate::test::TestCounts;

@@ -4,7 +4,7 @@ use std::process::Command;
 
 use crate::release::types::ReleaseArtifact;
 use homeboy_core::component::{
-    CommandScopeConfig, Component, PackageCoverageArtifactMatch, PackageCoverageConfig, ScopeConfig,
+    CommandScopeConfig, Component, PackageCoverageArtifactMatch, PackageCoverageConfig,
 };
 use homeboy_core::error::{Error, Result};
 

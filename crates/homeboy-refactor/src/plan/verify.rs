@@ -140,7 +140,6 @@ pub fn run_audit_refactor(
 
 fn resolve_verify_config(component_id: &str) -> Option<homeboy_extension::AutofixVerifyConfig> {
     use homeboy_core::component;
-    use homeboy_extension;
 
     let comp = component::load(component_id).ok()?;
     let extensions = comp.extensions.as_ref()?;
