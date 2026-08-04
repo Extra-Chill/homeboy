@@ -49,17 +49,13 @@ if ! grep -q 'FAILED (exit code 1)' "${TMP_DIR}/run.log"; then
   exit 1
 fi
 
-output_dir="$(grep '^HOMEBOY_OUTPUT_DIR=' "${TMP_DIR}/github-env" | cut -d= -f2-)"
-temporary_result="${output_dir}/review-test.json"
 ci_result="${TMP_DIR}/workspace/homeboy-ci-results/review-test.json"
-if ! jq -e . "${temporary_result}" >/dev/null 2>&1 \
-  || ! jq -e . "${ci_result}" >/dev/null 2>&1 \
-  || ! cmp -s "${temporary_result}" "${ci_result}"; then
-  printf 'FAIL: valid review test result is retained and mirrored to CI artifacts\n'
+if ! jq -e . "${ci_result}" >/dev/null 2>&1; then
+  printf 'FAIL: valid review test result is retained at the durable CI result path\n'
   exit 1
 fi
 
-printf 'PASS: failed review test records a current-run failure and mirrors its valid result\n'
+printf 'PASS: failed review test records a current-run failure at its durable result path\n'
 
 for output_mode in missing malformed; do
   mkdir -p "${TMP_DIR}/workspace/homeboy-ci-results"
@@ -226,13 +222,11 @@ RESOLVED_COMMANDS='bench' \
 COMPONENT_NAME='homeboy-action' \
 bash "${ROOT_DIR}/scripts/core/run-homeboy-commands.sh" >"${TMP_DIR}/bench.log" 2>&1
 
-bench_output_dir="$(grep '^HOMEBOY_OUTPUT_DIR=' "${TMP_DIR}/bench-env" | cut -d= -f2-)"
-if ! jq -e '.data.current == true' "${TMP_DIR}/workspace/homeboy-ci-results/bench.json" >/dev/null 2>&1 \
-  || ! cmp -s "${bench_output_dir}/bench.json" "${TMP_DIR}/workspace/homeboy-ci-results/bench.json"; then
-  printf 'FAIL: bench result does not replace stale output and retain its artifact and comment copies\n'
+if ! jq -e '.data.current == true' "${TMP_DIR}/workspace/homeboy-ci-results/bench.json" >/dev/null 2>&1; then
+  printf 'FAIL: bench result does not replace stale output at its durable result path\n'
   exit 1
 fi
-printf 'PASS: bench requires current output and retains its artifact and comment copies\n'
+printf 'PASS: bench requires current output at its durable result path\n'
 
 mkdir -p "${TMP_DIR}/symlink-workspace" "${TMP_DIR}/outside-results"
 printf 'outside sentinel\n' > "${TMP_DIR}/outside-results/sentinel"

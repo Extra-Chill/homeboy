@@ -52,11 +52,11 @@ for CMD in "${CMD_ARRAY[@]}"; do
   OUTPUT_STEM="$(command_output_stem "${CMD}")"
   if [ "$(printf '%s' "${CMD}" | awk '{print $1}')" = "bench" ]; then
     CI_RESULT_JSON="${HOMEBOY_CI_RESULTS_DIR}/bench.json"
-    OUTPUT_JSON="${CI_RESULT_JSON}"
   else
     CI_RESULT_JSON="${HOMEBOY_CI_RESULTS_DIR}/${OUTPUT_STEM}.json"
-    OUTPUT_JSON="${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.json"
   fi
+  # This is the one durable result path consumed by artifacts and reporting.
+  OUTPUT_JSON="${CI_RESULT_JSON}"
 
   if [ -L "${HOMEBOY_CI_RESULTS_DIR}" ] || [ ! -d "${HOMEBOY_CI_RESULTS_DIR}" ]; then
     echo "::error::HOMEBOY_CI_RESULTS_DIR must remain a real directory: ${HOMEBOY_CI_RESULTS_DIR}"
@@ -98,16 +98,6 @@ for CMD in "${CMD_ARRAY[@]}"; do
     STRUCTURED_OUTPUT=false
     rm -f "${CI_RESULT_JSON}"
     echo "::error::homeboy ${CMD} did not write valid structured output to ${OUTPUT_JSON}"
-  elif [ "$(printf '%s' "${CMD}" | awk '{print $1}')" = "bench" ]; then
-    cp "${OUTPUT_JSON}" "${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.json"
-  else
-    if [ -L "${HOMEBOY_CI_RESULTS_DIR}" ] || [ ! -d "${HOMEBOY_CI_RESULTS_DIR}" ] || [ -L "${CI_RESULT_JSON}" ]; then
-      STRUCTURED_OUTPUT=false
-      rm -f "${CI_RESULT_JSON}"
-      echo "::error::homeboy ${CMD} result target is not safe to publish"
-    else
-      cp "${OUTPUT_JSON}" "${HOMEBOY_CI_RESULTS_DIR}/${OUTPUT_STEM}.json"
-    fi
   fi
 
   if [ "${CMD_EXIT}" -eq 0 ] && [ "${STRUCTURED_OUTPUT}" = true ]; then

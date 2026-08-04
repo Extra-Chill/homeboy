@@ -115,7 +115,7 @@ run_categorizer \
 run_categorizer \
   "failed command in RESULTS propagates exit 1" \
   1 \
-  "Commands failed without producing structured output" \
+  "No structured result exists for review audit; attempted" \
   RESULTS='{"review audit":"fail"}' \
   COMMANDS='review audit' \
   EXPECTED_COMMANDS='review audit,review lint,review test'

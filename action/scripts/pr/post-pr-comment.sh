@@ -27,7 +27,11 @@ source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
 source "${GITHUB_ACTION_PATH}/scripts/pr/comment/lib.sh"
 source "${GITHUB_ACTION_PATH}/scripts/pr/comment/sections.sh"
 
-OUTPUT_DIR="${HOMEBOY_OUTPUT_DIR:-}"
+# Same precedence as select-final-results.sh, generate-failure-digest.sh, and
+# auto-file-categorized-issues.sh. This consumer was the one left on the raw
+# HOMEBOY_OUTPUT_DIR, which is why dropping the duplicate bench copy broke the
+# comment summary rather than any of the other three.
+OUTPUT_DIR="${HOMEBOY_CI_RESULTS_DIR:-${HOMEBOY_OUTPUT_DIR:-}}"
 COMP_ID="$(resolve_component_id)"
 WORKSPACE="$(resolve_workspace)"
 REPO="${GITHUB_REPOSITORY}"

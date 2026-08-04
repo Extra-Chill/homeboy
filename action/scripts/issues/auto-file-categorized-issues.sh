@@ -21,7 +21,7 @@
 #   test   — groups by failure cluster category or single aggregate
 #
 # Env vars:
-#   HOMEBOY_OUTPUT_DIR    — directory with command log files
+#   HOMEBOY_CI_RESULTS_DIR — directory with durable command-result/v3 files
 #   COMPONENT_NAME        — component ID
 #   COMMANDS              — comma-separated list of commands that were run
 #   RESULTS               — JSON object with pass/fail per command
@@ -31,7 +31,7 @@
 set -euo pipefail
 
 COMP_ID="${COMPONENT_NAME:-$(basename "${GITHUB_REPOSITORY}")}"
-OUTPUT_DIR="${HOMEBOY_OUTPUT_DIR:-}"
+OUTPUT_DIR="${HOMEBOY_CI_RESULTS_DIR:-${HOMEBOY_OUTPUT_DIR:-}}"
 RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
 # CI runners check out a single repo to GITHUB_WORKSPACE and don't have the
@@ -124,7 +124,7 @@ for CMD in "${CMD_ARRAY[@]}"; do
   JSON_FILE="${OUTPUT_DIR}/${CMD_STEM}.json"
 
   if [ ! -f "${JSON_FILE}" ] || [ ! -s "${JSON_FILE}" ]; then
-    echo "No structured ${CMD_STEM}.json found — skipping categorized issues for ${CMD}"
+    echo "No structured result exists for ${CMD}; attempted ${JSON_FILE}"
     continue
   fi
 

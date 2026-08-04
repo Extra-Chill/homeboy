@@ -58,8 +58,12 @@ export BENCH_ITERATIONS="2"
 
 assert_file "${TMP_DIR}/workspace/homeboy-ci-results/bench.json" "stable bench artifact"
 
-output_dir="$(grep '^HOMEBOY_OUTPUT_DIR=' "${TMP_DIR}/github-env" | cut -d= -f2-)"
-assert_file "${output_dir}/bench.json" "comment-summary bench artifact copy"
+# The comment summary now reads the same durable results path as every other
+# consumer instead of a duplicate copy in HOMEBOY_OUTPUT_DIR, so assert the
+# path it actually reads.
+results_dir="$(grep '^HOMEBOY_CI_RESULTS_DIR=' "${TMP_DIR}/github-env" | cut -d= -f2-)"
+: "${results_dir:="${TMP_DIR}/workspace/homeboy-ci-results"}"
+assert_file "${results_dir}/bench.json" "comment-summary bench artifact source"
 
 if ! grep -q '^results={"bench":"pass"}$' "${TMP_DIR}/github-output"; then
   printf 'FAIL: bench result was not recorded as pass\n'
