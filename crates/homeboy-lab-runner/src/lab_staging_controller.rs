@@ -500,12 +500,13 @@ fn handoff_build_reference(identity: &str) -> String {
         .unwrap_or_else(|| format!("v{}", identity.split('+').next().unwrap_or(identity)))
 }
 
-fn immutable_handoff_recovery_command(runner_id: &str, requested: &str) -> String {
+fn immutable_handoff_recovery_action(
+    runner_id: &str,
+    requested: &str,
+) -> homeboy_agents::agent_task_lifecycle::AgentTaskLabRuntimeRecovery {
     let reference = handoff_build_reference(requested);
-    format!(
-        "homeboy runner refresh-homeboy {} --ref {} --reconnect",
-        homeboy_core::engine::shell::quote_arg(runner_id),
-        homeboy_core::engine::shell::quote_arg(&reference),
+    homeboy_agents::agent_task_lifecycle::AgentTaskLabRuntimeRecovery::refresh_homeboy(
+        runner_id, requested, reference,
     )
 }
 
@@ -515,7 +516,8 @@ fn handoff_identity_error(
     configured: Option<&str>,
     daemon: Option<&str>,
 ) -> Error {
-    let recovery = immutable_handoff_recovery_command(runner_id, requested);
+    let recovery_action = immutable_handoff_recovery_action(runner_id, requested);
+    let recovery = recovery_action.command();
     let mut error = Error::validation_invalid_argument(
         "runner",
         format!(
@@ -534,6 +536,8 @@ fn handoff_identity_error(
         "recovery_command": recovery,
         "preserved_invocation": preserved_invocation(),
     });
+    error.details["lab_handoff_runtime_recovery"] =
+        serde_json::to_value(recovery_action).expect("Lab runtime recovery serializes");
     error
 }
 
@@ -5005,6 +5009,14 @@ mod tests {
         assert_eq!(
             error.details["homeboy_handoff_identity"]["executed_command_build_identity"],
             serde_json::Value::Null
+        );
+        let recovery: homeboy_agents::agent_task_lifecycle::AgentTaskLabRuntimeRecovery =
+            serde_json::from_value(error.details["lab_handoff_runtime_recovery"].clone())
+                .expect("typed runtime recovery");
+        assert!(recovery.is_valid());
+        assert_eq!(
+            recovery.command(),
+            "homeboy runner refresh-homeboy lab-identity --ref required --reconnect"
         );
     }
 
