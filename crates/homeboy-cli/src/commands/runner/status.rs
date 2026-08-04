@@ -9,8 +9,8 @@ use homeboy::core::agent_runtime_manifest::{
 use homeboy::core::daemon::{DaemonRecoveryEvidence, DaemonStaleReasonCode};
 use homeboy::runner::readonly_probe;
 use homeboy::runner::runners::{
-    self as runner, RunnerActiveJobState, RunnerAvailability, RunnerBinarySource, RunnerSession,
-    RunnerStatusReport, RunnerTunnelMode, RuntimeMaterializationStatus,
+    self as runner, RunnerActiveJobState, RunnerBinarySource, RunnerSession, RunnerStatusReport,
+    RunnerTunnelMode, RuntimeMaterializationStatus,
 };
 
 use super::super::CmdResult;
