@@ -176,6 +176,49 @@ fn seed_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
     .unwrap();
 }
 
+fn seed_timeout_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
+    use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
+    use crate::agent_task_scheduler::{
+        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
+    };
+
+    let task = plan.tasks.first().expect("review form plan has one task");
+    agent_task_lifecycle::record_run_aggregate(
+        run_id,
+        plan,
+        &AgentTaskAggregate {
+            schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: plan.plan_id.clone(),
+            status: AgentTaskAggregateStatus::Failed,
+            totals: AgentTaskAggregateTotals {
+                failed: 1,
+                ..Default::default()
+            },
+            outcomes: vec![AgentTaskOutcome {
+                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: task.task_id.clone(),
+                status: AgentTaskOutcomeStatus::Timeout,
+                summary: Some("review form provider timed out".to_string()),
+                failure_classification: None,
+                artifacts: Vec::new(),
+                typed_artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                outputs: Value::Null,
+                workflow: None,
+                follow_up: None,
+                metadata: serde_json::json!({ "model": task.executor.model() }),
+            }],
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        },
+    )
+    .unwrap();
+}
+
 fn seed_missing_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
     use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_scheduler::{
@@ -1426,6 +1469,22 @@ impl AgentTaskExecutorAdapter for ReviewFormOnlyExecutor {
             follow_up: None,
             metadata: serde_json::json!({ "model": request.executor.model() }),
         }
+    }
+}
+
+#[derive(Clone)]
+struct RecordingReviewFormExecutor {
+    executions: Arc<AtomicUsize>,
+}
+
+impl AgentTaskExecutorAdapter for RecordingReviewFormExecutor {
+    fn execute(
+        &self,
+        request: crate::agent_task::AgentTaskRequest,
+        context: crate::agent_task_scheduler::AgentTaskExecutionContext,
+    ) -> crate::agent_task::AgentTaskOutcome {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        ReviewFormOnlyExecutor.execute(request, context)
     }
 }
 
@@ -6183,7 +6242,8 @@ fn record_tracked_promotion_continuation(
     checkpoint["target"] = serde_json::json!({
         "worktree": options.to_worktree,
         "path": target,
-        "branch": "cook-candidate"
+        "branch": "cook-candidate",
+        "head": fingerprint.head
     });
     checkpoint["patch_artifact"] = serde_json::json!({
         "id": "patch",
@@ -6195,6 +6255,7 @@ fn record_tracked_promotion_continuation(
     checkpoint["provenance"] = serde_json::json!({
         "post_apply": true,
         "candidate": candidate,
+        "worktree_path": target,
         "gate_feedback_baseline": {
             "schema": "homeboy/agent-task-gate-feedback-baseline/v1",
             "current_diff": patch
@@ -6323,6 +6384,15 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             .expect("tracked promotion continuation");
         assert_eq!(continuation.baseline["patch_artifact"]["id"], "patch");
 
+        let generic_preflight =
+            crate::agent_task_promotion::preflight_configured_workspace_provider(
+                &options.to_worktree,
+            )
+            .expect_err("generic provider preflight rejects every dirty destination");
+        assert_eq!(
+            generic_preflight.details["workspace"]["classification"],
+            "workspace.resolved_but_dirty"
+        );
         validate_cook_workspace(&options)
             .expect("exact dirty promoted provider destination resumes");
 
@@ -6344,6 +6414,167 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         assert!(error
             .message
             .contains("promoted candidate baseline could not be verified"));
+
+        // The historical admission branch is narrower than the workspace
+        // validator: it requires a terminal timed-out review-form retry whose
+        // copied applied promotion exactly matches its source promotion.
+        std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
+        let mut historical = options.clone();
+        historical.initial_plan = batch_cook_options(
+            "cook-historical-review-form",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        )
+        .initial_plan;
+        historical.initial_run_id = "run-historical-review-form".to_string();
+        historical.initial_plan.tasks[0].inputs = serde_json::json!({
+            "cook_loop": {
+                "review_form_required": true,
+                "execution_budget_authority": {
+                    "kind": "fresh_cook_review",
+                    "max_same_provider_retries": 1
+                }
+            }
+        });
+        historical.no_finalize = false;
+        let mut source_options = historical.clone();
+        source_options.initial_run_id = "run-tracked-promotion-source".to_string();
+        record_tracked_promotion_continuation(&source_options, &target);
+        let mut source_promotion = serde_json::to_value(
+            persisted_promotion_for_attempt(&source_options.initial_run_id)
+                .unwrap()
+                .expect("source promotion"),
+        )
+        .unwrap();
+        source_promotion["status"] = serde_json::json!("applied");
+        agent_task_lifecycle::record_promotion(&source_options.initial_run_id, source_promotion)
+            .unwrap();
+
+        let mut copied_promotion = serde_json::to_value(
+            persisted_promotion_for_attempt(&source_options.initial_run_id)
+                .unwrap()
+                .expect("applied source promotion"),
+        )
+        .unwrap();
+        copied_promotion["source"]["run_id"] = serde_json::json!(historical.initial_run_id);
+        copied_promotion["provenance"]["cook_follow_up"] = serde_json::json!({
+            "kind": "review_form_only",
+            "source_run_id": source_options.initial_run_id,
+        });
+        agent_task_lifecycle::submit_plan(
+            &historical.initial_plan,
+            Some(&historical.initial_run_id),
+        )
+        .unwrap();
+        agent_task_lifecycle::record_promotion(
+            &historical.initial_run_id,
+            copied_promotion.clone(),
+        )
+        .unwrap();
+        seed_timeout_review_form_aggregate(&historical.initial_run_id, &historical.initial_plan);
+        agent_task_lifecycle::rewrite_record_for_test(&historical.initial_run_id, |record| {
+            record.state = agent_task_lifecycle::AgentTaskRunState::Failed;
+        })
+        .unwrap();
+
+        assert!(
+            authenticated_historical_review_form_workspace(&historical).unwrap(),
+            "the exact dirty candidate authorizes only this historical continuation"
+        );
+        historical.attempt_dispatcher = None;
+        let executions = Arc::new(AtomicUsize::new(0));
+        let executor = RecordingReviewFormExecutor {
+            executions: Arc::clone(&executions),
+        };
+
+        std::fs::write(target.join("tracked.txt"), "drifted\n").unwrap();
+        assert!(
+            !authenticated_historical_review_form_workspace(&historical).unwrap(),
+            "candidate drift falls through to normal preflight"
+        );
+        let error = run_cook_with_boundaries_observed_policy(
+            historical.clone(),
+            executor.clone(),
+            DefaultCookSideEffects::new(|_, _, _| Ok(serde_json::json!({}))),
+            None,
+            true,
+        )
+        .expect_err("candidate drift is rejected before local dispatch");
+        assert_eq!(
+            error.details["workspace"]["classification"],
+            "workspace.resolved_but_dirty"
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+
+        std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(&historical.initial_run_id, |record| {
+            record.state = agent_task_lifecycle::AgentTaskRunState::Cancelled;
+        })
+        .unwrap();
+        assert!(
+            !authenticated_historical_review_form_workspace(&historical).unwrap(),
+            "cancelled review-form attempts never authorize the bypass"
+        );
+        let error = run_cook_with_boundaries_observed_policy(
+            historical.clone(),
+            executor.clone(),
+            DefaultCookSideEffects::new(|_, _, _| Ok(serde_json::json!({}))),
+            None,
+            true,
+        )
+        .expect_err("cancelled attempts are rejected before local dispatch");
+        assert_eq!(
+            error.details["workspace"]["classification"],
+            "workspace.resolved_but_dirty"
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+
+        agent_task_lifecycle::rewrite_record_for_test(&historical.initial_run_id, |record| {
+            record.state = agent_task_lifecycle::AgentTaskRunState::Failed;
+        })
+        .unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(&historical.initial_run_id, |record| {
+            record.metadata["latest_promotion"]["provenance"]
+                .as_object_mut()
+                .unwrap()
+                .remove("candidate");
+        })
+        .unwrap();
+        assert!(
+            !authenticated_historical_review_form_workspace(&historical).unwrap(),
+            "missing legacy candidate evidence is an authorization denial"
+        );
+        let error = run_cook_with_boundaries_observed_policy(
+            historical.clone(),
+            executor.clone(),
+            DefaultCookSideEffects::new(|_, _, _| Ok(serde_json::json!({}))),
+            None,
+            true,
+        )
+        .expect_err("malformed evidence is rejected before local dispatch");
+        assert_eq!(
+            error.details["workspace"]["classification"],
+            "workspace.resolved_but_dirty"
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        agent_task_lifecycle::record_promotion(&historical.initial_run_id, copied_promotion)
+            .unwrap();
+
+        let result = run_cook_with_boundaries_observed_policy(
+            historical.clone(),
+            executor,
+            DefaultCookSideEffects::new(|_, _, _| Ok(serde_json::json!({}))),
+            None,
+            true,
+        )
+        .expect("the exact promoted candidate reaches local review dispatch");
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "continuation status: {}; stop reason: {:?}",
+            result.value.status,
+            result.value.failure_context
+        );
+        assert_ne!(result.value.status, "durable_failure");
     });
 }
 

@@ -1739,7 +1739,10 @@ fn review_form_attempt_is_ready_for_cook_continuation(
         && promotion.changed_files == source.changed_files
         && promotion.verified_base == source.verified_base
         && promotion.deterministic_gates == source.deterministic_gates
-        && promotion.command_evidence == source.command_evidence)
+        && promotion.command_evidence == source.command_evidence
+        && promotion.provenance.get("candidate") == source.provenance.get("candidate")
+        && promotion.provenance.get("gate_feedback_baseline")
+            == source.provenance.get("gate_feedback_baseline"))
 }
 
 fn retryable_review_form_terminal_failure(
@@ -1765,7 +1768,7 @@ pub fn terminal_review_form_continuation_is_eligible(
     plan: &AgentTaskPlan,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<bool> {
-    if !record.state.is_terminal()
+    if record.state != agent_task_lifecycle::AgentTaskRunState::Failed
         || !review_form_attempt_is_ready_for_cook_continuation(plan, record)?
     {
         return Ok(false);
@@ -2071,8 +2074,11 @@ where
                     .and_then(Value::as_str)
                     == Some("verification_pending")
         });
+    let authenticated_historical_review_continuation =
+        allow_historical_terminal && authenticated_historical_review_form_workspace(&options)?;
     if !moving_base_continuation
         && !verification_pending_continuation
+        && !authenticated_historical_review_continuation
         && options.attempt_dispatcher.is_none()
         && options.provider_command.is_none()
         && options.provider_invocation.is_none()
@@ -3404,6 +3410,55 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
         ));
     }
     Ok(())
+}
+
+/// The normal configured-provider preflight rejects every dirty destination. A
+/// terminal review-form retry can retain its candidate only after its copied
+/// promotion lineage and the resolved destination prove an exact match.
+fn authenticated_historical_review_form_workspace(
+    options: &AgentTaskCookServiceOptions,
+) -> Result<bool> {
+    if !agent_task_lifecycle::run_record_exists(&options.initial_run_id)? {
+        return Ok(false);
+    }
+    let record = agent_task_lifecycle::status(&options.initial_run_id)?;
+    if !terminal_review_form_continuation_is_eligible(&options.initial_plan, &record)
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+    let Some(promotion) = persisted_promotion_for_attempt(&options.initial_run_id).unwrap_or(None)
+    else {
+        return Ok(false);
+    };
+    if promotion.status != AgentTaskPromotionStatus::Applied {
+        return Ok(false);
+    }
+    let Some(continuation) = tracked_promotion_continuation(options).unwrap_or(None) else {
+        return Ok(false);
+    };
+    let resolution =
+        match homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
+            &options.to_worktree,
+            &homeboy_core::defaults::load_config(),
+            Some(&continuation.baseline),
+        ) {
+            Ok(resolution) => resolution,
+            Err(_) => return Ok(false),
+        };
+    if resolution.worktree.handle != options.to_worktree
+        || homeboy_core::worktree_providers::validate_task_worktree_root(
+            std::path::Path::new(&resolution.worktree.path),
+            &options.to_worktree,
+        )
+        .is_err()
+    {
+        return Ok(false);
+    }
+    let Ok(target) = std::fs::canonicalize(&resolution.worktree.path) else {
+        return Ok(false);
+    };
+    Ok(authenticate_tracked_promotion_continuation(&target, &continuation).is_ok())
 }
 
 struct TrackedPromotionContinuation {
