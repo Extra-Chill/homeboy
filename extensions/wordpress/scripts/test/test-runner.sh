@@ -729,10 +729,22 @@ if [ -z "$TARGET_FILE" ] && [ "${HOMEBOY_TEST_SCOPE_KIND:-}" = "exclusive_env" ]
     fi
 fi
 
+homeboy_wordpress_is_phpunit_test_file() {
+    case "$(basename "$1")" in
+        *Test.php|test-*.php)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 if [ -z "$TARGET_FILE" ] && [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
     changed_js_smoke_files=""
     changed_shell_smoke_files=""
     changed_node_test_files=""
+    changed_phpunit_files=""
     changed_non_host_smoke_files=0
     while IFS= read -r changed_test_file; do
         [ -n "$changed_test_file" ] || continue
@@ -755,10 +767,23 @@ if [ -z "$TARGET_FILE" ] && [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
                 changed_node_test_files+=$'\n'
             fi
             changed_node_test_files+="$changed_test_rel"
+        elif homeboy_wordpress_is_phpunit_test_file "$changed_test_rel"; then
+            if [ -n "$changed_phpunit_files" ]; then
+                changed_phpunit_files+=$'\n'
+            fi
+            changed_phpunit_files+="$changed_test_rel"
+            changed_non_host_smoke_files=1
         else
             changed_non_host_smoke_files=1
         fi
     done <<< "$HOMEBOY_CHANGED_TEST_FILES"
+
+    # Selected PHPUnit files must reach the WordPress runtime backend as an
+    # explicit scope. Without it a changed-file review silently widens to the
+    # full suite, and the backend cannot report whether the selection ran.
+    if [ -n "$changed_phpunit_files" ]; then
+        export HOMEBOY_WORDPRESS_PHPUNIT_CHANGED_TEST_FILES="$changed_phpunit_files"
+    fi
 
     if [ -n "$changed_js_smoke_files" ] && [ -z "$changed_shell_smoke_files" ] && [ -z "$changed_node_test_files" ] && [ "$changed_non_host_smoke_files" -eq 0 ]; then
         homeboy_wordpress_run_js_smoke_files "$changed_js_smoke_files"

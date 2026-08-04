@@ -66,12 +66,16 @@ try {
     ['recipe', 'build'], ['recipe-run', '--recipe'], ['recipe', 'build'], ['recipe-run', '--recipe'],
   ]);
   const options = entries.filter((entry) => entry.options).map((entry) => entry.options);
-  assert.deepEqual(options.map((entry) => entry.extra_plugins[0]), [
-    { source: '/workspace/monorepo', sourceSubpath: 'plugins/canonical-plugin', slug: 'canonical-plugin', activate: false },
+  assert.deepEqual(options[0].extra_plugins, [
     { source: '/workspace/monorepo', sourceSubpath: 'plugins/canonical-plugin', slug: 'canonical-plugin', activate: false },
   ]);
-  assert.deepEqual(options[1].extra_plugins.slice(1), [
+  // The PHPUnit recipe activates declared validation dependencies first and
+  // never leaves the plugin under review inactive: an inactive target is
+  // excluded from WP Codebox's activation phase and Composer autoloader
+  // preloading, which produces a sandbox where nothing can execute.
+  assert.deepEqual(options[1].extra_plugins, [
     { source: dependency, slug: 'db-touching-dependency', activate: true },
+    { source: '/workspace/monorepo', sourceSubpath: 'plugins/canonical-plugin', slug: 'canonical-plugin', activate: true },
   ]);
   assert.deepEqual(options[1].dependencyMounts, [
     '/wordpress/wp-content/plugins/canonical-plugin',

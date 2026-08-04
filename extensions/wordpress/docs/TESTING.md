@@ -170,6 +170,40 @@ If your plugin depends on other local plugins at runtime, declare them:
 Dependencies are mounted alongside the plugin under test and their entry
 files are loaded during the `load_deps` bootstrap stage.
 
+Declared validation dependencies are activated first, in declaration order,
+and the plugin under review is activated last. Both appear in the recipe's
+setup and activation evidence
+(`wp-codebox-phpunit-recipe-options.json`, `wp-codebox-phpunit-provenance.json`)
+so a run can be checked against the topology it claims to have booted. Leaving
+the target inactive excludes it from Composer autoloader preloading and from
+the activation phase, which produces a sandbox where no test can execute.
+
+## Changed-file PHPUnit scope and zero-test diagnosis
+
+`--changed-since` selection forwards the PHPUnit-shaped subset of the changed
+files to the sandbox as an explicit scope, so a narrowed review runs the
+selection instead of silently widening to the full suite. `--file` selection
+forwards the single requested file the same way.
+
+Every run writes `files/phpunit-execution-diagnosis.json`
+(`homeboy/wordpress-phpunit-execution-diagnosis/v1`), registered as a run
+artifact alongside the raw `files/phpunit-output.log`. When a run reports zero
+executed tests the diagnosis names the seam rather than reporting an empty
+pass:
+
+| `cause` | Meaning |
+| --- | --- |
+| `target_component_not_mounted` | No entry file for the plugin under review was loaded |
+| `activation_failed` | Activation raised a throwable before discovery |
+| `bootstrap_failed` | A bootstrap stage failed before any test ran |
+| `changed_file_filter_mismatch` | The changed-file scope matched no discovered test file |
+| `phpunit_discovery_empty` | Discovery found no test files under the test root |
+| `suite_reported_no_tests` | Files were discovered but declared no runnable cases |
+| `bootstrap_evidence_unavailable` | No stage log was produced at all |
+
+The same classification prints to the runner transcript as
+`PHPUNIT_ZERO_TESTS cause=<cause>` with the detail and remediation lines.
+
 Bench and trace scenarios preflight dependency plugin packages before WP
 Codebox dispatch. The dependency path must be the runnable WordPress plugin
 package root with a root `Plugin Name:` main file. Monorepo source checkouts,

@@ -122,6 +122,7 @@ try {
     assert.deepEqual(manifest.artifacts.map(({ path: artifactPath }) => artifactPath), [
       'wp-codebox-phpunit/files/test-results.json',
       'wp-codebox-phpunit/files/phpunit-output.log',
+      'wp-codebox-phpunit/files/phpunit-execution-diagnosis.json',
       'wp-codebox-phpunit/files/test-failures.json',
     ], testCase.name);
     const durableSummary = JSON.parse(await readFile(path.join(invocationArtifacts, 'wp-codebox-phpunit/files/test-results.json'), 'utf8')).summary;
@@ -133,7 +134,10 @@ try {
     const options = JSON.parse(await readFile(path.join(runArtifact, 'wp-codebox-phpunit-recipe-options.json'), 'utf8'));
     const profile = JSON.parse(await readFile(path.join(runArtifact, 'wp-codebox-phpunit-profile.json'), 'utf8'));
     const provenance = JSON.parse(await readFile(path.join(runArtifact, 'wp-codebox-phpunit-provenance.json'), 'utf8'));
-    assert.equal(options.extra_plugins[1].activate, true);
+    assert.deepEqual(options.extra_plugins.map(({ slug, activate }) => [slug, activate]), [
+      ['dependency', true],
+      ['component', true],
+    ], `${testCase.name}: validation dependencies activate before the plugin under review`);
     assert.equal(options.phpunitXml, '/wordpress/wp-content/plugins/component/phpunit.xml.dist');
     assert.equal(options.autoloadFile, '/wp-codebox-vendor/autoload.php');
     assert.equal(options.bootstrapMode, testCase.bootstrapMode || (testCase.settings?.wp_codebox_phpunit_bootstrap_mode === 'managed' ? 'managed' : 'project'));
@@ -180,7 +184,10 @@ printf '%s\\n' '${JSON.stringify({ data: { entity: { local_path: conflictingData
   const metadataRunArtifact = path.join(metadataArtifacts, (await readdir(metadataArtifacts)).find((entry) => entry.startsWith('wp-codebox-phpunit.')));
   const metadataOptions = JSON.parse(await readFile(path.join(metadataRunArtifact, 'wp-codebox-phpunit-recipe-options.json'), 'utf8'));
   const metadataProvenance = JSON.parse(await readFile(path.join(metadataRunArtifact, 'wp-codebox-phpunit-provenance.json'), 'utf8'));
-  assert.deepEqual(metadataOptions.extra_plugins.slice(1), [{ source: dataMachine, slug: 'data-machine', activate: true }]);
+  assert.deepEqual(metadataOptions.extra_plugins, [
+    { source: dataMachine, slug: 'data-machine', activate: true },
+    { source: component, slug: 'component', activate: true },
+  ]);
   assert.deepEqual(metadataProvenance.source_refs.slice(1), [{ slug: 'data-machine', source: dataMachine }]);
 
   const malformedManifestArtifacts = path.join(root, 'malformed-manifest-artifacts');

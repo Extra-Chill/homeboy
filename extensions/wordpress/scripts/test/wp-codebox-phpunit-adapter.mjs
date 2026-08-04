@@ -37,6 +37,17 @@ const dependencies = await Promise.all((await dependencyPaths(settings, [compone
   const dependencySlug = path.basename(source).replace(/@[^/]+$/, '');
   return { source, slug: dependencySlug, sandboxDirectory: sandboxPluginDirectory(dependencySlug), composer: await composerPreparation(source) };
 }));
+const selectedTestFile = (process.env.HOMEBOY_WORDPRESS_PHPUNIT_TEST_FILE || '').trim();
+const changedTestFiles = phpunitChangedTestFiles();
+// Validation dependencies activate before the plugin under review so the
+// target's own activation hooks observe the topology it declares. The target
+// is activated last and never omitted: an inactive target is excluded from WP
+// Codebox's activation phase and from Composer autoloader preloading, which
+// yields a sandbox that reports zero executed tests.
+const activationPlan = [
+  ...dependencies.map(({ source, slug: dependencySlug, composer }) => ({ role: 'validation-dependency', source, slug: dependencySlug, composer })),
+  { role: 'target', source: root, sourceSubpath: subpath, slug },
+];
 await requireHarness(harnessSource);
 const options = clean({
   wordpressVersion: settings.wordpress_runtime_version,
@@ -44,11 +55,10 @@ const options = clean({
   databaseType: settings.database_type,
   services: databaseService ? [databaseService.service] : undefined,
   pluginSlug: slug,
-  extra_plugins: [
-    { source: root, sourceSubpath: subpath, slug, activate: false },
-    ...dependencies.map(({ source, slug: dependencySlug, composer }) => clean({ source, slug: dependencySlug, activate: true, composer })),
-  ],
+  extra_plugins: activationPlan.map(({ role, ...plugin }) => clean({ ...plugin, activate: true })),
   dependencyMounts: [...new Set([sandboxPluginDirectory(slug), ...dependencies.map(({ sandboxDirectory }) => sandboxDirectory)])],
+  selectedTestFile,
+  changedTestFiles,
   testRoot: phpunitProfile.testRoot,
   phpunitXml: phpunitProfile.config,
   cwd: phpunitProfile.cwd,
@@ -283,6 +293,18 @@ async function composerPreparation(source) {
 function sandboxPluginDirectory(pluginSlug) {
   return `/wordpress/wp-content/plugins/${pluginSlug}`;
 }
+// The router publishes the PHPUnit-shaped subset of the changed-file scope.
+// Fall back to filtering the raw scope so a directly invoked adapter still
+// narrows to the selection instead of silently widening to the full suite.
+function phpunitChangedTestFiles() {
+  const scoped = process.env.HOMEBOY_WORDPRESS_PHPUNIT_CHANGED_TEST_FILES;
+  const raw = scoped === undefined || scoped === '' ? process.env.HOMEBOY_CHANGED_TEST_FILES || '' : scoped;
+  const entries = raw.split('\n').map((entry) => entry.trim()).filter(Boolean);
+  const selected = scoped === undefined || scoped === ''
+    ? entries.filter((entry) => /(?:Test\.php|\/test-[^/]*\.php)$/.test(`/${entry}`))
+    : entries;
+  return [...new Set(selected)];
+}
 function canonicalMounts(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -513,14 +535,15 @@ async function publishPhpunitArtifacts(artifactDirectory, status) {
   const publishedDirectory = path.join(invocationArtifacts, 'wp-codebox-phpunit');
   const publishedFilesDirectory = path.join(publishedDirectory, 'files');
   const files = [
-    { name: 'test-results.json', kind: 'test-results', role: 'structured-test-results', semantic_key: 'test_results', content_type: 'application/json' },
-    { name: 'phpunit-output.log', kind: 'phpunit-output', role: 'raw-test-output', semantic_key: 'phpunit_output', content_type: 'text/plain' },
+    { name: 'test-results.json', kind: 'test-results', role: 'structured-test-results', semantic_key: 'test_results', content_type: 'application/json', copy: true },
+    { name: 'phpunit-output.log', kind: 'phpunit-output', role: 'raw-test-output', semantic_key: 'phpunit_output', content_type: 'text/plain', copy: true },
+    { name: 'phpunit-execution-diagnosis.json', kind: 'phpunit-execution-diagnosis', role: 'test-execution-diagnosis', semantic_key: 'phpunit_execution_diagnosis', content_type: 'application/json', copy: true },
     { name: 'test-failures.json', kind: 'test-failures', role: 'structured-test-failures', semantic_key: 'test_failures', content_type: 'application/json' },
   ];
   await withInvocationArtifactLock(invocationArtifacts, async () => {
     await assertDirectoryTree(invocationArtifacts, ['wp-codebox-phpunit', 'files']);
     await assertDirectoryTree(artifactDirectory, ['files']);
-    for (const file of files.slice(0, 2)) {
+    for (const file of files.filter((entry) => entry.copy)) {
       await atomicCopy(path.join(artifactDirectory, 'files', file.name), path.join(publishedFilesDirectory, file.name));
     }
     // The parser replaces this valid fallback atomically. Its registration and
@@ -529,7 +552,7 @@ async function publishPhpunitArtifacts(artifactDirectory, status) {
       path.join(publishedFilesDirectory, 'test-failures.json'),
       await fallbackTestFailures(publishedFilesDirectory),
     );
-    await registerInvocationArtifacts(invocationArtifacts, files.map((file) => ({
+    await registerInvocationArtifacts(invocationArtifacts, files.map(({ copy, ...file }) => ({
       ...file,
       path: path.join('wp-codebox-phpunit', 'files', file.name).replaceAll(path.sep, '/'),
     })));
@@ -830,6 +853,7 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
     const evidenceReferences = [
       { kind: 'structured-test-results', uri: 'artifact://files/test-results.json' },
       { kind: 'raw-phpunit-output', uri: 'artifact://files/phpunit-output.log' },
+      { kind: 'test-execution-diagnosis', uri: 'artifact://files/phpunit-execution-diagnosis.json' },
     ];
     if (managedRuntimeServices.length > 0) {
       evidenceReferences.push({ kind: 'managed-runtime-services', uri: 'artifact://files/managed-runtime-services.json' });
@@ -838,12 +862,139 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
     await writeFile(testResultsPath, `${JSON.stringify(results, null, 2)}\n`);
   }
 
+  const diagnosis = await phpunitExecutionDiagnosis(artifactDirectory, results, execution);
+  await writeFile(path.join(filesDirectory, 'phpunit-execution-diagnosis.json'), `${JSON.stringify(diagnosis, null, 2)}\n`);
+
   process.stdout.write('Structured PHPUnit evidence: artifact://files/test-results.json\n');
   process.stdout.write('Full PHPUnit output: artifact://files/phpunit-output.log\n');
+  process.stdout.write('PHPUnit execution diagnosis: artifact://files/phpunit-execution-diagnosis.json\n');
+  if (diagnosis.executed_tests === 0) {
+    process.stdout.write(`PHPUNIT_ZERO_TESTS cause=${diagnosis.cause}\n`);
+    process.stdout.write(`  ${diagnosis.detail}\n`);
+    process.stdout.write(`  ${diagnosis.remediation}\n`);
+  }
   if (managedRuntimeServices.length > 0) {
     process.stdout.write('Managed runtime service evidence: artifact://files/managed-runtime-services.json\n');
   }
   return results.status;
+}
+// A selected test set must either execute or say why it did not. The sandbox
+// bootstrap logs stage markers to a diagnostic file; classify them so a zero
+// count names the failing seam instead of reporting an empty pass.
+async function phpunitExecutionDiagnosis(artifactDirectory, results, execution) {
+  const summary = isObject(results?.summary) ? results.summary : {};
+  const executed = Number.isInteger(summary.total) ? summary.total : 0;
+  const stageLog = await readPhpunitStageLog(artifactDirectory);
+  const markers = stageLog === null
+    ? []
+    : stageLog.split('\n').filter((line) => /^(STAGE_FAIL|STAGE_FATAL|STAGE_DIE|NO_TEST_FILES|DISCOVERY:|SCOPED_TEST_FILES|PLUGIN_DETECTED|THEME_DETECTED|PLUGIN_ACTIVATE|NOTICE:no plugin entry file)/.test(line.trim()));
+  const has = (pattern) => markers.some((line) => pattern.test(line));
+  const scoped = markers.map((line) => line.match(/^SCOPED_TEST_FILES requested=(\d+) matched=(\d+)/)).find(Boolean);
+  const discovery = markers.map((line) => line.match(/^DISCOVERY:.*\bfound=(\d+)/)).find(Boolean);
+
+  const activation = {
+    target: { slug, source: root, source_subpath: subpath || null, activate: true, activated: has(new RegExp(`^PLUGIN_ACTIVATE(_OK)? ${escapeRegExp(slug)}/`)) },
+    validation_dependencies: dependencies.map(({ slug: dependencySlug, source }) => ({
+      slug: dependencySlug,
+      source,
+      activate: true,
+      activated: has(new RegExp(`^PLUGIN_ACTIVATE(_OK)? ${escapeRegExp(dependencySlug)}/`)),
+    })),
+    order: activationPlan.map(({ role, slug: planSlug }) => ({ role, slug: planSlug })),
+  };
+
+  const classification = (() => {
+    if (executed > 0) {
+      return { cause: 'tests_executed', detail: `PHPUnit executed ${executed} test(s).`, remediation: 'No execution diagnosis is required.' };
+    }
+    if (stageLog === null) {
+      return {
+        cause: 'bootstrap_evidence_unavailable',
+        detail: 'The sandbox produced no PHPUnit stage log, so the run did not reach the bootstrap that records stage markers.',
+        remediation: 'Inspect artifact://files/phpunit-output.log and logs/recipe-run.stderr.log for a runtime or recipe-level failure.',
+      };
+    }
+    if (has(/^NOTICE:no plugin entry file/) || !has(/^(PLUGIN_DETECTED|THEME_DETECTED)/)) {
+      return {
+        cause: 'target_component_not_mounted',
+        detail: `The sandbox never loaded an entry file for the component under review (${slug}); its mount or plugin header is missing.`,
+        remediation: 'Confirm wp_codebox_source_root/wp_codebox_source_subpath resolve to a directory containing the plugin entry file.',
+      };
+    }
+    if (has(/^STAGE_FAIL:activation/)) {
+      return {
+        cause: 'activation_failed',
+        detail: 'Plugin activation raised a throwable before PHPUnit discovery.',
+        remediation: 'Read the STAGE_FAIL:activation trace in the stage log; a validation dependency may be missing from validation_dependencies.',
+      };
+    }
+    if (has(/^(STAGE_FAIL|STAGE_FATAL|STAGE_DIE)/)) {
+      const stage = (markers.find((line) => /^(STAGE_FAIL|STAGE_FATAL|STAGE_DIE)/.test(line)) || '').split(':')[1] || 'unknown';
+      return {
+        cause: 'bootstrap_failed',
+        detail: `The sandbox bootstrap failed at stage '${stage}' before any test executed.`,
+        remediation: 'Read the failing stage trace in the stage log excerpt below and in artifact://files/phpunit-output.log.',
+      };
+    }
+    if (scoped && Number(scoped[1]) > 0 && Number(scoped[2]) === 0) {
+      return {
+        cause: 'changed_file_filter_mismatch',
+        detail: `The changed-file scope requested ${scoped[1]} file(s) and matched 0 discovered test files.`,
+        remediation: 'Confirm the selected paths sit under the configured PHPUnit test root and match the suite\'s discovery suffixes/prefixes.',
+      };
+    }
+    if (has(/^NO_TEST_FILES/) || (discovery && Number(discovery[1]) === 0)) {
+      return {
+        cause: 'phpunit_discovery_empty',
+        detail: 'PHPUnit discovery found no test files under the configured test root.',
+        remediation: 'Check wp_codebox_phpunit_test_root and the phpunit.xml testsuite directories against the mounted component.',
+      };
+    }
+    return {
+      cause: 'suite_reported_no_tests',
+      detail: 'The sandbox mounted, activated, and discovered the component but the assembled suite contained no test cases.',
+      remediation: 'Confirm the discovered files declare concrete PHPUnit\\Framework\\TestCase subclasses with runnable test methods.',
+    };
+  })();
+
+  return {
+    schema: 'homeboy/wordpress-phpunit-execution-diagnosis/v1',
+    executed_tests: executed,
+    recipe_run_exit_code: execution.status,
+    scope: {
+      selected_test_file: selectedTestFile || null,
+      changed_test_files: changedTestFiles,
+      test_root: phpunitProfile.testRoot,
+      phpunit_config: phpunitProfile.config || null,
+    },
+    activation,
+    ...classification,
+    evidence: [
+      { kind: 'raw-phpunit-output', uri: 'artifact://files/phpunit-output.log' },
+      { kind: 'structured-test-results', uri: 'artifact://files/test-results.json' },
+      { kind: 'recipe-options', uri: 'artifact://wp-codebox-phpunit-recipe-options.json' },
+      { kind: 'recipe-provenance', uri: 'artifact://wp-codebox-phpunit-provenance.json' },
+    ],
+    stage_markers: markers.slice(0, 60),
+  };
+}
+async function readPhpunitStageLog(artifactDirectory) {
+  const stageRoot = path.join(artifactDirectory, 'files', 'phpunit');
+  const candidates = [path.join(stageRoot, '.pg-test-result.txt')];
+  try {
+    for (const entry of await readdir(stageRoot, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        candidates.push(path.join(stageRoot, entry.name, '.pg-test-result.txt'));
+      }
+    }
+  } catch {}
+  for (const candidate of candidates) {
+    try { return await readFile(candidate, 'utf8'); } catch {}
+  }
+  return null;
+}
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 function validTestResults(results) {
   if (!isObject(results) || results.schema !== 'wp-codebox/test-results/v1' || !['passed', 'failed', 'skipped', 'unknown'].includes(results.status) || !isObject(results.summary)) {
@@ -951,7 +1102,7 @@ async function persistRecipeEvidence(artifactDirectory, recipeOptions, generated
     copyFile(generatedRecipePath, path.join(artifactDirectory, 'wp-codebox-phpunit-recipe.json')),
     writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-recipe-options.json'), `${JSON.stringify(recipeOptions, null, 2)}\n`),
     writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-profile.json'), `${JSON.stringify({ wordpress: { topology }, phpunit: { config: profile.config, cwd: profile.cwd, test_root: profile.testRoot, environment: profile.environment, bootstrap_mode: recipeOptions.bootstrapMode, project_bootstrap: recipeOptions.projectBootstrap || null, passthrough_args: recipeOptions.phpunitArgs, extra_mounts: recipeOptions.mounts } }, null, 2)}\n`),
-    writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-provenance.json'), `${JSON.stringify({ source_refs: sourceRefs, wp_codebox: { cli_bin: process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox', resolved_cli_path: process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox', command: [process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox'] } }, null, 2)}\n`),
+    writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-provenance.json'), `${JSON.stringify({ source_refs: sourceRefs, activation: { order: activationPlan.map(({ role, slug: planSlug }) => ({ role, slug: planSlug, activate: true })) }, scope: { selected_test_file: selectedTestFile || null, changed_test_files: changedTestFiles }, wp_codebox: { cli_bin: process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox', resolved_cli_path: process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox', command: [process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox'] } }, null, 2)}\n`),
   ]);
 }
 function runScript(script, args) {

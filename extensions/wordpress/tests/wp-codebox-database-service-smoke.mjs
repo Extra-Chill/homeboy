@@ -208,7 +208,7 @@ try {
   }, 'recipe build receives administrative names without host values');
   assert.equal(options.databaseType, 'mysql');
   assert.equal(options.multisite, true, 'external MySQL remains compatible with multisite PHPUnit');
-  assert.equal(options.extra_plugins[1].composer, 'install', 'source-form validation dependencies explicitly request staged Composer preparation');
+  assert.equal(options.extra_plugins[0].composer, 'install', 'source-form validation dependencies explicitly request staged Composer preparation');
   assert.equal('secretEnv' in options, false, 'administrative credentials are not forwarded into the sandbox runtime');
   assert.deepEqual(options.services, [{
     id: 'wordpress-database',
