@@ -3052,11 +3052,26 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         let mut public_env = request.recipe.job_override_env.clone();
         public_env.extend(runtime_env);
         public_env.extend(crate::lab_env::build_lab_offload_env(&lab_metadata));
-        let secret_handoff = crate::lab::secrets::build_lab_secret_env_handoff_plan(
+        let mut secret_handoff = crate::lab::secrets::build_lab_secret_env_handoff_plan(
             &request.recipe.command.secret_env_sources,
             &request.recipe.normalized_args,
             public_env,
         )?;
+        // The runner executes the durable plan and its execution-host service
+        // supervisor. Its secret handoff must therefore include service
+        // requirements before the runner job is admitted.
+        for service in &request.durable_agent_task_plan.services {
+            if let Some(service_plan) = &service.secret_env_plan {
+                secret_handoff
+                    .secret_env_plan
+                    .merge_from(service_plan.clone());
+            } else {
+                secret_handoff
+                    .secret_env_plan
+                    .extend_secret_env_names(service.secret_env.clone());
+            }
+        }
+        secret_handoff.secret_env_names = secret_handoff.secret_env_plan.secret_env_names();
         let mut env = secret_handoff.env_delta.clone();
         env.insert(
             "HOMEBOY_RUNNER_PLACEMENT_RESOLVED".to_string(),

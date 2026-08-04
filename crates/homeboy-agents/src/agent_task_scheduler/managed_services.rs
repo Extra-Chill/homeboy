@@ -24,6 +24,9 @@ use super::{
 pub(crate) struct AgentTaskManagedServiceRecord {
     pub id: String,
     pub state: String,
+    /// Generated before exec. A stale reconciler can distinguish a planned
+    /// launch that never acquired a process from a live owned process.
+    pub launch_token: String,
     pub local_url: Option<String>,
     pub public_url: Option<String>,
     pub log_path: Option<String>,
@@ -118,6 +121,28 @@ impl AgentTaskServiceSupervisor {
         let mut spec = spec;
         let (port, port_lease, listener) = lease_port(&spec)?;
         spec.port = port;
+        let local_url = spec.port.map(|port| format!("http://{}:{port}", spec.host));
+        let launch_token = uuid::Uuid::new_v4().to_string();
+        let mut record = AgentTaskManagedServiceRecord {
+            id: spec.id.clone(),
+            state: "planned".to_string(),
+            launch_token: launch_token.clone(),
+            local_url: local_url.clone(),
+            public_url: spec.public_url.clone(),
+            log_path: Some(log_path.display().to_string()),
+            pid: None,
+            cleanup: None,
+            provenance: json!({"schema":"homeboy/agent-task-managed-service/v3", "run_id": run_id, "argv": spec.command, "cwd": spec.cwd, "host": spec.host, "port": spec.port, "target": spec.target, "lifecycle": spec.lifecycle, "socket_handoff": spec.socket_handoff, "env_allowlist": spec.env_allowlist, "secret_env": spec.secret_env, "secret_env_plan": spec.secret_env_plan.as_ref().map(|plan| plan.redacted()), "endpoint_ownership": { "host": spec.host, "port": spec.port, "lease": port_lease.as_ref().map(|lease| lease.path.display().to_string()) }}),
+            process_identity: None,
+            port_lease: port_lease
+                .as_ref()
+                .map(|lease| lease.path.display().to_string()),
+            readiness_attempts: Vec::new(),
+        };
+        // This durable intent is committed before the execution host can run
+        // the service payload, so cancellation/reconciliation sees a launch
+        // even across a controller or runner interruption.
+        persist_record(run_id, &record)?;
         let mut command = Command::new(&spec.command[0]);
         command
             .args(&spec.command[1..])
@@ -148,6 +173,7 @@ impl AgentTaskServiceSupervisor {
         if let Some(port) = spec.port {
             command.env(spec.port_env.as_deref().unwrap_or("PORT"), port.to_string());
         }
+        command.env("HOMEBOY_SERVICE_LAUNCH_TOKEN", &launch_token);
         handoff_listener(&mut command, listener.as_ref())?;
         let mut containment = homeboy_core::process::ProcessContainment::prepare(&mut command)
             .map_err(|error| error.message)?;
@@ -155,23 +181,10 @@ impl AgentTaskServiceSupervisor {
             .spawn()
             .map_err(|error| format!("start managed service '{}': {error}", spec.id))?;
         containment.attach(&child).map_err(|error| error.message)?;
-        let local_url = spec.port.map(|port| format!("http://{}:{port}", spec.host));
-        let mut record = AgentTaskManagedServiceRecord {
-            id: spec.id.clone(),
-            state: "starting".to_string(),
-            local_url: local_url.clone(),
-            public_url: spec.public_url.clone(),
-            log_path: Some(log_path.display().to_string()),
-            pid: Some(child.id()),
-            cleanup: None,
-            provenance: json!({"schema":"homeboy/agent-task-managed-service/v3", "run_id": run_id, "argv": spec.command, "cwd": spec.cwd, "host": spec.host, "port": spec.port, "target": spec.target, "lifecycle": spec.lifecycle, "socket_handoff": spec.socket_handoff, "env_allowlist": spec.env_allowlist, "secret_env": spec.secret_env, "secret_env_plan": spec.secret_env_plan.as_ref().map(|plan| plan.redacted()), "endpoint_ownership": { "host": spec.host, "port": spec.port, "lease": port_lease.as_ref().map(|lease| lease.path.display().to_string()) }}),
-            process_identity: process_start_identity(child.id())
-                .map_err(|error| format!("inspect managed service process identity: {error}"))?,
-            port_lease: port_lease
-                .as_ref()
-                .map(|lease| lease.path.display().to_string()),
-            readiness_attempts: Vec::new(),
-        };
+        record.state = "starting".to_string();
+        record.pid = Some(child.id());
+        record.process_identity = process_start_identity(child.id())
+            .map_err(|error| format!("inspect managed service process identity: {error}"))?;
         persist_record(run_id, &record)?;
         if let Err(error) = wait_ready(&spec, local_url.as_deref(), &mut record.readiness_attempts)
         {
@@ -532,6 +545,8 @@ mod tests {
             );
             let records = services.cleanup("success");
             assert_eq!(records[0].state, "stopped");
+            assert!(!records[0].launch_token.is_empty());
+            assert!(records[0].process_identity.is_some());
             assert_eq!(records[0].cleanup.as_deref(), Some("cleaned_up:success"));
             assert!(std::path::Path::new(records[0].log_path.as_deref().unwrap()).exists());
             assert_eq!(
