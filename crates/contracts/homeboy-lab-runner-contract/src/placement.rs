@@ -14,20 +14,15 @@ use serde::{Deserialize, Serialize};
 
 /// The requested execution location. This is normalized once at the CLI
 /// boundary and is the only placement input used by routing code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize, Default)]
 #[value(rename_all = "lower")]
 pub enum Placement {
+    #[default]
     Auto,
     Local,
     Lab,
     #[value(name = "lab-or-local")]
     LabOrLocal,
-}
-
-impl Default for Placement {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl Placement {
