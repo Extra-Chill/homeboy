@@ -368,8 +368,6 @@ pub fn uninstall(extension_id: &str) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use homeboy_core::extension_update_check::{read_source_revision, read_source_url};
-
     use super::{
         install, install_for_component, install_with_revision, is_extension_update_workdir_clean,
         load_extension, refresh, shared_assets_for_extension_source, source_metadata, update,
