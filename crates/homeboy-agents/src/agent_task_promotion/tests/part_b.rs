@@ -874,6 +874,22 @@ fn promote_exports_all_agent_commits_after_the_recorded_task_base() {
     std::fs::write(repo.join("first.txt"), "base\n").expect("base");
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-m", "base"]);
+    let remote = temp.path().join("origin.git");
+    assert!(Command::new("git")
+        .args(["init", "--bare", remote.to_str().expect("remote path")])
+        .status()
+        .expect("create remote")
+        .success());
+    git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().expect("remote path"),
+        ],
+    );
+    git(&repo, &["push", "-u", "origin", "main"]);
     let base = git_head(&repo, "HEAD");
     git(&repo, &["checkout", "-b", "agent/work"]);
     std::fs::write(repo.join("first.txt"), "one\n").expect("first");

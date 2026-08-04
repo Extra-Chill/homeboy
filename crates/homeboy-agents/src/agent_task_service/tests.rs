@@ -696,8 +696,8 @@ fn service_materializes_component_worktree_before_provider_dispatch() {
             "provider must run in an isolated attempt worktree, not the managed worktree"
         );
         assert!(
-            observed_root.contains("homeboy-agent-task-attempts"),
-            "attempt worktree should live under the agent-task attempts scratch root, got {observed_root}"
+            observed_root.contains("controller-scratch/attempts"),
+            "attempt worktree should live under the registered controller scratch root, got {observed_root}"
         );
         assert!(observed.workspace.attempt.is_some());
         assert_eq!(observed.workspace.slug.as_deref(), Some("fixture"));
@@ -917,10 +917,7 @@ fn reconcile_dry_run_reports_but_does_not_cancel_stale_runs() {
         agent_task_lifecycle::rewrite_record_for_test("run-reconcile-dry", |record| {
             agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Running);
             record.tasks[0].state = AgentTaskState::Running;
-            record.metadata = serde_json::json!({
-                "runner_id": "homeboy-lab",
-                "runner_job_id": "job-dry",
-            });
+            record.metadata = serde_json::json!({ "runner_pid": u32::MAX });
         })
         .expect("stale record stored");
 
@@ -944,10 +941,7 @@ fn reconcile_cancels_stale_running_record_without_manual_edit() {
         agent_task_lifecycle::rewrite_record_for_test("run-reconcile-live", |record| {
             agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Running);
             record.tasks[0].state = AgentTaskState::Running;
-            record.metadata = serde_json::json!({
-                "runner_id": "homeboy-lab",
-                "runner_job_id": "job-live",
-            });
+            record.metadata = serde_json::json!({ "runner_pid": u32::MAX });
         })
         .expect("stale record stored");
 
@@ -1390,6 +1384,18 @@ fn reconcile_terminalizes_an_unaccepted_controller_handoff_after_its_deadline() 
             },
         )
         .expect("controller handoff persisted before runner acceptance");
+        let submission_request: homeboy_core::api_jobs::RemoteRunnerJobRequest =
+            serde_json::from_value(serde_json::json!({
+                "runner_id": "homeboy-lab",
+                "command": command,
+                "metadata": { "submission_key": "controller-handoff-unaccepted" }
+            }))
+            .expect("fixture runner submission request");
+        agent_task_lifecycle::record_lab_offload_submission_request(
+            "controller-handoff-unaccepted",
+            &submission_request,
+        )
+        .expect("persist complete pending handoff request");
         agent_task_lifecycle::rewrite_record_for_test("controller-handoff-unaccepted", |record| {
             record
                 .lab_handoff
@@ -1411,15 +1417,67 @@ fn reconcile_terminalizes_an_unaccepted_controller_handoff_after_its_deadline() 
             "homeboy agent-task status controller-handoff-unaccepted"
         );
 
-        let reconciliation = reconcile_stale_active_runs(false).expect("reconciled");
-        assert_eq!(reconciliation.reconciled, 1);
-        assert_eq!(reconciliation.runs[0].action, "reconciled");
-        let terminal =
-            lifecycle_status("controller-handoff-unaccepted").expect("terminal controller record");
+        let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
+            AbsentSubmissionProvider,
+        ));
+        let terminal = lifecycle_status("controller-handoff-unaccepted")
+            .expect("terminal controller record after confirmed absence");
         assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
         assert_eq!(terminal.metadata["provider_executions_consumed"], 0);
         assert_eq!(terminal.metadata["retryable"], true);
     });
+}
+
+struct AbsentSubmissionProvider;
+
+impl agent_task_lifecycle::RunnerContinuationProvider for AbsentSubmissionProvider {
+    fn runner_job_log_snapshot(
+        &self,
+        _runner_id: &str,
+        _job_id: &str,
+    ) -> homeboy_core::Result<homeboy_core::api_jobs::RunnerJobLogSnapshot> {
+        Err(homeboy_core::Error::internal_unexpected(
+            "unused in fixture",
+        ))
+    }
+
+    fn is_runner_connected(&self, _runner_id: &str) -> bool {
+        true
+    }
+
+    fn runner_exists(&self, _runner_id: &str) -> bool {
+        true
+    }
+
+    fn run_continuation_exec(
+        &self,
+        _runner_id: &str,
+        _cwd: &str,
+        _command: &[String],
+        _run_id: &str,
+    ) -> homeboy_core::Result<i32> {
+        Err(homeboy_core::Error::internal_unexpected(
+            "unused in fixture",
+        ))
+    }
+
+    fn submit_reverse_broker_job(
+        &self,
+        _runner_id: &str,
+        _request: homeboy_core::api_jobs::RemoteRunnerJobRequest,
+    ) -> homeboy_core::Result<homeboy_core::api_jobs::Job> {
+        Err(homeboy_core::Error::internal_unexpected(
+            "unused in fixture",
+        ))
+    }
+
+    fn lookup_reverse_broker_submission(
+        &self,
+        _runner_id: &str,
+        _submission_key: &str,
+    ) -> homeboy_core::Result<homeboy_core::api_jobs::RemoteRunnerSubmissionLookup> {
+        Ok(homeboy_core::api_jobs::RemoteRunnerSubmissionLookup::Absent)
+    }
 }
 
 #[derive(Clone)]

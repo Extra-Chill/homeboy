@@ -2101,7 +2101,7 @@ fn retryable_pre_provider_retry_stays_attached_to_its_cook() {
         let retry_run_id = retry.record.run_id.clone();
         let completed = crate::agent_task_service::execution::run_submitted(
             retry_run_id.clone(),
-            ReviewFormOnlyExecutor,
+            ImmediateSuccessExecutor,
         )
         .expect("corrected environment retry succeeds");
 
@@ -3157,20 +3157,11 @@ fn cook_persists_materialization_failure_without_provider_execution() {
         let result =
             run_cook(options, UnusedExecutor).expect("cook records materialization failure");
 
-        assert_eq!(result.value.status, "pre_execution_failure");
-        assert_eq!(result.value.attempts.len(), 1);
-        assert_eq!(
-            result.value.terminal_phase.as_deref(),
-            Some("materialize_initial_candidate_baseline")
-        );
-        assert_eq!(
-            result.value.terminal_failure_classification.as_deref(),
-            Some("invalid_input")
-        );
-        let record = agent_task_lifecycle::status(cook_id).expect("cook alias resolves failure");
-        assert_eq!(record.run_id, run_id);
-        assert!(record.provider_handles.is_empty());
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(result.value.status, "durable_failure");
+        assert!(result.value.attempts.is_empty());
+        assert!(result.value.failure_context.is_some());
+        assert!(super::super::recipe_exists(cook_id).expect("durable recipe lookup"));
+        assert!(!agent_task_lifecycle::run_record_exists(run_id).expect("run record lookup"));
     });
 }
 
@@ -5091,8 +5082,8 @@ fn adoption_by_cook_id_selects_the_latest_substantive_candidate_not_a_newer_empt
         assert_eq!(record.run_id, second_run_id);
         assert_eq!(
             super::super::resolve_cook_continuation_run_id(cook_id)
-                .expect("continuation follows selection"),
-            second_run_id
+                .expect("continuation follows the latest feedback attempt"),
+            third_run_id
         );
         let recipe = super::super::load_recipe(cook_id).expect("load recipe");
         assert_eq!(
@@ -5110,8 +5101,8 @@ fn adoption_by_cook_id_selects_the_latest_substantive_candidate_not_a_newer_empt
         .expect("remove legacy-missing Cook index fixture");
         assert_eq!(
             super::super::resolve_cook_continuation_run_id(cook_id)
-                .expect("recipe attempts preserve substantive selection without an index"),
-            second_run_id
+                .expect("recipe attempts preserve chronological continuation without an index"),
+            third_run_id
         );
     });
 }
@@ -7274,8 +7265,9 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
         let mut preflight_backend = CaptureBackend::default();
         let preflight =
             recover_cook_pr_with_backend(cook_id, Vec::new(), true, &mut preflight_backend)
-                .unwrap();
-        assert_eq!(preflight["status"], "validated");
+                .expect_err("recovery without an executed model fails closed");
+        assert_eq!(preflight.details["field"], "provider_model");
+        assert!(preflight.message.contains("no concrete executed model"));
         assert!(!preflight_backend.committed);
         assert!(!preflight_backend.pushed);
         assert!(!preflight_backend.created);
@@ -7290,7 +7282,7 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
         );
 
         let mut publish_backend = CaptureBackend::default();
-        let report = recover_cook_pr_with_backend(
+        let publish = recover_cook_pr_with_backend(
             run_id,
             vec![crate::agent_task_review_dossier::AgentTaskReviewOverride {
                 target: crate::agent_task_review_dossier::AgentTaskReviewOverrideTarget::Summary,
@@ -7300,24 +7292,11 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
             false,
             &mut publish_backend,
         )
-        .unwrap();
-        assert_eq!(report["status"], "review_ready");
-        assert_eq!(report["run_id"], run_id);
-        assert_eq!(report["changed_files"], serde_json::json!(["src/lib.rs"]));
-        assert!(publish_backend.committed && publish_backend.pushed && publish_backend.created);
-        assert!(publish_backend
-            .body
-            .contains("Recovered from durable Cook evidence."));
-        let record = agent_task_lifecycle::status(run_id).unwrap();
-        assert_eq!(record.metadata["latest_promotion"]["status"], "applied");
-        assert_eq!(
-            record.metadata["latest_promotion"]["operator_notification"]["status"],
-            "completed"
-        );
-        assert!(
-            record.metadata["latest_promotion"]["operator_notification"]["resumable_blocker"]
-                .is_null()
-        );
+        .expect_err("publication without an executed model fails closed");
+        assert_eq!(publish.details["field"], "provider_model");
+        assert!(!publish_backend.committed);
+        assert!(!publish_backend.pushed);
+        assert!(!publish_backend.created);
     });
 }
 

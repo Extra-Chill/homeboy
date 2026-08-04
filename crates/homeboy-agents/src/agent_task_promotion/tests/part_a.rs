@@ -437,6 +437,22 @@ fn promote_exports_committed_changes_when_executor_reports_no_patch_artifact() {
     std::fs::write(repo.join("lib.rs"), "old\n").expect("write base file");
     git(&repo, &["add", "lib.rs"]);
     git(&repo, &["commit", "-m", "base"]);
+    let remote = temp.path().join("origin.git");
+    assert!(Command::new("git")
+        .args(["init", "--bare", remote.to_str().expect("remote path")])
+        .status()
+        .expect("create remote")
+        .success());
+    git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().expect("remote path"),
+        ],
+    );
+    git(&repo, &["push", "-u", "origin", "main"]);
     let base = git_head(&repo, "HEAD");
     std::fs::write(repo.join("lib.rs"), "new\n").expect("write committed change");
     git(&repo, &["commit", "-am", "agent: committed change"]);
@@ -745,7 +761,13 @@ fn explicit_candidate_rejects_non_ancestor_base_and_dirty_source_before_apply() 
         &mut provider,
     )
     .expect_err("non-ancestor base");
-    assert!(error.message.contains("ancestor"), "{}", error.message);
+    assert!(
+        error
+            .message
+            .contains("recorded task base is unrelated to the adopted candidate parent"),
+        "{}",
+        error.message
+    );
     assert!(provider.apply_calls.is_empty());
 
     std::fs::write(repo.join("dirty.txt"), "dirty\n").expect("dirty source");
