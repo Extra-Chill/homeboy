@@ -988,6 +988,7 @@ mod status_serialization_tests {
         let mut report = base_report();
         report.stale_daemon = Some(RunnerStaleDaemonWarning {
             severity: "error",
+            mismatch_predicate: "active_daemon_control_plane_version != job_command_binary_version",
             session_homeboy_version: "0.299.0".to_string(),
             current_homeboy_version: "0.299.2".to_string(),
             session_homeboy_build_identity: None,
@@ -1149,6 +1150,9 @@ mod status_serialization_tests {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RunnerStaleDaemonWarning {
     pub severity: &'static str,
+    /// The exact machine-field predicate that made this warning reject admission.
+    /// The compared raw fields are serialized alongside this predicate.
+    pub mismatch_predicate: &'static str,
     pub session_homeboy_version: String,
     pub current_homeboy_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1211,28 +1215,45 @@ impl RunnerStaleDaemonWarning {
         session_homeboy_build_identity: Option<String>,
         current_homeboy_build_identity: Option<String>,
     ) -> Self {
-        let recovery_actions = recovery_action(
-            runner_id,
-            current_homeboy_build_identity.as_deref(),
-            &homeboy_product_identity::build_identity(),
-        );
+        let version_matches =
+            same_homeboy_version(&session_homeboy_version, &current_homeboy_version);
+        let identity_matches = session_homeboy_build_identity
+            .as_deref()
+            .zip(current_homeboy_build_identity.as_deref())
+            .is_some_and(|(session, current)| session.trim() == current.trim());
+        let mismatch_predicate = if !version_matches {
+            "active_daemon_control_plane_version != job_command_binary_version"
+        } else if !identity_matches {
+            "active_daemon_control_plane_build_identity != job_command_binary_build_identity"
+        } else {
+            "daemon_configured_identity == equal"
+        };
+        let recovery_actions = (!version_matches || !identity_matches)
+            .then(|| {
+                recovery_action(
+                    runner_id,
+                    current_homeboy_build_identity.as_deref(),
+                    &homeboy_product_identity::build_identity(),
+                )
+            })
+            .unwrap_or_default();
         let recovery_commands = rendered_commands(&recovery_actions);
-        let message = if !same_homeboy_version(&session_homeboy_version, &current_homeboy_version) {
+        let message = if !version_matches {
             format!(
                 "connected runner daemon control plane version `{session_homeboy_version}` differs from configured job command binary version `{current_homeboy_version}`; run recovery_commands in order when runner active jobs are drained"
             )
-        } else if let (Some(session_identity), Some(current_identity)) = (
-            session_homeboy_build_identity.as_deref(),
-            current_homeboy_build_identity.as_deref(),
-        ) {
+        } else if !identity_matches {
             format!(
-                "connected runner daemon control plane build identity `{session_identity}` differs from configured job command binary build identity `{current_identity}`; run recovery_commands in order when runner active jobs are drained"
+                "connected runner daemon control plane build identity `{:?}` differs from configured job command binary build identity `{:?}`; run recovery_commands in order when runner active jobs are drained",
+                session_homeboy_build_identity,
+                current_homeboy_build_identity,
             )
         } else {
-            "connected runner daemon runtime requires explicit identity verification; run recovery_commands in order when runner active jobs are drained".to_string()
+            "connected runner daemon and configured job command binary have equal immutable identities; a separate admission predicate must identify any rejection".to_string()
         };
         Self {
             severity: "warning",
+            mismatch_predicate,
             active_daemon_control_plane_version: session_homeboy_version.clone(),
             job_command_binary_version: current_homeboy_version.clone(),
             active_daemon_control_plane_build_identity: session_homeboy_build_identity.clone(),
@@ -1289,6 +1310,7 @@ impl RunnerStaleDaemonWarning {
         self.controller_homeboy_build_identity = Some(controller_build_identity.clone());
         if controller_dirty {
             self.compatibility_reason = Some("controller_dirty");
+            self.mismatch_predicate = "controller_git_dirty == true";
             self.message = format!(
                 "controller `{controller_build_identity}` is dirty and cannot prove compatibility with runner `{}`; rebuild or upgrade the controller first, then rerun `homeboy runner status` to derive runner convergence from the upgraded controller identity",
                 self.job_command_binary_build_identity
@@ -1308,6 +1330,11 @@ impl RunnerStaleDaemonWarning {
             } else {
                 "controller_configured_version_skew"
             });
+            self.mismatch_predicate = if controller_version_matches {
+                "controller_build_commit != job_command_binary_build_commit"
+            } else {
+                "controller_version != job_command_binary_version"
+            };
             self.message = format!(
                 "connected runner configured job command binary `{}` is incompatible with controller `{controller_build_identity}`; the daemon matches the configured binary, but controller compatibility requires convergence before admission",
                 self.job_command_binary_build_identity
@@ -1360,6 +1387,7 @@ impl RunnerStaleDaemonWarning {
         unverifiable: bool,
     ) -> Self {
         if unverifiable {
+            self.mismatch_predicate = "immutable_build_identity(active_daemon_control_plane_build_identity) && immutable_build_identity(job_command_binary_build_identity) == false";
             self.message = format!(
                 "connected runner daemon build identity could not be verified against configured executable `{configured_executable}`; run `{} self identity` on the runner and ensure it reports `git_commit` or an exact `display`, then run recovery_commands if needed",
                 shell::quote_arg(configured_executable),
@@ -1380,6 +1408,7 @@ impl RunnerStaleDaemonWarning {
         self.stale_runtime_paths = stale_runtime_paths;
         self.changed_runtime_paths = changed_runtime_paths;
         if !self.stale_runtime_paths.is_empty() || !self.changed_runtime_paths.is_empty() {
+            self.mismatch_predicate = "runtime_paths.loaded != runtime_paths.configured";
             let stale_paths = self.stale_runtime_paths.iter().map(|path| {
                 format!(
                     "{} at `{}` fingerprint `{}` -> `{}`",
@@ -1399,7 +1428,13 @@ impl RunnerStaleDaemonWarning {
             // Keep the exact immutable recovery reference established by
             // `new`; runtime-path drift must not silently turn it into a
             // mutable semver tag.
-            let _ = runner_id;
+            if self.recovery_actions.is_empty() {
+                self.set_recovery(recovery_action(
+                    runner_id,
+                    self.current_homeboy_build_identity.as_deref(),
+                    &homeboy_product_identity::build_identity(),
+                ));
+            }
         }
         self
     }
