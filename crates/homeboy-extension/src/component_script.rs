@@ -2,14 +2,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::runner::ExtensionRunner;
-use crate::{
-    env_provider, exec_context, load_extension, ExtensionCapability, ExtensionPhaseTiming,
-    RunnerOutput,
-};
+use crate::{env_provider, exec_context, load_extension, ExtensionCapability, RunnerOutput};
 use homeboy_core::component::Component;
 pub use homeboy_core::component_script_provider::ComponentScriptOutput;
 use homeboy_core::engine::invocation::{InvocationGuard, InvocationRequirements};
-use homeboy_core::engine::resource::ExtensionChildResourceSummary;
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::error::{Error, Result};
 

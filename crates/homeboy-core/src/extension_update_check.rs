@@ -5,7 +5,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::error::Result;
 use crate::extension_store::{is_extension_linked, load_extension};
 use crate::git;
 use crate::paths;

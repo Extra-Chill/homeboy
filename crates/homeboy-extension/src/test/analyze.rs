@@ -8,7 +8,6 @@ pub use homeboy_extension_contract::test_analysis::{
     FailureCategory, FailureCluster, TestAnalysis, TestAnalysisInput, TestFailure,
 };
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // ============================================================================

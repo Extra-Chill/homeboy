@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use homeboy_core::engine::resource::ExtensionChildResourceSummary;
 use homeboy_core::error::{Error, Result};

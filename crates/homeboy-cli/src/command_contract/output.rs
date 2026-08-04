@@ -12,7 +12,6 @@
 //! returned from [`Commands::descriptor`].
 
 use super::lab::{LabCommandContract, LabCommandPortability};
-use super::spec::CommandSpec;
 
 /// Populate the Lab-offload fields on a [`CommandDescriptor`] from a resolved
 /// [`LabCommandContract`]. Pure data transformation over contract/descriptor

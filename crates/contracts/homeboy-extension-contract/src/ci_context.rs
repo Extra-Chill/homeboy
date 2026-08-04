@@ -1,6 +1,6 @@
 //! CI execution-context contract type.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::ci_config::{CiJobMapping, CiLocalContext};
 

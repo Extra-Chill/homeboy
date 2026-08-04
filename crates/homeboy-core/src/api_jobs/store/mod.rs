@@ -132,7 +132,7 @@ pub(super) struct ControllerJobSubmission {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct StoredJob {
+pub(crate) struct StoredJob {
     pub(super) job: Job,
     pub(super) events: Vec<JobEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

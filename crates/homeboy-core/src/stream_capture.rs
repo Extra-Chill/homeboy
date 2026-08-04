@@ -10,4 +10,3 @@
 //! capture site.
 
 pub use homeboy_extension_contract::StreamCaptureMetadata;
-use serde::{Deserialize, Serialize};

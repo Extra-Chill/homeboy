@@ -3,8 +3,7 @@
 //! Walks source files, finds all references to a term (with word-boundary matching
 //! and case-variant awareness), generates edits, and optionally applies them.
 
-use crate::auto::{AppliedAutofixCapture, FixResultsSummary};
-use serde::Serialize;
+use crate::auto::AppliedAutofixCapture;
 use std::path::PathBuf;
 
 pub mod add;

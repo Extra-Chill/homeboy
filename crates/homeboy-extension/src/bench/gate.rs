@@ -1,11 +1,10 @@
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use homeboy_core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
 pub use homeboy_extension_contract::bench_gate::{BenchGate, BenchGateOp, BenchGateResult};
 
 use super::budget_findings;
-use super::parsing::{BenchMetrics, BenchResults};
+use super::parsing::BenchResults;
 
 /// Evaluate semantic gates in place and return every failure reason.
 pub fn evaluate_gates(results: &mut BenchResults) -> Vec<String> {

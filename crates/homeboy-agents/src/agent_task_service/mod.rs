@@ -22,7 +22,8 @@ pub use cook::*;
 pub use cook_adoption::*;
 pub use cook_baseline::*;
 pub use cook_budget::*;
-pub use cook_pre_execution::*;
+#[cfg(test)]
+pub(crate) use cook_pre_execution::*;
 pub use cook_promotion::*;
 pub use cook_recipe::*;
 pub use discovery::*;

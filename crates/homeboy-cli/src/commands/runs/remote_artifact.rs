@@ -13,7 +13,7 @@ use homeboy::core::resource_lifecycle_index::{
     ResourceCleanupPolicy, ResourceEvidenceRetention, ResourceLifecycleRecord,
     ResourceLifecycleResourceStatus,
 };
-use homeboy::core::{server, Error};
+use homeboy::core::Error;
 use homeboy::runner::artifact_attach::{
     self as runner_artifact_attach, RunnerAttachArtifactType, RunnerAttachSource,
 };

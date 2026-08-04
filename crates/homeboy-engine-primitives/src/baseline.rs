@@ -650,7 +650,7 @@ mod prune_tests {
     fn prune_removes_exactly_the_requested_rows_and_keeps_valid_sorted_json() {
         let dir = tempfile::tempdir().unwrap();
         let config = seed(dir.path(), &["a", "b", "c", "d"]);
-        let path = config.json_path();
+        let _path = config.json_path();
 
         // Prune the LAST fingerprint row — the case that is most error-prone to
         // hand-edit (removing it forces a trailing-comma change on the new-last

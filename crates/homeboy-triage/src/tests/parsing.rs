@@ -1,5 +1,4 @@
 use super::*;
-use crate::*;
 
 #[test]
 fn parse_stale_days_accepts_plain_or_d_suffix() {
