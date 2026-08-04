@@ -11,8 +11,7 @@ mod render;
 use clap::Args;
 
 pub use engine::{
-    compare_report_artifacts, compare_report_artifacts_with_store, BeforeAfterCount, CountDelta,
-    IdentityDelta, NamedCountDelta, ReportArtifactSummary, ReportCompareReport,
+    compare_report_artifacts, compare_report_artifacts_with_store, ReportCompareReport,
 };
 
 #[derive(Args, Debug, Clone)]
