@@ -2308,6 +2308,28 @@ fn explicit_local_cook_does_not_enter_lab_attempt_dispatch() {
 }
 
 #[test]
+fn detached_cook_without_a_lab_runner_does_not_fall_back_to_local_execution() {
+    let cli = Cli::parse_from([
+        "homeboy",
+        "--detach-after-handoff",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "fixture@remote",
+        "--verify",
+        "true",
+        "--prompt",
+        "queue this remotely",
+    ]);
+
+    let error = run_split_placement_cook(&cli, &[], None, None, None)
+        .expect_err("detached Cook must require a remote runner");
+    assert!(error
+        .message
+        .contains("controller-local execution was not authorized"));
+}
+
+#[test]
 fn lab_cook_materializes_derived_provider_destination_and_preserves_it_for_retry() {
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -3064,6 +3086,39 @@ fn split_placement_cook_accepts_lab_placement_when_a_runner_is_selected() {
         .is_none(),
         "a selected runner serves --placement lab instead of refusing it"
     );
+}
+
+#[test]
+fn detached_cook_is_the_only_split_placement_command_eligible_for_queue_admission() {
+    let queued = Cli::parse_from([
+        "homeboy",
+        "--detach-after-handoff",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "fixture@queue",
+        "--verify",
+        "true",
+        "--prompt",
+        "queue this on Lab",
+    ]);
+    assert!(detached_cook_can_queue(&queued));
+
+    let local = Cli::parse_from([
+        "homeboy",
+        "--placement",
+        "local",
+        "--detach-after-handoff",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "fixture@local",
+        "--verify",
+        "true",
+        "--prompt",
+        "remain local",
+    ]);
+    assert!(!detached_cook_can_queue(&local));
 }
 
 /// The failure an operator actually hits is "no ready Lab runner", not

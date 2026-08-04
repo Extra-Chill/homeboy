@@ -1372,6 +1372,24 @@ fn preflight_hot_command(
                             .unwrap_or(false)
                     })
                 });
+            // A detached Cook may be durably admitted to a connected reverse
+            // runner that is temporarily full. The route rechecks that runner
+            // and submits through the broker queue; this only bypasses the
+            // controller-local resource refusal, never selects local execution.
+            let runner_admits_offload = runner_admits_offload
+                || (hot_command.allows_warm_runner_coordination
+                    && cli.detach_after_handoff
+                    && cli.runner.is_none()
+                    && matches!(
+                        cli.command,
+                        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+                            command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
+                        })
+                    )
+                    && crate::runner::refresh_detached_queue_runner()
+                        .ok()
+                        .flatten()
+                        .is_some());
             let explicit_runner_placement = explicit_runner_placement(cli, hot_command);
             // An explicit runner resolves workload placement before resource
             // guidance. Controller pressure still matters for handoff overhead,
