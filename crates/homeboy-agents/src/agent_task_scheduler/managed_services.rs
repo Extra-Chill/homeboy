@@ -35,6 +35,14 @@ pub(crate) struct AgentTaskManagedServiceRecord {
     pub provenance: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_identity: Option<ProcessStartIdentity>,
+    /// The process group created before exec. Unlike the leader PID it remains
+    /// useful when a service daemonizes and its direct parent exits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_group_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_runner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_runner_job_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_lease: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -123,6 +131,8 @@ impl AgentTaskServiceSupervisor {
         spec.port = port;
         let local_url = spec.port.map(|port| format!("http://{}:{port}", spec.host));
         let launch_token = uuid::Uuid::new_v4().to_string();
+        let owner_runner_id = std::env::var(homeboy_lab_runner_contract::RUNNER_ID_ENV).ok();
+        let owner_runner_job_id = std::env::var("HOMEBOY_RUNNER_JOB_ID").ok();
         let mut record = AgentTaskManagedServiceRecord {
             id: spec.id.clone(),
             state: "planned".to_string(),
@@ -132,8 +142,11 @@ impl AgentTaskServiceSupervisor {
             log_path: Some(log_path.display().to_string()),
             pid: None,
             cleanup: None,
-            provenance: json!({"schema":"homeboy/agent-task-managed-service/v3", "run_id": run_id, "argv": spec.command, "cwd": spec.cwd, "host": spec.host, "port": spec.port, "target": spec.target, "lifecycle": spec.lifecycle, "socket_handoff": spec.socket_handoff, "env_allowlist": spec.env_allowlist, "secret_env": spec.secret_env, "secret_env_plan": spec.secret_env_plan.as_ref().map(|plan| plan.redacted()), "endpoint_ownership": { "host": spec.host, "port": spec.port, "lease": port_lease.as_ref().map(|lease| lease.path.display().to_string()) }}),
+            provenance: json!({"schema":"homeboy/agent-task-managed-service/v3", "run_id": run_id, "argv": spec.command, "cwd": spec.cwd, "host": spec.host, "port": spec.port, "target": spec.target, "lifecycle": spec.lifecycle, "socket_handoff": spec.socket_handoff, "env_allowlist": spec.env_allowlist, "secret_env": spec.secret_env, "secret_env_plan": spec.secret_env_plan.as_ref().map(|plan| plan.redacted()), "owner": { "runner_id": owner_runner_id, "runner_job_id": owner_runner_job_id }, "endpoint_ownership": { "host": spec.host, "port": spec.port, "lease": port_lease.as_ref().map(|lease| lease.path.display().to_string()) }}),
             process_identity: None,
+            process_group_id: None,
+            owner_runner_id,
+            owner_runner_job_id,
             port_lease: port_lease
                 .as_ref()
                 .map(|lease| lease.path.display().to_string()),
@@ -183,6 +196,7 @@ impl AgentTaskServiceSupervisor {
         containment.attach(&child).map_err(|error| error.message)?;
         record.state = "starting".to_string();
         record.pid = Some(child.id());
+        record.process_group_id = containment.process_group_id();
         record.process_identity = process_start_identity(child.id())
             .map_err(|error| format!("inspect managed service process identity: {error}"))?;
         persist_record(run_id, &record)?;
@@ -210,7 +224,10 @@ impl AgentTaskServiceSupervisor {
         let values = self.records().into_iter().map(|record| (record.id.clone(), json!({
             "local_url": record.local_url, "public_url": record.public_url,
             "browser_origin": record.public_url.clone().or(record.local_url.clone()),
-            "lease_ref": format!("managed-service:{}", record.id), "readiness_evidence": record.provenance,
+            "lease_ref": format!("managed-service:{}", record.id),
+            "readiness_attempts": record.readiness_attempts,
+            "endpoint_ownership": record.provenance["endpoint_ownership"],
+            "service_owner": { "pid": record.pid, "process_group_id": record.process_group_id, "runner_id": record.owner_runner_id, "runner_job_id": record.owner_runner_job_id },
         }))).collect::<serde_json::Map<_, _>>();
         if !inputs.is_object() {
             *inputs = json!({});
@@ -430,6 +447,21 @@ pub(crate) fn reconcile_run_services(
             }
             _ => "no_process_identity".to_string(),
         };
+        // A daemon can deliberately exit its leader while retaining descendants.
+        // The pre-exec process-group identity is the durable containment boundary
+        // for that case and is safe to signal independently of PID reuse.
+        let outcome = match (record.process_group_id, outcome.as_str()) {
+            (Some(group), "already_exited" | "no_process_identity") => {
+                match homeboy_core::process::isolated_process_group_is_running(group) {
+                    Ok(true) => homeboy_core::process::terminate_isolated_process_group(group)
+                        .map(|_| "reaped_process_group".to_string())
+                        .unwrap_or_else(|error| format!("cleanup_failed:{error}")),
+                    Ok(false) => outcome,
+                    Err(error) => format!("cleanup_unverifiable:{error}"),
+                }
+            }
+            _ => outcome,
+        };
         record.state = "stopped".to_string();
         record.cleanup = Some(format!("{outcome}:{reason}"));
         persist_record(run_id, &record)?;
@@ -547,6 +579,7 @@ mod tests {
             assert_eq!(records[0].state, "stopped");
             assert!(!records[0].launch_token.is_empty());
             assert!(records[0].process_identity.is_some());
+            assert!(records[0].process_group_id.is_some());
             assert_eq!(records[0].cleanup.as_deref(), Some("cleaned_up:success"));
             assert!(std::path::Path::new(records[0].log_path.as_deref().unwrap()).exists());
             assert_eq!(
@@ -603,6 +636,57 @@ mod tests {
                 Err(error) => error,
             };
             assert!(error.contains("socket_handoff"));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_reconcile_reaps_daemonized_descendants_by_persisted_process_group() {
+        with_isolated_home(|_| {
+            let service = AgentTaskManagedService {
+                version: AgentTaskManagedService::VERSION,
+                id: "daemon".to_string(),
+                command: vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "sleep 30 & exit 0".to_string(),
+                ],
+                cwd: None,
+                env: HashMap::new(),
+                env_allowlist: vec!["PATH".to_string()],
+                secret_env: Vec::new(),
+                secret_env_plan: None,
+                host: "127.0.0.1".to_string(),
+                port: None,
+                port_env: None,
+                socket_handoff: false,
+                readiness: None,
+                public_url: None,
+                lifecycle: AgentTaskManagedServiceLifecycle::Plan,
+                target: None,
+            };
+            let services = ManagedServices::start(&[service], "orphaned-daemon")
+                .expect("start daemonizing service");
+            let group = services.records()[0]
+                .process_group_id
+                .expect("persisted process group");
+            // Simulate controller loss: the ledger survives but no in-memory
+            // supervisor is available to reap the daemonized descendant.
+            std::mem::forget(services);
+            std::thread::sleep(Duration::from_millis(100));
+
+            let records = reconcile_run_services("orphaned-daemon", "stale_controller")
+                .expect("reconcile persisted service ledger");
+            assert_eq!(records[0].state, "stopped");
+            assert!(records[0]
+                .cleanup
+                .as_deref()
+                .unwrap_or_default()
+                .contains("reaped_process_group"));
+            assert!(
+                !homeboy_core::process::isolated_process_group_is_running(group)
+                    .expect("inspect process group")
+            );
         });
     }
 }
