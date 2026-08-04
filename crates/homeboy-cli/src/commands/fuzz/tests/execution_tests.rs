@@ -3,6 +3,40 @@ use crate::commands::fuzz::execution::{
     effective_fuzz_run_id, ensure_strict_rig_source_is_clean, FuzzArtifactRefValidation,
 };
 
+fn install_fuzz_postprocess_helper(home: &std::path::Path) {
+    let helper = home.join("fuzz-postprocess-helper");
+    std::fs::write(
+        &helper,
+        "#!/bin/sh\ncase \"$1\" in copy) cp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\" ;; missing) : ;; esac\n",
+    )
+    .expect("helper");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+            .expect("helper permissions");
+    }
+    let registry = home.join("fuzz-postprocess-helpers.json");
+    std::fs::write(
+        &registry,
+        serde_json::json!({
+            "schema": homeboy::core::artifacts::ARTIFACT_POSTPROCESS_HELPER_REGISTRY_SCHEMA,
+            "helpers": [{
+                "id": "fixture",
+                "path": helper,
+                "sha256": homeboy_engine_primitives::content_hash::sha256_hex(&std::fs::read(&helper).expect("helper bytes")),
+                "actions": ["copy", "missing"]
+            }]
+        })
+        .to_string(),
+    )
+    .expect("registry");
+    std::env::set_var(
+        homeboy::core::artifacts::ARTIFACT_POSTPROCESS_HELPER_REGISTRY_ENV,
+        registry,
+    );
+}
+
 #[test]
 fn strict_fuzz_rejects_dirty_linked_rig_packages() {
     let mut args = fuzz_run_args_with_run_id("dirty-rig");
@@ -1488,6 +1522,7 @@ fn fuzz_artifact_ref_validation_reports_missing_local_refs() {
 #[test]
 fn fuzz_artifact_postprocess_collects_declared_output_under_artifact_root() {
     with_isolated_home(|home| {
+        install_fuzz_postprocess_helper(home.path());
         let temp = tempfile::tempdir().expect("tempdir");
         let workload_path = temp.path().join("parser.json");
         std::fs::write(&workload_path, "{}").expect("workload");
@@ -1500,13 +1535,10 @@ fn fuzz_artifact_postprocess_collects_declared_output_under_artifact_root() {
                         "artifact_postprocess": [
                             {
                                 "id": "coverage-summary",
-                                "helper": "sh",
-                                "action": "-c",
+                                "helper": "fixture",
+                                "action": "copy",
                                 "input": "${run.fuzz_results}",
                                 "output": "coverage/summary.json",
-                                "parameters": {
-                                    "args": ["cp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\""]
-                                }
                             }
                         ]
                     }
@@ -1552,6 +1584,7 @@ fn fuzz_artifact_postprocess_collects_declared_output_under_artifact_root() {
 #[test]
 fn required_fuzz_artifact_postprocess_fails_when_output_is_missing() {
     with_isolated_home(|home| {
+        install_fuzz_postprocess_helper(home.path());
         let temp = tempfile::tempdir().expect("tempdir");
         let workload_path = temp.path().join("parser.json");
         std::fs::write(&workload_path, "{}").expect("workload");
@@ -1564,10 +1597,9 @@ fn required_fuzz_artifact_postprocess_fails_when_output_is_missing() {
                         "artifact_postprocess": [
                             {
                                 "id": "gap-report",
-                                "helper": "sh",
-                                "action": "-c",
-                                "output": "gaps/report.json",
-                                "parameters": { "args": ["true"] }
+                                "helper": "fixture",
+                                "action": "missing",
+                                "output": "gaps/report.json"
                             }
                         ]
                     }
