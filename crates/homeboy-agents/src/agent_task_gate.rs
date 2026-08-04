@@ -2557,7 +2557,10 @@ mod tests {
         assert_eq!(step["status"], "failed");
         assert_eq!(step["outputs"]["accepted_inherited_failure"], true);
         assert_eq!(step["outputs"]["baseline_red"], true);
-        assert_eq!(step["outputs"]["gate_result"]["status"], "failed");
+        assert_eq!(
+            step["outputs"]["gate_result"]["status"],
+            "accepted_inherited_failure"
+        );
     }
 
     #[test]
