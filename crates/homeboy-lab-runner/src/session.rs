@@ -1399,6 +1399,32 @@ impl RunnerStaleDaemonWarning {
         self
     }
 
+    /// A persisted session record participates in readiness independently of
+    /// the live daemon endpoint. Report it separately so equal live identities
+    /// cannot hide a stale persisted generation.
+    pub fn with_persisted_session_version(
+        mut self,
+        runner_id: &str,
+        persisted_session_version: String,
+    ) -> Self {
+        if !same_homeboy_version(&persisted_session_version, &self.current_homeboy_version)
+            && self.mismatch_predicate == "daemon_configured_identity == equal"
+        {
+            self.mismatch_predicate = "session_homeboy_version != job_command_binary_version";
+            self.session_homeboy_version = persisted_session_version;
+            self.message = format!(
+                "persisted runner session version `{}` differs from configured job command binary version `{}`; run recovery_commands in order when runner active jobs are drained",
+                self.session_homeboy_version, self.current_homeboy_version,
+            );
+            self.set_recovery(recovery_action(
+                runner_id,
+                self.current_homeboy_build_identity.as_deref(),
+                &homeboy_product_identity::build_identity(),
+            ));
+        }
+        self
+    }
+
     pub fn with_runtime_paths(
         mut self,
         runner_id: &str,
@@ -1408,17 +1434,26 @@ impl RunnerStaleDaemonWarning {
         self.stale_runtime_paths = stale_runtime_paths;
         self.changed_runtime_paths = changed_runtime_paths;
         if !self.stale_runtime_paths.is_empty() || !self.changed_runtime_paths.is_empty() {
+            for path in &mut self.stale_runtime_paths {
+                path.path = redact_runtime_value(&path.path);
+                path.loaded_fingerprint = redact_runtime_value(&path.loaded_fingerprint);
+                path.current_fingerprint = redact_runtime_value(&path.current_fingerprint);
+            }
+            for path in &mut self.changed_runtime_paths {
+                path.loaded_path = path.loaded_path.as_deref().map(redact_runtime_value);
+                path.configured_path = path.configured_path.as_deref().map(redact_runtime_value);
+            }
             self.mismatch_predicate = "runtime_paths.loaded != runtime_paths.configured";
             let stale_paths = self.stale_runtime_paths.iter().map(|path| {
                 format!(
                     "{} at `{}` fingerprint `{}` -> `{}`",
-                    path.env, path.path, path.loaded_fingerprint, path.current_fingerprint
+                    path.env, path.path, path.loaded_fingerprint, path.current_fingerprint,
                 )
             });
             let changed_paths = self.changed_runtime_paths.iter().map(|path| {
                 format!(
                     "{} path `{:?}` -> `{:?}`",
-                    path.env, path.loaded_path, path.configured_path
+                    path.env, path.loaded_path, path.configured_path,
                 )
             });
             self.message = format!(
@@ -1438,6 +1473,10 @@ impl RunnerStaleDaemonWarning {
         }
         self
     }
+}
+
+fn redact_runtime_value(value: &str) -> String {
+    homeboy_core::redaction::RedactionPolicy::default().redact_env_value(value)
 }
 
 fn action_from_refresh_command(command: &str) -> Option<ExecutableAction> {
