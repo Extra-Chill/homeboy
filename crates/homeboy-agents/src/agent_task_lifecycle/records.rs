@@ -12,6 +12,8 @@ pub(crate) mod schemas {
 pub const AGENT_TASK_RECORD_HEALTH_SCHEMA: &str = "homeboy/agent-task-record-health/v1";
 pub const AGENT_TASK_RECORD_RECONCILIATION_SCHEMA: &str =
     "homeboy/agent-task-record-reconciliation/v1";
+pub const AGENT_TASK_LAB_RUNTIME_RECOVERY_SCHEMA: &str =
+    "homeboy/agent-task-lab-runtime-recovery/v1";
 
 // Untyped run-record metadata keys for the controller's staleness / runner
 // liveness projection. Centralized so every read and write goes through one
@@ -330,6 +332,49 @@ pub struct AgentTaskLabHandoff {
     pub workspace_owner_lease: Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_claim: Option<homeboy_core::workspace_claim::WorkspaceClaim>,
+}
+
+/// An immutable runner repair emitted by Lab admission before provider work.
+///
+/// The action stores structured inputs and renders its own argv. Consumers must
+/// deserialize and validate this type instead of promoting diagnostic text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTaskLabRuntimeRecovery {
+    pub schema: String,
+    pub runner_id: String,
+    pub requested_build_identity: String,
+    pub build_ref: String,
+}
+
+impl AgentTaskLabRuntimeRecovery {
+    pub fn refresh_homeboy(
+        runner_id: impl Into<String>,
+        requested_build_identity: impl Into<String>,
+        build_ref: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema: AGENT_TASK_LAB_RUNTIME_RECOVERY_SCHEMA.to_string(),
+            runner_id: runner_id.into(),
+            requested_build_identity: requested_build_identity.into(),
+            build_ref: build_ref.into(),
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.schema == AGENT_TASK_LAB_RUNTIME_RECOVERY_SCHEMA
+            && !self.runner_id.trim().is_empty()
+            && !self.requested_build_identity.trim().is_empty()
+            && !self.build_ref.trim().is_empty()
+    }
+
+    pub fn command(&self) -> String {
+        format!(
+            "homeboy runner refresh-homeboy {} --ref {} --reconnect",
+            homeboy_core::engine::shell::quote_arg(&self.runner_id),
+            homeboy_core::engine::shell::quote_arg(&self.build_ref),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
