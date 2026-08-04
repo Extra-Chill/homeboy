@@ -139,7 +139,7 @@ mod managed_service_contract_tests {
         assert_eq!(service.host, "127.0.0.1");
         assert!(service.socket_handoff);
         assert_eq!(
-            service.browser_origin_probe.unwrap().provider,
+            service.browser_origin_probe.as_ref().unwrap().provider,
             "fixture-browser"
         );
         assert_eq!(service.target.as_deref(), Some("lab"));
@@ -147,10 +147,12 @@ mod managed_service_contract_tests {
             service.readiness.as_ref().unwrap().kind,
             AgentTaskManagedServiceReadinessKind::Http
         );
-        assert!(serde_json::to_value(&service)
-            .expect("serialize")
-            .get("secret_env")
-            .is_some());
+        let serialized = serde_json::to_value(&service).expect("serialize");
+        assert!(serialized.get("secret_env").is_some());
+        assert_eq!(
+            serialized["browser_origin_probe"]["provider"],
+            "fixture-browser"
+        );
     }
 }
 
