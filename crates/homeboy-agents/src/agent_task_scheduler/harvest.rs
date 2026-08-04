@@ -725,6 +725,7 @@ mod committed_harvest_tests {
             expected_artifacts: Vec::new(),
             artifact_declarations: Vec::new(),
             output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
             metadata: serde_json::json!({ "cook_loop": { "kind": "deterministic-gate-feedback" }}),
         }
     }
@@ -900,6 +901,7 @@ mod committed_harvest_tests {
             expected_artifacts: Vec::new(),
             artifact_declarations: Vec::new(),
             output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
             metadata: serde_json::Value::Null,
         };
         let running = RunningTask {
@@ -1029,6 +1031,7 @@ mod committed_harvest_tests {
             expected_artifacts: Vec::new(),
             artifact_declarations: Vec::new(),
             output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
             metadata: serde_json::Value::Null,
         };
         let running = RunningTask {
@@ -1122,6 +1125,7 @@ mod committed_harvest_tests {
             expected_artifacts: Vec::new(),
             artifact_declarations: Vec::new(),
             output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
             metadata: serde_json::Value::Null,
         };
 
@@ -1189,6 +1193,7 @@ mod committed_harvest_tests {
             expected_artifacts: Vec::new(),
             artifact_declarations: Vec::new(),
             output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
             metadata: serde_json::Value::Null,
         };
 
@@ -1254,6 +1259,7 @@ mod committed_harvest_tests {
             expected_artifacts: Vec::new(),
             artifact_declarations: Vec::new(),
             output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
             metadata: serde_json::Value::Null,
         };
         let running = RunningTask {

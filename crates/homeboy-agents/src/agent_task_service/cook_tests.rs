@@ -155,6 +155,7 @@ fn remediation_policy_rejects_denied_workspace_read_before_dispatch() {
         expected_artifacts: Vec::new(),
         artifact_declarations: Vec::new(),
         output_declarations: Vec::new(),
+        runtime_tools: Vec::new(),
         metadata: Value::Null,
     };
 
@@ -1988,6 +1989,7 @@ fn batch_cook_options(
                 expected_artifacts: Vec::new(),
                 artifact_declarations: Vec::new(),
                 output_declarations: Vec::new(),
+                runtime_tools: Vec::new(),
                 metadata: Value::Null,
             }],
         ),
@@ -4170,6 +4172,7 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
                 expected_artifacts: Vec::new(),
                 artifact_declarations: Vec::new(),
                 output_declarations: Vec::new(),
+                runtime_tools: Vec::new(),
                 metadata: Value::Null,
             }],
         );

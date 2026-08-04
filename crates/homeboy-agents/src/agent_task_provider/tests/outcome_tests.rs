@@ -5,6 +5,12 @@ use super::*;
 fn provider_runner_secret_env_contracts_are_applied_to_selected_plan_tasks() {
     let (mut request_a, mut provider_a) = request("task-a", "node provider-a.js".to_string());
     request_a.executor.backend = "provider-a".to_string();
+    request_a.runtime_tools = vec![serde_json::from_value(json!({
+        "id": "fixture.mcp",
+        "command": ["fixture-mcp"],
+        "secret_env": ["FIXTURE_MCP_TOKEN"]
+    }))
+    .expect("runtime tool")];
     provider_a.backend = "provider-a".to_string();
     provider_a.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
         id: "provider-a.auth".to_string(),
@@ -37,7 +43,10 @@ fn provider_runner_secret_env_contracts_are_applied_to_selected_plan_tasks() {
 
     assert_eq!(
         plan.tasks[0].executor.secret_env,
-        vec!["PROVIDER_A_TOKEN".to_string()]
+        vec![
+            "FIXTURE_MCP_TOKEN".to_string(),
+            "PROVIDER_A_TOKEN".to_string()
+        ]
     );
     assert_eq!(
         plan.tasks[1].executor.secret_env,

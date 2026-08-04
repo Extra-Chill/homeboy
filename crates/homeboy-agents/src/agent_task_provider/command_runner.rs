@@ -8,6 +8,7 @@ use super::runner_readiness::{
 };
 use super::secrets::{provider_secret_env_plan_with_status, provider_secret_sources};
 use super::*;
+use crate::agent_task::ResolvedAgentTaskRuntimeTool;
 use crate::agent_task_executor_evidence::link_latest_executor_evidence;
 use crate::agent_task_process_containment::{
     contained_group_recovery_commands, AgentTaskProcessContainment,
@@ -61,6 +62,7 @@ pub(super) fn run_materialized_provider_command(
             if attempt > 1 {
                 annotate_transient_retry(&mut outcome, attempt, retryable);
             }
+            attach_runtime_tool_provenance(request, &mut outcome);
             // Preserve and link the latest raw executor input/result as
             // first-class run evidence before returning the final outcome.
             link_latest_executor_evidence(request, &mut outcome, run_id);
@@ -72,6 +74,36 @@ pub(super) fn run_materialized_provider_command(
             std::thread::sleep(Duration::from_millis(backoff_ms));
         }
         attempt += 1;
+    }
+}
+
+fn attach_runtime_tool_provenance(
+    request: &AgentTaskExecutorRequest,
+    outcome: &mut AgentTaskOutcome,
+) {
+    if request.resolved_runtime_tools.is_empty() {
+        return;
+    }
+    if outcome.metadata.is_null() {
+        outcome.metadata = json!({});
+    }
+    if let Some(metadata) = outcome.metadata.as_object_mut() {
+        // This is resolved host evidence only: tool environment values never enter it.
+        metadata.insert(
+            "resolved_runtime_tools".to_string(),
+            serde_json::to_value(
+                request
+                    .resolved_runtime_tools
+                    .clone()
+                    .into_iter()
+                    .map(ResolvedAgentTaskRuntimeTool::redacted)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("resolved runtime tool provenance serializes"),
+        );
+        if let Some(evidence) = request.request.metadata.get("capability_evidence") {
+            metadata.insert("capability_evidence".to_string(), evidence.clone());
+        }
     }
 }
 
@@ -1054,6 +1086,7 @@ fn test_executor_request(request: &AgentTaskRequest) -> AgentTaskExecutorRequest
             task_id: request.task_id.clone(),
             attempt: 1,
         },
+        resolved_runtime_tools: Vec::new(),
     }
 }
 

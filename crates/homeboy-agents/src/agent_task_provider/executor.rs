@@ -116,6 +116,17 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             }
         };
 
+        if let Err(error) = resolve_runtime_tools(&mut request, &provider) {
+            return failure_outcome(
+                &request,
+                AgentTaskOutcomeStatus::Failed,
+                error.failure_classification,
+                error.class,
+                error.message,
+                error.data,
+            );
+        }
+
         let missing_capabilities: Vec<String> = requirements
             .provider
             .iter()
@@ -138,6 +149,45 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                     "provider": provider.id,
                     "missing_capabilities": missing_capabilities,
                     "advertised_capabilities": provider.capabilities,
+                }),
+            );
+        }
+
+        let unavailable_attached_tools = requirements
+            .attached_tools
+            .iter()
+            .filter_map(|required| {
+                let resolved = request
+                    .resolved_runtime_tools
+                    .iter()
+                    .find(|tool| tool.id == required.id);
+                let missing = required
+                    .contributes
+                    .iter()
+                    .filter(|capability| {
+                        resolved.is_none_or(|tool| !tool.capabilities.contains(capability))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                (!missing.is_empty()).then(|| {
+                    json!({
+                        "tool_id": required.id,
+                        "missing_capabilities": missing,
+                        "readiness": resolved.map_or("missing", |tool| tool.readiness.as_str()),
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        if !unavailable_attached_tools.is_empty() {
+            return failure_outcome(
+                &request,
+                AgentTaskOutcomeStatus::Failed,
+                AgentTaskFailureClassification::CapabilityMissing,
+                "agent_task.attached_tool_capability_unavailable",
+                "attached runtime tools did not satisfy their required capabilities".to_string(),
+                json!({
+                    "layer": "attached_tools",
+                    "tools": unavailable_attached_tools,
                 }),
             );
         }
@@ -246,6 +296,7 @@ fn materialize_executor_request_at_root(
         request,
         artifacts_path: path,
         artifacts_path_provenance: provenance,
+        resolved_runtime_tools: Vec::new(),
         artifacts_root_identity,
     })
 }
@@ -284,6 +335,7 @@ mod tests {
             expected_artifacts: Vec::new(),
             artifact_declarations: Vec::new(),
             output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
             metadata: Value::Null,
         };
         let context = AgentTaskExecutionContext {

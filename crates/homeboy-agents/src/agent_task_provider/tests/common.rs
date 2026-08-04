@@ -90,6 +90,7 @@ pub(super) fn request(
         expected_artifacts: Vec::new(),
         artifact_declarations: Vec::new(),
         output_declarations: Vec::new(),
+        runtime_tools: Vec::new(),
         metadata: Value::Null,
     };
     (request, provider)

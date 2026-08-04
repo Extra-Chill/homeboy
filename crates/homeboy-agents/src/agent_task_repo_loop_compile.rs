@@ -320,6 +320,7 @@ fn repo_loop_workflow_request(
         expected_artifacts: Vec::new(),
         artifact_declarations: repo_loop_workflow_artifact_declarations(spec, workflow),
         output_declarations: Vec::new(),
+        runtime_tools: Vec::new(),
         metadata: serde_json::json!({
             "source": "repo_loop_spec",
             "loop_id": spec.loop_id,
