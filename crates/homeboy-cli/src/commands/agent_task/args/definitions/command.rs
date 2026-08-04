@@ -59,7 +59,9 @@ pub enum AgentTaskCommand {
     /// Cook report. This is the default when neither flag is passed.
     ///
     /// `--detach-after-handoff` returns once the run is durably accepted. Its
-    /// result describes a submission, not an outcome.
+    /// result describes a submission, not an outcome. It is honored on every
+    /// placement: with `--placement local` the Cook is re-executed in its own
+    /// session, so it survives a client that is interrupted or times out.
     ///
     /// Do not infer the wait policy from client interactivity. An orchestration
     /// client that needs one predictable contract should pass the flag rather than

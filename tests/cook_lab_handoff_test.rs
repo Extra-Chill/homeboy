@@ -4,8 +4,9 @@ use homeboy_core::test_support::{bounded_output, HermeticTestContext, TestBinary
 
 /// Run the fixture binary through the shared hermetic harness.
 ///
-/// Every case in this file asserts that a contradictory invocation is rejected
-/// during argument validation, *before* any worktree or provider resolution.
+/// Every case in this file asserts what an invocation settles *before* any
+/// worktree or provider resolution: a contradictory combination is rejected,
+/// and a locally-detached Cook is handed off (#11476).
 ///
 /// `HermeticTestContext::command` owns the complete isolation contract — HOME,
 /// XDG config and data roots, artifact root, runtime and temp dirs — and strips
@@ -78,6 +79,11 @@ fn contradictory_cook_arguments_survive_controller_transport_context() {
         bounded_output(command)
     };
 
+    // Local detach is served on a controller (#11476), but not here: this
+    // process IS the runner's owned execution of one attempt. It has no
+    // controller lifecycle to hand off, so detaching would orphan work the
+    // runner believes it owns. The rejection must still land before any
+    // worktree or provider resolution.
     let detach = cook(&[
         "--placement",
         "local",
@@ -94,7 +100,9 @@ fn contradictory_cook_arguments_survive_controller_transport_context() {
     assert!(!detach.status.success());
     let detach_stdout = String::from_utf8_lossy(&detach.stdout);
     assert!(
-        detach_stdout.contains("cannot detach after handoff with --placement local"),
+        detach_stdout.contains(
+            "cannot detach after handoff with --placement local inside a runner-owned execution"
+        ),
         "{detach_stdout}"
     );
     assert!(
@@ -154,26 +162,76 @@ fn cook_rejects_invalid_controller_transport_before_worktree_resolution() {
     assert!(!stderr.contains("worktree provider"));
 }
 
+/// `--placement local --detach-after-handoff` is served, not rejected (#11476).
+///
+/// The launcher hands the Cook to a process in its own session and returns a
+/// bounded handoff naming the durable handle. It performs no worktree or
+/// provider resolution itself — that belongs to the detached cook — so this
+/// still asserts the fast, work-free return the old rejection guaranteed.
 #[test]
-fn cook_rejects_local_detach_before_worktree_resolution() {
-    let output = homeboy(&[
-        "--placement",
-        "local",
-        "--detach-after-handoff",
-        "agent-task",
-        "cook",
-        "--prompt",
-        "implement the fix",
-        "--to-worktree",
-        "missing@worktree",
-        "--verify",
-        "true",
-    ]);
+fn cook_detaches_local_placement_instead_of_rejecting_it() {
+    let context = HermeticTestContext::new();
+    let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    command
+        // Bound the launcher's wait so an unresolvable destination reports an
+        // honest handoff state promptly instead of holding the default budget.
+        .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "5000")
+        .args([
+            "--placement",
+            "local",
+            "--detach-after-handoff",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the fix",
+            "--to-worktree",
+            "missing@worktree",
+            "--verify",
+            "true",
+        ]);
+    let output = bounded_output(command);
 
-    assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("cannot detach after handoff with --placement local"));
-    assert!(!stdout.contains("worktree provider"));
+    assert!(output.status.success(), "{stdout}");
+    assert!(
+        !stdout.contains("cannot detach after handoff with --placement local"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("worktree provider"), "{stdout}");
+
+    // The envelope is the last thing the launcher writes, so parse from the
+    // first object brace rather than assuming stdout holds nothing else.
+    let envelope_start = stdout
+        .find('{')
+        .unwrap_or_else(|| panic!("handoff envelope is present\n{stdout}"));
+    let envelope: serde_json::Value = serde_json::from_str(stdout[envelope_start..].trim())
+        .unwrap_or_else(|error| panic!("handoff envelope is JSON: {error}\n{stdout}"));
+    assert_eq!(
+        envelope["schema"], "homeboy/agent-task-cook-local-detach-handoff/v1",
+        "{stdout}"
+    );
+    assert_eq!(envelope["placement"], "local", "{stdout}");
+    assert_eq!(envelope["detached"], true, "{stdout}");
+    let cook_id = envelope["cook_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("handoff names a cook id\n{stdout}"));
+    assert!(!cook_id.is_empty(), "{stdout}");
+    assert_eq!(
+        envelope["status_command"],
+        format!("homeboy agent-task status {cook_id}"),
+        "{stdout}"
+    );
+    let pid = envelope["pid"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("handoff names the detached pid\n{stdout}"));
+    assert!(pid > 0, "{stdout}");
+
+    // Never leave a detached process behind a test. An unresolvable destination
+    // normally kills it well before this, so this is belt-and-braces cleanup.
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    }
 }
 
 #[test]
