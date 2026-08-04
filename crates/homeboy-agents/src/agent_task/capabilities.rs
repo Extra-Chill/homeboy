@@ -65,6 +65,18 @@ pub struct AgentTaskToolCapabilityContribution {
     pub readiness: String,
 }
 
+pub(crate) fn ready_attached_tools_from_metadata(metadata: &Value) -> BTreeSet<String> {
+    metadata
+        .get("attached_tool_readiness")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|entries| entries.iter())
+        .filter_map(|(id, readiness)| {
+            (readiness.get("state").and_then(Value::as_str) == Some("ready")).then(|| id.clone())
+        })
+        .collect()
+}
+
 impl AgentTaskCapabilityRequirements {
     pub fn normalized(mut self) -> Self {
         normalize(&mut self.provider);

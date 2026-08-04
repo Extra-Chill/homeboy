@@ -417,14 +417,7 @@ mod tests {
             }),
             env_names: vec!["FIXTURE_MODE".to_string()],
             secret_env_names: Vec::new(),
-            readiness: crate::agent_task::ResolvedAgentTaskRuntimeToolReadiness {
-                status: "ready".to_string(),
-                evidence: crate::agent_task::ResolvedAgentTaskRuntimeToolProbeEvidence {
-                    kind: "version_command".to_string(),
-                    success: true,
-                    version: None,
-                },
-            },
+            readiness: "ready".to_string(),
             lifecycle: Default::default(),
         }];
 
