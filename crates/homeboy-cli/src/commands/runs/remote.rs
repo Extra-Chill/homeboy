@@ -70,7 +70,7 @@ pub fn list_runner_runs(
     apply_remote_list_filters(&mut runs, &args)?;
 
     let matched_runs = runs.len();
-    let actionable = actionable_for_run_list(&runs);
+    let actionable = actionable_for_run_list(&runs, None);
     Ok((
         RunsOutput::List(RunsListOutput {
             command,
@@ -81,6 +81,7 @@ pub fn list_runner_runs(
             hidden_mirrors: 0,
             probe_degradations: homeboy::runner::readonly_probe::take_degradations(),
             runner_enrichment: None,
+            stale_runs: None,
             actionable,
         }),
         0,
