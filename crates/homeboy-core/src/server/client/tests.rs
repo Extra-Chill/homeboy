@@ -17,7 +17,7 @@ use super::ssh_client::{
     build_secret_env_stdin_block, execute_command_with_stdin_source_timeout,
     execute_command_with_stdin_timeout, execute_command_with_writer_factory,
     run_command_with_stdin_source, wrap_command_with_secret_env_read_loop,
-    SECRET_ENV_STDIN_SENTINEL,
+    wrap_timed_remote_command, SECRET_ENV_STDIN_SENTINEL,
 };
 use super::{CommandOutput, SshClient};
 
@@ -144,6 +144,67 @@ fn small_secret_stdin_payload_completes_successfully() {
 
     assert!(output.success, "{}", output.stderr);
     assert_eq!(output.stdout, "done");
+}
+
+#[test]
+fn timed_ssh_envelope_owns_remote_descendant_cleanup() {
+    let envelope = wrap_timed_remote_command("sleep 30 & printf terminal-result");
+
+    assert!(envelope.contains("setsid sh -c"));
+    assert!(envelope.contains("kill -TERM -\"$__homeboy_remote_pid\""));
+    assert!(envelope.contains("kill -KILL -\"$__homeboy_remote_pid\""));
+    assert!(envelope.contains("exit \"$__homeboy_remote_status\""));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn timed_piped_ssh_envelope_preserves_stdin_and_output_while_reaping_descendants() {
+    let descendant_pid_path = std::env::temp_dir().join(format!(
+        "homeboy-disconnect-descendant-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&descendant_pid_path);
+    let mut command = Command::new("sh");
+    command
+        .args([
+            "-c",
+            &wrap_timed_remote_command(&format!(
+                "input=$(cat); sleep 30 & descendant=$!; printf '%s' \"$descendant\" > {}; printf '{{\"success\":true,\"data\":{{\"input\":\"%s\",\"action\":\"stop\",\"stopped\":true}}}}\\n' \"$input\"",
+                crate::engine::shell::quote_path(&descendant_pid_path.to_string_lossy())
+            )),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::server::process_cleanup::configure_process_group_cleanup(&mut command);
+
+    let started = Instant::now();
+    let input = tempfile::NamedTempFile::new().expect("piped stdin fixture");
+    std::fs::write(input.path(), "piped-input").expect("write piped stdin fixture");
+    let output = execute_command_with_stdin_source_timeout(
+        command,
+        StdinSource::Piped(std::fs::File::open(input.path()).expect("open piped stdin fixture")),
+        Duration::from_secs(2),
+    );
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(
+        output.stdout,
+        "{\"success\":true,\"data\":{\"input\":\"piped-input\",\"action\":\"stop\",\"stopped\":true}}\n"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "remote descendant cleanup must not retain the foreground command"
+    );
+    let descendant_pid = std::fs::read_to_string(&descendant_pid_path)
+        .expect("disconnect shim records its pipe-holding descendant")
+        .parse()
+        .expect("descendant PID");
+    assert!(
+        !crate::process::pid_is_running(descendant_pid),
+        "runner disconnect left its attributed pipe-holding descendant running"
+    );
+    let _ = std::fs::remove_file(descendant_pid_path);
 }
 
 #[test]
