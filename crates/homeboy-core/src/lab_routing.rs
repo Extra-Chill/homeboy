@@ -860,7 +860,10 @@ mod tests {
             workspace_mode_policy: LabWorkspaceModePolicy::GitCheckoutRequired,
             capture_mutation_patch: true,
             mutation_flag: Some("--keep-overlay"),
-            extra_required_capabilities: LAB_TRACE_EXTRA_CAPABILITIES,
+            extra_required_capabilities: LAB_TRACE_EXTRA_CAPABILITIES
+                .iter()
+                .map(|capability| (*capability).to_string())
+                .collect(),
             secret_env_sources: crate::lab_contract::LAB_TRACE_SECRET_ENV_SOURCES,
             routing_policy: LabRoutingPolicy {
                 default_lab_offload: true,
