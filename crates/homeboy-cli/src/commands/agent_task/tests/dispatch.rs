@@ -971,9 +971,12 @@ fn cook_execution_budget_flags_parse_and_reject_legacy_attempts_mix() {
     let AgentTaskCommand::Cook(args) = agent_task.command else {
         panic!("expected cook command");
     };
-    assert_eq!(args.dispatch.core.attempts, 2);
-    assert_eq!(args.dispatch.core.same_provider_retries, 1);
-    assert_eq!(args.dispatch.core.provider_rotations, 0);
+    assert_eq!(args.dispatch.core.attempts, Some(2));
+    assert_eq!(args.dispatch.core.same_provider_retries, Some(1));
+    // An explicit zero is still explicit: it must remain distinguishable from
+    // "not passed", which is what lets a configured rotation fund a default
+    // budget without ever overriding an operator (#11082).
+    assert_eq!(args.dispatch.core.provider_rotations, Some(0));
 
     assert!(Cli::try_parse_from([
         "homeboy",
