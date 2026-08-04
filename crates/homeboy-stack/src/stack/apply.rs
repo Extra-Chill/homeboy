@@ -8,8 +8,9 @@
 //! 2. Best-effort fetch `target.remote/target.branch` so existing local
 //!    history is up-to-date for diffing later. Failure here is non-fatal:
 //!    a fresh stack may not have pushed `target` yet.
-//! 3. Force-recreate `target.branch` locally from `base.remote/base.branch`.
-//! 4. For each PR entry:
+//! 3. Preflight the target and explicitly compatible installed alternatives.
+//! 4. Force-recreate `target.branch` locally from `base.remote/base.branch`.
+//! 5. For each PR entry:
 //!    - Resolve the PR's head SHA + head repo coordinates via `gh pr view`.
 //!    - Add a temporary remote for the PR's head repo (if it's not the
 //!      base repo and not already configured) and fetch the head SHA.
@@ -32,6 +33,7 @@ use std::collections::HashSet;
 
 use homeboy_core::error::{Error, Result};
 
+use super::candidates::{preflight, stale_stack_error, StackCandidate};
 use super::git::run_git;
 use super::pr_meta::{fetch_pr_meta, PrHead};
 use super::spec::{resolve_existing_component_path, StackPrEntry, StackSpec};
@@ -74,8 +76,8 @@ pub enum ConflictPolicy {
     /// so `git cherry-pick --continue` (or `--abort`) is available.
     #[default]
     Preserve,
-    /// Run `git cherry-pick --abort`, restoring a clean working tree and
-    /// discarding the conflicted state.
+    /// Run `git cherry-pick --abort`, restore the target's pre-rebuild tip,
+    /// and discard the conflicted state.
     Abort,
 }
 
@@ -141,8 +143,15 @@ fn rebuild(
     // 3. Best-effort fetch target.
     let _ = fetch_remote_branch(&path, &spec.target.remote, &spec.target.branch);
 
-    // 4. Force-recreate target locally from base.
     let base_ref = format!("{}/{}", spec.base.remote, spec.base.branch);
+    let preflight = preflight(spec, &path, &base_ref)?;
+    if preflight.blocked {
+        return Err(stale_stack_error(spec, &preflight));
+    }
+
+    // 4. Force-recreate target locally from base. Keep its tip so an opted-in
+    // conflict abort can restore the target instead of leaving it discarded.
+    let target_snapshot = TargetSnapshot::capture(&path, &spec.target.branch)?;
     checkout_force(&path, &spec.target.branch, &base_ref)?;
 
     // Track which remotes we've ensured exist this run, so we don't
@@ -204,9 +213,12 @@ fn rebuild(
                         sha: &head.sha,
                         rerun_command: &format!("homeboy stack {} {}", rerun_verb, spec.id),
                         policy: conflict_policy,
+                        candidates: &preflight.candidates,
+                        target_snapshot: Some(&target_snapshot),
+                        target_branch: &spec.target.branch,
                     },
                     &message,
-                ));
+                )?);
             }
         }
     }
@@ -248,6 +260,44 @@ pub(crate) struct ConflictContext<'a> {
     /// Full homeboy command to re-run once the tree is clean again.
     pub rerun_command: &'a str,
     pub policy: ConflictPolicy,
+    pub candidates: &'a [StackCandidate],
+    pub target_snapshot: Option<&'a TargetSnapshot>,
+    pub target_branch: &'a str,
+}
+
+/// The target tip before a rebuild began. It is intentionally a SHA, rather
+/// than a backup branch, so rollback does not leave extra refs behind.
+#[derive(Debug)]
+pub(crate) struct TargetSnapshot {
+    sha: Option<String>,
+}
+
+impl TargetSnapshot {
+    pub(crate) fn capture(path: &str, target_branch: &str) -> Result<Self> {
+        let output = run_git(path, &["rev-parse", "--verify", "--quiet", target_branch])?;
+        let sha = if output.status.success() {
+            Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            None
+        };
+        Ok(Self { sha })
+    }
+
+    fn restore(&self, path: &str, target_branch: &str) -> Result<()> {
+        match &self.sha {
+            Some(sha) => {
+                // The abort has returned HEAD to the rebuilt target. Resetting it
+                // back to the captured tip restores the branch and a clean tree.
+                git_succeeds(path, &["reset", "--hard", sha])
+            }
+            None => {
+                // `checkout -B` created this branch for the rebuild. Move HEAD
+                // away before deleting it so rollback restores its prior absence.
+                git_succeeds(path, &["checkout", "--detach"])?;
+                git_succeeds(path, &["branch", "-D", target_branch])
+            }
+        }
+    }
 }
 
 /// Finish a conflicted cherry-pick according to `ctx.policy` and build the
@@ -256,16 +306,21 @@ pub(crate) struct ConflictContext<'a> {
 /// Under [`ConflictPolicy::Preserve`] (the default) nothing is run: the
 /// conflicted index, the working-tree markers, and `CHERRY_PICK_HEAD` are the
 /// exact state the message asks the operator to resolve.
-pub(crate) fn conflict_error(ctx: ConflictContext<'_>, message: &str) -> Error {
+pub(crate) fn conflict_error(ctx: ConflictContext<'_>, message: &str) -> Result<Error> {
     if ctx.policy == ConflictPolicy::Abort {
-        let _ = run_git(ctx.path, &["cherry-pick", "--abort"]);
+        git_succeeds(ctx.path, &["cherry-pick", "--abort"])?;
+        if let Some(snapshot) = ctx.target_snapshot {
+            snapshot.restore(ctx.path, ctx.target_branch)?;
+        }
     }
-    Error::stack_apply_conflict(
+    let mut error = Error::stack_apply_conflict(
         ctx.stack_id,
         ctx.pr.number,
         &ctx.pr.repo,
         conflict_guidance(&ctx, message),
-    )
+    );
+    error.details["candidates"] = serde_json::to_value(ctx.candidates).unwrap_or_default();
+    Ok(error)
 }
 
 /// `true` while `path` has a cherry-pick paused mid-flight (`CHERRY_PICK_HEAD`
@@ -352,6 +407,18 @@ pub(crate) fn checkout_force(path: &str, branch: &str, start_point: &str) -> Res
         )));
     }
     Ok(())
+}
+
+fn git_succeeds(path: &str, args: &[&str]) -> Result<()> {
+    let output = run_git(path, args)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(Error::git_command_failed(format!(
+        "git {}: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
 }
 
 /// Make sure a git remote exists pointing at the PR's head repo, and return
@@ -469,7 +536,7 @@ pub(crate) fn cherry_pick(path: &str, sha: &str) -> Result<CherryPickResult> {
     // versions; check both the canonical phrase and the short-form hint.
     if combined.contains("nothing to commit") || combined.contains("--allow-empty") {
         // Abort to leave the working tree clean before continuing.
-        let _ = run_git(path, &["cherry-pick", "--skip"]);
+        git_succeeds(path, &["cherry-pick", "--skip"])?;
         return Ok(CherryPickResult::Empty);
     }
 

@@ -38,6 +38,8 @@ fn stack_spec(path: &str) -> StackSpec {
             branch: "dev/combined-fixes".to_string(),
         },
         prs: Vec::new(),
+        provenance: None,
+        requirements: Default::default(),
     }
 }
 

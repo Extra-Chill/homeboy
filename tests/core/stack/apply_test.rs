@@ -12,8 +12,9 @@
 use crate::stack::apply::{
     checkout_force, cherry_pick, cherry_pick_in_progress, conflict_error, conflict_guidance,
     ensure_no_cherry_pick_in_progress, rebase, url_matches, CherryPickResult, ConflictContext,
-    ConflictPolicy,
+    ConflictPolicy, TargetSnapshot,
 };
+use crate::stack::status::git_ref_exists;
 use crate::stack::{save, GitRef, StackPrEntry, StackSpec};
 use homeboy_core::test_support::with_isolated_home;
 use std::fs;
@@ -153,9 +154,13 @@ fn conflict_error_preserves_state_by_default() {
             sha: &sha,
             rerun_command: "homeboy stack apply demo",
             policy: ConflictPolicy::default(),
+            candidates: &[],
+            target_snapshot: None,
+            target_branch: "target",
         },
         "CONFLICT (content): Merge conflict in f.txt",
-    );
+    )
+    .expect("build conflict error");
 
     // The conflict the message points at must still exist.
     assert!(
@@ -205,9 +210,13 @@ fn conflict_error_aborts_when_opted_in() {
             sha: &sha,
             rerun_command: "homeboy stack apply demo",
             policy: ConflictPolicy::Abort,
+            candidates: &[],
+            target_snapshot: None,
+            target_branch: "target",
         },
         "CONFLICT (content): Merge conflict in f.txt",
-    );
+    )
+    .expect("abort conflict");
 
     assert!(
         !cherry_pick_in_progress(&path),
@@ -249,9 +258,13 @@ fn conflict_error_carries_pr_coordinates() {
             sha: "deadbeef",
             rerun_command: "homeboy stack sync demo",
             policy: ConflictPolicy::Preserve,
+            candidates: &[],
+            target_snapshot: None,
+            target_branch: "target",
         },
         "CONFLICT (content): Merge conflict in f.txt",
-    );
+    )
+    .expect("build conflict error");
 
     assert_eq!(
         error.code,
@@ -274,6 +287,9 @@ fn conflict_guidance_preserve_and_abort_differ() {
             sha: "abc1234",
             rerun_command: "homeboy stack apply demo",
             policy,
+            candidates: &[],
+            target_snapshot: None,
+            target_branch: "target",
         }
     }
 
@@ -296,6 +312,108 @@ fn conflict_policy_maps_the_cli_flag() {
     );
     assert_eq!(ConflictPolicy::from_abort_flag(true), ConflictPolicy::Abort);
     assert_eq!(ConflictPolicy::default(), ConflictPolicy::Preserve);
+}
+
+#[test]
+fn abort_on_conflict_restores_target_before_rebuild() {
+    let (dir, path) = init_repo();
+    git(&path, &["checkout", "-q", "-b", "target"]);
+    let prior_target = commit_file(&dir, &path, "keep.txt", "keep\n", "prior target");
+    git(&path, &["checkout", "-q", "main"]);
+    commit_file(&dir, &path, "f.txt", "main version\n", "main edit");
+    git(&path, &["checkout", "-q", "-b", "feature", "HEAD~1"]);
+    let conflict_sha = commit_file(&dir, &path, "f.txt", "feature version\n", "feature edit");
+    git(&path, &["checkout", "-q", "main"]);
+
+    let snapshot = TargetSnapshot::capture(&path, "target").expect("capture target");
+    checkout_force(&path, "target", "main").expect("rebuild target");
+    assert_ne!(rev_parse(&path, "target"), prior_target);
+    assert!(matches!(
+        cherry_pick(&path, &conflict_sha).expect("cherry-pick"),
+        CherryPickResult::Conflict(_)
+    ));
+
+    let pr = pr_entry();
+    conflict_error(
+        ConflictContext {
+            path: &path,
+            stack_id: "demo",
+            pr: &pr,
+            sha: &conflict_sha,
+            rerun_command: "homeboy stack apply demo",
+            policy: ConflictPolicy::Abort,
+            candidates: &[],
+            target_snapshot: Some(&snapshot),
+            target_branch: "target",
+        },
+        "CONFLICT (content): Merge conflict in f.txt",
+    )
+    .expect("abort and restore target");
+
+    assert!(!cherry_pick_in_progress(&path));
+    assert_eq!(rev_parse(&path, "target"), prior_target);
+    assert!(dir.path().join("keep.txt").exists());
+}
+
+#[test]
+fn abort_on_conflict_removes_target_created_by_rebuild() {
+    let (_dir, path, conflict_sha) = repo_with_live_conflict();
+    let pr = pr_entry();
+    git(&path, &["cherry-pick", "--abort"]);
+    let snapshot = TargetSnapshot::capture(&path, "target").expect("capture missing target");
+
+    checkout_force(&path, "target", "main").expect("create rebuild target");
+    assert!(git_ref_exists(&path, "target"));
+    assert!(matches!(
+        cherry_pick(&path, &conflict_sha).expect("cherry-pick"),
+        CherryPickResult::Conflict(_)
+    ));
+
+    conflict_error(
+        ConflictContext {
+            path: &path,
+            stack_id: "demo",
+            pr: &pr,
+            sha: &conflict_sha,
+            rerun_command: "homeboy stack apply demo",
+            policy: ConflictPolicy::Abort,
+            candidates: &[],
+            target_snapshot: Some(&snapshot),
+            target_branch: "target",
+        },
+        "CONFLICT (content): Merge conflict in f.txt",
+    )
+    .expect("abort and remove newly-created target");
+
+    assert!(!cherry_pick_in_progress(&path));
+    assert!(!git_ref_exists(&path, "target"));
+}
+
+#[test]
+fn abort_on_conflict_propagates_target_restore_failure() {
+    let (_dir, path, sha) = repo_with_live_conflict();
+    let pr = pr_entry();
+    let snapshot = TargetSnapshot {
+        sha: Some("not-a-commit".to_string()),
+    };
+
+    let error = conflict_error(
+        ConflictContext {
+            path: &path,
+            stack_id: "demo",
+            pr: &pr,
+            sha: &sha,
+            rerun_command: "homeboy stack apply demo",
+            policy: ConflictPolicy::Abort,
+            candidates: &[],
+            target_snapshot: Some(&snapshot),
+            target_branch: "main",
+        },
+        "CONFLICT (content): Merge conflict in f.txt",
+    )
+    .expect_err("failed reset must be returned");
+
+    assert!(error.to_string().contains("git reset --hard not-a-commit"));
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +509,8 @@ fn rebase_rebuilds_target_without_editing_spec() {
                 branch: "stack-target".to_string(),
             },
             prs: Vec::new(),
+            provenance: None,
+            requirements: Default::default(),
         };
         save(&spec).expect("save stack spec");
         let spec_path = home
