@@ -81,8 +81,9 @@ if TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.
 fi
 printf 'PASS: missing, mismatched, failed, and timed-out shards fail closed\n'
 
-grep -F 'needs: [reconcile, reconcile-test-shards]' "${WORKFLOW}" >/dev/null || { printf 'FAIL: policy does not wait for the sharded Test verdict\n'; exit 1; }
+grep -F 'needs: [reconcile, reconcile-test-shards, plan]' "${WORKFLOW}" >/dev/null || { printf 'FAIL: policy does not wait for the sharded Test verdict and pinned plan\n'; exit 1; }
 grep -F "inputs.test-shards == '1' || needs.reconcile-test-shards.result == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: policy can bypass a failed sharded Test verdict\n'; exit 1; }
-# shellcheck disable=SC2016 -- the literal workflow expression is the contract.
+# The literal workflow expression is the contract.
+# shellcheck disable=SC2016
 grep -F 'baseline_result="$(jq -r --arg command "${COMMAND}"' "${WORKFLOW}" >/dev/null || { printf 'FAIL: differential baseline metadata is not derived from its aggregate result\n'; exit 1; }
 printf 'PASS: policy waits for sharded Test reconciliation while preserving unsharded behavior\n'

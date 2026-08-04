@@ -14,6 +14,15 @@ fail_closed() {
   exit 1
 }
 
+# Selects into RESOLVED_MANIFEST rather than printing to stdout.
+#
+# This deliberately does NOT return the path via stdout, because callers would
+# then have to invoke it in a command substitution — and `fail_closed` writes
+# its `::error::` line to stdout, so inside `$( )` the message is captured into
+# the caller's variable instead of reaching the log. A missing artifact then
+# failed the job silently: exit 1, `results=fail` recorded, and not one word
+# explaining why. Keeping this in the current shell keeps the diagnosis visible.
+RESOLVED_MANIFEST=""
 manifest_for() {
   local phase="$1"
   local path attempt selected="" selected_attempt=0 selected_count=0
@@ -28,34 +37,74 @@ manifest_for() {
       selected_count=$((selected_count + 1))
     fi
   done < <(find "${artifact_root}" -path "*/${phase}/manifest.json" -type f | sort)
-  [ -n "${selected}" ] && [ "${selected_count}" -eq 1 ] || fail_closed "Expected one newest ${phase} provenance artifact; found ${selected_count} at attempt ${selected_attempt}."
-  printf '%s\n' "${selected}"
+  if [ -z "${selected}" ]; then
+    fail_closed "No ${phase} provenance artifact found under '${artifact_root}'. The ${phase} job did not upload one — check whether it ran, was skipped, or failed before writing evidence."
+  fi
+  [ "${selected_count}" -eq 1 ] || fail_closed "Expected one newest ${phase} provenance artifact; found ${selected_count} at attempt ${selected_attempt}."
+  RESOLVED_MANIFEST="${selected}"
 }
 
-candidate_manifest="$(manifest_for candidate)"
+manifest_for candidate
+candidate_manifest="${RESOLVED_MANIFEST}"
 candidate_dir="$(dirname "${candidate_manifest}")"
+
+# Report WHICH identity field failed.
+#
+# This used to be a single twelve-clause jq predicate with `2>/dev/null` and one
+# catch-all message, so a mismatch was indistinguishable from a missing file and
+# an operator could not tell which field was wrong without reproducing the run.
+# Artifacts are untrusted transport, so the checks themselves stay strict — only
+# the reporting changes.
+_field_mismatch() {
+  local phase="$1" field="$2" expected="$3" actual="$4"
+  fail_closed "${phase} phase provenance field '${field}' does not match this workflow: expected '${expected}', artifact has '${actual}'."
+}
+
+_check_equals() {
+  local phase="$1" manifest="$2" field="$3" expected="$4"
+  local actual
+  actual="$(jq -r --arg f "${field}" '.[$f] // "<absent>"' "${manifest}" 2>/dev/null || printf '<unreadable>')"
+  [ "${actual}" = "${expected}" ] || _field_mismatch "${phase}" "${field}" "${expected}" "${actual}"
+}
+
+_check_predicate() {
+  local phase="$1" manifest="$2" field="$3" description="$4" filter="$5"
+  jq -e "${filter}" "${manifest}" >/dev/null 2>&1 && return 0
+  local actual
+  actual="$(jq -c --arg f "${field}" '.[$f] // "<absent>"' "${manifest}" 2>/dev/null || printf '<unreadable>')"
+  fail_closed "${phase} phase provenance field '${field}' is invalid: ${description}. Artifact has ${actual}."
+}
 
 validate_manifest() {
   local phase="$1" manifest="$2" expected_sha="$3"
-  jq -e \
-    --arg phase "${phase}" --arg repository "${REPOSITORY:?REPOSITORY is required}" \
-    --arg candidate_sha "${CANDIDATE_SHA:?CANDIDATE_SHA is required}" --arg base_sha "${BASE_SHA:?BASE_SHA is required}" \
-    --arg command "${command}" --arg action_revision "${ACTION_REVISION:?ACTION_REVISION is required}" \
-    --arg expected_sha "${expected_sha}" '
-      type == "object"
-      and .phase == $phase
-      and .repository == $repository
-      and .candidate_sha == $candidate_sha
-      and .base_sha == $base_sha
-      and .checkout_sha == $expected_sha
-      and .command == $command
-      and .action_revision == $action_revision
-      and (.run_attempt | type == "number" and . > 0 and . <= (env.RUN_ATTEMPT | tonumber))
-      and (.component | type == "string" and length > 0)
-      and (.cli_revision | type == "string" and length > 0)
-      and (.binary_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
-      and (.results | type == "object" and (.[$command] == "pass" or .[$command] == "fail" or .[$command] == "timeout"))
-    ' "${manifest}" >/dev/null 2>&1 || fail_closed "${phase} phase provenance is missing, malformed, or does not match this workflow."
+
+  [ -f "${manifest}" ] || fail_closed "${phase} phase provenance artifact is missing at '${manifest}'."
+  jq -e 'type == "object"' "${manifest}" >/dev/null 2>&1 \
+    || fail_closed "${phase} phase provenance at '${manifest}' is not a JSON object."
+
+  _check_equals "${phase}" "${manifest}" phase           "${phase}"
+  _check_equals "${phase}" "${manifest}" repository      "${REPOSITORY:?REPOSITORY is required}"
+  _check_equals "${phase}" "${manifest}" candidate_sha   "${CANDIDATE_SHA:?CANDIDATE_SHA is required}"
+  _check_equals "${phase}" "${manifest}" base_sha        "${BASE_SHA:?BASE_SHA is required}"
+  _check_equals "${phase}" "${manifest}" checkout_sha    "${expected_sha}"
+  _check_equals "${phase}" "${manifest}" command         "${command}"
+  _check_equals "${phase}" "${manifest}" action_revision "${ACTION_REVISION:?ACTION_REVISION is required}"
+
+  _check_predicate "${phase}" "${manifest}" run_attempt \
+    "must be a positive number no greater than this run's attempt (${RUN_ATTEMPT})" \
+    '(.run_attempt | type == "number" and . > 0 and . <= (env.RUN_ATTEMPT | tonumber))'
+  _check_predicate "${phase}" "${manifest}" component \
+    'must be a non-empty string' \
+    '(.component | type == "string" and length > 0)'
+  _check_predicate "${phase}" "${manifest}" cli_revision \
+    'must be a non-empty string' \
+    '(.cli_revision | type == "string" and length > 0)'
+  _check_predicate "${phase}" "${manifest}" binary_sha256 \
+    'must be a 64-character hex digest' \
+    '(.binary_sha256 | type == "string" and test("^[0-9a-f]{64}$"))'
+  _check_predicate "${phase}" "${manifest}" results \
+    "must be an object recording '${command}' as pass, fail, or timeout" \
+    "(.results | type == \"object\" and (.[\"${command}\"] == \"pass\" or .[\"${command}\"] == \"fail\" or .[\"${command}\"] == \"timeout\"))"
 }
 
 validate_manifest candidate "${candidate_manifest}" "${CANDIDATE_SHA}"
@@ -64,7 +113,8 @@ candidate_output="${candidate_dir}/homeboy-ci-results"
 [ -d "${candidate_output}" ] || fail_closed "Candidate result payload is missing."
 
 if [ "${REQUIRE_BASELINE:-false}" = "true" ]; then
-  baseline_manifest="$(manifest_for baseline)"
+  manifest_for baseline
+  baseline_manifest="${RESOLVED_MANIFEST}"
   baseline_dir="$(dirname "${baseline_manifest}")"
   validate_manifest baseline "${baseline_manifest}" "${BASE_SHA}"
   candidate_component="$(jq -r '.component' "${candidate_manifest}")"

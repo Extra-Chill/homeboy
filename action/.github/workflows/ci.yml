@@ -189,6 +189,8 @@ permissions:
 jobs:
   binary:
     name: Prepare candidate Homeboy binary
+    # needs plan solely for needs.plan.outputs.action-sha; plan is pure bash.
+    needs: plan
     runs-on: ubuntu-latest
     outputs:
       cargo-cache-key: ${{ steps.cargo-cache-key.outputs.key }}
@@ -228,7 +230,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
-          ref: ${{ inputs.action-ref }}
+          ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
 
       - name: Materialize candidate Homeboy binary
@@ -251,61 +253,37 @@ jobs:
 
   plan:
     name: Plan
-    needs: binary
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
-      test-matrix: ${{ steps.plan.outputs.test-matrix }}
       test-shards-enabled: ${{ steps.plan.outputs.test-shards-enabled }}
       test-command: ${{ steps.plan.outputs.test-command }}
+      action-sha: ${{ steps.action-sha.outputs.sha }}
     steps:
-      - id: resolved-test-command
-        if: inputs.test-shards != '1'
+      # Resolve the action ref to one immutable revision for every phase and shard.
+      - name: Resolve action revision
+        id: action-sha
+        shell: bash
         env:
-          COMMANDS: ${{ inputs.commands }}
+          ACTION_REF: ${{ inputs.action-ref }}
+          ACTION_REPO: Extra-Chill/homeboy-action
         run: |
-          IFS=',' read -ra commands <<< "${COMMANDS}"
-          for command in "${commands[@]}"; do
-            command="$(printf '%s' "${command}" | xargs)"
-            case "${command}" in review\ test*|test*) echo "value=${command}" >> "${GITHUB_OUTPUT}"; exit 0 ;; esac
-          done
-          echo '::error::test-shards requires a requested Test command.'
-          exit 1
-      - uses: actions/checkout@v6
-        if: inputs.test-shards != '1'
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: actions/checkout@v6
-        if: inputs.test-shards != '1'
-        with:
-          repository: Extra-Chill/homeboy-action
-          ref: ${{ inputs.action-ref }}
-          path: .homeboy-action
-      - name: Download candidate Homeboy binary for test inventory
-        if: inputs.test-shards != '1'
-        id: candidate-binary
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
-      - name: Materialize canonical Test inventory
-        if: inputs.test-shards != '1'
-        env:
-          HOMEBOY_TEST_INVENTORY_ONLY: '1'
-          HOMEBOY_TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
-        uses: ./.homeboy-action
-        with:
-          binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
-          extension: ${{ inputs.extension }}
-          extension-source: ${{ inputs.extension-source }}
-          commands: ${{ steps.resolved-test-command.outputs.value }}
-          component: ${{ inputs.component }}
-          args: ${{ inputs.args }}
-          scope: full
-          auto-setup: ${{ inputs.auto-setup }}
-          php-version: ${{ inputs.php-version }}
-          node-version: ${{ inputs.node-version }}
-          pr-comment: 'false'
-          auto-issue: 'false'
+          set -euo pipefail
+          if [[ "${ACTION_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+            sha="${ACTION_REF}"
+          else
+            refs="$(git ls-remote "https://github.com/${ACTION_REPO}" \
+              "refs/tags/${ACTION_REF}^{}" "refs/tags/${ACTION_REF}" "refs/heads/${ACTION_REF}")"
+            sha="$(printf '%s\n' "${refs}" | awk '$2 ~ /\^\{\}$/ {print $1; exit}')"
+            [ -n "${sha:-}" ] || sha="$(printf '%s\n' "${refs}" | awk 'NR==1{print $1}')"
+          fi
+          if [ -z "${sha:-}" ]; then
+            echo "::error::Could not resolve action-ref '${ACTION_REF}' in ${ACTION_REPO} to a commit."
+            exit 1
+          fi
+          echo "Resolved ${ACTION_REF} -> ${sha}"
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+
       - name: Plan quality checks
         id: plan
         shell: bash
@@ -404,7 +382,6 @@ jobs:
           done
 
           matrix="$(printf '%s\n' "${rows[@]}" | jq -sc '{include:.}')"
-          test_matrix='{"include":[]}'
           test_shards_enabled=false
           test_command=''
           if [ "${TEST_SHARDS}" != '1' ] && [ -n "${TEST_SHARDS}" ]; then
@@ -416,31 +393,15 @@ jobs:
             test_row="$(printf '%s' "${matrix}" | jq -c '.include[] | select(.section_key == "test")')"
             if [ -n "${test_row}" ]; then
               test_command="$(jq -r .command <<< "${test_row}")"
-              TEST_INVENTORY_FILE="${GITHUB_WORKSPACE}/homeboy-test-inventory.json" \
-              TEST_SHARD_PLAN_FILE="${GITHUB_WORKSPACE}/homeboy-test-shard-plan.json" \
-              TEST_SHARD_COUNT="${TEST_SHARDS}" \
-                bash "${GITHUB_WORKSPACE}/.homeboy-action/scripts/core/shard-tests.sh" plan
-              test_matrix="$(jq -cn --argjson row "${test_row}" --slurpfile plan "${GITHUB_WORKSPACE}/homeboy-test-shard-plan.json" '{include:[$plan[0].shards[] | $row + {shard_id:.id}]}')"
               test_shards_enabled=true
               matrix="$(printf '%s' "${matrix}" | jq -c '{include:[.include[] | select(.section_key != "test")]}')"
             fi
           fi
           {
             echo "matrix=${matrix}"
-            echo "test-matrix=${test_matrix}"
             echo "test-shards-enabled=${test_shards_enabled}"
             echo "test-command=${test_command}"
           } >> "${GITHUB_OUTPUT}"
-
-      - name: Upload immutable Test shard plan
-        if: inputs.test-shards != '1'
-        uses: actions/upload-artifact@v7
-        with:
-          name: homeboy-test-shard-plan-${{ github.run_attempt }}
-          path: |
-            homeboy-test-inventory.json
-            homeboy-test-shard-plan.json
-          if-no-files-found: error
 
   candidate:
     name: Candidate ${{ matrix.title }}
@@ -470,7 +431,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
-          ref: ${{ inputs.action-ref }}
+          ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
 
       - name: Download candidate Homeboy binary
@@ -592,7 +553,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
-          ref: ${{ inputs.action-ref }}
+          ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
       - name: Download candidate Homeboy binary
         id: candidate-binary
@@ -652,14 +613,13 @@ jobs:
           path: differential-phase
           if-no-files-found: warn
 
-  candidate-test-shards:
-    name: Candidate Test shard ${{ matrix.shard_id }}
+  candidate-test-plan:
+    name: Plan candidate Test shards
     needs: [binary, plan]
     if: ${{ always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' }}
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.plan.outputs.test-matrix) }}
+    outputs:
+      test-matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -667,7 +627,63 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
-          ref: ${{ inputs.action-ref }}
+          ref: ${{ needs.plan.outputs.action-sha }}
+          path: .homeboy-action
+      - id: candidate-binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
+      - name: Materialize canonical candidate Test inventory
+        env:
+          HOMEBOY_TEST_INVENTORY_ONLY: '1'
+          HOMEBOY_TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
+        uses: ./.homeboy-action
+        with:
+          binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
+          extension: ${{ inputs.extension }}
+          extension-source: ${{ inputs.extension-source }}
+          commands: ${{ needs.plan.outputs.test-command }}
+          component: ${{ inputs.component }}
+          args: ${{ inputs.args }}
+          scope: full
+          auto-setup: ${{ inputs.auto-setup }}
+          php-version: ${{ inputs.php-version }}
+          node-version: ${{ inputs.node-version }}
+          pr-comment: 'false'
+          auto-issue: 'false'
+      - id: plan
+        env:
+          TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
+          TEST_SHARD_PLAN_FILE: ${{ github.workspace }}/homeboy-test-shard-plan.json
+          TEST_SHARD_COUNT: ${{ inputs.test-shards }}
+          TEST_COMMAND: ${{ needs.plan.outputs.test-command }}
+        run: |
+          bash .homeboy-action/scripts/core/shard-tests.sh plan
+          echo "matrix=$(jq -cn --arg command "${TEST_COMMAND}" --slurpfile plan homeboy-test-shard-plan.json '{include:[$plan[0].shards[] | {command:$command,shard_id:.id}]}')" >> "${GITHUB_OUTPUT}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: homeboy-test-shard-plan-${{ github.run_attempt }}
+          path: |
+            homeboy-test-inventory.json
+            homeboy-test-shard-plan.json
+          if-no-files-found: error
+
+  candidate-test-shards:
+    name: Candidate Test shard ${{ matrix.shard_id }}
+    needs: [binary, plan, candidate-test-plan]
+    if: ${{ always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.candidate-test-plan.outputs.test-matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
       - id: candidate-binary
         env:
@@ -725,7 +741,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
-          ref: ${{ inputs.action-ref }}
+          ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
       - uses: actions/download-artifact@v7
         with:
@@ -797,7 +813,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
-          ref: ${{ inputs.action-ref }}
+          ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
       - id: candidate-binary
         env:
@@ -854,7 +870,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
-          ref: ${{ inputs.action-ref }}
+          ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
       - id: candidate-binary
         env:
@@ -915,7 +931,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
-          ref: ${{ inputs.action-ref }}
+          ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
       - name: Download candidate Homeboy binary
         id: candidate-binary
@@ -974,7 +990,7 @@ jobs:
 
   policy:
     name: PR Policy
-    needs: [reconcile, reconcile-test-shards]
+    needs: [reconcile, reconcile-test-shards, plan]
     if: ${{ always() && github.event_name == 'pull_request' && inputs.pr-policy != '' && needs.reconcile.result == 'success' && (inputs.test-shards == '1' || needs.reconcile-test-shards.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
@@ -984,7 +1000,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
-          ref: ${{ inputs.action-ref }}
+          ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
       - name: Download candidate Homeboy binary
         id: candidate-binary

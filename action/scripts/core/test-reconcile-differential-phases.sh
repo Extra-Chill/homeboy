@@ -114,3 +114,53 @@ grep -F 'Evaluate PR policy after reconciled quality gates' "${WORKFLOW}" >/dev/
 # shellcheck disable=SC2016
 grep -F 'homeboy-differential-candidate-${{ matrix.artifact_key }}-${{ github.run_attempt }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate artifacts are not command- and attempt-scoped\n'; exit 1; }
 printf 'PASS: required checks, scope semantics, and post-reconciliation policy are preserved\n'
+
+# The point of the message is that an operator can act on it. A single
+# catch-all ("missing, malformed, or does not match") could not distinguish an
+# absent artifact from one wrong field, which made a real reconcile failure in
+# Extra-Chill/data-machine#3048 undiagnosable without reproducing the run.
+run_case_message() {
+  local expected_exit="$1" needle="$2" label="$3"
+  rm -f "${tmp}/output"
+  set +e
+  local out
+  out="$(PHASE_ARTIFACT_ROOT="${tmp}/artifacts" REPOSITORY=example/repo CANDIDATE_SHA=candidate BASE_SHA=base COMMAND='review test' ACTION_REVISION=action-sha RUN_ATTEMPT=2 REQUIRE_BASELINE=true GITHUB_OUTPUT="${tmp}/output" bash "${RECONCILE}" 2>&1)"
+  local actual=$?
+  set -e
+  if [ "${actual}" -ne "${expected_exit}" ]; then
+    printf 'FAIL: %s (expected exit %s, got %s)\n' "${label}" "${expected_exit}" "${actual}"
+    printf '%s\n' "${out}"
+    exit 1
+  fi
+  case "${out}" in
+    *"${needle}"*) printf 'PASS: %s\n' "${label}" ;;
+    *)
+      printf 'FAIL: %s (message did not mention %s)\n' "${label}" "${needle}"
+      printf '%s\n' "${out}"
+      exit 1
+      ;;
+  esac
+}
+
+rm -rf "${tmp}/artifacts"
+write_phase candidate wrong-sha component cli '{"review test":"pass"}' "${payload_pass}"
+write_phase baseline base component cli '{"review test":"pass"}' "${payload_pass}"
+run_case_message 1 "field 'checkout_sha'" 'a mismatched field is named in the error'
+run_case_message 1 "expected 'candidate', artifact has 'wrong-sha'" 'the error reports expected and actual values'
+
+rm -rf "${tmp}/artifacts"
+write_phase candidate candidate component cli '{}' "${payload_pass}"
+write_phase baseline base component cli '{"review test":"pass"}' "${payload_pass}"
+run_case_message 1 "field 'results'" 'an unusable results object is named, not reported as a generic mismatch'
+
+rm -rf "${tmp}/artifacts"
+write_phase candidate candidate '' cli '{"review test":"pass"}' "${payload_pass}"
+write_phase baseline base component cli '{"review test":"pass"}' "${payload_pass}"
+run_case_message 1 "field 'component'" 'an empty component is named'
+
+rm -rf "${tmp}/artifacts"
+mkdir -p "${tmp}/artifacts/candidate"
+write_phase baseline base component cli '{"review test":"pass"}' "${payload_pass}"
+run_case_message 1 "No candidate provenance artifact found" 'a wholly absent candidate artifact reports that it is absent, not silently'
+
+printf 'Reconcile provenance diagnosis checks passed.\n'
