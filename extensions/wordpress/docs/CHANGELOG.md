@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.30] - 2026-08-04
+
+### Fixed
+- honor the declared JavaScript test runner for changed tests
+
 ## [3.34.29] - 2026-08-03
 
 ### Changed
