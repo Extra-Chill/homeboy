@@ -31,6 +31,7 @@ Manage local and SSH execution runners
 | `homeboy runner pair` | Pair a runner with a trusted peer/controller policy from the runner side |
 | `homeboy runner remove` | Remove a runner configuration |
 | `homeboy runner doctor` | Diagnose a local or configured SSH runner without mutating it |
+| `homeboy runner preflight` | Evaluate workload placement without creating a run, rig lease, runner job, or connection |
 | `homeboy runner connect` | Connect to a runner by starting a loopback-only remote daemon and SSH tunnel |
 | `homeboy runner status` | Show persisted runner tunnel status |
 | `homeboy runner reconcile` | Reconcile persisted direct-runner generation state and retire verified drained daemons |
@@ -208,6 +209,29 @@ Diagnose a local or configured SSH runner without mutating it
 | `--require-tool` | `<REQUIRED_TOOLS>` | Required command to resolve on the runner PATH. Repeat for provider/job-specific tools |
 | `--scope` | `<SCOPE>` | Readiness scope. `lab-offload` adds Lab-specific binary, daemon, and provider readiness checks Values: `general`, `lab-offload`, `secret-env`. |
 | `--repair` | flag | Safely repair issues in the selected scope, such as reconnecting a stale Lab daemon |
+
+## `homeboy runner preflight`
+
+```sh
+homeboy runner preflight [OPTIONS] <RUNNER_ID>
+```
+
+Evaluate workload placement without creating a run, rig lease, runner job, or connection
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<RUNNER_ID>` | yes | Runner ID to evaluate |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--workload-family` | `<WORKLOAD_FAMILY>` | Declared workload family, for example bench, test, or agent-task |
+| `--command` | `<COMMAND>` | Canonical intended command label |
+| `--allow-queue` | flag | Permit a durable reverse-runner workload to report queueable at capacity |
+| `--durable-workload` | flag | The wrapper will persist a durable workload identity before setup |
+| `--require-tool` | `<REQUIRED_TOOLS>` | Required executable tool on the selected runner. Repeat for each requirement |
+| `--require-capability` | `<REQUIRED_CAPABILITIES>` | Required runner capability. Repeat for each requirement |
+| `--provider` | `<PROVIDER>` | Selected provider identity, retained in the admission evidence |
+| `--source-path` | `<SOURCE_PATH_INPUTS>` | Source or path-bearing input that execution will materialize. Repeat for each input |
 
 ## `homeboy runner connect`
 

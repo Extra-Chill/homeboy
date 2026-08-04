@@ -237,6 +237,12 @@ pub(super) enum RunnerCommand {
         /// Required runner capability. Repeat for each requirement.
         #[arg(long = "require-capability")]
         required_capabilities: Vec<String>,
+        /// Selected provider identity, retained in the admission evidence.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Source or path-bearing input that execution will materialize. Repeat for each input.
+        #[arg(long = "source-path")]
+        source_path_inputs: Vec<String>,
     },
     /// Connect to a runner by starting a loopback-only remote daemon and SSH tunnel
     Connect {
