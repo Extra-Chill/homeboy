@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use homeboy_engine_primitives::content_hash;
+use serde::{Deserialize, Serialize};
 
 use super::*;
 
@@ -14,7 +15,10 @@ pub(super) fn run_postprocess_steps(
     cancellation: &AgentTaskCancellationToken,
 ) {
     for step in &plan.postprocess_steps {
-        let outcome = if cancellation.is_cancelled() {
+        let checkpoint = postprocess_checkpoint_path(run_id, &step.id);
+        let outcome = if let Some(outcome) = read_checkpoint(&checkpoint) {
+            outcome
+        } else if cancellation.is_cancelled() {
             postprocess_outcome(
                 step,
                 AgentTaskOutcomeStatus::Cancelled,
@@ -22,10 +26,13 @@ pub(super) fn run_postprocess_steps(
                 None,
             )
         } else if let Some(message) = failed_dependency_message(step, outcomes) {
-            postprocess_outcome(step, AgentTaskOutcomeStatus::Failed, &message, None)
+            postprocess_failure_outcome(step, &message)
         } else {
             execute_postprocess_step(step, run_id, outcomes)
         };
+        if outcome.status != AgentTaskOutcomeStatus::Cancelled {
+            let _ = write_checkpoint(&checkpoint, step, &outcome);
+        }
         events.push(event(
             &step.id,
             AgentTaskScheduleSupport::state_for_outcome(&outcome),
@@ -152,16 +159,11 @@ fn execute_postprocess_step(
                     })
                     .collect(),
                 outputs: serde_json::json!({ "artifact_postprocess": result }),
-                metadata: serde_json::json!({ "step_kind": "artifact_postprocess", "required": step.required, "root": root }),
+                metadata: serde_json::json!({ "step_kind": "artifact_postprocess", "required": step.required, "optional_failure": failed && !step.required, "root": root }),
                 ..Default::default()
             }
         }
-        Err(error) => postprocess_outcome(
-            step,
-            AgentTaskOutcomeStatus::Failed,
-            &error.message,
-            Some(error.message.clone()),
-        ),
+        Err(error) => postprocess_failure_outcome(step, &error.message),
     }
 }
 
@@ -174,6 +176,10 @@ fn postprocess_root(run_id: Option<&str>, step_id: &str) -> PathBuf {
             run_id.unwrap_or("unrecorded-run"),
         ))
         .join(homeboy_core::paths::sanitize_path_segment(step_id))
+}
+
+fn postprocess_checkpoint_path(run_id: Option<&str>, step_id: &str) -> PathBuf {
+    postprocess_root(run_id, step_id).join("checkpoint.json")
 }
 
 fn materialize_dependency_artifacts(
@@ -197,7 +203,7 @@ fn materialize_dependency_artifacts(
             }
             let destination = input
                 .join(homeboy_core::paths::sanitize_path_segment(dependency))
-                .join(homeboy_core::paths::sanitize_path_segment(&artifact.id));
+                .join(materialized_artifact_name(artifact));
             if let Some(parent) = destination.parent() {
                 std::fs::create_dir_all(parent).map_err(|error| {
                     homeboy_core::Error::internal_io(
@@ -215,6 +221,27 @@ fn materialize_dependency_artifacts(
         }
     }
     Ok(())
+}
+
+fn materialized_artifact_name(artifact: &AgentTaskArtifact) -> String {
+    let candidate = artifact
+        .name
+        .as_deref()
+        .or_else(|| {
+            Path::new(&artifact.id)
+                .file_name()
+                .and_then(|name| name.to_str())
+        })
+        .unwrap_or(&artifact.id);
+    let path = Path::new(candidate);
+    if !candidate.is_empty()
+        && !path.is_absolute()
+        && path.components().count() == 1
+        && !candidate.contains(['/', '\\'])
+    {
+        return candidate.to_string();
+    }
+    homeboy_core::paths::sanitize_path_segment(&artifact.id)
 }
 
 fn postprocess_outcome(
@@ -240,6 +267,60 @@ fn postprocess_outcome(
         metadata: serde_json::json!({ "step_kind": "artifact_postprocess", "required": step.required }),
         ..Default::default()
     }
+}
+
+fn postprocess_failure_outcome(
+    step: &AgentTaskArtifactPostprocessStep,
+    message: &str,
+) -> AgentTaskOutcome {
+    let status = if step.required {
+        AgentTaskOutcomeStatus::Failed
+    } else {
+        AgentTaskOutcomeStatus::Succeeded
+    };
+    let mut outcome = postprocess_outcome(step, status, message, Some(message.to_string()));
+    outcome.metadata["optional_failure"] = serde_json::json!(!step.required);
+    outcome
+}
+
+#[derive(Serialize, Deserialize)]
+struct PostprocessCheckpoint {
+    schema: String,
+    step_id: String,
+    outcome: AgentTaskOutcome,
+}
+
+fn read_checkpoint(path: &Path) -> Option<AgentTaskOutcome> {
+    let checkpoint: PostprocessCheckpoint =
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    (checkpoint.schema == "homeboy/agent-task-postprocess-checkpoint/v1")
+        .then_some(checkpoint.outcome)
+}
+
+fn write_checkpoint(
+    path: &Path,
+    step: &AgentTaskArtifactPostprocessStep,
+    outcome: &AgentTaskOutcome,
+) -> homeboy_core::Result<()> {
+    let parent = path.parent().expect("checkpoint has parent");
+    std::fs::create_dir_all(parent).map_err(|error| {
+        homeboy_core::Error::internal_io(error.to_string(), Some(parent.display().to_string()))
+    })?;
+    let payload = serde_json::to_vec_pretty(&PostprocessCheckpoint {
+        schema: "homeboy/agent-task-postprocess-checkpoint/v1".to_string(),
+        step_id: step.id.clone(),
+        outcome: outcome.clone(),
+    })
+    .map_err(|error| {
+        homeboy_core::Error::internal_json(error.to_string(), Some(path.display().to_string()))
+    })?;
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&temporary, payload).map_err(|error| {
+        homeboy_core::Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
+    })?;
+    std::fs::rename(&temporary, path).map_err(|error| {
+        homeboy_core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
+    })
 }
 
 #[cfg(test)]
@@ -300,6 +381,133 @@ mod tests {
             assert_eq!(
                 result.artifacts[0].sha256.as_deref().map(str::len),
                 Some(64)
+            );
+        });
+    }
+
+    #[test]
+    fn optional_step_failure_is_visible_without_failing_the_aggregate() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let step = AgentTaskArtifactPostprocessStep {
+                id: "optional-compose".to_string(),
+                depends_on: vec!["capture".to_string()],
+                required: false,
+                plan: ArtifactPostprocessPlan {
+                    schema: ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string(),
+                    plan_id: "optional-compose".to_string(),
+                    artifact_roots: vec![ArtifactPostprocessRoot {
+                        id: "output".to_string(),
+                        path: "unused".to_string(),
+                        persisted_ref: None,
+                        manifest_path: None,
+                    }],
+                    actions: vec![ArtifactPostprocessAction {
+                        id: Some("fail".to_string()),
+                        helper: "sh".to_string(),
+                        action: "-c".to_string(),
+                        input: None,
+                        output: "unused.bin".to_string(),
+                        parameters: BTreeMap::from([(
+                            "args".to_string(),
+                            serde_json::json!(["exit 3"]),
+                        )]),
+                        required: true,
+                    }],
+                    reviewer_refs: Vec::new(),
+                    metadata: serde_json::json!({}),
+                },
+            };
+            let mut outcomes = vec![AgentTaskOutcome {
+                task_id: "capture".to_string(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                ..Default::default()
+            }];
+            let mut events = Vec::new();
+            run_postprocess_steps(
+                &AgentTaskPlan {
+                    postprocess_steps: vec![step],
+                    ..AgentTaskPlan::new("optional", Vec::new())
+                },
+                Some("optional-run"),
+                &mut outcomes,
+                &mut events,
+                &AgentTaskCancellationToken::default(),
+            );
+
+            let optional = outcomes.last().expect("optional outcome");
+            assert_eq!(optional.status, AgentTaskOutcomeStatus::Succeeded);
+            assert_eq!(optional.metadata["optional_failure"], true);
+            assert_eq!(
+                AgentTaskScheduleSupport::aggregate_status(&outcomes),
+                AgentTaskAggregateStatus::Succeeded
+            );
+        });
+    }
+
+    #[test]
+    fn checkpoint_reuses_completed_step_after_interruption() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = home.path().join("capture.bin");
+            std::fs::write(&source, [1, 2, 3]).expect("input");
+            let producer = AgentTaskOutcome {
+                task_id: "capture".to_string(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                artifacts: vec![AgentTaskArtifact {
+                    id: "capture.bin".to_string(),
+                    kind: "capture".to_string(),
+                    path: Some(source.display().to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let step = AgentTaskArtifactPostprocessStep {
+                id: "compose".to_string(), depends_on: vec!["capture".to_string()], required: true,
+                plan: ArtifactPostprocessPlan {
+                    schema: ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string(), plan_id: "compose".to_string(),
+                    artifact_roots: vec![ArtifactPostprocessRoot { id: "output".to_string(), path: "unused".to_string(), persisted_ref: None, manifest_path: None }],
+                    actions: vec![ArtifactPostprocessAction {
+                        id: Some("copy".to_string()), helper: "sh".to_string(), action: "-c".to_string(),
+                        input: Some("${run.input}/capture/capture.bin".to_string()), output: "result.bin".to_string(),
+                        parameters: BTreeMap::from([("args".to_string(), serde_json::json!(["cp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\"; printf x >> \"$HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT/count\""]))]), required: true,
+                    }], reviewer_refs: Vec::new(), metadata: serde_json::json!({}),
+                },
+            };
+            let plan = AgentTaskPlan {
+                postprocess_steps: vec![step],
+                ..AgentTaskPlan::new("resume", Vec::new())
+            };
+            let mut first = vec![producer.clone()];
+            let mut events = Vec::new();
+            run_postprocess_steps(
+                &plan,
+                Some("resume-run"),
+                &mut first,
+                &mut events,
+                &AgentTaskCancellationToken::default(),
+            );
+            let output = first.last().expect("first outcome").artifacts[0]
+                .path
+                .clone()
+                .expect("output");
+            let count = Path::new(&output)
+                .parent()
+                .expect("output parent")
+                .join("count");
+
+            let mut resumed = vec![producer];
+            run_postprocess_steps(
+                &plan,
+                Some("resume-run"),
+                &mut resumed,
+                &mut events,
+                &AgentTaskCancellationToken::default(),
+            );
+            assert_eq!(std::fs::read_to_string(count).expect("count"), "x");
+            assert_eq!(
+                resumed.last().expect("resumed outcome").artifacts[0]
+                    .path
+                    .as_deref(),
+                Some(output.as_str())
             );
         });
     }
