@@ -1,6 +1,8 @@
 # Documentation Structure
 
-Standard patterns for organizing documentation files and directories.
+Standard patterns for organizing documentation files and directories. These
+rules describe Homeboy's own `docs/` tree; downstream projects managed by
+Homeboy may differ.
 
 ## Directory Conventions
 
@@ -8,19 +10,31 @@ Standard patterns for organizing documentation files and directories.
 User-facing documentation lives in `/docs` at the project root. This directory is always included in documentation scans regardless of `.gitignore` patterns.
 
 ### Subdirectory Organization
-Create subdirectories that mirror actual code extensions:
+Group subdirectories by audience and purpose, and let each one carry an entry
+point. Homeboy's own tree:
 
 ```
 docs/
-├── api/                    # REST API documentation
-│   ├── authentication.md   # Auth endpoints
-│   └── users.md           # User endpoints
-├── components/            # UI component documentation
-│   ├── forms.md           # Form components
-│   └── navigation.md      # Navigation components
-└── configuration/         # Configuration documentation
-    └── settings.md        # Application settings
+├── index.md                # Entry point for the whole tree
+├── commands/               # Hand-written command narrative
+│   └── agent-task.md
+├── reference/              # Generated reference material
+│   ├── index.md
+│   └── cli/commands/index.md
+├── concepts/               # Conceptual explanation
+│   └── index.md
+├── workflows/              # Task-oriented guides
+│   └── index.md
+├── operations/             # Running Homeboy
+│   └── index.md
+└── internals/              # For people maintaining Homeboy itself
+    ├── index.md
+    └── docs-maintenance/index.md
 ```
+
+`docs/commands/*.md` and `docs/reference/cli/commands/*.md` are deliberately
+not duplicates: the first is hand-written narrative, the second is generated
+from the clap command tree. They cross-link and must not be consolidated.
 
 ### Hierarchical Depth
 Match the depth of code organization. If code has nested extensions, documentation can have nested subdirectories. Avoid unnecessary nesting.
@@ -33,26 +47,28 @@ File names describe the functionality being documented:
 - `user-management.md` not `users.md`
 - `form-validation.md` not `forms.md`
 
-### No Generic Names
-Never use generic names like `readme.md`, `index.md`, or `overview.md` in subdirectories. Each file should have a specific, descriptive name.
+### Descriptive Names For Content Files
+Every file that documents something specific gets a specific name. Do not use
+`readme.md` or `overview.md` inside `docs/`.
 
 ### Directory Entry Points
-When a directory needs an introductory file (architecture overview, component listing, how pieces connect), name it after the directory:
+When a directory needs an introductory file (what lives here, how the pieces
+connect, where to go next), name it `index.md`:
 
 ```
-blocks/
-├── blocks.md              # Entry point: "What is the blocks extension?"
-├── class-wp-block.md      # Specific component
-├── functions.md           # Function reference
-└── hooks.md               # Hook reference
+internals/
+├── index.md               # Entry point: "What is in internals?"
+├── docs-maintenance/
+│   └── index.md           # Entry point for docs-maintenance
+└── developer-guide/
+    └── architecture-cleanup-map.md
 ```
 
-The pattern {directory}/{directory}.md serves as the natural entry point:
-- api/api.md — API extension introduction
-- cache/cache.md — Cache system overview
-- rest-api/rest-api.md — REST API architecture
-
-This is descriptive (tells you it's THE blocks doc) while serving as an obvious starting point for navigation.
+`{directory}/index.md` is the convention throughout this tree, it is what
+`docs/index.md` and `README.md` link to, and the generated CLI reference emits
+`docs/reference/cli/commands/index.md` as a required page. An earlier revision
+of this file banned `index.md` in subdirectories; that rule never matched the
+repository and is withdrawn.
 
 ### Kebab-Case
 Use kebab-case for all file names: `user-authentication.md`, `api-reference.md`
@@ -63,34 +79,34 @@ Use kebab-case for all file names: `user-authentication.md`, `api-reference.md`
 Every documentation file starts with a single H1 title describing what the file covers:
 
 ```markdown
-# User Authentication
+# Configuration Precedence Map
 
-Content about user authentication...
+Content about how overlapping config schemas resolve...
 ```
 
 ### Section Headers
 Use H2 for major sections, H3 for subsections:
 
 ```markdown
-# User Authentication
+# Runner Contract
 
-## Login Methods
+## Step Filtering
 
-### Email/Password
+### Include Semantics
 
-### OAuth Providers
+### Skip Semantics
 
-## Session Management
+## Environment Mapping
 ```
 
 ### Code Examples
-Include code examples from actual implementation. Use appropriate language hints:
+Include code examples from actual implementation. Use appropriate language hints — in this repository that is usually `bash` for command usage and `rust` or `json` for contracts:
 
-```markdown
-```php
-$user = get_user_by('email', $email);
+````markdown
+```bash
+homeboy agent-task status <run-id>
 ```
-```
+````
 
 ## Content Organization
 
@@ -120,8 +136,9 @@ For configuration documentation, organize by:
 These belong elsewhere, not in `/docs`:
 - CLAUDE.md / AGENTS.md (project root)
 - README.md (project root or component roots)
-- CHANGELOG.md (project root)
 - Build documentation (in code comments or separate dev docs)
+
+`docs/changelog.md` is the exception: it lives in `/docs` because `homeboy release` generates it. Never hand-edit it.
 
 ## Documentation Commands
 

@@ -765,6 +765,11 @@ where
                     let outcome =
                         AgentTaskScheduleSupport::normalize_outcome(outcome, Some(&running_task));
                     let mut outcome = outcome;
+                    // Timeout reconciliation can discover a patch written after
+                    // the provider returned its incomplete result. Bind those
+                    // late artifacts to this exact execution before selecting a
+                    // recoverable candidate for promotion.
+                    finalize_candidate_artifacts(&mut outcome, &running_task);
                     if running_task.timeout_cancel_requested {
                         // Cancellation was requested at the deadline and this
                         // result proves the provider no longer owns the checkout.

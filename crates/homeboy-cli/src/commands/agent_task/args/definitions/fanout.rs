@@ -16,13 +16,28 @@ pub enum AgentTaskFanoutCommand {
     /// `--private-verify`. The gate is not optional — a child cook that cannot
     /// verify its work cannot promote it (#9838).
     CookBatch(AgentTaskFanoutCookBatchArgs),
+    /// Normalize and inspect a batch-cook plan without submitting or running it.
     Plan(AgentTaskFanoutPlanArgs),
+    /// Submit a batch of independent cooks and print the exact per-cook commands
+    /// for runner or operator execution.
     Submit(AgentTaskFanoutSubmitArgs),
+    /// Submit a durable batch of independent `AgentTaskPlan` tasks as one queued
+    /// child run per packet.
+    ///
+    /// Provider-neutral by design: drive execution with `agent-task run-next` or
+    /// an existing runner queue loop, then reconcile with `fanout status` and
+    /// `fanout artifacts`.
     SubmitBatch(AgentTaskFanoutSubmitBatchArgs),
+    /// Read durable batch state and per-child run status.
     Status(AgentTaskFanoutBatchStatusArgs),
     /// Resume a durable fanout batch after coordinator loss: idempotently harvest terminal children through gates, commit, push, and PR finalization.
     Resume(AgentTaskFanoutBatchStatusArgs),
+    /// List artifacts recorded by a durable batch's child runs.
     Artifacts(AgentTaskFanoutBatchStatusArgs),
+    /// Execute each cook in a batch-cook plan through the cook-loop service and
+    /// return a batch summary.
+    ///
+    /// Successful child cooks open or update their own pull requests.
     RunPlan(AgentTaskFanoutRunPlanArgs),
 }
 

@@ -201,6 +201,199 @@ pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
     ))
 }
 
+/// Probe the continuation admission boundary without claiming a continuation or
+/// calling any execution, transport, or finalization API.
+pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
+    let mut phases = Vec::new();
+    let mut selected_run_id = None;
+    let mut candidate_fingerprint = Value::Null;
+    let recipe =
+        match agent_task_service::load_recipe(&args.cook_or_attempt_id).or_else(|cook_error| {
+            agent_task_service::load_recipe_for_attempt(&args.cook_or_attempt_id)?.ok_or(cook_error)
+        }) {
+            Ok(recipe) => {
+                phases.push(
+                    serde_json::json!({ "phase": "recipe", "status": "passed", "reason": "ok" }),
+                );
+                recipe
+            }
+            Err(error) => {
+                return Ok((
+                    cook_continuation_preflight_report(None, Value::Null, phases, "recipe", &error),
+                    1,
+                ))
+            }
+        };
+    let run_id =
+        match agent_task_service::resolve_cook_continuation_run_id(&args.cook_or_attempt_id) {
+            Ok(run_id) => {
+                selected_run_id = Some(run_id.clone());
+                phases.push(
+                    serde_json::json!({ "phase": "selection", "status": "passed", "reason": "ok" }),
+                );
+                run_id
+            }
+            Err(error) => {
+                return Ok((
+                    cook_continuation_preflight_report(
+                        selected_run_id,
+                        Value::Null,
+                        phases,
+                        "selection",
+                        &error,
+                    ),
+                    1,
+                ))
+            }
+        };
+    let record = match agent_task_service::reconcile_recipe_attempt_for_continuation(
+        &recipe, &run_id,
+    ) {
+        Ok(record) => {
+            candidate_fingerprint = record
+                .metadata
+                .pointer("/latest_promotion/provenance/candidate")
+                .cloned()
+                .unwrap_or(Value::Null);
+            phases.push(serde_json::json!({ "phase": "lifecycle", "status": "passed", "reason": "ok", "state": format!("{:?}", record.state) }));
+            record
+        }
+        Err(error) => {
+            return Ok((
+                cook_continuation_preflight_report(
+                    selected_run_id,
+                    candidate_fingerprint,
+                    phases,
+                    "lifecycle",
+                    &error,
+                ),
+                1,
+            ))
+        }
+    };
+    if !matches!(
+        record.state,
+        agent_task_lifecycle::AgentTaskRunState::Succeeded
+            | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
+            | agent_task_lifecycle::AgentTaskRunState::PartialFailure
+            | agent_task_lifecycle::AgentTaskRunState::Failed
+            | agent_task_lifecycle::AgentTaskRunState::Cancelled
+    ) {
+        let error = homeboy::core::Error::validation_invalid_argument(
+            "cook_or_attempt_id",
+            "selected Cook attempt is not terminal and cannot be admitted to dispatch",
+            Some(run_id),
+            None,
+        );
+        return Ok((
+            cook_continuation_preflight_report(
+                selected_run_id,
+                candidate_fingerprint,
+                phases,
+                "lifecycle",
+                &error,
+            ),
+            1,
+        ));
+    }
+    let dispatcher = match crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(
+        &recipe.promotion_transport["attempt_dispatch"],
+    ) {
+        Ok(dispatcher) => {
+            phases.push(
+                serde_json::json!({ "phase": "transport", "status": "passed", "reason": "ok" }),
+            );
+            dispatcher
+        }
+        Err(error) => {
+            return Ok((
+                cook_continuation_preflight_report(
+                    selected_run_id,
+                    candidate_fingerprint,
+                    phases,
+                    "transport",
+                    &error,
+                ),
+                1,
+            ))
+        }
+    };
+    let attempt = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == run_id)
+        .expect("continuation selection is recipe-bound");
+    let terminal_review =
+        agent_task_service::terminal_review_form_continuation_is_eligible(&attempt.plan, &record)?;
+    let mut options = match if terminal_review {
+        agent_task_service::reconstruct_adoption_options_with_dispatcher(&recipe, dispatcher)
+    } else {
+        agent_task_service::reconstruct_options_with_dispatcher(&recipe, dispatcher)
+    } {
+        Ok(options) => options,
+        Err(error) => {
+            return Ok((
+                cook_continuation_preflight_report(
+                    selected_run_id,
+                    candidate_fingerprint,
+                    phases,
+                    "recipe",
+                    &error,
+                ),
+                1,
+            ))
+        }
+    };
+    options.initial_run_id = attempt.run_id.clone();
+    options.initial_plan = attempt.plan.clone();
+    if let Err(error) = agent_task_service::preflight_cook_continuation_admission(&options) {
+        return Ok((
+            cook_continuation_preflight_report(
+                selected_run_id,
+                candidate_fingerprint,
+                phases,
+                "provider_workspace_baseline",
+                &error,
+            ),
+            1,
+        ));
+    }
+    phases.push(serde_json::json!({ "phase": "provider_workspace_baseline", "status": "passed", "reason": "ok" }));
+    phases.push(
+        serde_json::json!({ "phase": "candidate_admission", "status": "passed", "reason": "ok" }),
+    );
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-cook-continue-preflight/v1",
+            "admitted": true,
+            "selected_attempt": { "run_id": selected_run_id },
+            "candidate_fingerprint": candidate_fingerprint,
+            "phases": phases,
+            "side_effects": { "provider_dispatch": false, "git_mutation": false, "github_mutation": false, "finalization": false }
+        }),
+        0,
+    ))
+}
+
+fn cook_continuation_preflight_report(
+    selected_run_id: Option<String>,
+    candidate_fingerprint: Value,
+    mut phases: Vec<Value>,
+    phase: &str,
+    error: &homeboy::core::Error,
+) -> Value {
+    phases.push(serde_json::json!({ "phase": phase, "status": "blocked", "reason": format!("{:?}", error.code), "message": error.message }));
+    serde_json::json!({
+        "schema": "homeboy/agent-task-cook-continue-preflight/v1",
+        "admitted": false,
+        "selected_attempt": { "run_id": selected_run_id },
+        "candidate_fingerprint": candidate_fingerprint,
+        "phases": phases,
+        "side_effects": { "provider_dispatch": false, "git_mutation": false, "github_mutation": false, "finalization": false }
+    })
+}
+
 fn cook_continuation_pending(cook_id: &str, run_id: &str, provider_state: &str) -> Value {
     serde_json::json!({
         "schema": "homeboy/agent-task-cook/v1",
@@ -1207,7 +1400,10 @@ pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cook_report_with_continuation, durable_cook_identity_lines};
+    use super::{
+        cook_report_with_continuation, durable_cook_identity_lines, preflight_continue_cook,
+    };
+    use crate::commands::agent_task::args::CookContinueArgs;
 
     #[test]
     fn durable_cook_identity_block_leads_with_the_run_id_and_follow_up_commands() {
@@ -1251,5 +1447,34 @@ mod tests {
             report["continuation_command"],
             "homeboy agent-task cook-continue cook-1-attempt-1"
         );
+    }
+
+    #[test]
+    fn cook_continue_preflight_reports_a_read_only_rejection_without_creating_a_run() {
+        crate::test_support::with_isolated_home(|_| {
+            let before = homeboy::agents::agent_tasks::lifecycle::list_records()
+                .expect("read initial lifecycle records");
+            let (report, exit_code) = preflight_continue_cook(CookContinueArgs {
+                cook_or_attempt_id: "missing-cook".to_string(),
+                preflight: true,
+                full: false,
+            })
+            .expect("preflight returns a machine-readable rejection");
+            let after = homeboy::agents::agent_tasks::lifecycle::list_records()
+                .expect("read lifecycle records after preflight");
+
+            assert_eq!(exit_code, 1);
+            assert_eq!(report["admitted"], false);
+            assert_eq!(report["phases"][0]["phase"], "recipe");
+            assert_eq!(report["side_effects"]["provider_dispatch"], false);
+            assert_eq!(report["side_effects"]["git_mutation"], false);
+            assert_eq!(report["side_effects"]["github_mutation"], false);
+            assert_eq!(report["side_effects"]["finalization"], false);
+            assert_eq!(
+                before.len(),
+                after.len(),
+                "preflight must not materialize a run"
+            );
+        });
     }
 }

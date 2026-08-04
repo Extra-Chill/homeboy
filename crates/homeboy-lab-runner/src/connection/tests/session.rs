@@ -610,6 +610,45 @@ fn equal_version_build_identity_and_runtime_paths_are_current() {
         &[],
         &[],
     ));
+    assert!(
+        RunnerAvailability::from_status_parts(
+            "homeboy-lab",
+            true,
+            false,
+            0,
+            &RunnerActiveJobState::Available,
+            None,
+        )
+        .accepts_jobs
+    );
+}
+
+#[test]
+fn identical_rendered_runtime_identities_are_current_without_refresh() {
+    let identity = "homeboy 0.328.0+1e63f1ae0369";
+    let warning = RunnerStaleDaemonWarning::new(
+        "homeboy-lab",
+        "0.328.0".to_string(),
+        "0.328.0".to_string(),
+        Some(identity.to_string()),
+        Some(identity.to_string()),
+    );
+
+    assert!(daemon_runtime_is_current(
+        "0.328.0",
+        "0.328.0",
+        "0.328.0",
+        IdentityComparison::Match,
+        &[],
+        &[],
+    ));
+    assert_eq!(
+        warning.mismatch_predicate,
+        "daemon_configured_identity == equal"
+    );
+    assert!(warning.recovery_commands.is_empty());
+    assert!(warning.refresh_command.is_empty());
+    assert!(warning.message.contains("equal immutable identities"));
 }
 
 #[test]
@@ -710,6 +749,23 @@ fn equal_versions_with_different_build_identities_are_stale_and_name_both_builds
     assert!(warning.message.contains("homeboy 0.296.3+daemon-build"));
     assert!(warning.message.contains("homeboy 0.296.3+job-build"));
     assert!(!warning.message.contains("version `0.296.3` differs"));
+    assert_eq!(
+        warning.mismatch_predicate,
+        "active_daemon_control_plane_build_identity != job_command_binary_build_identity"
+    );
+    let diagnostics = serde_json::to_value(&warning).expect("serialize rejection diagnostics");
+    assert_eq!(
+        diagnostics["active_daemon_control_plane_build_identity"],
+        "homeboy 0.296.3+daemon-build"
+    );
+    assert_eq!(
+        diagnostics["job_command_binary_build_identity"],
+        "homeboy 0.296.3+job-build"
+    );
+    assert_eq!(
+        diagnostics["mismatch_predicate"],
+        "active_daemon_control_plane_build_identity != job_command_binary_build_identity"
+    );
 }
 
 #[test]

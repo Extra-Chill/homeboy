@@ -108,14 +108,31 @@ pub fn candidate_fingerprint(path: &str) -> Result<AgentTaskPromotionCandidate> 
     })
 }
 
+/// The candidate tree must be a pure function of the working tree, because it
+/// authenticates a candidate across time: a promotion records it, and
+/// moving-base recovery re-derives it to prove the destination still holds the
+/// exact promoted content.
+///
+/// Seeding the scratch index from `HEAD` rather than copying the live index is
+/// what makes that true. A copied index carries Git's stat cache, and `git add`
+/// skips any file whose stat still matches its cached entry — so a file that
+/// was modified without a stat change keeps its stale blob and the tree
+/// silently describes content that is not on disk. `read-tree` writes entries
+/// with no stat data, so every working-tree file is re-hashed.
 fn candidate_tree(path: &str) -> Result<String> {
-    let index = text(run_git(path, &["rev-parse", "--git-path", "index"])?);
-    let index = Path::new(path).join(index.trim());
     let temporary = tempfile::NamedTempFile::new()
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.to_string())))?;
-    std::fs::copy(&index, temporary.path()).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(index.display().to_string()))
-    })?;
+    let output = Command::new("git")
+        .args(["read-tree", "HEAD"])
+        .current_dir(path)
+        .env("GIT_INDEX_FILE", temporary.path())
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if !output.status.success() {
+        return Err(Error::git_command_failed(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
     let output = Command::new("git")
         .args(["add", "-A"])
         .current_dir(path)

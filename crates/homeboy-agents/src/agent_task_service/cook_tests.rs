@@ -33,10 +33,81 @@ use homeboy_core::run_lifecycle_record::{
     ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
     RunLifecycleRecord,
 };
+use serde::Deserialize;
 use sha2::Digest;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Condvar};
+
+const DURABLE_COOK_FIXTURE_SCHEMA: &str = "homeboy/durable-cook-fixture/v1";
+
+#[derive(Debug, Deserialize)]
+struct DurableCookFixture {
+    schema: String,
+    producer: DurableCookFixtureProducer,
+    cook: DurableCookFixtureCook,
+    source_record: DurableCookFixtureSourceRecord,
+    continuation_record: DurableCookFixtureContinuationRecord,
+}
+
+#[derive(Debug, Deserialize)]
+struct DurableCookFixtureProducer {
+    runtime: String,
+    run_record_schema: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DurableCookFixtureCook {
+    id: String,
+    source_attempt: u32,
+    continuation_attempt: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct DurableCookFixtureSourceRecord {
+    schema: String,
+    state: String,
+    latest_promotion: DurableCookFixturePromotion,
+}
+
+#[derive(Debug, Deserialize)]
+struct DurableCookFixturePromotion {
+    status: String,
+    post_apply: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct DurableCookFixtureContinuationRecord {
+    schema: String,
+    state: String,
+    latest_promotion: DurableCookFixtureContinuationPromotion,
+    aggregate: DurableCookFixtureAggregate,
+}
+
+#[derive(Debug, Deserialize)]
+struct DurableCookFixtureContinuationPromotion {
+    follow_up_kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DurableCookFixtureAggregate {
+    status: String,
+    outcome_status: String,
+}
+
+fn durable_cook_0_328_fixture() -> DurableCookFixture {
+    let fixture: DurableCookFixture = serde_json::from_str(include_str!(
+        "fixtures/durable_cook_0.328_review_form_timeout.json"
+    ))
+    .expect("0.328 durable Cook fixture is valid JSON");
+    assert_eq!(fixture.schema, DURABLE_COOK_FIXTURE_SCHEMA);
+    assert_eq!(fixture.producer.runtime, "0.328.1");
+    assert_eq!(
+        fixture.producer.run_record_schema,
+        "homeboy/agent-task-run/v1"
+    );
+    fixture
+}
 
 /// Seed a terminal aggregate whose last outcome carries a valid AI-authored
 /// review form under `outputs["review_form"]`, so cook finalization (which now
@@ -130,6 +201,29 @@ fn terminal_review_form_continuation_rejects_generic_failed_and_cancelled_runs()
                     .unwrap()
             );
         }
+    });
+}
+
+#[test]
+fn durable_cook_inspection_reports_an_unsupported_run_schema() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = batch_cook_options(
+            "unsupported-durable-cook-schema",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        let run_id = "unsupported-durable-cook-schema-attempt-1";
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).unwrap();
+        agent_task_lifecycle::inject_raw_record_metadata_for_corruption_test(run_id, |metadata| {
+            metadata["agent_task_run"]["schema"] = serde_json::json!("homeboy/agent-task-run/v999");
+        })
+        .unwrap();
+
+        let error = agent_task_lifecycle::status(run_id)
+            .expect_err("unsupported durable record schema must be diagnosable");
+        assert!(error
+            .message
+            .contains("unsupported durable agent-task run schema"));
+        assert!(error.message.contains("homeboy/agent-task-run/v999"));
     });
 }
 
@@ -6282,6 +6376,7 @@ fn fresh_cook_has_no_tracked_promotion_before_lifecycle_materialization() {
 #[test]
 fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() {
     homeboy_core::test_support::with_isolated_home(|_| {
+        let fixture = durable_cook_0_328_fixture();
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("source");
         let target = temp.path().join("candidate");
@@ -6321,7 +6416,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
 
         let mut options = tracked_promotion_continuation_options(
-            "cook-tracked-promotion",
+            &fixture.cook.id,
             "run-tracked-promotion",
             &target,
         );
@@ -6421,7 +6516,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
         let mut historical = options.clone();
         historical.initial_plan = batch_cook_options(
-            "cook-historical-review-form",
+            &fixture.cook.id,
             Arc::new(AcceptedDetachedAttemptDispatcher),
         )
         .initial_plan;
@@ -6461,7 +6556,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         .unwrap();
         copied_promotion["source"]["run_id"] = serde_json::json!(historical.initial_run_id);
         copied_promotion["provenance"]["cook_follow_up"] = serde_json::json!({
-            "kind": "review_form_only",
+            "kind": fixture.continuation_record.latest_promotion.follow_up_kind,
             "source_run_id": source_options.initial_run_id,
         });
         agent_task_lifecycle::submit_plan(
@@ -6479,6 +6574,42 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             record.state = agent_task_lifecycle::AgentTaskRunState::PartialFailure;
         })
         .unwrap();
+
+        let source = persisted_promotion_for_attempt(&source_options.initial_run_id)
+            .unwrap()
+            .expect("fixture source promotion is inspectable");
+        let continuation = persisted_promotion_for_attempt(&historical.initial_run_id)
+            .unwrap()
+            .expect("fixture continuation promotion is inspectable");
+        assert_eq!(
+            serde_json::to_value(source.status).unwrap(),
+            fixture.source_record.latest_promotion.status
+        );
+        assert_eq!(fixture.source_record.schema, "homeboy/agent-task-run/v1");
+        assert_eq!(fixture.source_record.state, "succeeded");
+        assert!(!fixture.source_record.latest_promotion.post_apply);
+        assert_eq!(source.provenance.pointer("/post_apply"), None);
+        assert_eq!(
+            continuation.provenance["cook_follow_up"]["kind"],
+            fixture.continuation_record.latest_promotion.follow_up_kind
+        );
+        assert_eq!(fixture.cook.source_attempt, 1);
+        assert_eq!(fixture.cook.continuation_attempt, 2);
+        let aggregate = agent_task_lifecycle::read_aggregate(&historical.initial_run_id)
+            .expect("fixture continuation aggregate is inspectable");
+        assert_eq!(
+            serde_json::to_value(aggregate.status).unwrap(),
+            fixture.continuation_record.aggregate.status
+        );
+        assert_eq!(
+            serde_json::to_value(aggregate.outcomes[0].status).unwrap(),
+            fixture.continuation_record.aggregate.outcome_status
+        );
+        assert_eq!(
+            fixture.continuation_record.schema,
+            "homeboy/agent-task-run/v1"
+        );
+        assert_eq!(fixture.continuation_record.state, "partial_failure");
 
         assert!(
             authenticated_historical_review_form_workspace(&historical).unwrap(),
@@ -6507,6 +6638,15 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             error.details["workspace"]["classification"],
             "workspace.resolved_but_dirty"
         );
+        let trace = agent_task_lifecycle::status(&historical.initial_run_id)
+            .unwrap()
+            .metadata["cook_continuation_admission"]
+            .clone();
+        assert_eq!(
+            trace["first_authoritative_denial"],
+            "provider_baseline_verification"
+        );
+        assert_eq!(trace["predicates"][4]["outcome"], "fail");
         assert_eq!(executions.load(Ordering::SeqCst), 0);
 
         std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
@@ -6530,6 +6670,15 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             error.details["workspace"]["classification"],
             "workspace.resolved_but_dirty"
         );
+        let trace = agent_task_lifecycle::status(&historical.initial_run_id)
+            .unwrap()
+            .metadata["cook_continuation_admission"]
+            .clone();
+        assert_eq!(
+            trace["first_authoritative_denial"],
+            "terminal_review_form_eligibility"
+        );
+        assert_eq!(trace["predicates"][1]["outcome"], "fail");
         assert_eq!(executions.load(Ordering::SeqCst), 0);
 
         agent_task_lifecycle::rewrite_record_for_test(&historical.initial_run_id, |record| {
@@ -6559,6 +6708,15 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             error.details["workspace"]["classification"],
             "workspace.resolved_but_dirty"
         );
+        let trace = agent_task_lifecycle::status(&historical.initial_run_id)
+            .unwrap()
+            .metadata["cook_continuation_admission"]
+            .clone();
+        assert_eq!(
+            trace["first_authoritative_denial"],
+            "terminal_review_form_eligibility"
+        );
+        assert_eq!(trace["predicates"][1]["outcome"], "fail");
         assert_eq!(executions.load(Ordering::SeqCst), 0);
         agent_task_lifecycle::record_promotion(&historical.initial_run_id, copied_promotion)
             .unwrap();
@@ -6579,6 +6737,14 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             result.value.failure_context
         );
         assert_ne!(result.value.status, "durable_failure");
+        let trace = agent_task_lifecycle::status(&historical.initial_run_id)
+            .unwrap()
+            .metadata["cook_continuation_admission"]
+            .clone();
+        assert_eq!(trace["schema"], "homeboy/cook-continuation-admission/v1");
+        assert_eq!(trace["first_authoritative_denial"], serde_json::Value::Null);
+        assert_eq!(trace["predicates"].as_array().unwrap().len(), 8);
+        assert!(trace.to_string().len() < 2048, "trace remains bounded");
     });
 }
 
@@ -6639,7 +6805,7 @@ fn adopted_baseline_gate_outcome_is_candidate_bound_and_recovery_safe() {
 }
 
 #[test]
-fn normal_cook_finalizes_an_inherited_gate_failure_without_provider_retry() {
+fn closed_observer_pipe_does_not_stop_promotion_or_finalization() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("repository");
         let root = temp.path();
@@ -6713,10 +6879,22 @@ fn normal_cook_finalizes_an_inherited_gate_failure_without_provider_retry() {
         let finalization_count = Arc::clone(&finalized);
         let expected_base = base.clone();
         let expected_run_id = run_id.clone();
-        let result = run_cook_with_finalizer(
+        let observer_calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&observer_calls);
+        let observer = move |phase: &str, _: &str, _: &str| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            if phase == "promotion" {
+                return Err(Error::internal_io(
+                    "Broken pipe (os error 32)",
+                    Some("write submitting client stdout".to_string()),
+                ));
+            }
+            Ok(())
+        };
+        let result = run_cook_with_boundaries_observed(
             options,
             UnusedExecutor,
-            move |_, received_run, promotion| {
+            DefaultCookSideEffects::new(move |_, received_run, promotion| {
                 finalization_count.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(received_run, expected_run_id);
                 assert_eq!(promotion.verified_base.as_ref().unwrap().sha, expected_base);
@@ -6729,13 +6907,28 @@ fn normal_cook_finalizes_an_inherited_gate_failure_without_provider_retry() {
                     crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed
                 );
                 Ok(serde_json::json!({"status": "review_ready"}))
-            },
+            }),
+            Some(&observer),
         )
         .unwrap();
         assert_eq!(result.value.status, "review_ready", "{:#?}", result.value);
         assert_eq!(finalized.load(Ordering::SeqCst), 1);
+        assert!(observer_calls.load(Ordering::SeqCst) >= 1);
         let record = agent_task_lifecycle::status(&run_id).unwrap();
         assert_eq!(record.metadata["provider_executions_consumed"], 1);
+        assert_eq!(
+            record.metadata["cook_observer_events"][0]["kind"],
+            "delivery_failed"
+        );
+        assert_eq!(
+            record.metadata["cook_observer_events"][0]["phase"],
+            "promotion"
+        );
+        assert_eq!(
+            record.metadata["cook_progress"]["terminal_success"],
+            serde_json::json!(true),
+            "the disconnected observer can reconnect to the terminal durable result"
+        );
         let persisted = persisted_promotion_for_attempt(&run_id).unwrap().unwrap();
         assert_eq!(persisted.status, AgentTaskPromotionStatus::Applied);
         assert_eq!(persisted.deterministic_gates[0].exit_code, 1);
