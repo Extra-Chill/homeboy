@@ -1704,7 +1704,7 @@ fn materialize_snapshot_piped(
     action: &str,
     scratch: Option<&Path>,
 ) -> Result<()> {
-    let command = snapshot_materialization_command(local_path, target_command, excludes, scratch);
+    let command = snapshot_materialization_command(local_path, target_command, excludes, scratch)?;
     run_shell_command(&command, action)
 }
 
@@ -1722,12 +1722,12 @@ pub(super) fn snapshot_materialization_command(
     target_command: &str,
     excludes: &[String],
     scratch: Option<&Path>,
-) -> String {
-    let command = snapshot_archive_command(local_path, target_command, excludes);
-    match scratch {
+) -> Result<String> {
+    let command = snapshot_archive_command(local_path, target_command, excludes)?;
+    Ok(match scratch {
         Some(scratch) => scratch_scoped_command(&command, scratch),
         None => command,
-    }
+    })
 }
 
 /// Scope one snapshot command to an admitted controller scratch filesystem.
@@ -1749,15 +1749,12 @@ pub(super) fn snapshot_archive_command(
     local_path: &Path,
     target_command: &str,
     excludes: &[String],
-) -> String {
+) -> Result<String> {
     // A Git-backed snapshot overlays this archive onto an exact checkout. Keep
     // links whose resolved targets stay in the source tree so tracked Git links
     // retain their identity. Materialize only external dependency links: their
     // targets are unavailable at the runner, but plans may traverse them (#3913).
-    let root_anchored = excludes
-        .iter()
-        .filter(|pattern| pattern.starts_with("./"))
-        .collect::<Vec<_>>();
+    let root_excludes = excludes.to_vec();
     let excludes = excludes
         .iter()
         .filter(|pattern| !pattern.starts_with("./"))
@@ -1779,25 +1776,42 @@ pub(super) fn snapshot_archive_command(
     )
     };
 
-    if root_anchored.is_empty() {
-        let prepare = prepare(&format!("{source_archive} ."));
-        return format!(
-            "(cd {src} && {prepare} && {archive} .) | {target_command}",
-            src = shell::quote_arg(&local_path.display().to_string())
-        );
-    }
-
-    let root_filter = root_anchored
-        .iter()
-        .map(|pattern| format!("! -path {}", shell::quote_arg(pattern)))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let root_input = format!("find . -mindepth 1 -maxdepth 1 {root_filter} -print0",);
+    // Build both archive streams from the same controller-side manifest.
+    // Optional controller context paths may be absent from a clean source
+    // worktree; only entries observed under the selected root reach tar.
+    // Enumerating names does not read their contents, so tar remains the
+    // failure boundary for an existing unreadable input.
+    let root_input = snapshot_root_manifest_input(local_path, &root_excludes)?;
     let prepare = prepare(&format!("({root_input}) | {source_archive} --null -T -"));
-    format!(
+    Ok(format!(
         "(cd {src} && {prepare} && ({root_input}) | {archive} --null -T -) | {target_command}",
         src = shell::quote_arg(&local_path.display().to_string()),
-    )
+    ))
+}
+
+fn snapshot_root_manifest_input(local_path: &Path, excludes: &[String]) -> Result<String> {
+    let entries = fs::read_dir(local_path)
+        .map_err(|err| Error::internal_io(err.to_string(), Some("read snapshot root".to_string())))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("read snapshot root entry".to_string()),
+            )
+        })?;
+    let paths = entries
+        .iter()
+        .filter_map(|entry| {
+            let path = format!("./{}", entry.file_name().to_string_lossy());
+            (!is_excluded(local_path, &entry.path(), excludes, &[])).then_some(path)
+        })
+        .map(|path| shell::quote_arg(&path))
+        .collect::<Vec<_>>();
+    Ok(if paths.is_empty() {
+        "printf ''".to_string()
+    } else {
+        format!("printf '%s\\0' {}", paths.join(" "))
+    })
 }
 
 pub(crate) fn effective_snapshot_excludes(

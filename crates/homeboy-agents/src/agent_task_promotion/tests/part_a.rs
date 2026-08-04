@@ -67,17 +67,19 @@ fn adopted_workspace_wins_over_a_rejecting_configured_provider() {
         let marker = tempfile::NamedTempFile::new().expect("provider marker");
         let marker_path = marker.into_temp_path();
         std::fs::remove_file(&marker_path).expect("remove provider marker");
-        let provider = tempfile::NamedTempFile::new().expect("provider command");
+        let provider = tempfile::NamedTempFile::new()
+            .expect("provider command")
+            .into_temp_path();
         std::fs::write(
-            provider.path(),
+            &provider,
             format!("#!/bin/sh\ntouch '{}'\nexit 23\n", marker_path.display()),
         )
         .expect("write rejecting provider");
-        let mut permissions = std::fs::metadata(provider.path())
+        let mut permissions = std::fs::metadata(&provider)
             .expect("provider metadata")
             .permissions();
         permissions.set_mode(0o755);
-        std::fs::set_permissions(provider.path(), permissions).expect("make provider executable");
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
 
         worktree::adopt(WorktreeAdoptOptions {
             handle: "fixture@adopted".to_string(),
@@ -97,10 +99,7 @@ fn adopted_workspace_wins_over_a_rejecting_configured_provider() {
                 lookup_timeout_ms: 10_000,
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
-                    resolve: Some(vec![
-                        provider.path().display().to_string(),
-                        "{handle}".to_string(),
-                    ]),
+                    resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
                     ..Default::default()
                 },
                 list_result_mapping: Some(WorktreeProviderListResultMapping {

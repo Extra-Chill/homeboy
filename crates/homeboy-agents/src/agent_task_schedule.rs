@@ -28,6 +28,7 @@ mod plan {
         pub output_dependencies: HashMap<String, AgentTaskOutputDependencies>,
         pub artifact_outputs: HashMap<String, Vec<AgentTaskArtifactOutputDeclaration>>,
         pub postprocess_steps: Vec<AgentTaskArtifactPostprocessStep>,
+        pub services: Vec<AgentTaskManagedService>,
         pub options: AgentTaskScheduleOptions,
         pub metadata: Value,
         pub workspace_identity: Option<WorkspaceIdentity>,
@@ -47,6 +48,7 @@ mod plan {
                 output_dependencies: HashMap::new(),
                 artifact_outputs: HashMap::new(),
                 postprocess_steps: Vec::new(),
+                services: Vec::new(),
                 options: AgentTaskScheduleOptions::default(),
                 metadata: Value::Null,
                 workspace_identity: None,
@@ -135,6 +137,11 @@ mod plan {
                 .get("metadata")
                 .cloned()
                 .unwrap_or(Value::Null);
+            let services = homeboy_plan
+                .inputs
+                .get("managed_services")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_default();
 
             Self {
                 schema,
@@ -145,6 +152,7 @@ mod plan {
                 output_dependencies,
                 artifact_outputs,
                 postprocess_steps,
+                services,
                 options,
                 metadata,
                 workspace_identity: None,
@@ -193,6 +201,12 @@ mod plan {
                 plan.inputs.insert(
                     "component_contracts".to_string(),
                     serde_json::to_value(&self.component_contracts).unwrap_or(Value::Null),
+                );
+            }
+            if !self.services.is_empty() {
+                plan.inputs.insert(
+                    "managed_services".to_string(),
+                    serde_json::to_value(&self.services).unwrap_or(Value::Null),
                 );
             }
             plan.policy.insert(
@@ -309,6 +323,8 @@ mod plan {
         artifact_outputs: HashMap<String, Vec<AgentTaskArtifactOutputDeclaration>>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         postprocess_steps: Vec<AgentTaskArtifactPostprocessStep>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        services: Vec<AgentTaskManagedService>,
         #[serde(default)]
         options: AgentTaskScheduleOptions,
         #[serde(default, skip_serializing_if = "Value::is_null")]
@@ -341,6 +357,7 @@ mod plan {
                 output_dependencies: self.output_dependencies,
                 artifact_outputs: self.artifact_outputs,
                 postprocess_steps: self.postprocess_steps,
+                services: self.services,
                 options: self.options,
                 metadata: self.metadata,
                 workspace_identity: self.workspace_identity,
@@ -364,6 +381,7 @@ mod plan {
                 output_dependencies: plan.output_dependencies.clone(),
                 artifact_outputs: plan.artifact_outputs.clone(),
                 postprocess_steps: plan.postprocess_steps.clone(),
+                services: plan.services.clone(),
                 options: plan.options.clone(),
                 metadata: plan.metadata.clone(),
                 workspace_identity: plan.workspace_identity.clone(),
@@ -742,3 +760,80 @@ pub use cancellation::*;
 pub use defaults::*;
 pub use homeboy_core::agent_task_config::*;
 pub use plan::*;
+
+#[cfg(test)]
+mod managed_service_plan_tests {
+    use super::*;
+
+    #[test]
+    fn task_only_plans_remain_byte_compatible_and_services_round_trip_through_homeboy_plan() {
+        let task_only = AgentTaskPlan::new("task-only", Vec::new());
+        assert!(serde_json::to_value(&task_only)
+            .unwrap()
+            .get("services")
+            .is_none());
+
+        let mut plan = AgentTaskPlan::new("services", Vec::new());
+        plan.services.push(AgentTaskManagedService {
+            version: AgentTaskManagedService::VERSION,
+            id: "preview".to_string(),
+            command: vec!["server".to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            env_allowlist: Vec::new(),
+            secret_env: vec!["TOKEN".to_string()],
+            secret_env_plan: None,
+            host: "127.0.0.1".to_string(),
+            port: Some(3000),
+            port_env: None,
+            readiness: None,
+            public_url: Some("https://preview.example.test".to_string()),
+            lifecycle: AgentTaskManagedServiceLifecycle::Plan,
+            target: None,
+        });
+        plan.rebuild_homeboy_plan();
+        let round_trip = AgentTaskPlan::from_homeboy_plan(plan.homeboy_plan.clone());
+        assert_eq!(round_trip.services, plan.services);
+    }
+
+    #[test]
+    fn managed_services_and_postprocess_steps_round_trip_together() {
+        let mut plan = AgentTaskPlan::new("composed", Vec::new());
+        plan.services.push(AgentTaskManagedService {
+            version: AgentTaskManagedService::VERSION,
+            id: "preview".to_string(),
+            command: vec!["server".to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            env_allowlist: Vec::new(),
+            secret_env: Vec::new(),
+            secret_env_plan: None,
+            host: "127.0.0.1".to_string(),
+            port: Some(3000),
+            port_env: None,
+            readiness: None,
+            public_url: None,
+            lifecycle: AgentTaskManagedServiceLifecycle::Plan,
+            target: None,
+        });
+        plan.postprocess_steps
+            .push(AgentTaskArtifactPostprocessStep {
+                id: "postprocess".to_string(),
+                depends_on: Vec::new(),
+                required: true,
+                plan: homeboy_core::artifacts::ArtifactPostprocessPlan {
+                    schema: "homeboy/artifact-postprocess/v1".to_string(),
+                    plan_id: "postprocess".to_string(),
+                    artifact_roots: Vec::new(),
+                    actions: Vec::new(),
+                    reviewer_refs: Vec::new(),
+                    metadata: Value::Null,
+                },
+            });
+
+        plan.rebuild_homeboy_plan();
+        let round_trip = AgentTaskPlan::from_homeboy_plan(plan.homeboy_plan.clone());
+        assert_eq!(round_trip.services, plan.services);
+        assert_eq!(round_trip.postprocess_steps, plan.postprocess_steps);
+    }
+}

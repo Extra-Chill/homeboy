@@ -12,10 +12,10 @@ pub(super) use super::super::super::lab_workspaces::{
 pub(super) use super::*;
 pub(super) use crate::verify_lab_workspace_from_env;
 pub(super) use crate::{
-    compile_lab_admission_plan, PlacementReadinessRequest, RunnerActiveJobSource,
-    RunnerActiveJobState, RunnerAvailability, RunnerExecMode, RunnerExecOutput, RunnerRequiredTool,
-    RunnerSession, RunnerSessionState, RunnerStaleDaemonWarning, RunnerTunnelMode,
-    RunnerWorkspaceMaterializationPlan, RunnerWorkspaceSyncOutput,
+    compile_lab_admission_plan, RunnerActiveJobSource, RunnerActiveJobState, RunnerAvailability,
+    RunnerExecMode, RunnerExecOutput, RunnerRequiredTool, RunnerSession, RunnerSessionState,
+    RunnerStaleDaemonWarning, RunnerTunnelMode, RunnerWorkspaceMaterializationPlan,
+    RunnerWorkspaceSyncOutput,
 };
 pub(super) use homeboy_core::engine::command::{CaptureMetadata, CommandCaptureMetadata};
 pub(super) use homeboy_core::observation::{

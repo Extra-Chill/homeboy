@@ -6951,9 +6951,12 @@ fn adopted_baseline_gate_outcome_is_candidate_bound_and_recovery_safe() {
         accepted.status,
         crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
     );
+    // #11460 preserves the inherited-failure truth instead of flattening it to
+    // Failed; the sibling assertion in this file was updated there, this one was
+    // missed.
     assert_eq!(
         accepted.gate_results[0].status,
-        homeboy_core::gate::HomeboyGateStatus::Failed
+        homeboy_core::gate::HomeboyGateStatus::AcceptedInheritedFailure
     );
     assert!(!accepted.has_visible_passed_gate_for_command(command));
 
@@ -7983,6 +7986,10 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
         options.head = Some("fix/8058".to_string());
         options.gates = VerifyGateOptions {
             verify: vec!["cargo test --locked agent_task_promotion --lib".to_string()],
+            // The fixture below marks the gate AcceptedInheritedFailure, which
+            // is only a finalizable (and therefore recoverable) state when the
+            // cook actually accepted inherited failures.
+            accept_inherited_failures: true,
             ..Default::default()
         };
         persist_initial_recipe(&options).unwrap();
@@ -8017,8 +8024,15 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
         let preflight =
             recover_cook_pr_with_backend(cook_id, Vec::new(), true, &mut preflight_backend)
                 .expect_err("recovery without an executed model fails closed");
-        assert_eq!(preflight.details["field"], "provider_model");
-        assert!(preflight.message.contains("no concrete executed model"));
+        // #11460 stopped treating an accepted inherited failure as a passed
+        // gate (asserted directly in
+        // adopted_baseline_gate_outcome_is_candidate_bound_and_recovery_safe),
+        // so recovery now fails closed before the executed-model check: an
+        // inherited red baseline cannot back a published test claim.
+        assert_eq!(preflight.details["field"], "verification");
+        assert!(preflight
+            .message
+            .contains("without matching successful visible durable gate evidence"));
         assert!(!preflight_backend.committed);
         assert!(!preflight_backend.pushed);
         assert!(!preflight_backend.created);
@@ -8043,8 +8057,10 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
             false,
             &mut publish_backend,
         )
-        .expect_err("publication without an executed model fails closed");
-        assert_eq!(publish.details["field"], "provider_model");
+        .expect_err("publication without backing gate evidence fails closed");
+        // Same reason as the preflight above: the accepted inherited failure is
+        // not a passed gate, so the claim is refused before the model check.
+        assert_eq!(publish.details["field"], "verification");
         assert!(!publish_backend.committed);
         assert!(!publish_backend.pushed);
         assert!(!publish_backend.created);
@@ -8281,9 +8297,14 @@ fn cook_rejects_test_claim_without_matching_durable_gate() {
             attempt_dispatcher: None,
             harvest_context: crate::agent_task_scheduler::HarvestExecutionContext::default(),
         };
+        // Finalization eligibility is checked before the test-claim contract and
+        // requires a non-empty gate set, so clearing the gates outright never
+        // reaches the check this test names. Keep the gate green but private:
+        // eligible to finalize, yet not visible evidence that can back a
+        // published test claim.
         let mut unsupported = promotion(run_id);
-        unsupported.deterministic_gates.clear();
-        unsupported.gate_results.clear();
+        unsupported.deterministic_gates[0].visibility =
+            homeboy_core::gate::HomeboyGateVisibility::Private;
         let error = finalize_cook_pr_with_backend(
             &options,
             run_id,

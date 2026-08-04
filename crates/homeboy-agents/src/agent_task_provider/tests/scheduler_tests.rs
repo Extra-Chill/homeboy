@@ -256,45 +256,55 @@ fn scheduler_dispatches_extension_provider_command() {
 
 #[test]
 fn executor_materializes_runner_local_artifacts_for_no_op_and_editing_requests() {
-    let runner_root = homeboy_core::artifacts::root().expect("runner artifact root");
-    {
-        let controller_root = tempfile::tempdir().expect("controller root");
-        let command = format!(
+    // The point of this test is that artifacts land in the runner-local root
+    // rather than the controller root, which an isolated home preserves: it
+    // just moves the runner root somewhere hermetic. Without it the test wrote
+    // a durable provider reservation into the developer's real Homeboy state
+    // and failed on every subsequent run with "provider execution was already
+    // reserved by an interrupted controller".
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = homeboy_core::artifacts::root().expect("runner artifact root");
+        {
+            let controller_root = tempfile::tempdir().expect("controller root");
+            let command = format!(
             "node {}",
             script("let fs=require('fs'); let path=require('path'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let valid=path.isAbsolute(req.artifacts_path)&&fs.statSync(req.artifacts_path).isDirectory()&&req.artifacts_path_provenance.owner==='homeboy'&&req.artifacts_path_provenance.locality==='runner'&&!req.artifacts_path.startsWith(req.executor.config.controller_root); fs.writeFileSync(path.join(req.artifacts_path, req.task_id+'.txt'),'captured'); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:valid?(req.executor.config.no_op?'no_op':'succeeded'):'failed',summary:req.artifacts_path,artifacts:[]}));")
         );
-        let (mut no_op, provider) = request("task-no-op", command);
-        no_op.executor.config = json!({
-            "controller_root": controller_root.path(),
-            "no_op": true
-        });
-        let mut editing = no_op.clone();
-        editing.task_id = "task-editing".to_string();
-        editing.executor.config["no_op"] = json!(false);
-        let scheduler =
-            AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
-                provider,
-            ]))
-            .with_run_id("runner-local-artifact-run");
+            let (mut no_op, provider) = request("task-no-op", command);
+            no_op.executor.config = json!({
+                "controller_root": controller_root.path(),
+                "no_op": true
+            });
+            let mut editing = no_op.clone();
+            editing.task_id = "task-editing".to_string();
+            editing.executor.config["no_op"] = json!(false);
+            let scheduler =
+                AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
+                    provider,
+                ]))
+                .with_run_id("runner-local-artifact-run");
 
-        let aggregate = scheduler.run(AgentTaskPlan::new(
-            "runner-local-artifact-plan",
-            vec![no_op, editing],
-        ));
+            // Recording a provider execution is durable, so the run it belongs
+            // to has to exist before the scheduler dispatches it.
+            let plan = AgentTaskPlan::new("runner-local-artifact-plan", vec![no_op, editing]);
+            crate::agent_task_lifecycle::submit_plan(&plan, Some("runner-local-artifact-run"))
+                .expect("durable run record");
+            let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::NoOp);
-        assert_eq!(
-            aggregate.outcomes[1].status,
-            AgentTaskOutcomeStatus::Succeeded
-        );
-        for outcome in &aggregate.outcomes {
-            let path = PathBuf::from(outcome.summary.as_deref().expect("artifacts path"));
-            assert!(path.starts_with(&runner_root));
-            assert!(!path.starts_with(controller_root.path()));
-            assert!(path.join(format!("{}.txt", outcome.task_id)).is_file());
+            assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::NoOp);
+            assert_eq!(
+                aggregate.outcomes[1].status,
+                AgentTaskOutcomeStatus::Succeeded
+            );
+            for outcome in &aggregate.outcomes {
+                let path = PathBuf::from(outcome.summary.as_deref().expect("artifacts path"));
+                assert!(path.starts_with(&runner_root));
+                assert!(!path.starts_with(controller_root.path()));
+                assert!(path.join(format!("{}.txt", outcome.task_id)).is_file());
+            }
+            assert_ne!(aggregate.outcomes[0].summary, aggregate.outcomes[1].summary);
         }
-        assert_ne!(aggregate.outcomes[0].summary, aggregate.outcomes[1].summary);
-    }
+    });
 }
 
 #[test]

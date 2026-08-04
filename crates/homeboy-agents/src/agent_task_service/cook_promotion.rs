@@ -1546,7 +1546,18 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         let mut applied_run_id = None;
         for attempt in recipe.attempts.iter().rev() {
             if persisted_promotion_for_attempt(&attempt.run_id)?.is_some_and(|promotion| {
-                promotion.gate_outcome().status == AgentTaskPromotionStatus::Applied
+                // #11460 stopped flattening an explicitly accepted inherited
+                // baseline failure into Applied, so selecting only on Applied
+                // made recovery unable to find the very attempt it exists to
+                // recover. Selection is permissive on purpose: finalization
+                // still enforces finalization_eligible against the cook's own
+                // accept_inherited_failures, so a candidate the operator has
+                // not accepted still fails there, with its specific reason
+                // instead of "no attempt with an applied promotion".
+                let outcome = promotion.gate_outcome();
+                outcome.status == AgentTaskPromotionStatus::Applied
+                    || (outcome.status == AgentTaskPromotionStatus::GateFailed
+                        && promotion.finalization_eligible(true))
             }) {
                 applied_run_id = Some(attempt.run_id.clone());
                 break;
@@ -1569,15 +1580,22 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             None,
         )
     })?;
-    if promotion.gate_outcome().status != AgentTaskPromotionStatus::Applied {
+    let options = super::cook_recipe::reconstruct_adoption_options(&recipe)?;
+    // An explicitly accepted inherited baseline failure is finalizable (#11460),
+    // so it is recoverable too. Judge it with the cook's own
+    // accept_inherited_failures rather than requiring a green-gate Applied.
+    let recovery_outcome = promotion.gate_outcome();
+    if recovery_outcome.status != AgentTaskPromotionStatus::Applied
+        && !(recovery_outcome.status == AgentTaskPromotionStatus::GateFailed
+            && promotion.finalization_eligible(options.gates.accept_inherited_failures))
+    {
         return Err(Error::validation_invalid_argument(
             "latest_promotion.status",
-            "recovery requires an applied promotion with green gates",
+            "recovery requires an applied promotion with green gates or an explicitly accepted inherited baseline failure",
             Some(run_id),
             None,
         ));
     }
-    let options = super::cook_recipe::reconstruct_adoption_options(&recipe)?;
     let finalization = cook_finalization_options(&options, &run_id, &promotion, overrides)?;
     if !preflight {
         agent_task_lifecycle::record_promotion(
