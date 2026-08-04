@@ -345,7 +345,11 @@ pub struct ProvidersArgs {
     /// Restrict results to the runtime that owns the provider.
     #[arg(long = "runtime", value_name = "RUNTIME")]
     pub runtime: Option<String>,
-    /// Restrict results to `default` or `available` providers.
+    /// Restrict results to `default`, `available`, or `unavailable` providers.
+    ///
+    /// `unavailable` means declared but not dispatchable — a provider whose
+    /// declared credentials do not resolve here. Its `reason` names the missing
+    /// credential (#11479).
     #[arg(long = "status", value_name = "STATUS")]
     pub status: Option<String>,
     #[arg(long = "secret-env", value_name = "ENV")]

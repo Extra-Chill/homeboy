@@ -1010,7 +1010,7 @@ List extension-declared executor providers and optional secret/backend readiness
 | `--backend` | `<BACKEND>` | _no help text_ |
 | `--selector` | `<PROVIDER_ID>` | _no help text_ |
 | `--runtime` | `<RUNTIME>` | Restrict results to the runtime that owns the provider |
-| `--status` | `<STATUS>` | Restrict results to `default` or `available` providers |
+| `--status` | `<STATUS>` | Restrict results to `default`, `available`, or `unavailable` providers |
 | `--secret-env` | `<ENV>` | _no help text_ |
 | `--validate-readiness` | flag | _no help text_ |
 | `--refresh` | flag | _no help text_ |

@@ -37,6 +37,7 @@ pub(crate) mod artifact_finalization;
 mod catalog;
 pub(crate) mod command_runner;
 mod config_preflight;
+mod credential_readiness;
 pub mod discovery;
 mod executor;
 mod fixtures;
@@ -59,6 +60,12 @@ pub use command_runner::{
     ProviderExecutorResolution,
 };
 pub(crate) use config_preflight::preflight_plan_provider_config_with_providers;
+pub use credential_readiness::{
+    preflight_discovered_provider_credentials_for_backend, preflight_provider_credentials,
+    preflight_provider_credentials_for_backend, provider_credential_readiness,
+    AgentTaskProviderCredentialReadiness, AgentTaskProviderCredentialRequirement,
+    AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
+};
 pub use resolution::{resolve_provider_for_backend, ProviderResolution};
 pub(crate) use resolution::{
     role_aliases_for_executor, role_aliases_for_provider, selector_runtime_provider_hint,

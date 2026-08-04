@@ -16,7 +16,8 @@ use crate::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
 use crate::agent_task_provider::{
     apply_provider_runner_secret_env_contracts, default_backend_for_component,
     enforce_runtime_preflight_checks_for_plan, preflight_plan_provider_config_with_providers,
-    resolve_provider_for_backend, AgentTaskProviderCatalog, ProviderResolution,
+    preflight_provider_credentials_for_backend, resolve_provider_for_backend,
+    AgentTaskProviderCatalog, ProviderResolution,
 };
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskProviderRotationPolicy,
@@ -172,6 +173,16 @@ where
     E: AgentTaskExecutorAdapter,
 {
     let backend_selection = request.backend_selection.clone();
+    // Credentials first: the selected backend's declared credentials are
+    // knowable before a plan exists, before a workspace is resolved, and before
+    // any provider execution is spent. Discovering a credential gap inside the
+    // provider costs an execution against the task budget and can terminate a
+    // Cook that other backends could have run (#11479).
+    preflight_provider_credentials_for_backend(
+        catalog.providers(),
+        &request.backend,
+        request.selector.as_deref(),
+    )?;
     let mut plan =
         build_dispatch_plan_with_provider_requirements(&request, |backend, selector| {
             catalog.provider_requires_cwd_git_checkout(backend, selector)
@@ -199,6 +210,11 @@ where
     E: AgentTaskExecutorAdapter,
 {
     let backend_selection = request.backend_selection.clone();
+    preflight_provider_credentials_for_backend(
+        AgentTaskProviderCatalog::discover().providers(),
+        &request.backend,
+        request.selector.as_deref(),
+    )?;
     let mut plan = build_dispatch_plan_with_provider_requirements(
         &request,
         provider_requires_cwd_git_checkout,
@@ -566,6 +582,90 @@ fn command_json_value<T: Serialize>(value: T) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_task::{AgentTaskOutcome, AgentTaskRequest};
+    use crate::agent_task_scheduler::AgentTaskExecutionContext;
+
+    /// An executor that must never be reached. A credential gap is a
+    /// configuration failure, so it must be reported before a provider
+    /// execution is spent against the task's budget (#11479).
+    struct NeverRunExecutor;
+
+    impl AgentTaskExecutorAdapter for NeverRunExecutor {
+        fn execute(
+            &self,
+            _request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            panic!("a credential preflight failure must not consume a provider execution");
+        }
+    }
+
+    #[test]
+    fn dispatch_rejects_a_backend_whose_declared_credential_is_missing_without_executing() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let catalog = AgentTaskProviderCatalog {
+                providers: vec![serde_json::from_value(serde_json::json!({
+                    "id": "claude-code.agent-task-executor",
+                    "backend": "claude-code",
+                    "capabilities": ["cli_runtime", "provider_owned_auth"],
+                    "invocation": { "argv": ["claude-code"] },
+                    "provider_defaults": {
+                        "claude-code": {
+                            "secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
+                            "required_secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"]
+                        }
+                    }
+                }))
+                .expect("provider fixture")],
+                ..Default::default()
+            };
+            let request = AgentTaskDispatchRequest {
+                prompt: Some("Cook the task.".to_string()),
+                tasks: Vec::new(),
+                cwd: None,
+                workspace: None,
+                repo: None,
+                task_url: None,
+                backend: "claude-code".to_string(),
+                selector: None,
+                model: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                concurrency: 1,
+                run_id: None,
+                task_id: None,
+                core: DispatchCoreInputs::default(),
+                backend_selection: None,
+            };
+
+            let error = dispatch_with_provider_catalog(request, NeverRunExecutor, &catalog)
+                .expect_err("a missing declared credential must fail dispatch");
+
+            assert_eq!(error.details["field"], "provider_credentials");
+            assert!(
+                error
+                    .message
+                    .contains("AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"),
+                "the failure must name the credential: {}",
+                error.message
+            );
+        });
+    }
+
+    #[test]
+    fn dispatch_does_not_credential_gate_a_provider_that_declares_nothing() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let providers = vec![serde_json::from_value(serde_json::json!({
+                "id": "local-shell.agent-task-executor",
+                "backend": "local-shell",
+                "invocation": { "argv": ["local-shell"] }
+            }))
+            .expect("provider fixture")];
+
+            preflight_provider_credentials_for_backend(&providers, "local-shell", None)
+                .expect("a provider that declares no credential is dispatchable");
+        });
+    }
 
     fn command_with_backend(backend: Option<&str>) -> AgentTaskDispatchCommand {
         AgentTaskDispatchCommand {

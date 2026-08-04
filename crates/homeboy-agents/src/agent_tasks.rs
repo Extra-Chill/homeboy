@@ -381,6 +381,15 @@ pub mod provider {
         ProviderResolution, WorkspaceMaterializationSpec, WorkspaceMountSpec,
         AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA, AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
     };
+    /// Credential readiness: whether a *declared* provider is actually
+    /// *dispatchable* here, and the pre-dispatch preflight that enforces it
+    /// before a workspace or a provider execution is spent (#11479).
+    pub use crate::agent_task_provider::{
+        preflight_discovered_provider_credentials_for_backend, preflight_provider_credentials,
+        preflight_provider_credentials_for_backend, provider_credential_readiness,
+        AgentTaskProviderCredentialReadiness, AgentTaskProviderCredentialRequirement,
+        AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
+    };
     pub use crate::agent_task_provider::{
         probe_provider_executor_resolves, provider_runner_secret_env_for_plan_with_providers,
         provider_secret_sources_for_plan_with_providers, ProviderExecutorResolution,
