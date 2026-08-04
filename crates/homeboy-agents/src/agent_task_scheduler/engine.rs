@@ -98,6 +98,44 @@ where
             .unwrap_or_else(|| format!("ephemeral-{}", uuid::Uuid::new_v4()));
         let max_concurrency = plan.options.max_concurrency.max(1);
         let total_tasks = plan.tasks.len();
+        let services = match super::managed_services::ManagedServices::start(
+            &plan.services,
+            &scratch_run_id,
+        ) {
+            Ok(services) => Some(services),
+            Err(error) => {
+                let outcomes = plan
+                    .tasks
+                    .iter()
+                    .map(|request| AgentTaskOutcome {
+                        task_id: request.task_id.clone(),
+                        status: AgentTaskOutcomeStatus::Failed,
+                        summary: Some(error.clone()),
+                        failure_classification: Some(
+                            AgentTaskFailureClassification::ExecutionFailed,
+                        ),
+                        diagnostics: vec![AgentTaskDiagnostic {
+                            class: "managed_service_startup".to_string(),
+                            message: error.clone(),
+                            data: serde_json::Value::Null,
+                        }],
+                        ..Default::default()
+                    })
+                    .collect::<Vec<_>>();
+                return AgentTaskAggregate {
+                    schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                    plan_id: plan.plan_id,
+                    status: AgentTaskScheduleSupport::aggregate_status(&outcomes),
+                    totals: AgentTaskScheduleSupport::totals(total_tasks, &outcomes),
+                    outcomes,
+                    events: Vec::new(),
+                    artifact_lineage: Vec::new(),
+                    child_runs: Vec::new(),
+                    artifact_bindings: Vec::new(),
+                    queue: Default::default(),
+                };
+            }
+        };
         let max_queue_depth = plan.options.max_queue_depth.or(plan.options.max_tasks);
         let retry_budget_total = plan.options.retry.max_retries_total;
         let output_dependencies = plan.output_dependencies.clone();
@@ -367,6 +405,9 @@ where
                 };
                 let scheduled = queued.remove(next_index).expect("queued task");
                 let mut request = scheduled.request;
+                if let Some(services) = services.as_ref() {
+                    services.bind_into(&mut request.inputs, &mut request.metadata);
+                }
                 if let Err(outcome) = AgentTaskScheduleSupport::render_output_dependencies(
                     &mut request,
                     &completed_by_task,
@@ -770,12 +811,42 @@ where
                     // late artifacts to this exact execution before selecting a
                     // recoverable candidate for promotion.
                     finalize_candidate_artifacts(&mut outcome, &running_task);
+                    // CandidateRecoverable means "a controller must handle this
+                    // candidate", and rotation deliberately refuses to act on it
+                    // (#8809). Both the timeout downgrade below and the
+                    // base-bound patch retention set that status, so an
+                    // explicitly configured rotation policy was being disabled
+                    // for exactly the providers that produce patches. Decide
+                    // eligibility from the pre-downgrade outcome and give
+                    // rotation first refusal; both retentions are the fallback
+                    // for when nothing will rotate.
+                    let rotation_takes_over =
+                        AgentTaskScheduleSupport::rotation_policy_for_request(
+                            &running_task.request,
+                            plan.options.rotation.as_ref(),
+                        )
+                        .is_some_and(|policy| {
+                            let mut eligible = outcome.clone();
+                            if running_task.timeout_cancel_requested {
+                                eligible.status = AgentTaskOutcomeStatus::Timeout;
+                                eligible.failure_classification =
+                                    Some(AgentTaskFailureClassification::Timeout);
+                            }
+                            AgentTaskScheduleSupport::should_rotate_provider(
+                                &eligible,
+                                &policy,
+                                running_task.rotation_index,
+                                result.attempt,
+                                execution_budget.max_provider_executions,
+                                execution_budget.max_provider_rotations,
+                            )
+                        });
                     if running_task.timeout_cancel_requested {
                         // Cancellation was requested at the deadline and this
                         // result proves the provider no longer owns the checkout.
                         // Harvest above is therefore race-free.
                         let recovered = outcome.artifacts.iter().any(is_actionable_patch_artifact);
-                        outcome.status = if recovered {
+                        outcome.status = if recovered && !rotation_takes_over {
                             AgentTaskOutcomeStatus::CandidateRecoverable
                         } else {
                             AgentTaskOutcomeStatus::Timeout
@@ -815,9 +886,11 @@ where
                             );
                         }
                     }
-                    AgentTaskScheduleSupport::preserve_base_bound_patch_after_provider_failure(
-                        &mut outcome,
-                    );
+                    if !rotation_takes_over {
+                        AgentTaskScheduleSupport::preserve_base_bound_patch_after_provider_failure(
+                            &mut outcome,
+                        );
+                    }
                     let state = AgentTaskScheduleSupport::state_for_outcome(&outcome);
                     events.push(event(
                         &outcome.task_id,
@@ -1095,6 +1168,22 @@ where
             }
         }
 
+        let services = services
+            .map(|services| {
+                services.cleanup(if cancellation.is_cancelled() {
+                    "cancelled"
+                } else {
+                    "terminal"
+                })
+            })
+            .unwrap_or_default();
+        for outcome in &mut outcomes {
+            if !outcome.metadata.is_object() {
+                outcome.metadata = serde_json::json!({});
+            }
+            outcome.metadata["managed_services"] =
+                serde_json::to_value(&services).unwrap_or(serde_json::Value::Null);
+        }
         AgentTaskAggregate {
             schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: plan.plan_id,

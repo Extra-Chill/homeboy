@@ -2576,6 +2576,14 @@ where
             }
             let mut failed_dispatch_plan = None;
             let execution = (|| {
+                homeboy_core::cleanup::admit_reconstructable_artifact_work(
+                    plan.tasks
+                        .iter()
+                        .filter_map(|task| task.workspace.root.as_ref())
+                        .map(PathBuf::from)
+                        .collect(),
+                )
+                .map_err(|error| with_pre_execution_phase(error, "worktree_capacity_admission"))?;
                 let initial_baseline = if attempt == 1 {
                     materialize_initial_candidate_baseline(
                         &plan,

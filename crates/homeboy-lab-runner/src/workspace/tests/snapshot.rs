@@ -1420,7 +1420,8 @@ fn snapshot_archive_command_disables_extended_attributes() {
         Path::new("/Users/user/Developer/wp-site-generator"),
         "ssh runner 'tar -xf -'",
         &[],
-    );
+    )
+    .expect("snapshot archive command");
 
     assert!(command.contains("COPYFILE_DISABLE=1"));
     assert!(command.contains("tar --no-xattrs"));
@@ -1441,7 +1442,8 @@ fn scratch_scoped_snapshot_command_parses_under_posix_sh() {
             Path::new("/Users/user/Developer/wp-site-generator"),
             "ssh runner 'tar -xf -'",
             &excludes,
-        );
+        )
+        .expect("snapshot archive command");
         let scoped = scratch_scoped_command(&command, Path::new("/var/lib/homeboy/scratch dir"));
 
         assert!(
@@ -1486,7 +1488,8 @@ fn snapshot_materialization_command_parses_under_posix_shells() {
                     target,
                     &excludes,
                     scratch,
-                );
+                )
+                .expect("snapshot materialization command");
 
                 assert_eq!(
                     scratch.is_some(),
@@ -1530,7 +1533,8 @@ fn snapshot_archive_command_selectively_dereferences_external_symlinked_dependen
         Path::new("/Users/user/Developer/wp-site-generator"),
         "ssh runner 'tar -xf -'",
         &[],
-    );
+    )
+    .expect("snapshot archive command");
 
     assert!(
         command.contains("find \"$stage/source\" -type l -exec sh -c"),
@@ -1669,9 +1673,10 @@ fn root_anchored_dist_exclusion_matches_tar_and_preserves_nested_dist() {
     fs::write(source.join("packages/example/dist/input.a"), "nested input")
         .expect("nested dist input");
 
-    let command = snapshot_archive_command(&source, "tar -xf -", &excludes);
+    let command = snapshot_archive_command(&source, "tar -xf -", &excludes)
+        .expect("snapshot archive command");
     assert!(
-        command.contains("find . -mindepth 1 -maxdepth 1 ! -path ./dist -print0"),
+        command.contains("printf '%s\\0' ./packages"),
         "root-anchored tar input must omit the matching root path: {command}"
     );
 
@@ -1692,6 +1697,80 @@ fn root_anchored_dist_exclusion_matches_tar_and_preserves_nested_dist() {
         expected,
         "content hashing must use the same root-anchored exclusion semantics as tar"
     );
+}
+
+#[test]
+fn snapshot_git_omits_absent_optional_root_context_paths() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let optional_paths = ["/.datamachine", "/.claude", "/AGENTS.md", "/.git"];
+
+        for (index, ignored_paths) in optional_paths
+            .iter()
+            .map(|path| vec![*path])
+            .chain(std::iter::once(optional_paths.to_vec()))
+            .enumerate()
+        {
+            let source = tempfile::tempdir().expect("source workspace");
+            let runner_root = tempfile::tempdir().expect("runner root");
+            fs::write(source.path().join("README.md"), "source\n").expect("source file");
+            fs::write(source.path().join(".gitignore"), ignored_paths.join("\n"))
+                .expect("optional context excludes");
+            git(source.path(), &["init", "-b", "main"]);
+            git(source.path(), &["config", "user.email", "test@example.com"]);
+            git(source.path(), &["config", "user.name", "Test User"]);
+            git(source.path(), &["add", "."]);
+            git(source.path(), &["commit", "-m", "source"]);
+
+            crate::create(
+                &format!(
+                    r#"{{"id":"lab-optional-context-{index}","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+
+            let (output, exit_code) = sync_workspace(
+                &format!("lab-optional-context-{index}"),
+                RunnerWorkspaceSyncOptions {
+                    path: source.path().display().to_string(),
+                    mode: RunnerWorkspaceSyncMode::SnapshotGit,
+                    ..Default::default()
+                },
+            )
+            .expect("absent optional context paths must not block SnapshotGit materialization");
+
+            assert_eq!(exit_code, 0);
+            assert!(Path::new(&output.remote_path).join("README.md").exists());
+        }
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_archive_fails_for_existing_unreadable_input() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let source = tempfile::tempdir().expect("source workspace");
+    let destination = tempfile::tempdir().expect("destination workspace");
+    let unreadable = source.path().join("unreadable.txt");
+    fs::write(&unreadable, "private\n").expect("unreadable source file");
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000))
+        .expect("remove source read permission");
+
+    if fs::read(&unreadable).is_ok() {
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o600))
+            .expect("restore source permission");
+        return;
+    }
+
+    let error = copy_snapshot_to_directory(source.path(), destination.path(), &[])
+        .expect_err("an existing unreadable source input must fail materialization");
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o600))
+        .expect("restore source permission");
+
+    assert!(error.message.contains("prepare local workspace snapshot"));
+    assert!(error.message.contains("Permission denied"));
 }
 
 #[test]
@@ -1983,11 +2062,10 @@ fn snapshot_materialization_preserves_v3_owner_executable_capability_across_runn
         .replacen("tar -p -C", "(umask 0111; tar -p -C", 1)
         .replacen("-xf - &&", "-xf -) &&", 1);
     let target = format!("sh -c {}", homeboy_core::engine::shell::quote_arg(&install));
-    super::super::util::run_shell_command(
-        &snapshot_archive_command(controller.path(), &target, &[]),
-        "materialize restrictive-umask snapshot",
-    )
-    .expect("snapshot materialization");
+    let archive = snapshot_archive_command(controller.path(), &target, &[])
+        .expect("snapshot archive command");
+    super::super::util::run_shell_command(&archive, "materialize restrictive-umask snapshot")
+        .expect("snapshot materialization");
 
     assert_eq!(
         fs::metadata(&runner_tool)

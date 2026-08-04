@@ -374,6 +374,10 @@ mod provider_rotation_tests {
         }]));
         enable_rotation(&mut plan);
 
+        // Recording a provider execution is durable, so the run it belongs to
+        // has to exist before the scheduler dispatches it.
+        crate::agent_task_lifecycle::submit_plan(&plan, Some("run-adopt"))
+            .expect("durable run record");
         let aggregate = AgentTaskScheduler::new(scheduler)
             .with_run_id("run-adopt")
             .run(plan);
@@ -631,7 +635,7 @@ mod provider_rotation_tests {
                 );
                 if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                     fs::write(&self.scratch_index, "{ stale").expect("corrupt stale index");
-                    std::thread::sleep(Duration::from_millis(25));
+                    std::thread::sleep(Duration::from_millis(100));
                     return outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded);
                 }
                 outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
@@ -653,9 +657,16 @@ mod provider_rotation_tests {
         })
         .with_run_id(run_id);
         let mut plan = plan_with_tasks(1);
-        plan.tasks[0].limits.timeout_ms = Some(1);
+        // The first attempt must exceed its timeout and still return inside
+        // timeout_with_grace (timeout + 100ms), and the second must finish
+        // within the timeout. A 1ms budget made the second a race that any
+        // loaded machine lost, because the scheduler's own dispatch and
+        // finalization are charged to the attempt. 60ms timeout with a 100ms
+        // provider sleep keeps both orderings with ~40ms of margin either way.
+        plan.tasks[0].limits.timeout_ms = Some(60);
         plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
         enable_rotation(&mut plan);
+        crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("durable run record");
 
         let aggregate = scheduler.run(plan);
 

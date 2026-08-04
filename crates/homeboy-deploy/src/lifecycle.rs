@@ -17,7 +17,7 @@ const SCHEMA_VERSION: u32 = 1;
 ///
 /// The observation store is the generic activity surface. The file-backed
 /// multi-project lifecycle below remains the resumable aggregate checkpoint.
-pub(super) struct DeployObservation {
+pub(crate) struct DeployObservation {
     store: ObservationStore,
     run_id: String,
     metadata: serde_json::Value,
@@ -25,7 +25,15 @@ pub(super) struct DeployObservation {
 }
 
 impl DeployObservation {
-    pub(super) fn start(project_id: &str, source: &str) -> Result<Self> {
+    pub(crate) fn start(project_id: &str, source: &str) -> Result<Self> {
+        Self::start_with_id(None, project_id, source)
+    }
+
+    pub(crate) fn start_with_id(
+        requested_id: Option<&str>,
+        project_id: &str,
+        source: &str,
+    ) -> Result<Self> {
         let store = ObservationStore::open_initialized()?;
         let metadata = json!({
             "schema": "homeboy/deploy-lifecycle/v1",
@@ -33,15 +41,22 @@ impl DeployObservation {
             "phase": "admitted",
             "phase_history": [{ "phase": "admitted", "at": chrono::Utc::now().to_rfc3339() }],
             "remote_mutation_started": false,
+            "targets": {},
+            "homeboy_run_owner": { "pid": std::process::id() },
+            "recovery": {
+                "reconcile_command": "homeboy runs reconcile",
+                "pre_upload_guarantee": "remote_mutation_started=false means no remote mutation began",
+            },
         });
-        let run = store.start_run(
-            NewRunRecord::builder("deploy")
-                .component_id(project_id)
-                .command(format!("homeboy deploy {project_id}"))
-                .current_homeboy_version()
-                .metadata(metadata.clone())
-                .build(),
-        )?;
+        let builder = NewRunRecord::builder("deploy")
+            .component_id(project_id)
+            .command(format!("homeboy deploy {project_id}"))
+            .current_homeboy_version()
+            .metadata(metadata.clone());
+        let run = match requested_id {
+            Some(id) => store.start_run_with_id(builder.build(), id.to_string())?,
+            None => store.start_run(builder.build())?,
+        };
         Ok(Self {
             store,
             run_id: run.id,
@@ -50,16 +65,24 @@ impl DeployObservation {
         })
     }
 
-    pub(super) fn run_id(&self) -> &str {
+    pub(crate) fn run_id(&self) -> &str {
         &self.run_id
     }
 
-    pub(super) fn phase(&mut self, phase: &str, remote_mutation_started: bool) -> Result<()> {
+    pub(crate) fn phase(&mut self, phase: &str, remote_mutation_started: bool) -> Result<()> {
         let at = chrono::Utc::now().to_rfc3339();
         let object = self
             .metadata
             .as_object_mut()
             .expect("deploy metadata object");
+        if object.get("phase").and_then(serde_json::Value::as_str) == Some(phase) {
+            if remote_mutation_started {
+                object.insert("remote_mutation_started".to_string(), json!(true));
+            }
+            self.store
+                .update_run_metadata(&self.run_id, self.metadata.clone())?;
+            return Ok(());
+        }
         object.insert("phase".to_string(), json!(phase));
         if remote_mutation_started {
             object.insert("remote_mutation_started".to_string(), json!(true));
@@ -74,7 +97,7 @@ impl DeployObservation {
         Ok(())
     }
 
-    pub(super) fn finish(&mut self, status: RunStatus, error: Option<String>) {
+    pub(crate) fn finish(&mut self, status: RunStatus, error: Option<String>) {
         if self.finished {
             return;
         }
@@ -93,6 +116,23 @@ impl DeployObservation {
             .store
             .finish_running_run(&self.run_id, status, Some(self.metadata.clone()));
         self.finished = true;
+    }
+
+    pub(crate) fn link_target(&mut self, project_id: &str, run_id: &str) -> Result<()> {
+        let targets = self.metadata["targets"]
+            .as_object_mut()
+            .expect("deploy target metadata object");
+        targets.insert(project_id.to_string(), json!(run_id));
+        self.store
+            .update_run_metadata(&self.run_id, self.metadata.clone())
+            .map(|_| ())
+    }
+
+    pub(crate) fn link_resume(&mut self, prior_checkpoint_id: &str) -> Result<()> {
+        self.metadata["resumes_run_id"] = json!(prior_checkpoint_id);
+        self.store
+            .update_run_metadata(&self.run_id, self.metadata.clone())
+            .map(|_| ())
     }
 }
 
@@ -354,11 +394,20 @@ mod tests {
             let mut observation = DeployObservation::start("site", "HEAD").expect("admit run");
             let run_id = observation.run_id().to_string();
             observation
-                .phase("artifact_preparation", false)
-                .expect("persist preparation phase");
+                .phase("build", false)
+                .expect("persist build phase");
+            observation
+                .phase("package", false)
+                .expect("persist package phase");
             observation
                 .phase("transfer", true)
                 .expect("persist transfer phase");
+            observation
+                .phase("extract", true)
+                .expect("persist extract phase");
+            observation
+                .phase("verify", true)
+                .expect("persist verify phase");
             observation.finish(RunStatus::Pass, None);
 
             let run = ObservationStore::open_initialized()
@@ -371,7 +420,7 @@ mod tests {
             assert_eq!(run.metadata_json["remote_mutation_started"], true);
             assert_eq!(
                 run.metadata_json["phase_history"].as_array().map(Vec::len),
-                Some(4)
+                Some(7)
             );
         });
     }
@@ -383,8 +432,8 @@ mod tests {
                 let mut observation =
                     DeployObservation::start("site", "refs/heads/fix").expect("admit run");
                 observation
-                    .phase("artifact_preparation", false)
-                    .expect("persist preparation phase");
+                    .phase("package", false)
+                    .expect("persist pre-upload package phase");
                 observation.run_id().to_string()
             };
 
@@ -398,6 +447,72 @@ mod tests {
             assert!(run.metadata_json["error"]
                 .as_str()
                 .is_some_and(|error| error.contains("terminal result")));
+        });
+    }
+
+    #[test]
+    fn admission_binds_process_recovery_and_target_links() {
+        with_isolated_home(|_| {
+            let mut observation =
+                DeployObservation::start_with_id(Some("aggregate-run"), "site", "HEAD")
+                    .expect("admit aggregate run");
+            observation
+                .link_target("target-a", "target-run")
+                .expect("link target run");
+            let run = ObservationStore::open_initialized()
+                .expect("store")
+                .get_run(observation.run_id())
+                .expect("read run")
+                .expect("run");
+
+            assert_eq!(
+                run.metadata_json["homeboy_run_owner"]["pid"],
+                std::process::id()
+            );
+            assert_eq!(
+                run.metadata_json["recovery"]["reconcile_command"],
+                "homeboy runs reconcile"
+            );
+            assert_eq!(run.metadata_json["targets"]["target-a"], "target-run");
+            let activity = homeboy_core::activity::show_activity("aggregate-run")
+                .expect("aggregate deploy run resolves through activity");
+            assert_eq!(activity.items[0].id, "aggregate-run");
+        });
+    }
+
+    #[test]
+    fn resumed_aggregate_is_a_new_activity_run_linked_to_its_checkpoint() {
+        with_isolated_home(|_| {
+            let mut resumed = DeployObservation::start("multi", "HEAD").expect("admit resume");
+            let activity_run_id = resumed.run_id().to_string();
+            resumed
+                .link_resume("checkpoint-run")
+                .expect("link prior checkpoint");
+            let run = ObservationStore::open_initialized()
+                .expect("store")
+                .get_run(&activity_run_id)
+                .expect("read run")
+                .expect("run");
+
+            assert_ne!(activity_run_id, "checkpoint-run");
+            assert_eq!(run.metadata_json["resumes_run_id"], "checkpoint-run");
+            assert!(homeboy_core::activity::show_activity(&activity_run_id).is_ok());
+        });
+    }
+
+    #[test]
+    fn active_deploy_observation_is_available_through_activity_show() {
+        with_isolated_home(|_| {
+            let observation = DeployObservation::start("site", "HEAD").expect("admit run");
+            let report = homeboy_core::activity::show_activity(observation.run_id())
+                .expect("activity show active deploy");
+
+            assert_eq!(report.items.len(), 1);
+            assert_eq!(report.items[0].id, observation.run_id());
+            assert_eq!(
+                report.items[0].state,
+                homeboy_core::activity::ActivityState::Running
+            );
         });
     }
 }

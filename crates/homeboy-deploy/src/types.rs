@@ -1313,6 +1313,8 @@ pub struct ProjectDeployResult {
     pub summary: DeploySummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase_timings: Option<PhaseTimingReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_run_id: Option<String>,
 }
 
 /// Result of a multi-project deployment.
@@ -1323,6 +1325,9 @@ pub struct MultiDeployResult {
     pub summary: MultiDeploySummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deploy_run_id: Option<String>,
+    /// Durable file checkpoint used by `--resume`; distinct from the activity run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_run_id: Option<String>,
 }
 
 /// Summary of multi-project deployment.

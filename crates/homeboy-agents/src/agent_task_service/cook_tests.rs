@@ -1735,6 +1735,8 @@ impl AgentTaskCookAttemptDispatcher for RouteObservingAttemptDispatcher {
 #[derive(Debug)]
 struct AdmissionFailingAttemptDispatcher {
     message: &'static str,
+    runtime_recovery: Option<agent_task_lifecycle::AgentTaskLabRuntimeRecovery>,
+    phase: &'static str,
 }
 
 #[derive(Debug)]
@@ -1874,21 +1876,27 @@ impl AgentTaskCookAttemptDispatcher for AdmissionFailingAttemptDispatcher {
         Ok(serde_json::json!({ "kind": "test-admission-failure" }))
     }
 
+    fn pre_execution_failure_phase(&self) -> &'static str {
+        self.phase
+    }
+
     fn dispatch_attempt(
         &self,
-        plan: AgentTaskPlan,
-        run_id: &str,
+        _plan: AgentTaskPlan,
+        _run_id: &str,
         _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     ) -> Result<()> {
-        agent_task_lifecycle::submit_plan_with_runtime_admission(&plan, Some(run_id), |_| {
-            Err::<Value, _>(Error::validation_invalid_argument(
-                "controller_admission",
-                self.message,
-                Some("fixture controller diagnostics".to_string()),
-                None,
-            ))
-        })?;
-        Ok(())
+        let mut error = Error::validation_invalid_argument(
+            "controller_admission",
+            self.message,
+            Some("fixture controller diagnostics".to_string()),
+            None,
+        );
+        if let Some(recovery) = &self.runtime_recovery {
+            error.details["lab_handoff_runtime_recovery"] =
+                serde_json::to_value(recovery).expect("runtime recovery serializes");
+        }
+        Err(error)
     }
 }
 
@@ -2295,6 +2303,8 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
             cook_id,
             Arc::new(AdmissionFailingAttemptDispatcher {
                 message: "timed out waiting for controller generation admission",
+                runtime_recovery: None,
+                phase: "controller_admission",
             }),
         );
         options.provider_command = Some("fixture-provider".to_string());
@@ -3294,6 +3304,8 @@ fn retry_after_admission_failure_restores_managed_workspace_after_baseline_clean
             "cook-admission-retry",
             Arc::new(AdmissionFailingAttemptDispatcher {
                 message: "controller generation is held by another cook",
+                runtime_recovery: None,
+                phase: "controller_admission",
             }),
         );
         options.initial_run_id = run_id.to_string();
@@ -3383,6 +3395,8 @@ fn retry_reports_missing_candidate_source_as_retryable_recovery() {
             "cook-missing-worktree",
             Arc::new(AdmissionFailingAttemptDispatcher {
                 message: "controller generation is held by another cook",
+                runtime_recovery: None,
+                phase: "controller_admission",
             }),
         );
         options.initial_run_id = run_id.to_string();
@@ -3700,6 +3714,8 @@ fn cook_persists_controller_runtime_mismatch_before_provider_execution() {
                 "cook-runtime-mismatch",
                 Arc::new(AdmissionFailingAttemptDispatcher {
                     message: "pinned controller executable hash mismatch: expected fixture, found replacement",
+                    runtime_recovery: None,
+                    phase: "controller_admission",
                 }),
             );
         options.provider_command = Some("fixture-provider".to_string());
@@ -3735,6 +3751,14 @@ fn cook_does_not_retry_deterministic_pre_provider_input_failures() {
             "cook-invalid-input",
             Arc::new(AdmissionFailingAttemptDispatcher {
                 message: "invalid controller-owned Lab handoff input",
+                runtime_recovery: Some(
+                    agent_task_lifecycle::AgentTaskLabRuntimeRecovery::refresh_homeboy(
+                        "homeboy-lab",
+                        "homeboy 1.2.3+required",
+                        "required",
+                    ),
+                ),
+                phase: "lab_staging_controller",
             }),
         );
         options.provider_command = Some("fixture-provider".to_string());
@@ -3748,9 +3772,28 @@ fn cook_does_not_retry_deterministic_pre_provider_input_failures() {
         assert_eq!(result.value.status, "pre_execution_failure");
         assert_eq!(result.value.attempts.len(), 1);
         assert_eq!(result.value.history_run_ids, vec![run_id]);
+        let context = result
+            .value
+            .failure_context
+            .as_ref()
+            .expect("failure context");
+        let runtime_actions: Vec<_> = context
+            .legal_actions
+            .iter()
+            .filter(|action| action.action == "refresh_lab_runtime")
+            .collect();
+        assert_eq!(runtime_actions.len(), 1);
+        assert_eq!(
+            runtime_actions[0].command,
+            "homeboy runner refresh-homeboy homeboy-lab --ref required --reconnect"
+        );
+        assert!(context
+            .next_actions
+            .iter()
+            .all(|action| action.action != "refresh_lab_runtime"));
         assert_eq!(
             result.value.terminal_phase.as_deref(),
-            Some("controller_admission")
+            Some("lab_staging_controller")
         );
         assert_eq!(
             result.value.terminal_failure_classification.as_deref(),
@@ -3759,6 +3802,73 @@ fn cook_does_not_retry_deterministic_pre_provider_input_failures() {
         let record = agent_task_lifecycle::status(run_id).expect("attempt exists");
         assert!(record.provider_handles.is_empty());
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
+    });
+}
+
+#[test]
+fn cook_ignores_untrusted_or_malformed_lab_runtime_recovery_metadata() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-untrusted-runtime-recovery";
+        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id))
+            .expect("persist current invocation");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, &options.initial_run_id)
+            .expect("index current invocation");
+
+        for metadata in [
+            serde_json::json!({
+                "phase": "lab_staging_controller",
+                "details": {
+                    "homeboy_handoff_identity": {
+                        "recovery_command": "arbitrary command"
+                    }
+                }
+            }),
+            serde_json::json!({
+                "phase": "lab_staging_controller",
+                "details": {
+                    "lab_handoff_runtime_recovery": {
+                        "schema": "homeboy/agent-task-lab-runtime-recovery/v1",
+                        "runner_id": "homeboy-lab",
+                        "requested_build_identity": "homeboy 1.2.3+required"
+                    }
+                }
+            }),
+            serde_json::json!({
+                "phase": "controller_admission",
+                "details": {
+                    "lab_handoff_runtime_recovery": {
+                        "schema": "homeboy/agent-task-lab-runtime-recovery/v1",
+                        "runner_id": "homeboy-lab",
+                        "requested_build_identity": "homeboy 1.2.3+required",
+                        "build_ref": "required"
+                    }
+                }
+            }),
+        ] {
+            agent_task_lifecycle::rewrite_record_for_test(&options.initial_run_id, |record| {
+                record.metadata["pre_execution_failure"] = metadata.clone();
+            })
+            .expect("persist adversarial metadata");
+            let report = cook_report(CookReportInput {
+                cook_id: cook_id.to_string(),
+                status: "pre_execution_failure",
+                disposition: CookDisposition::Terminal,
+                attempts: Vec::new(),
+                finalization: None,
+                stop_reason: None,
+                exit_code: 1,
+                invocation_latest_run_id: Some(&options.initial_run_id),
+            });
+            assert!(report
+                .value
+                .failure_context
+                .expect("failure context")
+                .legal_actions
+                .iter()
+                .all(|action| action.action != "refresh_lab_runtime"));
+        }
     });
 }
 
@@ -6841,9 +6951,12 @@ fn adopted_baseline_gate_outcome_is_candidate_bound_and_recovery_safe() {
         accepted.status,
         crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
     );
+    // #11460 preserves the inherited-failure truth instead of flattening it to
+    // Failed; the sibling assertion in this file was updated there, this one was
+    // missed.
     assert_eq!(
         accepted.gate_results[0].status,
-        homeboy_core::gate::HomeboyGateStatus::Failed
+        homeboy_core::gate::HomeboyGateStatus::AcceptedInheritedFailure
     );
     assert!(!accepted.has_visible_passed_gate_for_command(command));
 
@@ -7873,6 +7986,10 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
         options.head = Some("fix/8058".to_string());
         options.gates = VerifyGateOptions {
             verify: vec!["cargo test --locked agent_task_promotion --lib".to_string()],
+            // The fixture below marks the gate AcceptedInheritedFailure, which
+            // is only a finalizable (and therefore recoverable) state when the
+            // cook actually accepted inherited failures.
+            accept_inherited_failures: true,
             ..Default::default()
         };
         persist_initial_recipe(&options).unwrap();
@@ -7907,8 +8024,15 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
         let preflight =
             recover_cook_pr_with_backend(cook_id, Vec::new(), true, &mut preflight_backend)
                 .expect_err("recovery without an executed model fails closed");
-        assert_eq!(preflight.details["field"], "provider_model");
-        assert!(preflight.message.contains("no concrete executed model"));
+        // #11460 stopped treating an accepted inherited failure as a passed
+        // gate (asserted directly in
+        // adopted_baseline_gate_outcome_is_candidate_bound_and_recovery_safe),
+        // so recovery now fails closed before the executed-model check: an
+        // inherited red baseline cannot back a published test claim.
+        assert_eq!(preflight.details["field"], "verification");
+        assert!(preflight
+            .message
+            .contains("without matching successful visible durable gate evidence"));
         assert!(!preflight_backend.committed);
         assert!(!preflight_backend.pushed);
         assert!(!preflight_backend.created);
@@ -7933,8 +8057,10 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
             false,
             &mut publish_backend,
         )
-        .expect_err("publication without an executed model fails closed");
-        assert_eq!(publish.details["field"], "provider_model");
+        .expect_err("publication without backing gate evidence fails closed");
+        // Same reason as the preflight above: the accepted inherited failure is
+        // not a passed gate, so the claim is refused before the model check.
+        assert_eq!(publish.details["field"], "verification");
         assert!(!publish_backend.committed);
         assert!(!publish_backend.pushed);
         assert!(!publish_backend.created);
@@ -8171,9 +8297,14 @@ fn cook_rejects_test_claim_without_matching_durable_gate() {
             attempt_dispatcher: None,
             harvest_context: crate::agent_task_scheduler::HarvestExecutionContext::default(),
         };
+        // Finalization eligibility is checked before the test-claim contract and
+        // requires a non-empty gate set, so clearing the gates outright never
+        // reaches the check this test names. Keep the gate green but private:
+        // eligible to finalize, yet not visible evidence that can back a
+        // published test claim.
         let mut unsupported = promotion(run_id);
-        unsupported.deterministic_gates.clear();
-        unsupported.gate_results.clear();
+        unsupported.deterministic_gates[0].visibility =
+            homeboy_core::gate::HomeboyGateVisibility::Private;
         let error = finalize_cook_pr_with_backend(
             &options,
             run_id,
@@ -9161,7 +9292,9 @@ fn selected_candidate_provenance_flags_cross_invocation_selection() {
         let cook_id = "cook-11114-selection-scope";
         let selected_run_id = "cook-11114-selection-scope-1";
         let latest_run_id = "cook-11114-selection-scope-2";
-        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = latest_run_id.to_string();
+        persist_initial_recipe(&options).expect("persist current invocation recipe");
         for (attempt, run_id) in [(1, selected_run_id), (2, latest_run_id)] {
             agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
                 .expect("persist lifecycle record");
@@ -9174,21 +9307,50 @@ fn selected_candidate_provenance_flags_cross_invocation_selection() {
             &temp.path().join("selected.patch"),
             "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
         );
-        seed_substantive_candidate_aggregate(
+        let historical_recovery =
+            agent_task_lifecycle::AgentTaskLabRuntimeRecovery::refresh_homeboy(
+                "homeboy-lab",
+                "homeboy 1.2.2+historical",
+                "historical",
+            );
+        agent_task_lifecycle::rewrite_record_for_test(selected_run_id, |record| {
+            record.metadata["pre_execution_failure"] = serde_json::json!({
+                "phase": "lab_staging_controller",
+                "details": { "lab_handoff_runtime_recovery": historical_recovery },
+            });
+        })
+        .expect("persist historical recovery");
+        let current_recovery = agent_task_lifecycle::AgentTaskLabRuntimeRecovery::refresh_homeboy(
+            "homeboy-lab",
+            "homeboy 1.2.3+current",
+            "current",
+        );
+        agent_task_lifecycle::record_pre_execution_failure(
             latest_run_id,
             &options.initial_plan,
-            &temp.path().join("malformed.patch"),
-            "nonempty malformed newer artifact\n",
-        );
+            "lab_staging_controller",
+            &{
+                let mut error = Error::validation_invalid_argument(
+                    "runner",
+                    "current Lab runtime is stale",
+                    None,
+                    None,
+                );
+                error.details["lab_handoff_runtime_recovery"] =
+                    serde_json::to_value(current_recovery).expect("current recovery serializes");
+                error
+            },
+        )
+        .expect("persist current admission failure");
 
         let cross_invocation = cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
-            status: "completed",
+            status: "pre_execution_failure",
             disposition: CookDisposition::Terminal,
             attempts: Vec::new(),
             finalization: None,
             stop_reason: None,
-            exit_code: 0,
+            exit_code: 1,
             invocation_latest_run_id: Some(latest_run_id),
         })
         .value
@@ -9200,6 +9362,33 @@ fn selected_candidate_provenance_flags_cross_invocation_selection() {
             serde_json::json!(false),
             "a candidate selected from a prior attempt must be flagged as out of invocation scope"
         );
+        let context = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "pre_execution_failure",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 1,
+            invocation_latest_run_id: Some(latest_run_id),
+        })
+        .value
+        .failure_context
+        .expect("failure context");
+        let runtime_actions: Vec<_> = context
+            .legal_actions
+            .iter()
+            .filter(|action| action.action == "refresh_lab_runtime")
+            .collect();
+        assert_eq!(runtime_actions.len(), 1);
+        assert_eq!(
+            runtime_actions[0].command,
+            "homeboy runner refresh-homeboy homeboy-lab --ref current --reconnect"
+        );
+        assert!(context
+            .next_actions
+            .iter()
+            .all(|action| action.action != "refresh_lab_runtime"));
 
         let in_invocation = cook_report(CookReportInput {
             cook_id: cook_id.to_string(),

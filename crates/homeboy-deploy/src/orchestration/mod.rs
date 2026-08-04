@@ -394,7 +394,13 @@ pub(super) fn deploy_components(
 
     // Build and validate every local artifact before the first remote write.
     if let Some(observation) = observation.as_deref_mut() {
-        observation.phase("artifact_preparation", false)?;
+        observation.phase("build", false)?;
+    }
+    if let Some(observation) = observation.as_deref_mut() {
+        // Payload preparation owns package construction and validation. Persist
+        // its checkpoint before that work begins so interruption never reports
+        // completed package work that was still in progress.
+        observation.phase("package", false)?;
     }
     let prepared_deployments = match prepare_component_deployments(
         &components,
@@ -428,9 +434,6 @@ pub(super) fn deploy_components(
 
     // Re-probe immediately before the first destructive write. A same-version
     // mismatch is remote-only content drift, not an ordinary local update.
-    if let Some(observation) = observation.as_deref_mut() {
-        observation.phase("transfer", true)?;
-    }
     for prepared in prepared_deployments.iter() {
         let exclusions = resolve_component_scope(&prepared.component, ScopeCommand::Deploy).exclude;
         let manifest = match (
@@ -503,7 +506,13 @@ pub(super) fn deploy_components(
             }
         }
 
-        let mut result = execute_preflighted_component_deploy(prepared, ctx, base_path, &project);
+        let mut result = execute_preflighted_component_deploy(
+            prepared,
+            ctx,
+            base_path,
+            &project,
+            observation.as_deref_mut(),
+        );
 
         // Record which git ref was deployed. The same label feeds build provenance
         // so `deployed_ref` and `build_provenance.built_from_ref` never disagree.
@@ -615,7 +624,7 @@ pub(super) fn deploy_components(
     // instead of sitting live. Catches runtime errors that a syntax-only
     // preflight structurally cannot. See homeboy#5471.
     if let Some(observation) = observation.as_deref_mut() {
-        observation.phase("verification", true)?;
+        observation.phase("verify", true)?;
     }
     if succeeded > 0 {
         if let Some(smoke) = run_post_deploy_smoke(&project, &mut results) {

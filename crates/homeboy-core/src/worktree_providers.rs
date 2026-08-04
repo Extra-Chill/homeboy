@@ -481,9 +481,59 @@ pub fn select_apply_enabled_worktree_provider_from_config(
     providers.sort();
     match providers.as_slice() {
         [provider] => Ok(provider.clone()),
-        [] => Err(Error::validation_invalid_argument("to_worktree", format!("worktree handle `{}` is missing and no enabled apply-enabled provider configures commands.ensure", intent.handle), Some(intent.handle.clone()), None)),
-        _ => Err(Error::validation_invalid_argument("to_worktree", format!("worktree handle `{}` is missing and multiple providers can ensure it: {}", intent.handle, providers.join(", ")), Some(intent.handle.clone()), None)),
+        [] => Err(Error::validation_invalid_argument("to_worktree", format!("worktree handle `{}` is missing and no enabled apply-enabled provider configures commands.ensure, so Homeboy cannot create it", intent.handle), Some(intent.handle.clone()), Some(missing_ensure_provider_remediation(intent)))),
+        _ => Err(Error::validation_invalid_argument("to_worktree", format!("worktree handle `{}` is missing and multiple providers can ensure it: {}", intent.handle, providers.join(", ")), Some(intent.handle.clone()), Some(ambiguous_ensure_provider_remediation(&providers.iter().map(String::as_str).collect::<Vec<_>>())))),
     }
+}
+
+/// Auto-creation is not a default capability: it needs an operator-configured
+/// provider. Naming the config shape does not tell a caller what to run, so the
+/// remediation leads with the command that creates the destination now and
+/// follows with the command that enables auto-creation for later runs.
+fn missing_ensure_provider_remediation(intent: &WorktreeProviderCreateIntent) -> Vec<String> {
+    let mut actions = vec![
+        format!(
+            "Create it now with: homeboy worktree create {} --branch {} --from {} --task-url {}",
+            intent.repo, intent.head, intent.base, intent.task_url
+        ),
+        format!(
+            "Then rerun with: --to-worktree {}",
+            crate::worktree::handle_for_branch(&intent.repo, &intent.head)
+        ),
+        "Or enable auto-creation for later runs with: homeboy config set \
+         /worktree_providers/<provider-id> \
+         '{\"enabled\":true,\"apply_enabled\":true,\"commands\":{\"ensure\":[\"<executable>\",\"<argument>\"]}}'"
+            .to_string(),
+    ];
+    if let Some(expected) = normalized_branch_handle(intent) {
+        actions.insert(
+            0,
+            format!(
+                "Handles slugify the branch, so `--head {}` names `{expected}`, not `{}`",
+                intent.head, intent.handle
+            ),
+        );
+    }
+    actions
+}
+
+/// The handle `--head` actually slugifies to, when the caller passed a different
+/// one. A caller who guesses the slug wrong otherwise reads a "missing handle"
+/// error about a handle that was never going to exist.
+fn normalized_branch_handle(intent: &WorktreeProviderCreateIntent) -> Option<String> {
+    let expected = crate::worktree::handle_for_branch(&intent.repo, &intent.head);
+    (expected != intent.handle).then_some(expected)
+}
+
+/// Homeboy will not pick between equally eligible providers, so the remediation
+/// is the command that removes the ambiguity rather than a restatement of it.
+fn ambiguous_ensure_provider_remediation(providers: &[&str]) -> Vec<String> {
+    providers
+        .iter()
+        .map(|id| {
+            format!("Disable all but one with: homeboy config set /worktree_providers/{id}/enabled false")
+        })
+        .collect()
 }
 
 /// A purpose-owned workspace needs all lifecycle phases before ownership is
@@ -569,30 +619,27 @@ fn provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
         .collect::<Vec<_>>();
     providers.sort_by_key(|(id, _)| *id);
     if providers.len() > 1 {
+        let ids = providers.iter().map(|(id, _)| *id).collect::<Vec<_>>();
         return Err(Error::validation_invalid_argument(
             "to_worktree",
             format!(
                 "worktree handle `{}` is missing and multiple providers can ensure it: {}",
                 intent.handle,
-                providers
-                    .iter()
-                    .map(|(id, _)| *id)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                ids.join(", ")
             ),
             Some(intent.handle.clone()),
-            Some(vec!["Configure exactly one enabled worktree provider commands.ensure template for this Cook destination.".to_string()]),
+            Some(ambiguous_ensure_provider_remediation(&ids)),
         ));
     }
     let Some((provider_id, provider)) = providers.first().copied() else {
         return Err(Error::validation_invalid_argument(
             "to_worktree",
             format!(
-                "worktree handle `{}` is missing and no enabled worktree provider configures commands.ensure",
+                "worktree handle `{}` is missing and no enabled worktree provider configures commands.ensure, so Homeboy cannot create it",
                 intent.handle
             ),
             Some(intent.handle.clone()),
-            Some(vec!["Configure an enabled generic worktree provider commands.ensure argv template.".to_string()]),
+            Some(missing_ensure_provider_remediation(intent)),
         ));
     };
     let idempotency_key = provision_idempotency_key(intent);
@@ -2470,6 +2517,122 @@ mod tests {
             .success());
         validate_task_worktree_root(&task_path, task_path.to_str().expect("utf8"))
             .expect("direct linked task worktree is valid");
+    }
+
+    /// Auto-creation reads as a default capability of `--to-worktree`, so the
+    /// refusal has to say that it is configuration-gated and hand back commands
+    /// the caller can run — not a description of a JSON shape.
+    #[test]
+    fn provision_without_an_ensure_provider_reports_runnable_next_steps() {
+        let config = HomeboyConfig::default();
+
+        let error = provision_apply_enabled_worktree_provider_from_config(
+            &WorktreeProviderCreateIntent {
+                handle: "homeboy@11168-wire-compiler-warning-provider".to_string(),
+                repo: "homeboy".to_string(),
+                base: "main".to_string(),
+                head: "fix/11168-wire-compiler-warning-provider".to_string(),
+                task_url: "https://github.com/Extra-Chill/homeboy/issues/11168".to_string(),
+            },
+            &config,
+        )
+        .expect_err("no configured provider can create the destination");
+
+        assert!(
+            error
+                .message
+                .contains("no enabled worktree provider configures commands.ensure"),
+            "{}",
+            error.message
+        );
+        let tried = error.details["tried"]
+            .as_array()
+            .expect("remediation")
+            .iter()
+            .map(|value| value.as_str().expect("remediation string").to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            tried.iter().any(|action| action.contains(
+                "homeboy worktree create homeboy --branch fix/11168-wire-compiler-warning-provider --from main --task-url https://github.com/Extra-Chill/homeboy/issues/11168"
+            )),
+            "{tried:?}"
+        );
+        assert!(
+            tried
+                .iter()
+                .any(|action| action.contains("homeboy config set /worktree_providers/")),
+            "{tried:?}"
+        );
+    }
+
+    /// The handle is the branch slugified, so a caller who guessed it otherwise
+    /// reads an error about a handle that was never going to exist.
+    #[test]
+    fn provision_names_the_handle_the_branch_actually_slugifies_to() {
+        let config = HomeboyConfig::default();
+
+        let error = provision_apply_enabled_worktree_provider_from_config(
+            &WorktreeProviderCreateIntent {
+                handle: "homeboy@11168-wire-compiler-warning-provider".to_string(),
+                repo: "homeboy".to_string(),
+                base: "main".to_string(),
+                head: "fix/11168-wire-compiler-warning-provider".to_string(),
+                task_url: "https://github.com/Extra-Chill/homeboy/issues/11168".to_string(),
+            },
+            &config,
+        )
+        .expect_err("no configured provider can create the destination");
+
+        let tried = error.details["tried"]
+            .as_array()
+            .expect("remediation")
+            .iter()
+            .map(|value| value.as_str().expect("remediation string").to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            tried
+                .iter()
+                .any(|action| action.contains("homeboy@fix-11168-wire-compiler-warning-provider")),
+            "{tried:?}"
+        );
+    }
+
+    /// A caller who already passed the slugified handle must not be told its own
+    /// handle is wrong.
+    #[test]
+    fn provision_does_not_claim_a_mismatch_when_the_handle_already_matches() {
+        let config = HomeboyConfig::default();
+
+        let error = provision_apply_enabled_worktree_provider_from_config(
+            &WorktreeProviderCreateIntent {
+                handle: "homeboy@fix-11168".to_string(),
+                repo: "homeboy".to_string(),
+                base: "main".to_string(),
+                head: "fix/11168".to_string(),
+                task_url: "https://github.com/Extra-Chill/homeboy/issues/11168".to_string(),
+            },
+            &config,
+        )
+        .expect_err("no configured provider can create the destination");
+
+        let tried = error.details["tried"]
+            .as_array()
+            .expect("remediation")
+            .iter()
+            .map(|value| value.as_str().expect("remediation string").to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            !tried
+                .iter()
+                .any(|action| action.contains("Handles slugify the branch")),
+            "{tried:?}"
+        );
+        assert!(
+            tried
+                .iter()
+                .any(|action| action.contains("homeboy worktree create homeboy")),
+            "{tried:?}"
+        );
     }
 
     #[cfg(unix)]

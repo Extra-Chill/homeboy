@@ -18,6 +18,7 @@ use homeboy::agents::agent_tasks::{
     AgentTaskEvidenceRef, AgentTaskFailureClassification, AgentTaskOutcomeStatus,
 };
 use homeboy::core::engine::shell::quote_arg;
+use homeboy::core::error::{ActionSafety, ExecutableAction};
 use homeboy::core::output::{budget_json_values, OutputBudget};
 use homeboy::runner::runners::{self as runner, RunnerKind};
 
@@ -1168,7 +1169,8 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         .as_ref()
         .map(causal_chain_from_aggregate)
         .unwrap_or_default();
-    let next_commands = diagnose_next_commands(run_id);
+    let retry = retry_replay_action(&record);
+    let next_commands = diagnose_next_commands(run_id, retry.action.as_ref());
 
     let mut value = json!({
         "schema": "homeboy/agent-task-diagnose/v1",
@@ -1180,6 +1182,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         "hydrated_evidence": hydrated_evidence,
         "hydrated_evidence_total": total_hydrated_evidence,
         "continuation_admission": record.metadata.get("cook_continuation_admission"),
+        "retry_replay": retry.projection(),
         "next_commands": next_commands,
     });
     if let Some(selection) = target.selection {
@@ -1205,6 +1208,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         aggregate.as_ref(),
         &missing_artifacts,
         record.runner_id(),
+        retry.action.as_ref(),
     );
     bound_full_reader_payload(&mut value);
     Ok((value, 0))
@@ -1266,6 +1270,7 @@ fn attach_diagnose_actionable(
     aggregate: Option<&AgentTaskAggregate>,
     missing_artifacts: &[Value],
     runner_id: Option<&str>,
+    retry_action: Option<&CommandNextAction>,
 ) {
     let run_id = record.run_id.as_str();
     let candidate_payload = candidate_result_payload(
@@ -1286,7 +1291,13 @@ fn attach_diagnose_actionable(
             DIAGNOSE_ACTION_BASIS_CANDIDATE,
         )
     } else {
-        diagnose_next_actions(run_id, &failures, missing_artifacts, runner_id)
+        diagnose_next_actions(
+            run_id,
+            &failures,
+            missing_artifacts,
+            runner_id,
+            retry_action,
+        )
     };
     if let Value::Object(map) = value {
         map.insert(
@@ -1315,10 +1326,11 @@ fn diagnose_next_actions(
     failures: &[DiagnosedFailure],
     missing_artifacts: &[Value],
     runner_id: Option<&str>,
+    retry_action: Option<&CommandNextAction>,
 ) -> (Vec<CommandNextAction>, &'static str) {
     let mut actions: Vec<CommandNextAction> = Vec::new();
     for failure in failures {
-        for action in classification_next_actions(run_id, failure, runner_id) {
+        for action in classification_next_actions(run_id, failure, runner_id, retry_action) {
             push_unique_next_action(&mut actions, action);
         }
     }
@@ -1327,7 +1339,7 @@ fn diagnose_next_actions(
     }
     if actions.is_empty() {
         return (
-            generic_diagnose_next_actions(run_id),
+            generic_diagnose_next_actions(run_id, retry_action),
             DIAGNOSE_ACTION_BASIS_FALLBACK,
         );
     }
@@ -1351,6 +1363,7 @@ fn classification_next_actions(
     run_id: &str,
     failure: &DiagnosedFailure,
     runner_id: Option<&str>,
+    retry_action: Option<&CommandNextAction>,
 ) -> Vec<CommandNextAction> {
     let run = quote_arg(run_id);
     let task = quote_arg(&failure.task_id);
@@ -1359,11 +1372,7 @@ fn classification_next_actions(
         format!("homeboy agent-task evidence {run} --task {task} --failure-only"),
     )
     .with_kind(CommandNextActionKind::Show);
-    let retry = CommandNextAction::new(
-        "retry the run from its plan",
-        format!("homeboy agent-task retry {run} --run"),
-    )
-    .with_kind(CommandNextActionKind::Repair);
+    let retry = retry_action.cloned();
     let review = CommandNextAction::new(
         "review the candidate this attempt left behind",
         format!("homeboy agent-task review {run}"),
@@ -1381,14 +1390,20 @@ fn classification_next_actions(
         AgentTaskFailureClassification::Provider => {
             let mut actions = vec![failure_evidence, list_providers];
             actions.extend(provider_readiness_actions(runner_id));
-            actions.push(retry);
+            actions.extend(retry);
             actions
         }
         // Documented as safe to retry with bounded backoff: lead with the retry.
-        AgentTaskFailureClassification::Transient => vec![retry, failure_evidence],
+        AgentTaskFailureClassification::Transient => {
+            retry.into_iter().chain([failure_evidence]).collect()
+        }
         // A wall-clock timeout can still have left a complete candidate patch,
         // so review comes before spending another attempt.
-        AgentTaskFailureClassification::Timeout => vec![failure_evidence, review, retry],
+        AgentTaskFailureClassification::Timeout => {
+            let mut actions = vec![failure_evidence, review];
+            actions.extend(retry);
+            actions
+        }
         // A silent hang: the durable record is likely still `running` and the
         // owning runner is the thing to interrogate.
         AgentTaskFailureClassification::Stalled => {
@@ -1399,21 +1414,22 @@ fn classification_next_actions(
             .with_kind(CommandNextActionKind::Repair)];
             actions.extend(lost_runner_actions(runner_id));
             actions.push(failure_evidence);
-            actions.push(retry);
+            actions.extend(retry);
             actions
         }
         // Throttled: the evidence carries the retry-after hint, and another
         // registered provider may be able to take the work now.
         AgentTaskFailureClassification::RateLimited => {
-            vec![
+            let mut actions = vec![
                 failure_evidence,
                 CommandNextAction::new(
                     "list registered providers to rotate to",
                     "homeboy agent-task providers".to_string(),
                 )
                 .with_kind(CommandNextActionKind::Show),
-                retry,
-            ]
+            ];
+            actions.extend(retry);
+            actions
         }
         // Policy refused this request. Retrying an identical request is denied
         // identically, so no retry action is emitted.
@@ -1452,16 +1468,19 @@ fn classification_next_actions(
         // The work ran and failed (gate/verify failure, harvest failure,
         // required typed artifacts missing): show what the failing step
         // recorded and what it produced before deciding to retry.
-        AgentTaskFailureClassification::ExecutionFailed => vec![
-            failure_evidence,
-            review,
-            CommandNextAction::new(
-                "list the artifacts the run produced",
-                format!("homeboy agent-task artifacts {run} --full"),
-            )
-            .with_kind(CommandNextActionKind::Artifacts),
-            retry,
-        ],
+        AgentTaskFailureClassification::ExecutionFailed => {
+            let mut actions = vec![
+                failure_evidence,
+                review,
+                CommandNextAction::new(
+                    "list the artifacts the run produced",
+                    format!("homeboy agent-task artifacts {run} --full"),
+                )
+                .with_kind(CommandNextActionKind::Artifacts),
+            ];
+            actions.extend(retry);
+            actions
+        }
         // Deliberately unmapped: an unclassified failure has no substantiable
         // specific step, so the caller gets the explicit generic fallback.
         AgentTaskFailureClassification::Unknown => Vec::new(),
@@ -1562,9 +1581,12 @@ fn missing_artifact_next_actions(
 
 /// The pre-existing static set, retained as the explicit fallback for a failure
 /// the diagnosis could not classify.
-fn generic_diagnose_next_actions(run_id: &str) -> Vec<CommandNextAction> {
+fn generic_diagnose_next_actions(
+    run_id: &str,
+    retry_action: Option<&CommandNextAction>,
+) -> Vec<CommandNextAction> {
     let run = quote_arg(run_id);
-    vec![
+    let mut actions = vec![
         CommandNextAction::new(
             "show the full run record",
             format!("homeboy agent-task status {run} --full"),
@@ -1577,12 +1599,9 @@ fn generic_diagnose_next_actions(run_id: &str) -> Vec<CommandNextAction> {
         .with_kind(CommandNextActionKind::Artifacts),
         CommandNextAction::new("review run", format!("homeboy agent-task review {run}"))
             .with_kind(CommandNextActionKind::Show),
-        CommandNextAction::new(
-            "retry the run from its plan",
-            format!("homeboy agent-task retry {run} --run"),
-        )
-        .with_kind(CommandNextActionKind::Repair),
-    ]
+    ];
+    actions.extend(retry_action.cloned());
+    actions
 }
 
 fn diagnose_run_ref(record: &AgentTaskRunRecord, runner_id: Option<&str>) -> CommandRunRef {
@@ -1673,8 +1692,14 @@ mod diagnose_actionable_tests {
         classification: AgentTaskFailureClassification,
         runner_id: Option<&str>,
     ) -> Vec<CommandNextAction> {
-        let (actions, basis) =
-            diagnose_next_actions("run-1", &[failure(classification)], &[], runner_id);
+        let retry = owner_bound_retry_action("run-1", None, json!({ "placement": "local" }));
+        let (actions, basis) = diagnose_next_actions(
+            "run-1",
+            &[failure(classification)],
+            &[],
+            runner_id,
+            Some(&retry),
+        );
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
         actions
     }
@@ -1688,12 +1713,12 @@ mod diagnose_actionable_tests {
             vec![
                 "homeboy agent-task evidence run-1 --task task-a --failure-only",
                 "homeboy agent-task providers",
-                "homeboy agent-task retry run-1 --run",
+                "homeboy --placement local agent-task retry run-1 --run",
             ]
         );
         assert_eq!(
             repair_commands(&actions),
-            vec!["homeboy agent-task retry run-1 --run"]
+            vec!["homeboy --placement local agent-task retry run-1 --run"]
         );
     }
 
@@ -1704,7 +1729,7 @@ mod diagnose_actionable_tests {
         assert_eq!(
             commands(&actions),
             vec![
-                "homeboy agent-task retry run-1 --run",
+                "homeboy --placement local agent-task retry run-1 --run",
                 "homeboy agent-task evidence run-1 --task task-a --failure-only",
             ]
         );
@@ -1719,7 +1744,7 @@ mod diagnose_actionable_tests {
             vec![
                 "homeboy agent-task evidence run-1 --task task-a --failure-only",
                 "homeboy agent-task review run-1",
-                "homeboy agent-task retry run-1 --run",
+                "homeboy --placement local agent-task retry run-1 --run",
             ]
         );
     }
@@ -1735,7 +1760,7 @@ mod diagnose_actionable_tests {
                 "homeboy runner status homeboy-lab",
                 "homeboy runner doctor homeboy-lab --repair",
                 "homeboy agent-task evidence run-1 --task task-a --failure-only",
-                "homeboy agent-task retry run-1 --run",
+                "homeboy --placement local agent-task retry run-1 --run",
             ]
         );
         assert_eq!(
@@ -1743,7 +1768,7 @@ mod diagnose_actionable_tests {
             vec![
                 "homeboy agent-task reconcile run-1 --dry-run",
                 "homeboy runner doctor homeboy-lab --repair",
-                "homeboy agent-task retry run-1 --run",
+                "homeboy --placement local agent-task retry run-1 --run",
             ]
         );
     }
@@ -1766,7 +1791,7 @@ mod diagnose_actionable_tests {
             vec![
                 "homeboy agent-task evidence run-1 --task task-a --failure-only",
                 "homeboy agent-task providers",
-                "homeboy agent-task retry run-1 --run",
+                "homeboy --placement local agent-task retry run-1 --run",
             ]
         );
     }
@@ -1831,7 +1856,7 @@ mod diagnose_actionable_tests {
                 "homeboy agent-task evidence run-1 --task task-a --failure-only",
                 "homeboy agent-task review run-1",
                 "homeboy agent-task artifacts run-1 --full",
-                "homeboy agent-task retry run-1 --run",
+                "homeboy --placement local agent-task retry run-1 --run",
             ]
         );
     }
@@ -1843,6 +1868,7 @@ mod diagnose_actionable_tests {
             &[failure(AgentTaskFailureClassification::Unknown)],
             &[],
             None,
+            None,
         );
 
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_FALLBACK);
@@ -1852,17 +1878,16 @@ mod diagnose_actionable_tests {
                 "homeboy agent-task status run-1 --full",
                 "homeboy agent-task artifacts run-1",
                 "homeboy agent-task review run-1",
-                "homeboy agent-task retry run-1 --run",
             ]
         );
     }
 
     #[test]
     fn a_run_with_no_diagnosis_at_all_falls_back_to_the_generic_set() {
-        let (actions, basis) = diagnose_next_actions("run-1", &[], &[], None);
+        let (actions, basis) = diagnose_next_actions("run-1", &[], &[], None, None);
 
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_FALLBACK);
-        assert_eq!(actions.len(), 4);
+        assert_eq!(actions.len(), 3);
     }
 
     #[test]
@@ -1872,7 +1897,7 @@ mod diagnose_actionable_tests {
             "missing": ["concept_packet", "design_packet"],
         })];
 
-        let (actions, basis) = diagnose_next_actions("run-1", &[], &missing, None);
+        let (actions, basis) = diagnose_next_actions("run-1", &[], &missing, None, None);
 
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
         assert_eq!(
@@ -1894,6 +1919,7 @@ mod diagnose_actionable_tests {
             "run-1",
             &[failure(AgentTaskFailureClassification::ExecutionFailed)],
             &missing,
+            None,
             None,
         );
 
@@ -1924,6 +1950,7 @@ mod diagnose_actionable_tests {
                 classification: AgentTaskFailureClassification::InvalidInput,
             }],
             &[],
+            None,
             None,
         );
 
@@ -3653,13 +3680,180 @@ fn causal_chain_from_aggregate(aggregate: &AgentTaskAggregate) -> Vec<Value> {
         .collect()
 }
 
-fn diagnose_next_commands(run_id: &str) -> Vec<String> {
-    vec![
+struct RetryReplayAction {
+    owner: Value,
+    readiness: &'static str,
+    reason: Option<String>,
+    action: Option<CommandNextAction>,
+}
+
+impl RetryReplayAction {
+    fn unavailable(owner: Value, reason: impl Into<String>) -> Self {
+        Self {
+            owner,
+            readiness: "unavailable",
+            reason: Some(reason.into()),
+            action: None,
+        }
+    }
+
+    fn projection(&self) -> Value {
+        json!({
+            "owner": self.owner,
+            "readiness": self.readiness,
+            "reason": self.reason,
+            "action": self.action.as_ref().and_then(|action| action.action.clone()),
+        })
+    }
+}
+
+/// Render retry only from the durable owner and replay contract. The command and
+/// typed action share this one admission decision, so a human hint cannot claim
+/// a retry exists when route materialization will reject it.
+fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
+    let runner_id = record.runner_id().filter(|id| !id.trim().is_empty());
+    let owner = match runner_id {
+        Some(runner_id) => json!({ "placement": "runner", "runner_id": runner_id }),
+        None => json!({ "placement": "local" }),
+    };
+    let plan = match agent_task_lifecycle::load_plan(&record.run_id) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return RetryReplayAction::unavailable(
+                owner,
+                format!("persisted replay plan is unavailable: {}", error.message),
+            );
+        }
+    };
+    if !plan_has_retry_materialization_identity(&plan) {
+        return RetryReplayAction::unavailable(
+            owner,
+            "persisted replay plan has no materialization identity",
+        );
+    }
+    if let Some(replay) = plan.metadata.get("generic_lab_command_replay") {
+        let root = replay
+            .pointer("/materialization/canonical_root")
+            .and_then(Value::as_str);
+        let expected_identity = replay
+            .pointer("/materialization/content_identity")
+            .and_then(Value::as_str);
+        let (Some(root), Some(expected_identity)) = (root, expected_identity) else {
+            return RetryReplayAction::unavailable(
+                owner,
+                "generic Lab replay is missing its materialization identity",
+            );
+        };
+        match homeboy::runner::controller_workspace_materialization_identity(std::path::Path::new(
+            root,
+        )) {
+            Ok(actual_identity) if actual_identity == expected_identity => {}
+            Ok(_) => {
+                return RetryReplayAction::unavailable(
+                    owner,
+                    "source workspace no longer matches the persisted Lab replay identity",
+                );
+            }
+            Err(error) => {
+                return RetryReplayAction::unavailable(
+                    owner,
+                    format!(
+                        "cannot validate persisted Lab replay identity: {}",
+                        error.message
+                    ),
+                );
+            }
+        }
+    }
+
+    RetryReplayAction {
+        owner: owner.clone(),
+        readiness: "ready",
+        reason: None,
+        action: Some(owner_bound_retry_action(&record.run_id, runner_id, owner)),
+    }
+}
+
+fn owner_bound_retry_action(
+    run_id: &str,
+    runner_id: Option<&str>,
+    owner: Value,
+) -> CommandNextAction {
+    let mut args = Vec::new();
+    if let Some(runner_id) = runner_id {
+        args.extend(["--runner".to_string(), runner_id.to_string()]);
+    } else {
+        args.extend(["--placement".to_string(), "local".to_string()]);
+    }
+    args.extend([
+        "agent-task".to_string(),
+        "retry".to_string(),
+        run_id.to_string(),
+        "--run".to_string(),
+    ]);
+    let action = ExecutableAction::new(
+        "agent-task.retry.owner-bound.v1",
+        "retry the run from its persisted plan",
+        "homeboy",
+        args,
+        ActionSafety::Mutating,
+    )
+    .with_evidence(json!({
+        "schema": "homeboy/agent-task-retry-replay/v1",
+        "owner": owner,
+        "replay_ready": true,
+        "materialization_identity": true,
+    }));
+    CommandNextAction::from_action(action)
+}
+
+fn plan_has_retry_materialization_identity(plan: &AgentTaskPlan) -> bool {
+    plan.tasks.iter().any(|task| {
+        task.workspace
+            .root
+            .as_deref()
+            .or_else(|| {
+                task.executor
+                    .config
+                    .get("workspace_root")
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| {
+                task.metadata
+                    .get("workspace")
+                    .and_then(|workspace| workspace.get("root"))
+                    .and_then(Value::as_str)
+            })
+            .is_some_and(|root| !root.trim().is_empty())
+    }) || plan
+        .metadata
+        .get("generic_lab_command_replay")
+        .is_some_and(|replay| {
+            replay.get("schema").and_then(Value::as_str)
+                == Some("homeboy/generic-lab-command-replay/v1")
+                && replay
+                    .get("normalized_args")
+                    .and_then(Value::as_array)
+                    .is_some_and(|args| !args.is_empty())
+                && replay
+                    .pointer("/materialization/canonical_root")
+                    .and_then(Value::as_str)
+                    .is_some_and(|root| !root.trim().is_empty())
+                && replay
+                    .pointer("/materialization/content_identity")
+                    .and_then(Value::as_str)
+                    .is_some_and(|identity| !identity.trim().is_empty())
+        })
+}
+
+fn diagnose_next_commands(run_id: &str, retry_action: Option<&CommandNextAction>) -> Vec<String> {
+    let mut commands = vec![
         format!("homeboy agent-task status {run_id} --full"),
         format!("homeboy agent-task artifacts {run_id}"),
         format!("homeboy agent-task review {run_id}"),
-        format!("homeboy agent-task retry {run_id} --run"),
-    ]
+    ];
+    commands.extend(retry_action.map(|action| action.command.clone()));
+    commands
 }
 
 #[cfg(test)]
@@ -3698,6 +3892,57 @@ mod tests {
             actions[1]["command"],
             "homeboy agent-task active --limit 20 --cursor 20"
         );
+    }
+
+    #[test]
+    fn retry_action_is_typed_and_bound_to_the_controller() {
+        let action = owner_bound_retry_action("run-1", None, json!({ "placement": "local" }));
+
+        assert_eq!(
+            action.command,
+            "homeboy --placement local agent-task retry run-1 --run"
+        );
+        assert_eq!(
+            action.action.as_ref().unwrap().id,
+            "agent-task.retry.owner-bound.v1"
+        );
+        assert_eq!(
+            action.action.as_ref().unwrap().evidence.as_ref().unwrap()["owner"]["placement"],
+            "local"
+        );
+    }
+
+    #[test]
+    fn retry_action_is_typed_and_bound_to_its_runner() {
+        let action = owner_bound_retry_action(
+            "run-1",
+            Some("lab-a"),
+            json!({ "placement": "runner", "runner_id": "lab-a" }),
+        );
+
+        assert_eq!(
+            action.command,
+            "homeboy --runner lab-a agent-task retry run-1 --run"
+        );
+        assert_eq!(
+            action.action.as_ref().unwrap().evidence.as_ref().unwrap()["owner"]["runner_id"],
+            "lab-a"
+        );
+    }
+
+    #[test]
+    fn unavailable_retry_has_a_reason_and_no_executable_action() {
+        let retry = RetryReplayAction::unavailable(
+            json!({ "placement": "runner", "runner_id": "lab-a" }),
+            "source workspace no longer matches the persisted Lab replay identity",
+        );
+
+        assert_eq!(retry.projection()["readiness"], "unavailable");
+        assert!(retry.projection()["action"].is_null());
+        assert!(retry.projection()["reason"]
+            .as_str()
+            .unwrap()
+            .contains("no longer matches"));
     }
 
     #[test]
