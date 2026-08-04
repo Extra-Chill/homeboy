@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.10.11] - 2026-08-04
+
+### Fixed
+- resolve the action ref once so a mid-run release cannot break reconcile
+
 ## [2.10.10] - 2026-08-04
 
 ### Fixed
