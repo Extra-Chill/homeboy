@@ -4,15 +4,10 @@ mod dispatch;
 mod handoff;
 
 use super::*;
-use clap::Parser;
-use homeboy::command_contract::{lab_runner_supports_contract_label, LabCommandPortability};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use tempfile::tempdir;
-
-use super::*;
 
 pub(super) fn git_init(path: &Path) {
     let output = Command::new("git")

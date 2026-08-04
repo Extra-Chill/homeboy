@@ -110,17 +110,6 @@ pub struct DependencyHygieneOptions {
     pub allow_stale: bool,
 }
 
-// Thin wrapper over `require_dependency_hygiene_for_source_with_settings`, kept for
-// callers that do not need settings; currently exercised only by tests.
-#[cfg(test)]
-pub(crate) fn require_dependency_hygiene_for_source(
-    source_path: &Path,
-    extension_path: Option<&Path>,
-    options: DependencyHygieneOptions,
-) -> Result<Vec<CheckoutHygieneSnapshot>> {
-    require_dependency_hygiene_for_source_with_settings(source_path, extension_path, &[], options)
-}
-
 pub fn require_dependency_hygiene_for_source_with_settings(
     source_path: &Path,
     extension_path: Option<&Path>,
