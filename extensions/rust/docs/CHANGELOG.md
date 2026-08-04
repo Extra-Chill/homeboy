@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.32.1] - 2026-08-04
+
+### Fixed
+- structure toolchain readiness probes
+
 ## [1.32.0] - 2026-08-04
 
 ### Added
