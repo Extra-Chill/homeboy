@@ -7,14 +7,13 @@ use homeboy_core::secret_env_plan::SECRET_ENV_PLAN_ENV_DELTA_SOURCE;
 
 pub(super) fn with_agent_task_retry_hint(
     error: Error,
-    run_id: &str,
-    plan: Option<&homeboy_agents::agent_task_scheduler::AgentTaskPlan>,
+    _run_id: &str,
+    _plan: Option<&homeboy_agents::agent_task_scheduler::AgentTaskPlan>,
 ) -> Error {
-    if plan.is_some_and(agent_task_lifecycle::plan_has_retry_materialization_identity) {
-        error.with_hint(format!("Retry: homeboy agent-task retry {run_id} --run"))
-    } else {
-        error
-    }
+    // Only the controller can combine durable owner, placement, and current
+    // workspace identity. Its status projection emits a retry action when that
+    // complete contract is replayable.
+    error
 }
 
 /// Homeboy-owned Lab artifact directory for a given runner checkout root.
