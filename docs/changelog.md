@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.329.0] - 2026-08-04
+
+### Added
+- reconcile missing active manifests
+- fence workspace reconciliation
+
+### Fixed
+- only report a budget as exhausted when one was reached
+- authenticate dirty review continuation
+- give the rotation baseline test a durable run record
+- give the scratch-retry scheduler test a durable run record
+- align recovery fixtures with runtime contracts
+- resume timed-out review forms
+- regenerate CLI reference contract
+
 ## [0.328.1] - 2026-08-03
 
 ### Fixed
