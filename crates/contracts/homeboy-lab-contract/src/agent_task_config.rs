@@ -68,10 +68,24 @@ pub struct AgentTaskManagedService {
     /// reference and never assumes a particular tunnel or preview provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
+    /// Optional generic probe-provider request. The supervisor records the
+    /// observed final URL and origin; a declared public URL is never evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_origin_probe: Option<AgentTaskManagedServiceBrowserOriginProbe>,
     #[serde(default)]
     pub lifecycle: AgentTaskManagedServiceLifecycle,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+}
+
+/// A provider-neutral browser-origin observation request. Providers may use
+/// their own browser implementation, but must return redirect/origin evidence
+/// through this durable contract rather than treating a configured URL as fact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskManagedServiceBrowserOriginProbe {
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 impl AgentTaskManagedService {
@@ -117,12 +131,14 @@ mod managed_service_contract_tests {
             "id": "neutral-http", "command": ["fixture", "--serve"],
             "port": 0, "socket_handoff": true, "readiness": { "kind": "http", "path": "/ready" },
             "secret_env": ["FIXTURE_TOKEN"], "public_url": "https://preview.example.test/run",
+            "browser_origin_probe": { "provider": "fixture-browser" },
             "target": "lab", "lifecycle": "target"
         }))
         .expect("service contract");
         assert_eq!(service.version, AgentTaskManagedService::VERSION);
         assert_eq!(service.host, "127.0.0.1");
         assert!(service.socket_handoff);
+        assert_eq!(service.browser_origin_probe.unwrap().provider, "fixture-browser");
         assert_eq!(service.target.as_deref(), Some("lab"));
         assert_eq!(
             service.readiness.as_ref().unwrap().kind,

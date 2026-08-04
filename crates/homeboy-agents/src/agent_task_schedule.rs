@@ -789,6 +789,7 @@ mod managed_service_plan_tests {
             socket_handoff: false,
             readiness: None,
             public_url: Some("https://preview.example.test".to_string()),
+            browser_origin_probe: None,
             lifecycle: AgentTaskManagedServiceLifecycle::Plan,
             target: None,
         });
@@ -815,6 +816,7 @@ mod managed_service_plan_tests {
             socket_handoff: false,
             readiness: None,
             public_url: None,
+            browser_origin_probe: None,
             lifecycle: AgentTaskManagedServiceLifecycle::Plan,
             target: None,
         });

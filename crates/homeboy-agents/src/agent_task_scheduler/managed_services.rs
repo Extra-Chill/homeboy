@@ -47,6 +47,8 @@ pub(crate) struct AgentTaskManagedServiceRecord {
     pub port_lease: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub readiness_attempts: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_origin_evidence: Option<Value>,
 }
 
 /// Execution-host service supervisor. It is instantiated by whichever host
@@ -151,6 +153,7 @@ impl AgentTaskServiceSupervisor {
                 .as_ref()
                 .map(|lease| lease.path.display().to_string()),
             readiness_attempts: Vec::new(),
+            browser_origin_evidence: None,
         };
         // This durable intent is committed before the execution host can run
         // the service payload, so cancellation/reconciliation sees a launch
@@ -208,6 +211,7 @@ impl AgentTaskServiceSupervisor {
             return Err(format!("managed service '{}': {error}", spec.id));
         }
         record.state = "ready".to_string();
+        record.browser_origin_evidence = observe_browser_origin(&spec);
         persist_record(run_id, &record)?;
         self.services.push(RunningService {
             spec,
@@ -223,7 +227,7 @@ impl AgentTaskServiceSupervisor {
     pub(super) fn bind_into(&self, inputs: &mut Value, metadata: &mut Value) {
         let values = self.records().into_iter().map(|record| (record.id.clone(), json!({
             "local_url": record.local_url, "public_url": record.public_url,
-            "browser_origin": record.public_url.clone().or(record.local_url.clone()),
+            "browser_origin_probe": record.browser_origin_evidence,
             "lease_ref": format!("managed-service:{}", record.id),
             "readiness_attempts": record.readiness_attempts,
             "endpoint_ownership": record.provenance["endpoint_ownership"],
@@ -277,6 +281,35 @@ impl AgentTaskServiceSupervisor {
             }
         }
         self.records()
+    }
+}
+
+fn observe_browser_origin(spec: &AgentTaskManagedService) -> Option<Value> {
+    let probe = spec.browser_origin_probe.as_ref()?;
+    let requested_url = probe.url.as_deref().or(spec.public_url.as_deref())?;
+    match reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .and_then(|client| client.get(requested_url).send())
+    {
+        Ok(response) => {
+            let observed_url = response.url().to_string();
+            let origin = response.url().origin().ascii_serialization();
+            Some(json!({
+                "schema": "homeboy/browser-origin-probe/v1",
+                "provider": probe.provider,
+                "requested_url": requested_url,
+                "observed_url": observed_url,
+                "origin": origin,
+                "status": response.status().as_u16(),
+            }))
+        }
+        Err(error) => Some(json!({
+            "schema": "homeboy/browser-origin-probe/v1",
+            "provider": probe.provider,
+            "requested_url": requested_url,
+            "error": error.to_string(),
+        })),
     }
 }
 
@@ -550,6 +583,7 @@ mod tests {
                 path: Some("/".to_string()), timeout_ms: Some(5_000),
             }),
             public_url: Some("https://preview.example.test/fixture".to_string()),
+            browser_origin_probe: None,
             lifecycle: AgentTaskManagedServiceLifecycle::Plan,
             target: None,
         }
@@ -572,8 +606,8 @@ mod tests {
                 "https://preview.example.test/fixture"
             );
             assert_eq!(
-                metadata["managed_services"]["fixture"]["browser_origin"],
-                "https://preview.example.test/fixture"
+                metadata["managed_services"]["fixture"]["browser_origin_probe"],
+                Value::Null
             );
             let records = services.cleanup("success");
             assert_eq!(records[0].state, "stopped");
@@ -662,6 +696,7 @@ mod tests {
                 socket_handoff: false,
                 readiness: None,
                 public_url: None,
+                browser_origin_probe: None,
                 lifecycle: AgentTaskManagedServiceLifecycle::Plan,
                 target: None,
             };
