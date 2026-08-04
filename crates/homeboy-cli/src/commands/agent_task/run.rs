@@ -132,6 +132,7 @@ pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
             crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(dispatch_recipe)
         };
         let execute = |options| {
+            agent_task_service::authorize_cook_continue_route(&options)?;
             let executor = ExtensionProviderAgentTaskExecutor::discover();
             let cook = if historical_terminal {
                 agent_task_service::run_terminal_cook_continuation(options, executor)?
@@ -187,6 +188,7 @@ pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
     };
     options.initial_run_id = attempt.run_id.clone();
     options.initial_plan = attempt.plan.clone();
+    agent_task_service::authorize_cook_continue_route(&options)?;
     let executor = ExtensionProviderAgentTaskExecutor::discover();
     let result = if terminal_review_form_continuation {
         agent_task_service::run_terminal_cook_continuation(options, executor)?
