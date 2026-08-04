@@ -11,8 +11,9 @@
 //!      cherry-picks. Rationale: a partial cherry-pick failure leaves a
 //!      half-applied target branch but a correctly-pruned spec, so re-running
 //!      `sync` is a clean rebuild.
-//!   4. Force-recreate `target.branch` from `base.remote/base.branch`.
-//!   5. Cherry-pick the pick list in order. On conflict, return
+//!   4. Preflight the target and explicitly compatible installed alternatives.
+//!   5. Force-recreate `target.branch` from `base.remote/base.branch`.
+//!   6. Cherry-pick the pick list in order. On conflict, return
 //!      [`Error::stack_apply_conflict`] and leave the conflicted pick in the
 //!      checkout for manual resolution — unless the caller asked for
 //!      [`ConflictPolicy::Abort`] (`--abort-on-conflict`).
@@ -43,8 +44,9 @@ const STACK_SYNC_UNCERTAIN_KIND: &str = "stack.sync.uncertain";
 use super::apply::{
     checkout_force, cherry_pick, conflict_error, ensure_head_remote,
     ensure_no_cherry_pick_in_progress, fetch_remote_branch, fetch_sha, AppliedPr, CherryPickResult,
-    ConflictContext, ConflictPolicy, PickOutcome,
+    ConflictContext, ConflictPolicy, PickOutcome, TargetSnapshot,
 };
+use super::candidates::{preflight, stale_stack_error};
 use super::pr_meta::fetch_pr_meta;
 pub(crate) use super::pr_meta::StackPrMeta as PrMeta;
 use super::spec::{resolve_existing_component_path, save, StackPrEntry, StackSpec};
@@ -604,6 +606,12 @@ pub fn sync(
         &format!("homeboy stack sync {}", spec.id),
     )?;
 
+    let base_ref = format!("{}/{}", spec.base.remote, spec.base.branch);
+    let preflight = preflight(spec, &plan.preview.component_path, &base_ref)?;
+    if preflight.blocked {
+        return Err(stale_stack_error(spec, &preflight));
+    }
+
     // 4. Persist the pruned spec BEFORE any cherry-picks. A partial pick
     //    failure leaves a half-applied target but a correct spec — re-run
     //    cleanly rebuilds.
@@ -617,7 +625,8 @@ pub fn sync(
     }
 
     // 5. Force-recreate target locally from base.
-    let base_ref = format!("{}/{}", spec.base.remote, spec.base.branch);
+    let target_snapshot =
+        TargetSnapshot::capture(&plan.preview.component_path, &spec.target.branch)?;
     checkout_force(&plan.preview.component_path, &spec.target.branch, &base_ref)?;
 
     // 6. Cherry-pick the kept PRs.
@@ -667,9 +676,12 @@ pub fn sync(
                         sha: &meta.head_sha,
                         rerun_command: &format!("homeboy stack sync {}", spec.id),
                         policy: conflict_policy,
+                        candidates: &preflight.candidates,
+                        target_snapshot: Some(&target_snapshot),
+                        target_branch: &spec.target.branch,
                     },
                     &message,
-                ));
+                )?);
             }
         }
     }

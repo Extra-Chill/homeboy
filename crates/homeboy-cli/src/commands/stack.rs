@@ -28,6 +28,11 @@ enum StackCommand {
         /// Stack ID.
         stack_id: String,
     },
+    /// Discover installed alternatives without switching stacks.
+    Candidates {
+        /// Stack ID to find alternatives for.
+        stack_id: String,
+    },
     /// Create a new stack spec.
     Create {
         /// Stack ID (used as filename: `~/.config/homeboy/stacks/<id>.json`).
@@ -161,6 +166,7 @@ enum StackCommand {
 pub enum StackCommandOutput {
     List(StackListOutput),
     Show(StackShowOutput),
+    Candidates(StackCandidatesOutput),
     Create(StackMutationOutput),
     AddPr(StackMutationOutput),
     RemovePr(StackMutationOutput),
@@ -197,6 +203,13 @@ pub struct StackShowOutput {
 }
 
 #[derive(Serialize)]
+pub struct StackCandidatesOutput {
+    pub command: &'static str,
+    pub stack_id: String,
+    pub candidates: Vec<stack::StackCandidate>,
+}
+
+#[derive(Serialize)]
 pub struct StackMutationOutput {
     pub command: &'static str,
     pub stack: StackSpec,
@@ -214,6 +227,7 @@ pub fn run(args: StackArgs) -> CmdResult<StackCommandOutput> {
     match args.command {
         StackCommand::List => list(),
         StackCommand::Show { stack_id } => show(&stack_id),
+        StackCommand::Candidates { stack_id } => candidates(&stack_id),
         StackCommand::Create {
             stack_id,
             component,
@@ -274,6 +288,19 @@ pub fn run(args: StackArgs) -> CmdResult<StackCommandOutput> {
             path,
         } => inspect(component_id.as_deref(), base, no_pr, repo, path.as_deref()),
     }
+}
+
+fn candidates(stack_id: &str) -> CmdResult<StackCommandOutput> {
+    let spec = stack::load(stack_id)?;
+    let candidates = stack::discover_candidates(&spec)?;
+    Ok((
+        StackCommandOutput::Candidates(StackCandidatesOutput {
+            command: "stack.candidates",
+            stack_id: spec.id,
+            candidates,
+        }),
+        0,
+    ))
 }
 
 fn list() -> CmdResult<StackCommandOutput> {
@@ -343,6 +370,8 @@ fn create(
         base: base_ref,
         target: target_ref,
         prs: Vec::new(),
+        provenance: None,
+        requirements: Default::default(),
     };
     stack::save(&spec)?;
     Ok((

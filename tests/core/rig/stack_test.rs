@@ -115,6 +115,8 @@ fn stack_spec(id: &str, component_path: &str) -> StackSpec {
             branch: "dev/combined-fixes".to_string(),
         },
         prs: Vec::<StackPrEntry>::new(),
+        provenance: None,
+        requirements: Default::default(),
     }
 }
 

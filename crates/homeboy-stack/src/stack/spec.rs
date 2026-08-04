@@ -47,11 +47,44 @@ pub struct StackSpec {
     /// PRs cherry-picked onto `target` in order.
     #[serde(default)]
     pub prs: Vec<StackPrEntry>,
+
+    /// Where this stack declaration came from, when its installer recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<StackProvenance>,
+
+    /// Explicit compatibility declarations used when suggesting an alternative
+    /// installed stack. An omitted block provides no compatibility evidence.
+    #[serde(default, skip_serializing_if = "StackRequirements::is_empty")]
+    pub requirements: StackRequirements,
+}
+
+/// Human-readable provenance for an installed stack declaration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StackProvenance {
+    /// Source that supplied the spec, such as a package or repository URL.
+    pub source: String,
+    /// Optional immutable revision or version of that source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+}
+
+/// Compatibility evidence declared by a stack author.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StackRequirements {
+    /// Base refs this stack's composition is declared compatible with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compatible_bases: Vec<GitRef>,
+}
+
+impl StackRequirements {
+    pub fn is_empty(&self) -> bool {
+        self.compatible_bases.is_empty()
+    }
 }
 
 /// A `<remote>/<branch>` pair. Split into two fields so callers can fetch
 /// + checkout without having to re-parse a slash-joined string.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitRef {
     pub remote: String,
     pub branch: String,
@@ -264,6 +297,8 @@ mod inline_tests {
                 branch: "stack".to_string(),
             },
             prs: Vec::new(),
+            provenance: None,
+            requirements: Default::default(),
         };
 
         assert_eq!(resolve_existing_component_path(&spec).unwrap(), path);
@@ -285,6 +320,8 @@ mod inline_tests {
                 branch: "stack".to_string(),
             },
             prs: Vec::new(),
+            provenance: None,
+            requirements: Default::default(),
         };
 
         let err = resolve_existing_component_path(&spec).unwrap_err();

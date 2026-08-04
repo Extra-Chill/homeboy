@@ -28,6 +28,7 @@
 //! - Conflict resolution cache
 
 pub mod apply;
+pub mod candidates;
 pub(crate) mod git;
 pub mod inspect;
 pub(crate) mod pr_meta;
@@ -37,13 +38,15 @@ pub mod status;
 pub mod sync;
 
 pub use apply::{apply, rebase, AppliedPr, ApplyOutput, ConflictPolicy, PickOutcome, RebaseOutput};
+pub use candidates::{discover as discover_candidates, StackCandidate, StackPreflight};
 pub use inspect::{
     inspect, inspect_at, InspectCommit, InspectCommitDetails, InspectOptions, InspectOutput,
     InspectPr,
 };
 pub use push::{push, PushOutput, PushStatus};
 pub use spec::{
-    exists, expand_path, list, list_ids, load, parse_git_ref, save, GitRef, StackPrEntry, StackSpec,
+    exists, expand_path, list, list_ids, load, parse_git_ref, save, GitRef, StackPrEntry,
+    StackProvenance, StackRequirements, StackSpec,
 };
 pub use status::{status, LocalEvidenceUnavailable, LocalState, StatusOutput, StatusPr};
 pub use sync::{

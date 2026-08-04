@@ -24,6 +24,7 @@ Manage stacks (combined-fixes branches built from base + cherry-picked PRs)
 | --- | --- |
 | `homeboy stack list` | List all installed stack specs |
 | `homeboy stack show` | Show a stack spec |
+| `homeboy stack candidates` | Discover installed alternatives without switching stacks |
 | `homeboy stack create` | Create a new stack spec |
 | `homeboy stack add-pr` | Append a PR entry to the stack's `prs` array |
 | `homeboy stack remove-pr` | Remove a PR entry from the stack's `prs` array |
@@ -54,6 +55,18 @@ Show a stack spec
 | Argument | Required | Description |
 | --- | --- | --- |
 | `<STACK_ID>` | yes | Stack ID |
+
+## `homeboy stack candidates`
+
+```sh
+homeboy stack candidates <STACK_ID>
+```
+
+Discover installed alternatives without switching stacks
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<STACK_ID>` | yes | Stack ID to find alternatives for |
 
 ## `homeboy stack create`
 

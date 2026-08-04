@@ -32,6 +32,8 @@ fn stack_spec(id: &str, component_path: String) -> StackSpec {
             number: 11410,
             note: None,
         }],
+        provenance: None,
+        requirements: Default::default(),
     }
 }
 

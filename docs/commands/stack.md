@@ -29,6 +29,19 @@ Stack specs live at `~/.config/homeboy/stacks/<id>.json`. A stack declares one c
 
 `component_path` supports `~` and `${env.VAR}` expansion. `base` and `target` are split into `{ remote, branch }` so Homeboy can fetch and rebuild without reparsing slash-joined refs.
 
+Installed specs can also declare provenance and compatibility evidence:
+
+```jsonc
+{
+  "provenance": { "source": "https://github.com/example-org/stack-specs", "revision": "abc123" },
+  "requirements": {
+    "compatible_bases": [{ "remote": "origin", "branch": "trunk" }]
+  }
+}
+```
+
+`compatible_bases` is an explicit statement that this stack composition can replace a stack using one of those base refs. Homeboy does not infer compatibility from branch names.
+
 ## Subcommands
 
 ### `list`
@@ -60,6 +73,14 @@ homeboy stack create <stack-id> \
 
 Create a spec file under `~/.config/homeboy/stacks/`.
 
+### `candidates`
+
+```sh
+homeboy stack candidates <stack-id>
+```
+
+Lists installed alternatives for the same component and repository without changing the selected stack. Candidates are ordered by declared base compatibility, then count of overlapping PR coordinates, then stack ID. Each JSON candidate includes its declared provenance (or `null` when absent), target, requirements, overlap evidence, and an exact `selection_command`. Run that command explicitly; discovery never switches or recreates a target branch.
+
 ### `add-pr`
 
 ```sh
@@ -88,7 +109,9 @@ Fetches the base, recreates the local target branch from the base, then cherry-p
 
 On the first conflict `apply` stops and **leaves the conflicted cherry-pick in the checkout** so it can actually be resolved. The error names the two commands that work from that state — `git -C <path> cherry-pick --continue` after staging the resolution, or `git -C <path> cherry-pick --abort` to bail out — plus the homeboy command to re-run afterwards.
 
-`--abort-on-conflict` opts into the old behaviour: homeboy runs `git cherry-pick --abort` for you and reports a clean tree. Use it for unattended runs where a dirty checkout is worse than a lost conflict.
+Before recreating the target, `apply` reads installed candidate declarations after fetching the requested base. If a cherry-pick subsequently conflicts, the structured error includes the deterministic candidate list and explicit selection commands. This is advisory evidence only: Homeboy fails closed and never switches to a candidate automatically.
+
+`--abort-on-conflict` runs `git cherry-pick --abort`, restores the target to its pre-rebuild tip, and reports a clean tree. Use it for unattended runs where a paused checkout is worse than an aborted rebuild.
 
 While a cherry-pick is still paused, `apply`, `rebase`, and `sync` refuse to rebuild the target branch rather than clobber an in-progress resolution.
 
