@@ -1,6 +1,5 @@
 //! Unit tests for the Lab offload module, split by concern.
 
-pub(super) use super::super::super::lab_capabilities::lab_runner_capability_contract;
 pub(super) use super::super::super::lab_env::build_lab_offload_env;
 pub(super) use super::super::super::lab_plan::base_lab_plan;
 pub(super) use super::super::super::lab_selection::{
@@ -13,10 +12,10 @@ pub(super) use super::super::super::lab_workspaces::{
 pub(super) use super::*;
 pub(super) use crate::verify_lab_workspace_from_env;
 pub(super) use crate::{
-    RunnerActiveJobSource, RunnerActiveJobState, RunnerAvailability, RunnerExecMode,
-    RunnerExecOutput, RunnerRequiredTool, RunnerSession, RunnerSessionState,
-    RunnerStaleDaemonWarning, RunnerTunnelMode, RunnerWorkspaceMaterializationPlan,
-    RunnerWorkspaceSyncOutput,
+    compile_lab_admission_plan, PlacementReadinessRequest, RunnerActiveJobSource,
+    RunnerActiveJobState, RunnerAvailability, RunnerExecMode, RunnerExecOutput, RunnerRequiredTool,
+    RunnerSession, RunnerSessionState, RunnerStaleDaemonWarning, RunnerTunnelMode,
+    RunnerWorkspaceMaterializationPlan, RunnerWorkspaceSyncOutput,
 };
 pub(super) use homeboy_core::engine::command::{CaptureMetadata, CommandCaptureMetadata};
 pub(super) use homeboy_core::observation::{
