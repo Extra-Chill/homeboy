@@ -185,6 +185,8 @@ permissions:
 jobs:
   binary:
     name: Prepare candidate Homeboy binary
+    # needs plan solely for needs.plan.outputs.action-sha; plan is pure bash.
+    needs: plan
     runs-on: ubuntu-latest
     outputs:
       cargo-cache-key: ${{ steps.cargo-cache-key.outputs.key }}
@@ -224,7 +226,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
-          ref: ${{ inputs.action-ref }}
+          ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
 
       - name: Materialize candidate Homeboy binary
@@ -250,7 +252,50 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      action-sha: ${{ steps.action-sha.outputs.sha }}
     steps:
+      # Resolve the action ref to an immutable SHA ONCE for the whole run.
+      #
+      # Every job used to check out `inputs.action-ref` independently. That ref
+      # is a floating tag by default (v2), and jobs in one run are minutes
+      # apart, so a release landing mid-run gave different jobs different action
+      # code. Provenance reconciliation compares an action_revision derived from
+      # each job's own checkout, so it failed closed and correctly — for a
+      # reason no operator would guess. See #332.
+      #
+      # Pinning the recorded revision alone would NOT be enough: the manifests
+      # would agree while the phases still ran different code, trading a loud
+      # failure for a silent inconsistency. The checkout itself has to be pinned.
+      - name: Resolve action revision
+        id: action-sha
+        shell: bash
+        env:
+          ACTION_REF: ${{ inputs.action-ref }}
+          ACTION_REPO: Extra-Chill/homeboy-action
+        run: |
+          set -euo pipefail
+          if [[ "${ACTION_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+            sha="${ACTION_REF}"
+          else
+            refs="$(git ls-remote "https://github.com/${ACTION_REPO}" \
+              "refs/tags/${ACTION_REF}^{}" "refs/tags/${ACTION_REF}" "refs/heads/${ACTION_REF}")"
+            # An annotated tag resolves to a TAG OBJECT, not a commit, and
+            # ls-remote sorts its output rather than honouring argument order —
+            # so taking the first line yields the tag object and `rev-parse
+            # HEAD` in the consuming job would then report the commit instead.
+            # That is the very mismatch this pinning exists to remove. Prefer
+            # the ^{} dereferenced entry; branches and lightweight tags have
+            # none and fall through to the plain ref.
+            sha="$(printf '%s\n' "${refs}" | awk '$2 ~ /\^\{\}$/ {print $1; exit}')"
+            [ -n "${sha:-}" ] || sha="$(printf '%s\n' "${refs}" | awk 'NR==1{print $1}')"
+          fi
+          if [ -z "${sha:-}" ]; then
+            echo "::error::Could not resolve action-ref '${ACTION_REF}' in ${ACTION_REPO} to a commit."
+            exit 1
+          fi
+          echo "Resolved ${ACTION_REF} -> ${sha}"
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+
       - name: Plan quality checks
         id: plan
         shell: bash
@@ -378,7 +423,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
-          ref: ${{ inputs.action-ref }}
+          ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
 
       - name: Download candidate Homeboy binary
@@ -500,7 +545,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
-          ref: ${{ inputs.action-ref }}
+          ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
       - name: Download candidate Homeboy binary
         id: candidate-binary
@@ -573,7 +618,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
-          ref: ${{ inputs.action-ref }}
+          ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
       - name: Download candidate Homeboy binary
         id: candidate-binary
@@ -632,7 +677,7 @@ jobs:
 
   policy:
     name: PR Policy
-    needs: reconcile
+    needs: [reconcile, plan]
     if: ${{ github.event_name == 'pull_request' && inputs.pr-policy != '' }}
     runs-on: ubuntu-latest
     steps:
@@ -642,7 +687,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
-          ref: ${{ inputs.action-ref }}
+          ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
       - name: Download candidate Homeboy binary
         id: candidate-binary
