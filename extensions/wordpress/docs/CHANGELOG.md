@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.35] - 2026-08-04
+
+### Fixed
+- retain failed PHPUnit artifacts
+
 ## [3.34.34] - 2026-08-04
 
 ### Fixed
