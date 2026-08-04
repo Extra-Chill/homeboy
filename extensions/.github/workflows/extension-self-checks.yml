@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   self-checks:
-    name: Self-checks ${{ matrix.component }}
+    name: Self-checks ${{ matrix.label || matrix.component }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -35,7 +35,15 @@ jobs:
           - rust
           - swift
           - wordpress
+          # The repo-root component owns the shared tests/ directory. The runner
+          # is directory-generic, so "." reads self_checks from the root
+          # homeboy.json and executes with the repo root as its working
+          # directory.
+          - "."
         include:
+          - component: "."
+            label: shared
+
           # #2507 is closed: runtime helpers now resolve through
           # scripts/lib/runtime-helper-resolver.sh, which honours HOMEBOY_CORE_DIR
           # (checked out below), so the rust zero-test-scope smoke and the

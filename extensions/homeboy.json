@@ -2,5 +2,27 @@
   "auto_cleanup": false,
   "changelog_target": "CHANGELOG.md",
   "id": "homeboy-extensions",
-  "remote_path": ""
+  "remote_path": "",
+  "self_checks": {
+    "test": [
+      "node tests/agent-task-provider-contract-smoke.mjs",
+      "node tests/browser-result-shapes-smoke.mjs",
+      "bash tests/cross-extension-sidecar-normalization-smoke.sh",
+      "node tests/deferred-init-browser-helper-smoke.mjs",
+      "node tests/dependency-adapter-manifests-smoke.mjs",
+      "node tests/local-shell-agent-task-executor-boundary.test.mjs",
+      "bash tests/project-scripts-pnpm-workspace-smoke.sh",
+      "node tests/runtime-provider-resolver-smoke.mjs",
+      "node tests/runtime-workflow-input-renderer-smoke.mjs",
+      "bash tests/rust-release-prepare-smoke.sh",
+      "node tests/secret-env-plan-smoke.mjs",
+      "bash tests/settings-helper-smoke.sh",
+      "bash tests/wordpress-install-command-smoke.sh",
+      "bash tests/wordpress-release-artifact-version-smoke.sh",
+      "bash tests/wordpress-runtime-helper-resolver-smoke.sh",
+      "node tests/wp-codebox-adapter-contract-smoke.mjs",
+      "node tests/wp-codebox-callback-data-smoke.mjs",
+      "node tests/wp-codebox-install-overrides-persist-smoke.mjs"
+    ]
+  }
 }
