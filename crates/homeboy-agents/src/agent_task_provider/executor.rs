@@ -9,7 +9,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         request: AgentTaskRequest,
         context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
-        let request = match materialize_executor_request(request, &context) {
+        let mut request = match materialize_executor_request(request, &context) {
             Ok(request) => request,
             Err((request, path, error)) => {
                 return failure_outcome(
@@ -84,6 +84,17 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                     missing_capabilities.join(", ")
                 ),
                 json!({ "provider": provider.id, "missing_capabilities": missing_capabilities }),
+            );
+        }
+
+        if let Err(error) = resolve_runtime_tools(&mut request, &provider) {
+            return failure_outcome(
+                &request,
+                AgentTaskOutcomeStatus::Failed,
+                AgentTaskFailureClassification::CapabilityMissing,
+                error.class,
+                error.message,
+                error.data,
             );
         }
 
@@ -218,6 +229,7 @@ mod tests {
             expected_artifacts: Vec::new(),
             artifact_declarations: Vec::new(),
             output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
             metadata: Value::Null,
         };
         let context = AgentTaskExecutionContext {

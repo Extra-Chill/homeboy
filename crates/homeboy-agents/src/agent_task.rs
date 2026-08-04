@@ -16,6 +16,7 @@ mod matrix;
 mod outcome;
 mod policy;
 mod request;
+mod runtime_tools;
 mod schema;
 
 #[cfg(test)]
@@ -55,6 +56,11 @@ pub use request::{
     AgentTaskExecutorRequest, AgentTaskOutputDeclaration, AgentTaskOutputEvidenceRelationship,
     AgentTaskPreparedWorkspace, AgentTaskProgress, AgentTaskProgressEvent, AgentTaskRequest,
     AgentTaskStart,
+};
+pub use runtime_tools::{
+    AgentTaskRuntimeTool, AgentTaskRuntimeToolLifecycle, AgentTaskRuntimeToolReadiness,
+    ResolvedAgentTaskRuntimeTool, AGENT_TASK_RUNTIME_TOOL_SCHEMA,
+    RESOLVED_AGENT_TASK_RUNTIME_TOOL_SCHEMA,
 };
 pub use schema::{
     AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_MATRIX_AGGREGATE_SCHEMA, AGENT_TASK_MATRIX_PLAN_SCHEMA,

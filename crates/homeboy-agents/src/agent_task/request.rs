@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use super::schema::request_schema;
 use super::{
     AgentTaskArtifactDeclaration, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits,
-    AgentTaskOutcome, AgentTaskPolicy, AgentTaskSourceRef, AgentTaskWorkspace,
+    AgentTaskOutcome, AgentTaskPolicy, AgentTaskRuntimeTool, AgentTaskSourceRef,
+    AgentTaskWorkspace,
 };
 
 /// Provider capability payload used by extension discovery and durable run metadata.
@@ -164,6 +165,10 @@ pub struct AgentTaskRequest {
     pub artifact_declarations: Vec<AgentTaskArtifactDeclaration>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub output_declarations: Vec<AgentTaskOutputDeclaration>,
+    /// Provider-neutral runtime processes attached to this task. Runtime adapters
+    /// project these declarations into their native configuration format.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_tools: Vec<AgentTaskRuntimeTool>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
 }
@@ -319,6 +324,11 @@ impl AgentTaskRequest {
             .into_iter()
             .map(|declaration| declaration.redacted_with(&policy))
             .collect();
+        redacted.runtime_tools = redacted
+            .runtime_tools
+            .into_iter()
+            .map(|tool| tool.redacted())
+            .collect();
         redacted.metadata = policy.redact_json(&redacted.metadata);
         redacted
     }
@@ -371,6 +381,7 @@ mod runner_execution_envelope_tests {
                 metadata: Value::Null,
             }],
             output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
             metadata: Value::Null,
         };
 

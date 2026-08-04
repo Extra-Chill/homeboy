@@ -72,6 +72,7 @@ fn request_round_trips_generic_agent_task_shape() {
             max_bytes: Some(1_024),
             evidence_relationship: None,
         }],
+        runtime_tools: Vec::new(),
         metadata: json!({ "batch": 1 }),
     };
 
@@ -477,6 +478,7 @@ fn redacted_request_removes_sensitive_fields() {
         expected_artifacts: Vec::new(),
         artifact_declarations: Vec::new(),
         output_declarations: Vec::new(),
+        runtime_tools: Vec::new(),
         metadata: json!({ "refresh_token": "secret-refresh" }),
     };
 

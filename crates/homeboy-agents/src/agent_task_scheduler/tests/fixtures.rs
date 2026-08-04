@@ -554,6 +554,7 @@ pub(super) fn request(task_id: &str) -> AgentTaskRequest {
         expected_artifacts: Vec::new(),
         artifact_declarations: Vec::new(),
         output_declarations: Vec::new(),
+        runtime_tools: Vec::new(),
         metadata: Value::Null,
     }
 }

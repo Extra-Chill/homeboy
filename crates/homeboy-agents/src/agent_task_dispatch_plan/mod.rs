@@ -327,6 +327,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
             ],
             artifact_declarations: Vec::new(),
             output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
             metadata: serde_json::json!({
                 "repo": repo,
                 "client_context": client_context,

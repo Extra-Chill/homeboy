@@ -61,6 +61,7 @@ pub(super) fn run_materialized_provider_command(
             if attempt > 1 {
                 annotate_transient_retry(&mut outcome, attempt, retryable);
             }
+            attach_runtime_tool_provenance(request, &mut outcome);
             // Preserve and link the latest raw executor input/result as
             // first-class run evidence before returning the final outcome.
             link_latest_executor_evidence(request, &mut outcome, run_id);
@@ -72,6 +73,22 @@ pub(super) fn run_materialized_provider_command(
             std::thread::sleep(Duration::from_millis(backoff_ms));
         }
         attempt += 1;
+    }
+}
+
+fn attach_runtime_tool_provenance(
+    request: &AgentTaskExecutorRequest,
+    outcome: &mut AgentTaskOutcome,
+) {
+    let Some(tools) = request.request.metadata.get("resolved_runtime_tools") else {
+        return;
+    };
+    if outcome.metadata.is_null() {
+        outcome.metadata = json!({});
+    }
+    if let Some(metadata) = outcome.metadata.as_object_mut() {
+        // This is resolved host evidence only: tool environment values never enter it.
+        metadata.insert("resolved_runtime_tools".to_string(), tools.clone());
     }
 }
 

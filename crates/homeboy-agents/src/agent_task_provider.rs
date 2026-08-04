@@ -45,6 +45,7 @@ mod outcome_normalization;
 mod resolution;
 mod runner_readiness;
 mod runtime_preflight_checks;
+mod runtime_tool_resolution;
 mod runtime_types;
 mod secret_types;
 mod secrets;
@@ -75,6 +76,7 @@ pub use runtime_preflight_checks::{
     ensure_runtime_preflight_checks, evaluate_runtime_preflight_checks, RuntimePreflightConflict,
     RuntimePreflightReadiness,
 };
+pub(crate) use runtime_tool_resolution::resolve_runtime_tools;
 pub use runtime_types::*;
 pub use secret_types::*;
 pub use secrets::{
