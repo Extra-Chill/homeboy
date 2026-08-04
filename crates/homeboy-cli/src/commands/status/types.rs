@@ -1,6 +1,7 @@
 //! Data types for the `status` command: CLI args, serialized output shapes,
 //! dashboard rows/summaries, and the phase timer.
 
+use homeboy_upgrade::controller_staleness::ControllerStaleness;
 use serde::Serialize;
 use std::time::Instant;
 
@@ -171,6 +172,15 @@ pub struct StatusOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub timings: Vec<StatusTiming>,
     pub clean: usize,
+    /// Freshness of the `homeboy` binary that produced this report, relative to
+    /// the latest published release.
+    ///
+    /// Emitted unconditionally (not only when stale) so a reader can tell
+    /// `current` from `unknown` — a controller whose freshness was never
+    /// established is exactly the state that let a two-release-old binary
+    /// triage its own issue tracker unnoticed (#11483). Costs one cached file
+    /// read; see [`homeboy_upgrade::controller_staleness`].
+    pub controller: ControllerStaleness,
 }
 
 #[derive(Debug, Serialize)]
@@ -244,6 +254,9 @@ pub struct ProjectDashboardOutput {
     pub summary: ProjectDashboardSummary,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub timings: Vec<StatusTiming>,
+    /// Freshness of the `homeboy` binary that produced this dashboard. See
+    /// [`StatusOutput::controller`].
+    pub controller: ControllerStaleness,
 }
 
 pub(super) struct StatusTimer {
