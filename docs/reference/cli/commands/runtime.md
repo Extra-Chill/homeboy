@@ -90,5 +90,6 @@ Plan or apply pruning for unreferenced immutable controller runtimes
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--apply` | flag | Delete pins not retained by nonterminal durable runs or the active generation |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--ignore-retention` | flag | Purge every unreferenced pin, ignoring the configured controller runtime retention window. Destructive: prefer the configured window |

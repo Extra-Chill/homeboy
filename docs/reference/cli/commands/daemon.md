@@ -24,6 +24,7 @@ Run the local-only HTTP API daemon
 | --- | --- |
 | `homeboy daemon start` | Start the local daemon in the background |
 | `homeboy daemon ensure-running` | Return the current live daemon or start one when no live daemon exists |
+| `homeboy daemon recover` | Resolve and run the right daemon recovery from the current status report |
 | `homeboy daemon adopt-orphan` | Explicitly replace one proven-dead daemon lease and reconcile its durable jobs |
 | `homeboy daemon reconcile-dead-lease-orphans` | Reconcile an exact PID-less job set after one proven unexpected daemon exit |
 | `homeboy daemon recover-missing-child-identity` | Recover one legacy job with exact PID and Linux start-tick evidence |
@@ -59,6 +60,23 @@ Return the current live daemon or start one when no live daemon exists
 | --- | --- | --- |
 | `--addr` | `<ADDR>` | _no help text_ |
 | `--replacement-operation-id` | `<REPLACEMENT_OPERATION_ID>` | Controller-generated idempotency key for a replacement operation |
+
+## `homeboy daemon recover`
+
+```sh
+homeboy daemon recover [OPTIONS]
+```
+
+Resolve and run the right daemon recovery from the current status report
+
+Reads `homeboy daemon status` once, matches its stale reason code, and fills every argument the resolved recovery needs from that report. The explicit subcommands below stay available as escape hatches for the cases this cannot resolve.
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--dry-run` | flag | Print the resolved plan without running it. This is the default |
+| `--yes` | flag | Run the resolved plan |
+| `--confirm-workload-processes-absent` | flag | Required only when the resolved plan reconciles PID-less durable jobs. Unverifiable by design, so it is never supplied automatically: the daemon died before persisting any child identity, leaving no PID for anything in process to check |
+| `--addr` | `<ADDR>` | _no help text_ |
 
 ## `homeboy daemon adopt-orphan`
 

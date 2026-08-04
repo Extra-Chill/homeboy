@@ -207,5 +207,6 @@ Run a command across all projects in a fleet via SSH
 | Option | Value | Description |
 | --- | --- | --- |
 | `--check` | flag | Show what would execute without running anything |
-| `--apply` | flag | Confirm the command should execute over SSH on every project in the fleet |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--user` | `<USER>` | Override the SSH user for this execution (instead of each server's configured user) |

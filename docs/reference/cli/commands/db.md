@@ -114,7 +114,8 @@ Delete a row from a table
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--apply` | flag | Apply the destructive mutation. Without this flag, prints a plan only |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 
 ## `homeboy db drop-table`
 
@@ -131,7 +132,8 @@ Drop a database table
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--apply` | flag | Apply the destructive mutation. Without this flag, prints a plan only |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 
 ## `homeboy db tunnel`
 

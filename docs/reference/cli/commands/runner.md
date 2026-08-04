@@ -33,6 +33,7 @@ Manage local and SSH execution runners
 | `homeboy runner doctor` | Diagnose a local or configured SSH runner without mutating it |
 | `homeboy runner connect` | Connect to a runner by starting a loopback-only remote daemon and SSH tunnel |
 | `homeboy runner status` | Show persisted runner tunnel status |
+| `homeboy runner reconcile` | Reconcile persisted direct-runner generation state and retire verified drained daemons |
 | `homeboy runner disconnect` | Close a runner tunnel and remove its persisted session state |
 | `homeboy runner refresh-homeboy` | Build or select the Homeboy binary used for runner/Lab jobs |
 | `homeboy runner dev-sync` | Sync a controller-local Homeboy dev binary to the runner and select it for Lab jobs |
@@ -254,6 +255,18 @@ Show persisted runner tunnel status
 | `--generations` | flag | Include the full historical draining-generation inventory. By default status leads with the compact authoritative admission summary and omits the expanded per-generation ledger, which can run to thousands of lines on a long-lived runner |
 | `--full` | flag | Return complete status, runtime diagnostics, followups, and generation detail |
 
+## `homeboy runner reconcile`
+
+```sh
+homeboy runner reconcile <ID>
+```
+
+Reconcile persisted direct-runner generation state and retire verified drained daemons
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<ID>` | yes | Runner ID |
+
 ## `homeboy runner disconnect`
 
 ```sh
@@ -327,7 +340,8 @@ Inventory or remove stale managed Homeboy binary slots on a runner
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--apply` | flag | Delete eligible slots. Omit for inventory only |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--min-age-hours` | `<MIN_AGE_HOURS>` | Minimum slot age before an unselected slot is eligible. Defaults to the shared runner age floor (`cleanup::RUNNER_MIN_AGE_HOURS`) |
 
 ## `homeboy runner exec`
@@ -635,7 +649,8 @@ Preview or remove orphaned runner-side Lab workspaces
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--apply` | flag | Delete the previewed orphaned workspaces. Without this flag, the command is a dry run |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--min-age-hours` | `<MIN_AGE_HOURS>` | Minimum workspace age before it can be considered orphaned. Defaults to the shared runner age floor (`cleanup::RUNNER_MIN_AGE_HOURS`) |
 | `--limit` | `<LIMIT>` | Maximum number of orphan candidates to report or remove per pass. Defaults to the shared page size (`cleanup::RUNNER_WORKSPACE_PAGE_LIMIT`) |
 | `--passes` | `<PASSES>` | Maximum apply passes to run. Each pass re-scans and removes at most --limit candidates |

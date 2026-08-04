@@ -80,7 +80,8 @@ Write content to file (from stdin)
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--apply` | flag | Apply the destructive write. Without this flag, prints a plan only |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 
 ## `homeboy file mkdir`
 
@@ -97,7 +98,8 @@ Create a directory
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--apply` | flag | Apply the directory creation. Without this flag, prints a plan only |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 
 ## `homeboy file delete`
 
@@ -115,7 +117,8 @@ Delete a file or directory
 | Option | Value | Description |
 | --- | --- | --- |
 | `-r`, `--recursive` | flag | Delete directories recursively |
-| `--apply` | flag | Apply the destructive delete. Without this flag, prints a plan only |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 
 ## `homeboy file rename`
 
@@ -133,7 +136,8 @@ Rename or move a file
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--apply` | flag | Apply the rename/move. Without this flag, prints a plan only |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 
 ## `homeboy file find`
 

@@ -37,6 +37,8 @@ Remove declared reconstructable artifacts from managed worktrees
 | `homeboy cleanup worktrees` | Aggregate cleanup across configured external worktree providers |
 | `homeboy cleanup retained-storage` | Explain retained Homeboy storage without deleting or reconciling resources |
 | `homeboy cleanup automatic-retention` | Run one configured, bounded retention pass |
+| `homeboy cleanup status` | Read compact durable progress for an asynchronous cleanup apply |
+| `homeboy cleanup resume` | Re-submit a queued durable cleanup job after an interrupted client |
 
 ## `homeboy cleanup artifacts`
 
@@ -94,3 +96,35 @@ homeboy cleanup automatic-retention
 ```
 
 Run one configured, bounded retention pass
+
+## `homeboy cleanup status`
+
+```sh
+homeboy cleanup status [OPTIONS] <JOB_ID>
+```
+
+Read compact durable progress for an asynchronous cleanup apply
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<JOB_ID>` | yes | Durable controller job identifier printed by cleanup --apply |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--full` | flag | Include the daemon's durable job record, including completed cleanup evidence |
+
+## `homeboy cleanup resume`
+
+```sh
+homeboy cleanup resume [OPTIONS] <JOB_ID>
+```
+
+Re-submit a queued durable cleanup job after an interrupted client
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<JOB_ID>` | yes | Durable controller job identifier printed by cleanup --apply |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--full` | flag | Include the daemon's durable job record, including completed cleanup evidence |

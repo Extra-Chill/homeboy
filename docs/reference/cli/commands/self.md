@@ -62,7 +62,8 @@ Plan or delete orphaned Homeboy runtime temp entries
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--apply` | flag | Delete planned temp entries. Without this flag, only reports the plan |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--older-than-days` | `<OLDER_THAN_DAYS>` | Only include entries older than this many days. Defaults to the configured `retention.runtime_tmp_days` |
 | `--prefix` | `<PREFIX>` | Only include entries whose directory/file name starts with this prefix |
 | `--limit` | `<LIMIT>` | Maximum temp entries to inspect in one invocation. Defaults to the configured `retention.limit` |
