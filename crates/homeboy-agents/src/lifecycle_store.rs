@@ -551,6 +551,26 @@ fn merge_observation_metadata(mut existing: Value, typed: Value) -> Value {
 }
 
 pub(super) fn record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
+    record_from_run_with_schema_policy(run, true)
+}
+
+/// Read a durable record without enforcing the supported-schema guard.
+///
+/// Record health reconciliation exists to migrate legacy schemas, so it is the
+/// one caller that must be able to read one. #11446 added the guard inside
+/// `record_from_run`, which is exactly what the migration branch calls, making
+/// legacy migration unreachable: the reconciler reported the unsupported-schema
+/// diagnostic instead of migrating.
+pub(super) fn record_from_run_allowing_legacy_schema(
+    run: &RunRecord,
+) -> Result<AgentTaskRunRecord> {
+    record_from_run_with_schema_policy(run, false)
+}
+
+fn record_from_run_with_schema_policy(
+    run: &RunRecord,
+    enforce_schema: bool,
+) -> Result<AgentTaskRunRecord> {
     let value = run.metadata_json.get("agent_task_run").ok_or_else(|| {
         Error::new(
             ErrorCode::InternalJsonError,
@@ -568,7 +588,7 @@ pub(super) fn record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
                 Some(format!("parse agent-task run {}", run.id)),
             )
         })?;
-    if record.schema != super::records::schemas::RUN {
+    if enforce_schema && record.schema != super::records::schemas::RUN {
         return Err(Error::validation_invalid_argument(
             "agent_task_run.schema",
             format!(
