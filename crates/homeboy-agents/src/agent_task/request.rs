@@ -4,8 +4,9 @@ use std::path::PathBuf;
 
 use super::schema::request_schema;
 use super::{
-    AgentTaskArtifactDeclaration, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits,
-    AgentTaskOutcome, AgentTaskPolicy, AgentTaskSourceRef, AgentTaskWorkspace,
+    AgentTaskArtifactDeclaration, AgentTaskCapabilityEvidence, AgentTaskCapabilityRequirements,
+    AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome, AgentTaskPolicy,
+    AgentTaskSourceRef, AgentTaskWorkspace,
 };
 
 /// Provider capability payload used by extension discovery and durable run metadata.
@@ -200,6 +201,20 @@ impl std::ops::Deref for AgentTaskExecutorRequest {
 }
 
 impl AgentTaskRequest {
+    pub fn capability_requirements(&self) -> Result<AgentTaskCapabilityRequirements, String> {
+        super::capabilities::requirements_from_metadata(
+            &self.metadata,
+            &self.executor.required_capabilities,
+        )
+    }
+
+    pub fn record_capability_evidence(&mut self, evidence: AgentTaskCapabilityEvidence) {
+        if !self.metadata.is_object() {
+            self.metadata = Value::Object(Default::default());
+        }
+        self.metadata["capability_evidence"] =
+            serde_json::to_value(evidence).unwrap_or(Value::Null);
+    }
     pub fn canonical_artifact_declarations(&self) -> Vec<AgentTaskArtifactDeclaration> {
         let mut declarations = Vec::new();
         for declaration in &self.artifact_declarations {
