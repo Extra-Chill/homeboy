@@ -16,6 +16,9 @@ use serde_json::Value;
 
 use super::summary_json::{string_value, value_at};
 
+const PRIMARY_ARTIFACT_LIMIT: usize = 8;
+const RECOVERY_COMMAND_LIMIT: usize = 4;
+
 /// Render a compact summary for a serialized `RunsOutput` value. Returns
 /// `None` for any variant other than `show`, leaving other `runs`
 /// subcommands with their existing full-JSON presentation.
@@ -57,10 +60,11 @@ fn render_run_detail(run: &Value) -> String {
     let kind = string_value(run, &["kind"]).unwrap_or("run");
     let status = string_value(run, &["status"]).unwrap_or("unknown");
 
-    let mut lines = vec![
-        format!("Run {run_id} ({kind})"),
-        format!("Status: {status}"),
-    ];
+    // Put terminal state and a supported next action ahead of run metadata.
+    let mut lines = vec![format!("Status: {status}")];
+    lines.extend(failure_summary_lines(run));
+    lines.extend(recovery_command_lines(run));
+    lines.push(format!("Run {run_id} ({kind})"));
 
     if let Some(component) = string_value(run, &["component_id"]) {
         lines.push(format!("Component: {component}"));
@@ -79,8 +83,6 @@ fn render_run_detail(run: &Value) -> String {
     }
     lines.extend(execution_provenance_lines(run));
 
-    lines.extend(failure_summary_lines(run));
-
     if kind == "bench" {
         lines.extend(super::bench_summary::bench_hotspot_lines(run));
         lines.extend(super::bench_summary::bench_regression_threshold_lines(run));
@@ -91,7 +93,7 @@ fn render_run_detail(run: &Value) -> String {
     lines.extend(key_artifact_lines(run, run_id));
     lines.extend(artifact_lines(run, run_id));
     lines.extend(report_followup_lines(run, run_id, kind));
-    lines.push(format!("Full output: homeboy runs show {run_id} --json"));
+    lines.extend(detail_reference_lines(run_id));
 
     finish(lines)
 }
@@ -149,6 +151,61 @@ fn failure_summary_lines(run: &Value) -> Vec<String> {
     lines
 }
 
+fn recovery_command_lines(run: &Value) -> Vec<String> {
+    let mut commands = Vec::new();
+    collect_recovery_commands(
+        value_at(run, &["metadata"]).unwrap_or(&Value::Null),
+        &mut commands,
+    );
+    commands.sort();
+    commands.dedup();
+    commands.truncate(RECOVERY_COMMAND_LIMIT);
+
+    if commands.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = vec!["Recovery:".to_string()];
+    lines.extend(commands.into_iter().map(|command| format!("  {command}")));
+    lines
+}
+
+fn collect_recovery_commands(value: &Value, commands: &mut Vec<String>) {
+    match value {
+        Value::Object(values) => {
+            for (key, nested) in values {
+                let normalized = key.to_ascii_lowercase();
+                // Cleanup inventories are evidence, not an operator recovery plan.
+                if normalized.contains("cleanup") {
+                    continue;
+                }
+                if matches!(
+                    normalized.as_str(),
+                    "recovery_commands"
+                        | "rerun_command"
+                        | "retry_command"
+                        | "resume_command"
+                        | "next_command"
+                ) {
+                    match nested {
+                        Value::String(command) => commands.push(command.clone()),
+                        Value::Array(values) => commands
+                            .extend(values.iter().filter_map(Value::as_str).map(str::to_string)),
+                        _ => {}
+                    }
+                }
+                collect_recovery_commands(nested, commands);
+            }
+        }
+        Value::Array(values) => {
+            for nested in values {
+                collect_recovery_commands(nested, commands);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn report_followup_lines(run: &Value, run_id: &str, kind: &str) -> Vec<String> {
     if kind != "bench" {
         return Vec::new();
@@ -199,8 +256,32 @@ fn artifact_lines(run: &Value, run_id: &str) -> Vec<String> {
         ];
     }
 
-    let mut lines = vec![format!("Artifacts ({}):", artifacts.len())];
-    for artifact in artifacts {
+    let primary = artifacts
+        .iter()
+        .filter(|artifact| !is_cleanup_inventory_artifact(artifact))
+        .collect::<Vec<_>>();
+    let selected = if primary.is_empty() {
+        artifacts
+            .iter()
+            .take(PRIMARY_ARTIFACT_LIMIT)
+            .collect::<Vec<_>>()
+    } else {
+        primary
+            .into_iter()
+            .take(PRIMARY_ARTIFACT_LIMIT)
+            .collect::<Vec<_>>()
+    };
+    let omitted = artifacts.len().saturating_sub(selected.len());
+    let mut lines = vec![if omitted == 0 {
+        format!("Artifacts ({}):", artifacts.len())
+    } else {
+        format!(
+            "Primary artifacts ({} of {}):",
+            selected.len(),
+            artifacts.len()
+        )
+    }];
+    for artifact in selected {
         let id = string_value(artifact, &["id"]).unwrap_or("artifact");
         let kind = string_value(artifact, &["kind"]).unwrap_or("");
         let label = if kind.is_empty() {
@@ -219,7 +300,19 @@ fn artifact_lines(run: &Value, run_id: &str) -> Vec<String> {
             ));
         }
     }
+    if omitted > 0 {
+        lines.push(format!(
+            "  omitted: {omitted} artifact records; inspect the full inventory with `homeboy runs artifacts {run_id}`"
+        ));
+    }
     lines
+}
+
+fn is_cleanup_inventory_artifact(artifact: &Value) -> bool {
+    ["id", "name", "kind", "artifact_id"]
+        .into_iter()
+        .filter_map(|key| string_value(artifact, &[key]))
+        .any(|value| value.to_ascii_lowercase().contains("cleanup"))
 }
 
 fn key_artifact_lines(run: &Value, run_id: &str) -> Vec<String> {
@@ -231,6 +324,15 @@ fn key_artifact_lines(run: &Value, run_id: &str) -> Vec<String> {
 
 fn artifact_locator(artifact: &Value) -> Option<String> {
     super::key_artifacts::artifact_locator(artifact).map(str::to_string)
+}
+
+fn detail_reference_lines(run_id: &str) -> Vec<String> {
+    vec![
+        "Details:".to_string(),
+        format!("  full run: homeboy runs show {run_id} --json"),
+        format!("  failure and evidence: homeboy runs evidence {run_id}"),
+        format!("  full artifact inventory: homeboy runs artifacts {run_id}"),
+    ]
 }
 
 fn finish(lines: Vec<String>) -> String {
@@ -292,7 +394,7 @@ mod tests {
 
         let summary = render_runs_show_summary(&payload).expect("summary");
 
-        assert!(summary.starts_with("Run bench-run-42 (bench)\nStatus: pass\n"));
+        assert!(summary.starts_with("Status: pass\nRun bench-run-42 (bench)\n"));
         assert!(summary.contains("Component: homeboy\n"));
         assert!(summary.contains("Rig: rtc\n"));
         assert!(summary.contains("Component SHA: abcdef1234\n"));
@@ -313,7 +415,7 @@ mod tests {
         assert!(summary.contains(
             "  compare: homeboy runs bench-compare --from-run <other-run-id> --to-run bench-run-42\n"
         ));
-        assert!(summary.contains("Full output: homeboy runs show bench-run-42 --json\n"));
+        assert!(summary.contains("full run: homeboy runs show bench-run-42 --json\n"));
         // URL artifacts are not fetchable via `runs artifact get`.
         assert!(!summary.contains("get: homeboy runs artifact get bench-run-42 admin_url"));
         // Compact: no raw JSON braces.
@@ -843,6 +945,72 @@ mod tests {
 
         let summary = render_runs_show_summary(&payload).expect("summary");
         assert!(summary.contains("Artifacts: none recorded\n"));
-        assert!(summary.contains("Full output: homeboy runs show run-1 --json\n"));
+        assert!(summary.contains("full run: homeboy runs show run-1 --json\n"));
+    }
+
+    #[test]
+    fn failed_show_summary_bounds_cleanup_inventory_without_losing_recovery_or_primary_artifact() {
+        let mut artifacts = (1..=1_000)
+            .map(|index| {
+                json!({
+                    "id": format!("cleanup-entry-{index}"),
+                    "run_id": "failed-run",
+                    "kind": "cleanup_inventory",
+                    "type": "file",
+                    "path": format!("/tmp/cleanup-{index}.json")
+                })
+            })
+            .collect::<Vec<_>>();
+        artifacts.push(json!({
+            "id": "failure-report",
+            "run_id": "failed-run",
+            "kind": "raw_result",
+            "type": "file",
+            "path": "/tmp/failure-report.json"
+        }));
+        let payload = json!({
+            "variant": "show",
+            "payload": { "run": {
+                "id": "failed-run",
+                "kind": "runner-exec",
+                "status": "fail",
+                "metadata": {
+                    "error": "selected runtime exited 1",
+                    "recovery_commands": ["homeboy runner exec lab-1 -- retry failed-run"],
+                    "cleanup": {
+                        "recovery_commands": ["must-not-render cleanup recovery"]
+                    }
+                },
+                "artifacts": artifacts
+            }}
+        });
+
+        let summary = render_runs_show_summary(&payload).expect("summary");
+        let failure_index = summary.find("Failure summary:\n").expect("failure summary");
+        let recovery_index = summary.find("Recovery:\n").expect("recovery commands");
+        let run_index = summary
+            .find("Run failed-run (runner-exec)\n")
+            .expect("run identity");
+        let artifact_index = summary
+            .find("Primary artifacts (1 of 1001):\n")
+            .expect("primary artifacts");
+
+        assert!(summary.starts_with("Status: fail\nFailure summary:\n"));
+        assert!(failure_index < run_index);
+        assert!(recovery_index < run_index);
+        assert!(failure_index < artifact_index);
+        assert!(recovery_index < artifact_index);
+        assert!(summary.contains("selected runtime exited 1"));
+        assert!(summary.contains("homeboy runner exec lab-1 -- retry failed-run"));
+        assert!(summary.contains("failure-report [raw_result]: /tmp/failure-report.json"));
+        assert!(summary.contains(
+            "omitted: 1000 artifact records; inspect the full inventory with `homeboy runs artifacts failed-run`"
+        ));
+        assert!(summary.contains("failure and evidence: homeboy runs evidence failed-run"));
+        assert!(summary.contains("full artifact inventory: homeboy runs artifacts failed-run"));
+        assert!(!summary.contains("cleanup-entry-1"));
+        assert!(!summary.contains("cleanup-entry-1000"));
+        assert!(!summary.contains("must-not-render cleanup recovery"));
+        assert!(summary.len() < 3_000, "summary must stay bounded");
     }
 }
