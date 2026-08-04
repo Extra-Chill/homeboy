@@ -27,6 +27,7 @@ mod plan {
         pub component_contracts: Vec<AgentTaskComponentContract>,
         pub output_dependencies: HashMap<String, AgentTaskOutputDependencies>,
         pub artifact_outputs: HashMap<String, Vec<AgentTaskArtifactOutputDeclaration>>,
+        pub postprocess_steps: Vec<AgentTaskArtifactPostprocessStep>,
         pub options: AgentTaskScheduleOptions,
         pub metadata: Value,
         pub workspace_identity: Option<WorkspaceIdentity>,
@@ -45,6 +46,7 @@ mod plan {
                 component_contracts: Vec::new(),
                 output_dependencies: HashMap::new(),
                 artifact_outputs: HashMap::new(),
+                postprocess_steps: Vec::new(),
                 options: AgentTaskScheduleOptions::default(),
                 metadata: Value::Null,
                 workspace_identity: None,
@@ -111,6 +113,23 @@ mod plan {
                 .get("agent_task_schedule_options")
                 .and_then(|value| serde_json::from_value(value.clone()).ok())
                 .unwrap_or_default();
+            let postprocess_steps = homeboy_plan
+                .steps
+                .iter()
+                .filter(|step| step.kind == "artifact_postprocess")
+                .filter_map(|step| {
+                    value_as::<homeboy_core::artifacts::ArtifactPostprocessPlan>(
+                        &step.inputs,
+                        "artifact_postprocess_plan",
+                    )
+                    .map(|plan| AgentTaskArtifactPostprocessStep {
+                        id: step.id.clone(),
+                        depends_on: step.needs.clone(),
+                        required: step.blocking,
+                        plan,
+                    })
+                })
+                .collect();
             let metadata = homeboy_plan
                 .inputs
                 .get("metadata")
@@ -125,6 +144,7 @@ mod plan {
                 component_contracts,
                 output_dependencies,
                 artifact_outputs,
+                postprocess_steps,
                 options,
                 metadata,
                 workspace_identity: None,
@@ -231,6 +251,25 @@ mod plan {
                     });
                 }
             }
+            plan.steps
+                .extend(self.postprocess_steps.iter().map(|step| PlanStep {
+                    id: step.id.clone(),
+                    kind: "artifact_postprocess".to_string(),
+                    label: Some(step.id.clone()),
+                    blocking: step.required,
+                    scope: Vec::new(),
+                    needs: step.depends_on.clone(),
+                    needs_kind: PlanStepDependencyKind::Execution,
+                    status: PlanStepStatus::Ready,
+                    inputs: HashMap::from([(
+                        "artifact_postprocess_plan".to_string(),
+                        serde_json::to_value(&step.plan).unwrap_or(Value::Null),
+                    )]),
+                    outputs: HashMap::new(),
+                    skip_reason: None,
+                    policy: HashMap::new(),
+                    missing: Vec::new(),
+                }));
             plan
         }
     }
@@ -268,6 +307,8 @@ mod plan {
         output_dependencies: HashMap<String, AgentTaskOutputDependencies>,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         artifact_outputs: HashMap<String, Vec<AgentTaskArtifactOutputDeclaration>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        postprocess_steps: Vec<AgentTaskArtifactPostprocessStep>,
         #[serde(default)]
         options: AgentTaskScheduleOptions,
         #[serde(default, skip_serializing_if = "Value::is_null")]
@@ -299,6 +340,7 @@ mod plan {
                 component_contracts: self.component_contracts,
                 output_dependencies: self.output_dependencies,
                 artifact_outputs: self.artifact_outputs,
+                postprocess_steps: self.postprocess_steps,
                 options: self.options,
                 metadata: self.metadata,
                 workspace_identity: self.workspace_identity,
@@ -321,6 +363,7 @@ mod plan {
                 component_contracts: plan.component_contracts.clone(),
                 output_dependencies: plan.output_dependencies.clone(),
                 artifact_outputs: plan.artifact_outputs.clone(),
+                postprocess_steps: plan.postprocess_steps.clone(),
                 options: plan.options.clone(),
                 metadata: plan.metadata.clone(),
                 workspace_identity: plan.workspace_identity.clone(),
@@ -328,6 +371,20 @@ mod plan {
                 workspace_owner_lease: plan.workspace_owner_lease.clone(),
             }
         }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct AgentTaskArtifactPostprocessStep {
+        pub id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub depends_on: Vec<String>,
+        #[serde(default = "default_artifact_postprocess_step_required")]
+        pub required: bool,
+        pub plan: homeboy_core::artifacts::ArtifactPostprocessPlan,
+    }
+
+    fn default_artifact_postprocess_step_required() -> bool {
+        true
     }
 
     fn string_input(plan: &HomeboyPlan, key: &str) -> Option<String> {

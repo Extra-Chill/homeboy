@@ -1066,6 +1066,14 @@ where
             }
         }
 
+        postprocess::run_postprocess_steps(
+            &plan,
+            self.run_id.as_deref(),
+            &mut outcomes,
+            &mut events,
+            &cancellation,
+        );
+
         let artifact_lineage =
             AgentTaskScheduleSupport::artifact_lineage(&outcomes, &plan.artifact_outputs);
         let child_runs = child_runs_for_outcomes(&outcomes);
@@ -1091,7 +1099,10 @@ where
             schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: plan.plan_id,
             status: AgentTaskScheduleSupport::aggregate_status(&outcomes),
-            totals: AgentTaskScheduleSupport::totals(total_tasks, &outcomes),
+            totals: AgentTaskScheduleSupport::totals(
+                total_tasks + plan.postprocess_steps.len(),
+                &outcomes,
+            ),
             queue: AgentTaskScheduleSupport::queue_status(
                 max_concurrency,
                 plan.options.max_tasks,

@@ -11,6 +11,7 @@ mod outcome;
 mod outcome_artifacts;
 mod outcome_status;
 mod outcome_templates;
+mod postprocess;
 mod resources;
 mod scheduling;
 #[cfg(test)]
@@ -26,8 +27,9 @@ pub use crate::agent_task_schedule::{
     AgentTaskAdaptiveConcurrencyInputs, AgentTaskAdaptiveConcurrencyPolicy,
     AgentTaskAdaptiveConcurrencyStatus, AgentTaskAggregate, AgentTaskAggregateStatus,
     AgentTaskAggregateTotals, AgentTaskArtifactBinding, AgentTaskArtifactLineage,
-    AgentTaskArtifactOutputDeclaration, AgentTaskArtifactRunBinding, AgentTaskBackpressureStatus,
-    AgentTaskCancellationToken, AgentTaskCandidateAdoption, AgentTaskCandidateAdoptionDecision,
+    AgentTaskArtifactOutputDeclaration, AgentTaskArtifactPostprocessStep,
+    AgentTaskArtifactRunBinding, AgentTaskBackpressureStatus, AgentTaskCancellationToken,
+    AgentTaskCandidateAdoption, AgentTaskCandidateAdoptionDecision,
     AgentTaskCandidateCompletionPolicy, AgentTaskChildRun, AgentTaskExecutionBudget,
     AgentTaskExecutionContext, AgentTaskOutputBinding, AgentTaskOutputDependencies, AgentTaskPlan,
     AgentTaskProgressEvent, AgentTaskProviderRotationAttempt, AgentTaskProviderRotationEntry,
