@@ -10,10 +10,11 @@
 //! fixture spec described in the PR body.
 
 use crate::stack::apply::{
-    checkout_force, cherry_pick, cherry_pick_in_progress, conflict_error, conflict_guidance,
-    ensure_no_cherry_pick_in_progress, rebase, url_matches, CherryPickResult, ConflictContext,
-    ConflictPolicy,
+    checkout_force, cherry_pick, cherry_pick_in_progress, cherry_pick_pr_head, conflict_error,
+    conflict_guidance, ensure_no_cherry_pick_in_progress, rebase, url_matches, CherryPickResult,
+    ConflictContext, ConflictPolicy,
 };
+use crate::stack::pr_meta::PrHead;
 use crate::stack::{save, GitRef, StackPrEntry, StackSpec};
 use homeboy_core::test_support::with_isolated_home;
 use std::fs;
@@ -49,6 +50,283 @@ fn cherry_pick_succeeds_picked() {
         .output()
         .unwrap();
     assert!(status.stdout.is_empty(), "working tree should be clean");
+}
+
+#[test]
+fn non_merge_pr_head_uses_ordinary_cherry_pick() {
+    let (dir, path) = init_repo();
+    git(&path, &["checkout", "-q", "-b", "feature"]);
+    let sha = commit_file(
+        &dir,
+        &path,
+        "feature.txt",
+        "feature change\n",
+        "feature commit",
+    );
+    git(&path, &["checkout", "-q", "main"]);
+    let pr = pr_entry();
+    let head = PrHead {
+        sha,
+        base_sha: None,
+        head_repo: "example-org/studio".to_string(),
+        clone_url: "https://github.com/example-org/studio.git".to_string(),
+    };
+
+    let result = cherry_pick_pr_head(&path, &pr, &head).expect("non-merge PR head should apply");
+
+    assert!(matches!(result, CherryPickResult::Picked));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("feature.txt")).unwrap(),
+        "feature change\n"
+    );
+}
+
+#[test]
+fn merge_pr_head_uses_base_side_parent_equal_to_github_base() {
+    let (dir, path) = init_repo();
+    let initial = rev_parse(&path, "HEAD");
+    git(&path, &["checkout", "-q", "-b", "feature"]);
+    commit_file(
+        &dir,
+        &path,
+        "feature.txt",
+        "feature change\n",
+        "feature commit",
+    );
+    git(&path, &["checkout", "-q", "main"]);
+    let base_sha = commit_file(&dir, &path, "base.txt", "base change\n", "base commit");
+    git(&path, &["checkout", "-q", "feature"]);
+    git(
+        &path,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "main",
+            "-m",
+            "merge base into feature",
+        ],
+    );
+    let merge_sha = rev_parse(&path, "HEAD");
+    git(&path, &["checkout", "-q", "-B", "target", &initial]);
+    let pr = pr_entry();
+    let head = PrHead {
+        sha: merge_sha,
+        base_sha: Some(base_sha),
+        head_repo: "example-org/studio".to_string(),
+        clone_url: "https://github.com/example-org/studio.git".to_string(),
+    };
+
+    let result = cherry_pick_pr_head(&path, &pr, &head).expect("merge PR head should apply");
+
+    assert!(matches!(result, CherryPickResult::Picked));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("feature.txt")).unwrap(),
+        "feature change\n"
+    );
+    assert!(
+        !dir.path().join("base.txt").exists(),
+        "the base-side merge must not be included in the PR patch"
+    );
+}
+
+#[test]
+fn merge_pr_head_uses_base_side_parent_when_github_base_advanced_after_merge() {
+    let (dir, path) = init_repo();
+    let initial = rev_parse(&path, "HEAD");
+    git(&path, &["checkout", "-q", "-b", "feature"]);
+    commit_file(
+        &dir,
+        &path,
+        "feature.txt",
+        "feature change\n",
+        "feature commit",
+    );
+    git(&path, &["checkout", "-q", "main"]);
+    let merged_base = commit_file(&dir, &path, "base.txt", "merged base\n", "base commit");
+    git(&path, &["checkout", "-q", "feature"]);
+    git(
+        &path,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "main",
+            "-m",
+            "merge base into feature",
+        ],
+    );
+    let merge_sha = rev_parse(&path, "HEAD");
+    git(&path, &["checkout", "-q", "main"]);
+    let advanced_base = commit_file(
+        &dir,
+        &path,
+        "later.txt",
+        "later base\n",
+        "later base commit",
+    );
+    git(&path, &["checkout", "-q", "-B", "target", &initial]);
+    let pr = pr_entry();
+    let head = PrHead {
+        sha: merge_sha,
+        base_sha: Some(advanced_base.clone()),
+        head_repo: "example-org/studio".to_string(),
+        clone_url: "https://github.com/example-org/studio.git".to_string(),
+    };
+
+    let result = cherry_pick_pr_head(&path, &pr, &head)
+        .expect("base parent remains valid after the GitHub base advances");
+
+    assert!(matches!(result, CherryPickResult::Picked));
+    assert!(
+        !dir.path().join("base.txt").exists(),
+        "the base-side merge must not be included in the PR patch"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("feature.txt")).unwrap(),
+        "feature change\n"
+    );
+    assert_ne!(merged_base, advanced_base);
+}
+
+#[test]
+fn merge_pr_head_with_no_base_side_parent_fails_before_starting_a_cherry_pick() {
+    let (dir, path) = init_repo();
+    let initial = rev_parse(&path, "HEAD");
+    git(&path, &["checkout", "-q", "-b", "feature"]);
+    commit_file(
+        &dir,
+        &path,
+        "feature.txt",
+        "feature change\n",
+        "feature commit",
+    );
+    git(&path, &["checkout", "-q", "main"]);
+    commit_file(&dir, &path, "base.txt", "base change\n", "base commit");
+    git(&path, &["checkout", "-q", "feature"]);
+    git(
+        &path,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "main",
+            "-m",
+            "merge base into feature",
+        ],
+    );
+    let merge_sha = rev_parse(&path, "HEAD");
+    git(&path, &["checkout", "-q", "-B", "target", &initial]);
+    let pr = pr_entry();
+    let head = PrHead {
+        sha: merge_sha,
+        base_sha: Some(initial.clone()),
+        head_repo: "example-org/studio".to_string(),
+        clone_url: "https://github.com/example-org/studio.git".to_string(),
+    };
+
+    let error =
+        cherry_pick_pr_head(&path, &pr, &head).expect_err("no base-side parent must fail closed");
+
+    let rendered = error.to_string();
+    assert!(rendered.contains("candidate parents: none"), "{rendered}");
+    assert!(
+        rendered.contains("no cherry-pick was started"),
+        "{rendered}"
+    );
+    assert!(!cherry_pick_in_progress(&path));
+    assert_eq!(rev_parse(&path, "HEAD"), initial);
+    assert!(!dir.path().join("feature.txt").exists());
+}
+
+#[test]
+fn merge_pr_head_with_multiple_base_side_parents_fails_before_starting_a_cherry_pick() {
+    let (dir, path) = init_repo();
+    let initial = rev_parse(&path, "HEAD");
+    git(&path, &["checkout", "-q", "-b", "feature"]);
+    commit_file(
+        &dir,
+        &path,
+        "feature.txt",
+        "feature change\n",
+        "feature commit",
+    );
+    git(&path, &["checkout", "-q", "main"]);
+    git(
+        &path,
+        &["merge", "-q", "--no-ff", "feature", "-m", "ambiguous merge"],
+    );
+    let merge_sha = rev_parse(&path, "HEAD");
+    let advanced_base = commit_file(
+        &dir,
+        &path,
+        "later.txt",
+        "later base\n",
+        "later base commit",
+    );
+    git(&path, &["checkout", "-q", "-B", "target", &initial]);
+    let pr = pr_entry();
+    let head = PrHead {
+        sha: merge_sha,
+        base_sha: Some(advanced_base),
+        head_repo: "example-org/studio".to_string(),
+        clone_url: "https://github.com/example-org/studio.git".to_string(),
+    };
+
+    let error = cherry_pick_pr_head(&path, &pr, &head)
+        .expect_err("ambiguous base-side parents must fail closed");
+
+    let rendered = error.to_string();
+    assert!(rendered.contains("candidate parents: 1, 2"), "{rendered}");
+    assert!(
+        rendered.contains("no cherry-pick was started"),
+        "{rendered}"
+    );
+    assert!(!cherry_pick_in_progress(&path));
+    assert_eq!(rev_parse(&path, "HEAD"), initial);
+    assert!(!dir.path().join("feature.txt").exists());
+}
+
+#[test]
+fn merge_pr_head_without_github_base_fails_before_starting_a_cherry_pick() {
+    let (dir, path) = init_repo();
+    git(&path, &["checkout", "-q", "-b", "feature"]);
+    commit_file(
+        &dir,
+        &path,
+        "feature.txt",
+        "feature change\n",
+        "feature commit",
+    );
+    git(&path, &["checkout", "-q", "main"]);
+    commit_file(&dir, &path, "base.txt", "base change\n", "base commit");
+    git(&path, &["checkout", "-q", "feature"]);
+    git(
+        &path,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "main",
+            "-m",
+            "merge base into feature",
+        ],
+    );
+    let pr = pr_entry();
+    let head = PrHead {
+        sha: rev_parse(&path, "HEAD"),
+        base_sha: None,
+        head_repo: "example-org/studio".to_string(),
+        clone_url: "https://github.com/example-org/studio.git".to_string(),
+    };
+
+    let error = cherry_pick_pr_head(&path, &pr, &head)
+        .expect_err("a merge head without baseRefOid must fail closed");
+
+    assert!(error
+        .to_string()
+        .contains("GitHub returned no baseRefOid for this merge head"));
+    assert!(!cherry_pick_in_progress(&path));
 }
 
 #[test]

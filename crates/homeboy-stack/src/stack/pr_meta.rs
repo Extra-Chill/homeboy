@@ -10,6 +10,9 @@ use super::spec::StackPrEntry;
 #[derive(Debug, Clone)]
 pub(crate) struct PrHead {
     pub(crate) sha: String,
+    /// Authoritative base commit recorded by GitHub for this PR. Required to
+    /// identify the base-side parent when `sha` is a merge commit.
+    pub(crate) base_sha: Option<String>,
     /// `<owner>/<name>` of the head repo (may differ from the PR's base repo
     /// if the PR was opened from a fork).
     pub(crate) head_repo: String,
@@ -22,6 +25,7 @@ pub(crate) struct PrHead {
 #[derive(Debug, Clone)]
 pub(crate) struct StackPrMeta {
     pub(crate) head_sha: String,
+    pub(crate) base_sha: Option<String>,
     pub(crate) head_owner: Option<String>,
     pub(crate) head_name: Option<String>,
     pub(crate) state: String,
@@ -55,6 +59,7 @@ impl StackPrMeta {
         let head_repo = format!("{}/{}", head_owner, head_name);
         Ok(PrHead {
             sha: self.head_sha.clone(),
+            base_sha: self.base_sha.clone(),
             clone_url: format!("https://github.com/{}.git", head_repo),
             head_repo,
         })
@@ -79,7 +84,7 @@ pub(crate) fn fetch_pr_meta(pr: &StackPrEntry) -> Result<StackPrMeta> {
             "--repo",
             &pr.repo,
             "--json",
-            "headRefOid,headRepository,headRepositoryOwner,state,title,url,reviewDecision,mergedAt",
+            "headRefOid,baseRefOid,headRepository,headRepositoryOwner,state,title,url,reviewDecision,mergedAt",
         ])
         .output()
         .map_err(|e| {
@@ -113,6 +118,7 @@ pub(crate) fn parse_pr_meta(pr: &StackPrEntry, stdout: &str) -> Result<StackPrMe
 
     Ok(StackPrMeta {
         head_sha: string_field(&parsed, "headRefOid").unwrap_or_default(),
+        base_sha: non_empty_string_field(&parsed, "baseRefOid"),
         head_owner: nested_string_field(&parsed, "headRepositoryOwner", "login"),
         head_name: nested_string_field(&parsed, "headRepository", "name"),
         state: string_field(&parsed, "state").unwrap_or_default(),
@@ -160,6 +166,7 @@ mod tests {
     fn full_json() -> &'static str {
         r#"{
             "headRefOid": "abc123",
+            "baseRefOid": "base123",
             "headRepositoryOwner": { "login": "Extra-Chill" },
             "headRepository": { "name": "homeboy" },
             "state": "MERGED",
@@ -191,6 +198,7 @@ mod tests {
         std::env::set_var("PATH", old_path);
 
         assert_eq!(meta.head_sha, "abc123");
+        assert_eq!(meta.base_sha.as_deref(), Some("base123"));
         assert_eq!(meta.title.as_deref(), Some("Clean stack internals"));
     }
 
@@ -199,6 +207,7 @@ mod tests {
         let meta = parse_pr_meta(&pr(), full_json()).expect("parse metadata");
 
         assert_eq!(meta.head_sha, "abc123");
+        assert_eq!(meta.base_sha.as_deref(), Some("base123"));
         assert_eq!(meta.state, "MERGED");
         assert_eq!(meta.review_decision.as_deref(), Some("APPROVED"));
         assert_eq!(meta.merged_at.as_deref(), Some("2026-04-26T00:00:00Z"));
@@ -219,6 +228,7 @@ mod tests {
         let meta = parse_pr_meta(&pr(), full_json()).expect("parse metadata");
         let head = meta.require_head(&pr()).expect("required head");
         assert_eq!(head.sha, "abc123");
+        assert_eq!(head.base_sha.as_deref(), Some("base123"));
         assert_eq!(head.head_repo, "Extra-Chill/homeboy");
         assert_eq!(head.clone_url, "https://github.com/Extra-Chill/homeboy.git");
 
