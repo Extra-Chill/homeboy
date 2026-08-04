@@ -175,9 +175,10 @@ pub struct PlacementReadiness {
     pub runner_id: String,
     pub state: PlacementReadinessState,
     pub predicates: Vec<PlacementReadinessPredicate>,
-    pub recovery_actions: Vec<PlacementRecoveryAction>,
+    /// Stable v1 typed recovery actions retained from merged #11455.
+    pub recovery_actions: Vec<ExecutableAction>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub recovery_action_metadata: Vec<ExecutableAction>,
+    pub recovery_action_projections: Vec<PlacementRecoveryAction>,
     /// A complete typed input emitted by the same compiler execution uses.
     /// Passing it back to `runner preflight --request` cannot silently drop a
     /// provider, source, toolchain, browser, or capability requirement.
@@ -242,7 +243,7 @@ fn placement_readiness_from_status(
     } else {
         PlacementReadinessState::Blocked
     };
-    let recovery_action_metadata = if !compatible {
+    let recovery_actions = if !compatible {
         match capability {
             super::LabRunnerGateDecision::Missing { remediation, .. } => remediation
                 .into_iter()
@@ -273,7 +274,7 @@ fn placement_readiness_from_status(
             ActionSafety::ReadOnly,
         )]
     };
-    let recovery_actions = recovery_action_metadata
+    let recovery_action_projections = recovery_actions
         .iter()
         .map(|action| PlacementRecoveryAction {
             command: action.render_command(),
@@ -332,7 +333,7 @@ fn placement_readiness_from_status(
             },
         ],
         recovery_actions,
-        recovery_action_metadata,
+        recovery_action_projections,
         compiled_request: request.clone(),
         revalidate_before_execution: true,
     }
@@ -1734,13 +1735,17 @@ mod placement_readiness_tests {
         assert_eq!(result.state, PlacementReadinessState::Blocked);
         assert_eq!(
             result.recovery_actions[0],
-            PlacementRecoveryAction {
-                command: "homeboy runner doctor lab".to_string(),
-                requires_confirmation: false,
-            }
+            ExecutableAction::new(
+                "runner.capability.remediation.0",
+                "Inspect runner capability remediation",
+                "homeboy",
+                ["runner", "doctor", "lab"],
+                ActionSafety::ReadOnly,
+            )
+            .with_evidence(serde_json::json!({ "remediation": "install browser" }))
         );
         assert_eq!(
-            result.recovery_action_metadata[0].evidence,
+            result.recovery_actions[0].evidence,
             Some(serde_json::json!({ "remediation": "install browser" }))
         );
     }
@@ -1792,13 +1797,13 @@ mod placement_readiness_tests {
             .predicates
             .iter()
             .any(|predicate| predicate.id == "runner_connected" && !predicate.satisfied));
-        let action = &result.recovery_action_metadata[0];
+        let action = &result.recovery_actions[0];
         assert_eq!(action.id, "runner.connect");
         assert_eq!(action.safety, ActionSafety::Mutating);
         assert_eq!(
             serde_json::to_value(&result).expect("serialized v1 envelope")["recovery_actions"][0]
-                ["command"],
-            action.render_command()
+                ["program"],
+            "homeboy"
         );
     }
 
@@ -1816,9 +1821,11 @@ mod placement_readiness_tests {
         );
         let value = serde_json::to_value(&result).expect("serialize v1 result");
         let legacy = &value["recovery_actions"][0];
-        assert!(legacy.get("command").is_some());
-        assert!(legacy.get("requires_confirmation").is_some());
-        assert!(legacy.get("program").is_none());
-        assert_eq!(value["recovery_action_metadata"][0]["program"], "homeboy");
+        assert_eq!(legacy["program"], "homeboy");
+        assert!(legacy.get("args").is_some());
+        assert_eq!(
+            value["recovery_action_projections"][0]["command"],
+            result.recovery_actions[0].render_command()
+        );
     }
 }

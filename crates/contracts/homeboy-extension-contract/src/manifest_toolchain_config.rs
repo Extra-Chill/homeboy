@@ -13,7 +13,11 @@ pub struct ToolchainReadinessProbe {
     pub id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
-    pub command: String,
+    /// Executed as an argv vector, never through a shell. Legacy `command`
+    /// strings are rejected by this strict manifest schema.
+    pub program: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repair_command: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

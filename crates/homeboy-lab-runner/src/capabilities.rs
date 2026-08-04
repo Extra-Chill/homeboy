@@ -52,6 +52,14 @@ pub fn prepare_lab_runner_capability(
     for tool in contract.required_tools {
         push_unique(&mut required_tools, tool);
     }
+    for capability in &contract.required_capabilities {
+        let capability = capability.trim();
+        if !capability.is_empty()
+            && !homeboy_core::lab_contract::lab_capability_is_pipeline_enforced(capability)
+        {
+            push_unique(&mut required_tools, RunnerRequiredTool::new(capability));
+        }
+    }
 
     PreparedLabRunnerCapability {
         command: contract.command,
@@ -65,8 +73,8 @@ pub fn evaluate_lab_runner_capabilities_for_runner(
     plan: &PreparedLabRunnerCapability,
     mode: LabRunnerGateMode,
 ) -> Result<LabRunnerGateDecision> {
-    let capabilities =
-        RunnerCapabilitySnapshot::from_runner_probe(runner, &RunnerCapabilityPreflight::default())?;
+    let preflight: RunnerCapabilityPreflight = plan.clone().into();
+    let capabilities = RunnerCapabilitySnapshot::from_runner_probe(runner, &preflight)?;
     Ok(evaluate_lab_runner_capabilities(
         &runner.id,
         plan,
@@ -472,13 +480,12 @@ fn batch_probe_script(
         lines.push(tool_capability_probe_script(index, probe));
     }
     for (index, probe) in toolchain_probes.iter().enumerate() {
-        let environment = probe
-            .diagnostic_env
-            .iter()
-            .map(|name| format!("{name}=${{{name}:-}}"))
+        let argv = std::iter::once(&probe.program)
+            .chain(probe.args.iter())
+            .map(|arg| shell::quote_arg(arg))
             .collect::<Vec<_>>()
             .join(" ");
-        lines.push(format!("if ({}) >/dev/null 2>&1; then printf 'R\\t{index}\\t1\\n'; else printf 'R\\t{index}\\t0\\t{}\\n'; fi", probe.command, shell::quote_arg(&environment)));
+        lines.push(format!("if {argv} >/dev/null 2>&1; then printf 'R\\t{index}\\t1\\n'; else printf 'R\\t{index}\\t0\\t{}\\n'; fi", shell::quote_arg(&probe.diagnostic_env.join(","))));
     }
     lines.push("exit 0".to_string());
     lines.join("\n")
@@ -1263,7 +1270,8 @@ mod tests {
             required_toolchain_probes: vec![RunnerToolchainReadinessProbe {
                 extension_id: "fixture".to_string(),
                 id: "fixture:usable-toolchain".to_string(),
-                command: "command -v sh >/dev/null && false".to_string(),
+                program: "sh".to_string(),
+                args: vec!["-c".to_string(), "false".to_string()],
                 repair_command: Some("repair-fixture-toolchain".to_string()),
                 diagnostic_env: vec!["PATH".to_string()],
             }],

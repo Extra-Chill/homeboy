@@ -31,7 +31,8 @@ pub(crate) fn toolchain_readiness_preflight_for_extensions(
             probes.push(RunnerToolchainReadinessProbe {
                 extension_id: extension_id.clone(),
                 id: format!("{extension_id}:{}", probe.id),
-                command: probe.command.clone(),
+                program: probe.program.clone(),
+                args: probe.args.clone(),
                 repair_command: probe.repair_command.clone(),
                 diagnostic_env: probe.diagnostic_env.clone(),
             });

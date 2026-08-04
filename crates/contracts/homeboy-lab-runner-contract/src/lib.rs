@@ -230,7 +230,8 @@ pub struct RunnerToolCapabilityRequirement {
 pub struct RunnerToolchainReadinessProbe {
     pub extension_id: String,
     pub id: String,
-    pub command: String,
+    pub program: String,
+    pub args: Vec<String>,
     pub repair_command: Option<String>,
     pub diagnostic_env: Vec<String>,
 }
