@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.32] - 2026-08-04
+
+### Changed
+- register 50 orphaned extension smokes
+
 ## [3.34.31] - 2026-08-04
 
 ### Fixed
