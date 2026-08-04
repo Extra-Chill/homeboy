@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::defaults::HomeboyConfig;
+use crate::error::StorageExhaustedDetails;
+use crate::observation::disk_budget::disk_budget;
 use crate::resource_cleanup_intent::ResourceCleanupIntent;
 use crate::worktree_providers::{
     cleanup_worktree_providers_from_config, WorktreeProviderCleanupOptions,
@@ -105,6 +107,85 @@ pub struct ArtifactCleanupOptions {
 pub fn run_automatic_artifact_retention(roots: Vec<PathBuf>) -> Result<ArtifactCleanupOutput> {
     let retention = crate::defaults::load_config().retention;
     run_automatic_artifact_retention_in(&roots, &retention, SystemTime::now())
+}
+
+/// Reclaim idle, reconstructable worktree artifacts before managed work writes
+/// into `roots`, then require the configured free-space reserve to be present.
+///
+/// This deliberately delegates removal to the existing automatic owner: its
+/// registry and process liveness checks remain the only authority for deciding
+/// whether an artifact is safe to remove. An unmeasurable filesystem is not
+/// rejected; that is distinct from a measured reserve breach.
+pub fn admit_reconstructable_artifact_work(roots: Vec<PathBuf>) -> Result<()> {
+    let retention = crate::defaults::load_config().retention;
+    let roots = existing_unique_roots(roots);
+    if roots.is_empty() || retention.reconstructable_artifact_reserve_bytes == 0 {
+        return Ok(());
+    }
+
+    if !roots.iter().any(|root| {
+        below_reconstructable_reserve(root, retention.reconstructable_artifact_reserve_bytes)
+    }) {
+        return Ok(());
+    }
+
+    run_automatic_artifact_retention_in(&roots, &retention, SystemTime::now())?;
+
+    for root in roots {
+        let budget = disk_budget(
+            &root,
+            "managed worktree",
+            "worktree capacity is not measurable on this platform",
+        );
+        if budget
+            .available_bytes
+            .is_some_and(|available| available < retention.reconstructable_artifact_reserve_bytes)
+        {
+            return Err(reconstructable_admission_error(
+                &root,
+                budget.available_bytes,
+                budget.available_inodes,
+                retention.reconstructable_artifact_reserve_bytes,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn existing_unique_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    roots
+        .into_iter()
+        .filter(|root| root.is_dir())
+        .filter(|root| seen.insert(canonical_or_owned(root)))
+        .collect()
+}
+
+fn below_reconstructable_reserve(root: &Path, reserve_bytes: u64) -> bool {
+    disk_budget(
+        root,
+        "managed worktree",
+        "worktree capacity is not measurable on this platform",
+    )
+    .available_bytes
+    .is_some_and(|available| available < reserve_bytes)
+}
+
+fn reconstructable_admission_error(
+    root: &Path,
+    available_bytes: Option<u64>,
+    available_inodes: Option<u64>,
+    reserve_bytes: u64,
+) -> Error {
+    Error::storage_exhausted_detailed(StorageExhaustedDetails {
+        error: "managed worktree filesystem remains below the reconstructable-artifact reserve after bounded retention".to_string(),
+        context: Some("admission before managed work".to_string()),
+        path: Some(root.display().to_string()),
+        available_bytes,
+        available_inodes,
+        reserve_bytes: Some(reserve_bytes),
+        reserve_inodes: None,
+    })
 }
 
 fn run_automatic_artifact_retention_in(
@@ -2136,6 +2217,38 @@ mod tests {
                 .iter()
                 .any(|row| row.reason.contains("active task worktree")));
         });
+    }
+
+    #[test]
+    fn pressure_admission_preserves_active_artifacts_and_refuses_when_reserve_remains_unmet() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = repo_with_ignored_artifacts();
+            write_file(&repo.path().join("target/debug/app"), "active artifact");
+            register_active_task_worktree(repo.path());
+            crate::defaults::save_config(&crate::defaults::HomeboyConfig {
+                retention: crate::defaults::RetentionConfig {
+                    reconstructable_artifact_reserve_bytes: u64::MAX,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .expect("save retention");
+
+            let error = admit_reconstructable_artifact_work(vec![repo.path().to_path_buf()])
+                .expect_err("a measured reserve breach must refuse new managed work");
+
+            assert!(error.is_storage_exhausted());
+            assert_eq!(error.details["reserve_bytes"], u64::MAX);
+            assert!(repo.path().join("target/debug/app").exists());
+        });
+    }
+
+    #[test]
+    fn reconstructable_artifact_reserve_has_a_safe_nonzero_default() {
+        assert_eq!(
+            crate::defaults::RetentionConfig::default().reconstructable_artifact_reserve_bytes,
+            20 * 1024 * 1024 * 1024
+        );
     }
 
     #[test]
