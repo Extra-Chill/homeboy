@@ -223,6 +223,10 @@ fn postprocess_claim_path(run_id: Option<&str>, step_id: &str) -> PathBuf {
     postprocess_root(run_id, step_id).join("claim.json")
 }
 
+fn claim_mutation_path(path: &Path) -> PathBuf {
+    path.with_extension("mutation")
+}
+
 fn materialize_dependency_artifacts(
     input: &Path,
     dependencies: &[String],
@@ -366,6 +370,14 @@ struct PostprocessClaimGuard {
     heartbeat: Option<thread::JoinHandle<()>>,
 }
 
+struct ClaimMutationGuard(PathBuf);
+
+impl Drop for ClaimMutationGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 impl Drop for PostprocessClaimGuard {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
@@ -413,17 +425,12 @@ fn acquire_claim(path: &Path) -> std::result::Result<PostprocessClaimGuard, Stri
             })
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let stale = std::fs::read(path)
-                .ok()
-                .and_then(|raw| serde_json::from_slice::<PostprocessClaim>(&raw).ok())
-                .map(|claim| {
-                    claim.schema == CLAIM_SCHEMA
-                        && now_unix_secs().saturating_sub(claim.heartbeat_unix_secs)
-                            > CLAIM_STALE_AFTER_SECS
-                        && !claim_owner_is_alive(claim.owner_pid)
-                })
-                .unwrap_or(false);
-            if stale {
+            let Ok(_mutation) = acquire_claim_mutation(path) else {
+                return Err(
+                    "artifact postprocess step is already executing under a live claim".to_string(),
+                );
+            };
+            if claim_is_recoverable(path) {
                 std::fs::remove_file(path).map_err(|error| error.to_string())?;
                 acquire_claim(path)
             } else {
@@ -432,6 +439,28 @@ fn acquire_claim(path: &Path) -> std::result::Result<PostprocessClaimGuard, Stri
         }
         Err(error) => Err(error.to_string()),
     }
+}
+
+fn acquire_claim_mutation(path: &Path) -> std::result::Result<ClaimMutationGuard, String> {
+    let mutation = claim_mutation_path(path);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&mutation)
+        .map(|_| ClaimMutationGuard(mutation))
+        .map_err(|error| error.to_string())
+}
+
+fn claim_is_recoverable(path: &Path) -> bool {
+    std::fs::read(path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<PostprocessClaim>(&raw).ok())
+        .is_some_and(|claim| {
+            claim.schema == CLAIM_SCHEMA
+                && now_unix_secs().saturating_sub(claim.heartbeat_unix_secs)
+                    > CLAIM_STALE_AFTER_SECS
+                && !claim_owner_is_alive(claim.owner_pid)
+        })
 }
 
 fn heartbeat_claim(
@@ -443,6 +472,12 @@ fn heartbeat_claim(
         while !stop.load(Ordering::SeqCst) {
             thread::sleep(Duration::from_secs(CLAIM_HEARTBEAT_INTERVAL_SECS));
             if stop.load(Ordering::SeqCst) || !claim_owned_by(&path, &owner_id) {
+                return;
+            }
+            let Ok(_mutation) = acquire_claim_mutation(&path) else {
+                continue;
+            };
+            if !claim_owned_by(&path, &owner_id) {
                 return;
             }
             let Ok(mut claim) = std::fs::read(&path)
@@ -907,6 +942,13 @@ mod tests {
             .expect("claim json"),
         )
         .expect("dead stale claim");
+        std::fs::write(claim_mutation_path(&path), "takeover in progress")
+            .expect("interleaving lock");
+        assert!(
+            acquire_claim(&path).is_err(),
+            "a contender cannot delete a claim while another contender owns takeover"
+        );
+        std::fs::remove_file(claim_mutation_path(&path)).expect("release interleaving lock");
         assert!(
             acquire_claim(&path).is_ok(),
             "dead stale claim is recoverable"
