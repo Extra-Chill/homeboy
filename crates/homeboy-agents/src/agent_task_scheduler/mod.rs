@@ -7,6 +7,7 @@ mod attempt_workspace;
 mod candidate_adoption;
 mod engine;
 mod harvest;
+pub(crate) mod managed_services;
 mod outcome;
 mod outcome_artifacts;
 mod outcome_status;
@@ -31,8 +32,10 @@ pub use crate::agent_task_schedule::{
     AgentTaskArtifactRunBinding, AgentTaskBackpressureStatus, AgentTaskCancellationToken,
     AgentTaskCandidateAdoption, AgentTaskCandidateAdoptionDecision,
     AgentTaskCandidateCompletionPolicy, AgentTaskChildRun, AgentTaskExecutionBudget,
-    AgentTaskExecutionContext, AgentTaskOutputBinding, AgentTaskOutputDependencies, AgentTaskPlan,
-    AgentTaskProgressEvent, AgentTaskProviderRotationAttempt, AgentTaskProviderRotationEntry,
+    AgentTaskExecutionContext, AgentTaskManagedService, AgentTaskManagedServiceLifecycle,
+    AgentTaskManagedServiceReadiness, AgentTaskManagedServiceReadinessKind, AgentTaskOutputBinding,
+    AgentTaskOutputDependencies, AgentTaskPlan, AgentTaskProgressEvent,
+    AgentTaskProviderRotationAttempt, AgentTaskProviderRotationEntry,
     AgentTaskProviderRotationPolicy, AgentTaskQueueStatus, AgentTaskResourceBudget,
     AgentTaskResourceBudgetStatus, AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
     AGENT_TASK_AGGREGATE_SCHEMA, AGENT_TASK_PLAN_SCHEMA,
