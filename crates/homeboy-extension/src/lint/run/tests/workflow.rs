@@ -70,6 +70,10 @@ fn routed_lint_component(home: &Path, source: &Path, script: &str) -> Component 
         r#"{
             "name":"Routed lint fixture",
             "version":"1.0.0",
+            "structured_sidecars":{
+                "lint.findings":true,
+                "lint.producers":true
+            },
             "lint":{
                 "extension_script":"lint.sh",
                 "changed_file_routes":[
