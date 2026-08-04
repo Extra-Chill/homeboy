@@ -821,14 +821,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_output_path_escape_before_helper_execution() {
+    fn rejects_plan_controlled_shell_action() {
         with_isolated_home(|home| {
+            let registry = home.path().join("helpers.json");
+            std::fs::write(
+                &registry,
+                serde_json::json!({
+                    "schema": ARTIFACT_POSTPROCESS_HELPER_REGISTRY_SCHEMA,
+                    "helpers": []
+                })
+                .to_string(),
+            )
+            .expect("registry");
+            std::env::set_var(ARTIFACT_POSTPROCESS_HELPER_REGISTRY_ENV, registry);
             let artifact_root = home.path().join("artifacts");
             let step: ArtifactPostprocessAction = serde_json::from_value(serde_json::json!({
-                "id": "escape",
+                "id": "shell",
                 "helper": "sh",
                 "action": "-c",
-                "output": "reports/../../escape.txt",
+                "output": "report.txt",
                 "parameters": {
                     "args": ["printf should-not-run > /dev/null"]
                 }
@@ -843,10 +854,10 @@ mod tests {
                     path_expander: None,
                 },
             )
-            .expect_err("path escape should fail");
+            .expect_err("unregistered shell action should fail");
 
             assert_eq!(err.code.as_str(), "validation.invalid_argument");
-            assert!(err.message.contains("artifact_postprocess.output"));
+            assert!(err.message.contains("helper"));
         });
     }
 

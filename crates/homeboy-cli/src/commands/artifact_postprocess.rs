@@ -102,11 +102,47 @@ fn write_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy::core::artifacts::{
+        ARTIFACT_POSTPROCESS_HELPER_REGISTRY_ENV, ARTIFACT_POSTPROCESS_HELPER_REGISTRY_SCHEMA,
+    };
     use homeboy::core::observation::{runs_service, NewRunRecord, ObservationStore};
+    use homeboy_engine_primitives::content_hash;
+
+    fn install_test_helper(home: &tempfile::TempDir) {
+        let helper = home.path().join("binary-helper");
+        std::fs::write(
+            &helper,
+            "#!/bin/sh\ncase \"$1\" in binary) printf '\\001\\377\\020' > \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\" ;; esac\n",
+        )
+        .expect("helper");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+                .expect("helper permissions");
+        }
+        let registry = home.path().join("helpers.json");
+        std::fs::write(
+            &registry,
+            serde_json::json!({
+                "schema": ARTIFACT_POSTPROCESS_HELPER_REGISTRY_SCHEMA,
+                "helpers": [{
+                    "id": "fixture",
+                    "path": helper,
+                    "sha256": content_hash::sha256_hex(&std::fs::read(&helper).expect("helper bytes")),
+                    "actions": ["binary"]
+                }]
+            })
+            .to_string(),
+        )
+        .expect("registry");
+        std::env::set_var(ARTIFACT_POSTPROCESS_HELPER_REGISTRY_ENV, registry);
+    }
 
     #[test]
     fn lab_contract_postprocess_persists_binary_artifact_evidence() {
         homeboy::core::test_support::with_isolated_home(|home| {
+            install_test_helper(home);
             let artifact_root = home.path().join("lab-output");
             let plan_path = home.path().join("postprocess.json");
             std::fs::write(
@@ -116,8 +152,7 @@ mod tests {
                     "plan_id": "lab-binary",
                     "artifact_roots": [{ "id": "output", "path": artifact_root }],
                     "actions": [{
-                        "id": "binary", "helper": "sh", "action": "-c", "output": "report.bin",
-                        "parameters": { "args": ["printf '\\001\\377\\020' > \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\""] }
+                        "id": "binary", "helper": "fixture", "action": "binary", "output": "report.bin"
                     }]
                 })
                 .to_string(),

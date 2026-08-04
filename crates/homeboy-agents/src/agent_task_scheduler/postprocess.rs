@@ -107,6 +107,9 @@ pub fn run_postprocess_worker(request_path: &Path) -> homeboy_core::Result<()> {
     {
         return Ok(());
     }
+    if request.claim_delay_millis > 0 {
+        thread::sleep(Duration::from_millis(request.claim_delay_millis));
+    }
     let claim = acquire_claim(&postprocess_claim_path(
         Some(&request.run_id),
         &request.step.id,
@@ -149,6 +152,19 @@ fn start_or_reconcile_worker(
     outcomes: &[AgentTaskOutcome],
     fingerprint: &str,
 ) -> std::result::Result<AgentTaskOutcome, String> {
+    start_or_reconcile_worker_with_retry(plan, step, run_id, outcomes, fingerprint, true)
+}
+
+fn start_or_reconcile_worker_with_retry(
+    plan: &AgentTaskPlan,
+    step: &AgentTaskArtifactPostprocessStep,
+    run_id: Option<&str>,
+    outcomes: &[AgentTaskOutcome],
+    fingerprint: &str,
+    allow_startup_recovery: bool,
+) -> std::result::Result<AgentTaskOutcome, String> {
+    #[cfg(test)]
+    let _ = allow_startup_recovery;
     let run_id = run_id.unwrap_or("unrecorded-run");
     let root = postprocess_root(Some(run_id), &step.id);
     std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
@@ -160,6 +176,10 @@ fn start_or_reconcile_worker(
         fingerprint: fingerprint.to_string(),
         dependencies: outcomes.to_vec(),
         plan_id: plan.plan_id.clone(),
+        claim_delay_millis: std::env::var("HOMEBOY_POSTPROCESS_WORKER_CLAIM_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_default(),
     };
     write_json_atomically(&request_path, &request).map_err(|error| error.message)?;
     #[cfg(test)]
@@ -192,6 +212,11 @@ fn start_or_reconcile_worker(
         worker_id: uuid::Uuid::new_v4().to_string(),
         pid: child.id(),
         spawned_unix_secs: now_unix_secs(),
+        start_identity: homeboy_core::process::process_start_identity(child.id())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                "artifact postprocess worker exited before startup identity capture".to_string()
+            })?,
     };
     #[cfg(not(test))]
     write_json_atomically(&postprocess_worker_path(Some(run_id), &step.id), &spawned)
@@ -204,8 +229,20 @@ fn start_or_reconcile_worker(
             return Ok(outcome);
         }
         if !worker_is_alive(&spawned) {
-            // Claim creation is not proof of worker liveness. Only a spawned
-            // worker whose persisted PID is proven dead can be recovered.
+            // A worker that dies before claiming has not run a helper. Retry one
+            // fresh process rather than checkpointing a failure that would block
+            // safe recovery after a startup race.
+            if allow_startup_recovery {
+                let _ = std::fs::remove_file(postprocess_worker_path(Some(run_id), &step.id));
+                return start_or_reconcile_worker_with_retry(
+                    plan,
+                    step,
+                    Some(run_id),
+                    outcomes,
+                    fingerprint,
+                    false,
+                );
+            }
             return Err("artifact postprocess worker died before completion".to_string());
         }
         thread::sleep(Duration::from_millis(100));
@@ -439,9 +476,11 @@ fn recover_completed_attempt(
             .unwrap_or(false);
         if staged_matches {
             promote_attempt(&root, &attempt, &completion)?;
+            discard_other_staged_attempts(&staging, &attempt);
             return Ok(completion.outcome);
         }
         if promoted_matches {
+            discard_other_staged_attempts(&staging, &attempt);
             return Ok(completion.outcome);
         }
         let _ = std::fs::remove_dir_all(&attempt);
@@ -449,6 +488,17 @@ fn recover_completed_attempt(
     Err(homeboy_core::Error::internal_unexpected(
         "valid completed postprocess stage is absent",
     ))
+}
+
+fn discard_other_staged_attempts(staging: &Path, completed_attempt: &Path) {
+    if let Ok(entries) = std::fs::read_dir(staging) {
+        for entry in entries.flatten() {
+            let attempt = entry.path();
+            if attempt != completed_attempt {
+                let _ = std::fs::remove_dir_all(attempt);
+            }
+        }
+    }
 }
 
 fn write_completion(path: &Path, completion: &PostprocessCompletion) -> homeboy_core::Result<()> {
@@ -780,6 +830,8 @@ struct PostprocessWorkerRequest {
     step: AgentTaskArtifactPostprocessStep,
     fingerprint: String,
     dependencies: Vec<AgentTaskOutcome>,
+    #[serde(default)]
+    claim_delay_millis: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -788,6 +840,7 @@ struct PostprocessWorkerSpawn {
     worker_id: String,
     pid: u32,
     spawned_unix_secs: u64,
+    start_identity: homeboy_core::process::ProcessStartIdentity,
 }
 
 const CHECKPOINT_SCHEMA: &str = "homeboy/agent-task-postprocess-checkpoint/v2";
@@ -897,7 +950,16 @@ fn claim_is_recoverable(path: &Path) -> bool {
 }
 
 fn worker_is_alive(worker: &PostprocessWorkerSpawn) -> bool {
-    worker.schema == WORKER_SPAWN_SCHEMA && claim_owner_is_alive(worker.pid)
+    worker.schema == WORKER_SPAWN_SCHEMA
+        && matches!(
+            homeboy_core::process::process_identity_state_with_start_identity(
+                worker.pid,
+                None,
+                Some(&worker.start_identity),
+            ),
+            homeboy_core::process::ProcessIdentityState::Live
+                | homeboy_core::process::ProcessIdentityState::Unverifiable
+        )
 }
 
 fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> homeboy_core::Result<()> {
@@ -1142,9 +1204,44 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    fn install_test_helper(home: &tempfile::TempDir) {
+        let helper = home.path().join("postprocess-helper");
+        std::fs::write(
+            &helper,
+            "#!/bin/sh\ncase \"$1\" in\n  copy) cp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\"; printf x >> \"$HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT/count\" ;;\n  report) printf x >> \"$HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT/count\"; printf report > \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\" ;;\n  fail) exit 3 ;;\nesac\n",
+        )
+        .expect("helper");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+                .expect("helper permissions");
+        }
+        let registry = home.path().join("postprocess-helpers.json");
+        std::fs::write(
+            &registry,
+            serde_json::json!({
+                "schema": homeboy_core::artifacts::ARTIFACT_POSTPROCESS_HELPER_REGISTRY_SCHEMA,
+                "helpers": [{
+                    "id": "fixture",
+                    "path": helper,
+                    "sha256": content_hash::sha256_hex(&std::fs::read(&helper).expect("helper bytes")),
+                    "actions": ["copy", "report", "fail"]
+                }]
+            })
+            .to_string(),
+        )
+        .expect("helper registry");
+        std::env::set_var(
+            homeboy_core::artifacts::ARTIFACT_POSTPROCESS_HELPER_REGISTRY_ENV,
+            registry,
+        );
+    }
+
     #[test]
     fn materializes_binary_dependency_and_records_postprocessed_artifact() {
         homeboy_core::test_support::with_isolated_home(|home| {
+            install_test_helper(home);
             let source = home.path().join("capture.bin");
             std::fs::write(&source, [0, 255, 17, 42]).expect("binary input");
             let producer = AgentTaskOutcome {
@@ -1159,16 +1256,30 @@ mod tests {
                 ..Default::default()
             };
             let step = AgentTaskArtifactPostprocessStep {
-                id: "compose".to_string(), depends_on: vec!["capture".to_string()], required: true,
+                id: "compose".to_string(),
+                depends_on: vec!["capture".to_string()],
+                required: true,
                 plan: ArtifactPostprocessPlan {
-                    schema: ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string(), plan_id: "compose".to_string(),
-                    artifact_roots: vec![ArtifactPostprocessRoot { id: "output".to_string(), path: "unused".to_string(), persisted_ref: None, manifest_path: None }],
+                    schema: ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string(),
+                    plan_id: "compose".to_string(),
+                    artifact_roots: vec![ArtifactPostprocessRoot {
+                        id: "output".to_string(),
+                        path: "unused".to_string(),
+                        persisted_ref: None,
+                        manifest_path: None,
+                    }],
                     actions: vec![ArtifactPostprocessAction {
-                        id: Some("copy".to_string()), helper: "sh".to_string(), action: "-c".to_string(),
-                        input: Some("${run.input}/capture/capture.bin".to_string()), output: "result.bin".to_string(),
-                        parameters: BTreeMap::from([("args".to_string(), serde_json::json!(["cp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\""]))]), required: true,
+                        id: Some("copy".to_string()),
+                        helper: "fixture".to_string(),
+                        action: "copy".to_string(),
+                        input: Some("${run.input}/capture/capture.bin".to_string()),
+                        output: "result.bin".to_string(),
+                        parameters: BTreeMap::new(),
+                        required: true,
                         side_effects: vec!["artifact_root_output".to_string()],
-                    }], reviewer_refs: Vec::new(), metadata: serde_json::json!({}),
+                    }],
+                    reviewer_refs: Vec::new(),
+                    metadata: serde_json::json!({}),
                 },
             };
             let mut outcomes = vec![producer];
@@ -1198,7 +1309,8 @@ mod tests {
 
     #[test]
     fn optional_step_failure_is_visible_without_failing_the_aggregate() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            install_test_helper(home);
             let step = AgentTaskArtifactPostprocessStep {
                 id: "optional-compose".to_string(),
                 depends_on: vec!["capture".to_string()],
@@ -1214,14 +1326,11 @@ mod tests {
                     }],
                     actions: vec![ArtifactPostprocessAction {
                         id: Some("fail".to_string()),
-                        helper: "sh".to_string(),
-                        action: "-c".to_string(),
+                        helper: "fixture".to_string(),
+                        action: "fail".to_string(),
                         input: None,
                         output: "unused.bin".to_string(),
-                        parameters: BTreeMap::from([(
-                            "args".to_string(),
-                            serde_json::json!(["exit 3"]),
-                        )]),
+                        parameters: BTreeMap::new(),
                         required: true,
                         side_effects: vec!["artifact_root_output".to_string()],
                     }],
@@ -1259,6 +1368,7 @@ mod tests {
     #[test]
     fn checkpoint_reuses_completed_step_after_interruption() {
         homeboy_core::test_support::with_isolated_home(|home| {
+            install_test_helper(home);
             let source = home.path().join("capture.bin");
             std::fs::write(&source, [1, 2, 3]).expect("input");
             let producer = AgentTaskOutcome {
@@ -1273,16 +1383,30 @@ mod tests {
                 ..Default::default()
             };
             let step = AgentTaskArtifactPostprocessStep {
-                id: "compose".to_string(), depends_on: vec!["capture".to_string()], required: true,
+                id: "compose".to_string(),
+                depends_on: vec!["capture".to_string()],
+                required: true,
                 plan: ArtifactPostprocessPlan {
-                    schema: ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string(), plan_id: "compose".to_string(),
-                    artifact_roots: vec![ArtifactPostprocessRoot { id: "output".to_string(), path: "unused".to_string(), persisted_ref: None, manifest_path: None }],
+                    schema: ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string(),
+                    plan_id: "compose".to_string(),
+                    artifact_roots: vec![ArtifactPostprocessRoot {
+                        id: "output".to_string(),
+                        path: "unused".to_string(),
+                        persisted_ref: None,
+                        manifest_path: None,
+                    }],
                     actions: vec![ArtifactPostprocessAction {
-                        id: Some("copy".to_string()), helper: "sh".to_string(), action: "-c".to_string(),
-                        input: Some("${run.input}/capture/capture.bin".to_string()), output: "result.bin".to_string(),
-                        parameters: BTreeMap::from([("args".to_string(), serde_json::json!(["cp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\"; printf x >> \"$HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT/count\""]))]), required: true,
+                        id: Some("copy".to_string()),
+                        helper: "fixture".to_string(),
+                        action: "copy".to_string(),
+                        input: Some("${run.input}/capture/capture.bin".to_string()),
+                        output: "result.bin".to_string(),
+                        parameters: BTreeMap::new(),
+                        required: true,
                         side_effects: vec!["artifact_root_output".to_string()],
-                    }], reviewer_refs: Vec::new(), metadata: serde_json::json!({}),
+                    }],
+                    reviewer_refs: Vec::new(),
+                    metadata: serde_json::json!({}),
                 },
             };
             let plan = AgentTaskPlan {
@@ -1327,7 +1451,8 @@ mod tests {
 
     #[test]
     fn worker_completion_survives_scheduler_crash_without_reinvoking_helper() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            install_test_helper(home);
             let step = AgentTaskArtifactPostprocessStep {
                 id: "compose".to_string(),
                 depends_on: Vec::new(),
@@ -1335,14 +1460,24 @@ mod tests {
                 plan: ArtifactPostprocessPlan {
                     schema: ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string(),
                     plan_id: "compose".to_string(),
-                    artifact_roots: vec![ArtifactPostprocessRoot { id: "output".to_string(), path: "unused".to_string(), persisted_ref: None, manifest_path: None }],
+                    artifact_roots: vec![ArtifactPostprocessRoot {
+                        id: "output".to_string(),
+                        path: "unused".to_string(),
+                        persisted_ref: None,
+                        manifest_path: None,
+                    }],
                     actions: vec![ArtifactPostprocessAction {
-                        id: Some("report".to_string()), helper: "sh".to_string(), action: "-c".to_string(),
-                        input: None, output: "report.txt".to_string(),
-                        parameters: BTreeMap::from([("args".to_string(), serde_json::json!(["printf x >> \"$HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT/count\"; printf report > \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\""]))]),
+                        id: Some("report".to_string()),
+                        helper: "fixture".to_string(),
+                        action: "report".to_string(),
+                        input: None,
+                        output: "report.txt".to_string(),
+                        parameters: BTreeMap::new(),
                         required: true,
                         side_effects: vec!["artifact_root_output".to_string()],
-                    }], reviewer_refs: Vec::new(), metadata: serde_json::json!({}),
+                    }],
+                    reviewer_refs: Vec::new(),
+                    metadata: serde_json::json!({}),
                 },
             };
             let plan = AgentTaskPlan {
@@ -1367,6 +1502,7 @@ mod tests {
                     step: step.clone(),
                     fingerprint: identity.clone(),
                     dependencies: Vec::new(),
+                    claim_delay_millis: 0,
                 },
             )
             .expect("worker request");
