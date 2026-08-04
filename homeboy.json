@@ -1829,7 +1829,11 @@
     "CARGO_TARGET_DIR": "target"
   },
   "extensions": {
-    "rust": {}
+    "rust": {
+      "settings": {
+        "rust_cargo_test_threads": 1
+      }
+    }
   },
   "hooks": {},
   "id": "homeboy",
