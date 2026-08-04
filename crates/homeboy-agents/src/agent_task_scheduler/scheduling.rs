@@ -1384,6 +1384,7 @@ impl AgentTaskScheduleSupport {
         budget: &AgentTaskExecutionBudget,
         executions_used: u32,
         rotations_used: usize,
+        same_provider_retries_used: usize,
     ) {
         if !outcome.metadata.is_object() {
             outcome.metadata = serde_json::json!({});
@@ -1394,15 +1395,32 @@ impl AgentTaskScheduleSupport {
                 | AgentTaskOutcomeStatus::NoOp
                 | AgentTaskOutcomeStatus::Cancelled
         );
-        let exhausted = terminal_is_failure.then(|| {
-            if executions_used >= budget.max_provider_executions {
-                "total_executions"
-            } else if rotations_used >= budget.max_provider_rotations as usize {
-                "provider_rotations"
-            } else {
-                "same_provider_retries"
-            }
-        });
+        // Only name a budget that was actually reached. This used to fall
+        // through to `same_provider_retries` for *any* terminal failure, so a
+        // task that failed for unrelated reasons was still decorated with an
+        // authoritative "execution budget exhausted" diagnostic — which sends
+        // whoever reads it after the wrong cause (#11419).
+        //
+        // The rotation and retry arms additionally require that the budget was
+        // consumed at all. A limit of zero was never available to exhaust, so
+        // blaming it explains nothing about why this attempt failed.
+        let exhausted = terminal_is_failure
+            .then(|| {
+                if executions_used >= budget.max_provider_executions {
+                    Some("total_executions")
+                } else if rotations_used > 0
+                    && rotations_used >= budget.max_provider_rotations as usize
+                {
+                    Some("provider_rotations")
+                } else if same_provider_retries_used > 0
+                    && same_provider_retries_used >= budget.max_same_provider_retries as usize
+                {
+                    Some("same_provider_retries")
+                } else {
+                    None
+                }
+            })
+            .flatten();
         outcome
             .metadata
             .as_object_mut()
@@ -1415,6 +1433,7 @@ impl AgentTaskScheduleSupport {
                     "max_provider_rotations": budget.max_provider_rotations,
                     "executions_used": executions_used,
                     "provider_rotations_used": rotations_used,
+                    "same_provider_retries_used": same_provider_retries_used,
                     "remaining_provider_executions": budget.max_provider_executions.saturating_sub(executions_used),
                     "exhausted": exhausted,
                     "terminal_reason": format!("{:?}", outcome.status).to_lowercase(),
@@ -1668,4 +1687,133 @@ fn is_base_bound_patch_candidate(outcome: &AgentTaskOutcome, artifact: &AgentTas
                 .and_then(Value::as_str)
                 .is_some_and(|value| !value.is_empty())
         })
+}
+
+#[cfg(test)]
+mod execution_budget_evidence_tests {
+    use super::*;
+
+    fn budget(executions: u32, rotations: u32, retries: u32) -> AgentTaskExecutionBudget {
+        AgentTaskExecutionBudget {
+            version: AgentTaskExecutionBudget::VERSION,
+            deadline_unix_ms: None,
+            max_provider_executions: executions,
+            max_same_provider_retries: retries,
+            max_provider_rotations: rotations,
+        }
+    }
+
+    fn failed_outcome() -> AgentTaskOutcome {
+        AgentTaskOutcome {
+            task_id: "task-1".to_string(),
+            status: AgentTaskOutcomeStatus::Failed,
+            ..Default::default()
+        }
+    }
+
+    fn exhaustion_diagnostic(outcome: &AgentTaskOutcome) -> Option<&AgentTaskDiagnostic> {
+        outcome
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.class == "agent_task.execution_budget_exhausted")
+    }
+
+    /// A failure that never approached a limit must not be labelled a budget
+    /// exhaustion. This previously fell through to `same_provider_retries` for
+    /// every terminal failure, which reported an authoritative cause that had
+    /// nothing to do with the actual one (#11419).
+    #[test]
+    fn a_failure_within_budget_is_not_labelled_exhausted() {
+        let mut outcome = failed_outcome();
+        AgentTaskScheduleSupport::attach_execution_budget_evidence(
+            &mut outcome,
+            &budget(10, 10, 0),
+            2,
+            1,
+            0,
+        );
+
+        assert!(
+            exhaustion_diagnostic(&outcome).is_none(),
+            "2 of 10 executions and 1 of 10 rotations is not exhaustion: {:#?}",
+            outcome.diagnostics
+        );
+        // The counts stay attached regardless — they are useful on every outcome.
+        assert_eq!(outcome.metadata["execution_budget"]["executions_used"], 2);
+        assert_eq!(
+            outcome.metadata["execution_budget"]["same_provider_retries_used"],
+            0
+        );
+        assert_eq!(
+            outcome.metadata["execution_budget"]["exhausted"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn a_genuinely_exhausted_budget_is_still_reported() {
+        for (executions, rotations, retries, used, rotations_used, retries_used, expected) in [
+            (
+                1u32,
+                10u32,
+                10u32,
+                1u32,
+                0usize,
+                0usize,
+                "max_provider_executions",
+            ),
+            (10, 1, 10, 2, 1, 0, "max_provider_rotations"),
+            (10, 10, 1, 2, 0, 1, "max_same_provider_retries"),
+        ] {
+            let mut outcome = failed_outcome();
+            AgentTaskScheduleSupport::attach_execution_budget_evidence(
+                &mut outcome,
+                &budget(executions, rotations, retries),
+                used,
+                rotations_used,
+                retries_used,
+            );
+            let diagnostic =
+                exhaustion_diagnostic(&outcome).expect("a reached limit must still be reported");
+            assert_eq!(diagnostic.data["exhausted_budget"], expected);
+        }
+    }
+
+    /// A limit of zero was never available to exhaust, so blaming it explains
+    /// nothing about why the attempt failed.
+    #[test]
+    fn an_unavailable_budget_is_not_blamed() {
+        let mut outcome = failed_outcome();
+        AgentTaskScheduleSupport::attach_execution_budget_evidence(
+            &mut outcome,
+            &budget(10, 0, 0),
+            1,
+            0,
+            0,
+        );
+
+        assert!(
+            exhaustion_diagnostic(&outcome).is_none(),
+            "zero-limit budgets that were never consumed must not be blamed: {:#?}",
+            outcome.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_successful_outcome_is_never_labelled_exhausted() {
+        let mut outcome = AgentTaskOutcome {
+            task_id: "task-1".to_string(),
+            status: AgentTaskOutcomeStatus::Succeeded,
+            ..Default::default()
+        };
+        AgentTaskScheduleSupport::attach_execution_budget_evidence(
+            &mut outcome,
+            &budget(1, 0, 0),
+            1,
+            0,
+            0,
+        );
+
+        assert!(exhaustion_diagnostic(&outcome).is_none());
+    }
 }
