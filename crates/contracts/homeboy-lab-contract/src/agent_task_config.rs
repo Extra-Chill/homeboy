@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::agent_task_outcome::{AgentTaskFailureClassification, AgentTaskOutcomeStatus};
+use crate::secret_env_plan::SecretEnvPlan;
 
 fn default_managed_service_version() -> u32 {
     AgentTaskManagedService::VERSION
@@ -38,22 +39,48 @@ pub struct AgentTaskManagedService {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
+    /// Names copied from the selected execution host. An empty list gives a
+    /// service no ambient environment; plans must make every dependency clear.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_env: Vec<String>,
+    /// Portable, redacted secret handoff for a Lab or another selected target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_env_plan: Option<SecretEnvPlan>,
     #[serde(default = "default_managed_service_host")]
     pub host: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Environment variable receiving the leased port. `None` means the
+    /// command has an externally fixed endpoint and no port lease is required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_env: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readiness: Option<AgentTaskManagedServiceReadiness>,
     /// An externally provisioned reviewer URL. Homeboy treats this as a
     /// reference and never assumes a particular tunnel or preview provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
+    #[serde(default)]
+    pub lifecycle: AgentTaskManagedServiceLifecycle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 impl AgentTaskManagedService {
     pub const VERSION: u32 = 1;
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskManagedServiceLifecycle {
+    /// The service is owned by the complete plan, including postprocess steps.
+    #[default]
+    Plan,
+    /// The service is owned by the selected execution target and must be
+    /// reconciled there after an interrupted controller handoff.
+    Target,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

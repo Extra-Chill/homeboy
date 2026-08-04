@@ -780,11 +780,16 @@ mod managed_service_plan_tests {
             command: vec!["server".to_string()],
             cwd: None,
             env: HashMap::new(),
+            env_allowlist: Vec::new(),
             secret_env: vec!["TOKEN".to_string()],
+            secret_env_plan: None,
             host: "127.0.0.1".to_string(),
             port: Some(3000),
+            port_env: None,
             readiness: None,
             public_url: Some("https://preview.example.test".to_string()),
+            lifecycle: AgentTaskManagedServiceLifecycle::Plan,
+            target: None,
         });
         plan.rebuild_homeboy_plan();
         let round_trip = AgentTaskPlan::from_homeboy_plan(plan.homeboy_plan.clone());
@@ -800,11 +805,16 @@ mod managed_service_plan_tests {
             command: vec!["server".to_string()],
             cwd: None,
             env: HashMap::new(),
+            env_allowlist: Vec::new(),
             secret_env: Vec::new(),
+            secret_env_plan: None,
             host: "127.0.0.1".to_string(),
             port: Some(3000),
+            port_env: None,
             readiness: None,
             public_url: None,
+            lifecycle: AgentTaskManagedServiceLifecycle::Plan,
+            target: None,
         });
         plan.postprocess_steps
             .push(AgentTaskArtifactPostprocessStep {

@@ -4,18 +4,24 @@
 //! evidence. Public URLs are opaque references supplied by a preview/tunnel
 //! provider, keeping this contract independent of any product integration.
 
-use std::fs::OpenOptions;
-use std::net::TcpStream;
+use std::fs::{File, OpenOptions};
+use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use homeboy_core::agent_task_config::AgentTaskManagedServiceReadiness;
+use homeboy_core::process::{
+    process_identity_state_with_start_identity, process_start_identity, terminate_process_tree,
+    ProcessIdentityState, ProcessStartIdentity,
+};
 use serde_json::{json, Value};
 
-use super::{AgentTaskManagedService, AgentTaskManagedServiceReadinessKind};
+use super::{
+    AgentTaskManagedService, AgentTaskManagedServiceLifecycle, AgentTaskManagedServiceReadinessKind,
+};
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub(super) struct AgentTaskManagedServiceRecord {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct AgentTaskManagedServiceRecord {
     pub id: String,
     pub state: String,
     pub local_url: Option<String>,
@@ -24,6 +30,10 @@ pub(super) struct AgentTaskManagedServiceRecord {
     pub pid: Option<u32>,
     pub cleanup: Option<String>,
     pub provenance: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_identity: Option<ProcessStartIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_lease: Option<String>,
 }
 
 pub(super) struct ManagedServices {
@@ -35,6 +45,18 @@ struct RunningService {
     child: Child,
     containment: homeboy_core::process::ProcessContainment,
     record: AgentTaskManagedServiceRecord,
+    port_lease: Option<PortLease>,
+}
+
+struct PortLease {
+    path: std::path::PathBuf,
+    _file: File,
+}
+
+impl Drop for PortLease {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 impl ManagedServices {
@@ -88,6 +110,9 @@ impl ManagedServices {
         let stderr = log
             .try_clone()
             .map_err(|error| format!("clone managed service log: {error}"))?;
+        let mut spec = spec;
+        let (port, port_lease) = lease_port(&spec)?;
+        spec.port = port;
         let mut command = Command::new(&spec.command[0]);
         command
             .args(&spec.command[1..])
@@ -97,15 +122,26 @@ impl ManagedServices {
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);
         }
+        // A service never receives the controller's ambient environment by
+        // accident. The plan declares public inheritance and secret handoff.
+        command.env_clear();
+        for name in &spec.env_allowlist {
+            if let Ok(value) = std::env::var(name) {
+                command.env(name, value);
+            }
+        }
         command.envs(&spec.env);
-        for name in &spec.secret_env {
-            let value = std::env::var(name).map_err(|_| {
-                format!(
-                    "managed service '{}' requires secret environment variable '{name}'",
-                    spec.id
-                )
-            })?;
-            command.env(name, value);
+        if let Some(plan) = &spec.secret_env_plan {
+            let values = crate::agent_task_secrets::resolve_secret_env_plan(plan)
+                .map_err(|error| format!("managed service '{}': {}", spec.id, error.message))?;
+            command.envs(values);
+        } else {
+            let values = crate::agent_task_secrets::resolve_secret_env(&spec.secret_env)
+                .map_err(|error| format!("managed service '{}': {}", spec.id, error.message))?;
+            command.envs(values);
+        }
+        if let Some(port) = spec.port {
+            command.env(spec.port_env.as_deref().unwrap_or("PORT"), port.to_string());
         }
         let mut containment = homeboy_core::process::ProcessContainment::prepare(&mut command)
             .map_err(|error| error.message)?;
@@ -122,8 +158,14 @@ impl ManagedServices {
             log_path: Some(log_path.display().to_string()),
             pid: Some(child.id()),
             cleanup: None,
-            provenance: json!({"schema":"homeboy/agent-task-managed-service/v1", "argv": spec.command, "cwd": spec.cwd, "host": spec.host, "port": spec.port, "secret_env": spec.secret_env}),
+            provenance: json!({"schema":"homeboy/agent-task-managed-service/v2", "run_id": run_id, "argv": spec.command, "cwd": spec.cwd, "host": spec.host, "port": spec.port, "target": spec.target, "lifecycle": spec.lifecycle, "env_allowlist": spec.env_allowlist, "secret_env": spec.secret_env, "secret_env_plan": spec.secret_env_plan.as_ref().map(|plan| plan.redacted())}),
+            process_identity: process_start_identity(child.id())
+                .map_err(|error| format!("inspect managed service process identity: {error}"))?,
+            port_lease: port_lease
+                .as_ref()
+                .map(|lease| lease.path.display().to_string()),
         };
+        persist_record(run_id, &record)?;
         if let Err(error) = wait_ready(&spec, local_url.as_deref()) {
             let _ = containment.terminate_on_failure_bounded(Duration::from_secs(2), false);
             record.state = "failed".to_string();
@@ -131,11 +173,13 @@ impl ManagedServices {
             return Err(format!("managed service '{}': {error}", spec.id));
         }
         record.state = "ready".to_string();
+        persist_record(run_id, &record)?;
         self.services.push(RunningService {
             spec,
             child,
             containment,
             record,
+            port_lease,
         });
         Ok(())
     }
@@ -184,9 +228,123 @@ impl ManagedServices {
                 Ok(()) => format!("cleaned_up:{reason}"),
                 Err(error) => format!("cleanup_failed:{reason}:{}", error.message),
             });
+            if let Some(run_id) = service
+                .record
+                .provenance
+                .get("run_id")
+                .and_then(Value::as_str)
+            {
+                let _ = persist_record(run_id, &service.record);
+            }
         }
         self.records()
     }
+}
+
+fn lease_port(spec: &AgentTaskManagedService) -> Result<(Option<u16>, Option<PortLease>), String> {
+    let Some(requested) = spec.port else {
+        return Ok((None, None));
+    };
+    let port = if requested == 0 {
+        TcpListener::bind((spec.host.as_str(), 0))
+            .map_err(|error| format!("allocate managed service port: {error}"))?
+            .local_addr()
+            .map_err(|error| format!("read managed service port: {error}"))?
+            .port()
+    } else {
+        requested
+    };
+    let lease_dir = homeboy_core::paths::homeboy_data()
+        .map_err(|error| error.message)?
+        .join("agent-task-service-ports");
+    std::fs::create_dir_all(&lease_dir)
+        .map_err(|error| format!("create managed service lease directory: {error}"))?;
+    let host = spec
+        .host
+        .replace(|character: char| !character.is_ascii_alphanumeric(), "_");
+    let path = lease_dir.join(format!("{host}-{port}.lease"));
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|_| {
+            format!(
+                "managed service '{}' port allocation collision on {}:{port}",
+                spec.id, spec.host
+            )
+        })?;
+    Ok((Some(port), Some(PortLease { path, _file: file })))
+}
+
+fn persist_record(run_id: &str, record: &AgentTaskManagedServiceRecord) -> Result<(), String> {
+    let path = homeboy_core::paths::homeboy_data()
+        .map_err(|error| error.message)?
+        .join("agent-task-runs")
+        .join(run_id)
+        .join("services")
+        .join(format!("{}.json", record.id));
+    let bytes = serde_json::to_vec_pretty(record).map_err(|error| error.to_string())?;
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, bytes)
+        .map_err(|error| format!("persist managed service ownership: {error}"))?;
+    std::fs::rename(temporary, path)
+        .map_err(|error| format!("commit managed service ownership: {error}"))
+}
+
+/// Reap service leaders left by an interrupted controller. The persisted kernel
+/// process-start identity prevents a recycled PID from ever being signalled.
+pub(crate) fn reconcile_run_services(
+    run_id: &str,
+    reason: &str,
+) -> Result<Vec<AgentTaskManagedServiceRecord>, String> {
+    let directory = homeboy_core::paths::homeboy_data()
+        .map_err(|error| error.message)?
+        .join("agent-task-runs")
+        .join(run_id)
+        .join("services");
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("read managed service ledger: {error}")),
+    };
+    let mut records = Vec::new();
+    for entry in entries.flatten() {
+        if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(entry.path()) else {
+            continue;
+        };
+        let Ok(mut record) = serde_json::from_slice::<AgentTaskManagedServiceRecord>(&bytes) else {
+            continue;
+        };
+        if matches!(record.state.as_str(), "stopped" | "failed") {
+            records.push(record);
+            continue;
+        }
+        let outcome = match (record.pid, record.process_identity.as_ref()) {
+            (Some(pid), identity) => {
+                match process_identity_state_with_start_identity(pid, None, identity) {
+                    ProcessIdentityState::Live => terminate_process_tree(pid)
+                        .map(|_| "reaped".to_string())
+                        .unwrap_or_else(|error| format!("cleanup_failed:{error}")),
+                    ProcessIdentityState::Dead => "already_exited".to_string(),
+                    ProcessIdentityState::IdentityMismatch => {
+                        "ownership_mismatch_not_signalled".to_string()
+                    }
+                    ProcessIdentityState::Unverifiable => {
+                        "ownership_unverifiable_not_signalled".to_string()
+                    }
+                }
+            }
+            _ => "no_process_identity".to_string(),
+        };
+        record.state = "stopped".to_string();
+        record.cleanup = Some(format!("{outcome}:{reason}"));
+        persist_record(run_id, &record)?;
+        records.push(record);
+    }
+    Ok(records)
 }
 
 fn wait_ready(spec: &AgentTaskManagedService, local_url: Option<&str>) -> Result<(), String> {
@@ -251,14 +409,19 @@ mod tests {
             ],
             cwd: None,
             env: HashMap::from([("PORT".to_string(), port.to_string())]),
+            env_allowlist: vec!["PATH".to_string()],
             secret_env: Vec::new(),
+            secret_env_plan: None,
             host: "127.0.0.1".to_string(),
             port: Some(port),
+            port_env: Some("PORT".to_string()),
             readiness: Some(AgentTaskManagedServiceReadiness {
                 kind: AgentTaskManagedServiceReadinessKind::Http,
                 path: Some("/".to_string()), timeout_ms: Some(5_000),
             }),
             public_url: Some("https://preview.example.test/fixture".to_string()),
+            lifecycle: AgentTaskManagedServiceLifecycle::Plan,
+            target: None,
         }
     }
 
@@ -302,6 +465,23 @@ mod tests {
                     Err(error) => error,
                 };
             assert!(error.contains("never-ready"));
+        });
+    }
+
+    #[test]
+    fn rejects_a_second_live_lease_for_the_same_port() {
+        with_isolated_home(|_| {
+            let port = free_port();
+            let first =
+                ManagedServices::start(&[fixture(port)], "lease-first").expect("first lease");
+            let mut second = fixture(port);
+            second.id = "second".to_string();
+            let error = match ManagedServices::start(&[second], "lease-second") {
+                Ok(_) => panic!("port lease collision"),
+                Err(error) => error,
+            };
+            assert!(error.contains("port allocation collision"));
+            first.cleanup("test");
         });
     }
 }
