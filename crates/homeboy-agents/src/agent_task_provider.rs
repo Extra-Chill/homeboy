@@ -76,6 +76,7 @@ pub use runtime_preflight_checks::{
     ensure_runtime_preflight_checks, evaluate_runtime_preflight_checks, RuntimePreflightConflict,
     RuntimePreflightReadiness,
 };
+pub(crate) use runtime_tool_resolution::preflight_runtime_tools_for_plan_with_providers;
 pub(crate) use runtime_tool_resolution::resolve_runtime_tools;
 pub use runtime_types::*;
 pub use secret_types::*;

@@ -16,8 +16,8 @@ use crate::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
 use crate::agent_task_provider::{
     apply_provider_runner_secret_env_contracts, default_backend_for_component,
     enforce_runtime_preflight_checks_for_plan, preflight_plan_provider_config_with_providers,
-    preflight_provider_credentials_for_backend, resolve_provider_for_backend,
-    AgentTaskProviderCatalog, ProviderResolution,
+    preflight_provider_credentials_for_backend, preflight_runtime_tools_for_plan_with_providers,
+    resolve_provider_for_backend, AgentTaskProviderCatalog, ProviderResolution,
 };
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskProviderRotationPolicy,
@@ -202,6 +202,7 @@ where
             catalog.provider_requires_cwd_git_checkout(backend, selector)
         })?;
     catalog.apply_provider_runner_secret_env_contracts(&mut plan);
+    preflight_runtime_tools_for_plan_with_providers(&mut plan, catalog.providers())?;
     catalog.validate_explicit_models(&plan)?;
     catalog.enforce_runtime_preflight_checks_for_plan(&plan)?;
     preflight_dispatch_provider_secrets(&plan)?;
@@ -234,6 +235,8 @@ where
         provider_requires_cwd_git_checkout,
     )?;
     apply_provider_runner_secret_env_contracts(&mut plan);
+    let catalog = AgentTaskProviderCatalog::discover();
+    preflight_runtime_tools_for_plan_with_providers(&mut plan, catalog.providers())?;
     AgentTaskProviderCatalog::discover().validate_explicit_models(&plan)?;
     enforce_runtime_preflight_checks_for_plan(&plan)?;
     preflight_dispatch_provider_secrets(&plan)?;
