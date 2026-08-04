@@ -167,7 +167,12 @@ impl ManagedServices {
         for service in &mut self.services {
             let exited = service.child.try_wait().ok().flatten().is_some();
             let cleanup = if exited {
-                Ok(())
+                // A daemonized child can outlive its direct service leader.
+                // ProcessContainment owns the platform-specific scope marker
+                // needed to reap those descendants after a normal leader exit.
+                service
+                    .containment
+                    .cleanup_after_leader_exit_bounded(Duration::from_secs(2))
             } else {
                 service
                     .containment
