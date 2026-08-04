@@ -313,7 +313,7 @@ Inspect or remove installed rig sources
 homeboy rig sources list
 ```
 
-List installed rig source packages
+List managed rig source packages and standalone installed stacks. The JSON list report exposes managed package URL/path, revision, content identity, source spec paths, and ownership. `orphaned_stacks` reports legacy stack configs without source metadata, including independent component-path availability and non-mutating recovery actions.
 
 ## `homeboy rig sources remove`
 
