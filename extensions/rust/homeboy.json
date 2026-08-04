@@ -12,7 +12,8 @@
       "bash tests/env-provider-smoke.sh",
       "bash tests/fingerprint-policy-flow-smoke.sh",
       "bash tests/zero-test-scope-fallback-smoke.sh",
-   "bash ../tests/lint-findings-clean-pass-contract-smoke.sh"
+      "bash tests/test-shard-inventory-smoke.sh",
+      "bash ../tests/lint-findings-clean-pass-contract-smoke.sh"
     ]
   }
 }

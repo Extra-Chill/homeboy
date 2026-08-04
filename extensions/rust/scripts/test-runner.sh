@@ -32,6 +32,12 @@ homeboy_runner_harness_source_command_capture
 # shellcheck source=../../scripts/lib/settings.sh
 source "${SETTINGS_HELPER}"
 
+WRITE_TEST_RESULTS_HELPER="${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-}"
+if [ -n "$WRITE_TEST_RESULTS_HELPER" ] && [ -f "$WRITE_TEST_RESULTS_HELPER" ]; then
+    # shellcheck source=/dev/null
+    source "$WRITE_TEST_RESULTS_HELPER"
+fi
+
 rust_test_runner() {
     case "${HOMEBOY_RUST_TEST_RUNNER:-$(homeboy_setting rust_test_runner '.rust_test_runner // .test_runner' cargo)}" in
         nextest|cargo-nextest|cargo_nextest)
@@ -135,12 +141,113 @@ record = {
     "status": status,
     "exit_code": int(exit_code or 0),
 }
+
 with open(target, "w", encoding="utf-8") as handle:
     json.dump([record], handle, indent=2)
     handle.write("\n")
 PY
     homeboy_merge_annotations rust-test-plan "$plan_tmp" || true
     rm -f "$plan_tmp"
+}
+
+rust_emit_shard_result() {
+    local status="$1" total="$2" executed="$3" passed="$4" failed="$5" skipped="$6" duration_ms="$7"
+    local result_tmp
+    if type homeboy_write_test_results >/dev/null 2>&1; then
+        homeboy_write_test_results "$executed" "$passed" "$failed" "$skipped" "rust-shard"
+    fi
+    type homeboy_merge_annotations >/dev/null 2>&1 || return 0
+    result_tmp="$(mktemp)"
+    python3 - "$status" "$total" "$executed" "$passed" "$failed" "$skipped" "$duration_ms" "$result_tmp" <<'PY'
+import json
+import sys
+status, total, executed, passed, failed, skipped, duration, target = sys.argv[1:]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump([{"type": "rust-test-shard", "status": status, "total": int(total), "executed": int(executed), "passed": int(passed), "failed": int(failed), "skipped": int(skipped), "duration_ms": int(duration)}], handle)
+    handle.write("\n")
+PY
+    homeboy_merge_annotations rust-test-shard "$result_tmp" || true
+    rm -f "$result_tmp"
+}
+
+rust_shard_cargo_counts() {
+    python3 - "$1" <<'PY'
+import re
+import sys
+
+passed = failed = skipped = 0
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    if not line.startswith("test result:"):
+        continue
+    for name, target in (("passed", "passed"), ("failed", "failed"), ("ignored", "skipped")):
+        match = re.search(rf"(\d+) {name}", line)
+        if match:
+            if target == "passed": passed += int(match.group(1))
+            elif target == "failed": failed += int(match.group(1))
+            else: skipped += int(match.group(1))
+print(f"{passed}\t{failed}\t{skipped}")
+PY
+}
+
+rust_nextest_filter() {
+    jq -r '[.selected[] | "package(=\(.package)) and kind(=\(.target_kind)) and binary(=\(.target)) and test(=\(.name))"] | join(" + ")' "$1"
+}
+
+rust_validate_nextest_membership() {
+    local list_file="$1" shard_file="$2"
+    python3 - "$list_file" "$shard_file" <<'PY'
+import json
+import sys
+
+listed = json.load(open(sys.argv[1], encoding="utf-8"))
+expected = {item["id"] for item in json.load(open(sys.argv[2], encoding="utf-8"))["selected"]}
+actual = set()
+for suite in listed.get("rust-suites", {}).values():
+    for name, testcase in suite.get("testcases", {}).items():
+        if testcase.get("filter-match", {}).get("status") == "matches":
+            actual.add(f'{suite["package-name"]}::{suite["kind"]}::{suite["binary-name"]}::{name}')
+if actual != expected:
+    missing = sorted(expected - actual)
+    extra = sorted(actual - expected)
+    raise SystemExit(f"Rust test shard error: nextest exact filter membership mismatch (missing={missing[:1]}, extra={extra[:1]})")
+PY
+}
+
+rust_nextest_counts() {
+    python3 - "$1" "$2" <<'PY'
+import json
+import sys
+
+expected = json.load(open(sys.argv[2], encoding="utf-8"))["selected"]
+names = {}
+for item in expected:
+    key = f'{item["package"]}::{item["target"]}${item["name"]}'
+    if key in names:
+        raise SystemExit(f"Rust test shard error: nextest output identity is ambiguous: {key}")
+    names[key] = item["id"]
+passed = failed = skipped = 0
+actual = set()
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if event.get("type") != "test":
+        continue
+    status = event.get("event")
+    if status not in {"ok", "passed", "failed", "fail", "ignored", "skipped"}:
+        continue
+    name = event.get("name")
+    if name not in names or names[name] in actual:
+        raise SystemExit(f"Rust test shard error: nextest emitted an unexpected or duplicate test identity: {name}")
+    actual.add(names[name])
+    if status in {"ok", "passed"}: passed += 1
+    elif status in {"failed", "fail"}: failed += 1
+    else: skipped += 1
+if actual != set(names.values()):
+    raise SystemExit(f"Rust test shard error: nextest executed membership does not match the shard manifest (missing={sorted(set(names.values()) - actual)[:1]})")
+print(f"{passed}\t{failed}\t{skipped}")
+PY
 }
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -163,7 +270,9 @@ fi
 echo "Running Rust tests..."
 
 # ── Step 1: Pre-test lint (unless skipped) ──
-if should_run_step "lint" && [ "${HOMEBOY_SKIP_LINT:-}" != "1" ]; then
+if [ "${HOMEBOY_TEST_INVENTORY_ONLY:-}" = "1" ]; then
+    echo "Skipping lint (test inventory only)"
+elif should_run_step "lint" && [ "${HOMEBOY_SKIP_LINT:-}" != "1" ]; then
     LINT_RUNNER="${EXTENSION_PATH}/scripts/lint-runner.sh"
     if [ -f "$LINT_RUNNER" ]; then
         echo ""
@@ -184,7 +293,7 @@ if ! should_run_step "test"; then
 fi
 
 # Coverage mode: use cargo-tarpaulin if HOMEBOY_COVERAGE=1
-if [ "${HOMEBOY_COVERAGE:-}" = "1" ]; then
+if [ "${HOMEBOY_TEST_INVENTORY_ONLY:-}" != "1" ] && [ "${HOMEBOY_COVERAGE:-}" = "1" ]; then
     if command -v cargo-tarpaulin &>/dev/null; then
         echo "Running cargo tarpaulin (test + coverage)..."
 
@@ -322,6 +431,96 @@ if [ "$SELECTED_RUNNER" = "nextest" ]; then
     fi
 else
     echo "Running cargo test..."
+fi
+
+# Shard manifests are Rust-owned because Cargo target identities and their
+# resolution are runner-specific. Normal and changed-scope paths do not enter
+# this branch.
+if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_TEST_INVENTORY_FILE:-}${HOMEBOY_TEST_INVENTORY_ONLY:-}" ]; then
+    if [ "$#" -gt 0 ]; then
+        echo "Error: test shard inventory and replay do not support passthrough arguments." >&2
+        echo "Remove arguments after -- and encode selection in HOMEBOY_TEST_SHARD_MANIFEST." >&2
+        exit 2
+    fi
+    SHARD_TOOL="${EXTENSION_PATH}/scripts/test-shard-inventory.py"
+    SHARD_DATA="$(mktemp)"
+    SHARD_ARGS=(--project "$PROJECT_PATH" --runner "$SELECTED_RUNNER" --output "$SHARD_DATA")
+    if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}" ]; then
+        SHARD_ARGS+=(--manifest "$HOMEBOY_TEST_SHARD_MANIFEST")
+    fi
+    if ! python3 "$SHARD_TOOL" "${SHARD_ARGS[@]}"; then
+        rm -f "$SHARD_DATA"
+        exit 1
+    fi
+    if [ -n "${HOMEBOY_TEST_INVENTORY_FILE:-}" ]; then
+        cp "$SHARD_DATA" "$HOMEBOY_TEST_INVENTORY_FILE"
+    fi
+    if [ "${HOMEBOY_TEST_INVENTORY_ONLY:-}" = "1" ]; then
+        cat "$SHARD_DATA"
+        rm -f "$SHARD_DATA"
+        exit 0
+    fi
+    if [ -z "${HOMEBOY_TEST_SHARD_MANIFEST:-}" ]; then
+        rm -f "$SHARD_DATA"
+        exit 0
+    fi
+    SHARD_STARTED="$(date +%s)"
+    SHARD_TOTAL="$(jq '.selected | length' "$SHARD_DATA")"
+    SHARD_PASSED=0
+    SHARD_FAILED=0
+    SHARD_SKIPPED=0
+    if [ "$SELECTED_RUNNER" = "nextest" ]; then
+        NEXTEST_FILTER="$(rust_nextest_filter "$SHARD_DATA")"
+        NEXTEST_LIST="$(mktemp)"
+        homeboy_run_step_capture NEXTEST_LIST_OUTPUT NEXTEST_LIST_EXIT "cargo nextest list" -- cargo nextest list --workspace --message-format json -E "$NEXTEST_FILTER" || true
+        if [ "$NEXTEST_LIST_EXIT" -ne 0 ] || ! rust_validate_nextest_membership "$NEXTEST_LIST_OUTPUT" "$SHARD_DATA"; then
+            SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
+            rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
+            rm -f "$NEXTEST_LIST_OUTPUT" "$NEXTEST_LIST"
+            exit 1
+        fi
+        rm -f "$NEXTEST_LIST_OUTPUT" "$NEXTEST_LIST"
+        echo "Replaying Rust nextest shard: ${SHARD_TOTAL} exact identities"
+        homeboy_run_step_capture SHARD_OUTPUT SHARD_EXIT "cargo nextest run" -- env NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run --manifest-path "${PROJECT_PATH}/Cargo.toml" --test-threads 1 --no-fail-fast --no-tests fail --message-format libtest-json-plus --message-format-version 0.1 -E "$NEXTEST_FILTER" || true
+        if ! NEXTEST_COUNTS="$(rust_nextest_counts "$SHARD_OUTPUT" "$SHARD_DATA")"; then
+            SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
+            rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
+            rm -f "$SHARD_OUTPUT" "$SHARD_DATA"
+            exit 1
+        fi
+        IFS=$'\t' read -r SHARD_PASSED SHARD_FAILED SHARD_SKIPPED <<< "$NEXTEST_COUNTS"
+        rm -f "$SHARD_OUTPUT"
+    else
+        while IFS=$'\t' read -r package target target_kind name; do
+            case "$target_kind" in
+                lib) TARGET_ARGS=(--lib) ;;
+                bin) TARGET_ARGS=(--bin "$target") ;;
+                doc) TARGET_ARGS=(--doc) ;;
+                example) TARGET_ARGS=(--example "$target") ;;
+                bench) TARGET_ARGS=(--bench "$target") ;;
+                *) TARGET_ARGS=(--test "$target") ;;
+            esac
+            echo "Replaying Rust shard test: ${package}::${target}::${name}"
+            homeboy_run_step_capture SHARD_OUTPUT SHARD_EXIT "cargo test" -- cargo test --manifest-path "${PROJECT_PATH}/Cargo.toml" -p "$package" "${TARGET_ARGS[@]}" -- "$name" --exact --test-threads=1 || true
+            IFS=$'\t' read -r PASSED FAILED SKIPPED < <(rust_shard_cargo_counts "$SHARD_OUTPUT")
+            rm -f "$SHARD_OUTPUT"
+            SHARD_PASSED=$((SHARD_PASSED + PASSED))
+            SHARD_FAILED=$((SHARD_FAILED + FAILED))
+            SHARD_SKIPPED=$((SHARD_SKIPPED + SKIPPED))
+        done < <(jq -r '.selected[] | [.package, .target, .target_kind, .name] | @tsv' "$SHARD_DATA")
+    fi
+    SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
+    SHARD_EXECUTED=$((SHARD_PASSED + SHARD_FAILED + SHARD_SKIPPED))
+    if [ "$SHARD_EXECUTED" -ne "$SHARD_TOTAL" ] || [ "$SHARD_FAILED" -ne 0 ] || [ "${SHARD_EXIT:-0}" -ne 0 ]; then
+        echo "Rust shard result: total=${SHARD_TOTAL} executed=${SHARD_EXECUTED} passed=${SHARD_PASSED} failed=${SHARD_FAILED} skipped=${SHARD_SKIPPED}" >&2
+        rust_emit_shard_result failed "$SHARD_TOTAL" "$SHARD_EXECUTED" "$SHARD_PASSED" "$SHARD_FAILED" "$SHARD_SKIPPED" "$((SHARD_ELAPSED*1000))"
+        rm -f "$SHARD_DATA"
+        exit 1
+    fi
+    echo "Rust shard result: total=${SHARD_TOTAL} passed=${SHARD_PASSED} failed=${SHARD_FAILED} skipped=${SHARD_SKIPPED} duration_ms=$((SHARD_ELAPSED*1000))"
+    rust_emit_shard_result completed "$SHARD_TOTAL" "$SHARD_EXECUTED" "$SHARD_PASSED" "$SHARD_FAILED" "$SHARD_SKIPPED" "$((SHARD_ELAPSED*1000))"
+    rm -f "$SHARD_DATA"
+    exit 0
 fi
 
 TEST_ARGS=(

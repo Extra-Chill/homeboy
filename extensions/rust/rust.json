@@ -82,6 +82,13 @@
   },
   "test": {
     "extension_script": "scripts/test-runner.sh",
+    "portable_env": {
+      "keys": [
+        "HOMEBOY_TEST_INVENTORY_ONLY",
+        "HOMEBOY_TEST_INVENTORY_FILE",
+        "HOMEBOY_TEST_SHARD_MANIFEST"
+      ]
+    },
     "passthrough_filter": {
       "strategy": "runner_positional"
     },
