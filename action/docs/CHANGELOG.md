@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.1] - 2026-08-04
+
+### Fixed
+- authorize v2 updates by remote tip
+
 ## [2.11.0] - 2026-08-04
 
 ### Added
