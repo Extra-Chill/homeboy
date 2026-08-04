@@ -972,6 +972,9 @@ where
                         &mut outcome.artifacts,
                         running_task.candidate_artifacts,
                     );
+                    // Captured before the loop consumes the vector; this is the
+                    // same-provider retry count the budget diagnostic needs.
+                    let same_provider_retries_used = running_task.retry_attempts.len();
                     for retry_attempt in running_task.retry_attempts {
                         outcome.diagnostics.push(AgentTaskDiagnostic {
                             class: "agent_task.retry_attempt".to_string(),
@@ -997,6 +1000,7 @@ where
                         &execution_budget,
                         result.attempt,
                         running_task.rotation_index,
+                        same_provider_retries_used,
                     );
                     release_scratch(
                         &result.scratch,
