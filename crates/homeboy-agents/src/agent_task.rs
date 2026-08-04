@@ -32,6 +32,7 @@ pub use artifacts::{
     AgentTaskArtifact, AgentTaskArtifactDeclaration, AgentTaskDiagnostic, AgentTaskEvidenceRef,
     AgentTaskFollowUp, AgentTaskTypedArtifact,
 };
+pub(crate) use capabilities::ready_attached_tools_from_metadata;
 pub use capabilities::{
     AgentTaskAttachedToolCapability, AgentTaskCapabilityEvidence, AgentTaskCapabilityRequirements,
     AgentTaskToolCapabilityContribution, AGENT_TASK_CAPABILITY_EVIDENCE_SCHEMA,
