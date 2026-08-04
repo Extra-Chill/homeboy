@@ -228,14 +228,10 @@ fn explicit_local_promotion_defers_target_resolution_to_promotion() {
     assert_eq!(route_after_parse(&cli, &normalized, None).unwrap(), None);
 }
 use clap::Parser;
-use homeboy::command_contract::{lab_runner_supports_contract_label, LabCommandPortability};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Mutex, MutexGuard, OnceLock};
 use tempfile::tempdir;
-
-use super::*;
 
 #[test]
 fn review_test_inlines_external_database_service_profile_before_lab_handoff() {

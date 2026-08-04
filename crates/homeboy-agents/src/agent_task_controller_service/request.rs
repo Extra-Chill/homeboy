@@ -49,9 +49,12 @@ pub fn controller_request_dispatch_command(
             tasks_json: optional_string(dispatch, "tasks_json"),
             provider_config: optional_string(dispatch, "provider_config"),
             client_context: optional_string(dispatch, "client_context"),
-            attempts: optional_u32(dispatch, "attempts")?.unwrap_or(1),
-            same_provider_retries: optional_u32(dispatch, "same_provider_retries")?.unwrap_or(0),
-            provider_rotations: optional_u32(dispatch, "provider_rotations")?.unwrap_or(0),
+            // An absent key is "unspecified", not "one execution and no
+            // rotation": the dispatch-plan layer resolves it against the
+            // configured provider rotation (#11082).
+            attempts: optional_u32(dispatch, "attempts")?,
+            same_provider_retries: optional_u32(dispatch, "same_provider_retries")?,
+            provider_rotations: optional_u32(dispatch, "provider_rotations")?,
             queue_only: optional_bool(dispatch, "queue_only").unwrap_or(false),
             timeout_ms: optional_u64(dispatch, "timeout_ms")?,
             resolved_provider_policy: None,

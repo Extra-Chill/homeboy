@@ -2,20 +2,12 @@
 #![cfg(test)]
 
 use super::*;
-use crate::{
-    Runner, RunnerActiveJobState, RunnerExecMode, RunnerExecOutput, RunnerKind, RunnerRequiredTool,
-    RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
-};
 use homeboy_core::build_identity;
-use homeboy_core::server::RunnerSettings;
-use homeboy_core::Result;
 use homeboy_upgrade::upgrade::current_version;
 use homeboy_upgrade::upgrade::ExtensionUpgradeEntry;
 use homeboy_upgrade::upgrade::InstallMethod;
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 thread_local! {
     static LOCAL_VERSION_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
