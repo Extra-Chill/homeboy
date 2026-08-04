@@ -73,6 +73,10 @@ pub enum PlacementReadinessInvocation {
     AgentTaskCook {
         provider: String,
         source_path: String,
+        /// Optional serialized durable plan. v2 callers omit this; v3 callers
+        /// let mutation-free preflight compile the same runner requirements as execution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        durable_plan: Option<serde_json::Value>,
     },
     CapabilityAudit {
         source_path: String,
@@ -125,13 +129,43 @@ pub fn compile_lab_admission_plan(
     })
 }
 
+/// Add controller-owned durable task requirements to an already routed plan.
+/// This is shared by public preflight and execution, so a ready snapshot cannot
+/// omit a runner capability that execution will later reject.
+pub fn project_durable_agent_task_capabilities(
+    plan: &mut LabAdmissionPlan,
+    durable_plan: Option<&homeboy_agents::agent_task_scheduler::AgentTaskPlan>,
+) -> Result<()> {
+    let Some(durable_plan) = durable_plan else {
+        return Ok(());
+    };
+    for task in &durable_plan.tasks {
+        let requirements = task.capability_requirements().map_err(|message| {
+            Error::validation_invalid_argument(
+                "capability_requirements",
+                message,
+                Some(task.task_id.clone()),
+                Some(vec!["Use homeboy/agent-task-capability-requirements/v1 with explicit provider, runner, and attached-tool declarations.".to_string()]),
+            )
+        })?;
+        plan.capability
+            .required_capabilities
+            .extend(requirements.runner);
+    }
+    plan.capability.required_capabilities.sort();
+    plan.capability.required_capabilities.dedup();
+    Ok(())
+}
+
 fn compile_placement_readiness_plan(
     request: &PlacementReadinessRequest,
 ) -> Result<LabAdmissionPlan> {
-    if request.schema != "homeboy/placement-readiness/v2" {
+    if request.schema != "homeboy/placement-readiness/v2"
+        && request.schema != "homeboy/placement-readiness/v3"
+    {
         return Err(Error::validation_invalid_argument(
             "schema",
-            "placement readiness accepts homeboy/placement-readiness/v2 requests",
+            "placement readiness accepts homeboy/placement-readiness/v2 or v3 requests",
             Some(request.schema.clone()),
             None,
         ));
@@ -143,10 +177,12 @@ fn compile_placement_readiness_plan(
         source_path_inputs,
         required_capabilities,
         extensions,
+        durable_plan,
     ) = match &request.invocation {
         PlacementReadinessInvocation::AgentTaskCook {
             provider,
             source_path,
+            durable_plan,
         } => (
             "agent-task".to_string(),
             "agent-task cook",
@@ -154,6 +190,7 @@ fn compile_placement_readiness_plan(
             vec![source_path.clone()],
             vec!["extension_parity".to_string()],
             vec![provider.clone()],
+            durable_plan.as_ref(),
         ),
         PlacementReadinessInvocation::CapabilityAudit {
             source_path,
@@ -165,6 +202,7 @@ fn compile_placement_readiness_plan(
             vec![source_path.clone()],
             vec![capability_id.clone()],
             Vec::new(),
+            None,
         ),
     };
     if source_path_inputs.iter().any(|path| path.trim().is_empty())
@@ -197,6 +235,18 @@ fn compile_placement_readiness_plan(
         std::path::Path::new(source_path),
         &[super::RunnerRequiredTool::homeboy()],
     )?;
+    let durable_plan = durable_plan
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "durable_plan",
+                format!("invalid durable agent-task plan: {error}"),
+                None,
+                None,
+            )
+        })?;
+    project_durable_agent_task_capabilities(&mut plan, durable_plan.as_ref())?;
     // Public preflight is mutation-free: it never invokes extension programs.
     // Execution reuses the same compiled probes through the bounded runner
     // diagnostic transport immediately before dispatch.
@@ -291,7 +341,7 @@ fn placement_readiness_from_status(
         request.runner_id.clone(),
         status.connected,
         status.stale_daemon.is_some(),
-        status.active_jobs.len(),
+        status.active_job_count,
         &status.active_job_state,
         capacity,
     );
@@ -416,6 +466,7 @@ fn admission_identity(
         PlacementReadinessInvocation::AgentTaskCook {
             provider,
             source_path,
+            ..
         } => (
             "agent-task".to_string(),
             "agent-task cook".to_string(),
@@ -531,7 +582,7 @@ fn preflight_lab_runner_availability_with(
         selection.runner_id.clone(),
         status.connected,
         status.stale_daemon.is_some(),
-        status.active_jobs.len(),
+        status.active_job_count,
         &status.active_job_state,
         load(&selection.runner_id)?.settings.concurrency_limit,
     );
@@ -1029,6 +1080,9 @@ fn connected_runner_not_ready_reason(
     runner_id: &str,
     status: &RunnerStatusReport,
 ) -> Option<String> {
+    if status.daemon_ready_for_admission() {
+        return None;
+    }
     if let Some(warning) = status.stale_daemon.as_ref() {
         let restart = daemon_repair_command(runner_id, status);
         if !warning.stale_runtime_paths.is_empty() || !warning.changed_runtime_paths.is_empty() {
@@ -1757,6 +1811,55 @@ mod placement_readiness_tests {
     }
 
     #[test]
+    fn v3_durable_plan_projects_the_same_runner_requirements_as_execution() {
+        let durable_plan: homeboy_agents::agent_task_scheduler::AgentTaskPlan =
+            serde_json::from_value(serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "plan_id": "capability-plan",
+                "tasks": [{
+                    "schema": "homeboy/agent-task-request/v1",
+                    "task_id": "task",
+                    "executor": { "backend": "fixture" },
+                    "instructions": "test",
+                    "metadata": {
+                        "capability_requirements": {
+                            "schema": "homeboy/agent-task-capability-requirements/v1",
+                            "runner": ["browser"]
+                        }
+                    }
+                }]
+            }))
+            .expect("durable plan");
+        let routed = homeboy_core::lab_routing::lab_offload_command_from_contract(
+            homeboy_core::lab_contract::LabCommandContract::portable(
+                "audit capability",
+                None,
+                false,
+                &[],
+            )
+            .with_extra_required_capabilities(vec!["extension_parity".to_string()]),
+            Vec::new(),
+        );
+        let mut preflight = compile_lab_admission_plan(
+            &routed,
+            std::path::Path::new("/workspace/source"),
+            &[super::super::RunnerRequiredTool::homeboy()],
+        )
+        .expect("preflight plan");
+        let mut execution = preflight.clone();
+        project_durable_agent_task_capabilities(&mut preflight, Some(&durable_plan))
+            .expect("project preflight requirements");
+        project_durable_agent_task_capabilities(&mut execution, Some(&durable_plan))
+            .expect("project execution requirements");
+
+        assert_eq!(preflight.capability, execution.capability);
+        assert!(preflight
+            .capability
+            .required_capabilities
+            .contains(&"browser".to_string()));
+    }
+
+    #[test]
     fn public_json_cannot_supply_probe_commands_or_capabilities() {
         let request = request();
         let encoded = serde_json::to_value(&request).expect("encode compiled request");
@@ -1780,6 +1883,7 @@ mod placement_readiness_tests {
         request.invocation = PlacementReadinessInvocation::AgentTaskCook {
             provider: " ".to_string(),
             source_path: " ".to_string(),
+            durable_plan: None,
         };
         assert!(compile_placement_readiness_plan(&request).is_err());
     }
@@ -1816,6 +1920,7 @@ mod placement_readiness_tests {
             }))
             .expect("job"),
         );
+        observed.active_job_count = 1;
         let mut request = request();
         request.allow_queue = true;
         request.durable_workload = true;

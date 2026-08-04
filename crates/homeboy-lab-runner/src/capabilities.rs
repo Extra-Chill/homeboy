@@ -559,8 +559,12 @@ fn evaluate_lab_runner_capabilities(
         .cloned()
         .collect::<Vec<_>>();
     for capability in &plan.required_capabilities {
-        if !capabilities.components.contains(capability.as_str()) {
-            push_unique(&mut missing_tools, RunnerRequiredTool::new(capability));
+        let tool = RunnerRequiredTool::new(capability.trim());
+        if !capability.trim().is_empty()
+            && !capabilities.has_capability(capability)
+            && !missing_tools.contains(&tool)
+        {
+            missing_tools.push(tool);
         }
     }
 
@@ -598,6 +602,14 @@ fn evaluate_lab_runner_capabilities(
         missing_tools,
         reason,
         remediation,
+    }
+}
+
+impl RunnerCapabilitySnapshot {
+    fn has_capability(&self, capability: &str) -> bool {
+        self.tools.iter().any(|tool| tool.id() == capability)
+            || self.components.contains(capability)
+            || self.tool_capabilities.contains(capability)
     }
 }
 
@@ -1004,6 +1016,31 @@ mod tests {
         assert!(remediation
             .iter()
             .any(|item| item.contains("omit --runner")));
+    }
+
+    #[test]
+    fn lab_runner_gate_refuses_a_runner_missing_a_declared_capability() {
+        let plan = PreparedLabRunnerCapability {
+            command: "agent-task",
+            required_tools: vec![RunnerRequiredTool::git()],
+            required_capabilities: vec!["browser".to_string()],
+        };
+        let decision = evaluate_lab_runner_capabilities(
+            "lab",
+            &plan,
+            &RunnerCapabilitySnapshot {
+                tools: [RunnerRequiredTool::git()].into_iter().collect(),
+                commands: BTreeSet::new(),
+                tool_capabilities: BTreeSet::new(),
+                failed_toolchain_probes: HashMap::new(),
+                components: BTreeSet::new(),
+            },
+            LabRunnerGateMode::Explicit,
+        );
+        let LabRunnerGateDecision::Missing { missing_tools, .. } = decision else {
+            panic!("runner without declared capability must be refused");
+        };
+        assert_eq!(missing_tools, vec![RunnerRequiredTool::new("browser")]);
     }
 
     #[test]

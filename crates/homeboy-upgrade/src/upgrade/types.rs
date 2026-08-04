@@ -85,6 +85,9 @@ pub struct UpgradeResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
     pub upgraded: bool,
+    /// Machine-readable outcome for controller and runner ordering semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
     /// Independent controller mutation outcome. Additive so persisted and
     /// older callers can continue using `upgraded` and `partial` unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1551,13 +1551,35 @@ fn automatic_retention() -> CmdResult<Value> {
             state_path: state_path.display().to_string(),
             resume_command: "homeboy cleanup automatic-retention".to_string(),
             cargo_targets: None,
+            runtime_tmp: None,
         }
     } else {
         cleanup::run_automatic_cargo_retention()?
     };
+    let runtime_tmp = if deadline.is_some_and(|deadline| SystemTime::now() >= deadline) {
+        serde_json::json!({ "status": "partial" })
+    } else {
+        match cleanup::run_automatic_runtime_temp_retention() {
+            Ok(output) => serde_json::to_value(output.runtime_tmp).map_err(|error| {
+                homeboy::core::Error::internal_json(
+                    error.to_string(),
+                    Some("serialize automatic runtime-temp retention".to_string()),
+                )
+            })?,
+            Err(error) => serde_json::json!({ "status": "retained", "reason": error.message }),
+        }
+    };
     let cleanup_exit_code = cleanup.exit_code;
     let status = if cleanup_exit_code == 0 {
-        cargo_targets.status
+        if runtime_tmp["status"] == "retained" {
+            "partial_failure"
+        } else if runtime_tmp["continuation_required"] == true
+            && cargo_targets.status == "completed"
+        {
+            "partial"
+        } else {
+            cargo_targets.status
+        }
     } else {
         "partial_failure"
     };
@@ -1571,6 +1593,7 @@ fn automatic_retention() -> CmdResult<Value> {
         cleanup: serde_json::json!({
             "categories": cleanup.output,
             "cargo_targets": cargo_targets,
+            "runtime_tmp": runtime_tmp,
         }),
     };
     let value = serde_json::to_value(&output).map_err(|error| {
@@ -1594,7 +1617,7 @@ fn automatic_retention() -> CmdResult<Value> {
             Some("write automatic retention state".to_string()),
         )
     })?;
-    Ok((value, cleanup_exit_code))
+    Ok((value, (status == "partial_failure") as i32))
 }
 
 fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<CleanupInventoryResult> {
