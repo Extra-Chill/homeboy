@@ -2032,7 +2032,8 @@ where
     );
     let required_toolchains = options.gates.required_toolchains();
     let preflight = (required_toolchains.is_empty()
-        && options.gates.gate_package_artifacts.is_empty())
+        && options.gates.gate_package_artifacts.is_empty()
+        && options.gates.gate_environment.extension_inputs.is_empty())
     .then_some(Ok(()))
     .unwrap_or_else(|| {
         let gate_workspace = options.source_worktree_path.as_deref().ok_or_else(|| {
