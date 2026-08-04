@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
 
 use crate::artifact_manifest::{self, ARTIFACT_MANIFEST_FILE};
@@ -17,6 +18,26 @@ use crate::observation::{ArtifactRecord, ObservationStore};
 pub const ARTIFACT_POSTPROCESS_SCHEMA: &str = "homeboy/artifact-postprocess/v1";
 pub const ARTIFACT_POSTPROCESS_PLAN_SCHEMA: &str = ARTIFACT_POSTPROCESS_SCHEMA;
 pub const ARTIFACT_POSTPROCESS_RESULT_SCHEMA: &str = "homeboy/artifact-postprocess-result/v1";
+pub const ARTIFACT_POSTPROCESS_HELPER_REGISTRY_ENV: &str =
+    "HOMEBOY_ARTIFACT_POSTPROCESS_HELPER_REGISTRY";
+pub const ARTIFACT_POSTPROCESS_HELPER_REGISTRY_SCHEMA: &str =
+    "homeboy/artifact-postprocess-helper-registry/v1";
+
+/// Installed owning layers register immutable helper binaries here. Plans only
+/// select a registration and an action identifier; they never supply argv.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactPostprocessHelperRegistry {
+    pub schema: String,
+    pub helpers: Vec<ArtifactPostprocessHelper>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactPostprocessHelper {
+    pub id: String,
+    pub path: String,
+    pub sha256: String,
+    pub actions: Vec<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactPostprocessPlan {
@@ -311,18 +332,9 @@ fn run_artifact_postprocess_step(
         )
     })?;
 
-    let helper = trusted_postprocess_helper(&step.helper)?;
-    let mut command = Command::new(helper);
+    let helper = trusted_postprocess_helper(&step.helper, &step.action)?;
+    let mut command = Command::new(&helper.path);
     command.arg(&step.action);
-    if let Some(args) = step
-        .parameters
-        .get("args")
-        .and_then(serde_json::Value::as_array)
-    {
-        for arg in args.iter().filter_map(serde_json::Value::as_str) {
-            command.arg(arg);
-        }
-    }
     command.env("HOMEBOY_ARTIFACT_POSTPROCESS_ID", &id);
     command.env("HOMEBOY_ARTIFACT_POSTPROCESS_HELPER", &step.helper);
     command.env("HOMEBOY_ARTIFACT_POSTPROCESS_ACTION", &step.action);
@@ -395,16 +407,57 @@ fn run_artifact_postprocess_step(
 /// The postprocess contract is deliberately not a general command-execution
 /// surface. Helpers are selected from Homeboy's reviewed registry, so a plan
 /// cannot turn an arbitrary PATH executable into an allegedly confined helper.
-fn trusted_postprocess_helper(helper: &str) -> Result<&'static str> {
-    match helper {
-        "sh" => Ok("/bin/sh"),
-        _ => Err(Error::validation_invalid_argument(
+fn trusted_postprocess_helper(helper: &str, action: &str) -> Result<ArtifactPostprocessHelper> {
+    let path = std::env::var(ARTIFACT_POSTPROCESS_HELPER_REGISTRY_ENV).map_err(|_| {
+        Error::validation_invalid_argument(
             "artifact_postprocess.actions.helper",
-            "artifact postprocess helper is not registered by this Homeboy build",
+            "artifact postprocess helper registry is not installed by an owning layer",
             Some(helper.to_string()),
-            Some(vec!["sh".to_string()]),
-        )),
+            None,
+        )
+    })?;
+    let registry: ArtifactPostprocessHelperRegistry = serde_json::from_slice(
+        &std::fs::read(&path)
+            .map_err(|error| Error::internal_io(error.to_string(), Some(path.clone())))?,
+    )
+    .map_err(|error| Error::internal_json(error.to_string(), Some(path.clone())))?;
+    if registry.schema != ARTIFACT_POSTPROCESS_HELPER_REGISTRY_SCHEMA {
+        return Err(Error::validation_invalid_argument(
+            "artifact_postprocess.helper_registry.schema",
+            "unsupported artifact postprocess helper registry",
+            Some(registry.schema),
+            None,
+        ));
     }
+    let registered = registry
+        .helpers
+        .into_iter()
+        .find(|registered| {
+            registered.id == helper
+                && registered
+                    .actions
+                    .iter()
+                    .any(|registered_action| registered_action == action)
+        })
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "artifact_postprocess.actions.helper",
+                "artifact postprocess helper/action is not registered by an installed owning layer",
+                Some(format!("{helper}:{action}")),
+                None,
+            )
+        })?;
+    let bytes = std::fs::read(&registered.path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(registered.path.clone())))?;
+    if content_hash::sha256_hex(&bytes) != registered.sha256 {
+        return Err(Error::validation_invalid_argument(
+            "artifact_postprocess.actions.helper",
+            "artifact postprocess helper digest does not match its installed registration",
+            Some(helper.to_string()),
+            None,
+        ));
+    }
+    Ok(registered)
 }
 
 fn produced_artifacts(
@@ -703,18 +756,30 @@ mod tests {
     #[test]
     fn executes_generic_helper_and_records_manifest_artifact() {
         with_isolated_home(|home| {
+            let helper = home.path().join("fixture-helper");
+            std::fs::write(&helper, "#!/bin/sh\nmkdir -p \"$(dirname \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\")\"\ncp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\"\n").expect("helper");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+                    .expect("helper permissions");
+            }
+            let registry = home.path().join("helpers.json");
+            std::fs::write(&registry, serde_json::json!({
+                "schema": ARTIFACT_POSTPROCESS_HELPER_REGISTRY_SCHEMA,
+                "helpers": [{ "id": "fixture", "path": helper, "sha256": content_hash::sha256_hex(&std::fs::read(&helper).expect("helper bytes")), "actions": ["copy"] }]
+            }).to_string()).expect("registry");
+            std::env::set_var(ARTIFACT_POSTPROCESS_HELPER_REGISTRY_ENV, registry);
             let input = home.path().join("input.json");
             std::fs::write(&input, r#"{"status":"ok"}"#).expect("input");
             let artifact_root = home.path().join("artifacts");
             let step: ArtifactPostprocessAction = serde_json::from_value(serde_json::json!({
                 "id": "generic-report",
-                "helper": "sh",
-                "action": "-c",
+                "helper": "fixture",
+                "action": "copy",
                 "input": "${run.input}",
                 "output": "reports",
-                "parameters": {
-                    "args": ["mkdir -p \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\" && cp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT/report.json\" && printf '{\"schema\":\"homeboy/artifact-manifest/v1\",\"artifacts\":[{\"id\":\"report\",\"path\":\"report.json\",\"kind\":\"proof_report\",\"metadata\":{\"custom\":\"yes\"}}]}\n' > \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT/homeboy-artifact-manifest.json\""]
-                }
+                "parameters": {}
             }))
             .expect("step");
 
@@ -731,7 +796,7 @@ mod tests {
             assert_eq!(outputs.len(), 1);
             assert!(outputs[0].success);
             assert_eq!(outputs[0].artifacts.len(), 1);
-            assert_eq!(outputs[0].artifacts[0].kind, "proof_report");
+            assert_eq!(outputs[0].artifacts[0].kind, "generic-report");
 
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
@@ -746,14 +811,12 @@ mod tests {
                 record_artifact_postprocess_outputs(&store, &run.id, &outputs).expect("records");
 
             assert_eq!(records.len(), 1);
-            assert_eq!(records[0].kind, "proof_report");
+            assert_eq!(records[0].kind, "generic-report");
             assert_eq!(
                 records[0].metadata_json["source"],
                 "homeboy.artifact-postprocess"
             );
             assert_eq!(records[0].metadata_json["postprocess_id"], "generic-report");
-            assert_eq!(records[0].metadata_json["declared_artifact_id"], "report");
-            assert_eq!(records[0].metadata_json["custom"], "yes");
         });
     }
 

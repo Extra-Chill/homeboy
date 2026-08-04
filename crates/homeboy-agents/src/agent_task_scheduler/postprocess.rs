@@ -163,30 +163,54 @@ fn start_or_reconcile_worker(
     };
     write_json_atomically(&request_path, &request).map_err(|error| error.message)?;
     #[cfg(test)]
-    run_postprocess_worker(&request_path).map_err(|error| error.message)?;
-    #[cfg(not(test))]
     {
-        let worker = std::env::var_os("HOMEBOY_POSTPROCESS_WORKER")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_exe().expect("current Homeboy executable"));
-        Command::new(worker)
-            .args(["self", "postprocess-worker", "--request"])
-            .arg(&request_path)
-            .spawn()
-            .map_err(|error| error.to_string())?;
+        return run_postprocess_worker(&request_path)
+            .map_err(|error| error.message)
+            .and_then(|_| {
+                read_checkpoint(
+                    &postprocess_checkpoint_path(Some(run_id), &step.id),
+                    Some(run_id),
+                    &step.id,
+                    fingerprint,
+                )
+                .ok_or_else(|| "artifact postprocess worker did not write checkpoint".to_string())
+            });
     }
+    #[cfg(not(test))]
+    let worker = std::env::var_os("HOMEBOY_POSTPROCESS_WORKER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_exe().expect("current Homeboy executable"));
+    #[cfg(not(test))]
+    let child = Command::new(worker)
+        .args(["self", "postprocess-worker", "--request"])
+        .arg(&request_path)
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    #[cfg(not(test))]
+    let spawned = PostprocessWorkerSpawn {
+        schema: WORKER_SPAWN_SCHEMA.to_string(),
+        worker_id: uuid::Uuid::new_v4().to_string(),
+        pid: child.id(),
+        spawned_unix_secs: now_unix_secs(),
+    };
+    #[cfg(not(test))]
+    write_json_atomically(&postprocess_worker_path(Some(run_id), &step.id), &spawned)
+        .map_err(|error| error.message)?;
+    #[cfg(not(test))]
     let checkpoint = postprocess_checkpoint_path(Some(run_id), &step.id);
+    #[cfg(not(test))]
     for _ in 0..3000 {
         if let Some(outcome) = read_checkpoint(&checkpoint, Some(run_id), &step.id, fingerprint) {
             return Ok(outcome);
         }
-        if claim_is_recoverable(&postprocess_claim_path(Some(run_id), &step.id)) {
-            // The worker died before completion. A subsequent scheduler pass will
-            // discard the incomplete attempt and start a fresh worker.
+        if !worker_is_alive(&spawned) {
+            // Claim creation is not proof of worker liveness. Only a spawned
+            // worker whose persisted PID is proven dead can be recovered.
             return Err("artifact postprocess worker died before completion".to_string());
         }
         thread::sleep(Duration::from_millis(100));
     }
+    #[cfg(not(test))]
     Err("artifact postprocess worker did not complete before scheduler wait limit".to_string())
 }
 
@@ -358,6 +382,10 @@ fn postprocess_checkpoint_path(run_id: Option<&str>, step_id: &str) -> PathBuf {
 
 fn postprocess_claim_path(run_id: Option<&str>, step_id: &str) -> PathBuf {
     postprocess_root(run_id, step_id).join("claim.json")
+}
+
+fn postprocess_worker_path(run_id: Option<&str>, step_id: &str) -> PathBuf {
+    postprocess_root(run_id, step_id).join("worker.json")
 }
 
 fn recover_completed_attempt(
@@ -754,10 +782,19 @@ struct PostprocessWorkerRequest {
     dependencies: Vec<AgentTaskOutcome>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct PostprocessWorkerSpawn {
+    schema: String,
+    worker_id: String,
+    pid: u32,
+    spawned_unix_secs: u64,
+}
+
 const CHECKPOINT_SCHEMA: &str = "homeboy/agent-task-postprocess-checkpoint/v2";
 const CLAIM_SCHEMA: &str = "homeboy/agent-task-postprocess-claim/v2";
 const COMPLETION_SCHEMA: &str = "homeboy/agent-task-postprocess-completion/v1";
 const WORKER_REQUEST_SCHEMA: &str = "homeboy/agent-task-postprocess-worker-request/v1";
+const WORKER_SPAWN_SCHEMA: &str = "homeboy/agent-task-postprocess-worker-spawn/v1";
 const CLAIM_STALE_AFTER_SECS: u64 = 300;
 const CLAIM_HEARTBEAT_INTERVAL_SECS: u64 = 1;
 
@@ -857,6 +894,10 @@ fn claim_is_recoverable(path: &Path) -> bool {
         .and_then(|raw| serde_json::from_slice::<PostprocessClaim>(&raw).ok())
         .map(|claim| claim.schema == CLAIM_SCHEMA && !claim_owner_is_alive(claim.owner_pid))
         .unwrap_or(true)
+}
+
+fn worker_is_alive(worker: &PostprocessWorkerSpawn) -> bool {
+    worker.schema == WORKER_SPAWN_SCHEMA && claim_owner_is_alive(worker.pid)
 }
 
 fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> homeboy_core::Result<()> {
