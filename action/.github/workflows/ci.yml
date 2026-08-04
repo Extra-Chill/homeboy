@@ -641,6 +641,7 @@ jobs:
         env:
           HOMEBOY_TEST_INVENTORY_ONLY: '1'
           HOMEBOY_TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
+          HOMEBOY_RUST_TEST_RUNNER: nextest
           HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
           NEXTEST_PROFILE: ci
         uses: ./.homeboy-action
@@ -707,6 +708,7 @@ jobs:
         continue-on-error: true
         env:
           HOMEBOY_TEST_SHARD_MANIFEST: ${{ github.workspace }}/homeboy-test-shard.json
+          HOMEBOY_RUST_TEST_RUNNER: nextest
           HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
           NEXTEST_PROFILE: ci
         uses: ./.homeboy-action
@@ -838,6 +840,7 @@ jobs:
         env:
           HOMEBOY_TEST_INVENTORY_ONLY: '1'
           HOMEBOY_TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
+          HOMEBOY_RUST_TEST_RUNNER: nextest
           HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
           NEXTEST_PROFILE: ci
         uses: ./.homeboy-action
@@ -904,6 +907,7 @@ jobs:
         continue-on-error: true
         env:
           HOMEBOY_TEST_SHARD_MANIFEST: ${{ github.workspace }}/homeboy-test-shard.json
+          HOMEBOY_RUST_TEST_RUNNER: nextest
           HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
           NEXTEST_PROFILE: ci
         uses: ./.homeboy-action

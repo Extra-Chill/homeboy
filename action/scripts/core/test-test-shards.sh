@@ -92,6 +92,9 @@ fi
 if [ "$(grep -c "HOMEBOY_RUST_NEXTEST_FALLBACK: '0'" "${WORKFLOW}")" -ne 4 ] || [ "$(grep -c 'NEXTEST_PROFILE: ci' "${WORKFLOW}")" -ne 4 ]; then
   printf 'FAIL: Rust shard jobs do not require nextest with the CI profile\n'; exit 1
 fi
+if [ "$(grep -c 'HOMEBOY_RUST_TEST_RUNNER: nextest' "${WORKFLOW}")" -ne 4 ]; then
+  printf 'FAIL: Rust shard jobs do not explicitly select nextest\n'; exit 1
+fi
 # The literal workflow expression is the contract.
 # shellcheck disable=SC2016
 grep -F 'baseline_result="$(jq -r --arg command "${COMMAND}"' "${WORKFLOW}" >/dev/null || { printf 'FAIL: differential baseline metadata is not derived from its aggregate result\n'; exit 1; }
