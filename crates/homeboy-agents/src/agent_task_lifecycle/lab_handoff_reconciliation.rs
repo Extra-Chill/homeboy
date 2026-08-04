@@ -50,13 +50,22 @@ pub fn reconcile_active_lab_runner_handoffs() -> Result<usize> {
 }
 
 fn has_pending_runner_submission_intent(record: &AgentTaskRunRecord) -> bool {
+    has_live_pending_runner_submission_intent(record, chrono::Utc::now())
+}
+
+/// A pending reverse-broker request is live only while its complete durable
+/// intent remains inside the controller's acceptance deadline.
+pub(crate) fn has_live_pending_runner_submission_intent(
+    record: &AgentTaskRunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
     has_complete_pending_runner_submission_intent(record)
         && record
             .lab_handoff
             .as_ref()
             .and_then(|handoff| handoff.acceptance_deadline_at.as_deref())
             .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
-            .is_some_and(|deadline| deadline.with_timezone(&chrono::Utc) > chrono::Utc::now())
+            .is_some_and(|deadline| deadline.with_timezone(&chrono::Utc) > now)
 }
 
 pub(crate) fn has_expired_pending_runner_submission_intent(
