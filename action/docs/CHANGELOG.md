@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.4] - 2026-08-04
+
+### Fixed
+- stream shard inventories into jq
+
 ## [2.11.3] - 2026-08-04
 
 ### Fixed
