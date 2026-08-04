@@ -27,9 +27,9 @@ Passively observe a running system and persist timeline evidence
 | Option | Value | Description |
 | --- | --- | --- |
 | `--path` | `<PATH>` | Override the component checkout path for this invocation |
-| `--duration` | `<DURATION>` | _no help text_ |
-| `--tail-log` | `<PATH>` | _no help text_ |
-| `--grep` | `<REGEX>` | _no help text_ |
-| `--watch-process` | `<REGEX>` | _no help text_ |
-| `--watch-process-interval` | `<WATCH_PROCESS_INTERVAL>` | _no help text_ |
-| `--probe` | `<JSON>` | _no help text_ |
+| `--duration` | `<DURATION>` | How long to observe before closing the run, as a duration such as `30s` or `5m` |
+| `--tail-log` | `<PATH>` | Log file to tail for the length of the run. Repeatable |
+| `--grep` | `<REGEX>` | Regex applied to every `--tail-log` probe, so only matching lines are recorded |
+| `--watch-process` | `<REGEX>` | Regex matched against running process command lines; a snapshot is recorded on each interval. Repeatable |
+| `--watch-process-interval` | `<WATCH_PROCESS_INTERVAL>` | How often `--watch-process` samples, as a duration such as `1s` |
+| `--probe` | `<JSON>` | Raw `TraceProbeConfig` JSON for probes that the flags above cannot express. Repeatable |
