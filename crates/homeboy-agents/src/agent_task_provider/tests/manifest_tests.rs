@@ -419,9 +419,10 @@ fn runtime_tool_cannot_claim_capability_without_a_probe() {
 #[test]
 fn runtime_tool_without_capabilities_is_usable_without_a_probe() {
     let provider_script = script(
-        r#"let input = ''; process.stdin.on('data', chunk => input += chunk); process.stdin.on('end', () => {
+        r#"process.stdin.once('data', input => {
   const tool = JSON.parse(input).resolved_runtime_tools[0];
-  process.stdout.write(JSON.stringify({ schema: 'homeboy/agent-task-outcome/v1', task_id: 'runtime-tool-no-capabilities', status: tool.capabilities.length === 0 && tool.capability_probe === undefined ? 'succeeded' : 'failed' }));
+  process.stdout.write(JSON.stringify({ schema: 'homeboy/agent-task-outcome/v1', task_id: 'runtime-tool-no-capabilities', status: tool.capabilities === undefined && tool.capability_probe === undefined ? 'succeeded' : 'failed' }));
+  process.exit(0);
 });"#,
     );
     let (mut request, provider) = request(

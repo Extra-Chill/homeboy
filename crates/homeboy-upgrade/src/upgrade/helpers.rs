@@ -277,6 +277,7 @@ pub fn run_upgrade_with_method(
                 new_build_identity: None,
                 source_revision: None,
                 upgraded: false,
+                outcome: Some("controller_unchanged".to_string()),
                 controller: Some(component_status("unchanged", "controller already current")),
                 extensions: Some(extension_component_status(!skip_extensions, skip_extensions, &extensions_updated, &extensions_skipped)),
                 runners: Some(runner_component_status(runner_disposition, &runners_updated, &runners_skipped, false)),
@@ -326,16 +327,41 @@ pub fn run_upgrade_with_method(
         None
     };
 
-    // Execute the upgrade
-    promotion_lease.assert_generation()?;
-    let (success, new_version, new_build_identity, source_revision) = execute_upgrade(
-        install_method,
-        source_upgrade_path.as_deref(),
-        source_path.is_some(),
-        force,
-        previous_build_identity.as_deref(),
-        selected_binary_version.as_deref(),
-    )?;
+    let runner_preflight = if skip_runners {
+        Vec::new()
+    } else {
+        super::with_runner_upgrade(|provider| {
+            provider.preflight_configured_runners_for_upgrade(
+                runner_method_override,
+                source_upgrade_path.as_deref(),
+                source_path.is_some(),
+                runner_targets,
+            )
+        })?
+    };
+    let controller_upgrade =
+        run_controller_mutation_after_runner_preflight(runner_preflight, || {
+            promotion_lease.assert_generation()?;
+            execute_upgrade(
+                install_method,
+                source_upgrade_path.as_deref(),
+                source_path.is_some(),
+                force,
+                previous_build_identity.as_deref(),
+                selected_binary_version.as_deref(),
+            )
+        })?;
+    let (success, new_version, new_build_identity, source_revision) = match controller_upgrade {
+        Ok(result) => result,
+        Err(runners_skipped) => {
+            return Ok(runner_preflight_failure_result(
+                install_method,
+                previous_version,
+                previous_build_identity,
+                runners_skipped,
+            ));
+        }
+    };
     let upgrade_completed = should_sync_after_upgrade(new_version.as_deref());
     if upgrade_completed {
         // This is deliberately a short switch, not a drain: records admitted
@@ -395,6 +421,7 @@ pub fn run_upgrade_with_method(
         new_build_identity: new_build_identity.clone(),
         source_revision,
         upgraded: success,
+        outcome: Some(upgrade_outcome(success, runner_disposition).to_string()),
         controller: Some(component_status(
             if success { "updated" } else { "failed" },
             if success {
@@ -458,6 +485,7 @@ fn source_upgrade_noop_result(
         new_build_identity: None,
         source_revision: None,
         upgraded: false,
+        outcome: Some("controller_unchanged".to_string()),
         controller: Some(component_status("unchanged", "controller was not promoted")),
         extensions: Some(component_status("skipped", "extensions were not refreshed")),
         runners: Some(component_status(
@@ -476,6 +504,72 @@ fn source_upgrade_noop_result(
         extensions_unrefreshed: Vec::new(),
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
+    }
+}
+
+fn run_controller_mutation_after_runner_preflight<T>(
+    runner_preflight: Vec<RunnerUpgradeEntry>,
+    mutate_controller: impl FnOnce() -> Result<T>,
+) -> Result<std::result::Result<T, Vec<RunnerUpgradeEntry>>> {
+    if runner_preflight.is_empty() {
+        return mutate_controller().map(Ok);
+    }
+
+    Ok(Err(runner_preflight))
+}
+
+fn runner_preflight_failure_result(
+    install_method: InstallMethod,
+    previous_version: String,
+    previous_build_identity: Option<String>,
+    runners_skipped: Vec<RunnerUpgradeEntry>,
+) -> UpgradeResult {
+    UpgradeResult {
+        command: "upgrade".to_string(),
+        install_method,
+        new_version: Some(previous_version.clone()),
+        previous_version,
+        previous_build_identity,
+        new_build_identity: None,
+        source_revision: None,
+        upgraded: false,
+        outcome: Some("runner_preflight_failed".to_string()),
+        controller: Some(component_status(
+            "runner_preflight_failed",
+            "controller was not updated because selected runner preflight failed",
+        )),
+        extensions: Some(component_status(
+            "not_run",
+            "extensions were not refreshed because runner preflight failed",
+        )),
+        runners: Some(component_status(
+            "runner_preflight_failed",
+            "one or more selected runners could not prepare the source checkout",
+        )),
+        partial: true,
+        runner_convergence: Some(RunnerConvergenceDisposition::Partial),
+        message: "runner_preflight_failed: controller was not updated".to_string(),
+        restart_required: false,
+        extensions_updated: Vec::new(),
+        extensions_skipped: Vec::new(),
+        runners_updated: Vec::new(),
+        runners_skipped,
+        extensions_unrefreshed: Vec::new(),
+        services_restarted: Vec::new(),
+        services_pending_restart: Vec::new(),
+    }
+}
+
+fn upgrade_outcome(
+    success: bool,
+    runner_disposition: RunnerConvergenceDisposition,
+) -> &'static str {
+    if success && runner_disposition == RunnerConvergenceDisposition::Partial {
+        "controller_updated_runner_failed"
+    } else if success {
+        "controller_updated"
+    } else {
+        "controller_update_failed"
     }
 }
 
@@ -542,6 +636,7 @@ fn run_targeted_runner_upgrade(
         new_build_identity: Some(previous_build_identity),
         source_revision: None,
         upgraded: false,
+        outcome: Some("runner_only".to_string()),
         controller: Some(component_status(
             "unchanged",
             "targeted runner operation did not promote controller",
@@ -1444,6 +1539,48 @@ mod runner_source_upgrade_tests {
     use super::*;
     use std::process::Command;
     use tempfile::tempdir;
+
+    #[test]
+    fn runner_preflight_failure_does_not_invoke_controller_mutation() {
+        let mut controller_mutated = false;
+        let result = run_controller_mutation_after_runner_preflight(
+            vec![RunnerUpgradeEntry {
+                runner_id: "lab-a".to_string(),
+                homeboy_path: "homeboy".to_string(),
+                success: false,
+                upgraded: false,
+                previous_version: None,
+                new_version: None,
+                bare_homeboy_version: None,
+                path_drift: None,
+                recovery_commands: Vec::new(),
+                extensions_synced: Vec::new(),
+                extensions_skipped: Vec::new(),
+                extensions_failed: Vec::new(),
+                stale_daemon: None,
+                daemon_previous_version: None,
+                daemon_new_version: None,
+                exit_code: 1,
+                detail: "runner preflight materialization failed".to_string(),
+            }],
+            || {
+                controller_mutated = true;
+                Ok(())
+            },
+        )
+        .expect("preflight evaluation");
+
+        assert!(!controller_mutated, "controller build/install must not run");
+        let runners_skipped = result.unwrap_err();
+        assert_eq!(runners_skipped[0].runner_id, "lab-a");
+        let upgrade = runner_preflight_failure_result(
+            InstallMethod::Source,
+            "0.1.0".to_string(),
+            None,
+            runners_skipped,
+        );
+        assert_eq!(upgrade.outcome.as_deref(), Some("runner_preflight_failed"));
+    }
 
     #[test]
     fn every_install_method_discovers_versions_from_github_releases() {

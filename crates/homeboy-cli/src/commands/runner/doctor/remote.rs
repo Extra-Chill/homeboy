@@ -13,7 +13,14 @@ pub fn report(
         std::time::Duration::from_secs(60),
         "runner doctor",
     );
-    let persisted_status = runner::diagnostic_status(runner_id).ok();
+    // Lab admission uses the live status projection, including the daemon's
+    // typed freshness report. Doctor repair must make its decision from that
+    // same observation rather than treating a reachable endpoint as ready.
+    let persisted_status = if options.scope == RunnerDoctorScope::LabOffload {
+        runner::status(runner_id).ok()
+    } else {
+        runner::diagnostic_status(runner_id).ok()
+    };
     if options.scope == RunnerDoctorScope::LabOffload {
         match persisted_status.as_ref() {
             Some(status) if !status.connected => {
@@ -319,7 +326,7 @@ pub fn report(
         checks,
         secret_env_migration: None,
         diagnostics,
-        daemon_recovery: None,
+        daemon_recovery: persisted_status.and_then(|status| status.daemon_freshness),
         repairs: Vec::new(),
     }
 }

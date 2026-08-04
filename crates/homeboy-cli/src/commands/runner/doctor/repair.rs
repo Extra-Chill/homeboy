@@ -69,7 +69,10 @@ pub fn apply(
         .checks
         .iter()
         .any(|check| check.id == "daemon.exec" && check.status == RunnerDoctorStatus::Error);
-    if !daemon_failed {
+    let daemon_admission_closed = runner::status(id)
+        .map(|status| !daemon_admission_ready(&status))
+        .unwrap_or(false);
+    if !daemon_failed && !daemon_admission_closed {
         report.repairs.push(RunnerRepair {
             id: "repair.daemon".to_string(),
             status: RunnerDoctorStatus::Ok,
@@ -94,17 +97,36 @@ pub fn apply(
             report
                 .checks
                 .extend(probes::connected_daemon_exec_checks(id, workspace_root));
-            report.repairs.push(RunnerRepair {
-                id: "repair.daemon".to_string(),
-                status: RunnerDoctorStatus::Ok,
-                message: match disconnect_error {
-                    Some(error) => format!(
-                        "Recovered the Lab runner daemon after bounded disconnect failed ({}) and reran the daemon exec probe",
+            let (status, message) = match runner::status(id) {
+                Ok(status) if daemon_admission_ready(&status) => (
+                    RunnerDoctorStatus::Ok,
+                    match disconnect_error {
+                        Some(error) => format!(
+                            "Recovered the Lab runner daemon after bounded disconnect failed ({}) and reran the daemon exec probe",
+                            error.message
+                        ),
+                        None => {
+                            "Reconnected the Lab runner daemon and reran the daemon exec probe"
+                                .to_string()
+                        }
+                    },
+                ),
+                Ok(_) => (
+                    RunnerDoctorStatus::Error,
+                    "Reconnected the Lab runner daemon, but Lab admission remains closed".to_string(),
+                ),
+                Err(error) => (
+                    RunnerDoctorStatus::Error,
+                    format!(
+                        "Reconnected the Lab runner daemon, but could not verify Lab admission: {}",
                         error.message
                     ),
-                    None => "Reconnected the Lab runner daemon and reran the daemon exec probe"
-                        .to_string(),
-                },
+                ),
+            };
+            report.repairs.push(RunnerRepair {
+                id: "repair.daemon".to_string(),
+                status,
+                message,
                 commands,
             });
         }
@@ -292,19 +314,44 @@ fn apply_daemon_repair_plan(runner_id: &str, report: &mut RunnerDoctorOutput) ->
     }
 
     report.checks.retain(|check| check.id != "daemon.exec");
-    report.repairs.push(RunnerRepair {
-        id: "repair.daemon".to_string(),
-        status: RunnerDoctorStatus::Ok,
-        message: format!(
-            "Applied the reported daemon repair plan ({applied} step(s): {})",
-            plan.iter()
-                .map(|step| step.code.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        commands,
-    });
+    let steps = plan
+        .iter()
+        .map(|step| step.code.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    match runner::status(runner_id) {
+        Ok(status) if daemon_admission_ready(&status) => report.repairs.push(RunnerRepair {
+            id: "repair.daemon".to_string(),
+            status: RunnerDoctorStatus::Ok,
+            message: format!("Applied the reported daemon repair plan ({applied} step(s): {steps})"),
+            commands,
+        }),
+        Ok(_) => report.repairs.push(RunnerRepair {
+            id: "repair.daemon".to_string(),
+            status: RunnerDoctorStatus::Error,
+            message: format!(
+                "Applied the reported daemon repair plan ({applied} step(s): {steps}), but Lab admission remains closed"
+            ),
+            commands,
+        }),
+        Err(error) => report.repairs.push(RunnerRepair {
+            id: "repair.daemon".to_string(),
+            status: RunnerDoctorStatus::Error,
+            message: format!(
+                "Applied the reported daemon repair plan ({applied} step(s): {steps}), but could not verify Lab admission: {}",
+                error.message
+            ),
+            commands,
+        }),
+    }
     true
+}
+
+/// The same typed readiness decision rendered as `accepting_jobs` by runner
+/// status and used by Lab admission. Repair success is only valid when it is
+/// true after the final mutation.
+pub(super) fn daemon_admission_ready(status: &runner::RunnerStatusReport) -> bool {
+    status.admission_summary(0).accepting_jobs
 }
 
 fn connect_outcome(
