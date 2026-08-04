@@ -53,20 +53,31 @@ pub(super) enum LabRunnerPreparation {
 
 /// A side-effect-free placement question. Wrappers call this before durable run
 /// creation and setup; execution rechecks the same live admission facts.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlacementReadinessRequest {
+    /// Versioned public request contract. This typed surface was never
+    /// released, so v2 is the first supported external schema.
+    pub schema: String,
     pub runner_id: String,
-    pub workload_family: String,
-    pub command: String,
     pub allow_queue: bool,
     pub durable_workload: bool,
-    pub required_tools: Vec<super::RunnerRequiredTool>,
-    pub required_capabilities: Vec<String>,
-    /// Provider, toolchain, browser, and source/path requirements are part of
-    /// the admission identity, rather than wrapper-only diagnostics.
-    pub provider: Option<String>,
-    pub required_toolchain_probes: Vec<super::RunnerToolchainReadinessProbe>,
-    pub source_path_inputs: Vec<String>,
+    /// Only compiler-recognised invocations are accepted at the public
+    /// boundary. Requirements are derived below, never supplied by callers.
+    pub invocation: PlacementReadinessInvocation,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PlacementReadinessInvocation {
+    AgentTaskCook {
+        provider: String,
+        source_path: String,
+    },
+    CapabilityAudit {
+        source_path: String,
+        capability_id: String,
+    },
 }
 
 /// The immutable admission contract shared by mutation-free preflight and the
@@ -74,30 +85,124 @@ pub struct PlacementReadinessRequest {
 /// it again against its fresh runner snapshot before reserving daemon capacity.
 #[derive(Debug, Clone)]
 pub struct LabAdmissionPlan {
-    pub request: PlacementReadinessRequest,
     pub capability: super::PreparedLabRunnerCapability,
     pub toolchain: Option<super::RunnerCapabilityPreflight>,
+    /// Public preflight uses runner snapshots only and therefore reports
+    /// executable extension probes as an explicit unknown/blocked condition.
+    pub executable_probe_required: bool,
 }
 
-pub fn compile_lab_admission_plan(request: PlacementReadinessRequest) -> LabAdmissionPlan {
-    let capability = super::prepare_lab_runner_capability(super::LabRunnerCapabilityContract {
-        // The shared contract currently retains a static diagnostic label. The
-        // caller command remains on `request` and is serialized in the result.
-        command: "runner preflight",
-        required_tools: request.required_tools.clone(),
-        required_capabilities: request.required_capabilities.clone(),
-    });
-    let toolchain =
-        (!request.required_toolchain_probes.is_empty()).then(|| super::RunnerCapabilityPreflight {
-            command: request.command.clone(),
-            required_toolchain_probes: request.required_toolchain_probes.clone(),
-            ..Default::default()
-        });
-    LabAdmissionPlan {
-        request,
-        capability,
-        toolchain,
+/// Compile every runner admission requirement from the trusted routed command.
+/// Both execution and public preflight use this boundary so neither can omit a
+/// command-prefix tool, extension probe, or opaque capability.
+pub fn compile_lab_admission_plan(
+    command: &LabOffloadCommand,
+    source_path: &std::path::Path,
+    command_prefix_required_tools: &[super::RunnerRequiredTool],
+) -> Result<LabAdmissionPlan> {
+    if !command.is_portable() {
+        return Err(Error::validation_invalid_argument(
+            "invocation",
+            "placement invocation must compile to a portable Lab command",
+            None,
+            None,
+        ));
     }
+    let _ = source_path;
+    let capability = super::prepare_lab_runner_capability(super::LabRunnerCapabilityContract {
+        command: command.hot_label,
+        required_tools: command_prefix_required_tools.to_vec(),
+        required_capabilities: command
+            .required_capabilities
+            .iter()
+            .map(|capability| capability.name.clone())
+            .collect(),
+    });
+    Ok(LabAdmissionPlan {
+        toolchain: crate::lab_capabilities::toolchain_readiness_preflight(command)?,
+        capability,
+        executable_probe_required: false,
+    })
+}
+
+fn compile_placement_readiness_plan(
+    request: &PlacementReadinessRequest,
+) -> Result<LabAdmissionPlan> {
+    if request.schema != "homeboy/placement-readiness/v2" {
+        return Err(Error::validation_invalid_argument(
+            "schema",
+            "placement readiness accepts homeboy/placement-readiness/v2 requests",
+            Some(request.schema.clone()),
+            None,
+        ));
+    }
+    let (
+        _workload_family,
+        hot_label,
+        provider,
+        source_path_inputs,
+        required_capabilities,
+        extensions,
+    ) = match &request.invocation {
+        PlacementReadinessInvocation::AgentTaskCook {
+            provider,
+            source_path,
+        } => (
+            "agent-task".to_string(),
+            "agent-task cook",
+            Some(provider.clone()),
+            vec![source_path.clone()],
+            vec!["extension_parity".to_string()],
+            vec![provider.clone()],
+        ),
+        PlacementReadinessInvocation::CapabilityAudit {
+            source_path,
+            capability_id,
+        } => (
+            "audit".to_string(),
+            "audit capability",
+            None,
+            vec![source_path.clone()],
+            vec![capability_id.clone()],
+            Vec::new(),
+        ),
+    };
+    if source_path_inputs.iter().any(|path| path.trim().is_empty())
+        || provider
+            .as_ref()
+            .is_some_and(|provider| provider.trim().is_empty())
+    {
+        return Err(Error::validation_invalid_argument(
+            "invocation",
+            "placement invocation requires a non-empty provider and source path",
+            None,
+            None,
+        ));
+    }
+    let command = homeboy_core::lab_routing::lab_offload_command_from_contract(
+        homeboy_core::lab_contract::LabCommandContract::portable(
+            hot_label,
+            None,
+            !extensions.is_empty(),
+            &[],
+        )
+        .with_extra_required_capabilities(required_capabilities),
+        extensions,
+    );
+    let source_path = source_path_inputs
+        .first()
+        .expect("validated invocation has one source path");
+    let mut plan = compile_lab_admission_plan(
+        &command,
+        std::path::Path::new(source_path),
+        &[super::RunnerRequiredTool::homeboy()],
+    )?;
+    // Public preflight is mutation-free: it never invokes extension programs.
+    // Execution reuses the same compiled probes through the bounded runner
+    // diagnostic transport immediately before dispatch.
+    plan.executable_probe_required = plan.toolchain.is_some();
+    plan.toolchain = None;
+    Ok(plan)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -114,6 +219,15 @@ pub struct PlacementReadinessPredicate {
     pub satisfied: bool,
 }
 
+/// The stable v1 recovery-action projection. Typed executable metadata is
+/// additive so existing readers retain their `{command, requires_confirmation}`
+/// contract.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PlacementRecoveryAction {
+    pub command: String,
+    pub requires_confirmation: bool,
+}
+
 /// A snapshot, not a reservation. It cannot create a rig/run/runner mutation.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PlacementReadiness {
@@ -123,14 +237,29 @@ pub struct PlacementReadiness {
     pub runner_id: String,
     pub state: PlacementReadinessState,
     pub predicates: Vec<PlacementReadinessPredicate>,
+    /// Stable v1 typed recovery actions retained from merged #11455.
     pub recovery_actions: Vec<ExecutableAction>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recovery_action_projections: Vec<PlacementRecoveryAction>,
+    /// A complete typed input emitted by the same compiler execution uses.
+    /// Passing it back to `runner preflight --request` cannot silently drop a
+    /// provider, source, toolchain, or capability requirement.
+    pub compiled_request: PlacementReadinessRequest,
     pub revalidate_before_execution: bool,
 }
 
 pub fn placement_readiness(request: &PlacementReadinessRequest) -> Result<PlacementReadiness> {
     let runner = load(&request.runner_id)?;
     let status = status(&request.runner_id)?;
-    let plan = compile_lab_admission_plan(request.clone());
+    let plan = compile_placement_readiness_plan(request)?;
+    if plan.executable_probe_required {
+        return Err(Error::validation_invalid_argument(
+            "invocation",
+            "placement readiness is blocked: extension executable probe required; upgrade the extension to advertise runner capabilities or run execution admission",
+            None,
+            None,
+        ));
+    }
     if let Some(toolchain) = plan.toolchain.as_ref() {
         // This probe only observes runner toolchain state; unlike execution it
         // neither creates a workspace nor reserves daemon admission.
@@ -142,7 +271,7 @@ pub fn placement_readiness(request: &PlacementReadinessRequest) -> Result<Placem
         super::LabRunnerGateMode::Explicit,
     )?;
     Ok(placement_readiness_from_status(
-        &plan.request,
+        request,
         &status,
         runner.settings.concurrency_limit,
         status_tunnel_mode(&status),
@@ -157,6 +286,7 @@ fn placement_readiness_from_status(
     mode: RunnerTunnelMode,
     capability: super::LabRunnerGateDecision,
 ) -> PlacementReadiness {
+    let (workload_family, command, provider, source_path_inputs) = admission_identity(request);
     let availability = RunnerAvailability::from_status_parts(
         request.runner_id.clone(),
         status.connected,
@@ -170,9 +300,15 @@ fn placement_readiness_from_status(
         && mode == RunnerTunnelMode::Reverse
         && availability.is_capacity_exhausted();
     let compatible = matches!(capability, super::LabRunnerGateDecision::Eligible);
-    let state = if availability.accepts_jobs && compatible {
+    let inputs_declared = source_path_inputs
+        .iter()
+        .all(|path| !path.trim().is_empty())
+        && provider
+            .as_ref()
+            .is_none_or(|provider| !provider.trim().is_empty());
+    let state = if availability.accepts_jobs && compatible && inputs_declared {
         PlacementReadinessState::Ready
-    } else if queueable && compatible {
+    } else if queueable && compatible && inputs_declared {
         PlacementReadinessState::Queueable
     } else {
         PlacementReadinessState::Blocked
@@ -208,10 +344,18 @@ fn placement_readiness_from_status(
             ActionSafety::ReadOnly,
         )]
     };
+    let recovery_action_projections = recovery_actions
+        .iter()
+        .map(|action| PlacementRecoveryAction {
+            command: action.render_command(),
+            requires_confirmation: !action.required_confirmations.is_empty()
+                || !matches!(action.safety, ActionSafety::ReadOnly),
+        })
+        .collect();
     PlacementReadiness {
-        schema: "homeboy/placement-readiness/v1",
-        workload_family: request.workload_family.clone(),
-        command: request.command.clone(),
+        schema: "homeboy/placement-readiness/v2",
+        workload_family,
+        command,
         runner_id: request.runner_id.clone(),
         state,
         predicates: vec![
@@ -247,21 +391,43 @@ fn placement_readiness_from_status(
             },
             PlacementReadinessPredicate {
                 id: "source_path_inputs_declared",
-                satisfied: request
-                    .source_path_inputs
+                satisfied: source_path_inputs
                     .iter()
                     .all(|path| !path.trim().is_empty()),
             },
             PlacementReadinessPredicate {
                 id: "provider_declared",
-                satisfied: request
-                    .provider
+                satisfied: provider
                     .as_ref()
                     .is_none_or(|provider| !provider.trim().is_empty()),
             },
         ],
         recovery_actions,
+        recovery_action_projections,
+        compiled_request: request.clone(),
         revalidate_before_execution: true,
+    }
+}
+
+fn admission_identity(
+    request: &PlacementReadinessRequest,
+) -> (String, String, Option<String>, Vec<String>) {
+    match &request.invocation {
+        PlacementReadinessInvocation::AgentTaskCook {
+            provider,
+            source_path,
+        } => (
+            "agent-task".to_string(),
+            "agent-task cook".to_string(),
+            Some(provider.clone()),
+            vec![source_path.clone()],
+        ),
+        PlacementReadinessInvocation::CapabilityAudit { source_path, .. } => (
+            "audit".to_string(),
+            "audit capability".to_string(),
+            None,
+            vec![source_path.clone()],
+        ),
     }
 }
 
@@ -1468,16 +1634,14 @@ mod placement_readiness_tests {
 
     fn request() -> PlacementReadinessRequest {
         PlacementReadinessRequest {
+            schema: "homeboy/placement-readiness/v2".to_string(),
             runner_id: "lab".to_string(),
-            workload_family: "bench".to_string(),
-            command: "bench run".to_string(),
             allow_queue: false,
             durable_workload: false,
-            required_tools: Vec::new(),
-            required_capabilities: Vec::new(),
-            provider: None,
-            required_toolchain_probes: Vec::new(),
-            source_path_inputs: Vec::new(),
+            invocation: PlacementReadinessInvocation::CapabilityAudit {
+                source_path: "/workspace/source".to_string(),
+                capability_id: "capability.alpha".to_string(),
+            },
         }
     }
 
@@ -1527,28 +1691,97 @@ mod placement_readiness_tests {
     }
 
     #[test]
-    fn execution_and_preflight_compile_the_same_capability_and_toolchain_plan() {
-        let mut request = request();
-        request.required_tools = vec![super::super::RunnerRequiredTool::new("node")];
-        request.required_capabilities = vec!["browser".to_string()];
-        request.provider = Some("openai".to_string());
-        request.source_path_inputs = vec!["/workspace/provider.json".to_string()];
-        request.required_toolchain_probes = vec![super::super::RunnerToolchainReadinessProbe {
-            extension_id: "fixture".to_string(),
-            id: "fixture:node".to_string(),
-            command: "node --version".to_string(),
-            repair_command: None,
-            diagnostic_env: Vec::new(),
-        }];
-
-        let preflight = compile_lab_admission_plan(request.clone());
-        let execution = compile_lab_admission_plan(request);
+    fn repeated_typed_invocations_compile_the_same_capability_plan() {
+        let preflight = compile_placement_readiness_plan(&request()).expect("compile preflight");
+        let execution = compile_placement_readiness_plan(&request()).expect("compile execution");
         assert_eq!(preflight.capability, execution.capability);
         assert_eq!(preflight.toolchain, execution.toolchain);
         assert_eq!(
             preflight.capability.required_capabilities,
-            vec!["browser".to_string()]
+            vec!["capability.alpha".to_string()]
         );
+    }
+
+    #[test]
+    fn routed_preflight_and_execution_share_command_prefix_tool_requirements() {
+        let routed = homeboy_core::lab_routing::lab_offload_command_from_contract(
+            homeboy_core::lab_contract::LabCommandContract::portable(
+                "audit capability",
+                None,
+                false,
+                &[],
+            )
+            .with_extra_required_capabilities(vec!["capability.alpha".to_string()]),
+            Vec::new(),
+        );
+        let execution = compile_lab_admission_plan(
+            &routed,
+            std::path::Path::new("/workspace/source"),
+            &[super::super::RunnerRequiredTool::homeboy()],
+        )
+        .expect("compile execution admission");
+        let preflight = compile_placement_readiness_plan(&request()).expect("compile preflight");
+
+        assert_eq!(preflight.capability, execution.capability);
+        assert!(preflight
+            .capability
+            .required_tools
+            .contains(&super::super::RunnerRequiredTool::homeboy()));
+    }
+
+    #[test]
+    fn routed_preflight_and_execution_share_opaque_capability_requirements() {
+        let routed = homeboy_core::lab_routing::lab_offload_command_from_contract(
+            homeboy_core::lab_contract::LabCommandContract::portable(
+                "audit capability",
+                None,
+                false,
+                &[],
+            )
+            .with_extra_required_capabilities(vec!["capability.alpha".to_string()]),
+            Vec::new(),
+        );
+        let execution = compile_lab_admission_plan(
+            &routed,
+            std::path::Path::new("/workspace/source"),
+            &[super::super::RunnerRequiredTool::homeboy()],
+        )
+        .expect("compile execution admission");
+        let preflight = compile_placement_readiness_plan(&request()).expect("compile preflight");
+
+        assert_eq!(preflight.capability, execution.capability);
+        assert_eq!(
+            preflight.capability.required_capabilities,
+            vec!["capability.alpha".to_string()]
+        );
+    }
+
+    #[test]
+    fn public_json_cannot_supply_probe_commands_or_capabilities() {
+        let request = request();
+        let encoded = serde_json::to_value(&request).expect("encode compiled request");
+        let decoded: PlacementReadinessRequest =
+            serde_json::from_value(encoded.clone()).expect("decode complete request");
+        assert!(matches!(
+            decoded.invocation,
+            PlacementReadinessInvocation::CapabilityAudit { .. }
+        ));
+        let mut adversarial = encoded;
+        adversarial.as_object_mut().expect("request object").insert(
+            "required_toolchain_probes".to_string(),
+            serde_json::json!([{ "command": "touch /tmp/pwned" }]),
+        );
+        assert!(serde_json::from_value::<PlacementReadinessRequest>(adversarial).is_err());
+    }
+
+    #[test]
+    fn incomplete_provider_or_source_input_cannot_compile_ready() {
+        let mut request = request();
+        request.invocation = PlacementReadinessInvocation::AgentTaskCook {
+            provider: " ".to_string(),
+            source_path: " ".to_string(),
+        };
+        assert!(compile_placement_readiness_plan(&request).is_err());
     }
 
     #[test]
@@ -1614,8 +1847,8 @@ mod placement_readiness_tests {
             runner_id: "lab".to_string(),
             command: "runner preflight",
             missing_tools: Vec::new(),
-            reason: "missing browser".to_string(),
-            remediation: vec!["install browser".to_string()],
+            reason: "missing capability.alpha".to_string(),
+            remediation: vec!["configure capability.alpha".to_string()],
         };
         let result = decide(
             &request(),
@@ -1626,8 +1859,19 @@ mod placement_readiness_tests {
         );
         assert_eq!(result.state, PlacementReadinessState::Blocked);
         assert_eq!(
+            result.recovery_actions[0],
+            ExecutableAction::new(
+                "runner.capability.remediation.0",
+                "Inspect runner capability remediation",
+                "homeboy",
+                ["runner", "doctor", "lab"],
+                ActionSafety::ReadOnly,
+            )
+            .with_evidence(serde_json::json!({ "remediation": "configure capability.alpha" }))
+        );
+        assert_eq!(
             result.recovery_actions[0].evidence,
-            Some(serde_json::json!({ "remediation": "install browser" }))
+            Some(serde_json::json!({ "remediation": "configure capability.alpha" }))
         );
     }
 
@@ -1654,8 +1898,8 @@ mod placement_readiness_tests {
                 runner_id: "lab".to_string(),
                 command: "runner preflight",
                 missing_tools: Vec::new(),
-                reason: "missing browser".to_string(),
-                remediation: vec!["install browser".to_string()],
+                reason: "missing capability.alpha".to_string(),
+                remediation: vec!["configure capability.alpha".to_string()],
             },
         );
         assert_eq!(result.state, PlacementReadinessState::Blocked);
@@ -1685,6 +1929,28 @@ mod placement_readiness_tests {
             serde_json::to_value(&result).expect("serialized v1 envelope")["recovery_actions"][0]
                 ["program"],
             "homeboy"
+        );
+    }
+
+    #[test]
+    fn v1_recovery_actions_keep_the_legacy_shape_with_additive_metadata() {
+        let mut observed = status();
+        observed.connected = false;
+        observed.state = RunnerSessionState::Disconnected;
+        let result = decide(
+            &request(),
+            &observed,
+            Some(1),
+            RunnerTunnelMode::DirectSsh,
+            super::super::LabRunnerGateDecision::Eligible,
+        );
+        let value = serde_json::to_value(&result).expect("serialize v1 result");
+        let legacy = &value["recovery_actions"][0];
+        assert_eq!(legacy["program"], "homeboy");
+        assert!(legacy.get("args").is_some());
+        assert_eq!(
+            value["recovery_action_projections"][0]["command"],
+            result.recovery_actions[0].render_command()
         );
     }
 }

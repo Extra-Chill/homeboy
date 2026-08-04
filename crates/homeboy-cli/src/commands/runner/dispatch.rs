@@ -130,33 +130,16 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
                 repair,
             },
         )),
-        RunnerCommand::Preflight {
-            runner_id,
-            workload_family,
-            command,
-            allow_queue,
-            durable_workload,
-            required_tools,
-            required_capabilities,
-            provider,
-            source_path_inputs,
-        } => Ok((
+        RunnerCommand::Preflight { request } => Ok((
             RunnerCommandOutput::Preflight(runner::placement_readiness(
-                &runner::PlacementReadinessRequest {
-                    runner_id,
-                    workload_family,
-                    command,
-                    allow_queue,
-                    durable_workload,
-                    required_tools: required_tools
-                        .into_iter()
-                        .map(runner::RunnerRequiredTool::new)
-                        .collect(),
-                    required_capabilities,
-                    provider,
-                    required_toolchain_probes: Vec::new(),
-                    source_path_inputs,
-                },
+                &serde_json::from_str(&request).map_err(|error| {
+                    homeboy::core::Error::validation_invalid_argument(
+                        "request",
+                        format!("invalid PlacementReadinessRequest JSON: {error}"),
+                        None,
+                        None,
+                    )
+                })?,
             )?),
             0,
         )),

@@ -115,7 +115,8 @@ pub(crate) mod lab_plan;
 mod lab_selection;
 pub use lab_selection::{
     compile_lab_admission_plan, placement_readiness, LabAdmissionPlan, PlacementReadiness,
-    PlacementReadinessPredicate, PlacementReadinessRequest, PlacementReadinessState,
+    PlacementReadinessInvocation, PlacementReadinessPredicate, PlacementReadinessRequest,
+    PlacementReadinessState,
 };
 mod lab_workspace_provenance_provider;
 mod lab_workspaces;

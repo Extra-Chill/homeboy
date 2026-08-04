@@ -1528,30 +1528,15 @@ pub(crate) fn run_lab_offload_inner(
         &runner_homeboy,
         &runner_status,
     )?;
-    // Compile the same typed admission plan exposed by `runner preflight`.
-    // This prevents execution-only command-prefix, toolchain, provider, and
-    // source inputs from quietly widening admission after wrappers preflight.
-    let execution_toolchain = toolchain_readiness_preflight(&contract)?;
-    let admission_plan = crate::compile_lab_admission_plan(crate::PlacementReadinessRequest {
-        runner_id: runner_id.to_string(),
-        workload_family: contract.hot_label.to_string(),
-        command: contract.hot_label.to_string(),
-        allow_queue: request.detach_after_handoff,
-        durable_workload: request.durable_agent_task_plan.is_some(),
-        required_tools: command_prefix.required_tools.clone(),
-        required_capabilities: contract
-            .required_capabilities
-            .iter()
-            .map(|capability| capability.name.clone())
-            .collect(),
-        provider: contract.required_extensions.first().cloned(),
-        required_toolchain_probes: execution_toolchain
-            .as_ref()
-            .map(|preflight| preflight.required_toolchain_probes.clone())
-            .unwrap_or_default(),
-        source_path_inputs: vec![source_path.display().to_string()],
-    });
-    let capability_plan = Some(admission_plan.capability.clone());
+    // Public preflight constructs the same typed routed command before entering
+    // this compiler, so no admission requirement can diverge at this boundary.
+    let admission_plan = crate::lab_selection::compile_lab_admission_plan(
+        &contract,
+        &source_path,
+        &command_prefix.required_tools,
+    )?;
+    let execution_toolchain = admission_plan.toolchain;
+    let capability_plan = Some(admission_plan.capability);
     if let Some(capability_plan) = &capability_plan {
         // Capability/daemon preflight is runner setup overhead (#3001); time it
         // and record the elapsed duration on every exit path so a fallback-to-
@@ -1659,7 +1644,7 @@ pub(crate) fn run_lab_offload_inner(
 
     let mut capability_preflight: Option<RunnerCapabilityPreflight> =
         capability_plan.map(Into::into);
-    if let Some(toolchain_preflight) = admission_plan.toolchain {
+    if let Some(toolchain_preflight) = execution_toolchain {
         match &mut capability_preflight {
             Some(preflight) => preflight
                 .required_toolchain_probes

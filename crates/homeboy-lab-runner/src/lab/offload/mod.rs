@@ -77,7 +77,6 @@ use super::super::lab_args::{
     remap_provider_config_with_materialization_plan_in_args, rewrite_lab_offload_args,
     rewrite_runner_resident_lab_offload_args, LabAtFileSpec, LabPathRemap,
 };
-use super::super::lab_capabilities::toolchain_readiness_preflight;
 use super::super::lab_command::lab_offload_command_prefix;
 use super::super::lab_env::{
     build_lab_offload_env_with_passthroughs, forward_declared_dependency_paths_env,
