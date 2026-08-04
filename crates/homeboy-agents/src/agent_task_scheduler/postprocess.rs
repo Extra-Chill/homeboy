@@ -1,6 +1,7 @@
 //! Plan-native execution of generic artifact postprocess actions.
 
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -22,39 +23,24 @@ pub(super) fn run_postprocess_steps(
     for step in &plan.postprocess_steps {
         let checkpoint = postprocess_checkpoint_path(run_id, &step.id);
         let identity = checkpoint_identity(plan, run_id, step, outcomes);
-        let outcome = if let Some(outcome) =
-            read_checkpoint(&checkpoint, run_id, &step.id, &identity)
-        {
-            outcome
-        } else if cancellation.is_cancelled() {
-            postprocess_outcome(
-                step,
-                AgentTaskOutcomeStatus::Cancelled,
-                "cancelled before execution",
-                None,
-            )
-        } else if let Some(message) = failed_dependency_message(step, outcomes) {
-            postprocess_failure_outcome(step, &message)
-        } else {
-            match acquire_claim(&postprocess_claim_path(run_id, &step.id)) {
-                Ok(claim) => {
-                    // A prior owner may have finished after our first checkpoint read.
-                    let outcome = read_checkpoint(&checkpoint, run_id, &step.id, &identity)
-                        .or_else(|| recover_completed_attempt(step, run_id, &identity).ok())
-                        .unwrap_or_else(|| {
-                            execute_postprocess_step(step, run_id, outcomes, &identity)
-                        });
-                    let checkpoint_result =
-                        write_checkpoint(&checkpoint, run_id, &identity, outcomes, step, &outcome);
-                    drop(claim);
-                    match checkpoint_result {
-                        Ok(()) => outcome,
-                        Err(error) => checkpoint_failure_outcome(step, error.message),
-                    }
+        let outcome =
+            if let Some(outcome) = read_checkpoint(&checkpoint, run_id, &step.id, &identity) {
+                outcome
+            } else if cancellation.is_cancelled() {
+                postprocess_outcome(
+                    step,
+                    AgentTaskOutcomeStatus::Cancelled,
+                    "cancelled before execution",
+                    None,
+                )
+            } else if let Some(message) = failed_dependency_message(step, outcomes) {
+                postprocess_failure_outcome(step, &message)
+            } else {
+                match start_or_reconcile_worker(plan, step, run_id, outcomes, &identity) {
+                    Ok(outcome) => outcome,
+                    Err(message) => postprocess_failure_outcome(step, &message),
                 }
-                Err(message) => postprocess_failure_outcome(step, &message),
-            }
-        };
+            };
         if outcome.status != AgentTaskOutcomeStatus::Cancelled
             && !outcome.metadata["checkpoint_write_failed"]
                 .as_bool()
@@ -83,6 +69,125 @@ pub(super) fn run_postprocess_steps(
         ));
         outcomes.push(outcome);
     }
+}
+
+/// Runs a persisted request from the internal Homeboy worker command. The worker,
+/// rather than its scheduler parent, owns the side-effecting helper and all durable
+/// completion records. A controller crash therefore cannot repeat a completed helper.
+pub fn run_postprocess_worker(request_path: &Path) -> homeboy_core::Result<()> {
+    let request: PostprocessWorkerRequest =
+        serde_json::from_slice(&std::fs::read(request_path).map_err(|error| {
+            homeboy_core::Error::internal_io(
+                error.to_string(),
+                Some(request_path.display().to_string()),
+            )
+        })?)
+        .map_err(|error| {
+            homeboy_core::Error::internal_json(
+                error.to_string(),
+                Some(request_path.display().to_string()),
+            )
+        })?;
+    if request.schema != WORKER_REQUEST_SCHEMA {
+        return Err(homeboy_core::Error::validation_invalid_argument(
+            "postprocess_worker.schema",
+            "unsupported postprocess worker request",
+            Some(request.schema),
+            None,
+        ));
+    }
+    let checkpoint = postprocess_checkpoint_path(Some(&request.run_id), &request.step.id);
+    if read_checkpoint(
+        &checkpoint,
+        Some(&request.run_id),
+        &request.step.id,
+        &request.fingerprint,
+    )
+    .is_some()
+    {
+        return Ok(());
+    }
+    let claim = acquire_claim(&postprocess_claim_path(
+        Some(&request.run_id),
+        &request.step.id,
+    ))
+    .map_err(homeboy_core::Error::internal_unexpected)?;
+    // Another worker may have completed while this worker waited for ownership.
+    let outcome = read_checkpoint(
+        &checkpoint,
+        Some(&request.run_id),
+        &request.step.id,
+        &request.fingerprint,
+    )
+    .or_else(|| {
+        recover_completed_attempt(&request.step, Some(&request.run_id), &request.fingerprint).ok()
+    })
+    .unwrap_or_else(|| {
+        execute_postprocess_step(
+            &request.step,
+            Some(&request.run_id),
+            &request.dependencies,
+            &request.fingerprint,
+        )
+    });
+    write_checkpoint(
+        &checkpoint,
+        Some(&request.run_id),
+        &request.fingerprint,
+        &request.dependencies,
+        &request.step,
+        &outcome,
+    )?;
+    drop(claim);
+    Ok(())
+}
+
+fn start_or_reconcile_worker(
+    plan: &AgentTaskPlan,
+    step: &AgentTaskArtifactPostprocessStep,
+    run_id: Option<&str>,
+    outcomes: &[AgentTaskOutcome],
+    fingerprint: &str,
+) -> std::result::Result<AgentTaskOutcome, String> {
+    let run_id = run_id.unwrap_or("unrecorded-run");
+    let root = postprocess_root(Some(run_id), &step.id);
+    std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    let request_path = root.join("request.json");
+    let request = PostprocessWorkerRequest {
+        schema: WORKER_REQUEST_SCHEMA.to_string(),
+        run_id: run_id.to_string(),
+        step: step.clone(),
+        fingerprint: fingerprint.to_string(),
+        dependencies: outcomes.to_vec(),
+        plan_id: plan.plan_id.clone(),
+    };
+    write_json_atomically(&request_path, &request).map_err(|error| error.message)?;
+    #[cfg(test)]
+    run_postprocess_worker(&request_path).map_err(|error| error.message)?;
+    #[cfg(not(test))]
+    {
+        let worker = std::env::var_os("HOMEBOY_POSTPROCESS_WORKER")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_exe().expect("current Homeboy executable"));
+        Command::new(worker)
+            .args(["self", "postprocess-worker", "--request"])
+            .arg(&request_path)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+    }
+    let checkpoint = postprocess_checkpoint_path(Some(run_id), &step.id);
+    for _ in 0..3000 {
+        if let Some(outcome) = read_checkpoint(&checkpoint, Some(run_id), &step.id, fingerprint) {
+            return Ok(outcome);
+        }
+        if claim_is_recoverable(&postprocess_claim_path(Some(run_id), &step.id)) {
+            // The worker died before completion. A subsequent scheduler pass will
+            // discard the incomplete attempt and start a fresh worker.
+            return Err("artifact postprocess worker died before completion".to_string());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err("artifact postprocess worker did not complete before scheduler wait limit".to_string())
 }
 
 fn failed_dependency_message(
@@ -212,8 +317,12 @@ fn execute_postprocess_step(
         }
         Err(error) => postprocess_failure_outcome(step, &error.message),
     };
-    let final_output = root.join("output");
-    let outcome = rebase_outcome_paths(outcome, &output, &final_output);
+    // Each attempt receives a permanent version directory. Consumers resolve the
+    // small `current.json` pointer; no output directory is ever replaced.
+    let version = root
+        .join("versions")
+        .join(attempt.file_name().expect("attempt id"));
+    let outcome = rebase_outcome_paths(outcome, &output, &version);
     let completion = PostprocessCompletion {
         schema: COMPLETION_SCHEMA.to_string(),
         run_id: run_id.unwrap_or("unrecorded-run").to_string(),
@@ -293,7 +402,7 @@ fn recover_completed_attempt(
             }
         };
         let staged_output = attempt.join("output");
-        let promoted_output = root.join("output");
+        let promoted_output = promoted_output_path(&root, &completion.output_digest);
         let staged_matches = output_digest(&staged_output)
             .map(|digest| digest == completion.output_digest)
             .unwrap_or(false);
@@ -341,28 +450,60 @@ fn promote_attempt(
     std::fs::create_dir_all(root).map_err(|error| {
         homeboy_core::Error::internal_io(error.to_string(), Some(root.display().to_string()))
     })?;
-    let output = root.join("output");
-    if output_digest(&output).ok().as_deref() == Some(&completion.output_digest) {
+    let version = root
+        .join("versions")
+        .join(attempt.file_name().expect("attempt id"));
+    if output_digest(&version).ok().as_deref() == Some(&completion.output_digest) {
+        write_current_pointer(root, &version, completion)?;
         return Ok(());
     }
-    let previous = root.join(format!("output.previous-{}", uuid::Uuid::new_v4()));
-    if output.exists() {
-        std::fs::rename(&output, &previous).map_err(|error| {
-            homeboy_core::Error::internal_io(error.to_string(), Some(output.display().to_string()))
+    if version.exists() {
+        return Err(homeboy_core::Error::internal_unexpected(
+            "postprocess artifact version already exists with a different digest",
+        ));
+    }
+    if let Some(parent) = version.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            homeboy_core::Error::internal_io(error.to_string(), Some(parent.display().to_string()))
         })?;
     }
-    std::fs::rename(&staged, &output).map_err(|error| {
-        homeboy_core::Error::internal_io(error.to_string(), Some(output.display().to_string()))
+    std::fs::rename(&staged, &version).map_err(|error| {
+        homeboy_core::Error::internal_io(error.to_string(), Some(version.display().to_string()))
     })?;
-    if previous.exists() {
-        std::fs::remove_dir_all(&previous).map_err(|error| {
-            homeboy_core::Error::internal_io(
-                error.to_string(),
-                Some(previous.display().to_string()),
-            )
-        })?;
-    }
+    write_current_pointer(root, &version, completion)?;
     Ok(())
+}
+
+fn promoted_output_path(root: &Path, digest: &str) -> PathBuf {
+    let pointer = root.join("current.json");
+    serde_json::from_slice::<PostprocessArtifactPointer>(
+        &std::fs::read(pointer).unwrap_or_default(),
+    )
+    .ok()
+    .filter(|value| value.output_digest == digest)
+    .map(|value| root.join(value.version))
+    .unwrap_or_else(|| root.join("missing-version"))
+}
+
+fn write_current_pointer(
+    root: &Path,
+    version: &Path,
+    completion: &PostprocessCompletion,
+) -> homeboy_core::Result<()> {
+    let relative = version
+        .strip_prefix(root)
+        .unwrap_or(version)
+        .to_string_lossy()
+        .to_string();
+    write_json_atomically(
+        &root.join("current.json"),
+        &PostprocessArtifactPointer {
+            schema: "homeboy/agent-task-postprocess-artifact-pointer/v1".to_string(),
+            version: relative,
+            output_digest: completion.output_digest.clone(),
+            fingerprint: completion.fingerprint.clone(),
+        },
+    )
 }
 
 fn output_digest(path: &Path) -> homeboy_core::Result<String> {
@@ -595,9 +736,28 @@ struct PostprocessCompletion {
     outcome: AgentTaskOutcome,
 }
 
+#[derive(Serialize, Deserialize)]
+struct PostprocessArtifactPointer {
+    schema: String,
+    version: String,
+    output_digest: String,
+    fingerprint: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PostprocessWorkerRequest {
+    schema: String,
+    run_id: String,
+    plan_id: String,
+    step: AgentTaskArtifactPostprocessStep,
+    fingerprint: String,
+    dependencies: Vec<AgentTaskOutcome>,
+}
+
 const CHECKPOINT_SCHEMA: &str = "homeboy/agent-task-postprocess-checkpoint/v2";
 const CLAIM_SCHEMA: &str = "homeboy/agent-task-postprocess-claim/v2";
 const COMPLETION_SCHEMA: &str = "homeboy/agent-task-postprocess-completion/v1";
+const WORKER_REQUEST_SCHEMA: &str = "homeboy/agent-task-postprocess-worker-request/v1";
 const CLAIM_STALE_AFTER_SECS: u64 = 300;
 const CLAIM_HEARTBEAT_INTERVAL_SECS: u64 = 1;
 
@@ -690,15 +850,26 @@ fn acquire_claim_mutation(path: &Path) -> std::result::Result<ClaimMutationGuard
 }
 
 fn claim_is_recoverable(path: &Path) -> bool {
+    // A crash while creating or rewriting a claim can leave an empty/truncated
+    // file. It has no valid live owner, so a contender can safely replace it.
     std::fs::read(path)
         .ok()
         .and_then(|raw| serde_json::from_slice::<PostprocessClaim>(&raw).ok())
-        .is_some_and(|claim| {
-            claim.schema == CLAIM_SCHEMA
-                && now_unix_secs().saturating_sub(claim.heartbeat_unix_secs)
-                    > CLAIM_STALE_AFTER_SECS
-                && !claim_owner_is_alive(claim.owner_pid)
-        })
+        .map(|claim| claim.schema == CLAIM_SCHEMA && !claim_owner_is_alive(claim.owner_pid))
+        .unwrap_or(true)
+}
+
+fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> homeboy_core::Result<()> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
+        homeboy_core::Error::internal_json(error.to_string(), Some(path.display().to_string()))
+    })?;
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    std::fs::write(&temporary, bytes).map_err(|error| {
+        homeboy_core::Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
+    })?;
+    std::fs::rename(temporary, path).map_err(|error| {
+        homeboy_core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
+    })
 }
 
 fn heartbeat_claim(
@@ -1114,7 +1285,7 @@ mod tests {
     }
 
     #[test]
-    fn adopts_completion_after_crash_before_checkpoint_without_reinvoking_helper() {
+    fn worker_completion_survives_scheduler_crash_without_reinvoking_helper() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let step = AgentTaskArtifactPostprocessStep {
                 id: "compose".to_string(),
@@ -1142,14 +1313,38 @@ mod tests {
             std::fs::create_dir_all(root.join("output")).expect("old output");
             std::fs::write(root.join("output/old.txt"), "old").expect("old output");
 
-            // This models a process death immediately after durable completion/promotion and before checkpointing.
-            execute_postprocess_step(&step, Some("crash-run"), &[], &identity);
+            // The worker has already invoked the helper and durably recorded its
+            // completion. Removing its checkpoint models a scheduler dying before
+            // it can observe the worker result; recovery must adopt, never rerun.
+            let request = root.join("request.json");
+            write_json_atomically(
+                &request,
+                &PostprocessWorkerRequest {
+                    schema: WORKER_REQUEST_SCHEMA.to_string(),
+                    run_id: "crash-run".to_string(),
+                    plan_id: plan.plan_id.clone(),
+                    step: step.clone(),
+                    fingerprint: identity.clone(),
+                    dependencies: Vec::new(),
+                },
+            )
+            .expect("worker request");
+            run_postprocess_worker(&request).expect("worker completion");
+            std::fs::remove_file(postprocess_checkpoint_path(Some("crash-run"), &step.id))
+                .expect("scheduler did not resume");
             assert!(
-                !root.join("output/old.txt").exists(),
-                "promotion replaces prior output atomically"
+                root.join("output/old.txt").exists(),
+                "prior artifact versions remain immutable"
+            );
+            let pointer: PostprocessArtifactPointer =
+                serde_json::from_slice(&std::fs::read(root.join("current.json")).expect("pointer"))
+                    .expect("pointer json");
+            assert!(
+                root.join(&pointer.version).is_dir(),
+                "pointer atomically selects an immutable version"
             );
             assert_eq!(
-                std::fs::read_to_string(root.join("output/count")).expect("count"),
+                std::fs::read_to_string(root.join(&pointer.version).join("count")).expect("count"),
                 "x"
             );
             std::fs::create_dir_all(root.join("staging/incomplete")).expect("incomplete stage");
@@ -1182,7 +1377,7 @@ mod tests {
                 AgentTaskOutcomeStatus::Succeeded
             );
             assert_eq!(
-                std::fs::read_to_string(root.join("output/count")).expect("count"),
+                std::fs::read_to_string(root.join(&pointer.version).join("count")).expect("count"),
                 "x",
                 "completed helper is invoked once"
             );
@@ -1274,6 +1469,11 @@ mod tests {
         assert!(
             acquire_claim(&path).is_ok(),
             "dead stale claim is recoverable"
+        );
+        std::fs::write(&path, []).expect("empty crashed claim");
+        assert!(
+            acquire_claim(&path).is_ok(),
+            "an empty claim from a crashed owner is recoverable"
         );
     }
 
