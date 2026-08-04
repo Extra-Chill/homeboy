@@ -132,7 +132,7 @@ pub fn route_after_parse_with_provenance(
     // Keep the readiness verdict, not just the selected id: when no runner is
     // eligible the reasons and remediation commands are the only thing that can
     // explain a local fallback to the operator.
-    let lab_readiness = if lab_command.is_some() && cli.runner.is_none() {
+    let mut lab_readiness = if lab_command.is_some() && cli.runner.is_none() {
         runners::lab_runner_readiness().ok()
     } else {
         None
@@ -146,6 +146,17 @@ pub fn route_after_parse_with_provenance(
     } else {
         None
     };
+    if inferred_runner_id.is_none() && detached_cook_can_queue(cli) {
+        // The first readiness observation is intentionally non-mutating. Before
+        // refusing a hot-machine Cook, reconcile the live Lab inventory: a
+        // terminal runner job may have freed capacity since that observation.
+        let queued_runner_id = runners::refresh_detached_queue_runner()?;
+        lab_readiness = runners::lab_runner_readiness().ok();
+        inferred_runner_id = lab_readiness
+            .as_ref()
+            .and_then(|readiness| readiness.selected_runner_id.clone())
+            .or(queued_runner_id);
+    }
     let deferred_requirements = review_test_deferred_requirements(cli);
     let deferred_runner_incompatible = inferred_runner_id
         .as_deref()
@@ -658,6 +669,17 @@ fn split_placement_coordinator_label(command: &Commands) -> Option<&'static str>
     }
 }
 
+fn detached_cook_can_queue(cli: &Cli) -> bool {
+    cli.detach_after_handoff
+        && !matches!(cli.placement, homeboy::cli_surface::Placement::Local)
+        && matches!(
+            cli.command,
+            Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+                command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
+            })
+        )
+}
+
 /// Explain a Lab placement that cannot be served, without contradicting the
 /// documented guidance.
 ///
@@ -941,6 +963,17 @@ fn run_split_placement_cook(
         return Ok(None);
     }
     let Some(runner_id) = runner_id else {
+        if cli.detach_after_handoff {
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                "a detached Cook requires an eligible Lab runner or reverse-runner durable queue; controller-local execution was not authorized",
+                None,
+                Some(vec![
+                    "Wait for a reverse runner to reconnect or free capacity, then retry.".to_string(),
+                    "Use `--placement local` to explicitly authorize controller execution.".to_string(),
+                ]),
+            ));
+        }
         return Ok(None);
     };
 

@@ -646,6 +646,10 @@ pub enum LabRunnerReadinessState {
     Disconnected,
 }
 
+// A detached admission retry must not turn an operator command into an
+// unbounded sweep across every configured remote runner.
+const DETACHED_QUEUE_REFRESH_LIMIT: usize = 3;
+
 impl LabRunnerReadinessState {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -688,6 +692,62 @@ pub fn lab_runner_readiness() -> Result<LabRunnerReadiness> {
         preferred.as_deref(),
         candidates,
     ))
+}
+
+/// Reconcile the configured Lab inventory before admitting a detached Cook to a
+/// reverse runner's durable capacity queue. This is deliberately narrower than
+/// default selection: only a connected, healthy reverse runner at capacity can
+/// accept a broker-queued job without choosing controller-local execution.
+///
+/// `reconcile_status` owns bounded remote status reads and terminal-job
+/// settlement. Refreshing here prevents a stale controller projection from
+/// refusing work that a just-freed runner can accept.
+pub fn refresh_detached_queue_runner() -> Result<Option<String>> {
+    let mut runner_ids = configured_lab_runner_ids()?;
+    runner_ids.sort();
+
+    for runner_id in runner_ids.into_iter().take(DETACHED_QUEUE_REFRESH_LIMIT) {
+        let runner = load(&runner_id)?;
+        let status = connection::reconcile_status(&runner_id)?;
+        let mode = status
+            .session
+            .as_ref()
+            .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
+        let capabilities_ready = runner_capability_inventory(&runner_id)
+            .is_ok_and(|inventory| !inventory.runtime_ids.is_empty());
+        let candidate = DefaultLabRunnerCandidate {
+            id: runner_id,
+            mode,
+            connected: status.connected,
+            capacity: runner.settings.concurrency_limit,
+            stale_daemon: status.stale_daemon.is_some(),
+            active_jobs: status.active_jobs.len(),
+            active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
+            capabilities_ready,
+        };
+        if let Some(runner_id) = detached_queue_runner_from_candidates([candidate]) {
+            return Ok(Some(runner_id));
+        }
+    }
+
+    Ok(None)
+}
+
+fn detached_queue_runner_from_candidates(
+    candidates: impl IntoIterator<Item = DefaultLabRunnerCandidate>,
+) -> Option<String> {
+    candidates.into_iter().find_map(|candidate| {
+        let at_capacity = candidate
+            .capacity
+            .is_some_and(|capacity| candidate.active_jobs >= capacity);
+        (candidate.mode == RunnerTunnelMode::Reverse
+            && candidate.connected
+            && !candidate.stale_daemon
+            && candidate.active_jobs_available
+            && candidate.capabilities_ready
+            && at_capacity)
+            .then_some(candidate.id)
+    })
 }
 
 fn lab_runner_readiness_from_candidates(
@@ -1338,6 +1398,43 @@ mod tests {
             active_jobs_available: true,
             capabilities_ready: true,
         }
+    }
+
+    #[test]
+    fn refreshed_stale_inventory_selects_a_newly_ready_runner() {
+        let mut stale = default_lab_candidate("lab-a", RunnerTunnelMode::Reverse, true);
+        stale.stale_daemon = true;
+        let cached = lab_runner_readiness_from_candidates(None, vec![stale]);
+        assert_eq!(cached.state, LabRunnerReadinessState::Stale);
+        assert!(cached.selected_runner_id.is_none());
+
+        let refreshed = lab_runner_readiness_from_candidates(
+            None,
+            vec![default_lab_candidate(
+                "lab-a",
+                RunnerTunnelMode::Reverse,
+                true,
+            )],
+        );
+        assert_eq!(refreshed.state, LabRunnerReadinessState::ConnectedReady);
+        assert_eq!(refreshed.selected_runner_id.as_deref(), Some("lab-a"));
+    }
+
+    #[test]
+    fn delayed_reverse_runner_is_selected_only_for_durable_capacity_queueing() {
+        let mut full_reverse = default_lab_candidate("lab-queue", RunnerTunnelMode::Reverse, true);
+        full_reverse.capacity = Some(1);
+        full_reverse.active_jobs = 1;
+        assert_eq!(
+            detached_queue_runner_from_candidates(vec![full_reverse.clone()]).as_deref(),
+            Some("lab-queue")
+        );
+
+        full_reverse.mode = RunnerTunnelMode::DirectSsh;
+        assert_eq!(
+            detached_queue_runner_from_candidates(vec![full_reverse]),
+            None
+        );
     }
 
     #[test]
