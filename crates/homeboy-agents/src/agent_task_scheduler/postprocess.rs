@@ -168,6 +168,9 @@ fn start_or_reconcile_worker_with_retry(
     let run_id = run_id.unwrap_or("unrecorded-run");
     let root = postprocess_root(Some(run_id), &step.id);
     std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    if let Some(outcome) = reconcile_existing_worker(step, run_id, fingerprint)? {
+        return Ok(outcome);
+    }
     let request_path = root.join("request.json");
     let request = PostprocessWorkerRequest {
         schema: WORKER_REQUEST_SCHEMA.to_string(),
@@ -248,6 +251,78 @@ fn start_or_reconcile_worker_with_retry(
         thread::sleep(Duration::from_millis(100));
     }
     #[cfg(not(test))]
+    Err("artifact postprocess worker did not complete before scheduler wait limit".to_string())
+}
+
+/// A restarted scheduler must adopt the durable worker it finds. The worker owns
+/// the helper claim, so starting another process before proving that owner dead
+/// would turn a scheduler restart into a competing execution attempt.
+fn reconcile_existing_worker(
+    step: &AgentTaskArtifactPostprocessStep,
+    run_id: &str,
+    fingerprint: &str,
+) -> std::result::Result<Option<AgentTaskOutcome>, String> {
+    let checkpoint = postprocess_checkpoint_path(Some(run_id), &step.id);
+    if let Some(outcome) = read_checkpoint(&checkpoint, Some(run_id), &step.id, fingerprint) {
+        return Ok(Some(outcome));
+    }
+    let worker_path = postprocess_worker_path(Some(run_id), &step.id);
+    let worker = std::fs::read(&worker_path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<PostprocessWorkerSpawn>(&raw).ok())
+        .filter(|worker| worker.schema == WORKER_SPAWN_SCHEMA);
+    if let Some(worker) = worker {
+        if worker_is_alive(&worker) {
+            if let Some(outcome) = wait_for_postprocess_completion(
+                &checkpoint,
+                Some(&worker),
+                Some(run_id),
+                step,
+                fingerprint,
+            )? {
+                return Ok(Some(outcome));
+            }
+        }
+        if let Ok(outcome) = recover_completed_attempt(step, Some(run_id), fingerprint) {
+            return Ok(Some(outcome));
+        }
+        let _ = std::fs::remove_file(&worker_path);
+    } else if let Ok(outcome) = recover_completed_attempt(step, Some(run_id), fingerprint) {
+        return Ok(Some(outcome));
+    }
+
+    let claim = postprocess_claim_path(Some(run_id), &step.id);
+    if claim.exists() {
+        if claim_is_recoverable(&claim) {
+            let _ = std::fs::remove_file(&claim);
+        } else if let Some(outcome) =
+            wait_for_postprocess_completion(&checkpoint, None, Some(run_id), step, fingerprint)?
+        {
+            return Ok(Some(outcome));
+        }
+    }
+    Ok(None)
+}
+
+fn wait_for_postprocess_completion(
+    checkpoint: &Path,
+    worker: Option<&PostprocessWorkerSpawn>,
+    run_id: Option<&str>,
+    step: &AgentTaskArtifactPostprocessStep,
+    fingerprint: &str,
+) -> std::result::Result<Option<AgentTaskOutcome>, String> {
+    let claim = postprocess_claim_path(run_id, &step.id);
+    for _ in 0..3000 {
+        if let Some(outcome) = read_checkpoint(checkpoint, run_id, &step.id, fingerprint) {
+            return Ok(Some(outcome));
+        }
+        if worker.is_some_and(|worker| !worker_is_alive(worker))
+            || worker.is_none() && (!claim.exists() || claim_is_recoverable(&claim))
+        {
+            return Ok(None);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
     Err("artifact postprocess worker did not complete before scheduler wait limit".to_string())
 }
 

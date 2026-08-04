@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,8 @@ use homeboy::core::artifacts::{
 use homeboy_engine_primitives::content_hash;
 
 struct NoopExecutor;
+
+static POSTPROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 impl AgentTaskExecutorAdapter for NoopExecutor {
     fn execute(
@@ -61,18 +63,9 @@ fn install_helper(home: &std::path::Path) {
     std::env::set_var(ARTIFACT_POSTPROCESS_HELPER_REGISTRY_ENV, registry);
 }
 
-#[test]
-fn scheduler_recovers_a_worker_killed_before_claim_creation() {
-    let home = tempfile::tempdir().expect("home");
-    let artifact_root = home.path().join("artifacts");
-    homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));
-    {
-        install_helper(home.path());
-        std::env::set_var("HOMEBOY_ARTIFACT_ROOT", artifact_root);
-        std::env::set_var("HOMEBOY_POSTPROCESS_WORKER", env!("CARGO_BIN_EXE_homeboy"));
-        std::env::set_var("HOMEBOY_POSTPROCESS_WORKER_CLAIM_DELAY_MS", "1500");
-
-        let step = AgentTaskArtifactPostprocessStep {
+fn postprocess_plan() -> AgentTaskPlan {
+    AgentTaskPlan {
+        postprocess_steps: vec![AgentTaskArtifactPostprocessStep {
             id: "compose".to_string(),
             depends_on: Vec::new(),
             required: true,
@@ -98,11 +91,24 @@ fn scheduler_recovers_a_worker_killed_before_claim_creation() {
                 reviewer_refs: Vec::new(),
                 metadata: serde_json::json!({}),
             },
-        };
-        let plan = AgentTaskPlan {
-            postprocess_steps: vec![step],
-            ..AgentTaskPlan::new("startup-race", Vec::new())
-        };
+        }],
+        ..AgentTaskPlan::new("startup-race", Vec::new())
+    }
+}
+
+#[test]
+fn scheduler_recovers_a_worker_killed_before_claim_creation() {
+    let _lock = POSTPROCESS_TEST_LOCK.lock().expect("test lock");
+    let home = tempfile::tempdir().expect("home");
+    let artifact_root = home.path().join("artifacts");
+    homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));
+    {
+        install_helper(home.path());
+        std::env::set_var("HOMEBOY_ARTIFACT_ROOT", artifact_root);
+        std::env::set_var("HOMEBOY_POSTPROCESS_WORKER", env!("CARGO_BIN_EXE_homeboy"));
+        std::env::set_var("HOMEBOY_POSTPROCESS_WORKER_CLAIM_DELAY_MS", "1500");
+
+        let plan = postprocess_plan();
         let root = homeboy::core::artifacts::root()
             .expect("artifact root")
             .join("agent-task/postprocess/race-run/compose");
@@ -168,5 +174,52 @@ fn scheduler_recovers_a_worker_killed_before_claim_creation() {
             "replacement worker completed after the empty pre-claim recovery"
         );
     }
+    homeboy::core::set_artifact_root_override(None);
+}
+
+#[test]
+fn scheduler_restart_adopts_a_live_worker_without_reinvoking_helper() {
+    let _lock = POSTPROCESS_TEST_LOCK.lock().expect("test lock");
+    let home = tempfile::tempdir().expect("home");
+    let artifact_root = home.path().join("artifacts");
+    homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));
+    install_helper(home.path());
+    std::env::set_var("HOMEBOY_ARTIFACT_ROOT", artifact_root);
+    std::env::set_var("HOMEBOY_POSTPROCESS_WORKER", env!("CARGO_BIN_EXE_homeboy"));
+    std::env::set_var("HOMEBOY_POSTPROCESS_WORKER_CLAIM_DELAY_MS", "1500");
+
+    let root = homeboy::core::artifacts::root()
+        .expect("artifact root")
+        .join("agent-task/postprocess/restart-run/compose");
+    let first = thread::spawn(|| {
+        AgentTaskScheduler::new(NoopExecutor)
+            .with_run_id("restart-run")
+            .run(postprocess_plan())
+    });
+    let worker_file = root.join("worker.json");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !worker_file.is_file() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        worker_file.is_file(),
+        "first scheduler persisted its worker"
+    );
+
+    let restarted = thread::spawn(|| {
+        AgentTaskScheduler::new(NoopExecutor)
+            .with_run_id("restart-run")
+            .run(postprocess_plan())
+    });
+    let first = first.join().expect("first scheduler");
+    let restarted = restarted.join().expect("restarted scheduler");
+
+    assert_eq!(first.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(restarted.status, AgentTaskAggregateStatus::Succeeded);
+    let versions = std::fs::read_dir(root.join("versions"))
+        .expect("versions")
+        .count();
+    assert_eq!(versions, 1, "live worker helper was invoked once");
+    assert!(root.join("checkpoint.json").is_file());
     homeboy::core::set_artifact_root_override(None);
 }
