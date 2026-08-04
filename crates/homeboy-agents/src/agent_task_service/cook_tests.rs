@@ -1784,7 +1784,12 @@ impl CandidateAdoptionFixture {
             assert!(output.status.success());
             String::from_utf8(output.stdout).unwrap().trim().to_string()
         };
-        git(&source, &["init"]);
+        // The fixture declares `base: "main"`, and promotion verifies that base
+        // exists on origin. Without an explicit initial branch this repo inherits
+        // the host's `init.defaultBranch` — still `master` on stock git — so the
+        // declared base never resolves and every adoption test fails on a machine
+        // that has not opted into `main`.
+        git(&source, &["init", "--initial-branch=main"]);
         git(&source, &["config", "user.email", "agent@example.test"]);
         git(&source, &["config", "user.name", "Agent"]);
         std::fs::write(source.join("lib.rs"), "base\n").unwrap();
@@ -3870,7 +3875,7 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
                 .trim()
                 .to_string()
         };
-        git(&source, &["init"]);
+        git(&source, &["init", "--initial-branch=main"]);
         git(&source, &["config", "user.email", "agent@example.test"]);
         git(&source, &["config", "user.name", "Agent"]);
         std::fs::write(source.join("lib.rs"), "base\n").expect("write base");
