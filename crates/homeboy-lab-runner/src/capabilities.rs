@@ -1,6 +1,5 @@
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
-use std::time::Duration;
 
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
@@ -53,6 +52,14 @@ pub fn prepare_lab_runner_capability(
     for tool in contract.required_tools {
         push_unique(&mut required_tools, tool);
     }
+    for capability in &contract.required_capabilities {
+        let capability = capability.trim();
+        if !capability.is_empty()
+            && !homeboy_core::lab_contract::lab_capability_is_pipeline_enforced(capability)
+        {
+            push_unique(&mut required_tools, RunnerRequiredTool::new(capability));
+        }
+    }
 
     PreparedLabRunnerCapability {
         command: contract.command,
@@ -66,8 +73,8 @@ pub fn evaluate_lab_runner_capabilities_for_runner(
     plan: &PreparedLabRunnerCapability,
     mode: LabRunnerGateMode,
 ) -> Result<LabRunnerGateDecision> {
-    let capabilities =
-        RunnerCapabilitySnapshot::from_runner_probe(runner, &RunnerCapabilityPreflight::default())?;
+    let preflight: RunnerCapabilityPreflight = plan.clone().into();
+    let capabilities = RunnerCapabilitySnapshot::from_runner_probe(runner, &preflight)?;
     Ok(evaluate_lab_runner_capabilities(
         &runner.id,
         plan,
@@ -554,16 +561,21 @@ fn evaluate_lab_runner_capabilities(
     capabilities: &RunnerCapabilitySnapshot,
     mode: LabRunnerGateMode,
 ) -> LabRunnerGateDecision {
+    let preflight: RunnerCapabilityPreflight = plan.clone().into();
+    // This is intentionally the execution validator, not a parallel evaluator.
+    // Admission is eligible only when the exact preflight execution will run passes.
+    if validate_runner_capability_preflight(runner_id, &preflight, capabilities, &HashMap::new())
+        .is_ok()
+    {
+        return LabRunnerGateDecision::Eligible;
+    }
+
     let missing_tools = plan
         .required_tools
         .iter()
         .filter(|tool| !capabilities.has_tool(tool))
         .cloned()
         .collect::<Vec<_>>();
-
-    if missing_tools.is_empty() {
-        return LabRunnerGateDecision::Eligible;
-    }
 
     let missing = tool_list(&missing_tools);
     let reason = match mode {
@@ -761,6 +773,7 @@ mod tests {
     use homeboy_core::gate::HOMEBOY_GATE_RESULT_SCHEMA;
     use homeboy_core::server::{RunnerPolicy, RunnerSettings};
     use std::fs;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn ssh_runner() -> Runner {
@@ -808,6 +821,7 @@ mod tests {
                 RunnerRequiredTool::new("language-runtime"),
                 RunnerRequiredTool::new("dependency-manager"),
                 RunnerRequiredTool::new("container-runtime"),
+                RunnerRequiredTool::new("browser-runner"),
             ]
         );
     }
@@ -834,6 +848,31 @@ mod tests {
                 RunnerRequiredTool::new("workspace-manager"),
             ]
         );
+    }
+
+    #[test]
+    fn capability_gate_uses_the_execution_preflight_for_declared_browser_requirements() {
+        let plan = prepare_lab_runner_capability(LabRunnerCapabilityContract {
+            command: "browser test",
+            required_tools: Vec::new(),
+            required_capabilities: vec!["browser-runner".to_string()],
+        });
+        let capabilities = RunnerCapabilitySnapshot {
+            tools: [RunnerRequiredTool::git()].into_iter().collect(),
+            commands: BTreeSet::new(),
+            tool_capabilities: BTreeSet::new(),
+            failed_toolchain_probes: HashMap::new(),
+            components: BTreeSet::new(),
+        };
+
+        let decision = evaluate_lab_runner_capabilities(
+            "lab",
+            &plan,
+            &capabilities,
+            LabRunnerGateMode::Explicit,
+        );
+
+        assert!(matches!(decision, LabRunnerGateDecision::Missing { .. }));
     }
 
     #[test]

@@ -193,7 +193,7 @@ pub fn is_internal_control_env(name: &str) -> bool {
 }
 
 /// A tool that must be present on a runner for a capability to be satisfied.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RunnerRequiredTool {
     id: String,
 }
@@ -217,7 +217,7 @@ impl RunnerRequiredTool {
 }
 
 /// A tool + command capability requirement probed on a runner.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerToolCapabilityRequirement {
     pub tool: String,
     pub command: String,
@@ -226,7 +226,7 @@ pub struct RunnerToolCapabilityRequirement {
 }
 
 /// Extension-owned command that proves a runner toolchain is usable.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerToolchainReadinessProbe {
     pub extension_id: String,
     pub id: String,
@@ -237,7 +237,7 @@ pub struct RunnerToolchainReadinessProbe {
 
 /// A resolved set of capability requirements to preflight before running a
 /// command on a runner.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerCapabilityPreflight {
     pub command: String,
     pub required_tools: Vec<RunnerRequiredTool>,
