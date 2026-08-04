@@ -135,7 +135,6 @@ pub mod keychain;
 pub mod lab_offload;
 pub mod lab_routing;
 pub mod lab_workspace_provenance;
-pub mod local_permissions;
 pub mod operation_record;
 pub use homeboy_lifecycle_contract::lifecycle;
 pub mod loop_lifecycle;
@@ -158,7 +157,6 @@ pub mod performance_hotspots;
 pub use homeboy_engine_primitives::phase_timing;
 pub use homeboy_gate_contract::plan;
 pub mod process;
-pub mod process_activity;
 // product_identity moved to the internal `homeboy-product-identity` crate.
 // Re-exported so `crate::product_identity::*` call sites keep working.
 pub use homeboy_product_identity as product_identity;
@@ -172,8 +170,6 @@ pub use homeboy_redaction as redaction;
 pub mod refactor_transform_provider;
 pub mod release_provider;
 pub mod release_set;
-pub mod report_compare;
-pub(crate) mod report_compare_render;
 pub mod repository_integrity;
 pub mod resource_cleanup_intent;
 pub mod resource_lifecycle_index;

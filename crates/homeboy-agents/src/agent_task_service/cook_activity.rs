@@ -28,7 +28,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use homeboy_core::process_activity::{self, DescendantActivity};
+use super::process_activity::{self, DescendantActivity};
 
 /// A single sample of what a running Cook's provider is doing.
 ///
