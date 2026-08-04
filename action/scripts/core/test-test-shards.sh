@@ -83,6 +83,15 @@ printf 'PASS: missing, mismatched, failed, and timed-out shards fail closed\n'
 
 grep -F 'needs: [reconcile, reconcile-test-shards, plan]' "${WORKFLOW}" >/dev/null || { printf 'FAIL: policy does not wait for the sharded Test verdict and pinned plan\n'; exit 1; }
 grep -F "inputs.test-shards == '1' || needs.reconcile-test-shards.result == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: policy can bypass a failed sharded Test verdict\n'; exit 1; }
+if [ "$(grep -c 'uses: taiki-e/install-action@nextest' "${WORKFLOW}")" -ne 4 ]; then
+  printf 'FAIL: Rust candidate and baseline plan/replay jobs do not all install cargo-nextest\n'; exit 1
+fi
+if [ "$(grep -c "continue-on-error: true" "${WORKFLOW}")" -lt 4 ]; then
+  printf 'FAIL: inventory planning transport is not isolated from normal Test verdict enforcement\n'; exit 1
+fi
+if [ "$(grep -c "HOMEBOY_RUST_NEXTEST_FALLBACK: '0'" "${WORKFLOW}")" -ne 4 ] || [ "$(grep -c 'NEXTEST_PROFILE: ci' "${WORKFLOW}")" -ne 4 ]; then
+  printf 'FAIL: Rust shard jobs do not require nextest with the CI profile\n'; exit 1
+fi
 # The literal workflow expression is the contract.
 # shellcheck disable=SC2016
 grep -F 'baseline_result="$(jq -r --arg command "${COMMAND}"' "${WORKFLOW}" >/dev/null || { printf 'FAIL: differential baseline metadata is not derived from its aggregate result\n'; exit 1; }

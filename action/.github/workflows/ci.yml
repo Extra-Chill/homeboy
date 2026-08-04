@@ -633,10 +633,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
+      - name: Install cargo-nextest for Rust shard planning
+        if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
+        uses: taiki-e/install-action@nextest
       - name: Materialize canonical candidate Test inventory
+        continue-on-error: true
         env:
           HOMEBOY_TEST_INVENTORY_ONLY: '1'
           HOMEBOY_TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
+          HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
+          NEXTEST_PROFILE: ci
         uses: ./.homeboy-action
         with:
           binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
@@ -689,6 +695,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
+      - name: Install cargo-nextest for Rust shard replay
+        if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
+        uses: taiki-e/install-action@nextest
       - uses: actions/download-artifact@v7
         with:
           name: homeboy-test-shard-plan-${{ github.run_attempt }}
@@ -698,6 +707,8 @@ jobs:
         continue-on-error: true
         env:
           HOMEBOY_TEST_SHARD_MANIFEST: ${{ github.workspace }}/homeboy-test-shard.json
+          HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
+          NEXTEST_PROFILE: ci
         uses: ./.homeboy-action
         with:
           binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
@@ -819,10 +830,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
+      - name: Install cargo-nextest for Rust baseline shard planning
+        if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
+        uses: taiki-e/install-action@nextest
       - name: Materialize canonical baseline Test inventory
+        continue-on-error: true
         env:
           HOMEBOY_TEST_INVENTORY_ONLY: '1'
           HOMEBOY_TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
+          HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
+          NEXTEST_PROFILE: ci
         uses: ./.homeboy-action
         with:
           binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
@@ -876,6 +893,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash .homeboy-action/scripts/core/download-candidate-binary.sh
+      - name: Install cargo-nextest for Rust baseline shard replay
+        if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
+        uses: taiki-e/install-action@nextest
       - uses: actions/download-artifact@v7
         with:
           name: homeboy-baseline-test-shard-plan-${{ github.run_attempt }}
@@ -884,6 +904,8 @@ jobs:
         continue-on-error: true
         env:
           HOMEBOY_TEST_SHARD_MANIFEST: ${{ github.workspace }}/homeboy-test-shard.json
+          HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
+          NEXTEST_PROFILE: ci
         uses: ./.homeboy-action
         with:
           binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
