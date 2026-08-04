@@ -1850,6 +1850,7 @@ mod tests {
                 source_refs: Vec::new(),
                 workspace: AgentTaskWorkspace::default(),
                 component_contracts: Vec::new(),
+                runtime_tools: Vec::new(),
                 policy: AgentTaskPolicy::default(),
                 limits: AgentTaskLimits::default(),
                 expected_artifacts: Vec::new(),
