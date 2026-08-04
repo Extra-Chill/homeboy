@@ -1,17 +1,11 @@
 #![cfg(test)]
 
-use std::collections::HashMap;
 use std::fs;
 
 use serde_json::json;
 
-use super::persistence::recovered_terminal_from_result;
-use super::store::{
-    LinkedDurableRunResolution, RecoveredTerminalJob, ADMISSION_RESERVATION_LEASE_MS,
-};
+use super::store::{LinkedDurableRunResolution, ADMISSION_RESERVATION_LEASE_MS};
 use super::*;
-use crate::secret_env_plan::SecretEnvPlan;
-use crate::source_snapshot::SourceSnapshot;
 use crate::Error;
 use uuid::Uuid;
 
