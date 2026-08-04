@@ -1783,6 +1783,42 @@ pub fn terminal_review_form_continuation_is_eligible(
     Ok(retryable_review_form_terminal_failure(record, &aggregate))
 }
 
+/// Validate the read-only admission boundary for a reconstructed continuation.
+/// This deliberately stops before recipe/lifecycle materialization, transport
+/// preparation, provider dispatch, and finalization.
+pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    let moving_base_continuation = agent_task_lifecycle::status(&options.initial_run_id)
+        .ok()
+        .and_then(|record| record.metadata.get("cook_moving_base_recovery").cloned())
+        .is_some();
+    let verification_pending_continuation = agent_task_lifecycle::status(&options.initial_run_id)
+        .ok()
+        .is_some_and(|record| {
+            record
+                .metadata
+                .pointer("/latest_promotion/status")
+                .and_then(Value::as_str)
+                == Some("verification_pending")
+        });
+    let authenticated_historical_review_continuation =
+        authenticated_historical_review_form_workspace(options)?;
+    if !moving_base_continuation
+        && !verification_pending_continuation
+        && !authenticated_historical_review_continuation
+        && options.attempt_dispatcher.is_none()
+        && options.provider_command.is_none()
+        && options.provider_invocation.is_none()
+    {
+        crate::agent_task_promotion::preflight_configured_workspace_provider(&options.to_worktree)?;
+    }
+    if cook_attempt_needs_execution(&options.initial_run_id)
+        && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
+    {
+        validate_cook_workspace(options)?;
+    }
+    validate_cook_candidate_group(&options.initial_plan)
+}
+
 pub fn run_cook<E>(
     options: AgentTaskCookServiceOptions,
     executor: E,
