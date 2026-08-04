@@ -5,12 +5,14 @@ use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::project::Project;
 
+use super::lifecycle::DeployObservation;
 use super::types::{ComponentDeployResult, DeployConfig, DeployOrchestrationResult, DeploySummary};
 
 pub(super) fn run_if_configured(
     project_id: &str,
     project: &Project,
     config: &DeployConfig,
+    mut observation: Option<&mut DeployObservation>,
 ) -> Result<Option<DeployOrchestrationResult>> {
     let component_ids = if config.component_ids.is_empty() && config.check {
         project
@@ -30,7 +32,14 @@ pub(super) fn run_if_configured(
     }
     let components = component_ids
         .iter()
-        .map(|id| homeboy_core::project::resolve_project_component(project, id))
+        .map(|id| {
+            super::planning::resolve_project_component(
+                project,
+                id,
+                None,
+                config.prepared_projection.as_ref(),
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
     let provider_count = components
         .iter()
@@ -45,10 +54,16 @@ pub(super) fn run_if_configured(
         ));
     }
     if provider_count == components.len() {
-        let results = components
-            .iter()
-            .map(|component| run_component(project_id, project, component, config))
-            .collect::<Result<Vec<_>>>()?;
+        let mut results = Vec::with_capacity(components.len());
+        for component in &components {
+            results.push(run_component(
+                project_id,
+                project,
+                component,
+                config,
+                observation.as_deref_mut(),
+            )?);
+        }
         let failed = results
             .iter()
             .filter(|result| result.status == "failed")
@@ -73,6 +88,7 @@ fn run_component(
     project: &Project,
     component: &Component,
     config: &DeployConfig,
+    mut observation: Option<&mut DeployObservation>,
 ) -> Result<ComponentDeployResult> {
     let project_attachment = project
         .components
@@ -146,6 +162,13 @@ fn run_component(
         .as_ref()
         .and_then(|layered| layered.result_schema.as_deref());
     let dry_run = config.dry_run || config.check;
+    if !dry_run {
+        // Provider execution is the generic contract's first operation that may
+        // mutate a provider-owned target; provider internals remain opaque.
+        if let Some(observation) = observation.as_deref_mut() {
+            observation.phase("provider_execute", true)?;
+        }
+    }
     let run = if layered.is_some() {
         let payload = layered_payload(
             component,
@@ -179,6 +202,11 @@ fn run_component(
             dry_run,
         )
     }?;
+    if !dry_run {
+        if let Some(observation) = observation.as_deref_mut() {
+            observation.phase("verify", true)?;
+        }
+    }
     let evidence = run.output.unwrap_or_default();
     let output = format!("{}{}", evidence.stdout, evidence.stderr);
     // Layered input can contain target secrets. Provider output is therefore not
@@ -652,10 +680,14 @@ mod tests {
             );
             let project = provider_project(repository.path());
 
-            let result =
-                run_if_configured("site", &project, &DeployConfig::check_all_no_pull_head())
-                    .expect("provider check")
-                    .expect("provider-owned result");
+            let result = run_if_configured(
+                "site",
+                &project,
+                &DeployConfig::check_all_no_pull_head(),
+                None,
+            )
+            .expect("provider check")
+            .expect("provider-owned result");
 
             assert_eq!(result.summary.total, 1);
             assert_eq!(result.results[0].status, "validated");
@@ -674,9 +706,13 @@ mod tests {
             write_provider_extension(home.path(), None);
             let project = provider_project(repository.path());
 
-            let error =
-                run_if_configured("site", &project, &DeployConfig::check_all_no_pull_head())
-                    .expect_err("missing check capability must be explicit");
+            let error = run_if_configured(
+                "site",
+                &project,
+                &DeployConfig::check_all_no_pull_head(),
+                None,
+            )
+            .expect_err("missing check capability must be explicit");
 
             assert_eq!(
                 error.details["field"],
@@ -713,8 +749,13 @@ mod tests {
             ..Default::default()
         };
 
-        let error = run_if_configured("site", &project, &DeployConfig::check_all_no_pull_head())
-            .expect_err("mixed project-wide check must not omit provider components");
+        let error = run_if_configured(
+            "site",
+            &project,
+            &DeployConfig::check_all_no_pull_head(),
+            None,
+        )
+        .expect_err("mixed project-wide check must not omit provider components");
 
         assert_eq!(error.details["field"], "component_ids");
         assert_eq!(error.details["id"], "site");

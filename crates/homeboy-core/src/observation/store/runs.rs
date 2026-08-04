@@ -75,19 +75,39 @@ impl ObservationStore {
             .run_context
             .clone()
             .with_missing_from(RunContext::subprocess_compatibility_from_env());
-        self.start_run_with_context(run, context)
+        self.start_run_with_context_and_id(run, context, None)
+    }
+
+    /// Start a run under a caller-reserved identifier for a lifecycle that must
+    /// correlate durable records across subsystems.
+    pub fn start_run_with_id(&self, run: NewRunRecord, id: String) -> Result<RunRecord> {
+        let context = run
+            .run_context
+            .clone()
+            .with_missing_from(RunContext::subprocess_compatibility_from_env());
+        self.start_run_with_context_and_id(run, context, Some(id))
     }
 
     pub fn start_run_with_context(
         &self,
+        run: NewRunRecord,
+        context: RunContext,
+    ) -> Result<RunRecord> {
+        self.start_run_with_context_and_id(run, context, None)
+    }
+
+    fn start_run_with_context_and_id(
+        &self,
         mut run: NewRunRecord,
         context: RunContext,
+        requested_id: Option<String>,
     ) -> Result<RunRecord> {
         if let Some(route) = crate::notification_route::current() {
             route.insert_into_metadata(&mut run.metadata_json);
         }
         validate_required("kind", &run.kind)?;
-        let id = Uuid::new_v4().to_string();
+        let id = requested_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        validate_required("id", &id)?;
         let started_at = chrono::Utc::now().to_rfc3339();
         let metadata_json =
             serialize_metadata(&with_run_context_metadata(run.metadata_json, &context))?;

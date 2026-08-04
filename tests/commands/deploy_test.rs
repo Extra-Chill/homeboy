@@ -1,4 +1,4 @@
-use super::{resolve_multi_args, run, DeployArgs};
+use super::{resolve_multi_args, resume_deploy_command, run, DeployArgs};
 use crate::cli_surface::{Cli, Commands};
 use clap::Parser;
 use std::collections::BTreeMap;
@@ -207,6 +207,54 @@ fn deploy_resume_run_id_propagates_to_multi_target_config() {
     let (_, config) = resolve_multi_args(&args).expect("deploy config should resolve");
 
     assert_eq!(config.resume_run_id.as_deref(), Some("run-123"));
+}
+
+#[test]
+fn generated_resume_action_round_trips_all_multi_target_identity_inputs() {
+    let mut config = resolve_multi_args(&deploy_args(|args| {
+        args.component = Some(vec![
+            "component one".to_string(),
+            "component-two".to_string(),
+        ]);
+        args.all = true;
+        args.force = true;
+        args.keep_deps = true;
+        args.no_pull = true;
+        args.allow_stale_source = true;
+        args.allow_downgrade = true;
+        args.head = true;
+    }))
+    .expect("config")
+    .1;
+    config.component_ids = vec!["component one".to_string(), "component-two".to_string()];
+    let projects = vec!["project one".to_string(), "project-two".to_string()];
+    let command = resume_deploy_command(
+        &projects,
+        &config.component_ids,
+        &config,
+        "checkpoint with spaces",
+    );
+    let argv = shlex::split(&command).expect("shell-safe resume command");
+    let cli = Cli::try_parse_from(argv).expect("resume action should parse");
+    let Commands::Deploy(args) = cli.command else {
+        panic!("expected deploy command");
+    };
+    let parsed_projects = args.projects.clone().expect("multi-project targets");
+    let (components, parsed_config) = resolve_multi_args(&args).expect("multi-target config");
+
+    assert_eq!(parsed_projects, projects);
+    assert_eq!(components, config.component_ids);
+    assert_eq!(
+        parsed_config.resume_run_id.as_deref(),
+        Some("checkpoint with spaces")
+    );
+    assert!(parsed_config.all);
+    assert!(parsed_config.force);
+    assert!(parsed_config.keep_deps);
+    assert!(parsed_config.no_pull);
+    assert!(parsed_config.allow_stale_source);
+    assert!(parsed_config.allow_downgrade);
+    assert!(parsed_config.head);
 }
 
 #[test]

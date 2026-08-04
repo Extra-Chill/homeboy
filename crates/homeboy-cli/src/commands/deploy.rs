@@ -151,6 +151,9 @@ pub struct MultiProjectDeployOutput {
     pub release_set_identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deploy_run_id: Option<String>,
+    /// Durable file checkpoint for `homeboy deploy --resume`, distinct from activity ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_run_id: Option<String>,
     #[serde(
         rename = "_homeboy_actionable",
         skip_serializing_if = "Option::is_none"
@@ -581,7 +584,13 @@ fn run_multi_output(
     let result = deploy::run_multi(project_ids, component_ids, config)?;
     let exit_code = if result.summary.failed > 0 { 1 } else { 0 };
 
-    let actionable = multi_deploy_actionable(&result.projects);
+    let actionable = multi_deploy_actionable(
+        &result.projects,
+        project_ids,
+        component_ids,
+        config,
+        result.resume_run_id.as_deref(),
+    );
     Ok((
         DeployCommandOutput::Multi(MultiProjectDeployOutput {
             command: "deploy.run_multi".to_string(),
@@ -594,6 +603,7 @@ fn run_multi_output(
             force: args.force,
             release_set_identity: release_set.map(|value| value.identity.clone()),
             deploy_run_id: result.deploy_run_id,
+            resume_run_id: result.resume_run_id,
             actionable: Some(actionable),
         }),
         exit_code,
@@ -610,7 +620,13 @@ fn deploy_actionable(project_id: &str) -> CommandActionableMetadata {
     )
 }
 
-fn multi_deploy_actionable(projects: &[ProjectDeployResult]) -> CommandActionableMetadata {
+fn multi_deploy_actionable(
+    projects: &[ProjectDeployResult],
+    project_ids: &[String],
+    component_ids: &[String],
+    config: &DeployConfig,
+    resume_run_id: Option<&str>,
+) -> CommandActionableMetadata {
     let mut metadata = CommandActionableMetadata::default();
     for project in projects.iter().take(10) {
         metadata.next_actions.push(
@@ -621,7 +637,74 @@ fn multi_deploy_actionable(projects: &[ProjectDeployResult]) -> CommandActionabl
             .with_kind(CommandNextActionKind::Show),
         );
     }
+    if let Some(run_id) = resume_run_id {
+        metadata.next_actions.push(
+            CommandNextAction::new(
+                "resume deploy checkpoint",
+                resume_deploy_command(project_ids, component_ids, config, run_id),
+            )
+            .with_kind(CommandNextActionKind::Repair),
+        );
+    }
     metadata
+}
+
+/// Reconstruct the CLI inputs whose lifecycle identity is stored by the
+/// checkpoint. The checkpoint validates the identity again before retrying.
+fn resume_deploy_command(
+    project_ids: &[String],
+    component_ids: &[String],
+    config: &DeployConfig,
+    run_id: &str,
+) -> String {
+    use homeboy_core::engine::shell::quote_arg;
+
+    let mut args = vec!["homeboy deploy".to_string()];
+    for project_id in project_ids {
+        args.push(format!("--projects {}", quote_arg(project_id)));
+    }
+    for component_id in component_ids {
+        args.push(format!("--component {}", quote_arg(component_id)));
+    }
+    if config.all {
+        args.push("--all".to_string());
+    }
+    if config.outdated {
+        args.push("--outdated".to_string());
+    }
+    if config.behind_upstream {
+        args.push("--behind-upstream".to_string());
+    }
+    if config.force {
+        args.push("--force".to_string());
+    }
+    if config.keep_deps {
+        args.push("--keep-deps".to_string());
+    }
+    if let Some(version) = config.expected_version.as_deref() {
+        args.push(format!("--version {}", quote_arg(version)));
+    }
+    if config.no_pull {
+        args.push("--no-pull".to_string());
+    }
+    if config.allow_stale_source {
+        args.push("--allow-stale-source".to_string());
+    }
+    if config.allow_downgrade {
+        args.push("--allow-downgrade".to_string());
+    }
+    if config.head {
+        args.push("--head".to_string());
+    }
+    if let Some(reference) = config.requested_ref.as_deref() {
+        args.push(format!("--ref {}", quote_arg(reference)));
+    }
+    if config.tagged {
+        args.push("--tagged".to_string());
+    }
+    args.push(format!("--resume {}", quote_arg(run_id)));
+    args.push("--apply".to_string());
+    args.join(" ")
 }
 
 #[cfg(test)]

@@ -350,6 +350,53 @@ fn runs_reconcile_explicitly_reconciles_owned_dead_running_runs() {
 }
 
 #[test]
+fn runs_reconcile_immediately_terminalizes_dead_deploy_observation_owner() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 0.05"])
+            .spawn()
+            .expect("child process");
+        let child_pid = child.id();
+        let run = store
+            .start_run(sample_run(
+                "deploy",
+                "site",
+                "studio",
+                serde_json::json!({
+                    "schema": "homeboy/deploy-lifecycle/v1",
+                    "phase": "admitted",
+                    "homeboy_run_owner": { "pid": child_pid },
+                }),
+            ))
+            .expect("deploy observation");
+        let mut metadata = run.metadata_json.clone();
+        metadata["homeboy_run_owner"]["pid"] = serde_json::json!(child_pid);
+        store
+            .update_run_metadata(&run.id, metadata)
+            .expect("record child owner");
+        child.wait().expect("child exits");
+
+        let (output, _) = reconcile_runs(RunsReconcileArgs {
+            dry_run: false,
+            limit: 20,
+        })
+        .expect("reconcile");
+        let RunsOutput::Reconcile(output) = output else {
+            panic!("expected reconcile output");
+        };
+
+        assert_eq!(output.reconciled.len(), 1);
+        assert_eq!(output.reconciled[0].id, run.id);
+        assert_eq!(output.reconciled[0].owner_pid, Some(child_pid));
+        assert_eq!(output.reconciled[0].reason, "owner_process_not_running");
+        let stored = store.get_run(&run.id).expect("read run").expect("run");
+        assert_eq!(stored.status, "stale");
+    });
+}
+
+#[test]
 fn run_show_includes_metadata_and_artifacts() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();
