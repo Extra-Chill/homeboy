@@ -796,7 +796,7 @@ mod tests {
         let lease =
             CookOutputLease::claim(path.to_str().expect("utf8 path")).expect("claim output");
         lease
-            .progress("in_flight", Some("cook-current"), Some("run-current"))
+            .progress("in_flight", Some("cook-current"), Some("run-current"), None)
             .expect("record current durable run");
         let in_flight: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -839,7 +839,7 @@ mod tests {
         assert!(preparing.get("recovery").is_none());
 
         lease
-            .progress("in_flight", Some("cook-durable"), Some("run-durable"))
+            .progress("in_flight", Some("cook-durable"), Some("run-durable"), None)
             .unwrap();
         let durable: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -868,7 +868,7 @@ mod tests {
         let path = dir.path().join("cook.json");
         let lease = CookOutputLease::claim(path.to_str().expect("utf8 path")).expect("claim");
         lease
-            .progress("in_flight", Some("cook-a"), Some("run-a"))
+            .progress("in_flight", Some("cook-a"), Some("run-a"), None)
             .unwrap();
         let before = std::fs::read(&path).expect("read active output");
 
