@@ -537,6 +537,7 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         commit_message,
         gate_results,
         normalized_gate_results,
+        accept_inherited_failures: false,
         changed_files: args.changed_files,
         evidence,
         ai_used_for: args.ai_used_for,

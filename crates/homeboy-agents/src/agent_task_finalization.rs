@@ -111,7 +111,10 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         }
         options.evidence.lifecycle = Some(lifecycle);
     }
-    validate_green_gates(&options.normalized_gate_results)?;
+    validate_finalization_gates(
+        &options.normalized_gate_results,
+        options.accept_inherited_failures,
+    )?;
     options.review_dossier.apply_overrides()?;
     let current_branch = backend.current_branch(&options.path)?;
     let head = options
@@ -596,7 +599,10 @@ fn is_review_form_only_follow_up(promotion: &AgentTaskPromotionReport, run_id: &
             .is_some_and(|source_run_id| !source_run_id.is_empty() && source_run_id != run_id)
 }
 
-fn validate_green_gates(gates: &[HomeboyGateResult]) -> Result<()> {
+fn validate_finalization_gates(
+    gates: &[HomeboyGateResult],
+    accept_inherited_failures: bool,
+) -> Result<()> {
     if gates.is_empty() {
         return Err(Error::validation_invalid_argument(
             "gate_results",
@@ -607,7 +613,11 @@ fn validate_green_gates(gates: &[HomeboyGateResult]) -> Result<()> {
     }
     let red: Vec<String> = gates
         .iter()
-        .filter(|gate| gate.status != HomeboyGateStatus::Passed)
+        .filter(|gate| {
+            gate.status != HomeboyGateStatus::Passed
+                && !(accept_inherited_failures
+                    && gate.status == HomeboyGateStatus::AcceptedInheritedFailure)
+        })
         .map(|gate| format!("{}={:?}", gate.name, gate.status))
         .collect();
     if !red.is_empty() {
@@ -876,6 +886,7 @@ fn report(
         changed_files,
         gate_results: options.gate_results.clone(),
         normalized_gate_results,
+        accept_inherited_failures: options.accept_inherited_failures,
         proof,
         publication_intent,
         publication_proof,

@@ -6839,13 +6839,13 @@ fn adopted_baseline_gate_outcome_is_candidate_bound_and_recovery_safe() {
 
     assert_eq!(
         accepted.status,
-        crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+        crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
     );
     assert_eq!(
         accepted.gate_results[0].status,
-        homeboy_core::gate::HomeboyGateStatus::Passed
+        homeboy_core::gate::HomeboyGateStatus::Failed
     );
-    assert!(accepted.has_visible_passed_gate_for_command(command));
+    assert!(!accepted.has_visible_passed_gate_for_command(command));
 
     let mut regression = accepted.clone();
     regression.status = crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed;
@@ -6875,7 +6875,7 @@ fn adopted_baseline_gate_outcome_is_candidate_bound_and_recovery_safe() {
 }
 
 #[test]
-fn closed_observer_pipe_does_not_stop_promotion_or_finalization() {
+fn closed_observer_pipe_does_not_stop_explicitly_accepted_inherited_gate_finalization() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("repository");
         let root = temp.path();
@@ -6903,6 +6903,7 @@ fn closed_observer_pipe_does_not_stop_promotion_or_finalization() {
         options.to_worktree = root.display().to_string();
         options.source_worktree_path = Some(root.to_path_buf());
         options.max_attempts = 1;
+        options.gates.accept_inherited_failures = true;
         options.gates.verify = vec!["cat failure >&2; exit 1".to_string()];
         options.initial_plan.options.execution_budget =
             crate::agent_task_scheduler::AgentTaskExecutionBudget::new(1, 0, 0);
@@ -6982,6 +6983,11 @@ fn closed_observer_pipe_does_not_stop_promotion_or_finalization() {
         )
         .unwrap();
         assert_eq!(result.value.status, "review_ready", "{:#?}", result.value);
+        assert!(result
+            .value
+            .stop_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("accepted inherited baseline-red")));
         assert_eq!(finalized.load(Ordering::SeqCst), 1);
         assert!(observer_calls.load(Ordering::SeqCst) >= 1);
         let record = agent_task_lifecycle::status(&run_id).unwrap();
@@ -7000,11 +7006,15 @@ fn closed_observer_pipe_does_not_stop_promotion_or_finalization() {
             "the disconnected observer can reconnect to the terminal durable result"
         );
         let persisted = persisted_promotion_for_attempt(&run_id).unwrap().unwrap();
-        assert_eq!(persisted.status, AgentTaskPromotionStatus::Applied);
+        assert_eq!(persisted.status, AgentTaskPromotionStatus::GateFailed);
         assert_eq!(persisted.deterministic_gates[0].exit_code, 1);
         assert_eq!(
             persisted.deterministic_gates[0].status,
             crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure
+        );
+        assert_eq!(
+            persisted.gate_results[0].status,
+            homeboy_core::gate::HomeboyGateStatus::AcceptedInheritedFailure
         );
         assert_eq!(
             persisted.deterministic_gates[0]

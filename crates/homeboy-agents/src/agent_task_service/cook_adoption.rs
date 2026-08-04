@@ -703,7 +703,33 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
             }
         };
     }
-    if feedback.status != AgentTaskCookLoopStatus::GreenCompleted {
+    if feedback.status == AgentTaskCookLoopStatus::BaselineRed {
+        if options.gates.accept_inherited_failures && promotion.finalization_eligible(true) {
+            // Continue directly to finalization below; this adoption already has
+            // durable baseline proof and must not spend another provider attempt.
+        } else {
+            let reason = "candidate and immutable baseline failed the same required gate; repair the inherited infrastructure or gate environment before retrying adoption";
+            agent_task_lifecycle::finish_candidate_adoption(
+                &record.run_id,
+                Some(reason.to_string()),
+            )?;
+            return Ok(cook_report(CookReportInput {
+                cook_id: cook_id.to_string(),
+                status: "baseline_red",
+                disposition: CookDisposition::Terminal,
+                attempts: vec![attempt],
+                finalization: None,
+                stop_reason: Some(reason.to_string()),
+                exit_code: 1,
+                invocation_latest_run_id: Some(record.run_id.as_str()),
+            }));
+        }
+    }
+    if feedback.status != AgentTaskCookLoopStatus::GreenCompleted
+        && !(feedback.status == AgentTaskCookLoopStatus::BaselineRed
+            && options.gates.accept_inherited_failures
+            && promotion.finalization_eligible(true))
+    {
         agent_task_lifecycle::finish_candidate_adoption(
             &record.run_id,
             Some("adopted candidate did not pass the original deterministic gates".to_string()),
