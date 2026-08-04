@@ -114,9 +114,9 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--run-id` | `<ID>` | Optional durable run id. Generated when omitted |
 | `--provider-config` | `<JSON>` | Provider config JSON object, @file, or - for stdin. Merged with workspace metadata |
 | `--client-context` | `<JSON>` | Opaque client context JSON object, @file, or - for stdin |
-| `--max-provider-executions` | `<N>` | Maximum total provider executions per task, including same-provider retries and provider rotations. For Cook, this must be at least --max-attempts; use --max-same-provider-retries for gate and review-form remediation. `--attempts 1` runs exactly once |
-| `--max-same-provider-retries` | `<N>` | Same-provider retries allowed after the first provider execution. Cook needs one for each possible gate or required review-form remediation; provider rotations cannot replace those retries |
-| `--max-provider-rotations` | `<N>` | Cross-provider rotations allowed after the first provider execution. Rotations are distinct from same-provider Cook remediation and do not satisfy its required review-form retry budget |
+| `--max-provider-executions` | `<N>` | Maximum total provider executions per task, including same-provider retries and provider rotations. For Cook, this must be at least --max-attempts; use --max-same-provider-retries for gate and review-form remediation. `--attempts 1` runs exactly once. When omitted, defaults to the total attempts the configured provider rotation needs, or 1 when no rotation is configured |
+| `--max-same-provider-retries` | `<N>` | Same-provider retries allowed after the first provider execution. Cook needs one for each possible gate or required review-form remediation; provider rotations cannot replace those retries. Defaults to 0; a configured provider rotation never funds these |
+| `--max-provider-rotations` | `<N>` | Cross-provider rotations allowed after the first provider execution. Rotations are distinct from same-provider Cook remediation and do not satisfy its required review-form retry budget. When omitted, defaults to the number of entries in the configured provider rotation, or 0 when no rotation is configured |
 | `--queue-only` | flag | Persist the run for a daemon/runner but do not execute immediately |
 | `--timeout-ms` | `<MS>` | Provider wall-clock timeout in milliseconds. Defaults to Homeboy's provider timeout |
 | `--deny-command` | `<PATTERN>` | Command pattern the provider agent must not run. Repeatable, and additive to the host-level `agent_task.command_policy` config |

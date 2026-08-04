@@ -2,8 +2,6 @@ pub use homeboy_audit_contract::test_mapping::{
     BehaviorScenarioNames, IncludeWrapperPolicy, PackageNameSource, TestMappingConfig,
     TestVacuityPolicy,
 };
-#[cfg(test)]
-use homeboy_core::config::ConfigEntity;
 use homeboy_core::error::{Error, Result};
 pub use homeboy_extension_contract::extension_contract_producer::{
     ExtensionContractProducer, ExtensionContractProducerInvocation,

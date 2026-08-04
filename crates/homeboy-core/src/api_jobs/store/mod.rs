@@ -3168,7 +3168,7 @@ impl RecoveredTerminalJob {
 
 #[cfg(test)]
 #[derive(Clone)]
-pub(super) enum LinkedDurableRunResolution {
+pub(crate) enum LinkedDurableRunResolution {
     None,
     Terminal(RecoveredTerminalJob),
     Active(String),
