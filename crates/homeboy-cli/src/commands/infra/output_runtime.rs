@@ -39,7 +39,7 @@ impl CookOutputLease {
             token,
             lock,
         };
-        lease.write_in_flight("preparing", None, None)?;
+        lease.write_in_flight("preparing", None, None, None)?;
         Ok(lease)
     }
 
@@ -48,8 +48,9 @@ impl CookOutputLease {
         phase: &str,
         cook_id: Option<&str>,
         run_id: Option<&str>,
+        activity: Option<&str>,
     ) -> homeboy::core::Result<()> {
-        self.write_in_flight(phase, cook_id, run_id)
+        self.write_in_flight(phase, cook_id, run_id, activity)
     }
 
     pub(crate) fn finish(
@@ -79,6 +80,7 @@ impl CookOutputLease {
         phase: &str,
         cook_id: Option<&str>,
         run_id: Option<&str>,
+        activity: Option<&str>,
     ) -> homeboy::core::Result<()> {
         let mut value = serde_json::json!({
             "schema": "homeboy/agent-task-cook-output/v1",
@@ -90,6 +92,12 @@ impl CookOutputLease {
             "updated_at": chrono::Utc::now().to_rfc3339(),
             "phase": phase,
         });
+        // An `--output` cook is watched by polling this file. Without the
+        // activity sentence the poller sees a phase that has not changed for
+        // minutes and has no way to tell work from a stall (#11482).
+        if let Some(activity) = activity {
+            value["provider_activity"] = serde_json::json!(activity);
+        }
         if let (Some(cook_id), Some(run_id)) = (cook_id, run_id) {
             let object = value.as_object_mut().expect("Cook output envelope object");
             object.insert("cook_id".to_string(), serde_json::json!(cook_id));

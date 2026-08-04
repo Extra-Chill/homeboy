@@ -158,6 +158,7 @@ pub mod performance_hotspots;
 pub use homeboy_engine_primitives::phase_timing;
 pub use homeboy_gate_contract::plan;
 pub mod process;
+pub mod process_activity;
 // product_identity moved to the internal `homeboy-product-identity` crate.
 // Re-exported so `crate::product_identity::*` call sites keep working.
 pub use homeboy_product_identity as product_identity;
