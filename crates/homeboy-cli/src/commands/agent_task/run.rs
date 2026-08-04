@@ -166,7 +166,6 @@ pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
     let dispatcher = crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(
         &recipe.promotion_transport["attempt_dispatch"],
     )?;
-    let mut options = agent_task_service::reconstruct_options_with_dispatcher(&recipe, dispatcher)?;
     let attempt = recipe
         .attempts
         .iter()
@@ -179,10 +178,21 @@ pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
                 None,
             )
         })?;
+    let terminal_review_form_continuation =
+        agent_task_service::terminal_review_form_continuation_is_eligible(&attempt.plan, &record)?;
+    let mut options = if terminal_review_form_continuation {
+        agent_task_service::reconstruct_adoption_options_with_dispatcher(&recipe, dispatcher)?
+    } else {
+        agent_task_service::reconstruct_options_with_dispatcher(&recipe, dispatcher)?
+    };
     options.initial_run_id = attempt.run_id.clone();
     options.initial_plan = attempt.plan.clone();
-    let result =
-        agent_task_service::run_cook(options, ExtensionProviderAgentTaskExecutor::discover())?;
+    let executor = ExtensionProviderAgentTaskExecutor::discover();
+    let result = if terminal_review_form_continuation {
+        agent_task_service::run_terminal_cook_continuation(options, executor)?
+    } else {
+        agent_task_service::run_cook(options, executor)?
+    };
     let value =
         cook_report_with_continuation(serde_json::to_value(result.value).unwrap_or(Value::Null));
     Ok((

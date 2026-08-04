@@ -96,6 +96,43 @@ fn remediation_policy_rejects_denied_workspace_read_before_dispatch() {
     assert!(remediation_tool_policy_error(&request).is_none());
 }
 
+#[test]
+fn terminal_review_form_continuation_rejects_generic_failed_and_cancelled_runs() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = batch_cook_options(
+            "generic-terminal-review-form",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        for (run_id, cancelled) in [
+            ("generic-terminal-review-form-failed", false),
+            ("generic-terminal-review-form-cancelled", true),
+        ] {
+            agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).unwrap();
+            if cancelled {
+                agent_task_lifecycle::cancel_run(run_id, Some("policy cancelled")).unwrap();
+            } else {
+                agent_task_lifecycle::record_pre_execution_failure(
+                    run_id,
+                    &options.initial_plan,
+                    "fixture",
+                    &Error::validation_invalid_argument(
+                        "fixture",
+                        "generic policy failure",
+                        None,
+                        None,
+                    ),
+                )
+                .unwrap();
+            }
+            let record = agent_task_lifecycle::status(run_id).unwrap();
+            assert!(
+                !terminal_review_form_continuation_is_eligible(&options.initial_plan, &record,)
+                    .unwrap()
+            );
+        }
+    });
+}
+
 fn seed_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
     use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_scheduler::{
@@ -552,7 +589,7 @@ fn fresh_cook_review_form_has_bounded_budget_independent_of_code_execution() {
     assert!(budget_remaining(&code_budget, consumed_code_budget).is_none());
 
     let (review_budget, review_usage) =
-        scoped_follow_up_budget(scope, &code_budget, consumed_code_budget);
+        scoped_follow_up_budget(scope, &code_budget, consumed_code_budget, None);
     assert_eq!(
         review_budget,
         crate::agent_task_scheduler::AgentTaskExecutionBudget::new(2, 1, 0)
@@ -568,17 +605,108 @@ fn fresh_cook_review_form_has_bounded_budget_independent_of_code_execution() {
     source_request.inputs["cook_loop"]["execution_budget_authority"] = serde_json::json!({
         "kind": "fresh_cook_review",
         "max_provider_executions": 2,
+        "max_same_provider_retries": 1,
+        "max_provider_rotations": 0,
+        "review_plan_provider_executions": 1,
     });
+    let persisted_authority =
+        source_request.inputs["cook_loop"]["execution_budget_authority"].clone();
+    let (narrowed_budget, _) = scoped_follow_up_budget(
+        scope,
+        &code_budget,
+        consumed_code_budget,
+        Some(&persisted_authority),
+    );
+    assert_eq!(
+        narrowed_budget,
+        crate::agent_task_scheduler::AgentTaskExecutionBudget::new(2, 1, 0),
+        "the canonical review authority remains bounded"
+    );
     assert_eq!(
         follow_up_budget_scope(&source_request, &follow_up_request),
-        CookFollowUpBudgetScope::Cook,
-        "a review-only retry cannot mint another review allowance"
+        CookFollowUpBudgetScope::FreshCookReview,
+        "a review-only retry reuses its persisted review allowance"
     );
+    follow_up_request.inputs["cook_loop"]["execution_budget_authority"] =
+        persisted_authority.clone();
+    assert_eq!(
+        follow_up_request.inputs["cook_loop"]["execution_budget_authority"], persisted_authority,
+        "cook-continue carries the exact authority instead of minting one"
+    );
+
+    let timed_out_usage = ExecutionBudgetUsage {
+        executions: 1,
+        ..Default::default()
+    };
+    let remaining_after_timeout = budget_remaining(&review_budget, timed_out_usage).unwrap();
+    assert_eq!(
+        remaining_after_timeout,
+        crate::agent_task_scheduler::AgentTaskExecutionBudget::new(1, 1, 0),
+        "the timed-out review execution leaves exactly one same-provider retry"
+    );
+    assert_eq!(
+        reserve_remediation_budget(&remaining_after_timeout, true).unwrap(),
+        ExecutionBudgetUsage {
+            same_provider_retries: 1,
+            ..Default::default()
+        }
+    );
+    assert!(budget_remaining(
+        &review_budget,
+        ExecutionBudgetUsage {
+            executions: 2,
+            same_provider_retries: 1,
+            provider_rotations: 0,
+        }
+    )
+    .is_none());
 
     follow_up_request.inputs["cook_loop"]["review_form_required"] = serde_json::json!(false);
     assert_eq!(
         follow_up_budget_scope(&source_request, &follow_up_request),
         CookFollowUpBudgetScope::Cook
+    );
+}
+
+#[test]
+fn persisted_review_budget_authority_preserves_lower_bounds_and_caps_larger_values() {
+    let scope = CookFollowUpBudgetScope::FreshCookReview;
+    let cook_budget = crate::agent_task_scheduler::AgentTaskExecutionBudget::new(9, 9, 9);
+    let lower = serde_json::json!({
+        "kind": "fresh_cook_review",
+        "max_provider_executions": 1,
+        "max_same_provider_retries": 0,
+        "max_provider_rotations": 0,
+        "review_plan_provider_executions": 0,
+    });
+    let (budget, _) = scoped_follow_up_budget(
+        scope,
+        &cook_budget,
+        ExecutionBudgetUsage::default(),
+        Some(&lower),
+    );
+    assert_eq!(
+        budget,
+        crate::agent_task_scheduler::AgentTaskExecutionBudget::new(1, 0, 0)
+    );
+    assert_eq!(review_budget_authority(scope, Some(&lower)), lower);
+
+    let larger = serde_json::json!({
+        "kind": "fresh_cook_review",
+        "max_provider_executions": 99,
+        "max_same_provider_retries": 99,
+        "max_provider_rotations": 99,
+        "review_plan_provider_executions": 99,
+    });
+    assert_eq!(
+        review_budget_authority(scope, Some(&larger)),
+        serde_json::json!({
+            "kind": "fresh_cook_review",
+            "max_provider_executions": 2,
+            "max_same_provider_retries": 1,
+            "max_provider_rotations": 0,
+            "review_plan_provider_executions": 1,
+        })
     );
 }
 

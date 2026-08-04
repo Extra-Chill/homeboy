@@ -12,7 +12,7 @@ use homeboy_core::{Error, Result};
 
 use super::cook_pre_execution::provider_rotation_attempts;
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ExecutionBudgetUsage {
     pub(crate) executions: u32,
     pub(crate) same_provider_retries: u32,

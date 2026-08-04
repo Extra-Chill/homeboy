@@ -1306,31 +1306,86 @@ fn follow_up_budget_scope(
     source_request: &crate::agent_task::AgentTaskRequest,
     follow_up_request: &crate::agent_task::AgentTaskRequest,
 ) -> CookFollowUpBudgetScope {
-    if follow_up_request.inputs["cook_loop"]["review_form_required"] == true
-        && source_request.inputs["cook_loop"]["execution_budget_authority"]["kind"]
-            != "fresh_cook_review"
-    {
-        CookFollowUpBudgetScope::FreshCookReview
-    } else {
-        CookFollowUpBudgetScope::Cook
+    if follow_up_request.inputs["cook_loop"]["review_form_required"] != true {
+        return CookFollowUpBudgetScope::Cook;
     }
+    match source_request.inputs["cook_loop"]["execution_budget_authority"]["kind"].as_str() {
+        Some("fresh_cook_review") => CookFollowUpBudgetScope::FreshCookReview,
+        Some("candidate_adoption_review") => CookFollowUpBudgetScope::CandidateAdoptionReview,
+        Some(_) => CookFollowUpBudgetScope::Cook,
+        None => CookFollowUpBudgetScope::FreshCookReview,
+    }
+}
+
+fn budget_authority_matches_scope(authority: &Value, scope: CookFollowUpBudgetScope) -> bool {
+    authority["kind"].as_str()
+        == Some(match scope {
+            CookFollowUpBudgetScope::FreshCookReview => "fresh_cook_review",
+            CookFollowUpBudgetScope::CandidateAdoptionReview => "candidate_adoption_review",
+            CookFollowUpBudgetScope::Cook => return false,
+        })
 }
 
 fn scoped_follow_up_budget(
     scope: CookFollowUpBudgetScope,
     cook_budget: &AgentTaskExecutionBudget,
     cook_usage: ExecutionBudgetUsage,
+    persisted_authority: Option<&Value>,
 ) -> (AgentTaskExecutionBudget, ExecutionBudgetUsage) {
     match scope {
         CookFollowUpBudgetScope::Cook => (cook_budget.clone(), cook_usage),
         CookFollowUpBudgetScope::FreshCookReview
-        | CookFollowUpBudgetScope::CandidateAdoptionReview => (
-            // One review execution plus one bounded replay when provider
-            // discovery fails before the review provider starts.
-            AgentTaskExecutionBudget::new(2, 1, 0),
-            ExecutionBudgetUsage::default(),
-        ),
+        | CookFollowUpBudgetScope::CandidateAdoptionReview => {
+            let authority = persisted_authority.unwrap_or(&Value::Null);
+            // Review-only remediation has a fixed upper bound, but a durable
+            // authority may intentionally narrow it. Never mint a broader
+            // allowance when resuming that authority.
+            let bounded = |key, maximum| {
+                authority[key]
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .map(|value| value.min(maximum))
+                    .unwrap_or(maximum)
+            };
+            (
+                AgentTaskExecutionBudget::new(
+                    bounded("max_provider_executions", 2),
+                    bounded("max_same_provider_retries", 1),
+                    bounded("max_provider_rotations", 0),
+                ),
+                ExecutionBudgetUsage::default(),
+            )
+        }
     }
+}
+
+fn review_budget_authority(
+    scope: CookFollowUpBudgetScope,
+    persisted_authority: Option<&Value>,
+) -> Value {
+    let (budget, _) = scoped_follow_up_budget(
+        scope,
+        &AgentTaskExecutionBudget::new(0, 0, 0),
+        ExecutionBudgetUsage::default(),
+        persisted_authority,
+    );
+    let kind = match scope {
+        CookFollowUpBudgetScope::FreshCookReview => "fresh_cook_review",
+        CookFollowUpBudgetScope::CandidateAdoptionReview => "candidate_adoption_review",
+        CookFollowUpBudgetScope::Cook => unreachable!(),
+    };
+    let review_plan_provider_executions = persisted_authority
+        .and_then(|authority| authority["review_plan_provider_executions"].as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+        .map(|value| value.min(1))
+        .unwrap_or(1);
+    serde_json::json!({
+        "kind": kind,
+        "max_provider_executions": budget.max_provider_executions,
+        "max_same_provider_retries": budget.max_same_provider_retries,
+        "max_provider_rotations": budget.max_provider_rotations,
+        "review_plan_provider_executions": review_plan_provider_executions,
+    })
 }
 
 /// Append and dispatch one remediation attempt from an authenticated promoted
@@ -1375,9 +1430,47 @@ where
                 && retryable_provider_discovery_failure(&recipe_attempt.run_id)
         })
         .cloned();
-    let (budget_limit, mut durable_budget_used) =
-        scoped_follow_up_budget(budget_scope, budget_limit, budget_used);
-    for recipe_attempt in related_attempts.clone() {
+    let persisted_budget_authority = plan
+        .tasks
+        .first()
+        .map(|task| &task.inputs["cook_loop"]["execution_budget_authority"])
+        .filter(|authority| budget_authority_matches_scope(authority, budget_scope))
+        .cloned();
+    let (budget_limit, mut durable_budget_used) = scoped_follow_up_budget(
+        budget_scope,
+        budget_limit,
+        budget_used,
+        persisted_budget_authority.as_ref(),
+    );
+    let mut authority_run_ids = std::collections::BTreeSet::new();
+    if let Some(authority) = persisted_budget_authority.as_ref() {
+        let mut ancestor_run_id = Some(source_run_id);
+        while let Some(run_id) = ancestor_run_id {
+            let Some(recipe_attempt) = recipe
+                .attempts
+                .iter()
+                .find(|recipe_attempt| recipe_attempt.run_id == run_id)
+                .filter(|recipe_attempt| {
+                    recipe_attempt.plan.tasks[0].inputs["cook_loop"]["execution_budget_authority"]
+                        == *authority
+                })
+            else {
+                break;
+            };
+            authority_run_ids.insert(recipe_attempt.run_id.as_str());
+            ancestor_run_id = recipe_attempt.plan.tasks[0].inputs["cook_loop"]
+                ["artifact_provenance"]["source_run_id"]
+                .as_str();
+        }
+    }
+    for recipe_attempt in recipe.attempts.iter().filter(|recipe_attempt| {
+        authority_run_ids.contains(recipe_attempt.run_id.as_str())
+            || (persisted_budget_authority.is_none()
+                && recipe_attempt.plan.tasks[0].inputs["cook_loop"]["artifact_provenance"]
+                    ["source_run_id"]
+                    .as_str()
+                    == Some(source_run_id))
+    }) {
         if let Ok(aggregate) = agent_task_lifecycle::read_aggregate(&recipe_attempt.run_id) {
             durable_budget_used.add(execution_budget_usage(&aggregate));
         }
@@ -1442,18 +1535,8 @@ where
         "source_patch_artifact_sha256": promotion.patch_artifact.sha256,
     });
     if budget_scope != CookFollowUpBudgetScope::Cook {
-        let kind = match budget_scope {
-            CookFollowUpBudgetScope::FreshCookReview => "fresh_cook_review",
-            CookFollowUpBudgetScope::CandidateAdoptionReview => "candidate_adoption_review",
-            CookFollowUpBudgetScope::Cook => unreachable!(),
-        };
-        follow_up_request.inputs["cook_loop"]["execution_budget_authority"] = serde_json::json!({
-            "kind": kind,
-            "max_provider_executions": 2,
-            "max_same_provider_retries": 1,
-            "max_provider_rotations": 0,
-            "review_plan_provider_executions": 1,
-        });
+        follow_up_request.inputs["cook_loop"]["execution_budget_authority"] =
+            review_budget_authority(budget_scope, persisted_budget_authority.as_ref());
     }
     let (next_attempt, next_run_id, mut follow_up_plan, replaced_run_id) = match replay {
         Some(recipe_attempt) => (
@@ -1619,6 +1702,79 @@ fn adopted_attempt_is_ready_for_cook_continuation(
         return Ok(Some(adoption.ai_model.clone()));
     }
     Ok(None)
+}
+
+fn review_form_attempt_is_ready_for_cook_continuation(
+    plan: &AgentTaskPlan,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Result<bool> {
+    let Some(task) = plan.tasks.first() else {
+        return Ok(false);
+    };
+    if task.inputs["cook_loop"]["review_form_required"] != true
+        || !budget_authority_matches_scope(
+            &task.inputs["cook_loop"]["execution_budget_authority"],
+            follow_up_budget_scope(task, task),
+        )
+    {
+        return Ok(false);
+    }
+    let Some(promotion) = persisted_promotion_for_attempt(&record.run_id)? else {
+        return Ok(false);
+    };
+    let Some(source_run_id) = promotion.provenance["cook_follow_up"]["source_run_id"].as_str()
+    else {
+        return Ok(false);
+    };
+    if promotion.provenance["cook_follow_up"]["kind"] != "review_form_only" {
+        return Ok(false);
+    }
+    let Some(source) = persisted_promotion_for_attempt(source_run_id)? else {
+        return Ok(false);
+    };
+    Ok(promotion.status == source.status
+        && promotion.target == source.target
+        && promotion.to_worktree == source.to_worktree
+        && promotion.patch_artifact == source.patch_artifact
+        && promotion.changed_files == source.changed_files
+        && promotion.verified_base == source.verified_base
+        && promotion.deterministic_gates == source.deterministic_gates
+        && promotion.command_evidence == source.command_evidence)
+}
+
+fn retryable_review_form_terminal_failure(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+) -> bool {
+    retryable_pre_execution_failure(record)
+        || retryable_provider_discovery_failure(&record.run_id)
+        || aggregate.outcomes.iter().any(|outcome| {
+            outcome.status == crate::agent_task::AgentTaskOutcomeStatus::Timeout
+                || outcome
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.class == "agent_task.provider_timeout")
+        })
+}
+
+/// Whether a terminal review-form attempt may re-enter Cook's historical
+/// continuation path. This is intentionally narrower than terminality: only
+/// authenticated form-only continuations with a provider timeout or an
+/// existing retryable provider/pre-execution signal may execute again.
+pub fn terminal_review_form_continuation_is_eligible(
+    plan: &AgentTaskPlan,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Result<bool> {
+    if !record.state.is_terminal()
+        || !review_form_attempt_is_ready_for_cook_continuation(plan, record)?
+    {
+        return Ok(false);
+    }
+    let aggregate = match agent_task_lifecycle::read_aggregate(&record.run_id) {
+        Ok(aggregate) => aggregate,
+        Err(_) => return Ok(false),
+    };
+    Ok(retryable_review_form_terminal_failure(record, &aggregate))
 }
 
 pub fn run_cook<E>(
@@ -2153,7 +2309,30 @@ where
         .find(|attempt| attempt.run_id == run_id)
         .map(|attempt| attempt.attempt)
         .unwrap_or(1);
-    for attempt in first_attempt..=max_attempts {
+    let continuation_attempt_limit = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == run_id)
+        .and_then(|attempt| attempt.plan.tasks.first())
+        .filter(|task| {
+            task.inputs["cook_loop"]["review_form_required"] == true
+                && matches!(
+                    task.inputs["cook_loop"]["execution_budget_authority"]["kind"].as_str(),
+                    Some("fresh_cook_review" | "candidate_adoption_review")
+                )
+        })
+        .and_then(|task| {
+            task.inputs["cook_loop"]["execution_budget_authority"]["max_same_provider_retries"]
+                .as_u64()
+        })
+        .and_then(|retries| u32::try_from(retries).ok())
+        .unwrap_or(0);
+    let attempt_limit = if continuation_attempt_limit > 0 {
+        first_attempt.saturating_add(continuation_attempt_limit)
+    } else {
+        max_attempts
+    };
+    for attempt in first_attempt..=attempt_limit {
         let plan = match next_plan.take() {
             Some(plan) => plan,
             None => agent_task_lifecycle::load_plan(&run_id)?,
@@ -2181,7 +2360,7 @@ where
                     &run_id,
                     notify_component.as_deref(),
                     attempt,
-                    max_attempts,
+                    attempt_limit,
                 );
             }
             if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
@@ -2560,12 +2739,16 @@ where
         validate_cook_candidate_group(&plan)?;
 
         let adopted_continuation = adopted_attempt_is_ready_for_cook_continuation(&record)?;
+        let review_form_continuation = allow_historical_terminal
+            && review_form_attempt_is_ready_for_cook_continuation(&plan, &record)?
+            && retryable_review_form_terminal_failure(&record, &aggregate);
         if !matches!(
             record.state,
             agent_task_lifecycle::AgentTaskRunState::Succeeded
                 | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
                 | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
         ) && adopted_continuation.is_none()
+            && !review_form_continuation
         {
             attempts.push(AgentTaskCookAttemptReport {
                 attempt,
@@ -2704,7 +2887,7 @@ where
             source_request: source_request.clone(),
             promotion_report: promotion.clone(),
             attempt,
-            max_attempts,
+            max_attempts: attempt_limit,
             source_run_id: Some(run_id.clone()),
             current_diff: gate_feedback_current_diff(&promotion),
             // The form is publication evidence. A no-finalize Cook preserves
@@ -2970,6 +3153,18 @@ where
                     .as_ref()
                     .expect("budget is initialized from the loaded attempt plan");
                 let budget_scope = follow_up_budget_scope(&source_request, &follow_up_request);
+                let persisted_authority = plan
+                    .tasks
+                    .first()
+                    .map(|task| &task.inputs["cook_loop"]["execution_budget_authority"])
+                    .filter(|authority| budget_authority_matches_scope(authority, budget_scope));
+                let scoped_budget_limit = scoped_follow_up_budget(
+                    budget_scope,
+                    budget_limit,
+                    budget_used,
+                    persisted_authority,
+                )
+                .0;
                 let review_form_only =
                     follow_up_request.inputs["cook_loop"]["review_form_required"] == true;
                 match dispatch_cook_follow_up(
@@ -2999,8 +3194,8 @@ where
                             attempts,
                             finalization: None,
                             stop_reason: Some(exhausted_budget_guidance(
-                                max_attempts,
-                                budget_limit,
+                                attempt_limit,
+                                &scoped_budget_limit,
                                 &reason,
                                 review_form_only,
                             )),
