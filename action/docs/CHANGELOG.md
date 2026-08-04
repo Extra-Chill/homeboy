@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.10.10] - 2026-08-04
+
+### Fixed
+- name the failing provenance field, and stop failing silently
+
 ## [2.10.9] - 2026-08-04
 
 ### Changed
