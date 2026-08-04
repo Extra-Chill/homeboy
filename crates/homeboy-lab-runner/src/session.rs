@@ -675,6 +675,11 @@ impl RunnerStatusReport {
         self.state == RunnerSessionState::Connected
     }
 
+    /// Shared daemon compatibility predicate for Lab admission and repair.
+    pub fn daemon_ready_for_admission(&self) -> bool {
+        self.is_connected() && self.stale_daemon.is_none()
+    }
+
     /// Project the authoritative current-state admission summary.
     ///
     /// `draining_generation_count` is supplied by the caller from the same
@@ -695,7 +700,7 @@ impl RunnerStatusReport {
         draining_generation_count: usize,
     ) -> RunnerAdmissionSummary {
         let connected = self.is_connected();
-        let daemon_fresh = self.stale_daemon.is_none();
+        let daemon_fresh = self.daemon_ready_for_admission();
         let blocking_generation = generations
             .iter()
             .find(|generation| !generation.admission_owner && generation.active_job_count > 0)

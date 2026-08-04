@@ -1080,6 +1080,9 @@ fn connected_runner_not_ready_reason(
     runner_id: &str,
     status: &RunnerStatusReport,
 ) -> Option<String> {
+    if status.daemon_ready_for_admission() {
+        return None;
+    }
     if let Some(warning) = status.stale_daemon.as_ref() {
         let restart = daemon_repair_command(runner_id, status);
         if !warning.stale_runtime_paths.is_empty() || !warning.changed_runtime_paths.is_empty() {
