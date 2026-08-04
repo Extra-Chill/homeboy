@@ -22,7 +22,10 @@ pub use cargo_targets::{
     CargoTargetCleanupOutput, CargoTargetStorageStatus, SharedCargoTargetLease,
 };
 mod automatic_retention;
-pub use automatic_retention::{run_automatic_cargo_retention, AutomaticRetentionOutput};
+pub use automatic_retention::{
+    run_automatic_cargo_retention, run_automatic_runtime_temp_retention, AutomaticRetentionOutput,
+    RuntimeTempRetentionOutput,
+};
 pub mod degraded;
 pub use degraded::{
     degraded_cleanup, observation_store_availability, DegradedCleanupCategory,
