@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.2] - 2026-08-04
+
+### Fixed
+- provision nextest for Rust shards
+
 ## [2.11.1] - 2026-08-04
 
 ### Fixed
