@@ -87,6 +87,34 @@ homeboy runner doctor <runner-id> --scope lab-offload --repair
 
 More invasive fixes such as upgrading binaries, refreshing caches, or rewriting runner paths remain explicit operator actions.
 
+### Decide What Drift Refuses The Offload
+
+Two runner settings turn a drift warning into a refusal. Both default to warn-and-proceed:
+
+```bash
+homeboy runner set <runner-id> --json '{"require_exact_homeboy_version":true,"require_fresh_runtime_overlay":true}'
+```
+
+For an SSH runner these persist under the server's `runner` capability in `servers/<id>.json`:
+
+```json
+{
+  "runner": {
+    "require_exact_homeboy_version": true,
+    "require_fresh_runtime_overlay": true
+  }
+}
+```
+
+`require_fresh_runtime_overlay` covers runtime overlays — built artifact directories synced to the runner. When the built artifact is provably behind the source checkout that contains it, the default behavior prints a stderr warning and the offload runs the old build; with this setting the dispatch refuses instead. Escalate a single run without changing configuration by exporting the override:
+
+```bash
+HOMEBOY_REQUIRE_FRESH_RUNTIME_OVERLAY=1 homeboy --runner <runner-id> review <component-id>
+HOMEBOY_REQUIRE_EXACT_RUNNER_VERSION=1 homeboy --runner <runner-id> review <component-id>
+```
+
+Environment values escalate only. Neither variable can relax a runner already configured strict. See [Server schema](../reference/schemas/server-schema.md#lab-offload-safety-gates) for the full precedence rules.
+
 ## 6. Refresh Runner Homeboy Deliberately
 
 Runner proof depends on the Homeboy binary actually used by the runner:
@@ -130,6 +158,7 @@ homeboy runs artifacts <run-id>
 ## Reference
 
 - [runner command](../commands/runner.md)
+- [Server schema](../reference/schemas/server-schema.md)
 - [Use runners](use-runners.md)
 - [Release-gate proof path](../operations/release-gate-proof-path.md)
 - [Artifact loop for runner and matrix workflows](../operations/artifact-loop-runner-matrix.md)

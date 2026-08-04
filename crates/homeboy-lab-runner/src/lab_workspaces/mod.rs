@@ -480,6 +480,7 @@ pub(super) fn sync_lab_runtime_overlays(
     overlays: Vec<RuntimeOverlay>,
     workspace_mapping: &mut Vec<LabWorkspaceMappingEntry>,
     skip_deps_hydration: bool,
+    runner_settings: &homeboy_core::server::RunnerSettings,
 ) -> Result<Vec<SyncedRuntimeOverlay>> {
     if overlays.is_empty() {
         return Ok(Vec::new());
@@ -500,6 +501,11 @@ pub(super) fn sync_lab_runtime_overlays(
         // reflects (derived from its on-disk build time). A stale dist would
         // silently ship old code to the runner (#6965). Computed on the
         // controller-local artifact dir, where mtimes are authoritative.
+        //
+        // A proven-stale build warns by default and hard-refuses when the
+        // runner is configured strict or the per-run env override is set
+        // (#11110); the runner's own settings carry that choice, so escalation
+        // is not env-only.
         let build_provenance =
             super::runtime_overlay_freshness::assess_runtime_overlay_build_freshness(&local_path);
         if let Some(warning) = super::runtime_overlay_freshness::stale_runtime_overlay_warning(
@@ -507,7 +513,7 @@ pub(super) fn sync_lab_runtime_overlays(
             &local_path.display().to_string(),
             &build_provenance,
         ) {
-            if super::runtime_overlay_freshness::require_fresh_runtime_overlay() {
+            if super::runtime_overlay_freshness::require_fresh_runtime_overlay(runner_settings) {
                 return Err(Error::validation_invalid_argument(
                     "runtime_overlay",
                     warning,

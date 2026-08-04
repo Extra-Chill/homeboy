@@ -83,6 +83,15 @@ pub struct RunnerSettings {
     /// single run regardless of this setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_exact_homeboy_version: Option<bool>,
+    /// When `true`, a Lab runtime overlay whose built artifact is provably
+    /// behind its source checkout hard-refuses the offload instead of emitting
+    /// a stderr warning and shipping the old build. Default (unset/`false`)
+    /// warns and proceeds. The `HOMEBOY_REQUIRE_FRESH_RUNTIME_OVERLAY` env var
+    /// forces the strict behavior for a single run regardless of this setting.
+    /// Only builds proven stale escalate — an unverifiable overlay stays a
+    /// report, never a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_fresh_runtime_overlay: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

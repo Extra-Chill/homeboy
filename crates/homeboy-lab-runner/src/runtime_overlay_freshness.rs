@@ -63,10 +63,15 @@ use super::workspace::git_output;
 const MTIME_WALK_SKIPPED_DIRECTORY_NAMES: &[&str] = &[".git", "node_modules"];
 
 /// Env var that escalates a stale runtime-overlay build from a warning to a hard
-/// error for a single run. Accepts the usual truthy spellings (`1`, `true`,
-/// `yes`, `on`). Mirrors the opt-in gate style already used for the
-/// controller↔runner version check.
+/// error for a single run, regardless of per-runner configuration. Accepts the
+/// usual truthy spellings (`1`, `true`, `yes`, `on`). Mirrors the opt-in gate
+/// style already used for the controller↔runner version check.
 pub(super) const REQUIRE_FRESH_RUNTIME_OVERLAY_ENV: &str = "HOMEBOY_REQUIRE_FRESH_RUNTIME_OVERLAY";
+
+/// Runner setting that escalates a stale runtime-overlay build for every offload
+/// dispatched to that runner. Named here so operator-facing messages can point
+/// at the durable control instead of only the per-run env var.
+pub(super) const REQUIRE_FRESH_RUNTIME_OVERLAY_SETTING: &str = "require_fresh_runtime_overlay";
 
 /// Build provenance for a runtime overlay's artifact directory. Folded into the
 /// synced-overlay record so a stale build is auditable from `homeboy runs`.
@@ -176,10 +181,22 @@ impl RuntimeOverlayBuildProvenance {
     }
 }
 
-/// Whether a stale runtime-overlay build should hard-fail this run instead of
-/// warning, per the [`REQUIRE_FRESH_RUNTIME_OVERLAY_ENV`] opt-in.
-pub(super) fn require_fresh_runtime_overlay() -> bool {
-    std::env::var(REQUIRE_FRESH_RUNTIME_OVERLAY_ENV)
+/// Resolve whether a stale runtime-overlay build should hard-fail the run
+/// instead of warning. Defaults to warn-and-proceed (`false`). Operators opt
+/// into the strict behavior either per-runner (the
+/// [`REQUIRE_FRESH_RUNTIME_OVERLAY_SETTING`] runner setting) or for a single run
+/// via [`REQUIRE_FRESH_RUNTIME_OVERLAY_ENV`].
+///
+/// Precedence deliberately mirrors the controller↔runner version gate
+/// (`require_exact_runner_version`): a truthy env var escalates regardless of
+/// configuration, and anything else falls through to the runner setting, whose
+/// unset default is `false`. The env var is an escalation override only — it
+/// cannot relax a runner that is configured strict, because a falsy value there
+/// is indistinguishable from "not set for this run".
+pub(super) fn require_fresh_runtime_overlay(
+    settings: &homeboy_core::server::RunnerSettings,
+) -> bool {
+    if std::env::var(REQUIRE_FRESH_RUNTIME_OVERLAY_ENV)
         .ok()
         .is_some_and(|value| {
             matches!(
@@ -187,6 +204,10 @@ pub(super) fn require_fresh_runtime_overlay() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
+    {
+        return true;
+    }
+    settings.require_fresh_runtime_overlay.unwrap_or(false)
 }
 
 /// Assess the build freshness of a controller-local runtime-overlay artifact
@@ -308,7 +329,8 @@ pub(super) fn stale_runtime_overlay_warning(
         "Lab offload: runtime overlay `{role}` build at `{local_path}` is STALE ({behind}): \
          built dist reflects source `{built}` but the source checkout is at `{head}`. \
          The offload will run the old build. Rebuild the overlay artifact (re-run its build step) \
-         before retrying, or export `{REQUIRE_FRESH_RUNTIME_OVERLAY_ENV}=1` to fail instead of warn."
+         before retrying. Set runner setting `{REQUIRE_FRESH_RUNTIME_OVERLAY_SETTING}` or export \
+         `{REQUIRE_FRESH_RUNTIME_OVERLAY_ENV}=1` to fail instead of warn."
     ))
 }
 
@@ -361,11 +383,12 @@ mod tests {
     use chrono::{Duration, Utc};
 
     use homeboy_core::materialization_currency::{Currency, CurrencyEvidence};
+    use homeboy_core::server::RunnerSettings;
 
     use super::{
         assess_runtime_overlay_build_freshness, require_fresh_runtime_overlay,
         stale_runtime_overlay_warning, RuntimeOverlayBuildStatus,
-        REQUIRE_FRESH_RUNTIME_OVERLAY_ENV,
+        REQUIRE_FRESH_RUNTIME_OVERLAY_ENV, REQUIRE_FRESH_RUNTIME_OVERLAY_SETTING,
     };
 
     fn git(path: &Path, args: &[&str]) {
@@ -543,17 +566,73 @@ mod tests {
         assert!(!CurrencyEvidence::BuildTimestamp.proves_content_equality());
     }
 
+    fn strict_settings() -> RunnerSettings {
+        RunnerSettings {
+            require_fresh_runtime_overlay: Some(true),
+            ..RunnerSettings::default()
+        }
+    }
+
+    /// The full precedence matrix for the escalation gate.
+    ///
+    /// Deliberately one test rather than three: every assertion here mutates the
+    /// same process-wide environment variable, and `cargo test` runs a module's
+    /// tests on parallel threads. Splitting these would let one case observe
+    /// another's env write.
     #[test]
     fn require_fresh_env_opt_in_parses_truthy_values() {
-        temp_env_var(REQUIRE_FRESH_RUNTIME_OVERLAY_ENV, Some("1"), || {
-            assert!(require_fresh_runtime_overlay());
-        });
-        temp_env_var(REQUIRE_FRESH_RUNTIME_OVERLAY_ENV, Some("false"), || {
-            assert!(!require_fresh_runtime_overlay());
-        });
+        let default_settings = RunnerSettings::default();
+
+        // Env override escalates a runner with no opinion configured.
+        for truthy in ["1", "true", "yes", "on"] {
+            temp_env_var(REQUIRE_FRESH_RUNTIME_OVERLAY_ENV, Some(truthy), || {
+                assert!(
+                    require_fresh_runtime_overlay(&default_settings),
+                    "expected `{truthy}` to escalate"
+                );
+            });
+        }
+
+        // No env var: the runner setting decides, and unset means warn-only.
         temp_env_var(REQUIRE_FRESH_RUNTIME_OVERLAY_ENV, None, || {
-            assert!(!require_fresh_runtime_overlay());
+            assert!(!require_fresh_runtime_overlay(&default_settings));
+            // Escalation is configurable, not env-only — this is the durable
+            // "never ship a stale build to this runner" answer that #11110 was
+            // missing.
+            assert!(require_fresh_runtime_overlay(&strict_settings()));
+            assert!(!require_fresh_runtime_overlay(&RunnerSettings {
+                require_fresh_runtime_overlay: Some(false),
+                ..RunnerSettings::default()
+            }));
         });
+
+        // A falsy env value is not a relaxation: it is indistinguishable from
+        // "not set for this run", so it falls through to configuration and a
+        // runner configured strict stays strict.
+        for falsy in ["false", "off"] {
+            temp_env_var(REQUIRE_FRESH_RUNTIME_OVERLAY_ENV, Some(falsy), || {
+                assert!(!require_fresh_runtime_overlay(&default_settings));
+                assert!(require_fresh_runtime_overlay(&strict_settings()));
+            });
+        }
+    }
+
+    /// The stale warning must name both durable and per-run controls, or the
+    /// escalation stays undiscoverable to the operator reading stderr.
+    #[test]
+    fn stale_warning_names_both_escalation_controls() {
+        let repo = tempfile::tempdir().expect("repo");
+        init_repo(repo.path());
+        commit_at(repo.path(), "a.txt", "a", &iso(-3));
+        let dist = write_dist(repo.path());
+        commit_at(repo.path(), "b.txt", "b", &iso(2));
+
+        let provenance = assess_runtime_overlay_build_freshness(&dist);
+        let warning = stale_runtime_overlay_warning("cli", "/local/dist", &provenance)
+            .expect("stale warning");
+
+        assert!(warning.contains(REQUIRE_FRESH_RUNTIME_OVERLAY_SETTING));
+        assert!(warning.contains(REQUIRE_FRESH_RUNTIME_OVERLAY_ENV));
     }
 
     fn temp_env_var<F: FnOnce()>(key: &str, value: Option<&str>, run: F) {

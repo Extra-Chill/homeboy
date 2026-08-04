@@ -182,6 +182,7 @@ fn empty_overlay_list_is_a_no_op_and_leaves_mapping_unchanged() {
         Vec::new(),
         &mut mapping,
         false,
+        &homeboy_core::server::RunnerSettings::default(),
     )
     .expect("no-op overlay sync");
 
@@ -226,9 +227,93 @@ fn skips_declared_overlay_dependency_hydration_only_when_opted_out() {
             overlays,
             &mut mapping,
             true,
+            &homeboy_core::server::RunnerSettings::default(),
         )
         .expect("opt-out bypasses the declared dependency command");
         assert_eq!(synced[0].dependency_hydration["status"], "not_applied");
         assert_eq!(synced[0].dependency_hydration["reason"], "opt_out");
     });
+}
+
+/// A stale overlay refuses the offload on runner CONFIGURATION alone, with no
+/// environment variable involved. Before #11110 the only way to reach this
+/// branch was an undocumented env var, so the durable answer to "never ship a
+/// stale build to this runner" did not exist.
+///
+/// The freshness check runs before the overlay is snapshotted, so the refusal
+/// happens without contacting a runner. Only the escalating direction is
+/// asserted: a concurrently running test may have the per-run env override set,
+/// and that override can only push toward refusal.
+#[test]
+fn stale_overlay_refuses_the_sync_from_runner_configuration_alone() {
+    let repo = tempfile::tempdir().expect("repo");
+    init_stale_overlay_checkout(repo.path());
+    let primary = tempfile::tempdir().expect("primary tempdir");
+    let mut mapping = Vec::new();
+    let overlays = parse_runtime_overlays(vec![RuntimeOverlaySpec {
+        path: repo.path().join("dist").display().to_string(),
+        role: Some("cli-runtime".to_string()),
+        snapshot_includes: Vec::new(),
+        install: None,
+        expose_remote_path_env: None,
+    }])
+    .expect("parse overlay");
+
+    let error = sync_lab_runtime_overlays(
+        "unreachable-runner",
+        &primary.path().display().to_string(),
+        overlays,
+        &mut mapping,
+        false,
+        &homeboy_core::server::RunnerSettings {
+            require_fresh_runtime_overlay: Some(true),
+            ..Default::default()
+        },
+    )
+    .expect_err("a runner configured strict refuses a stale overlay build");
+
+    let message = error.to_string();
+    assert!(message.contains("STALE"), "unexpected refusal: {message}");
+    // Refused before any sync, so the mapping never gained the stale overlay.
+    assert!(mapping.is_empty());
+}
+
+/// Build a checkout whose `dist/` (mtime ≈ now) predates commits dated in the
+/// future, which is what the mtime-vs-commit-date heuristic reads as stale.
+fn init_stale_overlay_checkout(path: &std::path::Path) {
+    let git = |args: &[&str], date: Option<&str>| {
+        let mut command = std::process::Command::new("git");
+        command.args(args).current_dir(path);
+        if let Some(date) = date {
+            command
+                .env("GIT_AUTHOR_DATE", date)
+                .env("GIT_COMMITTER_DATE", date);
+        }
+        let output = command.output().expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    let iso =
+        |offset_days: i64| (chrono::Utc::now() + chrono::Duration::days(offset_days)).to_rfc3339();
+
+    git(&["init", "-b", "main"], None);
+    git(&["config", "user.email", "homeboy@example.test"], None);
+    git(&["config", "user.name", "Homeboy Test"], None);
+    git(&["config", "commit.gpgsign", "false"], None);
+
+    std::fs::write(path.join("a.txt"), "a").expect("write source");
+    git(&["add", "a.txt"], None);
+    git(&["commit", "-m", "a"], Some(&iso(-3)));
+
+    let dist = path.join("dist");
+    std::fs::create_dir_all(&dist).expect("dist dir");
+    std::fs::write(dist.join("index.js"), "built").expect("write dist");
+
+    std::fs::write(path.join("b.txt"), "b").expect("write source");
+    git(&["add", "b.txt"], None);
+    git(&["commit", "-m", "b"], Some(&iso(2)));
 }
