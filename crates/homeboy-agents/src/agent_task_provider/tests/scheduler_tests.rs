@@ -789,6 +789,9 @@ fn provider_attempts_receive_distinct_allocated_runtime_tmpdirs() {
         plan.options.retry.retryable_failure_classifications =
             vec![AgentTaskFailureClassification::ExecutionFailed];
 
+        crate::agent_tasks::lifecycle::submit_plan(&plan, Some("run-scratch-retry"))
+            .expect("submit plan");
+        crate::agent_tasks::lifecycle::mark_running("run-scratch-retry").expect("mark running");
         let aggregate =
             AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
                 provider,
