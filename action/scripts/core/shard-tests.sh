@@ -27,14 +27,14 @@ plan() {
   local canonical inventory_digest plan_digest
   canonical="$(jq -cS '{schema,runner,runner_fingerprint,workspace_fingerprint,inventory_fingerprint,tests:(.tests | sort_by(.id))}' "${inventory}")"
   inventory_digest="$(digest "${canonical}")"
-  jq -cn --argjson inventory "${canonical}" --arg inventory_digest "${inventory_digest}" --argjson count "${count}" --argjson unknown "${unknown}" '
+  printf '%s' "${canonical}" | jq -cn --slurpfile inventory /dev/stdin --arg inventory_digest "${inventory_digest}" --argjson count "${count}" --argjson unknown "${unknown}" '
     [range(0; $count) | {index:., duration_ms:0, tests:[]}] as $empty
-    | reduce ($inventory.tests | map(. + {weight:(.duration_ms // $unknown)}) | sort_by(-.weight, .id))[] as $test
+    | reduce ($inventory[0].tests | map(. + {weight:(.duration_ms // $unknown)}) | sort_by(-.weight, .id))[] as $test
         ($empty; (min_by(.duration_ms, .index).index) as $index | .[$index].duration_ms += $test.weight | .[$index].tests += [$test.id])
-    | {schema:"homeboy/test-shard-plan/v1", inventory_digest:$inventory_digest, inventory_fingerprint:$inventory.inventory_fingerprint,
-       shards:(map({schema:"homeboy/test-shard-manifest/v1", id:("shard-" + ((.index + 1)|tostring)), runner:$inventory.runner,
-         runner_fingerprint:$inventory.runner_fingerprint, workspace_fingerprint:$inventory.workspace_fingerprint,
-         inventory_fingerprint:$inventory.inventory_fingerprint, tests:.tests, estimated_duration_ms:.duration_ms}))}
+    | {schema:"homeboy/test-shard-plan/v1", inventory_digest:$inventory_digest, inventory_fingerprint:$inventory[0].inventory_fingerprint,
+       shards:(map({schema:"homeboy/test-shard-manifest/v1", id:("shard-" + ((.index + 1)|tostring)), runner:$inventory[0].runner,
+         runner_fingerprint:$inventory[0].runner_fingerprint, workspace_fingerprint:$inventory[0].workspace_fingerprint,
+         inventory_fingerprint:$inventory[0].inventory_fingerprint, tests:.tests, estimated_duration_ms:.duration_ms}))}
   ' > "${output}.tmp"
   plan_digest="$(digest "$(jq -cS . "${output}.tmp")")"
   jq --arg digest "${plan_digest}" '. + {plan_digest:$digest}' "${output}.tmp" > "${output}"
