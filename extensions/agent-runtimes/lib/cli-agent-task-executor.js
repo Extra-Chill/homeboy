@@ -16,6 +16,7 @@ const {
 const {
 	normalizeAgentTaskOutcome,
 } = require('../../runtime-agent-ci/lib/agent-task-outcome-normalizer');
+const { harvestDeclaredArtifacts } = require('./declared-artifact-harvester');
 
 const DEFAULT_MAX_BUFFER = 10 * 1024 * 1024;
 const DEFAULT_PROCESS_ENV_ALLOWLIST = [
@@ -233,22 +234,24 @@ function createCliAgentTaskExecutor(spec) {
 		});
 
 		const processEvidence = collectArtifacts ? processArtifacts(request, config, spawnResult) : {};
+		const declaredEvidence = harvestDeclaredArtifacts({ request, config, cwd, artifactDir: artifactDirectory(request, config) });
+		const evidence = mergeEvidence(processEvidence, declaredEvidence);
 		const context = { request, config, commandSpec, cwd, spawnResult, spawnExtra };
 
 		if (spawnResult.error?.code === 'ENOENT') {
-			return outcome(request, buildNotFound(context));
+			return outcome(request, applyDeclaredArtifactResult({ ...buildNotFound(context), ...evidence }, declaredEvidence));
 		}
 
 		if (spawnResult.error) {
 			const timedOut = spawnResult.error.code === 'ETIMEDOUT';
-			return outcome(request, buildSpawnError(context, timedOut));
+			return outcome(request, applyDeclaredArtifactResult({ ...buildSpawnError(context, timedOut), ...evidence }, declaredEvidence));
 		}
 
 		if (spawnResult.status === 0) {
-			return outcome(request, { ...buildSuccess(context), ...processEvidence });
+			return outcome(request, applyDeclaredArtifactResult({ ...buildSuccess(context), ...evidence }, declaredEvidence));
 		}
 
-		return outcome(request, { ...buildFailure(context), ...processEvidence });
+		return outcome(request, applyDeclaredArtifactResult({ ...buildFailure(context), ...evidence }, declaredEvidence));
 	}
 
 	return { execute, outcome, validationFailure };
@@ -263,6 +266,40 @@ function timeoutSecondsFromLimits(limits = {}, fallbackSeconds = 0) {
 
 function resolveCwd(request = {}, config = {}) {
 	return config.cwd || request.workspace_path || request.workspace?.path || process.cwd();
+}
+
+function artifactDirectory(request = {}, config = {}) {
+	return config.artifacts_path || config.artifactsPath || request.artifacts_path || process.env.HOMEBOY_AGENT_TASK_ARTIFACTS_DIR || process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACTS_DIR || '';
+}
+
+function mergeEvidence(primary = {}, secondary = {}) {
+	return {
+		artifacts: [...arrayValue(primary.artifacts), ...arrayValue(secondary.artifacts)],
+		evidence_refs: [...arrayValue(primary.evidence_refs), ...arrayValue(secondary.evidence_refs)],
+	};
+}
+
+function applyDeclaredArtifactResult(terminal = {}, harvested = {}) {
+	const errors = arrayValue(harvested.errors);
+	const missingRequired = arrayValue(harvested.missing?.required);
+	const missingOptional = arrayValue(harvested.missing?.optional);
+	const diagnostics = [
+		...arrayValue(terminal.diagnostics),
+		...missingOptional.map((artifact) => ({ classification: 'artifact', code: 'agent_task.optional_declared_artifact_missing', message: `Optional declared artifact is absent: ${artifact.name}.`, data: artifact })),
+	];
+	if (errors.length === 0 && missingRequired.length === 0) {
+		return { ...terminal, diagnostics };
+	}
+	const details = [...missingRequired.map((artifact) => artifact.name), ...errors.map((error) => error.artifact)].join(', ');
+	return {
+		...terminal,
+		status: terminal.status === 'succeeded' ? 'failed' : terminal.status,
+		failure_classification: terminal.status === 'succeeded' ? 'execution_failed' : terminal.failure_classification,
+		failure_code: terminal.status === 'succeeded' ? 'agent_task.declared_artifact_harvest_failed' : terminal.failure_code,
+		summary: terminal.status === 'succeeded' ? `Declared artifact harvesting failed: ${details}.` : terminal.summary,
+		diagnostics: [...diagnostics, ...(missingRequired.length ? [{ classification: 'artifact', code: 'agent_task.required_declared_artifact_missing', message: `Required declared artifact is absent: ${missingRequired.map((artifact) => artifact.name).join(', ')}.`, data: { missing_artifacts: missingRequired } }] : []), ...errors.map((error) => ({ classification: 'artifact', code: `agent_task.declared_artifact_${error.code}`, message: error.message, data: error }))],
+		metadata: { ...(terminal.metadata || {}), declared_artifact_missing: harvested.missing, declared_artifact_errors: errors },
+	};
 }
 
 function safeFileSegment(value) {
@@ -317,6 +354,9 @@ module.exports = {
 	DEFAULT_PROCESS_ENV_ALLOWLIST,
 	cliAgentTaskSpawnEnv,
 	createCliAgentTaskExecutor,
+	applyDeclaredArtifactResult,
+	artifactDirectory,
+	mergeEvidence,
 	timeoutSecondsFromLimits,
 	resolveCwd,
 	safeFileSegment,

@@ -13,8 +13,11 @@ const {
 const {
 	cliAgentTaskSpawnEnv,
 	createCliAgentTaskExecutor,
+	applyDeclaredArtifactResult,
+	artifactDirectory,
 	timeoutSecondsFromLimits,
 } = require('../../lib/cli-agent-task-executor');
+const { harvestDeclaredArtifacts } = require('../../lib/declared-artifact-harvester');
 const {
 	createOpenCodeProgressAdapter,
 } = require('./opencode-progress-events');
@@ -1231,7 +1234,10 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 		});
 	}
 
-	const terminal = withArtifactCaptureFailure(spawnResult.status === 0 ? opencodeSuccessOutcome(context) : opencodeFailureOutcome(context));
+	const declaredEvidence = harvestDeclaredArtifacts({ request, config, cwd, artifactDir: artifactDirectory(request, config) || resolveArtifactDir(context) });
+	const providerEvidence = spawnResult.status === 0 ? opencodeSuccessOutcome(context) : opencodeFailureOutcome(context);
+	const collected = { ...providerEvidence, ...mergeEvidence(providerEvidence, declaredEvidence) };
+	const terminal = applyDeclaredArtifactResult(withArtifactCaptureFailure(collected), declaredEvidence);
 	return outcome(request, { ...terminal, ...mergeEvidence(terminal, runtimeLogs) });
 }
 

@@ -85,6 +85,7 @@ try {
 	assert.equal(fs.existsSync(scriptPath), true, `provider command target should exist: ${scriptPath}`);
 
 	const mockCliPath = path.join(root, 'mock-codex.cjs');
+	const declaredArtifactCliPath = path.join(root, 'mock-codex-declared-artifacts.cjs');
 	const omittedModelCliPath = path.join(root, 'mock-codex-without-model.cjs');
 	fs.writeFileSync(omittedModelCliPath, `#!/usr/bin/env node
 const assert = require('node:assert/strict');
@@ -100,6 +101,13 @@ assert.equal(process.argv.at(-1), 'Prove the Codex runtime boundary without leak
 assert.equal(process.env.UNDECLARED_SECRET, undefined);
 process.stdout.write(process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN || 'missing secret');
 process.stderr.write(process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN || 'missing secret');
+process.exit(0);
+`);
+	fs.writeFileSync(declaredArtifactCliPath, `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.mkdirSync('screenshots', { recursive: true });
+fs.writeFileSync('report.md', '# Captured report\\n');
+fs.writeFileSync('screenshots/image.bin', Buffer.from([0, 255, 1]));
 process.exit(0);
 `);
 
@@ -138,6 +146,51 @@ process.exit(0);
 		instructions: 'Run without selecting a model.',
 	});
 	assert.equal(omittedModelResult.status, 'succeeded', JSON.stringify(omittedModelResult.diagnostics));
+	const declaredWorkspace = path.join(root, 'declared-workspace');
+	fs.mkdirSync(declaredWorkspace);
+	const declaredResult = executeCodexAgentTask({
+		...request,
+		task_id: 'codex-declared-artifacts',
+		executor: {
+			...request.executor,
+			config: {
+				provider: 'codex',
+				command: process.execPath,
+				command_args: [declaredArtifactCliPath, 'exec'],
+				cwd: declaredWorkspace,
+				artifacts_path: path.join(root, 'declared-artifacts'),
+			},
+		},
+		artifact_declarations: [
+			{ name: 'report', path: 'report.md', kind: 'markdown', required: true },
+			{ name: 'screenshots', path: 'screenshots', kind: 'screenshot-directory', required: true },
+		],
+	});
+	assert.equal(declaredResult.status, 'succeeded', JSON.stringify(declaredResult.diagnostics));
+	const declaredReport = declaredResult.artifacts.find((artifact) => artifact.name === 'report');
+	const declaredScreenshots = declaredResult.artifacts.find((artifact) => artifact.name === 'screenshots');
+	assert.equal(fs.readFileSync(declaredReport.path, 'utf8'), '# Captured report\n');
+	assert.deepEqual(fs.readFileSync(path.join(declaredScreenshots.path, 'image.bin')), Buffer.from([0, 255, 1]));
+	assert.equal(declaredScreenshots.file_count, 1);
+	const missingDeclaredResult = executeCodexAgentTask({
+		...request,
+		task_id: 'codex-missing-declared-artifact',
+		executor: {
+			...request.executor,
+			config: {
+				provider: 'codex',
+				command: process.execPath,
+				command_args: [omittedModelCliPath, 'exec'],
+				cwd: declaredWorkspace,
+				artifacts_path: path.join(root, 'missing-declared-artifacts'),
+			},
+		},
+		instructions: 'Run without selecting a model.',
+		artifact_declarations: [{ name: 'required-report', path: 'missing.md', required: true }],
+	});
+	assert.equal(missingDeclaredResult.status, 'failed');
+	assert.equal(missingDeclaredResult.failure_code, 'agent_task.declared_artifact_harvest_failed');
+	assert.equal(missingDeclaredResult.diagnostics.some((diagnostic) => diagnostic.class === 'agent_task.required_declared_artifact_missing'), true);
 	const runResult = spawnSync(process.execPath, [scriptPath], {
 		encoding: 'utf8',
 		env: {
