@@ -323,6 +323,7 @@ mod plan {
         artifact_outputs: HashMap<String, Vec<AgentTaskArtifactOutputDeclaration>>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         postprocess_steps: Vec<AgentTaskArtifactPostprocessStep>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         services: Vec<AgentTaskManagedService>,
         #[serde(default)]
         options: AgentTaskScheduleOptions,
@@ -805,19 +806,20 @@ mod managed_service_plan_tests {
             readiness: None,
             public_url: None,
         });
-        plan.postprocess_steps.push(AgentTaskArtifactPostprocessStep {
-            id: "postprocess".to_string(),
-            depends_on: Vec::new(),
-            required: true,
-            plan: homeboy_core::artifacts::ArtifactPostprocessPlan {
-                schema: "homeboy/artifact-postprocess/v1".to_string(),
-                plan_id: "postprocess".to_string(),
-                artifact_roots: Vec::new(),
-                actions: Vec::new(),
-                reviewer_refs: Vec::new(),
-                metadata: Value::Null,
-            },
-        });
+        plan.postprocess_steps
+            .push(AgentTaskArtifactPostprocessStep {
+                id: "postprocess".to_string(),
+                depends_on: Vec::new(),
+                required: true,
+                plan: homeboy_core::artifacts::ArtifactPostprocessPlan {
+                    schema: "homeboy/artifact-postprocess/v1".to_string(),
+                    plan_id: "postprocess".to_string(),
+                    artifact_roots: Vec::new(),
+                    actions: Vec::new(),
+                    reviewer_refs: Vec::new(),
+                    metadata: Value::Null,
+                },
+            });
 
         plan.rebuild_homeboy_plan();
         let round_trip = AgentTaskPlan::from_homeboy_plan(plan.homeboy_plan.clone());
