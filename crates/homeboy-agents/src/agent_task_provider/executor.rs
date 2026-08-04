@@ -9,7 +9,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         request: AgentTaskRequest,
         context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
-        let request = match materialize_executor_request(request, &context) {
+        let mut request = match materialize_executor_request(request, &context) {
             Ok(request) => request,
             Err((request, path, error)) => {
                 return failure_outcome(
@@ -65,9 +65,21 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             }
         };
 
-        let missing_capabilities: Vec<String> = request
-            .executor
-            .required_capabilities
+        let requirements = match request.capability_requirements() {
+            Ok(requirements) => requirements,
+            Err(message) => {
+                return failure_outcome(
+                    &request,
+                    AgentTaskOutcomeStatus::Failed,
+                    AgentTaskFailureClassification::CapabilityMissing,
+                    "agent_task.capability_requirements_invalid",
+                    message,
+                    json!({ "layer": "declaration" }),
+                )
+            }
+        };
+        let missing_capabilities: Vec<String> = requirements
+            .provider
             .iter()
             .filter(|capability| !provider.capabilities.contains(capability))
             .cloned()
@@ -83,9 +95,24 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                     provider.id,
                     missing_capabilities.join(", ")
                 ),
-                json!({ "provider": provider.id, "missing_capabilities": missing_capabilities }),
+                json!({
+                    "layer": "provider",
+                    "provider": provider.id,
+                    "missing_capabilities": missing_capabilities,
+                    "advertised_capabilities": provider.capabilities,
+                }),
             );
         }
+
+        // A provider only records what it owns. Runner admission appends runner
+        // observations and attached-tool contributions after its readiness pass.
+        request
+            .request
+            .record_capability_evidence(requirements.evidence(
+                provider.capabilities.clone(),
+                Vec::new(),
+                &std::collections::BTreeSet::new(),
+            ));
 
         run_materialized_provider_command(&request, &provider, context.run_id.as_deref())
     }

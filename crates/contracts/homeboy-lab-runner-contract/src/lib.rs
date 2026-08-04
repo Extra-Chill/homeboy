@@ -274,9 +274,19 @@ pub struct PreparedLabRunnerCapability {
 
 impl From<PreparedLabRunnerCapability> for RunnerCapabilityPreflight {
     fn from(plan: PreparedLabRunnerCapability) -> Self {
+        let mut required_tools = plan.required_tools;
+        // Capability labels are runner-owned admission requirements. Preserve
+        // them as probeable tool IDs at the execution boundary so reservation
+        // revalidates the same decision that placement made.
+        for capability in plan.required_capabilities {
+            let tool = RunnerRequiredTool::new(capability);
+            if !required_tools.contains(&tool) {
+                required_tools.push(tool);
+            }
+        }
         Self {
             command: plan.command.to_string(),
-            required_tools: plan.required_tools,
+            required_tools,
             required_commands: Vec::new(),
             required_tool_capabilities: Vec::new(),
             required_toolchain_probes: Vec::new(),

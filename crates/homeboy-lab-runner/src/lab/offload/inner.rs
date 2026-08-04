@@ -1530,11 +1530,32 @@ pub(crate) fn run_lab_offload_inner(
     )?;
     // Public preflight constructs the same typed routed command before entering
     // this compiler, so no admission requirement can diverge at this boundary.
-    let admission_plan = crate::lab_selection::compile_lab_admission_plan(
+    let mut admission_plan = crate::lab_selection::compile_lab_admission_plan(
         &contract,
         &source_path,
         &command_prefix.required_tools,
     )?;
+    // Durable plan declarations are controller-owned inputs to the same
+    // admission plan, never a replacement routed command or a wrapper-only
+    // preflight. The converted preflight is rechecked before reservation.
+    if let Some(durable_plan) = request.durable_agent_task_plan {
+        for task in &durable_plan.tasks {
+            let requirements = task.capability_requirements().map_err(|message| {
+                Error::validation_invalid_argument(
+                    "capability_requirements",
+                    message,
+                    Some(task.task_id.clone()),
+                    Some(vec!["Use homeboy/agent-task-capability-requirements/v1 with explicit provider, runner, and attached-tool declarations.".to_string()]),
+                )
+            })?;
+            admission_plan
+                .capability
+                .required_capabilities
+                .extend(requirements.runner);
+        }
+    }
+    admission_plan.capability.required_capabilities.sort();
+    admission_plan.capability.required_capabilities.dedup();
     let execution_toolchain = admission_plan.toolchain;
     let capability_plan = Some(admission_plan.capability);
     if let Some(capability_plan) = &capability_plan {
