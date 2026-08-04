@@ -140,6 +140,45 @@ impl ProcessStep {
     }
 }
 
+/// Detach a child from the caller's session and process group before it execs.
+///
+/// A process that shares its launcher's process group dies with it: the shell,
+/// agent harness, or SSH session that terminates the launcher signals the whole
+/// group. Work that a caller was told is durable and independently observable
+/// must not inherit that fate, so the child leads its own session.
+///
+/// `setsid` fails with `EPERM` when the child is already a process-group
+/// leader — which is exactly what [`ProcessContainment::prepare`] arranges via
+/// `process_group(0)`. That is not a failure of intent: the child is already
+/// outside the caller's group, which is the property this exists to guarantee.
+/// Treating it as success is what lets containment and detachment compose on
+/// the same command instead of fighting over who calls `setpgid` first.
+#[cfg(unix)]
+pub fn detach_from_caller_session(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: `pre_exec` runs in the forked child immediately before exec.
+    // `setsid` only changes that child process's session and reports failure
+    // through errno; it allocates nothing and touches no shared state.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EPERM) {
+                    // Already a process-group leader, so already detached from
+                    // the caller's group. Nothing left to guarantee.
+                    return Ok(());
+                }
+                return Err(error);
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+pub fn detach_from_caller_session(_command: &mut Command) {}
+
 pub fn pid_is_running(pid: u32) -> bool {
     if pid > i32::MAX as u32 {
         return false;
@@ -1366,6 +1405,74 @@ mod process_tree_tests {
 
         let _ = reaper.join();
         assert!(!pid_is_running(pid));
+    }
+
+    fn process_group_of(pid: u32) -> libc::pid_t {
+        // SAFETY: `getpgid` reads kernel state for a pid and reports failure
+        // through its return value; it mutates nothing in this process.
+        unsafe { libc::getpgid(pid as libc::pid_t) }
+    }
+
+    /// The behaviour a detached launch has to escape: a plain child shares its
+    /// launcher's process group, so whatever signals the group — a shell, an
+    /// agent harness enforcing a command timeout, a closing SSH session — takes
+    /// the child with it.
+    #[test]
+    fn a_plain_child_shares_the_caller_process_group() {
+        let child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn attached child");
+        let pid = child.id();
+        let child_group = process_group_of(pid);
+        let caller_group = process_group_of(std::process::id());
+        let reaper = reap_in_background(child);
+
+        let _ = terminate_process_tree(pid);
+        let _ = reaper.join();
+
+        assert_eq!(child_group, caller_group);
+    }
+
+    #[test]
+    fn a_detached_child_leads_its_own_session() {
+        let mut command = Command::new("sleep");
+        command.arg("30");
+        detach_from_caller_session(&mut command);
+        let child = command.spawn().expect("spawn detached child");
+        let pid = child.id();
+        let child_group = process_group_of(pid);
+        let caller_group = process_group_of(std::process::id());
+        let reaper = reap_in_background(child);
+
+        let _ = terminate_process_tree(pid);
+        let _ = reaper.join();
+
+        assert_ne!(child_group, caller_group);
+        assert_eq!(child_group, pid as libc::pid_t);
+    }
+
+    /// Containment (children die with their owner) and detachment (the owner
+    /// survives its launcher) are complementary, and a single command can carry
+    /// both. `setsid` refuses for a process that `process_group(0)` already made
+    /// a group leader, so the tolerated `EPERM` is what keeps the pair from
+    /// turning into a spawn failure.
+    #[test]
+    fn detachment_composes_with_process_group_containment() {
+        let mut command = Command::new("sleep");
+        command.arg("30");
+        let _containment = ProcessContainment::prepare(&mut command).expect("prepare containment");
+        detach_from_caller_session(&mut command);
+        let child = command.spawn().expect("spawn contained detached child");
+        let pid = child.id();
+        let child_group = process_group_of(pid);
+        let caller_group = process_group_of(std::process::id());
+        let reaper = reap_in_background(child);
+
+        let _ = terminate_process_tree(pid);
+        let _ = reaper.join();
+
+        assert_ne!(child_group, caller_group);
     }
 
     #[test]
