@@ -136,6 +136,14 @@ where
                 };
             }
         };
+        let recovered_outcomes =
+            postprocess::recovered_upstream_outcomes(&plan, self.run_id.as_deref());
+        let recovered_ids: std::collections::HashSet<_> = recovered_outcomes
+            .iter()
+            .map(|outcome| outcome.task_id.as_str())
+            .collect();
+        plan.tasks
+            .retain(|task| !recovered_ids.contains(task.task_id.as_str()));
         let max_queue_depth = plan.options.max_queue_depth.or(plan.options.max_tasks);
         let retry_budget_total = plan.options.retry.max_retries_total;
         let output_dependencies = plan.output_dependencies.clone();
@@ -184,8 +192,11 @@ where
             .collect();
         let mut running: Vec<RunningTask> = Vec::new();
         let mut quarantined: Vec<QuarantinedTask> = Vec::new();
-        let mut outcomes = Vec::new();
-        let mut completed_by_task: HashMap<String, AgentTaskOutcome> = HashMap::new();
+        let mut outcomes = recovered_outcomes;
+        let mut completed_by_task: HashMap<String, AgentTaskOutcome> = outcomes
+            .iter()
+            .map(|outcome| (outcome.task_id.clone(), outcome.clone()))
+            .collect();
         let mut events = Vec::new();
         let mut cancellation_notified = false;
         let execution_budget = plan.options.execution_budget.clone();

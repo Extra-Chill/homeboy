@@ -1,6 +1,7 @@
 //! Plan-native execution of generic artifact postprocess actions.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,10 @@ pub(super) fn run_postprocess_steps(
 ) {
     for step in &plan.postprocess_steps {
         let checkpoint = postprocess_checkpoint_path(run_id, &step.id);
-        let outcome = if let Some(outcome) = read_checkpoint(&checkpoint) {
+        let identity = checkpoint_identity(plan, run_id, step, outcomes);
+        let outcome = if let Some(outcome) =
+            read_checkpoint(&checkpoint, run_id, &step.id, &identity)
+        {
             outcome
         } else if cancellation.is_cancelled() {
             postprocess_outcome(
@@ -28,10 +32,39 @@ pub(super) fn run_postprocess_steps(
         } else if let Some(message) = failed_dependency_message(step, outcomes) {
             postprocess_failure_outcome(step, &message)
         } else {
-            execute_postprocess_step(step, run_id, outcomes)
+            match acquire_claim(&postprocess_claim_path(run_id, &step.id)) {
+                Ok(claim) => {
+                    let outcome = execute_postprocess_step(step, run_id, outcomes);
+                    let checkpoint_result =
+                        write_checkpoint(&checkpoint, run_id, &identity, outcomes, step, &outcome);
+                    drop(claim);
+                    match checkpoint_result {
+                        Ok(()) => outcome,
+                        Err(error) => checkpoint_failure_outcome(step, error.message),
+                    }
+                }
+                Err(message) => postprocess_failure_outcome(step, &message),
+            }
         };
-        if outcome.status != AgentTaskOutcomeStatus::Cancelled {
-            let _ = write_checkpoint(&checkpoint, step, &outcome);
+        if outcome.status != AgentTaskOutcomeStatus::Cancelled
+            && !outcome.metadata["checkpoint_write_failed"]
+                .as_bool()
+                .unwrap_or(false)
+            && !checkpoint.is_file()
+        {
+            if let Err(error) =
+                write_checkpoint(&checkpoint, run_id, &identity, outcomes, step, &outcome)
+            {
+                let outcome = checkpoint_failure_outcome(step, error.message);
+                events.push(event(
+                    &step.id,
+                    AgentTaskScheduleSupport::state_for_outcome(&outcome),
+                    1,
+                    outcome.summary.clone(),
+                ));
+                outcomes.push(outcome);
+                continue;
+            }
         }
         events.push(event(
             &step.id,
@@ -182,6 +215,10 @@ fn postprocess_checkpoint_path(run_id: Option<&str>, step_id: &str) -> PathBuf {
     postprocess_root(run_id, step_id).join("checkpoint.json")
 }
 
+fn postprocess_claim_path(run_id: Option<&str>, step_id: &str) -> PathBuf {
+    postprocess_root(run_id, step_id).join("claim.json")
+}
+
 fn materialize_dependency_artifacts(
     input: &Path,
     dependencies: &[String],
@@ -203,7 +240,7 @@ fn materialize_dependency_artifacts(
             }
             let destination = input
                 .join(homeboy_core::paths::sanitize_path_segment(dependency))
-                .join(materialized_artifact_name(artifact));
+                .join(materialized_artifact_name(artifact)?);
             if let Some(parent) = destination.parent() {
                 std::fs::create_dir_all(parent).map_err(|error| {
                     homeboy_core::Error::internal_io(
@@ -223,7 +260,7 @@ fn materialize_dependency_artifacts(
     Ok(())
 }
 
-fn materialized_artifact_name(artifact: &AgentTaskArtifact) -> String {
+fn materialized_artifact_name(artifact: &AgentTaskArtifact) -> homeboy_core::Result<String> {
     let candidate = artifact
         .name
         .as_deref()
@@ -234,14 +271,26 @@ fn materialized_artifact_name(artifact: &AgentTaskArtifact) -> String {
         })
         .unwrap_or(&artifact.id);
     let path = Path::new(candidate);
+    if matches!(candidate, "." | "..") {
+        return Err(homeboy_core::Error::validation_invalid_argument(
+            "artifact.filename",
+            "artifact filename cannot be `.` or `..`",
+            Some(candidate.to_string()),
+            None,
+        ));
+    }
     if !candidate.is_empty()
+        && !matches!(
+            path.components().next(),
+            Some(Component::CurDir | Component::ParentDir)
+        )
         && !path.is_absolute()
         && path.components().count() == 1
         && !candidate.contains(['/', '\\'])
     {
-        return candidate.to_string();
+        return Ok(candidate.to_string());
     }
-    homeboy_core::paths::sanitize_path_segment(&artifact.id)
+    Ok(homeboy_core::paths::sanitize_path_segment(&artifact.id))
 }
 
 fn postprocess_outcome(
@@ -286,19 +335,133 @@ fn postprocess_failure_outcome(
 #[derive(Serialize, Deserialize)]
 struct PostprocessCheckpoint {
     schema: String,
+    run_id: String,
     step_id: String,
+    fingerprint: String,
+    dependencies: Vec<AgentTaskOutcome>,
     outcome: AgentTaskOutcome,
 }
 
-fn read_checkpoint(path: &Path) -> Option<AgentTaskOutcome> {
+#[derive(Serialize, Deserialize)]
+struct PostprocessClaim {
+    schema: String,
+    created_at_unix_secs: u64,
+}
+
+const CHECKPOINT_SCHEMA: &str = "homeboy/agent-task-postprocess-checkpoint/v2";
+const CLAIM_SCHEMA: &str = "homeboy/agent-task-postprocess-claim/v1";
+const CLAIM_STALE_AFTER_SECS: u64 = 300;
+
+struct PostprocessClaimGuard(PathBuf);
+
+impl Drop for PostprocessClaimGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn acquire_claim(path: &Path) -> std::result::Result<PostprocessClaimGuard, String> {
+    let parent = path.parent().expect("claim has parent");
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let claim = PostprocessClaim {
+        schema: CLAIM_SCHEMA.to_string(),
+        created_at_unix_secs: now_unix_secs(),
+    };
+    let bytes = serde_json::to_vec(&claim).map_err(|error| error.to_string())?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(&bytes).map_err(|error| error.to_string())?;
+            Ok(PostprocessClaimGuard(path.to_path_buf()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let stale = std::fs::read(path)
+                .ok()
+                .and_then(|raw| serde_json::from_slice::<PostprocessClaim>(&raw).ok())
+                .map(|claim| {
+                    claim.schema == CLAIM_SCHEMA
+                        && now_unix_secs().saturating_sub(claim.created_at_unix_secs)
+                            > CLAIM_STALE_AFTER_SECS
+                })
+                .unwrap_or(false);
+            if stale {
+                std::fs::remove_file(path).map_err(|error| error.to_string())?;
+                acquire_claim(path)
+            } else {
+                Err("artifact postprocess step is already executing under a live claim".to_string())
+            }
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn checkpoint_identity(
+    plan: &AgentTaskPlan,
+    run_id: Option<&str>,
+    step: &AgentTaskArtifactPostprocessStep,
+    outcomes: &[AgentTaskOutcome],
+) -> String {
+    let dependencies: Vec<_> = step
+        .depends_on
+        .iter()
+        .filter_map(|id| outcomes.iter().find(|outcome| outcome.task_id == *id))
+        .collect();
+    let artifact_identities: Vec<_> = dependencies
+        .iter()
+        .flat_map(|outcome| {
+            outcome.artifacts.iter().map(move |artifact| {
+                serde_json::json!({
+                    "task_id": outcome.task_id,
+                    "id": artifact.id,
+                    "kind": artifact.kind,
+                    "sha256": artifact.sha256.clone().or_else(|| artifact.path.as_deref().and_then(|path| std::fs::read(path).ok()).map(|bytes| content_hash::sha256_hex(&bytes))),
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let payload = serde_json::json!({
+        "schema": CHECKPOINT_SCHEMA,
+        "run_id": run_id.unwrap_or("unrecorded-run"),
+        "plan_id": plan.plan_id,
+        "step_id": step.id,
+        "plan": step.plan,
+        "dependencies": dependencies,
+        "artifact_identities": artifact_identities,
+    });
+    content_hash::sha256_hex(&serde_json::to_vec(&payload).unwrap_or_default())
+}
+
+fn read_checkpoint(
+    path: &Path,
+    run_id: Option<&str>,
+    step_id: &str,
+    identity: &str,
+) -> Option<AgentTaskOutcome> {
     let checkpoint: PostprocessCheckpoint =
         serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    (checkpoint.schema == "homeboy/agent-task-postprocess-checkpoint/v1")
+    (checkpoint.schema == CHECKPOINT_SCHEMA
+        && checkpoint.run_id == run_id.unwrap_or("unrecorded-run")
+        && checkpoint.step_id == step_id
+        && checkpoint.fingerprint == identity)
         .then_some(checkpoint.outcome)
 }
 
 fn write_checkpoint(
     path: &Path,
+    run_id: Option<&str>,
+    fingerprint: &str,
+    outcomes: &[AgentTaskOutcome],
     step: &AgentTaskArtifactPostprocessStep,
     outcome: &AgentTaskOutcome,
 ) -> homeboy_core::Result<()> {
@@ -307,8 +470,20 @@ fn write_checkpoint(
         homeboy_core::Error::internal_io(error.to_string(), Some(parent.display().to_string()))
     })?;
     let payload = serde_json::to_vec_pretty(&PostprocessCheckpoint {
-        schema: "homeboy/agent-task-postprocess-checkpoint/v1".to_string(),
+        schema: CHECKPOINT_SCHEMA.to_string(),
+        run_id: run_id.unwrap_or("unrecorded-run").to_string(),
         step_id: step.id.clone(),
+        fingerprint: fingerprint.to_string(),
+        dependencies: step
+            .depends_on
+            .iter()
+            .filter_map(|id| {
+                outcomes
+                    .iter()
+                    .find(|outcome| outcome.task_id == *id)
+                    .cloned()
+            })
+            .collect(),
         outcome: outcome.clone(),
     })
     .map_err(|error| {
@@ -321,6 +496,55 @@ fn write_checkpoint(
     std::fs::rename(&temporary, path).map_err(|error| {
         homeboy_core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
     })
+}
+
+fn checkpoint_failure_outcome(
+    step: &AgentTaskArtifactPostprocessStep,
+    message: String,
+) -> AgentTaskOutcome {
+    let mut outcome = postprocess_outcome(
+        step,
+        AgentTaskOutcomeStatus::Failed,
+        "artifact postprocess side effects completed but checkpoint persistence failed",
+        Some(message),
+    );
+    outcome.metadata["checkpoint_write_failed"] = serde_json::json!(true);
+    outcome
+}
+
+pub(super) fn recovered_upstream_outcomes(
+    plan: &AgentTaskPlan,
+    run_id: Option<&str>,
+) -> Vec<AgentTaskOutcome> {
+    let mut recovered = Vec::new();
+    for step in &plan.postprocess_steps {
+        let path = postprocess_checkpoint_path(run_id, &step.id);
+        let Ok(raw) = std::fs::read(path) else {
+            continue;
+        };
+        let Ok(checkpoint) = serde_json::from_slice::<PostprocessCheckpoint>(&raw) else {
+            continue;
+        };
+        if checkpoint.schema != CHECKPOINT_SCHEMA
+            || checkpoint.run_id != run_id.unwrap_or("unrecorded-run")
+            || checkpoint.step_id != step.id
+        {
+            continue;
+        }
+        let identity = checkpoint_identity(plan, run_id, step, &checkpoint.dependencies);
+        if checkpoint.fingerprint != identity {
+            continue;
+        }
+        for outcome in checkpoint.dependencies {
+            if !recovered
+                .iter()
+                .any(|existing: &AgentTaskOutcome| existing.task_id == outcome.task_id)
+            {
+                recovered.push(outcome);
+            }
+        }
+    }
+    recovered
 }
 
 #[cfg(test)]
@@ -510,5 +734,141 @@ mod tests {
                 Some(output.as_str())
             );
         });
+    }
+
+    #[test]
+    fn rejects_dot_artifact_filenames() {
+        for name in [".", ".."] {
+            let artifact = AgentTaskArtifact {
+                id: name.to_string(),
+                kind: "input".to_string(),
+                ..Default::default()
+            };
+            assert!(
+                materialized_artifact_name(&artifact).is_err(),
+                "{name} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn claim_blocks_live_execution_and_recovers_stale_claim() {
+        let root = tempfile::tempdir().expect("claim root");
+        let path = root.path().join("claim.json");
+        let first = acquire_claim(&path).expect("first claim");
+        assert!(
+            acquire_claim(&path).is_err(),
+            "live claim blocks duplicate execution"
+        );
+        drop(first);
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&PostprocessClaim {
+                schema: CLAIM_SCHEMA.to_string(),
+                created_at_unix_secs: 0,
+            })
+            .expect("claim json"),
+        )
+        .expect("stale claim");
+        assert!(acquire_claim(&path).is_ok(), "stale claim is recoverable");
+    }
+
+    #[test]
+    fn checkpoint_identity_rejects_changed_dependency_digest_and_recovers_upstream() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let producer = AgentTaskOutcome {
+                task_id: "capture".to_string(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                artifacts: vec![AgentTaskArtifact {
+                    id: "capture.bin".to_string(),
+                    kind: "input".to_string(),
+                    sha256: Some("a".repeat(64)),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let step = AgentTaskArtifactPostprocessStep {
+                id: "compose".to_string(),
+                depends_on: vec!["capture".to_string()],
+                required: true,
+                plan: ArtifactPostprocessPlan {
+                    schema: ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string(),
+                    plan_id: "compose".to_string(),
+                    artifact_roots: vec![ArtifactPostprocessRoot {
+                        id: "output".to_string(),
+                        path: "unused".to_string(),
+                        persisted_ref: None,
+                        manifest_path: None,
+                    }],
+                    actions: Vec::new(),
+                    reviewer_refs: Vec::new(),
+                    metadata: serde_json::json!({}),
+                },
+            };
+            let plan = AgentTaskPlan {
+                postprocess_steps: vec![step.clone()],
+                ..AgentTaskPlan::new("recover", Vec::new())
+            };
+            let checkpoint = postprocess_checkpoint_path(Some("recover-run"), &step.id);
+            let identity =
+                checkpoint_identity(&plan, Some("recover-run"), &step, &[producer.clone()]);
+            write_checkpoint(
+                &checkpoint,
+                Some("recover-run"),
+                &identity,
+                &[producer.clone()],
+                &step,
+                &postprocess_outcome(&step, AgentTaskOutcomeStatus::Succeeded, "done", None),
+            )
+            .expect("checkpoint");
+            assert_eq!(
+                recovered_upstream_outcomes(&plan, Some("recover-run"))[0].task_id,
+                "capture"
+            );
+            let mut changed = producer;
+            changed.artifacts[0].sha256 = Some("b".repeat(64));
+            let stale = checkpoint_identity(&plan, Some("recover-run"), &step, &[changed]);
+            assert!(
+                read_checkpoint(&checkpoint, Some("recover-run"), &step.id, &stale).is_none(),
+                "changed artifact digest invalidates checkpoint"
+            );
+        });
+    }
+
+    #[test]
+    fn checkpoint_write_failure_is_terminal_and_visible() {
+        let step = AgentTaskArtifactPostprocessStep {
+            id: "compose".to_string(),
+            depends_on: Vec::new(),
+            required: true,
+            plan: ArtifactPostprocessPlan {
+                schema: ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string(),
+                plan_id: "compose".to_string(),
+                artifact_roots: vec![ArtifactPostprocessRoot {
+                    id: "output".to_string(),
+                    path: "unused".to_string(),
+                    persisted_ref: None,
+                    manifest_path: None,
+                }],
+                actions: Vec::new(),
+                reviewer_refs: Vec::new(),
+                metadata: serde_json::json!({}),
+            },
+        };
+        let root = tempfile::tempdir().expect("checkpoint root");
+        let checkpoint = root.path().join("checkpoint.json");
+        std::fs::create_dir(&checkpoint).expect("checkpoint directory");
+        let error = write_checkpoint(
+            &checkpoint,
+            Some("run"),
+            "identity",
+            &[],
+            &step,
+            &postprocess_outcome(&step, AgentTaskOutcomeStatus::Succeeded, "done", None),
+        )
+        .expect_err("write fails after side effect");
+        let outcome = checkpoint_failure_outcome(&step, error.message);
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
+        assert_eq!(outcome.metadata["checkpoint_write_failed"], true);
     }
 }
