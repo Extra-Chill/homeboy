@@ -51,6 +51,172 @@ pub(super) enum LabRunnerPreparation {
     FallBackLocal { reason: String },
 }
 
+/// A side-effect-free placement question. Wrappers call this before durable run
+/// creation and setup; execution rechecks the same live admission facts.
+#[derive(Debug, Clone)]
+pub struct PlacementReadinessRequest {
+    pub runner_id: String,
+    pub workload_family: String,
+    pub command: String,
+    pub allow_queue: bool,
+    pub durable_workload: bool,
+    pub required_tools: Vec<super::RunnerRequiredTool>,
+    pub required_capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementReadinessState {
+    Ready,
+    Queueable,
+    Blocked,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlacementReadinessPredicate {
+    pub id: &'static str,
+    pub satisfied: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlacementRecoveryAction {
+    pub command: String,
+    pub requires_confirmation: bool,
+}
+
+/// A snapshot, not a reservation. It cannot create a rig/run/runner mutation.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlacementReadiness {
+    pub schema: &'static str,
+    pub workload_family: String,
+    pub command: String,
+    pub runner_id: String,
+    pub state: PlacementReadinessState,
+    pub predicates: Vec<PlacementReadinessPredicate>,
+    pub recovery_actions: Vec<PlacementRecoveryAction>,
+    pub revalidate_before_execution: bool,
+}
+
+pub fn placement_readiness(request: &PlacementReadinessRequest) -> Result<PlacementReadiness> {
+    let runner = load(&request.runner_id)?;
+    let status = status(&request.runner_id)?;
+    let capability_plan =
+        super::prepare_lab_runner_capability(super::LabRunnerCapabilityContract {
+            // The public request retains the caller's command context. The shared
+            // capability contract currently stores its diagnostic label as static
+            // data, so use the generic admission label without weakening predicates.
+            command: "runner preflight",
+            required_tools: request.required_tools.clone(),
+            required_capabilities: request.required_capabilities.clone(),
+        });
+    let capability = super::evaluate_lab_runner_capabilities_for_runner(
+        &runner,
+        &capability_plan,
+        super::LabRunnerGateMode::Explicit,
+    )?;
+    Ok(placement_readiness_from_status(
+        request,
+        &status,
+        runner.settings.concurrency_limit,
+        status_tunnel_mode(&status),
+        capability,
+    ))
+}
+
+fn placement_readiness_from_status(
+    request: &PlacementReadinessRequest,
+    status: &RunnerStatusReport,
+    capacity: Option<usize>,
+    mode: RunnerTunnelMode,
+    capability: super::LabRunnerGateDecision,
+) -> PlacementReadiness {
+    let availability = RunnerAvailability::from_status_parts(
+        request.runner_id.clone(),
+        status.connected,
+        status.stale_daemon.is_some(),
+        status.active_jobs.len(),
+        &status.active_job_state,
+        capacity,
+    );
+    let queueable = request.allow_queue
+        && request.durable_workload
+        && mode == RunnerTunnelMode::Reverse
+        && availability.is_capacity_exhausted();
+    let compatible = matches!(capability, super::LabRunnerGateDecision::Eligible);
+    let state = if availability.accepts_jobs && compatible {
+        PlacementReadinessState::Ready
+    } else if queueable {
+        PlacementReadinessState::Queueable
+    } else {
+        PlacementReadinessState::Blocked
+    };
+    let recovery_actions = if !compatible {
+        match capability {
+            super::LabRunnerGateDecision::Missing { remediation, .. } => remediation
+                .into_iter()
+                .map(|command| PlacementRecoveryAction {
+                    command,
+                    requires_confirmation: false,
+                })
+                .collect(),
+            super::LabRunnerGateDecision::Eligible => Vec::new(),
+        }
+    } else if availability.accepts_jobs || queueable {
+        Vec::new()
+    } else if let Some(action) = status.admission_action() {
+        vec![PlacementRecoveryAction {
+            command: action.render_command(),
+            requires_confirmation: !matches!(action.safety, ActionSafety::ReadOnly),
+        }]
+    } else {
+        vec![PlacementRecoveryAction {
+            command: format!("homeboy runner status {} --full", request.runner_id),
+            requires_confirmation: false,
+        }]
+    };
+    PlacementReadiness {
+        schema: "homeboy/placement-readiness/v1",
+        workload_family: request.workload_family.clone(),
+        command: request.command.clone(),
+        runner_id: request.runner_id.clone(),
+        state,
+        predicates: vec![
+            PlacementReadinessPredicate {
+                id: "runner_connected",
+                satisfied: availability.connected,
+            },
+            PlacementReadinessPredicate {
+                id: "daemon_fresh",
+                satisfied: status.stale_daemon.is_none(),
+            },
+            PlacementReadinessPredicate {
+                id: "active_jobs_authoritative",
+                satisfied: matches!(
+                    status.active_job_state,
+                    super::RunnerActiveJobState::Available
+                ),
+            },
+            PlacementReadinessPredicate {
+                id: "capacity_available",
+                satisfied: !availability
+                    .reasons
+                    .iter()
+                    .any(|reason| reason == "capacity_reached"),
+            },
+            PlacementReadinessPredicate {
+                id: "durable_reverse_queue",
+                satisfied: queueable,
+            },
+            PlacementReadinessPredicate {
+                id: "required_capabilities",
+                satisfied: compatible,
+            },
+        ],
+        recovery_actions,
+        revalidate_before_execution: true,
+    }
+}
+
 static HANDOFF_CONNECT_LOCKS: OnceLock<Mutex<std::collections::BTreeMap<String, Arc<Mutex<()>>>>> =
     OnceLock::new();
 const HANDOFF_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -1243,5 +1409,165 @@ mod placement_rejection_tests {
             !hints.iter().any(|hint| hint.contains("fanout")),
             "non-cook remediation must not mention fanout, got {hints:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod placement_readiness_tests {
+    use super::*;
+    use crate::session::RunnerStaleDaemonWarning;
+    use crate::{RunnerActiveJobState, RunnerSessionState};
+
+    fn request() -> PlacementReadinessRequest {
+        PlacementReadinessRequest {
+            runner_id: "lab".to_string(),
+            workload_family: "bench".to_string(),
+            command: "bench run".to_string(),
+            allow_queue: false,
+            durable_workload: false,
+            required_tools: Vec::new(),
+            required_capabilities: Vec::new(),
+        }
+    }
+
+    fn status() -> RunnerStatusReport {
+        RunnerStatusReport {
+            runner_id: "lab".to_string(),
+            connected: true,
+            state: RunnerSessionState::Connected,
+            session: None,
+            stale_daemon: None,
+            daemon_freshness: None,
+            active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
+            stale_runner_jobs: Vec::new(),
+            active_job_count: 0,
+            stale_runner_job_count: 0,
+            active_job_state: RunnerActiveJobState::Available,
+            active_job_source: None,
+            active_job_error: None,
+            active_job_recovery_evidence: None,
+            session_path: "/tmp/lab.json".to_string(),
+        }
+    }
+
+    fn decide(
+        request: &PlacementReadinessRequest,
+        status: &RunnerStatusReport,
+        capacity: Option<usize>,
+        mode: RunnerTunnelMode,
+        capability: super::super::LabRunnerGateDecision,
+    ) -> PlacementReadiness {
+        placement_readiness_from_status(request, status, capacity, mode, capability)
+    }
+
+    #[test]
+    fn ready_is_read_only_and_requires_execution_revalidation() {
+        let result = decide(
+            &request(),
+            &status(),
+            Some(1),
+            RunnerTunnelMode::DirectSsh,
+            super::super::LabRunnerGateDecision::Eligible,
+        );
+        assert_eq!(result.state, PlacementReadinessState::Ready);
+        assert!(result.recovery_actions.is_empty());
+        assert!(result.revalidate_before_execution);
+    }
+
+    #[test]
+    fn stale_is_blocked_with_bounded_recovery() {
+        let mut observed = status();
+        observed.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+            "lab",
+            "old".to_string(),
+            "new".to_string(),
+            None,
+            None,
+        ));
+        let result = decide(
+            &request(),
+            &observed,
+            Some(1),
+            RunnerTunnelMode::DirectSsh,
+            super::super::LabRunnerGateDecision::Eligible,
+        );
+        assert_eq!(result.state, PlacementReadinessState::Blocked);
+        assert!(!result.recovery_actions.is_empty());
+    }
+
+    #[test]
+    fn busy_reverse_runner_is_queueable_only_for_durable_work() {
+        let mut observed = status();
+        observed.active_jobs.push(
+            serde_json::from_value(serde_json::json!({
+                "runner_id":"lab", "job_id":"00000000-0000-0000-0000-000000000001",
+                "operation":"test", "source":"daemon", "kind":"workload", "status":"running",
+                "command":"test", "started_at_ms":0, "elapsed_ms":0
+            }))
+            .expect("job"),
+        );
+        let mut request = request();
+        request.allow_queue = true;
+        request.durable_workload = true;
+        let result = decide(
+            &request,
+            &observed,
+            Some(1),
+            RunnerTunnelMode::Reverse,
+            super::super::LabRunnerGateDecision::Eligible,
+        );
+        assert_eq!(result.state, PlacementReadinessState::Queueable);
+        request.durable_workload = false;
+        assert_eq!(
+            decide(
+                &request,
+                &observed,
+                Some(1),
+                RunnerTunnelMode::Reverse,
+                super::super::LabRunnerGateDecision::Eligible
+            )
+            .state,
+            PlacementReadinessState::Blocked
+        );
+    }
+
+    #[test]
+    fn incompatible_is_blocked_with_capability_remediation() {
+        let decision = super::super::LabRunnerGateDecision::Missing {
+            runner_id: "lab".to_string(),
+            command: "runner preflight",
+            missing_tools: Vec::new(),
+            reason: "missing browser".to_string(),
+            remediation: vec!["install browser".to_string()],
+        };
+        let result = decide(
+            &request(),
+            &status(),
+            Some(1),
+            RunnerTunnelMode::DirectSsh,
+            decision,
+        );
+        assert_eq!(result.state, PlacementReadinessState::Blocked);
+        assert_eq!(result.recovery_actions[0].command, "install browser");
+    }
+
+    #[test]
+    fn disconnected_is_blocked_without_creating_an_admission() {
+        let mut observed = status();
+        observed.connected = false;
+        observed.state = RunnerSessionState::Disconnected;
+        let result = decide(
+            &request(),
+            &observed,
+            Some(1),
+            RunnerTunnelMode::DirectSsh,
+            super::super::LabRunnerGateDecision::Eligible,
+        );
+        assert_eq!(result.state, PlacementReadinessState::Blocked);
+        assert!(result
+            .predicates
+            .iter()
+            .any(|predicate| predicate.id == "runner_connected" && !predicate.satisfied));
     }
 }
