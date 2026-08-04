@@ -215,6 +215,29 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         repair: bool,
     },
+    /// Evaluate workload placement without creating a run, rig lease, runner job, or connection
+    Preflight {
+        /// Runner ID to evaluate
+        runner_id: String,
+        /// Declared workload family, for example bench, test, or agent-task
+        #[arg(long)]
+        workload_family: String,
+        /// Canonical intended command label
+        #[arg(long)]
+        command: String,
+        /// Permit a durable reverse-runner workload to report queueable at capacity
+        #[arg(long)]
+        allow_queue: bool,
+        /// The wrapper will persist a durable workload identity before setup
+        #[arg(long)]
+        durable_workload: bool,
+        /// Required executable tool on the selected runner. Repeat for each requirement.
+        #[arg(long = "require-tool")]
+        required_tools: Vec<String>,
+        /// Required runner capability. Repeat for each requirement.
+        #[arg(long = "require-capability")]
+        required_capabilities: Vec<String>,
+    },
     /// Connect to a runner by starting a loopback-only remote daemon and SSH tunnel
     Connect {
         /// Runner ID for direct SSH connect, or controller/broker ID when --reverse is set

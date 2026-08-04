@@ -348,6 +348,7 @@ pub(super) const REDACTED_ENV_VALUE: &str = "[redacted]";
 pub enum RunnerCommandOutput {
     Registry(RunnerOutput),
     Doctor(doctor::RunnerDoctorOutput),
+    Preflight(homeboy::runner::runners::PlacementReadiness),
     Execution(RunnerExecutionCommandOutput),
     Env(RunnerEnvOutput),
     Lifecycle(lifecycle::RunnerLifecycleOutput),

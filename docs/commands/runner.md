@@ -157,6 +157,22 @@ The JSON payload uses `command: "runner.doctor"` and includes `runner_id`,
 Use `doctor` before `connect` when you need to know whether Homeboy, Git, SSH,
 and the configured workspace root are usable on the target machine.
 
+### `preflight`
+
+```sh
+homeboy runner preflight homeboy-lab --workload-family bench --command "bench run"
+homeboy runner preflight homeboy-lab --workload-family agent-task --command "agent-task cook" --allow-queue --durable-workload
+homeboy runner preflight homeboy-lab --workload-family test --command "test" --require-tool node --require-capability browser
+```
+
+`preflight` creates no run, rig lease, runner job, workspace, or connection. Its
+`homeboy/placement-readiness/v1` response is `ready`, `queueable`, or `blocked`
+with exact predicates and bounded recovery actions. Queueing is limited to a
+durable workload on a full reverse runner. Execution revalidates live admission
+facts before reserving a daemon admission, so this result is evidence, not a
+reservation. Wrapper order is preflight, durable run persistence, then setup and
+materialization.
+
 Safety manifest metadata marks `runner connect` and `runner work` as explicit
 operator lifecycle actions. They do not currently expose dry-run contracts; use
 `runner doctor` for preflight diagnostics before changing runner lifecycle state.
