@@ -304,6 +304,7 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
 
         let (status_value, status_exit) = status(StatusArgs {
             run_id: "cook-cli-preflight-recovery".to_string(),
+            exact: false,
             bridge: false,
             since_cursor: None,
             full: true,
@@ -333,6 +334,7 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
         assert_eq!(
             status(StatusArgs {
                 run_id: "cook-cli-preflight-recovery".to_string(),
+                exact: false,
                 bridge: false,
                 since_cursor: None,
                 full: true,
@@ -377,6 +379,7 @@ fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
 
         let (status_value, status_exit) = status(StatusArgs {
             run_id: "run-cli-controller-proxy".to_string(),
+            exact: false,
             bridge: false,
             since_cursor: None,
             full: true,
@@ -624,6 +627,7 @@ fn submit_run_status_reports_terminal_state() {
         .expect("run completed");
         let (status_json, status_exit_code) = status(StatusArgs {
             run_id: "run-cli-terminal".to_string(),
+            exact: false,
             bridge: false,
             since_cursor: None,
             full: true,
@@ -632,6 +636,7 @@ fn submit_run_status_reports_terminal_state() {
         .expect("status loaded");
         let (bridge_status_json, bridge_status_exit_code) = status(StatusArgs {
             run_id: "run-cli-terminal".to_string(),
+            exact: false,
             bridge: true,
             since_cursor: Some(0),
             full: false,
@@ -663,6 +668,7 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
 
         let (status_value, _) = status(StatusArgs {
             run_id: run_id.to_string(),
+            exact: false,
             bridge: false,
             since_cursor: None,
             full: false,
@@ -816,6 +822,7 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
 
         let (status_value, status_exit_code) = status(StatusArgs {
             run_id: "run-cli-diagnose-evidence".to_string(),
+            exact: false,
             bridge: false,
             since_cursor: None,
             full: true,
@@ -1178,6 +1185,7 @@ fn generic_contract_fixtures_surface_runtime_import_before_missing_artifact() {
 
         let (status_value, status_exit_code) = status(StatusArgs {
             run_id: run_id.to_string(),
+            exact: false,
             bridge: false,
             since_cursor: None,
             full: true,
@@ -1663,6 +1671,7 @@ fn terminal_provider_failure_with_large_promotion_evidence_keeps_inspection_boun
         let started = std::time::Instant::now();
         let (status_value, _) = status(StatusArgs {
             run_id: run_id.to_string(),
+            exact: false,
             full: true,
             no_runner_probe: false,
             bridge: false,
@@ -2072,6 +2081,7 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
 
         let (value, exit_code) = resume(StatusArgs {
             run_id: run_id.to_string(),
+            exact: false,
             bridge: true,
             since_cursor: Some(1),
             full: false,
@@ -2103,6 +2113,7 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
 
         resume(StatusArgs {
             run_id: run_id.to_string(),
+            exact: false,
             bridge: true,
             since_cursor: Some(1),
             full: false,
@@ -2142,6 +2153,7 @@ fn non_bridge_resume_keeps_aggregate_output_shape() {
 
         let (value, exit_code) = resume(StatusArgs {
             run_id: run_id.to_string(),
+            exact: false,
             bridge: false,
             since_cursor: None,
             full: false,

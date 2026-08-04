@@ -46,15 +46,37 @@ const FULL_TEXT_LIMIT: usize = 4 * 1024;
 pub(super) struct CookReaderTarget {
     pub(super) run_id: String,
     pub(super) selection: Option<Value>,
+    pub(super) cook_alias: Option<Value>,
+    pub(super) exact: bool,
 }
 
 pub(super) fn resolve_cook_reader_target(
     run_or_cook_id: &str,
+    exact: bool,
 ) -> homeboy::core::Result<CookReaderTarget> {
+    if exact {
+        let cook_alias = agent_task_lifecycle::cook_index_exists(run_or_cook_id)?
+            .then(|| agent_task_lifecycle::cook_index(run_or_cook_id))
+            .transpose()?
+            .map(|index| {
+                json!({
+                    "cook_id": index.cook_id,
+                    "latest_attempt_run_id": index.latest_run_id,
+                })
+            });
+        return Ok(CookReaderTarget {
+            run_id: run_or_cook_id.to_string(),
+            selection: None,
+            cook_alias,
+            exact: true,
+        });
+    }
     if !agent_task_lifecycle::cook_index_exists(run_or_cook_id)? {
         return Ok(CookReaderTarget {
             run_id: run_or_cook_id.to_string(),
             selection: None,
+            cook_alias: None,
+            exact: false,
         });
     }
     let selection = agent_task_service_direct::select_cook_candidate(run_or_cook_id)?;
@@ -68,12 +90,17 @@ pub(super) fn resolve_cook_reader_target(
     }
     Ok(CookReaderTarget {
         run_id: selection.run_id.clone(),
+        cook_alias: Some(json!({
+            "cook_id": selection.cook_id,
+            "latest_attempt_run_id": selection.latest_attempt_run_id,
+        })),
         selection: Some(serde_json::to_value(selection).unwrap_or(Value::Null)),
+        exact: false,
     })
 }
 
 pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
-    let target = resolve_cook_reader_target(&args.run_id)?;
+    let target = resolve_cook_reader_target(&args.run_id, args.exact)?;
     if args.bridge {
         let bridge_status = agent_task_service::run_status(&target.run_id, args.since_cursor)?;
         let mut value = serde_json::to_value(bridge_status).unwrap_or(Value::Null);
@@ -86,7 +113,11 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     let run_id = &target.run_id;
     // Terminal inspection is a durable-local read. Reconciliation has its own
     // explicit command so an unavailable runner cannot hold status hostage.
-    let durable_read = match agent_task_lifecycle::durable_local_read(run_id) {
+    let durable_read = match if target.exact {
+        agent_task_lifecycle::exact_durable_local_read(run_id)
+    } else {
+        agent_task_lifecycle::durable_local_read(run_id)
+    } {
         Ok(read) => read,
         Err(error) if is_missing_agent_task_run_metadata_error(&error) => {
             if let Some(remediation) = agent_task_service::offloaded_status_remediation(run_id)? {
@@ -113,6 +144,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
         }
     }
     let mut value = serde_json::to_value(&record).unwrap_or(Value::Null);
+    attach_status_identity(&mut value, &args.run_id, &target);
     attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
     let acceptance_is_actionable = record.state
         == agent_task_lifecycle::AgentTaskRunState::Succeeded
@@ -168,6 +200,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     }
     let summary = compact_status_summary(&value, run_id);
     let mut summary = summary;
+    attach_status_identity(&mut summary, &args.run_id, &target);
     if let Some(selection) = target.selection {
         summary["candidate_selection"] = selection;
     }
@@ -175,6 +208,20 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     attach_agent_task_status_actionable(&mut summary, run_id);
     let exit_code = status_exit_code(&summary);
     Ok((summary, exit_code))
+}
+
+fn attach_status_identity(value: &mut Value, requested_run_id: &str, target: &CookReaderTarget) {
+    if let Value::Object(fields) = value {
+        let mut identity = json!({
+            "requested_run_id": requested_run_id,
+            "resolved_run_id": target.run_id,
+            "resolution": if target.exact { "exact_record" } else { "default" },
+        });
+        if let Some(cook_alias) = &target.cook_alias {
+            identity["cook_alias"] = cook_alias.clone();
+        }
+        fields.insert("identity".to_string(), identity);
+    }
 }
 
 /// A Cook owns the provider attempt's publication lifecycle. Once it records a
@@ -817,7 +864,7 @@ pub(super) fn artifacts(args: StatusArgs) -> CmdResult<Value> {
 }
 
 pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
-    let target = resolve_cook_reader_target(&args.run_id)?;
+    let target = resolve_cook_reader_target(&args.run_id, false)?;
     let run_id = &target.run_id;
     let durable_read = agent_task_lifecycle::durable_local_read(run_id)?;
     let artifacts = agent_task_service::artifacts(run_id)?;
@@ -902,7 +949,7 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
 }
 
 pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
-    let target = resolve_cook_reader_target(&args.run_id)?;
+    let target = resolve_cook_reader_target(&args.run_id, false)?;
     let run_id = &target.run_id;
     // Keep diagnosis within the same durable-local inspection contract as
     // status and logs; reconciliation is explicitly requested separately.

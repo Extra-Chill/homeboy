@@ -2436,6 +2436,17 @@ pub struct AgentTaskDurableReadUnavailable {
 /// read-only store budget, without runner liveness reconciliation.
 pub fn durable_local_read(run_id: &str) -> Result<AgentTaskDurableLocalRead> {
     let record = persisted_status(run_id)?;
+    durable_local_read_record(record)
+}
+
+/// Read one concrete durable record without resolving a Cook ID through its
+/// latest attempt. This is the inspection counterpart to [`exact_record`].
+pub fn exact_durable_local_read(run_id: &str) -> Result<AgentTaskDurableLocalRead> {
+    let record = store::read_record_bounded(&sanitize_run_id(run_id))?;
+    durable_local_read_record(record)
+}
+
+fn durable_local_read_record(record: AgentTaskRunRecord) -> Result<AgentTaskDurableLocalRead> {
     let aggregate = match store::read_aggregate_bounded(&record.run_id) {
         Ok(aggregate) => Some(aggregate),
         Err(error) => {

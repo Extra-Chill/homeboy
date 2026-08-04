@@ -32,6 +32,10 @@ pub struct SubmitArgs {
 #[derive(Args, Debug)]
 pub struct StatusArgs {
     pub run_id: String,
+    /// Inspect this exact lifecycle record instead of resolving a Cook ID to its
+    /// current attempt.
+    #[arg(long, conflicts_with = "bridge")]
+    pub exact: bool,
     #[arg(long)]
     pub bridge: bool,
     #[arg(long, value_name = "CURSOR", requires = "bridge")]
@@ -167,6 +171,28 @@ mod tests {
             panic!("expected adoption command");
         };
         assert_eq!(args.ai_model.as_deref(), Some("openai/gpt-5.6-sol"));
+    }
+
+    #[test]
+    fn status_exact_selects_concrete_record_and_cannot_bridge() {
+        let cli = Cli::try_parse_from(["homeboy", "agent-task", "status", "cook-a", "--exact"])
+            .expect("exact status parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::Status(args) = agent_task.command else {
+            panic!("expected status command");
+        };
+        assert!(args.exact);
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "status",
+            "cook-a",
+            "--exact",
+            "--bridge",
+        ])
+        .is_err());
     }
 
     #[test]
