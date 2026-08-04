@@ -1737,12 +1737,15 @@ struct BatchCookSpec {
     model: Option<String>,
     #[serde(default)]
     secret_env: Vec<String>,
-    #[serde(default = "one")]
-    attempts: u32,
-    #[serde(default)]
-    same_provider_retries: u32,
-    #[serde(default)]
-    provider_rotations: u32,
+    // Absent means "unspecified", so the dispatch-plan layer can resolve the
+    // budget against the configured provider rotation (#11082). An explicit
+    // value in a batch plan still wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attempts: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    same_provider_retries: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_rotations: Option<u32>,
     #[serde(default = "one_usize")]
     concurrency: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2059,9 +2062,9 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
             selector: args.selector.clone(),
             model: args.model.clone(),
             secret_env: args.secret_env.clone(),
-            attempts: 1,
-            same_provider_retries: 0,
-            provider_rotations: 0,
+            attempts: None,
+            same_provider_retries: None,
+            provider_rotations: None,
             concurrency: 1,
             provider_config: args.provider_config.clone(),
             client_context: Some(
@@ -2411,10 +2414,6 @@ fn invalid_fanout(message: &str) -> Error {
 
 fn batch_cook_fanout_plan_schema() -> String {
     AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA.to_string()
-}
-
-fn one() -> u32 {
-    1
 }
 
 fn one_usize() -> usize {

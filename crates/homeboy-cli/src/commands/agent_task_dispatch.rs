@@ -29,36 +29,34 @@ pub struct DispatchCoreArgs {
     /// Maximum total provider executions per task, including same-provider
     /// retries and provider rotations. For Cook, this must be at least
     /// --max-attempts; use --max-same-provider-retries for gate and review-form
-    /// remediation. `--attempts 1` runs exactly once.
-    #[arg(
-        long = "max-provider-executions",
-        alias = "attempts",
-        default_value_t = 1,
-        value_name = "N"
-    )]
-    pub attempts: u32,
+    /// remediation. `--attempts 1` runs exactly once. When omitted, defaults to
+    /// the total attempts the configured provider rotation needs, or 1 when no
+    /// rotation is configured.
+    #[arg(long = "max-provider-executions", alias = "attempts", value_name = "N")]
+    pub attempts: Option<u32>,
 
     /// Same-provider retries allowed after the first provider execution. Cook
     /// needs one for each possible gate or required review-form remediation;
-    /// provider rotations cannot replace those retries.
+    /// provider rotations cannot replace those retries. Defaults to 0; a
+    /// configured provider rotation never funds these.
     #[arg(
         long = "max-same-provider-retries",
         alias = "same-provider-retries",
-        default_value_t = 0,
         value_name = "N"
     )]
-    pub same_provider_retries: u32,
+    pub same_provider_retries: Option<u32>,
 
     /// Cross-provider rotations allowed after the first provider execution.
     /// Rotations are distinct from same-provider Cook remediation and do not
-    /// satisfy its required review-form retry budget.
+    /// satisfy its required review-form retry budget. When omitted, defaults to
+    /// the number of entries in the configured provider rotation, or 0 when no
+    /// rotation is configured.
     #[arg(
         long = "max-provider-rotations",
         alias = "provider-rotations",
-        default_value_t = 0,
         value_name = "N"
     )]
-    pub provider_rotations: u32,
+    pub provider_rotations: Option<u32>,
 
     /// Persist the run for a daemon/runner but do not execute immediately.
     #[arg(long)]
@@ -302,9 +300,9 @@ mod tests {
                     tasks_json: None,
                     provider_config: None,
                     client_context: None,
-                    attempts: 1,
-                    same_provider_retries: 0,
-                    provider_rotations: 0,
+                    attempts: Some(1),
+                    same_provider_retries: Some(0),
+                    provider_rotations: Some(0),
                     queue_only: false,
                     timeout_ms: None,
                     resolved_provider_policy: None,
@@ -339,9 +337,9 @@ mod tests {
                     tasks_json: None,
                     provider_config: None,
                     client_context: None,
-                    attempts: 1,
-                    same_provider_retries: 0,
-                    provider_rotations: 0,
+                    attempts: Some(1),
+                    same_provider_retries: Some(0),
+                    provider_rotations: Some(0),
                     queue_only: false,
                     timeout_ms: None,
                     resolved_provider_policy: None,
@@ -448,11 +446,7 @@ mod tests {
                 tasks_json: overrides.core.tasks_json,
                 provider_config: overrides.core.provider_config,
                 client_context: overrides.core.client_context,
-                attempts: if overrides.core.attempts == 0 {
-                    1
-                } else {
-                    overrides.core.attempts
-                },
+                attempts: overrides.core.attempts,
                 same_provider_retries: overrides.core.same_provider_retries,
                 provider_rotations: overrides.core.provider_rotations,
                 queue_only: overrides.core.queue_only,

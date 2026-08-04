@@ -112,6 +112,18 @@ execution flag. Plan and
 `agent-task status` output show the resolved defaults before provider execution;
 an exhausted run records which budget stopped further execution.
 
+When these flags are omitted entirely, the budget is derived from the configured
+`agent_task.rotation` policy: the rotation chain funds its own reachability, so
+`N` configured entries resolve to `N` rotations and `N + 1` total executions
+(bounded by the policy's own `max_attempts`). Without a configured rotation the
+derived budget is still one execution and no rotation. Same-provider retries are
+never derived — they fund gate and required review-form remediation on the same
+provider identity, which a rotation chain says nothing about. Any explicitly
+passed flag, including an explicit `0`, always wins over the derived value.
+Cook states the effective rotation on submission, e.g.
+`cook: rotation: 2 fallback provider(s), up to 3 provider execution(s)` or
+`cook: rotation: disabled (1 provider execution(s))`.
+
 | Subcommand | Purpose |
 |---|---|
 | `cook` | Run one workspace task through the patch-artifact handoff workflow. |
