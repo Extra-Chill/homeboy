@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.10.9] - 2026-08-04
+
+### Changed
+- Preserve structured Homeboy results across Action stages
+
 ## [2.10.8] - 2026-08-03
 
 ### Fixed
