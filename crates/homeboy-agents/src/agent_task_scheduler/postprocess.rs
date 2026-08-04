@@ -1,6 +1,10 @@
 //! Plan-native execution of generic artifact postprocess actions.
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use homeboy_engine_primitives::content_hash;
@@ -345,18 +349,32 @@ struct PostprocessCheckpoint {
 #[derive(Serialize, Deserialize)]
 struct PostprocessClaim {
     schema: String,
-    created_at_unix_secs: u64,
+    owner_id: String,
+    owner_pid: u32,
+    heartbeat_unix_secs: u64,
 }
 
 const CHECKPOINT_SCHEMA: &str = "homeboy/agent-task-postprocess-checkpoint/v2";
-const CLAIM_SCHEMA: &str = "homeboy/agent-task-postprocess-claim/v1";
+const CLAIM_SCHEMA: &str = "homeboy/agent-task-postprocess-claim/v2";
 const CLAIM_STALE_AFTER_SECS: u64 = 300;
+const CLAIM_HEARTBEAT_INTERVAL_SECS: u64 = 1;
 
-struct PostprocessClaimGuard(PathBuf);
+struct PostprocessClaimGuard {
+    path: PathBuf,
+    owner_id: String,
+    stop: Arc<AtomicBool>,
+    heartbeat: Option<thread::JoinHandle<()>>,
+}
 
 impl Drop for PostprocessClaimGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(heartbeat) = self.heartbeat.take() {
+            let _ = heartbeat.join();
+        }
+        if claim_owned_by(&self.path, &self.owner_id) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -365,7 +383,9 @@ fn acquire_claim(path: &Path) -> std::result::Result<PostprocessClaimGuard, Stri
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let claim = PostprocessClaim {
         schema: CLAIM_SCHEMA.to_string(),
-        created_at_unix_secs: now_unix_secs(),
+        owner_id: uuid::Uuid::new_v4().to_string(),
+        owner_pid: std::process::id(),
+        heartbeat_unix_secs: now_unix_secs(),
     };
     let bytes = serde_json::to_vec(&claim).map_err(|error| error.to_string())?;
     match std::fs::OpenOptions::new()
@@ -375,8 +395,22 @@ fn acquire_claim(path: &Path) -> std::result::Result<PostprocessClaimGuard, Stri
     {
         Ok(mut file) => {
             use std::io::Write;
-            file.write_all(&bytes).map_err(|error| error.to_string())?;
-            Ok(PostprocessClaimGuard(path.to_path_buf()))
+            if let Err(error) = file.write_all(&bytes) {
+                let _ = std::fs::remove_file(path);
+                return Err(error.to_string());
+            }
+            let stop = Arc::new(AtomicBool::new(false));
+            let heartbeat = heartbeat_claim(
+                path.to_path_buf(),
+                claim.owner_id.clone(),
+                Arc::clone(&stop),
+            );
+            Ok(PostprocessClaimGuard {
+                path: path.to_path_buf(),
+                owner_id: claim.owner_id,
+                stop,
+                heartbeat: Some(heartbeat),
+            })
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let stale = std::fs::read(path)
@@ -384,8 +418,9 @@ fn acquire_claim(path: &Path) -> std::result::Result<PostprocessClaimGuard, Stri
                 .and_then(|raw| serde_json::from_slice::<PostprocessClaim>(&raw).ok())
                 .map(|claim| {
                     claim.schema == CLAIM_SCHEMA
-                        && now_unix_secs().saturating_sub(claim.created_at_unix_secs)
+                        && now_unix_secs().saturating_sub(claim.heartbeat_unix_secs)
                             > CLAIM_STALE_AFTER_SECS
+                        && !claim_owner_is_alive(claim.owner_pid)
                 })
                 .unwrap_or(false);
             if stale {
@@ -397,6 +432,66 @@ fn acquire_claim(path: &Path) -> std::result::Result<PostprocessClaimGuard, Stri
         }
         Err(error) => Err(error.to_string()),
     }
+}
+
+fn heartbeat_claim(
+    path: PathBuf,
+    owner_id: String,
+    stop: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        while !stop.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_secs(CLAIM_HEARTBEAT_INTERVAL_SECS));
+            if stop.load(Ordering::SeqCst) || !claim_owned_by(&path, &owner_id) {
+                return;
+            }
+            let Ok(mut claim) = std::fs::read(&path)
+                .ok()
+                .and_then(|raw| serde_json::from_slice::<PostprocessClaim>(&raw).ok())
+                .ok_or(())
+            else {
+                return;
+            };
+            claim.heartbeat_unix_secs = now_unix_secs();
+            let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+            if serde_json::to_vec(&claim)
+                .ok()
+                .and_then(|bytes| std::fs::write(&temporary, bytes).ok())
+                .is_none()
+            {
+                return;
+            }
+            if claim_owned_by(&path, &owner_id) {
+                let _ = std::fs::rename(&temporary, &path);
+            } else {
+                let _ = std::fs::remove_file(&temporary);
+                return;
+            }
+        }
+    })
+}
+
+fn claim_owned_by(path: &Path, owner_id: &str) -> bool {
+    std::fs::read(path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<PostprocessClaim>(&raw).ok())
+        .is_some_and(|claim| claim.schema == CLAIM_SCHEMA && claim.owner_id == owner_id)
+}
+
+#[cfg(unix)]
+fn claim_owner_is_alive(pid: u32) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    unsafe {
+        libc::kill(pid as libc::pid_t, 0) == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+}
+
+#[cfg(not(unix))]
+fn claim_owner_is_alive(pid: u32) -> bool {
+    pid == std::process::id()
 }
 
 fn now_unix_secs() -> u64 {
@@ -550,11 +645,17 @@ pub(super) fn recovered_upstream_outcomes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_task::{
+        AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
+        AGENT_TASK_REQUEST_SCHEMA,
+    };
     use homeboy_core::artifacts::{
         ArtifactPostprocessAction, ArtifactPostprocessPlan, ArtifactPostprocessRoot,
         ARTIFACT_POSTPROCESS_PLAN_SCHEMA,
     };
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn materializes_binary_dependency_and_records_postprocessed_artifact() {
@@ -752,25 +853,64 @@ mod tests {
     }
 
     #[test]
-    fn claim_blocks_live_execution_and_recovers_stale_claim() {
+    fn claim_keeps_long_running_live_owner_and_recovers_dead_owner() {
         let root = tempfile::tempdir().expect("claim root");
         let path = root.path().join("claim.json");
         let first = acquire_claim(&path).expect("first claim");
+        let initial: PostprocessClaim =
+            serde_json::from_slice(&std::fs::read(&path).expect("claim")).expect("claim json");
+        thread::sleep(Duration::from_secs(CLAIM_HEARTBEAT_INTERVAL_SECS + 1));
+        let renewed: PostprocessClaim =
+            serde_json::from_slice(&std::fs::read(&path).expect("claim")).expect("claim json");
+        assert!(
+            renewed.heartbeat_unix_secs > initial.heartbeat_unix_secs,
+            "active lease heartbeats renew"
+        );
         assert!(
             acquire_claim(&path).is_err(),
             "live claim blocks duplicate execution"
         );
+        let first_owner: PostprocessClaim =
+            serde_json::from_slice(&std::fs::read(&path).expect("claim")).expect("claim json");
         drop(first);
+        let replacement = acquire_claim(&path).expect("replacement claim");
+        let replacement_owner: PostprocessClaim =
+            serde_json::from_slice(&std::fs::read(&path).expect("claim")).expect("claim json");
+        assert_ne!(
+            first_owner.owner_id, replacement_owner.owner_id,
+            "same-process schedulers receive unique owners"
+        );
+        drop(replacement);
         std::fs::write(
             &path,
             serde_json::to_vec(&PostprocessClaim {
                 schema: CLAIM_SCHEMA.to_string(),
-                created_at_unix_secs: 0,
+                owner_id: "active-owner".to_string(),
+                owner_pid: std::process::id(),
+                heartbeat_unix_secs: 0,
             })
             .expect("claim json"),
         )
-        .expect("stale claim");
-        assert!(acquire_claim(&path).is_ok(), "stale claim is recoverable");
+        .expect("old live claim");
+        assert!(
+            acquire_claim(&path).is_err(),
+            "a live owner retains an old lease"
+        );
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&PostprocessClaim {
+                schema: CLAIM_SCHEMA.to_string(),
+                owner_id: "dead-owner".to_string(),
+                owner_pid: u32::MAX,
+                heartbeat_unix_secs: 0,
+            })
+            .expect("claim json"),
+        )
+        .expect("dead stale claim");
+        assert!(
+            acquire_claim(&path).is_ok(),
+            "dead stale claim is recoverable"
+        );
     }
 
     #[test]
@@ -870,5 +1010,101 @@ mod tests {
         let outcome = checkpoint_failure_outcome(&step, error.message);
         assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
         assert_eq!(outcome.metadata["checkpoint_write_failed"], true);
+    }
+
+    #[test]
+    fn scheduler_restart_recovers_upstream_without_provider_rerun() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let request = AgentTaskRequest {
+                schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                task_id: "capture".to_string(),
+                group_key: None,
+                parent_plan_id: None,
+                executor: AgentTaskExecutor {
+                    backend: "test".to_string(),
+                    selector: None,
+                    runtime_selection: None,
+                    required_capabilities: Vec::new(),
+                    secret_env: Vec::new(),
+                    model: None,
+                    config: serde_json::Value::Null,
+                },
+                instructions: "capture".to_string(),
+                inputs: serde_json::Value::Null,
+                source_refs: Vec::new(),
+                workspace: AgentTaskWorkspace::default(),
+                component_contracts: Vec::new(),
+                policy: AgentTaskPolicy::default(),
+                limits: AgentTaskLimits::default(),
+                expected_artifacts: Vec::new(),
+                artifact_declarations: Vec::new(),
+                output_declarations: Vec::new(),
+                metadata: serde_json::Value::Null,
+            };
+            let step = AgentTaskArtifactPostprocessStep {
+                id: "compose".to_string(),
+                depends_on: vec!["capture".to_string()],
+                required: true,
+                plan: ArtifactPostprocessPlan {
+                    schema: ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string(),
+                    plan_id: "compose".to_string(),
+                    artifact_roots: vec![ArtifactPostprocessRoot {
+                        id: "output".to_string(),
+                        path: "unused".to_string(),
+                        persisted_ref: None,
+                        manifest_path: None,
+                    }],
+                    actions: Vec::new(),
+                    reviewer_refs: Vec::new(),
+                    metadata: serde_json::json!({}),
+                },
+            };
+            let plan = AgentTaskPlan {
+                postprocess_steps: vec![step.clone()],
+                ..AgentTaskPlan::new("restart", vec![request])
+            };
+            let producer = AgentTaskOutcome {
+                task_id: "capture".to_string(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                ..Default::default()
+            };
+            let checkpoint = postprocess_checkpoint_path(Some("restart-run"), &step.id);
+            let identity =
+                checkpoint_identity(&plan, Some("restart-run"), &step, &[producer.clone()]);
+            write_checkpoint(
+                &checkpoint,
+                Some("restart-run"),
+                &identity,
+                &[producer],
+                &step,
+                &postprocess_outcome(&step, AgentTaskOutcomeStatus::Succeeded, "done", None),
+            )
+            .expect("checkpoint");
+            let calls = Arc::new(AtomicUsize::new(0));
+            struct Executor(Arc<AtomicUsize>);
+            impl AgentTaskExecutorAdapter for Executor {
+                fn execute(
+                    &self,
+                    request: AgentTaskRequest,
+                    _context: AgentTaskExecutionContext,
+                ) -> AgentTaskOutcome {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                    AgentTaskOutcome {
+                        task_id: request.task_id,
+                        status: AgentTaskOutcomeStatus::Succeeded,
+                        ..Default::default()
+                    }
+                }
+            }
+            let aggregate = AgentTaskScheduler::new(Executor(Arc::clone(&calls)))
+                .with_run_id("restart-run")
+                .run(plan);
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "recovered upstream outcome skips provider dispatch"
+            );
+            assert_eq!(aggregate.totals.succeeded, 2);
+        });
     }
 }
