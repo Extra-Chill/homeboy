@@ -2580,7 +2580,7 @@ pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<Agen
         }
     }
     let failure_context = (exit_code != 0)
-        .then(|| cook_failure_context(&cook_id, latest_run_id.as_deref()))
+        .then(|| cook_failure_context(&cook_id, latest_run_id.as_deref(), status))
         .flatten();
     let selected_candidate = cook_selected_candidate_provenance(&cook_id, &invocation_run_ids);
     AgentTaskRunResult {
@@ -2645,6 +2645,7 @@ fn cook_selected_candidate_provenance(
 fn cook_failure_context(
     cook_id: &str,
     latest_run_id: Option<&str>,
+    status: &str,
 ) -> Option<super::AgentTaskCookFailureContext> {
     let recipe = super::load_recipe(cook_id).ok()?;
     let chronological_latest_run_id = latest_run_id
@@ -2655,10 +2656,11 @@ fn cook_failure_context(
         .as_ref()
         .filter(|selection| !selection.incomplete && !selection.run_id.is_empty())
         .map(|selection| selection.run_id.clone());
-    let record_run_id = selected_run_id
-        .as_deref()
-        .unwrap_or(&chronological_latest_run_id);
-    let record = agent_task_lifecycle::status(record_run_id).ok();
+    // Candidate selection intentionally spans Cook history, but recovery is an
+    // operation on this invocation. Its legality, phase, diagnostics, and every
+    // emitted command must therefore come from this exact durable record.
+    let record_run_id = chronological_latest_run_id.as_str();
+    let record = agent_task_lifecycle::exact_record(record_run_id).ok();
     let provider_executions_consumed = recipe
         .attempts
         .iter()
@@ -2687,116 +2689,112 @@ fn cook_failure_context(
         (claim.state == agent_task_lifecycle::ClaimState::Running)
             .then(|| serde_json::to_value(claim).unwrap_or(Value::Null))
     });
-    let diagnostic = promotion_claim
+    let promotion_diagnostic = promotion_claim
         .as_ref()
         .filter(|claim| claim.state == agent_task_lifecycle::ClaimState::Failed)
         .and_then(|claim| claim.result.clone());
+    let promotion = record
+        .as_ref()
+        .and_then(|record| record.metadata.get("latest_promotion"));
+    let finalization_claim = promotion
+        .and_then(|promotion| {
+            promotion
+                .pointer("/patch_artifact/sha256")
+                .and_then(Value::as_str)
+        })
+        .and_then(|sha| {
+            agent_task_lifecycle::operation_claim(
+                record_run_id,
+                &format!("finalize:{record_run_id}:{sha}"),
+            )
+            .ok()
+            .flatten()
+        })
+        .or_else(|| {
+            agent_task_lifecycle::operation_claim(
+                record_run_id,
+                &format!("finalize:{record_run_id}"),
+            )
+            .ok()
+            .flatten()
+        });
+    let finalization_diagnostic = finalization_claim
+        .as_ref()
+        .filter(|claim| claim.state == agent_task_lifecycle::ClaimState::Failed)
+        .and_then(|claim| claim.result.clone());
+    let promotion_gate_failed = promotion
+        .and_then(|promotion| promotion.get("status"))
+        .and_then(Value::as_str)
+        .is_some_and(|status| matches!(status, "gate_failed" | "no_op_gate_failed"));
+    let progress_phase = record
+        .as_ref()
+        .and_then(|record| record.metadata.pointer("/cook_progress/phase"))
+        .and_then(Value::as_str);
     let continuation_admission = record
         .as_ref()
         .and_then(|record| record.metadata.get("cook_continuation_admission"))
         .cloned();
-    let (phase, reason_code) = if blocking_claim.is_some() {
-        ("promotion".to_string(), "operation_in_progress".to_string())
-    } else if let Some(diagnostic) = diagnostic.as_ref() {
+    let (phase, reason_code, diagnostic) = if blocking_claim.is_some() {
+        (
+            "promotion".to_string(),
+            "operation_in_progress".to_string(),
+            None,
+        )
+    } else if let Some(diagnostic) = promotion_diagnostic.as_ref() {
         (
             "promotion".to_string(),
             diagnostic["code"]
                 .as_str()
                 .unwrap_or("promotion_rejected")
                 .to_string(),
+            Some(diagnostic.clone()),
+        )
+    } else if promotion_gate_failed
+        || matches!(
+            status,
+            "gate_failed" | "no_op_gate_failed" | "deterministic_gate_failure"
+        )
+    {
+        (
+            "deterministic_gate".to_string(),
+            "gate_failed".to_string(),
+            None,
+        )
+    } else if let Some(diagnostic) = finalization_diagnostic.as_ref() {
+        (
+            "finalization".to_string(),
+            diagnostic["code"]
+                .as_str()
+                .unwrap_or("finalization_rejected")
+                .to_string(),
+            Some(diagnostic.clone()),
+        )
+    } else if progress_phase == Some("finalization")
+        || matches!(status, "finalization_failed" | "finalization_failure")
+    {
+        (
+            "finalization".to_string(),
+            "finalization_incomplete".to_string(),
+            None,
         )
     } else {
-        ("provider".to_string(), lifecycle_state.to_ascii_lowercase())
+        (
+            "provider".to_string(),
+            lifecycle_state.to_ascii_lowercase(),
+            None,
+        )
     };
-    let mut legal_actions = recovery_legal
-        .then(|| {
-            vec![
-                super::AgentTaskCookRecoveryAction {
-                    action: "status".to_string(),
-                    command: format!(
-                        "homeboy agent-task status {chronological_latest_run_id} --full"
-                    ),
-                },
-                super::AgentTaskCookRecoveryAction {
-                    action: "diagnose".to_string(),
-                    command: format!("homeboy agent-task diagnose {chronological_latest_run_id}"),
-                },
-            ]
-        })
-        .unwrap_or_default();
-    if recovery_legal {
-        legal_actions.push(super::AgentTaskCookRecoveryAction {
-            action: "resume".to_string(),
-            command: format!("homeboy agent-task cook-continue {chronological_latest_run_id}"),
-        });
-    }
-    if blocking_claim.is_some() {
-        legal_actions.insert(
-            2,
-            super::AgentTaskCookRecoveryAction {
-                action: "reconcile".to_string(),
-                command: format!(
-                    "homeboy agent-task reconcile {chronological_latest_run_id} --dry-run"
-                ),
-            },
-        );
-    }
-    let promotion_provenance = selected_run_id
-        .as_deref()
-        .and_then(|run_id| agent_task_lifecycle::exact_record(run_id).ok())
-        .and_then(|record| record.metadata.get("latest_promotion").cloned());
-    if let Some(selection) = selection.as_ref().filter(|selection| !selection.incomplete) {
-        if let (Some(task_id), Some(artifact_id), Some(destination)) = (
-            selection.selected_task_id.as_deref(),
-            selection.selected_artifact_id.as_deref(),
-            promotion_provenance
-                .as_ref()
-                .and_then(|promotion| promotion.get("to_worktree"))
-                .and_then(Value::as_str),
-        ) {
-            if promotion_provenance
-                .as_ref()
-                .is_some_and(destination_candidate_is_proven)
-            {
-                legal_actions.push(super::AgentTaskCookRecoveryAction {
-                    action: "review_selected_candidate".to_string(),
-                    command: format!(
-                        "homeboy agent-task review {} --to-worktree {destination}",
-                        selection.run_id
-                    ),
-                });
-                legal_actions.push(super::AgentTaskCookRecoveryAction {
-                    action: "finalize_selected_candidate".to_string(),
-                    command: format!(
-                        "homeboy agent-task finalize-pr --recover {}",
-                        selection.run_id
-                    ),
-                });
-            } else {
-                legal_actions.push(super::AgentTaskCookRecoveryAction {
-                    action: "promote_selected_candidate".to_string(),
-                    command: format!(
-                        "homeboy agent-task promote {} --to-worktree {destination} --task-id {task_id} --artifact-id {artifact_id}",
-                        selection.run_id
-                    ),
-                });
-                legal_actions.push(super::AgentTaskCookRecoveryAction {
-                    action: "review_selected_candidate".to_string(),
-                    command: format!(
-                        "homeboy agent-task review {} --to-worktree {destination}",
-                        selection.run_id
-                    ),
-                });
-                legal_actions.push(super::AgentTaskCookRecoveryAction {
-                    action: "finalize_selected_candidate".to_string(),
-                    command: format!(
-                        "homeboy agent-task finalize-pr --recover {}",
-                        selection.run_id
-                    ),
-                });
-            }
-        }
-    }
+    let recovery_actions = cook_recovery_actions(
+        status,
+        &chronological_latest_run_id,
+        recovery_legal,
+        blocking_claim.is_some(),
+        provider_executions_consumed
+            < recipe.retry_budget["max_attempts"]
+                .as_u64()
+                .unwrap_or_default(),
+    );
+    let promotion_provenance = promotion.cloned();
     Some(super::AgentTaskCookFailureContext {
         cook_id: cook_id.to_string(),
         latest_run_id: chronological_latest_run_id,
@@ -2818,41 +2816,146 @@ fn cook_failure_context(
         provider_budget_consumed: provider_executions_consumed > 0,
         provider_executions_consumed,
         recovery_legal,
-        recovery_reason: if recovery_legal {
-            "Only status, diagnose, and cook-continue are legal automatic recovery actions for this Cook state; retry and adopt require an explicit operator decision after diagnosis.".to_string()
-        } else {
-            "No recovery command is legal because the durable recipe has no lifecycle record. Start a fresh Cook after preserving the recipe reference for investigation.".to_string()
-        },
-        next_actions: legal_actions.clone(),
-        legal_actions,
+        recovery_reason: recovery_actions.reason,
+        next_actions: recovery_actions.actions.clone(),
+        legal_actions: recovery_actions.actions,
     })
 }
 
-fn destination_candidate_is_proven(promotion: &Value) -> bool {
-    promotion
-        .get("provenance")
-        .and_then(|provenance| provenance.get("candidate"))
-        .is_some_and(|candidate| !candidate.is_null())
-        && promotion
-            .get("command_evidence")
-            .and_then(Value::as_array)
-            .is_some_and(|commands| {
-                commands.iter().any(|command| {
-                    command
-                        .get("command")
-                        .and_then(Value::as_array)
-                        .is_some_and(|argv| {
-                            argv.iter().map(Value::as_str).eq([
-                                Some("git"),
-                                Some("apply"),
-                                Some("--reverse"),
-                                Some("--check"),
-                                Some("-"),
-                            ])
-                        })
-                        && command.get("exit_code").and_then(Value::as_i64) == Some(0)
-                })
-            })
+struct CookRecoveryActions {
+    actions: Vec<super::AgentTaskCookRecoveryAction>,
+    reason: String,
+}
+
+/// The recovery contract is deliberately built once: prose, `legal_actions`,
+/// and `next_actions` must never disagree about an executable Cook command.
+fn cook_recovery_actions(
+    status: &str,
+    run_id: &str,
+    recovery_legal: bool,
+    blocking_claim: bool,
+    provider_retry_available: bool,
+) -> CookRecoveryActions {
+    if !recovery_legal {
+        return CookRecoveryActions {
+            actions: Vec::new(),
+            reason: "No recovery command is legal because the durable recipe has no lifecycle record. Start a fresh Cook after preserving the recipe reference for investigation.".to_string(),
+        };
+    }
+
+    let continuation_eligible = match status {
+        "completed"
+        | "review_ready"
+        | "green_no_finalize"
+        | "intentional_no_change"
+        | "execution_budget_exhausted"
+        | "retries_exhausted" => false,
+        "gate_failed" | "no_op_gate_failed" => provider_retry_available,
+        _ => true,
+    };
+    let mut actions = vec![
+        super::AgentTaskCookRecoveryAction {
+            action: "status".to_string(),
+            command: format!("homeboy agent-task status {run_id} --full"),
+        },
+        super::AgentTaskCookRecoveryAction {
+            action: "diagnose".to_string(),
+            command: format!("homeboy agent-task diagnose {run_id}"),
+        },
+    ];
+    if blocking_claim {
+        actions.push(super::AgentTaskCookRecoveryAction {
+            action: "reconcile".to_string(),
+            command: format!("homeboy agent-task reconcile {run_id} --dry-run"),
+        });
+    }
+    if continuation_eligible {
+        actions.push(super::AgentTaskCookRecoveryAction {
+            action: "resume".to_string(),
+            command: format!("homeboy agent-task cook-continue {run_id}"),
+        });
+    }
+    let names = actions
+        .iter()
+        .map(|action| action.action.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    CookRecoveryActions {
+        reason: format!("Legal recovery actions for this Cook state: {names}."),
+        actions,
+    }
+}
+
+#[cfg(test)]
+mod recovery_action_tests {
+    use super::*;
+
+    #[test]
+    fn recovery_actions_follow_the_cook_state_matrix() {
+        let cases = [
+            ("gate_failed", true, vec!["status", "diagnose", "resume"]),
+            (
+                "execution_budget_exhausted",
+                false,
+                vec!["status", "diagnose"],
+            ),
+            (
+                "verification_pending",
+                false,
+                vec!["status", "diagnose", "resume"],
+            ),
+            (
+                "finalization_failed",
+                false,
+                vec!["status", "diagnose", "resume"],
+            ),
+            ("completed", false, vec!["status", "diagnose"]),
+        ];
+
+        for (status, retry_available, expected) in cases {
+            let recovery = cook_recovery_actions(
+                status,
+                "cook-state-matrix-attempt-1",
+                true,
+                false,
+                retry_available,
+            );
+            let actions = recovery
+                .actions
+                .iter()
+                .map(|action| action.action.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(actions, expected, "{status}");
+            assert_eq!(
+                recovery.reason,
+                format!(
+                    "Legal recovery actions for this Cook state: {}.",
+                    expected.join(", ")
+                ),
+                "{status} prose must be derived from the commands"
+            );
+            assert!(recovery.actions.iter().all(|action| {
+                action.command.starts_with("homeboy agent-task ")
+                    && action.command.ends_with("cook-state-matrix-attempt-1")
+                    || action.command
+                        == "homeboy agent-task status cook-state-matrix-attempt-1 --full"
+            }));
+            assert_eq!(
+                recovery.actions.iter().any(|action| action.command
+                    == "homeboy agent-task cook-continue cook-state-matrix-attempt-1"),
+                expected.contains(&"resume"),
+                "{status} must advertise cook-continue exactly when it can advance"
+            );
+            assert!(recovery.actions.iter().all(|action| {
+                !matches!(
+                    action.action.as_str(),
+                    "promote_selected_candidate"
+                        | "review_selected_candidate"
+                        | "finalize_selected_candidate"
+                )
+            }));
+        }
+    }
 }
 
 pub(crate) fn source_spec_path(spec: &str) -> Option<PathBuf> {

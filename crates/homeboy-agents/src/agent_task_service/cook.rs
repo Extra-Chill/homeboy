@@ -327,7 +327,17 @@ fn finalize_with_operation_claim(
         // This pass owns the operation. Finalize, then record the result as the
         // claim's immutable completion.
         agent_task_lifecycle::ClaimOutcome::Acquired => {
-            let finalization = finalize(options, run_id, promotion)?;
+            let finalization = match finalize(options, run_id, promotion) {
+                Ok(finalization) => finalization,
+                Err(error) => {
+                    agent_task_lifecycle::fail_cook_operation(
+                        run_id,
+                        &operation_key,
+                        bounded_error_diagnostic(&error),
+                    )?;
+                    return Err(error);
+                }
+            };
             agent_task_lifecycle::complete_cook_operation(
                 run_id,
                 &operation_key,

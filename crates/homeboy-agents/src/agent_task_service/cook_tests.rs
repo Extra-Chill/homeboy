@@ -5816,48 +5816,21 @@ fn resume_promoted_patch_guidance_keeps_the_exhausted_zero_byte_attempt_as_lates
         let context = report.value.failure_context.expect("recovery context");
         assert_eq!(context.latest_run_id, latest_empty_run_id);
         assert_eq!(context.selected_run_id.as_deref(), Some(candidate_run_id));
-        let actions = context.legal_actions;
-        assert!(actions
-            .iter()
-            .all(|action| action.action != "promote_selected_candidate"));
-        let review_action = actions
-            .iter()
-            .find(|action| action.action == "review_selected_candidate")
-            .expect("selected-candidate review action");
         assert_eq!(
-            review_action.command,
-            format!(
-                "homeboy agent-task review {candidate_run_id} --to-worktree fixture@destination"
-            )
+            context
+                .legal_actions
+                .iter()
+                .map(|action| action.action.as_str())
+                .collect::<Vec<_>>(),
+            ["status", "diagnose"],
+            "an exhausted Cook must not advertise lifecycle commands that cannot advance it"
         );
-        assert!(actions.iter().any(|action| {
-            action.command == format!("homeboy agent-task finalize-pr --recover {candidate_run_id}")
-        }));
 
         agent_task_lifecycle::rewrite_record_for_test(candidate_run_id, |record| {
             record.metadata["latest_promotion"]["command_evidence"][0]["exit_code"] =
                 serde_json::json!(1);
         })
         .expect("remove destination proof");
-        let unproven = cook_report(CookReportInput {
-            cook_id: cook_id.to_string(),
-            status: "execution_budget_exhausted",
-            disposition: CookDisposition::Terminal,
-            attempts: Vec::new(),
-            finalization: None,
-            stop_reason: None,
-            exit_code: 1,
-            invocation_latest_run_id: Some(&latest_empty_run_id),
-        })
-        .value
-        .failure_context
-        .expect("unproven destination context");
-        assert!(unproven.legal_actions.iter().any(|action| {
-            action.command == format!(
-                "homeboy agent-task promote {candidate_run_id} --to-worktree fixture@destination --task-id provider --artifact-id candidate"
-            )
-        }));
-
         let selected_record = agent_task_lifecycle::status(candidate_run_id).unwrap();
         let promotion = &selected_record.metadata["latest_promotion"];
         assert_eq!(
@@ -8989,6 +8962,110 @@ fn durable_controller_failure_reports_this_invocation_run_not_the_stale_cook_ind
                 action.command
             );
         }
+    });
+}
+
+#[test]
+fn recovery_context_uses_current_gate_and_finalization_evidence_not_an_older_candidate() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-recovery-phase-truth";
+        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        let current_run_id = options.initial_run_id.clone();
+        let older_run_id = "cook-recovery-phase-truth-older";
+        let artifacts = tempfile::tempdir().expect("candidate artifacts");
+        persist_initial_recipe(&options).expect("persist recipe");
+        for (attempt, run_id) in [(1, older_run_id), (2, current_run_id.as_str())] {
+            agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
+                .expect("persist lifecycle record");
+            agent_task_lifecycle::record_cook_attempt(cook_id, attempt, run_id)
+                .expect("persist Cook attempt");
+        }
+
+        // This older green candidate remains selectable across the Cook history.
+        // It must not influence recovery for the current failed invocation.
+        seed_substantive_candidate_aggregate(
+            older_run_id,
+            &options.initial_plan,
+            &artifacts.path().join("older.patch"),
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+older\n",
+        );
+        agent_task_lifecycle::record_promotion(
+            older_run_id,
+            serde_json::to_value(promotion(older_run_id)).unwrap(),
+        )
+        .unwrap();
+        let mut failed_gate = promotion(&current_run_id);
+        failed_gate.status = AgentTaskPromotionStatus::GateFailed;
+        agent_task_lifecycle::record_promotion(
+            &current_run_id,
+            serde_json::to_value(&failed_gate).unwrap(),
+        )
+        .unwrap();
+
+        let gate_context = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "durable_failure",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 1,
+            invocation_latest_run_id: Some(&current_run_id),
+        })
+        .value
+        .failure_context
+        .expect("gate recovery context");
+        assert_eq!(gate_context.phase, "deterministic_gate");
+        assert_eq!(gate_context.reason_code, "gate_failed");
+        assert_eq!(gate_context.selected_run_id.as_deref(), Some(older_run_id));
+        assert!(gate_context.legal_actions.iter().all(|action| {
+            action.command.contains(&current_run_id) && !action.command.contains(older_run_id)
+        }));
+
+        let applied = promotion(&current_run_id);
+        agent_task_lifecycle::record_promotion(
+            &current_run_id,
+            serde_json::to_value(&applied).unwrap(),
+        )
+        .unwrap();
+        let operation_key = format!("finalize:{current_run_id}");
+        agent_task_lifecycle::claim_cook_operation(
+            &current_run_id,
+            &operation_key,
+            std::time::Duration::from_secs(60),
+        )
+        .unwrap();
+        agent_task_lifecycle::fail_cook_operation(
+            &current_run_id,
+            &operation_key,
+            serde_json::json!({ "code": "publication_rejected" }),
+        )
+        .unwrap();
+
+        let finalization_context = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "durable_failure",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 1,
+            invocation_latest_run_id: Some(&current_run_id),
+        })
+        .value
+        .failure_context
+        .expect("finalization recovery context");
+        assert_eq!(finalization_context.phase, "finalization");
+        assert_eq!(finalization_context.reason_code, "publication_rejected");
+        assert_eq!(
+            finalization_context
+                .diagnostic
+                .expect("durable finalization reason")["code"],
+            "publication_rejected"
+        );
+        assert!(finalization_context.legal_actions.iter().all(|action| {
+            action.command.contains(&current_run_id) && !action.command.contains(older_run_id)
+        }));
     });
 }
 
