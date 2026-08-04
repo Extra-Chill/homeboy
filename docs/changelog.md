@@ -4,6 +4,34 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.328.1] - 2026-08-03
+
+### Fixed
+- load config from exact ref
+- complete tunnel identity session literals
+- keep fatal ancestry phase truthful
+- persist tunnel process identity
+- classify refresh terminal failures
+- make daemon mutation reservations crash-safe
+- retain ancestry refresh evidence
+- harden generation recovery ownership
+- fence orphan adoption
+- dedupe generation tunnel recovery
+- retain non-agent jobs on disconnect
+- isolate durable job recovery
+- expose refresh failure actions
+- reserve daemon mutations
+- preserve legacy status recovery actions
+- fence recovery generation mutations
+- retain accepted job ownership on disconnect
+- coordinate retained job tunnels
+- retain required refresh evidence
+- fence reconnect generation admission
+- recover polling through job owner
+- preserve status action runner ids
+- summarize refresh substeps
+- retain uncertain workspaces for reconciliation
+
 ## [0.328.0] - 2026-08-03
 
 ### Added
