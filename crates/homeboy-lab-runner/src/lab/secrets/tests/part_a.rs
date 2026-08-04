@@ -442,6 +442,34 @@ fn lab_secret_env_handoff_plan_carries_canonical_secret_env_plan() {
 }
 
 #[test]
+fn managed_service_secrets_are_required_by_lab_preflight_and_handoff() {
+    let mut handoff =
+        build_lab_secret_env_handoff_plan(&[], &[], HashMap::new()).expect("empty handoff");
+    let plan: homeboy_agents::agent_tasks::scheduler::AgentTaskPlan =
+        serde_json::from_value(serde_json::json!({
+            "schema": "homeboy/agent-task-plan/v1",
+            "plan_id": "service-secret-handoff",
+            "tasks": [],
+            "services": [{
+                "id": "fixture-service", "command": ["fixture"],
+                "secret_env": ["HOMEBOY_SERVICE_RUNNER_SECRET"]
+            }]
+        }))
+        .expect("portable plan");
+    merge_managed_service_secret_env(&mut handoff, Some(&plan));
+    let runner = fixture_runner(HashMap::new());
+
+    let error = preflight_lab_secret_env_handoff("lab-a", Some(&runner), &HashMap::new(), &handoff)
+        .expect_err("runner service secret is required before dispatch");
+
+    assert!(error.message.contains("HOMEBOY_SERVICE_RUNNER_SECRET"));
+    assert_eq!(
+        handoff.diagnostics["managed_service_secret_env"],
+        serde_json::json!(["HOMEBOY_SERVICE_RUNNER_SECRET"])
+    );
+}
+
+#[test]
 fn declared_tunnel_secret_env_reads_preview_client_default_and_override() {
     assert_eq!(
         declared_tunnel_secret_env(&[

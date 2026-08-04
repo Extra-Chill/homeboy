@@ -761,6 +761,78 @@ pub fn run_service_worker(request_path: &Path) -> Result<(), String> {
     }
 }
 
+/// Invoke a non-resident worker operation on its execution host. This keeps
+/// controller recovery transport-independent: the caller only needs the run id
+/// and asks the owning runner to resolve its own state directory.
+pub fn run_service_worker_operation(run_id: &str, operation: &str) -> Result<(), String> {
+    let request = AgentTaskServiceWorkerRequest {
+        schema: AgentTaskServiceWorkerRequest::SCHEMA.to_string(),
+        operation: operation.to_string(),
+        run_id: run_id.to_string(),
+        services: Vec::new(),
+        parent_pid: 0,
+        parent_ttl_ms: default_worker_ttl_ms(),
+    };
+    let request_path = service_worker_request_path(run_id)?;
+    write_json_atomically(&request_path, &request)?;
+    run_service_worker(&request_path)
+}
+
+/// Request cleanup from the execution host recorded by the controller handoff.
+/// The runner command uses its own HOME/data root, so no runner-local path is
+/// ever interpreted by the controller.
+pub(crate) fn reconcile_run_services_on_owner(
+    run_id: &str,
+    owner: Option<&Value>,
+    reason: &str,
+) -> Result<Value, String> {
+    let Some(owner) = owner else {
+        return Ok(
+            json!({ "transport": "local", "services": reconcile_run_services(run_id, reason)? }),
+        );
+    };
+    let Some(runner_id) = owner.get("runner_id").and_then(Value::as_str) else {
+        return Ok(
+            json!({ "transport": "local", "services": reconcile_run_services(run_id, reason)? }),
+        );
+    };
+    let command = |operation: &str| {
+        vec![
+            "self".to_string(),
+            "service-supervisor-worker".to_string(),
+            "--run-id".to_string(),
+            run_id.to_string(),
+            "--operation".to_string(),
+            operation.to_string(),
+        ]
+    };
+    let cwd = owner
+        .get("remote_workspace")
+        .and_then(Value::as_str)
+        .unwrap_or(".");
+    let status = crate::agent_task_lifecycle::with_runner_continuation(|provider| {
+        provider.run_continuation_exec(runner_id, cwd, &command("status"), run_id)
+    })
+    .map_err(|error| error.message)?;
+    let stop = crate::agent_task_lifecycle::with_runner_continuation(|provider| {
+        provider.run_continuation_exec(runner_id, cwd, &command("stop"), run_id)
+    })
+    .map_err(|error| error.message)?;
+    let reconcile = crate::agent_task_lifecycle::with_runner_continuation(|provider| {
+        provider.run_continuation_exec(runner_id, cwd, &command("reconcile"), run_id)
+    })
+    .map_err(|error| error.message)?;
+    Ok(json!({
+        "transport": "runner_command",
+        "runner_id": runner_id,
+        "state_ref": owner.get("state_ref").cloned().unwrap_or(Value::Null),
+        "status_exit_code": status,
+        "stop_exit_code": stop,
+        "reconcile_exit_code": reconcile,
+        "reason": reason,
+    }))
+}
+
 /// Reap service leaders left by an interrupted controller. The persisted kernel
 /// process-start identity prevents a recycled PID from ever being signalled.
 pub(crate) fn reconcile_run_services(

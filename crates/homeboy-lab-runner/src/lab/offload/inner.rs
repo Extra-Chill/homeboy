@@ -2023,11 +2023,12 @@ pub(crate) fn run_lab_offload_inner(
         serde_json::to_value(&runtime_generation).unwrap_or(serde_json::json!(null));
     lab_metadata["runtime_evidence"] =
         serde_json::to_value(&runtime_evidence).unwrap_or(serde_json::json!(null));
-    let secret_env_handoff = build_lab_secret_env_handoff_plan(
+    let mut secret_env_handoff = build_lab_secret_env_handoff_plan(
         &contract.secret_env_sources,
         &changed_since_preflight.args,
         env_delta,
     )?;
+    merge_managed_service_secret_env(&mut secret_env_handoff, request.durable_agent_task_plan);
     lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
     let mut lab_runner_workload = build_lab_runner_workload_for_dispatched_command(
         LabRunnerWorkloadBuildInput {

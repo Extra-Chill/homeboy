@@ -586,6 +586,20 @@ fn record_lab_offload_proxy(
     // discovered, so controller-generated commands must keep resolving here.
     metadata.insert("lifecycle_store_owner".to_string(), json!("controller"));
     metadata.insert("runner_id".to_string(), json!(runner_id));
+    if !durable_plan
+        .map(|plan| plan.services.is_empty())
+        .unwrap_or(true)
+    {
+        metadata.insert(
+            "managed_service_supervisor".to_string(),
+            json!({
+                "runner_id": runner_id,
+                "remote_workspace": remote_workspace,
+                "state_ref": format!("homeboy://runner/{runner_id}/agent-task-runs/{run_id}/service-supervisor/state"),
+                "operations": ["status", "stop", "reconcile"],
+            }),
+        );
+    }
     if remote_workspace != "pending" {
         metadata.insert("remote_workspace".to_string(), json!(remote_workspace));
     }

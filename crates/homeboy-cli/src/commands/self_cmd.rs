@@ -80,7 +80,11 @@ pub struct SelfCleanupRuntimeTmpArgs {
 #[derive(Args)]
 pub struct ServiceSupervisorWorkerArgs {
     #[arg(long)]
-    pub request: PathBuf,
+    pub request: Option<PathBuf>,
+    #[arg(long)]
+    pub run_id: Option<String>,
+    #[arg(long, default_value = "start")]
+    pub operation: String,
 }
 
 pub fn run(args: SelfArgs) -> CmdResult<Value> {
@@ -180,13 +184,32 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
             }
             Ok((json, 0))
         }
-        SelfCommand::ServiceSupervisorWorker(args) => {
-            homeboy_agents::agent_task_scheduler::managed_services::run_service_worker(
-                &args.request,
-            )
-            .map_err(homeboy::core::Error::internal_unexpected)?;
-            Ok((serde_json::json!({ "request": args.request }), 0))
-        }
+        SelfCommand::ServiceSupervisorWorker(args) => match (args.request, args.run_id) {
+            (Some(request), None) => {
+                homeboy_agents::agent_task_scheduler::managed_services::run_service_worker(
+                    &request,
+                )
+                .map_err(homeboy::core::Error::internal_unexpected)?;
+                Ok((serde_json::json!({ "request": request }), 0))
+            }
+            (None, Some(run_id)) => {
+                homeboy_agents::agent_task_scheduler::managed_services::run_service_worker_operation(
+                        &run_id,
+                        &args.operation,
+                    )
+                    .map_err(homeboy::core::Error::internal_unexpected)?;
+                Ok((
+                    serde_json::json!({ "run_id": run_id, "operation": args.operation }),
+                    0,
+                ))
+            }
+            _ => Err(homeboy::core::Error::validation_invalid_argument(
+                "service_supervisor_worker",
+                "supply exactly one of --request or --run-id",
+                None,
+                None,
+            )),
+        },
         SelfCommand::Docs(args) => {
             let (output, exit_code) = docs::run(args)?;
             let json = serde_json::to_value(output)

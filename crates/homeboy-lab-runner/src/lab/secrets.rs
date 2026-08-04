@@ -133,6 +133,60 @@ pub(crate) fn build_lab_secret_env_handoff_plan(
     })
 }
 
+/// Extend the Lab handoff with services that will be supervised by the selected
+/// runner while executing a durable agent-task plan. Service values remain
+/// unresolved here; the runner's existing secret-plan resolver remains the
+/// sole authority that materializes them.
+pub(crate) fn merge_managed_service_secret_env(
+    handoff: &mut LabSecretEnvHandoffPlan,
+    plan: Option<&homeboy_agents::agent_tasks::scheduler::AgentTaskPlan>,
+) {
+    let mut names = Vec::new();
+    for service in plan.into_iter().flat_map(|plan| plan.services.iter()) {
+        if let Some(service_plan) = &service.secret_env_plan {
+            handoff.secret_env_plan.merge_from(service_plan.clone());
+            names.extend(service_plan.secret_env_names());
+        } else {
+            handoff
+                .secret_env_plan
+                .extend_secret_env_names(service.secret_env.clone());
+            names.extend(service.secret_env.iter().cloned());
+        }
+    }
+    if names.is_empty() {
+        return;
+    }
+    names.sort();
+    names.dedup();
+    handoff.secret_env_names = handoff.secret_env_plan.secret_env_names();
+    handoff.runner_deferred_secret_env.extend(names.clone());
+    handoff.runner_deferred_secret_env.sort();
+    handoff.runner_deferred_secret_env.dedup();
+    for name in &names {
+        if handoff.entries.iter().any(|entry| entry.name == *name) {
+            continue;
+        }
+        handoff.entries.push(SecretEnvHandoffEntry {
+            source: "managed_service".to_string(),
+            name: name.clone(),
+            owner: "runner".to_string(),
+            destination: "runner".to_string(),
+            status: "deferred".to_string(),
+            remediation: Some(
+                "Configure the selected runner secret_env references for the managed service before Lab dispatch."
+                    .to_string(),
+            ),
+        });
+    }
+    handoff.diagnostics["entries"] =
+        serde_json::to_value(&handoff.entries).unwrap_or(serde_json::Value::Null);
+    handoff.diagnostics["managed_service_secret_env"] = serde_json::json!(names);
+    handoff.diagnostics["secret_env_plan"] =
+        serde_json::to_value(redacted_lab_secret_env_plan(&handoff.secret_env_plan))
+            .unwrap_or(serde_json::Value::Null);
+    handoff.diagnostics["secret_env_names"] = serde_json::json!(handoff.secret_env_names);
+}
+
 fn empty_agent_task_secret_env_metadata() -> serde_json::Value {
     serde_json::json!({
         "schema": "homeboy/lab-agent-task-secret-env/v1",
