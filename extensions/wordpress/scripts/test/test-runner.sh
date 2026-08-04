@@ -21,11 +21,16 @@ CORE_WP_CODEBOX_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_CORE_WP_CODEBOX:-${SCRIPT_
 WORDPRESS_TEST_RUNTIME_BACKEND="${HOMEBOY_WORDPRESS_TEST_RUNTIME_BACKEND:-wp-codebox}"
 
 SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-${SHARED_LIB_DIR}/settings.sh}"
+PROJECT_SCRIPTS_HELPER="${HOMEBOY_RUNTIME_PROJECT_SCRIPTS_HELPER:-${SHARED_LIB_DIR}/project-scripts.sh}"
 # shellcheck source=/dev/null
 source "$RUNNER_PRELUDE"
 homeboy_runner_init --bash 4 --component-alias PLUGIN_PATH
 # shellcheck source=/dev/null
 source "$SETTINGS_HELPER"
+if [ -f "$PROJECT_SCRIPTS_HELPER" ]; then
+    # shellcheck source=/dev/null
+    source "$PROJECT_SCRIPTS_HELPER"
+fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Extension path: $EXTENSION_PATH"
@@ -408,13 +413,181 @@ homeboy_wordpress_is_js_smoke_file() {
 
 homeboy_wordpress_is_node_test_file() {
     case "$1" in
-        *.test.js|*.test.cjs|*.test.mjs)
+        *.test.js|*.test.cjs|*.test.mjs|*.test.jsx|*.test.ts|*.test.tsx)
             return 0
             ;;
         *)
             return 1
             ;;
     esac
+}
+
+# A `*.test.js` suffix says nothing about which framework owns the file. A
+# WordPress package that declares `wp-scripts test-unit-js` runs Jest, whose
+# `describe`/`it`/`expect` globals, transforms, setup files, and test
+# environment come from the package configuration. Narrowing a run to changed
+# files must narrow the declared runner, never replace it.
+#
+# Resolution order, most explicit first:
+#   1. HOMEBOY_WORDPRESS_JS_TEST_SCRIPT
+#   2. settings wordpress_js_test_script / js_test_script
+#   3. the first declared package script from
+#      HOMEBOY_WORDPRESS_JS_TEST_SCRIPT_CANDIDATES
+#
+# Sets JS_TEST_SCRIPT and JS_TEST_SCRIPT_SOURCE. Returns 0 when a repository
+# runner is declared, 1 when none is declared, and 2 when an explicitly
+# declared script is missing from the package manifest.
+JS_TEST_SCRIPT=""
+JS_TEST_SCRIPT_SOURCE=""
+JS_TEST_SCRIPT_RESOLVED=0
+JS_TEST_SCRIPT_STATUS=1
+
+homeboy_wordpress_resolve_js_test_script() {
+    local configured candidate
+
+    if [ "$JS_TEST_SCRIPT_RESOLVED" -eq 1 ]; then
+        return "$JS_TEST_SCRIPT_STATUS"
+    fi
+    JS_TEST_SCRIPT_RESOLVED=1
+    JS_TEST_SCRIPT_STATUS=1
+
+    configured="${HOMEBOY_WORDPRESS_JS_TEST_SCRIPT:-}"
+    if [ -z "$configured" ]; then
+        configured="$(homeboy_setting wordpress_js_test_script '.wordpress_js_test_script // .js_test_script // empty')"
+    fi
+
+    if [ ! -f "${PLUGIN_PATH}/package.json" ] || ! type homeboy_project_init >/dev/null 2>&1; then
+        if [ -n "$configured" ]; then
+            echo "ERROR: declared JavaScript test script '${configured}' requires a package manifest at ${PLUGIN_PATH}/package.json" >&2
+            JS_TEST_SCRIPT_STATUS=2
+        fi
+        return "$JS_TEST_SCRIPT_STATUS"
+    fi
+
+    if ! homeboy_project_init --ecosystem nodejs --path "$PLUGIN_PATH" >/dev/null 2>&1; then
+        if [ -n "$configured" ]; then
+            echo "ERROR: could not resolve the Node.js project contract for ${PLUGIN_PATH}" >&2
+            JS_TEST_SCRIPT_STATUS=2
+        fi
+        return "$JS_TEST_SCRIPT_STATUS"
+    fi
+
+    if [ -n "$configured" ]; then
+        if ! homeboy_project_has_script "$configured"; then
+            echo "ERROR: declared JavaScript test script '${configured}' is not defined in ${PLUGIN_PATH}/package.json" >&2
+            JS_TEST_SCRIPT_STATUS=2
+            return "$JS_TEST_SCRIPT_STATUS"
+        fi
+        JS_TEST_SCRIPT="$configured"
+        JS_TEST_SCRIPT_SOURCE="declared setting wordpress_js_test_script -> package.json scripts.${configured}"
+        JS_TEST_SCRIPT_STATUS=0
+        return 0
+    fi
+
+    for candidate in ${HOMEBOY_WORDPRESS_JS_TEST_SCRIPT_CANDIDATES:-test:unit test:unit:js test:js}; do
+        if homeboy_project_has_script "$candidate"; then
+            JS_TEST_SCRIPT="$candidate"
+            JS_TEST_SCRIPT_SOURCE="package.json scripts.${candidate}"
+            JS_TEST_SCRIPT_STATUS=0
+            return 0
+        fi
+    done
+
+    return "$JS_TEST_SCRIPT_STATUS"
+}
+
+# True when the file itself imports Node's built-in test runner, which is the
+# only extension-independent evidence that `node --test` is the right backend.
+homeboy_wordpress_is_native_node_test_file() {
+    local rel_path="$1"
+    grep -qE "(require\(|from[[:space:]]+|import[[:space:]]*\()[[:space:]]*['\"]node:test['\"]" "${PLUGIN_PATH}/${rel_path}" 2>/dev/null
+}
+
+homeboy_wordpress_run_declared_js_test_files() {
+    local test_files_raw="$1"
+    local test_file rel_path run_command exit_code
+    local selected=()
+
+    while IFS= read -r test_file; do
+        [ -n "$test_file" ] || continue
+        if ! rel_path="$(homeboy_wordpress_rel_test_file "$test_file")"; then
+            echo "ERROR: requested JavaScript test file not found or outside the component: ${test_file}" >&2
+            return 2
+        fi
+        selected+=("$rel_path")
+    done <<< "$test_files_raw"
+
+    if [ "${#selected[@]}" -eq 0 ]; then
+        echo "ERROR: no JavaScript test files were selected" >&2
+        return 2
+    fi
+
+    if ! run_command="$(homeboy_project_run_script_command "$JS_TEST_SCRIPT")"; then
+        echo "ERROR: could not resolve the package runner command for script '${JS_TEST_SCRIPT}'" >&2
+        return 2
+    fi
+
+    homeboy_project_ensure_dependencies
+
+    echo "Running declared JavaScript tests..."
+    echo "  Component: ${HOMEBOY_COMPONENT_ID:-$(basename "$PLUGIN_PATH")} (${PLUGIN_PATH})"
+    echo "  Backend: package-script"
+    echo "  Contract: ${JS_TEST_SCRIPT_SOURCE}"
+    echo "  Command: ${run_command} -- ${selected[*]}"
+    for rel_path in "${selected[@]}"; do
+        echo "JS_TEST_BEGIN:${rel_path}"
+    done
+
+    exit_code=0
+    # shellcheck disable=SC2086
+    (cd "$PLUGIN_PATH" && $run_command -- "${selected[@]}") || exit_code=$?
+
+    if [ "$exit_code" -eq 0 ]; then
+        echo "JS_TEST_SUMMARY:backend=package-script script=${JS_TEST_SCRIPT} files=${#selected[@]} status=ok"
+    else
+        echo "JS_TEST_SUMMARY:backend=package-script script=${JS_TEST_SCRIPT} files=${#selected[@]} status=failed exit=${exit_code}"
+    fi
+    return "$exit_code"
+}
+
+# Route selected JavaScript test files to the framework that actually owns
+# them: the repository's declared runner when one exists, Node's built-in
+# runner when the files themselves declare it, and an actionable error when
+# neither is knowable.
+homeboy_wordpress_run_js_unit_test_files() {
+    local test_files_raw="$1"
+    local resolve_status=0
+    local test_file rel_path
+    local ambiguous=()
+
+    homeboy_wordpress_resolve_js_test_script || resolve_status=$?
+    if [ "$resolve_status" -eq 2 ]; then
+        return 2
+    fi
+    if [ "$resolve_status" -eq 0 ]; then
+        homeboy_wordpress_run_declared_js_test_files "$test_files_raw"
+        return $?
+    fi
+
+    while IFS= read -r test_file; do
+        [ -n "$test_file" ] || continue
+        if ! rel_path="$(homeboy_wordpress_rel_test_file "$test_file")"; then
+            echo "ERROR: requested JavaScript test file not found or outside the component: ${test_file}" >&2
+            return 2
+        fi
+        if ! homeboy_wordpress_is_native_node_test_file "$rel_path"; then
+            ambiguous+=("$rel_path")
+        fi
+    done <<< "$test_files_raw"
+
+    if [ "${#ambiguous[@]}" -gt 0 ]; then
+        echo "ERROR: cannot select a JavaScript test framework for: ${ambiguous[*]}" >&2
+        echo "  The files do not import Node's built-in 'node:test' runner and the component declares no JavaScript test script." >&2
+        echo "  Add a package.json test script (for example \"test:unit\": \"wp-scripts test-unit-js\"), set the wordpress_js_test_script setting, or import 'node:test' in the tests." >&2
+        return 2
+    fi
+
+    homeboy_wordpress_run_node_test_files "$test_files_raw"
 }
 
 homeboy_wordpress_run_node_test_files() {
@@ -428,6 +601,7 @@ homeboy_wordpress_run_node_test_files() {
     echo "Running Node test files..."
     echo "  Component: ${HOMEBOY_COMPONENT_ID:-$(basename "$PLUGIN_PATH")} (${PLUGIN_PATH})"
     echo "  Backend: node-test"
+    echo "  Contract: ${JS_TEST_SCRIPT_SOURCE:-native node:test import}"
 
     while IFS= read -r test_file; do
         [ -n "$test_file" ] || continue
@@ -597,12 +771,12 @@ if [ -z "$TARGET_FILE" ] && [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
     fi
 
     if [ -z "$changed_js_smoke_files" ] && [ -z "$changed_shell_smoke_files" ] && [ -n "$changed_node_test_files" ] && [ "$changed_non_host_smoke_files" -eq 0 ]; then
-        homeboy_wordpress_run_node_test_files "$changed_node_test_files"
+        homeboy_wordpress_run_js_unit_test_files "$changed_node_test_files"
         exit $?
     fi
 
     if [ -n "$changed_node_test_files" ]; then
-        homeboy_wordpress_run_node_test_files "$changed_node_test_files" || exit $?
+        homeboy_wordpress_run_js_unit_test_files "$changed_node_test_files" || exit $?
     fi
 fi
 
@@ -614,7 +788,7 @@ if [ -n "$TARGET_FILE" ]; then
 
     target_base="$(basename "$target_rel")"
     if homeboy_wordpress_is_node_test_file "$target_rel"; then
-        homeboy_wordpress_run_node_test_files "$target_rel"
+        homeboy_wordpress_run_js_unit_test_files "$target_rel"
         exit $?
     fi
 

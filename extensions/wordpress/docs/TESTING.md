@@ -94,6 +94,37 @@ The real-WordPress focused path preserves the machine-readable `HOST_SMOKE_BEGIN
 `HOST_SMOKE_PROGRESS`, `HOST_SMOKE_OK`, `HOST_SMOKE_FAIL`, and
 `HOST_SMOKE_SUMMARY` markers, and fails fast with the selected script name.
 
+## JavaScript unit tests
+
+`*.test.js`, `*.test.jsx`, `*.test.mjs`, `*.test.cjs`, `*.test.ts`, and
+`*.test.tsx` files route to the framework the component declares, not to a
+backend chosen from the file extension. Selection order:
+
+1. `HOMEBOY_WORDPRESS_JS_TEST_SCRIPT`
+2. the `wordpress_js_test_script` (or `js_test_script`) setting
+3. the first declared `package.json` script from
+   `HOMEBOY_WORDPRESS_JS_TEST_SCRIPT_CANDIDATES`, which defaults to
+   `test:unit test:unit:js test:js`
+
+When one of those resolves, the runner delegates to the package manager
+(`npm run <script> -- <selected files>`), which preserves the package's
+config, transforms, setup files, globals, and test environment. Evidence
+reports `Backend: package-script` with the `Contract:` line naming the source
+that selected it, and `JS_TEST_BEGIN` / `JS_TEST_SUMMARY` markers.
+
+```json
+{
+  "scripts": {
+    "test:unit": "wp-scripts test-unit-js"
+  }
+}
+```
+
+Node's built-in runner (`Backend: node-test`) is used only when no script is
+declared and every selected file imports `node:test`. A selected file that
+declares neither is a hard error with actionable guidance rather than a
+`describe is not defined` failure from the wrong runner.
+
 ## Agent Bundle Validator
 
 Agent bundle repositories can run the shared bundle validator as a standalone

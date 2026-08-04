@@ -5,7 +5,7 @@
   "self_checks": {
     "lint": [
       "jq empty wordpress.json",
-      "bash -n scripts/build/install-composer-dependencies.sh scripts/build/setup.sh scripts/build/setup-wp-codebox-smoke.sh scripts/build/update-wp-codebox-cache.sh scripts/build/update-wp-codebox-cache-smoke.sh scripts/test/test-runner.sh scripts/test/test-runner-wp-codebox.sh scripts/bench/bench-runner.sh scripts/bench/bench-runner-wp-codebox.sh scripts/doctor/wp-codebox-doctor.sh scripts/test/wp-codebox-doctor-smoke.sh tests/extension-composer-vendor-integrity-smoke.sh scripts/lint/eslint-dependency-tree-scope-smoke.sh",
+      "bash -n scripts/build/install-composer-dependencies.sh scripts/build/setup.sh scripts/build/setup-wp-codebox-smoke.sh scripts/build/update-wp-codebox-cache.sh scripts/build/update-wp-codebox-cache-smoke.sh scripts/test/test-runner.sh scripts/test/test-runner-wp-codebox.sh scripts/bench/bench-runner.sh scripts/bench/bench-runner-wp-codebox.sh scripts/doctor/wp-codebox-doctor.sh scripts/test/wp-codebox-doctor-smoke.sh tests/extension-composer-vendor-integrity-smoke.sh tests/js-test-framework-routing-smoke.sh scripts/lint/eslint-dependency-tree-scope-smoke.sh",
       "node --check index.js lib/codebox-client.js lib/wp-codebox-resolver.js lib/wp-codebox-fuzz-run.js scripts/fuzz/fuzz-runner.cjs scripts/bench/wp-codebox-bench-adapter.mjs scripts/test/wp-codebox-phpunit-adapter.mjs"
     ],
     "test": [
@@ -21,6 +21,7 @@
       "node tests/wp-codebox-database-service-smoke.mjs",
       "node tests/wp-codebox-native-database-canary.mjs",
       "bash scripts/test/full-suite-no-phpunit-smoke.sh",
+      "bash tests/js-test-framework-routing-smoke.sh",
       "node tests/codebox-client-boundary.test.js",
       "node tests/wp-codebox-fuzz-run-smoke.js",
       "node tests/wordpress-fuzz-runner-smoke.js",
