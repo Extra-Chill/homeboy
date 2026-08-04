@@ -308,7 +308,8 @@ fn run_artifact_postprocess_step(
         )
     })?;
 
-    let mut command = Command::new(&step.helper);
+    let helper = trusted_postprocess_helper(&step.helper)?;
+    let mut command = Command::new(helper);
     command.arg(&step.action);
     if let Some(args) = step
         .parameters
@@ -386,6 +387,21 @@ fn run_artifact_postprocess_step(
         error,
         artifacts,
     })
+}
+
+/// The postprocess contract is deliberately not a general command-execution
+/// surface. Helpers are selected from Homeboy's reviewed registry, so a plan
+/// cannot turn an arbitrary PATH executable into an allegedly confined helper.
+fn trusted_postprocess_helper(helper: &str) -> Result<&'static str> {
+    match helper {
+        "sh" => Ok("/bin/sh"),
+        _ => Err(Error::validation_invalid_argument(
+            "artifact_postprocess.actions.helper",
+            "artifact postprocess helper is not registered by this Homeboy build",
+            Some(helper.to_string()),
+            Some(vec!["sh".to_string()]),
+        )),
+    }
 }
 
 fn produced_artifacts(
