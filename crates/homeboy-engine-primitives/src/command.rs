@@ -576,8 +576,12 @@ pub fn wait_with_bounded_output_supervised_with_progress(
 
 /// A command can exit before a background descendant closes inherited output
 /// pipes. Stop that remaining process group before joining capture readers.
+///
+/// Public so callers that run their own wait loop (the agent-task provider
+/// path supervises stdin delivery and liveness itself) can reap an isolated
+/// tree with the same semantics instead of reimplementing them.
 #[cfg(unix)]
-fn terminate_remaining_process_group(root_pid: u32) -> io::Result<()> {
+pub fn terminate_remaining_process_group(root_pid: u32) -> io::Result<()> {
     if !process_group_is_running(root_pid) {
         return Ok(());
     }
@@ -596,7 +600,7 @@ fn terminate_remaining_process_group(root_pid: u32) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn terminate_remaining_process_group(_root_pid: u32) -> io::Result<()> {
+pub fn terminate_remaining_process_group(_root_pid: u32) -> io::Result<()> {
     Ok(())
 }
 
