@@ -401,7 +401,7 @@ fn scheduler_reports_missing_provider_capability() {
     );
     assert_eq!(
         aggregate.outcomes[0].diagnostics[0].class,
-        "agent_task.capability_missing"
+        "agent_task.provider_capability_unavailable"
     );
     assert_eq!(
         aggregate.outcomes[0].diagnostics[0].data["missing_capabilities"],
