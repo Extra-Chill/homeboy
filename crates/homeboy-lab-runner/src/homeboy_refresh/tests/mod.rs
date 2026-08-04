@@ -5,8 +5,6 @@ mod part_b;
 mod part_c;
 
 use super::*;
-use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
-use homeboy_core::test_support;
 
 pub(super) fn ssh_bootstrap_plan() -> HomeboyBinaryRefreshPlan {
     HomeboyBinaryRefreshPlan {

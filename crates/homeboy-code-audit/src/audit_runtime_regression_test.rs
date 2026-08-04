@@ -185,6 +185,11 @@ fn finding_fingerprints(findings: &[Finding]) -> Vec<String> {
 /// audited through [`run_main_audit_workflow`] (the CI entry point).
 ///
 /// This list IS the regression guard. See module docs before editing.
+///
+/// Only `audit_runtime_regression_matches_snapshot` consumes it, and that test
+/// is slow-tier, so — like `run_fixture_audit` above — this is gated to the
+/// same tier to avoid a dead-code warning in the default build.
+#[cfg(feature = "slow-tests")]
 const EXPECTED_FINDINGS: &[&str] = &[
     "core_boundary_leak::src/boundary_leak.rs",
     "high_item_count::src/god_file.rs",
