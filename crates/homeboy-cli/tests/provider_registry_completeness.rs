@@ -39,24 +39,12 @@ struct OptionalRegistry {
 /// how a registry graduates to "must be wired", and wiring one of these up later
 /// shrinks the unregistered set without breaking the test. Adding an entry is
 /// the deliberate, reviewable act of accepting an inert subsystem.
-const OPTIONAL_REGISTRIES: &[OptionalRegistry] = &[
-    OptionalRegistry {
-        id: "homeboy_agents::agent_task_lifecycle::acceptance_verifier::register_acceptance_verifier",
-        reason: "Conditional by design. `register_acceptance_verifier_from_config` returns \
+const OPTIONAL_REGISTRIES: &[OptionalRegistry] = &[OptionalRegistry {
+    id: "homeboy_agents::agent_task_lifecycle::acceptance_verifier::register_acceptance_verifier",
+    reason: "Conditional by design. `register_acceptance_verifier_from_config` returns \
                  Ok(()) without registering when `agent_task.acceptance_verifier` is unset, \
                  which is the default. Tests inject their own verifier through the registry.",
-    },
-    OptionalRegistry {
-        id: "homeboy_code_audit::compiler_warning_provider::register_compiler_warning_provider",
-        reason: "NOT WIRED (found while closing #11133). \
-                 `homeboy_extension::audit_compiler_warning_provider::register` exists and its \
-                 doc comment claims it is \"called once at binary startup by the CLI\", but no \
-                 caller exists anywhere in the workspace, so audit's compiler-warning provider \
-                 is inert in production and silently returns the no-op. Recorded here rather \
-                 than fixed because wiring it changes audit behavior, which is out of scope for \
-                 the detection fix. Removing this entry is the fix.",
-    },
-];
+}];
 
 /// A registry that must exist in the inventory for this test to mean anything.
 /// The inventory is collected at link time; a collection that silently yielded

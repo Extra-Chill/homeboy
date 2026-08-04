@@ -160,10 +160,11 @@ pub fn register_startup_providers_before_reconcile() {
     homeboy_extension::build::register_component_build_runner();
     homeboy_extension::lifecycle::register_component_install_runner();
     // Register extension-backed audit providers so code_audit can load
-    // grammars and run fallback fingerprint scripts without depending on the
-    // extension registry or script runner.
+    // grammars, run fallback fingerprint scripts, and collect compiler
+    // warnings without depending on the extension registry or script runner.
     homeboy_extension::audit_fingerprint_script_provider::register();
     homeboy_extension::audit_grammar_source_provider::register();
+    homeboy_extension::audit_compiler_warning_provider::register();
     // Register the audit recorded-artifact provider so the artifact-portability
     // detector can read past runs' artifacts from the observation store without
     // code_audit depending on observation — the last seam before audit becomes
