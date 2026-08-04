@@ -2236,6 +2236,32 @@ fn selected_outcome_for_attempt(run_id: &str) -> Result<crate::agent_task::Agent
 /// caller before disclosure.
 fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
     let plan = agent_task_lifecycle::load_plan(run_id)?;
+    let record = agent_task_lifecycle::exact_record(run_id)?;
+    if let Some(task) = plan.tasks.iter().find(|task| {
+        agent_task_lifecycle::candidate_adoption_recovery_outcome(&record, task).is_some()
+    }) {
+        if task.executor.backend.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "provider_tool",
+                "Cook lineage attempt has no dispatched provider tool",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+        return Ok(CookAttemptExecution {
+            task_summary: task
+                .instructions
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or("Delivered the authenticated Cook candidate.")
+                .to_string(),
+            form: None,
+            tool: task.executor.backend.clone(),
+            model: None,
+            review_form_only: false,
+        });
+    }
     let outcome = selected_outcome_for_attempt(run_id)?;
     let task = plan
         .tasks

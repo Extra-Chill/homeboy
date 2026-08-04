@@ -151,15 +151,21 @@ pub(super) fn restore_initial_cook_candidate_workspace(plan: &mut AgentTaskPlan)
             // Older records did not retain a continuation workspace separately.
             .or_else(|| baseline.get("source_root").and_then(Value::as_str))
             .filter(|path| !path.trim().is_empty())
+            .map(str::to_string)
             .ok_or_else(|| missing_cook_candidate_source_workspace(&task.task_id, None))?;
-        if !std::path::Path::new(continuation_root).is_dir() {
+        if !std::path::Path::new(&continuation_root).is_dir() {
             return Err(missing_cook_candidate_source_workspace(
                 &task.task_id,
-                Some(continuation_root),
+                Some(&continuation_root),
             ));
         }
-        task.workspace.root = Some(continuation_root.to_string());
-        task.executor.remap_workspace_root(continuation_root);
+        if let Some(prior) = task.metadata.get("cook_workspace_identity").cloned() {
+            task.metadata["cook_workspace_identity_predecessor"] = prior;
+        }
+        task.metadata["cook_workspace_identity"] =
+            crate::agent_task_workspace_identity::attest_workspace(Path::new(&continuation_root))?;
+        task.workspace.root = Some(continuation_root.clone());
+        task.executor.remap_workspace_root(&continuation_root);
     }
     Ok(())
 }
