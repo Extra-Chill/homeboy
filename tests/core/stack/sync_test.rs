@@ -22,6 +22,7 @@ use support::{commit_file, git, init_repo};
 fn meta(state: &str, head_sha: &str) -> PrMeta {
     PrMeta {
         head_sha: head_sha.to_string(),
+        base_sha: None,
         head_owner: Some("example-org".to_string()),
         head_name: Some("studio".to_string()),
         state: state.to_string(),
