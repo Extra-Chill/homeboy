@@ -56,6 +56,9 @@ pub(super) enum LabRunnerPreparation {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlacementReadinessRequest {
+    /// Versioned public request contract. This typed surface was never
+    /// released, so v2 is the first supported external schema.
+    pub schema: String,
     pub runner_id: String,
     pub allow_queue: bool,
     pub durable_workload: bool,
@@ -84,6 +87,9 @@ pub enum PlacementReadinessInvocation {
 pub struct LabAdmissionPlan {
     pub capability: super::PreparedLabRunnerCapability,
     pub toolchain: Option<super::RunnerCapabilityPreflight>,
+    /// Public preflight uses runner snapshots only and therefore reports
+    /// executable extension probes as an explicit unknown/blocked condition.
+    pub executable_probe_required: bool,
 }
 
 /// Compile every runner admission requirement from the trusted routed command.
@@ -94,29 +100,42 @@ pub fn compile_lab_admission_plan(
     source_path: &std::path::Path,
     command_prefix_required_tools: &[super::RunnerRequiredTool],
 ) -> Result<LabAdmissionPlan> {
-    let capability = crate::lab_capabilities::lab_runner_capability_contract(
-        command,
-        source_path,
-        command_prefix_required_tools,
-    )
-    .map(super::prepare_lab_runner_capability)
-    .ok_or_else(|| {
-        Error::validation_invalid_argument(
+    if !command.is_portable() {
+        return Err(Error::validation_invalid_argument(
             "invocation",
             "placement invocation must compile to a portable Lab command",
             None,
             None,
-        )
-    })?;
+        ));
+    }
+    let _ = source_path;
+    let capability = super::prepare_lab_runner_capability(super::LabRunnerCapabilityContract {
+        command: command.hot_label,
+        required_tools: command_prefix_required_tools.to_vec(),
+        required_capabilities: command
+            .required_capabilities
+            .iter()
+            .map(|capability| capability.name.clone())
+            .collect(),
+    });
     Ok(LabAdmissionPlan {
         toolchain: crate::lab_capabilities::toolchain_readiness_preflight(command)?,
         capability,
+        executable_probe_required: false,
     })
 }
 
 fn compile_placement_readiness_plan(
     request: &PlacementReadinessRequest,
 ) -> Result<LabAdmissionPlan> {
+    if request.schema != "homeboy/placement-readiness/v2" {
+        return Err(Error::validation_invalid_argument(
+            "schema",
+            "placement readiness accepts homeboy/placement-readiness/v2 requests",
+            Some(request.schema.clone()),
+            None,
+        ));
+    }
     let (
         _workload_family,
         hot_label,
@@ -173,11 +192,17 @@ fn compile_placement_readiness_plan(
     let source_path = source_path_inputs
         .first()
         .expect("validated invocation has one source path");
-    compile_lab_admission_plan(
+    let mut plan = compile_lab_admission_plan(
         &command,
         std::path::Path::new(source_path),
         &[super::RunnerRequiredTool::homeboy()],
-    )
+    )?;
+    // Public preflight is mutation-free: it never invokes extension programs.
+    // Execution reuses the same compiled probes through the bounded runner
+    // diagnostic transport immediately before dispatch.
+    plan.executable_probe_required = plan.toolchain.is_some();
+    plan.toolchain = None;
+    Ok(plan)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -227,6 +252,14 @@ pub fn placement_readiness(request: &PlacementReadinessRequest) -> Result<Placem
     let runner = load(&request.runner_id)?;
     let status = status(&request.runner_id)?;
     let plan = compile_placement_readiness_plan(request)?;
+    if plan.executable_probe_required {
+        return Err(Error::validation_invalid_argument(
+            "invocation",
+            "placement readiness is blocked: extension executable probe required; upgrade the extension to advertise runner capabilities or run execution admission",
+            None,
+            None,
+        ));
+    }
     if let Some(toolchain) = plan.toolchain.as_ref() {
         // This probe only observes runner toolchain state; unlike execution it
         // neither creates a workspace nor reserves daemon admission.
@@ -320,7 +353,7 @@ fn placement_readiness_from_status(
         })
         .collect();
     PlacementReadiness {
-        schema: "homeboy/placement-readiness/v1",
+        schema: "homeboy/placement-readiness/v2",
         workload_family,
         command,
         runner_id: request.runner_id.clone(),
@@ -1601,6 +1634,7 @@ mod placement_readiness_tests {
 
     fn request() -> PlacementReadinessRequest {
         PlacementReadinessRequest {
+            schema: "homeboy/placement-readiness/v2".to_string(),
             runner_id: "lab".to_string(),
             allow_queue: false,
             durable_workload: false,

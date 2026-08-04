@@ -20,6 +20,17 @@ pub(crate) fn toolchain_readiness_preflight_for_extensions(
     for extension_id in extensions {
         let manifest = homeboy_core::extension_store::load_extension(extension_id)?;
         for probe in &manifest.toolchain_readiness {
+            if probe.is_legacy_non_executable() {
+                return Err(homeboy_core::Error::validation_invalid_argument(
+                    "toolchain_readiness",
+                    format!(
+                        "extension `{extension_id}` declares legacy command probe `{}`; extension upgrade required",
+                        probe.id
+                    ),
+                    None,
+                    Some(vec![format!("Upgrade extension `{extension_id}` to structured program/args readiness probes.")]),
+                ));
+            }
             if !probe.capabilities.is_empty()
                 && !probe
                     .capabilities

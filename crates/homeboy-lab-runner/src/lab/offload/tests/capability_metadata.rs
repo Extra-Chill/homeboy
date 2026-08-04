@@ -5,23 +5,9 @@ fn admission_capability(
     source_path: &std::path::Path,
     required_tools: Vec<RunnerRequiredTool>,
 ) -> crate::PreparedLabRunnerCapability {
-    compile_lab_admission_plan(PlacementReadinessRequest {
-        runner_id: "lab".to_string(),
-        workload_family: command.hot_label.to_string(),
-        command: command.hot_label.to_string(),
-        allow_queue: false,
-        durable_workload: false,
-        required_tools,
-        required_capabilities: command
-            .required_capabilities
-            .iter()
-            .map(|capability| capability.name.clone())
-            .collect(),
-        provider: None,
-        required_toolchain_probes: Vec::new(),
-        source_path_inputs: vec![source_path.display().to_string()],
-    })
-    .capability
+    compile_lab_admission_plan(command, source_path, &required_tools)
+        .expect("compile routed admission")
+        .capability
 }
 
 fn expected_controller_refresh_ref() -> String {

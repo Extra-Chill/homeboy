@@ -723,7 +723,7 @@ mod tests {
             "runner",
             "preflight",
             "--request",
-            r#"{"runner_id":"lab","allow_queue":false,"durable_workload":false,"invocation":{"kind":"capability_audit","source_path":"/workspace","capability_id":"capability.alpha"}}"#,
+            r#"{"schema":"homeboy/placement-readiness/v2","runner_id":"lab","allow_queue":false,"durable_workload":false,"invocation":{"kind":"capability_audit","source_path":"/workspace","capability_id":"capability.alpha"}}"#,
         ])
         .expect("parse typed preflight request");
         assert!(matches!(
