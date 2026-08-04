@@ -2720,6 +2720,12 @@ fn cook_failure_context(
             ]
         })
         .unwrap_or_default();
+    if recovery_legal {
+        legal_actions.push(super::AgentTaskCookRecoveryAction {
+            action: "resume".to_string(),
+            command: format!("homeboy agent-task cook-continue {chronological_latest_run_id}"),
+        });
+    }
     if blocking_claim.is_some() {
         legal_actions.insert(
             2,

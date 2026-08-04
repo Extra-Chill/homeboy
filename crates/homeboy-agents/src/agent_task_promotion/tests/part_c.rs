@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[test]
-fn bridge_reconciliation_marks_missing_or_mismatched_finalized_bytes_failed() {
+fn bridge_reconciliation_marks_missing_or_mismatched_finalized_bytes_pending() {
     homeboy_core::test_support::with_isolated_home(|_| {
         for (run_id, contents) in [
             ("recovered-missing-finalized", None),
@@ -82,14 +82,14 @@ fn bridge_reconciliation_marks_missing_or_mismatched_finalized_bytes_failed() {
                 None,
                 Some(&identity),
             )
-            .expect("bridge preserves aggregate while surfacing failed projection");
+            .expect("bridge preserves aggregate while surfacing recoverable projection");
 
             let record = crate::agent_task_lifecycle::status(run_id).expect("lifecycle status");
-            assert_eq!(record.metadata["artifact_projection"]["status"], "failed");
-            assert!(record.metadata["artifact_projection"]["error"]
-                .as_str()
-                .expect("actionable error")
-                .contains("controller-finalized bytes"));
+            assert_eq!(record.metadata["artifact_projection"]["status"], "pending");
+            assert_eq!(
+                record.metadata["artifact_projection"]["recovery_action"]["kind"],
+                "fetch_and_reconcile"
+            );
             let artifacts = homeboy_core::observation::ObservationStore::open_initialized()
                 .expect("store")
                 .list_artifacts(run_id)
@@ -415,7 +415,7 @@ fn promote_reports_no_changes_for_empty_patch_metadata() {
         })
         .expect("empty patch reports no changes");
 
-        assert_eq!(report.status, AgentTaskPromotionStatus::NoChanges);
+        assert_eq!(report.status, AgentTaskPromotionStatus::VerifiedNoChanges);
         assert!(report.changed_files.is_empty());
         match prior_promotion_command {
             Some(command) => std::env::set_var("HOMEBOY_AGENT_TASK_PROMOTION_COMMAND", command),
@@ -631,9 +631,7 @@ fn promote_applies_patch_with_fake_workspace_provider() {
         provider.apply_calls[0].to_workspace,
         "repo@controlled-worktree"
     );
-    assert!(provider.apply_calls[0]
-        .patch_path
-        .ends_with("changes.patch"));
+    assert_eq!(provider.applied_patch_contents, vec![VALID_PATCH]);
     assert_eq!(provider.apply_calls[0].changed_files, vec!["src/lib.rs"]);
     assert_eq!(
         provider.verify_calls,
@@ -727,6 +725,7 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
     // verify gate executes. This uses a runtime-agnostic component `deps`
     // script (no composer/npm binary required) to prove the install ran.
     homeboy_core::test_support::with_isolated_home(|_| {
+        homeboy_extension::component_script::register_component_script_runner();
         let temp = tempfile::tempdir().expect("tempdir");
         let (source_path, source) = write_patch_source(&temp);
 
