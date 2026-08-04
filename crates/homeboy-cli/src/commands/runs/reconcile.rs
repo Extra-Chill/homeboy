@@ -152,7 +152,7 @@ where
     }))
 }
 
-fn stale_running_reason<F>(run: &RunRecord, pid_is_alive: &F) -> Option<&'static str>
+pub(crate) fn stale_running_reason<F>(run: &RunRecord, pid_is_alive: &F) -> Option<&'static str>
 where
     F: Fn(u32) -> bool,
 {
@@ -182,7 +182,7 @@ fn ownerless_running_is_stale(run: &RunRecord) -> bool {
         .unwrap_or(false)
 }
 
-fn runner_backed_run(run: &RunRecord) -> bool {
+pub(crate) fn runner_backed_run(run: &RunRecord) -> bool {
     metadata_string(&run.metadata_json, &["runner_job_id", "job_id"]).is_some()
         || run
             .metadata_json
