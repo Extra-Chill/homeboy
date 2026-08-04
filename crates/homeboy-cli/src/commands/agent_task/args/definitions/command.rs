@@ -6,6 +6,14 @@ use homeboy::agents::agent_task_service::AgentTaskDiscoveryOptions;
 /// focused status/artifact commands and `--output` artifacts.
 const DEFAULT_DISCOVERY_LIMIT: usize = 20;
 
+fn positive_discovery_limit(value: &str) -> std::result::Result<usize, String> {
+    let limit = value.parse::<usize>().map_err(|error| error.to_string())?;
+    if limit == 0 {
+        return Err("must be greater than zero".to_string());
+    }
+    Ok(limit)
+}
+
 use super::super::super::prompts::AgentTaskPromptsArgs;
 use super::super::super::tool::AgentTaskToolArgs;
 use super::cook::{AgentTaskCookArgs, AgentTaskLoopArgs, PromotionProviderArgs};
@@ -240,10 +248,22 @@ pub struct ListArgs {
 }
 #[derive(Args, Debug)]
 pub struct ActiveArgs {
-    #[arg(long = "limit", value_name = "N", conflicts_with = "full")]
+    /// Cap active discovery to a positive page size. Cannot be combined with
+    /// `--full` or fleet-wide `--reconcile`.
+    #[arg(
+        long = "limit",
+        value_name = "N",
+        value_parser = positive_discovery_limit,
+        conflicts_with_all = ["full", "reconcile"]
+    )]
     pub limit: Option<usize>,
+    /// Continue at this zero-based offset from the prior active page. Cannot be
+    /// combined with `--full` or fleet-wide `--reconcile`.
+    #[arg(long, value_name = "N", conflicts_with_all = ["full", "reconcile"])]
+    pub cursor: Option<usize>,
     /// Return every matching record. This is intentionally explicit because
-    /// discovery defaults to a finite agent-facing page.
+    /// discovery defaults to a finite agent-facing page and cannot scope
+    /// fleet-wide `--reconcile`.
     #[arg(long, conflicts_with = "reconcile")]
     pub full: bool,
     #[arg(long = "reconcile")]
@@ -290,6 +310,7 @@ impl From<ActiveArgs> for AgentTaskDiscoveryOptions {
     fn from(args: ActiveArgs) -> Self {
         Self {
             limit: (!args.full).then(|| args.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT)),
+            cursor: args.cursor.unwrap_or_default(),
             ..Default::default()
         }
     }

@@ -368,8 +368,9 @@ List queued and running durable runs, newest first.
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--limit` | `<N>` | _no help text_ |
-| `--full` | flag | Return every matching record. This is intentionally explicit because discovery defaults to a finite agent-facing page |
+| `--limit` | `<N>` | Cap active discovery to a positive page size. Cannot be combined with `--full` or fleet-wide `--reconcile` |
+| `--cursor` | `<N>` | Continue at this zero-based offset from the prior active page. Cannot be combined with `--full` or fleet-wide `--reconcile` |
+| `--full` | flag | Return every matching record. This is intentionally explicit because discovery defaults to a finite agent-facing page and cannot scope fleet-wide `--reconcile` |
 | `--reconcile` | flag | _no help text_ |
 | `--dry-run` | flag | _no help text_ |
 | `--apply` | flag | _no help text_ |

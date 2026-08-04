@@ -999,6 +999,53 @@ fn cook_execution_budget_flags_parse_and_reject_legacy_attempts_mix() {
 }
 
 #[test]
+fn active_cursor_continues_discovery_and_cannot_scope_fleet_reconciliation() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "active",
+        "--limit",
+        "20",
+        "--cursor",
+        "20",
+    ])
+    .expect("active continuation parses");
+    let Commands::AgentTask(agent_task) = cli.command else {
+        panic!("expected agent-task command");
+    };
+    let AgentTaskCommand::Active(args) = agent_task.command else {
+        panic!("expected active command");
+    };
+    assert_eq!(args.limit, Some(20));
+    assert_eq!(args.cursor, Some(20));
+    assert!(!args.reconcile);
+
+    assert!(Cli::try_parse_from(["homeboy", "agent-task", "active", "--limit", "0"]).is_err());
+
+    assert!(Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "active",
+        "--reconcile",
+        "--limit",
+        "20",
+    ])
+    .is_err());
+    assert!(Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "active",
+        "--reconcile",
+        "--cursor",
+        "20",
+    ])
+    .is_err());
+    assert!(
+        Cli::try_parse_from(["homeboy", "agent-task", "active", "--reconcile", "--full",]).is_err()
+    );
+}
+
+#[test]
 fn agent_task_timeout_ms_flags_parse_for_cook_run_and_run_plan() {
     let cook = Cli::try_parse_from([
         "homeboy",
