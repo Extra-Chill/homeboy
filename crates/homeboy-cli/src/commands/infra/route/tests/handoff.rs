@@ -4,12 +4,7 @@ use super::*;
 use clap::Parser;
 use homeboy::command_contract::{lab_runner_supports_contract_label, LabCommandPortability};
 use std::fs;
-use std::path::Path;
-use std::process::Command;
-use std::sync::{Mutex, MutexGuard, OnceLock};
 use tempfile::tempdir;
-
-use super::*;
 
 #[test]
 fn rig_install_offload_translates_source_path_instead_of_forwarding_it() {

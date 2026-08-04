@@ -1,7 +1,6 @@
 #![cfg(test)]
 
 use super::*;
-use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 use homeboy_core::test_support;
 use std::time::{Duration, Instant};
 

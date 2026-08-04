@@ -129,8 +129,6 @@ fn read_lab_patch_artifact(path: &str) -> Result<String> {
 mod tests {
     use std::path::Path;
 
-    use homeboy_core::source_snapshot::SourceSnapshot;
-
     use super::*;
 
     #[test]

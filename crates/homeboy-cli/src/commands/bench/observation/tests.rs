@@ -16,7 +16,7 @@ use crate::commands::utils::args::{
     BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
 };
 use crate::commands::utils::resource_policy::{
-    self, resource_policy_context_from_evaluation, HotCommand, ResourcePolicyContext,
+    self, resource_policy_context_from_evaluation, HotCommand,
 };
 use crate::test_support::{serve_public_artifact_base_once, with_isolated_home};
 
