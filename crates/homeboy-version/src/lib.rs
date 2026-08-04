@@ -56,13 +56,24 @@ mod tests {
     /// `pipeline` facade alongside the same check for `executor.rs`.
     #[test]
     fn version_core_stays_ecosystem_agnostic() {
-        let source = include_str!("version.rs");
-        let runtime_source = source.split("#[cfg(test)]").next().unwrap_or(source);
-        for term in ["Cargo", "cargo", "Rust", "rust"] {
-            assert!(
-                !runtime_source.contains(term),
-                "version core must not branch on ecosystem-specific term {term:?}"
-            );
+        // `component_version.rs` carries the single version-read spine that
+        // used to be three copies inside `version.rs` (#11144), so it is held
+        // to the same contract.
+        let sources = [
+            ("version.rs", include_str!("version.rs")),
+            (
+                "version/component_version.rs",
+                include_str!("version/component_version.rs"),
+            ),
+        ];
+        for (file, source) in sources {
+            let runtime_source = source.split("#[cfg(test)]").next().unwrap_or(source);
+            for term in ["Cargo", "cargo", "Rust", "rust"] {
+                assert!(
+                    !runtime_source.contains(term),
+                    "version core ({file}) must not branch on ecosystem-specific term {term:?}"
+                );
+            }
         }
     }
 }
