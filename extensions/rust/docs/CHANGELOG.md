@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.32.0] - 2026-08-04
+
+### Added
+- add deterministic test shard manifests
+
 ## [1.31.2] - 2026-07-30
 
 ### Fixed
