@@ -341,6 +341,7 @@ mod tests {
                 status: None,
                 rig_id: None,
                 limit: Some(limit as i64),
+                ..RunListFilter::default()
             }) else {
                 return Vec::new();
             };

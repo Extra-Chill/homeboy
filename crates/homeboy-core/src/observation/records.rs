@@ -81,6 +81,27 @@ pub struct RunRecord {
     pub metadata_json: serde_json::Value,
 }
 
+/// Keyset position of the last row a page returned, in the store's canonical
+/// `ORDER BY started_at DESC, id DESC` order.
+///
+/// Preferred over `RunListFilter::offset` for walking pages: rows inserted
+/// while a caller paginates shift every offset, so an offset walk can skip or
+/// repeat rows on a live store. A keyset cursor is stable under insertion.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunCursor {
+    pub started_at: String,
+    pub id: String,
+}
+
+impl RunCursor {
+    pub fn from_run(run: &RunRecord) -> Self {
+        Self {
+            started_at: run.started_at.clone(),
+            id: run.id.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunListFilter {
     pub kind: Option<String>,
@@ -88,6 +109,44 @@ pub struct RunListFilter {
     pub status: Option<String>,
     pub rig_id: Option<String>,
     pub limit: Option<i64>,
+    /// Rows to skip before the page begins. Simple to reason about, but see
+    /// `after` — an offset walk is not stable while rows are being inserted.
+    pub offset: Option<i64>,
+    /// Resume strictly after this keyset position. Takes effect in addition to
+    /// `offset`; callers normally set one or the other.
+    pub after: Option<RunCursor>,
+}
+
+/// A page of run rows carrying the signal that a bare `Vec<RunRecord>` cannot:
+/// whether the store stopped at the page boundary with more rows still matching
+/// the filter (#11177).
+///
+/// A caller whose logic treats "absent from this page" as "does not exist" —
+/// completion tracking, lineage walks, reconciliation — must consult
+/// `truncated` and either paginate via `next_cursor` or fail loudly. Ignoring
+/// it is how #11116 silently reported live runs as completed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunPage {
+    pub runs: Vec<RunRecord>,
+    /// True when more rows matched the filter than the applied limit returned.
+    pub truncated: bool,
+    /// The limit the store actually applied, after clamping the request into
+    /// `[1, MAX_RUN_PAGE_LIMIT]`. Compare against the requested limit to see
+    /// whether the request itself was reduced.
+    pub applied_limit: i64,
+    /// Keyset position to resume from, `Some` only when `truncated`.
+    pub next_cursor: Option<RunCursor>,
+    /// Offset to resume from, `Some` only when `truncated`. Prefer
+    /// `next_cursor` on a store that is being written to concurrently.
+    pub next_offset: Option<i64>,
+}
+
+impl RunPage {
+    /// Consume the page, discarding the truncation signal. Named so that
+    /// dropping the signal is a visible decision at the call site.
+    pub fn into_runs(self) -> Vec<RunRecord> {
+        self.runs
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

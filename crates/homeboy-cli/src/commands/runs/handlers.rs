@@ -64,6 +64,7 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
         // counts canonical rows the caller actually sees, not mirrors that get
         // collapsed away. The store already caps growth via retention.
         limit: Some(list_prefetch_limit(&args)),
+        ..RunListFilter::default()
     })?;
 
     let run_records = run_records

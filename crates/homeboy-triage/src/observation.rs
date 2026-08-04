@@ -32,6 +32,7 @@ impl TriageObservation {
                 status: None,
                 rig_id: None,
                 limit: Some(1),
+                ..RunListFilter::default()
             })
             .ok()
             .flatten()

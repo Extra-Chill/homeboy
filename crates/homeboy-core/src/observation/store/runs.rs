@@ -5,6 +5,48 @@ use uuid::Uuid;
 
 use super::*;
 
+/// Rows returned when a caller does not ask for a specific page size.
+pub const DEFAULT_RUN_PAGE_LIMIT: i64 = 100;
+
+/// Largest page a single run query will materialize. A request above this is
+/// reduced to it — but the reduction is reported through `RunPage::truncated`
+/// and `RunPage::applied_limit` rather than being silent (#11177).
+pub const MAX_RUN_PAGE_LIMIT: i64 = 1000;
+
+/// Ceiling on an exhaustive walk, above which
+/// [`ObservationStore::list_runs_all`] errors instead of returning a partial
+/// answer. A wrong answer is worse than a loud one.
+pub const MAX_EXHAUSTIVE_RUN_ROWS: i64 = 100_000;
+
+/// Turn a probe read of `limit + 1` rows into a page plus its resume position.
+///
+/// The extra row is the whole mechanism: it is the difference between "the
+/// page ended because the data ended" and "the page ended because the limit
+/// did", which a bare `Vec` cannot express.
+fn run_page_from_probe(mut runs: Vec<RunRecord>, limit: i64, offset: i64) -> RunPage {
+    let truncated = runs.len() as i64 > limit;
+    if truncated {
+        runs.truncate(limit.max(0) as usize);
+    }
+    let next_cursor = if truncated {
+        runs.last().map(RunCursor::from_run)
+    } else {
+        None
+    };
+    let next_offset = if truncated {
+        Some(offset + limit)
+    } else {
+        None
+    };
+    RunPage {
+        runs,
+        truncated,
+        applied_limit: limit,
+        next_cursor,
+        next_offset,
+    }
+}
+
 impl ObservationStore {
     /// Open and lazily initialize the local observed-state database.
     pub fn open_initialized() -> Result<Self> {
@@ -344,8 +386,36 @@ impl ObservationStore {
         }
     }
 
+    /// List runs, discarding any signal that the page was cut short.
+    ///
+    /// The returned `Vec` is indistinguishable from a complete answer even when
+    /// more rows matched the filter, so this is a **display-path** accessor.
+    /// Any caller whose logic treats "absent from this list" as "does not
+    /// exist" must use [`ObservationStore::list_runs_page`] and honour
+    /// `RunPage::truncated`, or [`ObservationStore::list_runs_all`] to walk
+    /// every matching row. See #11177 (and #11116, the outage it caused).
     pub fn list_runs(&self, filter: RunListFilter) -> Result<Vec<RunRecord>> {
-        let limit = filter.limit.unwrap_or(100).clamp(1, 1000);
+        Ok(self.list_runs_page(filter)?.runs)
+    }
+
+    /// List a page of runs together with an explicit truncation signal and the
+    /// position to resume from.
+    ///
+    /// The applied page size is clamped into `[1, MAX_RUN_PAGE_LIMIT]`; a
+    /// request above that ceiling is reduced, but the reduction is now
+    /// observable through `RunPage::applied_limit` and `RunPage::truncated`
+    /// instead of being silent (#11177). Truncation is detected by reading one
+    /// row past the page, so a result that exactly fills the limit is not
+    /// mistaken for a truncated one.
+    pub fn list_runs_page(&self, filter: RunListFilter) -> Result<RunPage> {
+        let limit = filter
+            .limit
+            .unwrap_or(DEFAULT_RUN_PAGE_LIMIT)
+            .clamp(1, MAX_RUN_PAGE_LIMIT);
+        let offset = filter.offset.unwrap_or(0).max(0);
+        // Read one row past the page so "ended on the boundary" and "there is
+        // more" are distinguishable rather than conflated.
+        let probe = limit + 1;
         let mut predicates = Vec::new();
         let mut values: Vec<&dyn ToSql> = Vec::new();
         if filter.kind.is_some() {
@@ -364,12 +434,22 @@ impl ObservationStore {
             predicates.push("rig_id = ?");
             values.push(filter.rig_id.as_ref().expect("checked"));
         }
+        if let Some(cursor) = filter.after.as_ref() {
+            // Keyset resume in the canonical `started_at DESC, id DESC` order.
+            // Expanded rather than written as a row-value comparison so the
+            // predicate does not depend on the linked SQLite version.
+            predicates.push("(started_at < ? OR (started_at = ? AND id < ?))");
+            values.push(&cursor.started_at);
+            values.push(&cursor.started_at);
+            values.push(&cursor.id);
+        }
         let where_clause = if predicates.is_empty() {
             String::new()
         } else {
             format!("WHERE {}", predicates.join(" AND "))
         };
-        values.push(&limit);
+        values.push(&probe);
+        values.push(&offset);
         let mut statement = self
             .connection
             .prepare(&format!(
@@ -379,7 +459,7 @@ impl ObservationStore {
                 FROM runs
                 {where_clause}
                 ORDER BY started_at DESC, id DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 "#,
             ))
             .map_err(sqlite_error("prepare list run records"))?;
@@ -387,18 +467,71 @@ impl ObservationStore {
             .query_map(params_from_iter(values), row_to_run_record)
             .map_err(sqlite_error("list run records"))?;
 
-        collect_rows(rows, "collect run records")
+        let runs = collect_rows(rows, "collect run records")?;
+        Ok(run_page_from_probe(runs, limit, offset))
+    }
+
+    /// Walk every run matching `filter`, paginating internally so the answer is
+    /// complete rather than silently cut at the page ceiling.
+    ///
+    /// `filter.limit` is ignored — completeness is the point. Pagination uses a
+    /// keyset cursor, so rows inserted mid-walk cannot shift the window and
+    /// cause a row to be skipped. If the result would exceed
+    /// `MAX_EXHAUSTIVE_RUN_ROWS` the call **fails loudly** instead of returning
+    /// a quietly partial set (#11177).
+    pub fn list_runs_all(&self, filter: RunListFilter) -> Result<Vec<RunRecord>> {
+        let mut page_filter = RunListFilter {
+            limit: Some(MAX_RUN_PAGE_LIMIT),
+            offset: None,
+            ..filter
+        };
+        let mut collected: Vec<RunRecord> = Vec::new();
+        loop {
+            let page = self.list_runs_page(page_filter.clone())?;
+            collected.extend(page.runs);
+            if !page.truncated {
+                return Ok(collected);
+            }
+            if collected.len() as i64 >= MAX_EXHAUSTIVE_RUN_ROWS {
+                return Err(Error::internal_unexpected(format!(
+                    "run listing exceeded the {MAX_EXHAUSTIVE_RUN_ROWS} row exhaustive-walk ceiling; \
+                     narrow the filter or paginate explicitly with list_runs_page"
+                )));
+            }
+            // `truncated` implies a non-empty page, so a missing cursor would be
+            // a store bug; stop rather than loop forever on it.
+            let Some(cursor) = page.next_cursor else {
+                return Ok(collected);
+            };
+            page_filter.after = Some(cursor);
+        }
     }
 
     /// Return a bounded set of runs linked to the given retry predecessor.
     /// The literal JSON path matches the `idx_runs_metadata_retry_of` index.
+    ///
+    /// Truncation is invisible in the returned `Vec`. A caller reasoning about
+    /// retry *lineage* — where a missing sibling is a wrong answer, not a slow
+    /// one — must use [`ObservationStore::list_runs_by_retry_of_page`] (#11177).
     pub fn list_runs_by_retry_of(
         &self,
         kind: &str,
         retry_of: &str,
         limit: usize,
     ) -> Result<Vec<RunRecord>> {
-        let limit = i64::try_from(limit.clamp(1, 1000)).expect("bounded run query limit");
+        Ok(self.list_runs_by_retry_of_page(kind, retry_of, limit)?.runs)
+    }
+
+    /// Retry-lineage siblings with an explicit truncation signal.
+    pub fn list_runs_by_retry_of_page(
+        &self,
+        kind: &str,
+        retry_of: &str,
+        limit: usize,
+    ) -> Result<RunPage> {
+        let limit = i64::try_from(limit.clamp(1, MAX_RUN_PAGE_LIMIT as usize))
+            .expect("bounded run query limit");
+        let probe = limit + 1;
         let mut statement = self
             .connection
             .prepare(
@@ -414,9 +547,10 @@ impl ObservationStore {
             )
             .map_err(sqlite_error("prepare metadata-indexed run query"))?;
         let rows = statement
-            .query_map(params![kind, retry_of, limit], row_to_run_record)
+            .query_map(params![kind, retry_of, probe], row_to_run_record)
             .map_err(sqlite_error("query metadata-indexed run records"))?;
-        collect_rows(rows, "collect metadata-indexed run records")
+        let runs = collect_rows(rows, "collect metadata-indexed run records")?;
+        Ok(run_page_from_probe(runs, limit, 0))
     }
 
     /// List every currently running run so callers can retain active work when
@@ -746,5 +880,354 @@ impl ObservationStore {
             )
         })?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::with_isolated_home;
+
+    /// Seed rows with explicit ids and timestamps so the canonical
+    /// `started_at DESC, id DESC` order is deterministic rather than dependent
+    /// on how fast the inserts happened to run. Returns the ids in the order
+    /// queries hand them back: newest first.
+    fn seed_runs(store: &ObservationStore, kind: &str, count: usize) -> Vec<String> {
+        let mut ids: Vec<String> = (0..count)
+            .map(|index| {
+                let id = format!("{kind}-{index:03}");
+                seed_run(
+                    store,
+                    kind,
+                    &id,
+                    &format!("2026-01-01T00:{index:02}:00+00:00"),
+                    None,
+                );
+                id
+            })
+            .collect();
+        ids.reverse();
+        ids
+    }
+
+    fn seed_run(
+        store: &ObservationStore,
+        kind: &str,
+        id: &str,
+        started_at: &str,
+        retry_of: Option<&str>,
+    ) {
+        let metadata_json = match retry_of {
+            Some(retry_of) => serde_json::json!({
+                "agent_task_run": { "metadata": { "retry_of": retry_of } }
+            }),
+            None => serde_json::json!({}),
+        };
+        store
+            .import_run(&RunRecord {
+                id: id.to_string(),
+                kind: kind.to_string(),
+                started_at: started_at.to_string(),
+                status: RunStatus::Running.as_str().to_string(),
+                metadata_json,
+                ..RunRecord::default()
+            })
+            .expect("seed run");
+    }
+
+    fn ids(runs: &[RunRecord]) -> Vec<String> {
+        runs.iter().map(|run| run.id.clone()).collect()
+    }
+
+    /// The whole defect is that a cut-short page looked exactly like a complete
+    /// one. A page that merely ends on its limit boundary must not claim
+    /// truncation, or the signal is noise and callers learn to ignore it.
+    #[test]
+    fn a_page_that_ends_because_the_data_ended_is_not_truncated() {
+        with_isolated_home(|_home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            seed_runs(&store, "page-exact", 3);
+
+            let page = store
+                .list_runs_page(RunListFilter {
+                    kind: Some("page-exact".to_string()),
+                    limit: Some(3),
+                    ..RunListFilter::default()
+                })
+                .expect("page");
+
+            assert_eq!(page.runs.len(), 3);
+            assert!(!page.truncated, "an exact fit is a complete answer");
+            assert_eq!(page.next_cursor, None);
+            assert_eq!(page.next_offset, None);
+        });
+    }
+
+    /// And a page that ended because the limit did must say so, and must say
+    /// where to resume — otherwise the caller can detect the boundary but not
+    /// cross it.
+    #[test]
+    fn a_page_cut_short_by_its_limit_reports_truncation_and_a_resume_point() {
+        with_isolated_home(|_home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let seeded = seed_runs(&store, "page-cut", 5);
+
+            let page = store
+                .list_runs_page(RunListFilter {
+                    kind: Some("page-cut".to_string()),
+                    limit: Some(2),
+                    ..RunListFilter::default()
+                })
+                .expect("page");
+
+            assert_eq!(ids(&page.runs), seeded[..2].to_vec());
+            assert!(page.truncated);
+            assert_eq!(page.applied_limit, 2);
+            assert_eq!(page.next_offset, Some(2));
+            assert_eq!(
+                page.next_cursor,
+                page.runs.last().map(RunCursor::from_run),
+                "the resume point is the last row handed out"
+            );
+        });
+    }
+
+    /// A request above the page ceiling is still reduced — but the reduction is
+    /// now reported instead of silent, which is the #11177 contract.
+    #[test]
+    fn a_request_above_the_page_ceiling_reports_the_limit_it_actually_applied() {
+        with_isolated_home(|_home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            seed_runs(&store, "page-ceiling", 2);
+
+            let page = store
+                .list_runs_page(RunListFilter {
+                    kind: Some("page-ceiling".to_string()),
+                    limit: Some(5_000),
+                    ..RunListFilter::default()
+                })
+                .expect("page");
+
+            assert_eq!(page.applied_limit, MAX_RUN_PAGE_LIMIT);
+            assert!(!page.truncated);
+            assert_eq!(page.runs.len(), 2);
+        });
+    }
+
+    /// Offset pagination has to actually reach past the first page, or the
+    /// truncation signal is a dead end.
+    #[test]
+    fn offset_pagination_reaches_the_rows_past_the_first_page() {
+        with_isolated_home(|_home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let seeded = seed_runs(&store, "page-offset", 5);
+            let filter = |offset: Option<i64>| RunListFilter {
+                kind: Some("page-offset".to_string()),
+                limit: Some(2),
+                offset,
+                ..RunListFilter::default()
+            };
+
+            let first = store.list_runs_page(filter(None)).expect("first page");
+            let second = store
+                .list_runs_page(filter(first.next_offset))
+                .expect("second page");
+            let third = store
+                .list_runs_page(filter(second.next_offset))
+                .expect("third page");
+
+            let walked: Vec<String> = ids(&first.runs)
+                .into_iter()
+                .chain(ids(&second.runs))
+                .chain(ids(&third.runs))
+                .collect();
+
+            assert_eq!(walked, seeded, "an offset walk must visit every row once");
+            assert!(!third.truncated, "the walk must terminate");
+        });
+    }
+
+    /// Cursor pagination is the one that stays correct while rows are being
+    /// inserted, so it must cover the same ground as the offset walk.
+    #[test]
+    fn cursor_pagination_visits_every_row_exactly_once() {
+        with_isolated_home(|_home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let seeded = seed_runs(&store, "page-cursor", 5);
+
+            let mut walked = Vec::new();
+            let mut after = None;
+            loop {
+                let page = store
+                    .list_runs_page(RunListFilter {
+                        kind: Some("page-cursor".to_string()),
+                        limit: Some(2),
+                        after: after.clone(),
+                        ..RunListFilter::default()
+                    })
+                    .expect("cursor page");
+                walked.extend(ids(&page.runs));
+                if !page.truncated {
+                    break;
+                }
+                after = page.next_cursor;
+            }
+
+            assert_eq!(walked, seeded);
+        });
+    }
+
+    /// A row inserted mid-walk shifts every offset. That is the case an offset
+    /// walk gets wrong and a keyset cursor walk does not.
+    #[test]
+    fn a_cursor_walk_survives_an_insert_that_would_shift_an_offset_walk() {
+        with_isolated_home(|_home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let seeded = seed_runs(&store, "page-shift", 4);
+            let filter = |after: Option<RunCursor>, offset: Option<i64>| RunListFilter {
+                kind: Some("page-shift".to_string()),
+                limit: Some(2),
+                offset,
+                after,
+                ..RunListFilter::default()
+            };
+
+            let first = store
+                .list_runs_page(filter(None, None))
+                .expect("first page");
+            // A newer row sorts ahead of everything the first page returned.
+            seed_run(
+                &store,
+                "page-shift",
+                "page-shift-newer",
+                "2026-01-01T23:00:00+00:00",
+                None,
+            );
+
+            let by_cursor = store
+                .list_runs_page(filter(first.next_cursor.clone(), None))
+                .expect("cursor page");
+            let by_offset = store
+                .list_runs_page(filter(None, first.next_offset))
+                .expect("offset page");
+
+            let cursor_walk: Vec<String> = ids(&first.runs)
+                .into_iter()
+                .chain(ids(&by_cursor.runs))
+                .collect();
+            assert_eq!(
+                cursor_walk, seeded,
+                "a cursor walk must not skip a row because a newer one arrived"
+            );
+            assert_ne!(
+                ids(&by_offset.runs),
+                ids(&by_cursor.runs),
+                "the offset walk is expected to be the one that shifts; if it stops \
+                 shifting this test no longer proves anything"
+            );
+        });
+    }
+
+    /// The exhaustive accessor exists so a correctness-sensitive caller can ask
+    /// for completeness explicitly; a display limit must not silently cap it.
+    #[test]
+    fn the_exhaustive_walk_ignores_the_display_limit_and_returns_every_row() {
+        with_isolated_home(|_home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let seeded = seed_runs(&store, "page-all", 7);
+            seed_runs(&store, "page-all-other", 3);
+
+            let runs = store
+                .list_runs_all(RunListFilter {
+                    kind: Some("page-all".to_string()),
+                    limit: Some(2),
+                    ..RunListFilter::default()
+                })
+                .expect("exhaustive walk");
+
+            assert_eq!(
+                ids(&runs),
+                seeded,
+                "the filter still applies; the limit does not"
+            );
+        });
+    }
+
+    /// The bounded accessor keeps its historical shape so the existing call
+    /// sites are unaffected: same rows, signal dropped.
+    #[test]
+    fn the_bounded_accessor_returns_the_same_rows_as_the_page() {
+        with_isolated_home(|_home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            seed_runs(&store, "page-parity", 4);
+            let filter = RunListFilter {
+                kind: Some("page-parity".to_string()),
+                limit: Some(3),
+                ..RunListFilter::default()
+            };
+
+            let rows = store.list_runs(filter.clone()).expect("rows");
+            let page = store.list_runs_page(filter).expect("page");
+
+            assert_eq!(rows, page.runs);
+            assert_eq!(rows.len(), 3);
+            assert!(page.truncated);
+        });
+    }
+
+    /// The default page size is unchanged for callers that ask for nothing.
+    #[test]
+    fn an_unspecified_limit_still_applies_the_historical_default() {
+        with_isolated_home(|_home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            seed_runs(&store, "page-default", 2);
+
+            let page = store
+                .list_runs_page(RunListFilter {
+                    kind: Some("page-default".to_string()),
+                    ..RunListFilter::default()
+                })
+                .expect("page");
+
+            assert_eq!(page.applied_limit, DEFAULT_RUN_PAGE_LIMIT);
+        });
+    }
+
+    /// Retry lineage carried the identical unsignalled clamp. A truncated
+    /// lineage is a wrong answer, not a slow one.
+    #[test]
+    fn a_truncated_retry_lineage_reports_truncation() {
+        with_isolated_home(|_home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            for index in 0..3 {
+                seed_run(
+                    &store,
+                    "agent-task",
+                    &format!("retry-{index:03}"),
+                    &format!("2026-01-01T00:{index:02}:00+00:00"),
+                    Some("source-run"),
+                );
+            }
+
+            let cut = store
+                .list_runs_by_retry_of_page("agent-task", "source-run", 2)
+                .expect("lineage page");
+            assert_eq!(cut.runs.len(), 2);
+            assert!(cut.truncated);
+            assert_eq!(cut.applied_limit, 2);
+
+            let complete = store
+                .list_runs_by_retry_of_page("agent-task", "source-run", 8)
+                .expect("lineage page");
+            assert_eq!(complete.runs.len(), 3);
+            assert!(!complete.truncated);
+            assert_eq!(
+                store
+                    .list_runs_by_retry_of("agent-task", "source-run", 8)
+                    .expect("lineage rows"),
+                complete.runs,
+                "the bounded accessor keeps returning the same rows"
+            );
+        });
     }
 }
