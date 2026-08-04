@@ -1404,6 +1404,10 @@ fn append_resume_contract(command: &mut Vec<String>, contract: &Value) {
             "gate_heartbeat_interval_seconds",
             "--gate-heartbeat-interval-seconds",
         ),
+        (
+            "gate_no_progress_timeout_seconds",
+            "--gate-no-progress-timeout-seconds",
+        ),
     ] {
         if let Some(value) = gates.get(key) {
             let value = value

@@ -1764,6 +1764,8 @@ struct BatchCookSpec {
     gate_timeout_seconds: u64,
     #[serde(default = "default_gate_heartbeat_interval_seconds")]
     gate_heartbeat_interval_seconds: u64,
+    #[serde(default = "default_gate_no_progress_timeout_seconds")]
+    gate_no_progress_timeout_seconds: u64,
     #[serde(default)]
     rerun_completed_gates: bool,
     #[serde(default)]
@@ -1915,6 +1917,7 @@ impl BatchCookSpec {
                     execution_policy: self.execution_policy,
                     gate_timeout_seconds: self.gate_timeout_seconds,
                     gate_heartbeat_interval_seconds: self.gate_heartbeat_interval_seconds,
+                    gate_no_progress_timeout_seconds: self.gate_no_progress_timeout_seconds,
                     rerun_completed_gates: self.rerun_completed_gates,
                     gate_environment: self.gate_environment.clone(),
                     gate_toolchains: self.gate_toolchains.clone(),
@@ -2076,6 +2079,7 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
             execution_policy: VerifyGateOptions::from(args.gates.clone()).execution_policy,
             gate_timeout_seconds: args.gates.gate_timeout_seconds,
             gate_heartbeat_interval_seconds: args.gates.gate_heartbeat_interval_seconds,
+            gate_no_progress_timeout_seconds: args.gates.gate_no_progress_timeout_seconds,
             rerun_completed_gates: args.gates.rerun_completed_gates,
             gate_environment: VerifyGateOptions::from(args.gates.clone()).gate_environment,
             gate_toolchains: VerifyGateOptions::from(args.gates.clone()).gate_toolchains,
@@ -2434,6 +2438,10 @@ fn default_gate_timeout_seconds() -> u64 {
 
 fn default_gate_heartbeat_interval_seconds() -> u64 {
     5
+}
+
+fn default_gate_no_progress_timeout_seconds() -> u64 {
+    5 * 60
 }
 
 fn default_ai_tool() -> String {
@@ -3238,6 +3246,7 @@ fi
                 gate_execution_policy: "ordered-fail-fast".to_string(),
                 gate_timeout_seconds: 30 * 60,
                 gate_heartbeat_interval_seconds: 5,
+                gate_no_progress_timeout_seconds: 5 * 60,
                 rerun_completed_gates: false,
                 gate_environment_mode: "inherit".to_string(),
                 gate_environment: Vec::new(),
