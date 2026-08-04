@@ -122,7 +122,7 @@ for generic runner, static HTML, and matrix examples.
 
 `homeboy runs retention` was removed. It carried no argument the aggregate could not express, so `homeboy cleanup --include terminal-runs [--older-than-days <days>] [--limit <n>] [--apply]` is now the only surface for terminal observation-record retention. See [Cleanup Retention Scope](../cleanup-retention.md).
 
-`homeboy runs artifact postprocess <PLAN>` runs a generic artifact postprocess plan over declared persisted artifact roots and emits the artifact-postprocess result contract. The plan can be a JSON file, `@file` spec, or `-` for stdin. Use `--artifact-root-id` and `--input-root-id` to select named roots from the plan, and `--result <path>` to write the bare postprocess result contract to disk.
+`homeboy runs artifact postprocess <PLAN>` runs a generic artifact postprocess plan over declared persisted artifact roots and emits the artifact-postprocess result contract. The plan can be a JSON file, `@file` spec, or `-` for stdin. Use `--artifact-root-id` and `--input-root-id` to select named roots from the plan, `--result <path>` to write the bare result contract, and `--run-id <id>` when a Lab invocation must persist produced artifacts as resolvable run evidence.
 
 `homeboy runs reconcile` marks orphaned `running` observation records stale. Treat it as a mutating maintenance command, not a reader.
 

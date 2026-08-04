@@ -468,6 +468,7 @@ Run a generic artifact postprocess plan over persisted artifact roots
 | --- | --- | --- |
 | `--artifact-root-id` | `<ID>` | Artifact root id from the plan to use as HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT |
 | `--input-root-id` | `<ID>` | Optional artifact root id from the plan to expose as ${run.input} |
+| `--run-id` | `<RUN_ID>` | Persist produced artifacts as evidence on this existing observation run. Lab runners use this to make postprocess output resolvable through run evidence |
 | `--result` | `<PATH>` | Write the bare artifact-postprocess result contract to this path |
 
 ## `homeboy runs findings`

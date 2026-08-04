@@ -56,6 +56,9 @@ pub struct ArtifactPostprocessAction {
     pub parameters: BTreeMap<String, serde_json::Value>,
     #[serde(default = "default_artifact_postprocess_required")]
     pub required: bool,
+    /// Every helper is confined to producing the declared artifact-root output.
+    #[serde(default = "default_artifact_postprocess_side_effects")]
+    pub side_effects: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -469,7 +472,20 @@ fn validate_artifact_postprocess_action(action: &ArtifactPostprocessAction) -> R
     if let Some(input) = &action.input {
         validate_non_empty("artifact_postprocess.actions.input", input)?;
     }
-    validate_relative_output_path(&action.output)
+    validate_relative_output_path(&action.output)?;
+    if action
+        .side_effects
+        .iter()
+        .any(|side_effect| side_effect != "artifact_root_output")
+    {
+        return Err(Error::validation_invalid_argument(
+            "artifact_postprocess.actions.side_effects",
+            "artifact postprocess helpers may only declare artifact_root_output side effects",
+            Some(action.side_effects.join(",")),
+            Some(vec!["artifact_root_output".to_string()]),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_relative_output_path(output: &str) -> Result<()> {
@@ -596,6 +612,10 @@ fn artifact_postprocess_plan_schema() -> String {
 
 fn default_artifact_postprocess_required() -> bool {
     true
+}
+
+fn default_artifact_postprocess_side_effects() -> Vec<String> {
+    vec!["artifact_root_output".to_string()]
 }
 
 fn expand_postprocess_path(value: &str, context: &ArtifactPostprocessContext<'_>) -> PathBuf {
@@ -752,6 +772,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_helpers_that_declare_external_side_effects() {
+        let action: ArtifactPostprocessAction = serde_json::from_value(serde_json::json!({
+            "helper": "helper", "action": "run", "output": "report.json",
+            "side_effects": ["network"]
+        }))
+        .expect("action");
+
+        let err = validate_artifact_postprocess_action(&action).expect_err("external side effect");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("side_effects"));
+    }
+
+    #[test]
     fn validates_and_describes_generic_plan_outputs() {
         let plan = ArtifactPostprocessPlan {
             schema: ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string(),
@@ -770,6 +804,7 @@ mod tests {
                 output: "summary/result.json".to_string(),
                 parameters: BTreeMap::new(),
                 required: true,
+                side_effects: vec!["artifact_root_output".to_string()],
             }],
             reviewer_refs: vec![ArtifactPostprocessReviewerRef {
                 kind: "artifact_index".to_string(),

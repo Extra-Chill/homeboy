@@ -38,7 +38,12 @@ pub(super) fn run_postprocess_steps(
         } else {
             match acquire_claim(&postprocess_claim_path(run_id, &step.id)) {
                 Ok(claim) => {
-                    let outcome = execute_postprocess_step(step, run_id, outcomes);
+                    // A prior owner may have finished after our first checkpoint read.
+                    let outcome = read_checkpoint(&checkpoint, run_id, &step.id, &identity)
+                        .or_else(|| recover_completed_attempt(step, run_id, &identity).ok())
+                        .unwrap_or_else(|| {
+                            execute_postprocess_step(step, run_id, outcomes, &identity)
+                        });
                     let checkpoint_result =
                         write_checkpoint(&checkpoint, run_id, &identity, outcomes, step, &outcome);
                     drop(claim);
@@ -118,11 +123,16 @@ fn execute_postprocess_step(
     step: &AgentTaskArtifactPostprocessStep,
     run_id: Option<&str>,
     outcomes: &[AgentTaskOutcome],
+    fingerprint: &str,
 ) -> AgentTaskOutcome {
     let root = postprocess_root(run_id, &step.id);
-    let input = root.join("input");
-    let output = root.join("output");
+    let attempt = root.join("staging").join(uuid::Uuid::new_v4().to_string());
+    let input = attempt.join("input");
+    let output = attempt.join("output");
     let result = (|| {
+        std::fs::create_dir_all(&output).map_err(|error| {
+            homeboy_core::Error::internal_io(error.to_string(), Some(output.display().to_string()))
+        })?;
         materialize_dependency_artifacts(&input, &step.depends_on, outcomes)?;
         let mut postprocess_plan = step.plan.clone();
         if let Some(root) = postprocess_plan.artifact_roots.first_mut() {
@@ -138,7 +148,7 @@ fn execute_postprocess_step(
             },
         )
     })();
-    match result {
+    let outcome = match result {
         Ok(result) => {
             let failed = !result.success;
             let artifacts = result.outputs.iter().flat_map(|output| output.artifacts.iter()).filter_map(|artifact| {
@@ -196,12 +206,30 @@ fn execute_postprocess_step(
                     })
                     .collect(),
                 outputs: serde_json::json!({ "artifact_postprocess": result }),
-                metadata: serde_json::json!({ "step_kind": "artifact_postprocess", "required": step.required, "optional_failure": failed && !step.required, "root": root }),
+                metadata: serde_json::json!({ "step_kind": "artifact_postprocess", "required": step.required, "optional_failure": failed && !step.required, "root": root.join("output") }),
                 ..Default::default()
             }
         }
         Err(error) => postprocess_failure_outcome(step, &error.message),
+    };
+    let final_output = root.join("output");
+    let outcome = rebase_outcome_paths(outcome, &output, &final_output);
+    let completion = PostprocessCompletion {
+        schema: COMPLETION_SCHEMA.to_string(),
+        run_id: run_id.unwrap_or("unrecorded-run").to_string(),
+        step_id: step.id.clone(),
+        fingerprint: fingerprint.to_string(),
+        exit_codes: completion_exit_codes(&outcome),
+        output_digest: output_digest(&output).unwrap_or_default(),
+        outcome: outcome.clone(),
+    };
+    if let Err(error) = write_completion(&attempt.join("completion.json"), &completion) {
+        return checkpoint_failure_outcome(step, error.message);
     }
+    if let Err(error) = promote_attempt(&root, &attempt, &completion) {
+        return checkpoint_failure_outcome(step, error.message);
+    }
+    outcome
 }
 
 fn postprocess_root(run_id: Option<&str>, step_id: &str) -> PathBuf {
@@ -221,6 +249,204 @@ fn postprocess_checkpoint_path(run_id: Option<&str>, step_id: &str) -> PathBuf {
 
 fn postprocess_claim_path(run_id: Option<&str>, step_id: &str) -> PathBuf {
     postprocess_root(run_id, step_id).join("claim.json")
+}
+
+fn recover_completed_attempt(
+    step: &AgentTaskArtifactPostprocessStep,
+    run_id: Option<&str>,
+    fingerprint: &str,
+) -> homeboy_core::Result<AgentTaskOutcome> {
+    let root = postprocess_root(run_id, &step.id);
+    let staging = root.join("staging");
+    let entries = match std::fs::read_dir(&staging) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(homeboy_core::Error::internal_unexpected(
+                "completed postprocess stage is absent",
+            ))
+        }
+        Err(error) => {
+            return Err(homeboy_core::Error::internal_io(
+                error.to_string(),
+                Some(staging.display().to_string()),
+            ))
+        }
+    };
+    for entry in entries.flatten() {
+        let attempt = entry.path();
+        let completion_path = attempt.join("completion.json");
+        let completion: PostprocessCompletion = match std::fs::read(&completion_path)
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<PostprocessCompletion>(&raw).ok())
+        {
+            Some(completion)
+                if completion.schema == COMPLETION_SCHEMA
+                    && completion.run_id == run_id.unwrap_or("unrecorded-run")
+                    && completion.step_id == step.id
+                    && completion.fingerprint == fingerprint =>
+            {
+                completion
+            }
+            _ => {
+                let _ = std::fs::remove_dir_all(&attempt);
+                continue;
+            }
+        };
+        let staged_output = attempt.join("output");
+        let promoted_output = root.join("output");
+        let staged_matches = output_digest(&staged_output)
+            .map(|digest| digest == completion.output_digest)
+            .unwrap_or(false);
+        let promoted_matches = output_digest(&promoted_output)
+            .map(|digest| digest == completion.output_digest)
+            .unwrap_or(false);
+        if staged_matches {
+            promote_attempt(&root, &attempt, &completion)?;
+            return Ok(completion.outcome);
+        }
+        if promoted_matches {
+            return Ok(completion.outcome);
+        }
+        let _ = std::fs::remove_dir_all(&attempt);
+    }
+    Err(homeboy_core::Error::internal_unexpected(
+        "valid completed postprocess stage is absent",
+    ))
+}
+
+fn write_completion(path: &Path, completion: &PostprocessCompletion) -> homeboy_core::Result<()> {
+    let bytes = serde_json::to_vec_pretty(completion).map_err(|error| {
+        homeboy_core::Error::internal_json(error.to_string(), Some(path.display().to_string()))
+    })?;
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    std::fs::write(&temporary, bytes).map_err(|error| {
+        homeboy_core::Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
+    })?;
+    std::fs::rename(&temporary, path).map_err(|error| {
+        homeboy_core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
+    })
+}
+
+fn promote_attempt(
+    root: &Path,
+    attempt: &Path,
+    completion: &PostprocessCompletion,
+) -> homeboy_core::Result<()> {
+    let staged = attempt.join("output");
+    if output_digest(&staged)? != completion.output_digest {
+        return Err(homeboy_core::Error::internal_unexpected(
+            "postprocess staging output digest changed before promotion",
+        ));
+    }
+    std::fs::create_dir_all(root).map_err(|error| {
+        homeboy_core::Error::internal_io(error.to_string(), Some(root.display().to_string()))
+    })?;
+    let output = root.join("output");
+    if output_digest(&output).ok().as_deref() == Some(&completion.output_digest) {
+        return Ok(());
+    }
+    let previous = root.join(format!("output.previous-{}", uuid::Uuid::new_v4()));
+    if output.exists() {
+        std::fs::rename(&output, &previous).map_err(|error| {
+            homeboy_core::Error::internal_io(error.to_string(), Some(output.display().to_string()))
+        })?;
+    }
+    std::fs::rename(&staged, &output).map_err(|error| {
+        homeboy_core::Error::internal_io(error.to_string(), Some(output.display().to_string()))
+    })?;
+    if previous.exists() {
+        std::fs::remove_dir_all(&previous).map_err(|error| {
+            homeboy_core::Error::internal_io(
+                error.to_string(),
+                Some(previous.display().to_string()),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn output_digest(path: &Path) -> homeboy_core::Result<String> {
+    if !path.is_dir() {
+        return Err(homeboy_core::Error::internal_unexpected(format!(
+            "postprocess output {} is absent",
+            path.display()
+        )));
+    }
+    let mut files = Vec::new();
+    collect_output_files(path, path, &mut files)?;
+    files.sort();
+    Ok(content_hash::sha256_hex(files.join("\n").as_bytes()))
+}
+
+fn collect_output_files(
+    root: &Path,
+    path: &Path,
+    files: &mut Vec<String>,
+) -> homeboy_core::Result<()> {
+    for entry in std::fs::read_dir(path)
+        .map_err(|error| {
+            homeboy_core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?
+        .flatten()
+    {
+        let entry_path = entry.path();
+        if entry_path.is_dir() {
+            collect_output_files(root, &entry_path, files)?;
+        } else if entry_path.is_file() {
+            let relative = entry_path.strip_prefix(root).unwrap_or(&entry_path);
+            let bytes = std::fs::read(&entry_path).map_err(|error| {
+                homeboy_core::Error::internal_io(
+                    error.to_string(),
+                    Some(entry_path.display().to_string()),
+                )
+            })?;
+            files.push(format!(
+                "{}:{}",
+                relative.display(),
+                content_hash::sha256_hex(&bytes)
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn completion_exit_codes(outcome: &AgentTaskOutcome) -> Vec<Option<i32>> {
+    outcome.outputs["artifact_postprocess"]["outputs"]
+        .as_array()
+        .map(|outputs| {
+            outputs
+                .iter()
+                .map(|output| output["exit_code"].as_i64().map(|code| code as i32))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn rebase_outcome_paths(mut outcome: AgentTaskOutcome, from: &Path, to: &Path) -> AgentTaskOutcome {
+    let from = from.to_string_lossy().to_string();
+    let to = to.to_string_lossy().to_string();
+    for artifact in &mut outcome.artifacts {
+        if let Some(path) = &artifact.path {
+            artifact.path = Some(path.replacen(&from, &to, 1));
+        }
+    }
+    rebase_json_paths(&mut outcome.outputs, &from, &to);
+    outcome
+}
+
+fn rebase_json_paths(value: &mut serde_json::Value, from: &str, to: &str) {
+    match value {
+        serde_json::Value::String(path) if path.starts_with(from) => {
+            *path = path.replacen(from, to, 1)
+        }
+        serde_json::Value::Array(values) => values
+            .iter_mut()
+            .for_each(|value| rebase_json_paths(value, from, to)),
+        serde_json::Value::Object(values) => values
+            .values_mut()
+            .for_each(|value| rebase_json_paths(value, from, to)),
+        _ => {}
+    }
 }
 
 fn claim_mutation_path(path: &Path) -> PathBuf {
@@ -358,8 +584,20 @@ struct PostprocessClaim {
     heartbeat_unix_secs: u64,
 }
 
+#[derive(Serialize, Deserialize)]
+struct PostprocessCompletion {
+    schema: String,
+    run_id: String,
+    step_id: String,
+    fingerprint: String,
+    exit_codes: Vec<Option<i32>>,
+    output_digest: String,
+    outcome: AgentTaskOutcome,
+}
+
 const CHECKPOINT_SCHEMA: &str = "homeboy/agent-task-postprocess-checkpoint/v2";
 const CLAIM_SCHEMA: &str = "homeboy/agent-task-postprocess-claim/v2";
+const COMPLETION_SCHEMA: &str = "homeboy/agent-task-postprocess-completion/v1";
 const CLAIM_STALE_AFTER_SECS: u64 = 300;
 const CLAIM_HEARTBEAT_INTERVAL_SECS: u64 = 1;
 
@@ -717,6 +955,7 @@ mod tests {
                         id: Some("copy".to_string()), helper: "sh".to_string(), action: "-c".to_string(),
                         input: Some("${run.input}/capture/capture.bin".to_string()), output: "result.bin".to_string(),
                         parameters: BTreeMap::from([("args".to_string(), serde_json::json!(["cp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\""]))]), required: true,
+                        side_effects: vec!["artifact_root_output".to_string()],
                     }], reviewer_refs: Vec::new(), metadata: serde_json::json!({}),
                 },
             };
@@ -772,6 +1011,7 @@ mod tests {
                             serde_json::json!(["exit 3"]),
                         )]),
                         required: true,
+                        side_effects: vec!["artifact_root_output".to_string()],
                     }],
                     reviewer_refs: Vec::new(),
                     metadata: serde_json::json!({}),
@@ -829,6 +1069,7 @@ mod tests {
                         id: Some("copy".to_string()), helper: "sh".to_string(), action: "-c".to_string(),
                         input: Some("${run.input}/capture/capture.bin".to_string()), output: "result.bin".to_string(),
                         parameters: BTreeMap::from([("args".to_string(), serde_json::json!(["cp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\"; printf x >> \"$HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT/count\""]))]), required: true,
+                        side_effects: vec!["artifact_root_output".to_string()],
                     }], reviewer_refs: Vec::new(), metadata: serde_json::json!({}),
                 },
             };
@@ -869,6 +1110,87 @@ mod tests {
                     .as_deref(),
                 Some(output.as_str())
             );
+        });
+    }
+
+    #[test]
+    fn adopts_completion_after_crash_before_checkpoint_without_reinvoking_helper() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let step = AgentTaskArtifactPostprocessStep {
+                id: "compose".to_string(),
+                depends_on: Vec::new(),
+                required: true,
+                plan: ArtifactPostprocessPlan {
+                    schema: ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string(),
+                    plan_id: "compose".to_string(),
+                    artifact_roots: vec![ArtifactPostprocessRoot { id: "output".to_string(), path: "unused".to_string(), persisted_ref: None, manifest_path: None }],
+                    actions: vec![ArtifactPostprocessAction {
+                        id: Some("report".to_string()), helper: "sh".to_string(), action: "-c".to_string(),
+                        input: None, output: "report.txt".to_string(),
+                        parameters: BTreeMap::from([("args".to_string(), serde_json::json!(["printf x >> \"$HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT/count\"; printf report > \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\""]))]),
+                        required: true,
+                        side_effects: vec!["artifact_root_output".to_string()],
+                    }], reviewer_refs: Vec::new(), metadata: serde_json::json!({}),
+                },
+            };
+            let plan = AgentTaskPlan {
+                postprocess_steps: vec![step.clone()],
+                ..AgentTaskPlan::new("resume", Vec::new())
+            };
+            let identity = checkpoint_identity(&plan, Some("crash-run"), &step, &[]);
+            let root = postprocess_root(Some("crash-run"), &step.id);
+            std::fs::create_dir_all(root.join("output")).expect("old output");
+            std::fs::write(root.join("output/old.txt"), "old").expect("old output");
+
+            // This models a process death immediately after durable completion/promotion and before checkpointing.
+            execute_postprocess_step(&step, Some("crash-run"), &[], &identity);
+            assert!(
+                !root.join("output/old.txt").exists(),
+                "promotion replaces prior output atomically"
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("output/count")).expect("count"),
+                "x"
+            );
+            std::fs::create_dir_all(root.join("staging/incomplete")).expect("incomplete stage");
+            std::fs::write(root.join("staging/incomplete/partial"), "partial")
+                .expect("incomplete stage");
+            std::fs::write(
+                postprocess_claim_path(Some("crash-run"), &step.id),
+                serde_json::to_vec(&PostprocessClaim {
+                    schema: CLAIM_SCHEMA.to_string(),
+                    owner_id: "dead-owner".to_string(),
+                    owner_pid: u32::MAX,
+                    heartbeat_unix_secs: 0,
+                })
+                .expect("claim"),
+            )
+            .expect("dead claim");
+
+            let mut outcomes = Vec::new();
+            let mut events = Vec::new();
+            run_postprocess_steps(
+                &plan,
+                Some("crash-run"),
+                &mut outcomes,
+                &mut events,
+                &AgentTaskCancellationToken::default(),
+            );
+
+            assert_eq!(
+                outcomes.last().expect("adopted outcome").status,
+                AgentTaskOutcomeStatus::Succeeded
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("output/count")).expect("count"),
+                "x",
+                "completed helper is invoked once"
+            );
+            assert!(
+                !root.join("staging/incomplete").exists(),
+                "incomplete staging is discarded"
+            );
+            assert!(postprocess_checkpoint_path(Some("crash-run"), &step.id).is_file());
         });
     }
 
