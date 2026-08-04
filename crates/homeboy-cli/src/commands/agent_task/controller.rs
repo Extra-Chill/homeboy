@@ -18,7 +18,9 @@ use homeboy::agents::agent_tasks::controller_service::{
     ControllerFromSpecRequest, ControllerInitRequest, ControllerMarkHumanReadyRequest,
     ControllerPlanRequest,
 };
-use homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
+use homeboy::agents::agent_tasks::provider::{
+    is_fixture_backend, ExtensionProviderAgentTaskExecutor,
+};
 use homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter;
 use homeboy::core::config;
 use homeboy::core::proof::validate_proof_value;
@@ -964,7 +966,10 @@ fn provider_availability_check(
     required_capabilities: &[String],
     executor: &ExtensionProviderAgentTaskExecutor,
 ) -> Value {
-    if backend == "fixture" {
+    // Folds to `false` in a production build. The test double has no provider
+    // manifest, so outside a `test-support` build this check must fall through
+    // to the real catalog lookup and report the backend as unavailable (#11118).
+    if is_fixture_backend(backend) {
         return doctor_check(
             format!("controller.action.{action_id}.provider"),
             "ok",
@@ -1490,6 +1495,31 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controller_doctor_checks_never_compare_the_backend_name_by_string() {
+        // The test double is gated behind `homeboy-agents/test-support`
+        // (#11118). Doctor checks must route the decision through
+        // `is_fixture_backend` so a release build reports the backend as
+        // unavailable instead of green-lighting a runtime that is not there.
+        let needle = format!("== {quote}{name}{quote}", quote = '"', name = TEST_DOUBLE);
+        assert!(
+            !include_str!("controller.rs").contains(&needle),
+            "controller doctor checks must call is_fixture_backend instead of \
+             comparing the backend name directly"
+        );
+    }
+
+    const TEST_DOUBLE: &str = concat!("fix", "ture");
+
+    #[test]
+    fn the_test_double_backend_is_recognized_only_in_a_test_support_build() {
+        // homeboy-cli enables `homeboy-agents/test-support` as a
+        // dev-dependency, so the gate is open here and closed in the shipped
+        // binary.
+        assert!(is_fixture_backend(TEST_DOUBLE));
+        assert!(!is_fixture_backend("opencode"));
+    }
 
     #[test]
     fn controller_dispatch_defaults_apply_provider_config_when_missing() {
