@@ -768,6 +768,10 @@ pub struct AgentTaskCookFailureContext {
     pub reason_code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<Value>,
+    /// Bounded, durable admission predicates for a denied historical
+    /// continuation. It intentionally contains no provider output or evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation_admission: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocking_claim: Option<Value>,
     pub provider_budget_consumed: bool,
@@ -778,6 +782,49 @@ pub struct AgentTaskCookFailureContext {
     pub legal_actions: Vec<AgentTaskCookRecoveryAction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<AgentTaskCookRecoveryAction>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ContinuationAdmissionTrace {
+    schema: &'static str,
+    predicates: Vec<ContinuationAdmissionPredicate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    first_authoritative_denial: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ContinuationAdmissionPredicate {
+    name: &'static str,
+    outcome: &'static str,
+}
+
+impl ContinuationAdmissionTrace {
+    fn new() -> Self {
+        Self {
+            schema: "homeboy/cook-continuation-admission/v1",
+            predicates: Vec::new(),
+            first_authoritative_denial: None,
+        }
+    }
+
+    fn pass(&mut self, name: &'static str) {
+        self.predicates.push(ContinuationAdmissionPredicate {
+            name,
+            outcome: "pass",
+        });
+    }
+
+    fn deny(&mut self, name: &'static str, outcome: &'static str) {
+        self.predicates
+            .push(ContinuationAdmissionPredicate { name, outcome });
+        if self.first_authoritative_denial.is_none() {
+            self.first_authoritative_denial = Some(name);
+        }
+    }
+
+    fn value(&self) -> Value {
+        serde_json::to_value(self).expect("continuation admission trace serializes")
+    }
 }
 
 /// An exact command that is legal for the durable Cook state.
@@ -2113,8 +2160,11 @@ where
                     .and_then(Value::as_str)
                     == Some("verification_pending")
         });
-    let authenticated_historical_review_continuation =
-        allow_historical_terminal && authenticated_historical_review_form_workspace(&options)?;
+    let authenticated_historical_review_continuation = if allow_historical_terminal {
+        authenticated_historical_review_form_workspace(&options)?
+    } else {
+        false
+    };
     if !moving_base_continuation
         && !verification_pending_continuation
         && !authenticated_historical_review_continuation
@@ -3457,25 +3507,52 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
 fn authenticated_historical_review_form_workspace(
     options: &AgentTaskCookServiceOptions,
 ) -> Result<bool> {
+    let mut trace = ContinuationAdmissionTrace::new();
     if !agent_task_lifecycle::run_record_exists(&options.initial_run_id)? {
+        trace.deny("run_record", "unavailable");
         return Ok(false);
     }
+    trace.pass("run_record");
     let record = agent_task_lifecycle::status(&options.initial_run_id)?;
-    if !terminal_review_form_continuation_is_eligible(&options.initial_plan, &record)
-        .unwrap_or(false)
-    {
-        return Ok(false);
+    match terminal_review_form_continuation_is_eligible(&options.initial_plan, &record) {
+        Ok(true) => trace.pass("terminal_review_form_eligibility"),
+        Ok(false) => {
+            trace.deny("terminal_review_form_eligibility", "fail");
+            record_continuation_admission_trace(&options.initial_run_id, &trace)?;
+            return Ok(false);
+        }
+        Err(_) => {
+            trace.deny("terminal_review_form_eligibility", "unavailable");
+            record_continuation_admission_trace(&options.initial_run_id, &trace)?;
+            return Ok(false);
+        }
     }
     let Some(promotion) = persisted_promotion_for_attempt(&options.initial_run_id).unwrap_or(None)
     else {
+        trace.deny("applied_promotion", "unavailable");
+        record_continuation_admission_trace(&options.initial_run_id, &trace)?;
         return Ok(false);
     };
     if promotion.status != AgentTaskPromotionStatus::Applied {
+        trace.deny("applied_promotion", "fail");
+        record_continuation_admission_trace(&options.initial_run_id, &trace)?;
         return Ok(false);
     }
-    let Some(continuation) = tracked_promotion_continuation(options).unwrap_or(None) else {
-        return Ok(false);
+    trace.pass("applied_promotion");
+    let continuation = match tracked_promotion_continuation(options) {
+        Ok(Some(continuation)) => continuation,
+        Ok(None) => {
+            trace.deny("continuation_evidence", "unavailable");
+            record_continuation_admission_trace(&options.initial_run_id, &trace)?;
+            return Ok(false);
+        }
+        Err(_) => {
+            trace.deny("continuation_evidence", "fail");
+            record_continuation_admission_trace(&options.initial_run_id, &trace)?;
+            return Ok(false);
+        }
     };
+    trace.pass("continuation_evidence");
     let resolution =
         match homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
             &options.to_worktree,
@@ -3483,8 +3560,21 @@ fn authenticated_historical_review_form_workspace(
             Some(&continuation.baseline),
         ) {
             Ok(resolution) => resolution,
-            Err(_) => return Ok(false),
+            Err(error) => {
+                let predicate = if error.details.pointer("/workspace/classification")
+                    == Some(&Value::String("workspace.resolved_but_dirty".to_string()))
+                {
+                    "provider_baseline_verification"
+                } else {
+                    "provider_resolution"
+                };
+                trace.deny(predicate, "fail");
+                record_continuation_admission_trace(&options.initial_run_id, &trace)?;
+                return Ok(false);
+            }
         };
+    trace.pass("provider_resolution");
+    trace.pass("provider_baseline_verification");
     if resolution.worktree.handle != options.to_worktree
         || homeboy_core::worktree_providers::validate_task_worktree_root(
             std::path::Path::new(&resolution.worktree.path),
@@ -3492,12 +3582,35 @@ fn authenticated_historical_review_form_workspace(
         )
         .is_err()
     {
+        trace.deny("worktree_root", "fail");
+        record_continuation_admission_trace(&options.initial_run_id, &trace)?;
         return Ok(false);
     }
+    trace.pass("worktree_root");
     let Ok(target) = std::fs::canonicalize(&resolution.worktree.path) else {
+        trace.deny("candidate_fingerprint", "unavailable");
+        record_continuation_admission_trace(&options.initial_run_id, &trace)?;
         return Ok(false);
     };
-    Ok(authenticate_tracked_promotion_continuation(&target, &continuation).is_ok())
+    if authenticate_tracked_promotion_continuation(&target, &continuation).is_err() {
+        trace.deny("candidate_fingerprint", "fail");
+        record_continuation_admission_trace(&options.initial_run_id, &trace)?;
+        return Ok(false);
+    }
+    trace.pass("candidate_fingerprint");
+    record_continuation_admission_trace(&options.initial_run_id, &trace)?;
+    Ok(true)
+}
+
+fn record_continuation_admission_trace(
+    run_id: &str,
+    trace: &ContinuationAdmissionTrace,
+) -> Result<()> {
+    agent_task_lifecycle::record_metadata_value(
+        run_id,
+        "cook_continuation_admission",
+        trace.value(),
+    )
 }
 
 struct TrackedPromotionContinuation {

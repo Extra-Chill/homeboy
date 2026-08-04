@@ -1010,6 +1010,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         "missing_artifacts": missing_artifacts.clone(),
         "hydrated_evidence": hydrated_evidence,
         "hydrated_evidence_total": total_hydrated_evidence,
+        "continuation_admission": record.metadata.get("cook_continuation_admission"),
         "next_commands": next_commands,
     });
     if let Some(selection) = target.selection {
