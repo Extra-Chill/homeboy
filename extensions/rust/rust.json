@@ -72,7 +72,16 @@
     {
       "id": "cargo-lint-toolchain",
       "capabilities": ["lint"],
-      "command": "cargo --version && cargo fmt --version",
+      "program": "cargo",
+      "args": ["--version"],
+      "repair_command": "rustup default stable",
+      "diagnostic_env": ["PATH", "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"]
+    },
+    {
+      "id": "cargo-fmt-lint-toolchain",
+      "capabilities": ["lint"],
+      "program": "cargo",
+      "args": ["fmt", "--version"],
       "repair_command": "rustup default stable",
       "diagnostic_env": ["PATH", "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"]
     }

@@ -2,7 +2,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const rootDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const rootDir = process.env.HOMEBOY_EXTENSION_ROOT
+  ? path.resolve(process.env.HOMEBOY_EXTENSION_ROOT)
+  : path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 
 const extensionIds = new Set([
   'cloudflare-workers',
@@ -159,11 +161,67 @@ function validateComposition(extensionId, composition) {
   }
 }
 
+function validateToolchainReadiness(extensionId, probes) {
+  if (probes === undefined) {
+    return;
+  }
+
+  if (!Array.isArray(probes)) {
+    fail(`${extensionId}: toolchain_readiness must be an array`);
+    return;
+  }
+
+  const ids = new Set();
+  for (const [index, probe] of probes.entries()) {
+    const source = `${extensionId}: toolchain_readiness.${index}`;
+    if (!probe || typeof probe !== 'object' || Array.isArray(probe)) {
+      fail(`${source} must be an object`);
+      continue;
+    }
+    const allowed = new Set(['id', 'capabilities', 'program', 'args', 'repair_command', 'diagnostic_env']);
+    for (const key of Object.keys(probe)) {
+      if (!allowed.has(key)) {
+        fail(`${source}.${key} is unsupported; readiness probes use program and args, not shell command strings`);
+      }
+    }
+    if (typeof probe.id !== 'string' || probe.id.length === 0) {
+      fail(`${source}.id must be a non-empty string`);
+    } else if (ids.has(probe.id)) {
+      fail(`${source}.id must be unique`);
+    } else {
+      ids.add(probe.id);
+    }
+    if (typeof probe.program !== 'string' || probe.program.length === 0) {
+      fail(`${source}.program must be a non-empty executable name or path`);
+    }
+    if (probe.args !== undefined && !isStringArray(probe.args)) {
+      fail(`${source}.args must be an array of non-empty literal arguments`);
+    }
+    if (probe.capabilities !== undefined && (!isStringArray(probe.capabilities) || hasDuplicates(probe.capabilities))) {
+      fail(`${source}.capabilities must be unique non-empty strings`);
+    }
+    if (probe.repair_command !== undefined && (typeof probe.repair_command !== 'string' || probe.repair_command.length === 0)) {
+      fail(`${source}.repair_command must be a non-empty diagnostic string`);
+    }
+    if (probe.diagnostic_env !== undefined && (!isStringArray(probe.diagnostic_env) || probe.diagnostic_env.some((name) => !/^[A-Z_][A-Z0-9_]*$/.test(name)))) {
+      fail(`${source}.diagnostic_env must contain environment variable names`);
+    }
+  }
+}
+
 function validateRustToolchainReadiness(manifest) {
   const expected = [{
     id: 'cargo-lint-toolchain',
     capabilities: ['lint'],
-    command: 'cargo --version && cargo fmt --version',
+    program: 'cargo',
+    args: ['--version'],
+    repair_command: 'rustup default stable',
+    diagnostic_env: ['PATH', 'CARGO_HOME', 'RUSTUP_HOME', 'RUSTUP_TOOLCHAIN'],
+  }, {
+    id: 'cargo-fmt-lint-toolchain',
+    capabilities: ['lint'],
+    program: 'cargo',
+    args: ['fmt', '--version'],
     repair_command: 'rustup default stable',
     diagnostic_env: ['PATH', 'CARGO_HOME', 'RUSTUP_HOME', 'RUSTUP_TOOLCHAIN'],
   }];
@@ -213,6 +271,8 @@ function validateExtension(extensionId) {
   if (Object.hasOwn(standardDiscoveryMarkers, extensionId)) {
     validateComposition(extensionId, manifest.composition);
   }
+
+  validateToolchainReadiness(extensionId, manifest.toolchain_readiness);
 
   if (extensionId === 'rust') {
     validateRustToolchainReadiness(manifest);

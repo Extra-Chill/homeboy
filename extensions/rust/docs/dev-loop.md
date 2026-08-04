@@ -4,6 +4,15 @@ The Rust extension owns Rust/Cargo toolchain acceleration. Homeboy core should
 only receive generic command environment and benchmark metadata; it should not
 grow Rust, Cargo, sccache, linker, or nextest behavior.
 
+## Portable Toolchain Readiness
+
+Before a portable lint operation, the extension declares separate structured
+probes for `cargo --version` and `cargo fmt --version`. Each probe uses a
+`program` plus literal `args` array, so the runner invokes Cargo directly
+rather than interpreting a compound shell command. The extension shape check
+rejects legacy `command` probe fields; repair guidance remains diagnostic
+metadata for the operator.
+
 ## Shared Cargo Target Directory
 
 The Rust env provider sets a stable `CARGO_TARGET_DIR` per component identity:
