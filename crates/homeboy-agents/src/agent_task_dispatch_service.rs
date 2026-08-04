@@ -110,6 +110,14 @@ pub struct DispatchCoreInputs {
     pub timeout_ms: Option<u64>,
     /// Internal Lab handoff input, compiled on the controller.
     pub resolved_provider_policy: Option<ResolvedAgentTaskProviderPolicy>,
+    /// Command patterns the provider agent must not run, additive to the
+    /// host-level `agent_task.command_policy` config (#11481).
+    pub deny_command: Vec<String>,
+    /// Command patterns the provider agent may run. Any entry switches the
+    /// effective policy to allow-list mode.
+    pub allow_command: Vec<String>,
+    /// Operator explanation returned to the agent with every refusal.
+    pub command_policy_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

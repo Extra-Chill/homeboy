@@ -36,6 +36,12 @@
 // Adding a new name here is an intentional API decision.
 
 pub use super::agent_task::{
+    AgentCommandDecision, AgentCommandDenial, AgentCommandPolicy, AgentCommandPolicyMode,
+    AgentCommandRule, AGENT_COMMAND_POLICY_SCHEMA, COMMAND_DENIAL_REMEDIATION,
+    DEFAULT_COMMAND_DENIAL_REASON,
+};
+
+pub use super::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskExecutionHandle,
     AgentTaskExecutionHandleKind, AgentTaskExecutionState, AgentTaskExecutor,
     AgentTaskExecutorCapabilities, AgentTaskFailureClassification, AgentTaskFollowUp,
