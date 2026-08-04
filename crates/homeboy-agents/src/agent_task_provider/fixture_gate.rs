@@ -17,7 +17,7 @@
 //! Consumers enable the feature as a dev-dependency:
 //! `homeboy-agents = { path = "...", features = ["test-support"] }`.
 
-use super::{AgentTaskOutcome, AgentTaskRequest};
+use super::{AgentTaskExecutorRequest, AgentTaskOutcome};
 
 /// Backend identifier reserved for the in-tree test double.
 #[cfg(any(test, feature = "test-support"))]
@@ -46,9 +46,11 @@ pub fn is_fixture_backend(_backend: &str) -> bool {
 /// Returns `None` in a production build, so the caller falls through to real
 /// provider resolution unconditionally.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn fixture_provider_outcome(request: &AgentTaskRequest) -> Option<AgentTaskOutcome> {
-    is_fixture_backend(&request.executor.backend)
-        .then(|| super::fixtures::run_fixture_provider(request, &request.artifacts_path))
+pub(crate) fn fixture_provider_outcome(
+    request: &AgentTaskExecutorRequest,
+) -> Option<AgentTaskOutcome> {
+    is_fixture_backend(&request.request.executor.backend)
+        .then(|| super::fixtures::run_fixture_provider(&request.request, &request.artifacts_path))
 }
 
 /// Run the deterministic test double when the request selects it.
@@ -56,7 +58,9 @@ pub(crate) fn fixture_provider_outcome(request: &AgentTaskRequest) -> Option<Age
 /// Returns `None` in a production build, so the caller falls through to real
 /// provider resolution unconditionally.
 #[cfg(not(any(test, feature = "test-support")))]
-pub(crate) fn fixture_provider_outcome(_request: &AgentTaskRequest) -> Option<AgentTaskOutcome> {
+pub(crate) fn fixture_provider_outcome(
+    _request: &AgentTaskExecutorRequest,
+) -> Option<AgentTaskOutcome> {
     None
 }
 
