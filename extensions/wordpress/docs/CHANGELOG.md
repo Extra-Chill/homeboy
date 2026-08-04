@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.31] - 2026-08-04
+
+### Fixed
+- activate the target plugin and scope changed PHPUnit files
+
 ## [3.34.30] - 2026-08-04
 
 ### Fixed
