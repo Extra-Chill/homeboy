@@ -689,6 +689,11 @@ const WORKTREE_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         ),
         "default output is a non-mutating task-worktree cleanup plan; pass --apply to remove eligible worktrees, and --cleanup-artifacts to include rebuildable Homeboy artifacts",
     ),
+    paths_safety(
+        &["inventory"],
+        operator_safety(None, &["--apply"]),
+        "bounded cursor-paginated task-worktree and adopted-workspace inventory; --apply reconciles only leased terminal snapshots and reports typed refusals for incomplete local or offloaded authority",
+    ),
 ];
 
 const TUNNEL_SERVICE_DECLARATION_PATHS: &[&str] =

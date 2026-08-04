@@ -149,6 +149,9 @@ fn cleanup_skip_reasons(safety: &WorktreeSafetyReport, force: bool) -> Vec<Strin
     if !safety.path_contained {
         reasons.push("worktree path is outside the component checkout parent".to_string());
     }
+    if safety.worktree_missing {
+        reasons.push("missing active worktree requires `worktree inventory --apply` reconciliation authority".to_string());
+    }
     if !force {
         if safety.dirty {
             reasons.push("dirty worktree".to_string());
@@ -210,7 +213,7 @@ pub(super) fn create_with_store(
     )?;
     ownership::normalize_created_path(&worktree_path, worktree_owner, true, "git worktree add")?;
 
-    let record = TaskWorktreeRecord {
+    let mut record = TaskWorktreeRecord {
         id,
         component_id: target.component_id,
         source_checkout: source_checkout.to_string_lossy().to_string(),
@@ -229,7 +232,6 @@ pub(super) fn create_with_store(
         lifecycle_revision: 0,
         terminal_workspace_authority: None,
     };
-    let mut record = record;
     record.workspace_identity = Some(record.effective_workspace_identity()?);
     write_record(store_dir, &record)?;
     Ok(WorktreeCreateOutput { record })
@@ -251,6 +253,446 @@ pub(super) fn list_with_store(store_dir: &Path) -> Result<WorktreeListOutput> {
     }
     worktrees.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(WorktreeListOutput { worktrees })
+}
+
+pub(super) fn inventory_with_store(
+    options: WorktreeInventoryOptions,
+    store_dir: &Path,
+    adopted_store_dir: &Path,
+) -> Result<WorktreeInventoryOutput> {
+    struct LocalOnlyAuthority;
+    impl WorktreeReconciliationAuthority for LocalOnlyAuthority {
+        fn acquire(&self, record: &TaskWorktreeRecord) -> Result<WorktreeLivenessAuthority> {
+            if record.run_id.is_none() {
+                Ok(WorktreeLivenessAuthority::Incomplete {
+                    reason: "no claim-capable workspace owner was supplied".to_string(),
+                })
+            } else {
+                Ok(WorktreeLivenessAuthority::Incomplete {
+                    reason: "no local-and-offloaded run authority was supplied".to_string(),
+                })
+            }
+        }
+    }
+    inventory_with_store_and_authority(options, store_dir, adopted_store_dir, &LocalOnlyAuthority)
+}
+
+pub(super) fn inventory_with_store_and_authority(
+    options: WorktreeInventoryOptions,
+    store_dir: &Path,
+    adopted_store_dir: &Path,
+    authority: &dyn WorktreeReconciliationAuthority,
+) -> Result<WorktreeInventoryOutput> {
+    let limit = options.limit.max(1);
+    let worktrees = list_with_store(store_dir)?.worktrees;
+    let total = worktrees.len();
+    let mut worktrees = worktrees.into_iter().filter(|record| {
+        options
+            .cursor
+            .as_ref()
+            .is_none_or(|cursor| record.id.as_str() > cursor.as_str())
+    });
+    let records_page: Vec<_> = worktrees.by_ref().take(limit).collect();
+    let next_cursor = worktrees.next().map(|_| {
+        records_page
+            .last()
+            .expect("a page with a following record is non-empty")
+            .id
+            .clone()
+    });
+    let truncated = next_cursor.is_some();
+    let mut records = Vec::new();
+
+    for mut record in records_page {
+        let mut path_exists = Path::new(&record.worktree_path).exists();
+        let mut missing_active = if record.state == TaskWorktreeState::Active && !path_exists {
+            Some(missing_active_worktree(&record))
+        } else {
+            None
+        };
+        let reconciliation = if options.apply && missing_active.is_some() {
+            let authority_snapshot = authority.acquire(&record)?;
+            if let WorktreeLivenessAuthority::Terminal { claim, .. } = &authority_snapshot {
+                let validation = claim
+                    .verify_shape(chrono::Utc::now().timestamp_millis().max(0) as u64)
+                    .and_then(|_| authority.validate(&record, claim));
+                let valid = match validation {
+                    Ok(valid) => valid,
+                    Err(error) => {
+                        // A validation transport failure still owns a fence.
+                        // Release it before returning a typed, non-mutating refusal.
+                        let release = authority.release(claim);
+                        records.push(WorktreeInventoryRecord {
+                            record,
+                            path_exists,
+                            missing_active,
+                            reconciliation: Some(WorktreeReconciliationResult {
+                                action: WorktreeReconciliationAction::Refused,
+                                provenance: "workspace reconciliation claim validation".to_string(),
+                                reason: Some(error.message),
+                            }),
+                        });
+                        release?;
+                        continue;
+                    }
+                };
+                if !valid {
+                    let release = authority.release(claim);
+                    records.push(WorktreeInventoryRecord {
+                        record,
+                        path_exists,
+                        missing_active,
+                        reconciliation: Some(WorktreeReconciliationResult {
+                            action: WorktreeReconciliationAction::Refused,
+                            provenance: "workspace reconciliation claim validation".to_string(),
+                            reason: Some("workspace owner rejected, expired, or does not support the reconciliation claim".to_string()),
+                        }),
+                    });
+                    release?;
+                    continue;
+                }
+            }
+            let reconciliation = reconcile_missing_record_with_store(
+                store_dir,
+                &record,
+                &authority_snapshot,
+                authority,
+            );
+            if let WorktreeLivenessAuthority::Terminal { claim, .. } = &authority_snapshot {
+                authority.release(claim)?;
+            }
+            let (reread, reread_path_exists, result) = reconciliation?;
+            record = reread;
+            path_exists = reread_path_exists;
+            missing_active = (record.state == TaskWorktreeState::Active && !path_exists)
+                .then(|| missing_active_worktree(&record));
+            Some(result)
+        } else {
+            None
+        };
+        records.push(WorktreeInventoryRecord {
+            record,
+            path_exists,
+            missing_active,
+            reconciliation,
+        });
+    }
+
+    // Cross-tab reflects returned post-apply records rather than their
+    // pre-apply snapshots.
+    let cross_tab = records
+        .iter()
+        .fold(WorktreeInventoryCrossTab::default(), |mut tab, item| {
+            match (&item.record.state, item.path_exists) {
+                (TaskWorktreeState::Active, true) => tab.active_path_present += 1,
+                (TaskWorktreeState::Active, false) => tab.active_path_missing += 1,
+                (TaskWorktreeState::Removed, true) => tab.removed_path_present += 1,
+                (TaskWorktreeState::Removed, false) => tab.removed_path_missing += 1,
+            }
+            tab
+        });
+    let adopted = list_adopted_with_store(adopted_store_dir)?;
+    let adopted_total = adopted.len();
+    let mut adopted = adopted.into_iter().filter(|record| {
+        options
+            .adopted_cursor
+            .as_ref()
+            .is_none_or(|cursor| record.handle.as_str() > cursor.as_str())
+    });
+    let adopted_records: Vec<_> = adopted
+        .by_ref()
+        .take(limit)
+        .map(|record| AdoptedWorkspaceInventoryRecord {
+            path_exists: Path::new(&record.path).exists(),
+            continuation: format!(
+                "Restore or re-adopt workspace handle `{}` before use.",
+                record.handle
+            ),
+            reason: MissingActiveWorktreeReason::AdoptedWorkspace,
+            record,
+        })
+        .collect();
+    let adopted_next_cursor = adopted.next().map(|_| {
+        adopted_records
+            .last()
+            .expect("a page with a following record is non-empty")
+            .record
+            .handle
+            .clone()
+    });
+    let adopted_truncated = adopted_next_cursor.is_some();
+
+    Ok(WorktreeInventoryOutput {
+        schema: "homeboy/worktree-inventory/v1",
+        authorization: if options.apply {
+            WorktreeInventoryAuthorization::ExplicitApply
+        } else {
+            WorktreeInventoryAuthorization::Preview
+        },
+        apply_refusal: None,
+        cursor: options.cursor,
+        next_cursor,
+        limit,
+        total,
+        truncated,
+        cross_tab_scope: "task_worktree_page",
+        cross_tab,
+        records,
+        adopted: WorktreeAdoptedInventoryPage {
+            cursor: options.adopted_cursor,
+            next_cursor: adopted_next_cursor,
+            total: adopted_total,
+            truncated: adopted_truncated,
+            records: adopted_records,
+        },
+    })
+}
+
+fn missing_active_worktree(record: &TaskWorktreeRecord) -> MissingActiveWorktree {
+    if record.cleanup_policy == CleanupPolicy::PreserveOnFailure {
+        return MissingActiveWorktree {
+            reason: MissingActiveWorktreeReason::PreserveOnFailure,
+            local_evidence: local_inventory_evidence(record),
+            continuation: format!(
+                "Inspect preserved task worktree `{}` and explicitly remove it when terminal.",
+                record.id
+            ),
+        };
+    }
+    let evidence = local_inventory_evidence(record);
+    let reason = if !evidence.source_checkout_exists {
+        MissingActiveWorktreeReason::SourceCheckoutUnavailable
+    } else if evidence.source_dirty == Some(true) {
+        MissingActiveWorktreeReason::SourceDirty
+    } else if evidence
+        .unpushed_branch_commits
+        .is_some_and(|count| count > 0)
+    {
+        MissingActiveWorktreeReason::UnpushedBranch
+    } else if evidence.unavailable_reason.is_some() {
+        MissingActiveWorktreeReason::BranchEvidenceUnavailable
+    } else {
+        MissingActiveWorktreeReason::RequiresAuthoritativeLiveness
+    };
+    MissingActiveWorktree {
+        reason,
+        local_evidence: evidence,
+        continuation: format!(
+            "Preserve `{}`. `worktree inventory --apply` is refused until Homeboy has a leased local-and-offloaded liveness and workspace-evidence primitive.",
+            record.id
+        ),
+    }
+}
+
+fn reconcile_missing_record_with_store(
+    store_dir: &Path,
+    expected: &TaskWorktreeRecord,
+    authority_snapshot: &WorktreeLivenessAuthority,
+    authority: &dyn WorktreeReconciliationAuthority,
+) -> Result<(TaskWorktreeRecord, bool, WorktreeReconciliationResult)> {
+    with_task_worktree_registry_write_lock(|| {
+        // Re-read under the exclusive registry lease. Any concurrent publisher must
+        // finish before this snapshot is evaluated and conditionally written.
+        let mut record = read_record(store_dir, &expected.id)?;
+        if record.state != TaskWorktreeState::Active
+            || record.id != expected.id
+            || record.worktree_path != expected.worktree_path
+            || record.effective_workspace_identity()? != expected.effective_workspace_identity()?
+            || record.lifecycle_revision != expected.lifecycle_revision
+            || record.run_id != expected.run_id
+            || Path::new(&record.worktree_path).exists()
+        {
+            let path_exists = Path::new(&record.worktree_path).exists();
+            return Ok((
+                record,
+                path_exists,
+                WorktreeReconciliationResult {
+                    action: WorktreeReconciliationAction::Preserved,
+                    provenance: "leased manifest re-read".to_string(),
+                    reason: Some(
+                        "manifest state or workspace path changed before apply".to_string(),
+                    ),
+                },
+            ));
+        }
+        let evidence = local_inventory_evidence(&record);
+        let shared_active_owner = list_with_store(store_dir)?
+            .worktrees
+            .into_iter()
+            .any(|other| {
+                other.id != record.id
+                    && other.state == TaskWorktreeState::Active
+                    && other.worktree_path == record.worktree_path
+            });
+        if shared_active_owner {
+            return Ok((
+                record,
+                false,
+                WorktreeReconciliationResult {
+                    action: WorktreeReconciliationAction::Preserved,
+                    provenance: "leased manifest re-read".to_string(),
+                    reason: Some(
+                        "another active task-worktree manifest owns this workspace path"
+                            .to_string(),
+                    ),
+                },
+            ));
+        }
+        let local_safe = record.cleanup_policy != CleanupPolicy::PreserveOnFailure
+            && evidence.source_checkout_exists
+            && evidence.source_dirty == Some(false)
+            && evidence.unpushed_branch_commits == Some(0)
+            && evidence.unavailable_reason.is_none();
+        if !local_safe {
+            return Ok((
+                record,
+                false,
+                WorktreeReconciliationResult {
+                    action: WorktreeReconciliationAction::Preserved,
+                    provenance: "leased manifest re-read plus local git evidence".to_string(),
+                    reason: Some(
+                        "local dirty or task-branch evidence is not safely terminal".to_string(),
+                    ),
+                },
+            ));
+        }
+        match authority_snapshot {
+            WorktreeLivenessAuthority::Terminal { claim, provenance } => {
+                let identity = record.effective_workspace_identity()?;
+                if claim.workspace != identity
+                    || (authority.requires_terminal_workspace_authority_proof()
+                        && !record
+                            .terminal_workspace_authority
+                            .as_ref()
+                            .is_some_and(|proof| {
+                                proof.exact_for(&record, record.run_id.as_deref())
+                            }))
+                    || !authority.ready_to_commit(claim)
+                {
+                    return Ok((record, false, WorktreeReconciliationResult {
+                        action: WorktreeReconciliationAction::Refused,
+                        provenance: "leased manifest re-read".to_string(),
+                        reason: Some("workspace identity changed or the local reconciliation claim budget expired before commit".to_string()),
+                    }));
+                }
+                record.state = TaskWorktreeState::Removed;
+                record.lifecycle_revision =
+                    record.lifecycle_revision.checked_add(1).ok_or_else(|| {
+                        Error::validation_invalid_argument(
+                            "lifecycle_revision",
+                            "task worktree lifecycle revision overflowed during reconciliation",
+                            Some(record.id.clone()),
+                            None,
+                        )
+                    })?;
+                write_record_unlocked(store_dir, &record)?;
+                Ok((
+                    record,
+                    false,
+                    WorktreeReconciliationResult {
+                        action: WorktreeReconciliationAction::Reconciled,
+                        provenance: format!("leased manifest re-read; {provenance}"),
+                        reason: None,
+                    },
+                ))
+            }
+            WorktreeLivenessAuthority::Live { provenance } => Ok((
+                record,
+                false,
+                WorktreeReconciliationResult {
+                    action: WorktreeReconciliationAction::Preserved,
+                    provenance: provenance.clone(),
+                    reason: Some("authoritative run is live".to_string()),
+                },
+            )),
+            WorktreeLivenessAuthority::Incomplete { reason } => Ok((
+                record,
+                false,
+                WorktreeReconciliationResult {
+                    action: WorktreeReconciliationAction::Refused,
+                    provenance: "leased manifest re-read".to_string(),
+                    reason: Some(format!("liveness authority is incomplete: {reason}")),
+                },
+            )),
+        }
+    })
+}
+
+fn local_inventory_evidence(record: &TaskWorktreeRecord) -> WorktreeInventoryLocalEvidence {
+    let source = Path::new(&record.source_checkout);
+    if !source.is_dir() {
+        return WorktreeInventoryLocalEvidence {
+            source_checkout_exists: false,
+            source_dirty: None,
+            unpushed_branch_commits: None,
+            unavailable_reason: Some("recorded source checkout is unavailable".to_string()),
+        };
+    }
+    let source_dirty = is_dirty(source).ok();
+    let unpushed_branch_commits =
+        unpushed_branch_commit_count(source, &record.branch, &record.base_ref).ok();
+    let unavailable_reason = match (&source_dirty, &unpushed_branch_commits) {
+        (None, _) => Some("could not inspect source checkout dirtiness".to_string()),
+        (_, None) => Some("could not inspect task branch push state".to_string()),
+        _ => None,
+    };
+    WorktreeInventoryLocalEvidence {
+        source_checkout_exists: true,
+        source_dirty,
+        unpushed_branch_commits,
+        unavailable_reason,
+    }
+}
+
+fn unpushed_branch_commit_count(source: &Path, branch: &str, base_ref: &str) -> Result<u32> {
+    git::run_git(
+        source,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+        "git show-ref task branch",
+    )?;
+    let upstream = git::run_git(
+        source,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            &format!("{branch}@{{upstream}}"),
+        ],
+        "git task branch upstream",
+    );
+    let range = match upstream {
+        Ok(upstream) if !upstream.trim().is_empty() => format!("{}..{branch}", upstream.trim()),
+        _ => format!("{base_ref}..{branch}"),
+    };
+    let count = git::run_git(
+        source,
+        &["rev-list", "--count", &range],
+        "git task branch rev-list",
+    )?;
+    count.trim().parse::<u32>().map_err(|error| {
+        Error::internal_unexpected(format!("invalid task branch commit count: {error}"))
+    })
+}
+
+fn list_adopted_with_store(store_dir: &Path) -> Result<Vec<AdoptedWorkspaceRecord>> {
+    if !store_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut records = Vec::new();
+    for entry in fs::read_dir(store_dir)
+        .map_err(|err| Error::internal_io(err.to_string(), Some(store_dir.display().to_string())))?
+    {
+        let entry = entry.map_err(|err| Error::internal_io(err.to_string(), None))?;
+        if entry.path().extension().and_then(|ext| ext.to_str()) == Some("json") {
+            records.push(read_adopted_record_path(&entry.path())?);
+        }
+    }
+    records.sort_by(|left, right| left.handle.cmp(&right.handle));
+    Ok(records)
 }
 
 pub(super) fn status_with_store(id: &str, store_dir: &Path) -> Result<WorktreeStatusOutput> {
@@ -670,29 +1112,26 @@ pub(super) fn record_path(store_dir: &Path, id: &str) -> PathBuf {
 
 pub(super) fn write_record(store_dir: &Path, record: &TaskWorktreeRecord) -> Result<()> {
     record.effective_workspace_identity()?;
-    with_task_worktree_registry_write_lock(|| {
-        let store_owner = ownership::owner_for_path_or_ancestor(store_dir)?;
-        fs::create_dir_all(store_dir).map_err(|err| {
-            Error::internal_io(err.to_string(), Some(store_dir.display().to_string()))
-        })?;
-        let json = serde_json::to_string_pretty(record)
-            .map_err(|err| Error::internal_json(err.to_string(), Some(record.id.clone())))?;
-        let path = record_path(store_dir, &record.id);
-        crate::io::write_output_file_atomically(
-            &path,
-            format!("{json}\n"),
-            crate::io::OutputWriteOptions::file(),
-        )
-        .map_err(|err| Error::internal_io(err.to_string(), Some(record.id.clone())))?;
-        ownership::normalize_created_path(
-            store_dir,
-            store_owner,
-            false,
-            "write worktree metadata",
-        )?;
-        ownership::normalize_created_path(&path, store_owner, false, "write worktree metadata")?;
-        Ok(())
-    })
+    with_task_worktree_registry_write_lock(|| write_record_unlocked(store_dir, record))
+}
+
+pub(super) fn write_record_unlocked(store_dir: &Path, record: &TaskWorktreeRecord) -> Result<()> {
+    let store_owner = ownership::owner_for_path_or_ancestor(store_dir)?;
+    fs::create_dir_all(store_dir).map_err(|err| {
+        Error::internal_io(err.to_string(), Some(store_dir.display().to_string()))
+    })?;
+    let json = serde_json::to_string_pretty(record)
+        .map_err(|err| Error::internal_json(err.to_string(), Some(record.id.clone())))?;
+    let path = record_path(store_dir, &record.id);
+    crate::io::write_output_file_atomically(
+        &path,
+        format!("{json}\n"),
+        crate::io::OutputWriteOptions::file(),
+    )
+    .map_err(|err| Error::internal_io(err.to_string(), Some(record.id.clone())))?;
+    ownership::normalize_created_path(store_dir, store_owner, false, "write worktree metadata")?;
+    ownership::normalize_created_path(&path, store_owner, false, "write worktree metadata")?;
+    Ok(())
 }
 
 pub(super) fn write_adopted_record(

@@ -1,7 +1,6 @@
+use crate::workspace_claim::{WorkspaceClaim, WorkspaceIdentity};
+use crate::Result;
 use serde::{Deserialize, Serialize};
-
-use crate::error::Result;
-use crate::workspace_claim::WorkspaceIdentity;
 
 /// Canonical, portable identity for a managed task worktree. The registry
 /// handle and registered component identify the physical allocation; paths and
@@ -112,6 +111,8 @@ pub struct TerminalWorkspaceAuthorityProof {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_runner_job_id: Option<String>,
     pub authority_set: Vec<String>,
+    /// Deterministic fingerprint of `authority_set`, retained so a replay can
+    /// reject configuration drift without consulting historical receipts.
     pub authority_set_fingerprint: String,
     pub observations: Vec<TerminalWorkspaceAuthorityObservation>,
     pub issued_evidence: Vec<String>,
@@ -315,6 +316,174 @@ pub struct WorktreeAdoptOutput {
 #[derive(Debug, Clone, Serialize)]
 pub struct WorktreeListOutput {
     pub worktrees: Vec<TaskWorktreeRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeInventoryOutput {
+    pub schema: &'static str,
+    pub authorization: WorktreeInventoryAuthorization,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apply_refusal: Option<WorktreeInventoryApplyRefusal>,
+    /// The task-worktree page starts strictly after this sorted record ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub limit: usize,
+    pub total: usize,
+    pub truncated: bool,
+    /// Cross-tab counts describe `records`, never the uninspected registry remainder.
+    pub cross_tab_scope: &'static str,
+    pub cross_tab: WorktreeInventoryCrossTab,
+    pub records: Vec<WorktreeInventoryRecord>,
+    pub adopted: WorktreeAdoptedInventoryPage,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeInventoryAuthorization {
+    Preview,
+    ExplicitApply,
+    ApplyRefused,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeInventoryApplyRefusal {
+    pub code: &'static str,
+    pub mutated_records: usize,
+    pub mutation_provenance: &'static str,
+    pub required_primitive: &'static str,
+    pub message: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+pub struct WorktreeInventoryCrossTab {
+    pub active_path_present: usize,
+    pub active_path_missing: usize,
+    pub removed_path_present: usize,
+    pub removed_path_missing: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeInventoryRecord {
+    pub record: TaskWorktreeRecord,
+    pub path_exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_active: Option<MissingActiveWorktree>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconciliation: Option<WorktreeReconciliationResult>,
+}
+
+pub trait WorktreeReconciliationAuthority {
+    /// Acquires an owner-issued admission fence before the registry write lease.
+    fn acquire(&self, record: &TaskWorktreeRecord) -> Result<WorktreeLivenessAuthority>;
+
+    /// Revalidates the opaque fence at the owner. This is intentionally outside
+    /// the task-worktree registry lease because it can be a network operation.
+    fn validate(&self, _record: &TaskWorktreeRecord, _claim: &WorkspaceClaim) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Performs only controller-local checks while the registry write lease is
+    /// held. Implementations must not contact runner authorities here.
+    fn ready_to_commit(&self, _claim: &WorkspaceClaim) -> bool {
+        false
+    }
+
+    fn requires_terminal_workspace_authority_proof(&self) -> bool {
+        false
+    }
+
+    /// Releases the owner-issued fence after the conditional registry mutation.
+    fn release(&self, _claim: &WorkspaceClaim) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeLivenessAuthority {
+    Terminal {
+        claim: WorkspaceClaim,
+        provenance: String,
+    },
+    Live {
+        provenance: String,
+    },
+    Incomplete {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeReconciliationResult {
+    pub action: WorktreeReconciliationAction,
+    pub provenance: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeReconciliationAction {
+    Reconciled,
+    Preserved,
+    Refused,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AdoptedWorkspaceInventoryRecord {
+    pub record: AdoptedWorkspaceRecord,
+    pub path_exists: bool,
+    pub reason: MissingActiveWorktreeReason,
+    pub continuation: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeAdoptedInventoryPage {
+    pub cursor: Option<String>,
+    pub next_cursor: Option<String>,
+    pub total: usize,
+    pub truncated: bool,
+    pub records: Vec<AdoptedWorkspaceInventoryRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MissingActiveWorktree {
+    pub reason: MissingActiveWorktreeReason,
+    pub local_evidence: WorktreeInventoryLocalEvidence,
+    pub continuation: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeInventoryLocalEvidence {
+    pub source_checkout_exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_dirty: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unpushed_branch_commits: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MissingActiveWorktreeReason {
+    PreserveOnFailure,
+    SourceCheckoutUnavailable,
+    SourceDirty,
+    UnpushedBranch,
+    BranchEvidenceUnavailable,
+    RequiresAuthoritativeLiveness,
+    LiveRun,
+    AdoptedWorkspace,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WorktreeInventoryOptions {
+    pub limit: usize,
+    pub cursor: Option<String>,
+    pub adopted_cursor: Option<String>,
+    pub apply: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
