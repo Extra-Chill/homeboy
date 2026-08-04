@@ -203,6 +203,9 @@ pub(crate) fn run_with_cook_progress_and_provenance(
                 run::run_cook(cook_args)
             }
         }
+        AgentTaskCommand::CookContinue(args) if args.preflight => {
+            run::preflight_continue_cook(args)
+        }
         AgentTaskCommand::CookContinue(args) => run::continue_cook(args),
         AgentTaskCommand::Loop(loop_args) => controller::loop_command(loop_args),
         AgentTaskCommand::RunPlan(run_args) => run::run_plan(run_args),

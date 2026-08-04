@@ -200,6 +200,9 @@ pub struct AcceptArgs {
 pub struct CookContinueArgs {
     /// Durable Cook ID or one of its provider attempt IDs.
     pub cook_or_attempt_id: String,
+    /// Validate continuation admission without dispatching a provider or mutating lifecycle state.
+    #[arg(long)]
+    pub preflight: bool,
     /// Include the complete Cook report rather than the compact lifecycle view.
     #[arg(long)]
     pub full: bool,
