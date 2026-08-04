@@ -360,11 +360,14 @@ mod tests {
         let super::super::AgentTaskCommand::Cook(cook) = agent_task.command else {
             panic!("Cook command");
         };
-        let budget = homeboy::agents::agent_task_scheduler::AgentTaskExecutionBudget::new(
-            cook.dispatch.core.attempts,
-            cook.dispatch.core.same_provider_retries,
-            cook.dispatch.core.provider_rotations,
-        );
+        // Resolve through the real budget resolver with no configured rotation:
+        // that is the shape this error message exists for.
+        let core: homeboy::agents::agent_task_dispatch_service::DispatchCoreInputs =
+            cook.dispatch.core.clone().into();
+        let budget =
+            homeboy::agents::agent_task_dispatch_plan::resolve_execution_budget(&core, None);
+        assert_eq!(budget.max_provider_executions, 1);
+        assert_eq!(budget.max_provider_rotations, 0);
 
         let error = homeboy::agents::agent_task_service::validate_effective_cook_budget(
             cook.max_attempts,

@@ -63,6 +63,46 @@ pub(crate) fn announce_durable_cook_identity(cook_id: Option<&str>, run_id: &str
     }
 }
 
+/// Operator-facing statement of the provider rotation a Cook will actually
+/// perform.
+///
+/// A configured `agent_task.rotation` is only reachable if the execution budget
+/// funds it, and nothing surfaced that mismatch — which is how a Cook could
+/// carry a multi-provider rotation policy and still die terminally on the first
+/// provider's recoverable failure while every other provider sat available
+/// (#11082). State the effective behavior on every submission, including when
+/// that behavior is "no rotation at all".
+pub(crate) fn cook_rotation_disclosure(plan: &AgentTaskPlan) -> String {
+    let budget = &plan.options.execution_budget;
+    let executions = budget.max_provider_executions;
+    let entries = plan
+        .options
+        .rotation
+        .as_ref()
+        .map_or(0, |rotation| rotation.entries.len());
+    let entries = u32::try_from(entries).unwrap_or(u32::MAX);
+    // Only rotations that are both configured AND affordable will ever fire.
+    let funded = entries
+        .min(budget.max_provider_rotations)
+        .min(executions.saturating_sub(1));
+    if funded == 0 {
+        let unreachable = if entries > 0 {
+            format!(
+                "; {entries} configured rotation provider(s) are unreachable at this budget \
+                 (--max-provider-executions {executions}, --max-provider-rotations {})",
+                budget.max_provider_rotations
+            )
+        } else {
+            String::new()
+        };
+        format!("cook: rotation: disabled ({executions} provider execution(s)){unreachable}")
+    } else {
+        format!(
+            "cook: rotation: {funded} fallback provider(s), up to {executions} provider execution(s)"
+        )
+    }
+}
+
 /// Serialize a completed run aggregate and, when the run did not fully succeed,
 /// surface a prominent top-level `failure_reasons` summary so the operator sees
 /// the root cause (recipe validation, PHP fatal, provider registration, missing
@@ -891,6 +931,9 @@ where
         record_cook_provision(&mut initial_plan, provision);
         record_cook_goal(&mut initial_plan, args.goal.as_deref());
     }
+    if !no_progress {
+        eprintln!("{}", cook_rotation_disclosure(&initial_plan));
+    }
     if let Some(provenance) = provenance {
         record_cook_argument_provenance(&mut initial_plan, provenance);
     }
@@ -1056,6 +1099,67 @@ pub(super) fn resolve_dispatch_prompt(
 }
 
 #[cfg(test)]
+mod rotation_disclosure_tests {
+    use super::*;
+    use homeboy::agents::agent_task_scheduler::{
+        AgentTaskExecutionBudget, AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
+    };
+
+    fn plan_with(executions: u32, rotations: u32, entries: usize) -> AgentTaskPlan {
+        let mut plan = AgentTaskPlan::new("cook-rotation-disclosure".to_string(), Vec::new());
+        plan.options.execution_budget = AgentTaskExecutionBudget::new(executions, 0, rotations);
+        plan.options.rotation = (entries > 0).then(|| AgentTaskProviderRotationPolicy {
+            entries: (0..entries)
+                .map(|index| AgentTaskProviderRotationEntry {
+                    model: Some(format!("fallback-model-{index}")),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        });
+        plan
+    }
+
+    #[test]
+    fn a_funded_rotation_states_the_providers_and_executions_it_will_use() {
+        assert_eq!(
+            cook_rotation_disclosure(&plan_with(3, 2, 2)),
+            "cook: rotation: 2 fallback provider(s), up to 3 provider execution(s)"
+        );
+    }
+
+    #[test]
+    fn no_rotation_at_all_states_that_plainly() {
+        assert_eq!(
+            cook_rotation_disclosure(&plan_with(1, 0, 0)),
+            "cook: rotation: disabled (1 provider execution(s))"
+        );
+    }
+
+    /// The silence that let #11082 survive: a policy was configured, carried,
+    /// and unreachable, and nothing said so.
+    #[test]
+    fn a_configured_but_unfunded_rotation_is_named_as_unreachable() {
+        let disclosure = cook_rotation_disclosure(&plan_with(1, 0, 3));
+
+        assert!(disclosure.contains("disabled"), "{disclosure}");
+        assert!(
+            disclosure.contains("3 configured rotation provider(s) are unreachable"),
+            "{disclosure}"
+        );
+    }
+
+    /// A rotation budget that outruns the execution budget can never fire.
+    #[test]
+    fn executions_bound_the_rotations_the_disclosure_promises() {
+        assert_eq!(
+            cook_rotation_disclosure(&plan_with(2, 5, 5)),
+            "cook: rotation: 1 fallback provider(s), up to 2 provider execution(s)"
+        );
+    }
+}
+
+#[cfg(test)]
 mod prompt_input_tests {
     use super::*;
 
@@ -1078,9 +1182,9 @@ mod prompt_input_tests {
                 tasks_json: None,
                 provider_config: None,
                 client_context: None,
-                attempts: 1,
-                same_provider_retries: 0,
-                provider_rotations: 0,
+                attempts: Some(1),
+                same_provider_retries: Some(0),
+                provider_rotations: Some(0),
                 queue_only: false,
                 timeout_ms: None,
                 resolved_provider_policy: None,
