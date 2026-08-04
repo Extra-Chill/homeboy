@@ -1,5 +1,3 @@
-use base64::Engine;
-
 use homeboy_core::error::{Error, Result};
 use homeboy_core::execution_contract::{decode_uri_component, EXECUTION_CONTRACT};
 

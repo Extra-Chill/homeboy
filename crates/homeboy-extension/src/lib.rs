@@ -5,6 +5,10 @@ pub mod audit_compiler_warning_provider;
 pub mod audit_fingerprint_script_provider;
 pub mod audit_grammar_source_provider;
 pub mod audit_manifest_provider;
+#[allow(
+    dead_code,
+    reason = "Benchmark serde compatibility helpers support optional result formats."
+)]
 pub mod bench;
 pub mod build;
 mod capability;
@@ -46,10 +50,7 @@ pub use compiler_warning_contract::{
     extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
     CompilerWarningContract,
 };
-pub(crate) use homeboy_core::extension_execution::{
-    extension_guidance_hints, has_linked_extension_for_capability,
-    resolve_execution_context_if_available, stderr_tail,
-};
+pub(crate) use homeboy_core::extension_execution::{extension_guidance_hints, stderr_tail};
 pub use homeboy_core::extension_execution::{
     extract_component_extension_settings, path_list_env_value, resolve_execution_context,
     resolve_extension_for_capability, ExtensionExecutionContext,

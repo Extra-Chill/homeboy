@@ -8,8 +8,8 @@ use homeboy_core::redaction::RedactionPolicy;
 use homeboy_core::source_snapshot::SourceSnapshot;
 
 use super::super::{
-    LabRunnerHandoff, Runner, RunnerArtifactRef, RunnerJob, RunnerLifecycleOwner,
-    RunnerMutationArtifacts, RunnerResult,
+    LabRunnerHandoff, Runner, RunnerJob, RunnerLifecycleOwner, RunnerMutationArtifacts,
+    RunnerResult,
 };
 
 #[allow(unused_imports)]

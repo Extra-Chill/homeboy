@@ -48,6 +48,19 @@ jobs:
       - name: Compile all workspace test targets
         run: cargo check --workspace --tests --locked
 
+  warning-clean:
+    name: homeboy / Warning Clean
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the shipped CLI without warnings
+        run: RUSTFLAGS=-Dwarnings cargo build --locked -p homeboy --bin homeboy
+      - name: Run a focused agent test without warnings
+        run: RUSTFLAGS=-Dwarnings cargo test --locked -p homeboy-agents --lib agent_task_timeout::tests::timeout_grace_is_bounded
+
   # Unix-only `libc` constants (`SIGKILL` has no Windows definition) and other
   # cfg-gating misses compile fine on Linux (#10398). The release has no Windows
   # artifact consumer, so keep this codegen-free source check on every PR rather

@@ -5,11 +5,10 @@ use std::collections::BTreeMap;
 
 use crate::trace_parsing::{
     TraceArtifact, TraceAssertion, TraceComponentsProvenance, TraceDependencyProvenance,
-    TraceEvent, TraceEvidenceMetadata, TraceScenario, TraceSpanDefinition, TraceSpanResult,
-    TraceStatus, TraceTemporalAssertionDefinition, TraceToolchainProvenance,
+    TraceEvent, TraceEvidenceMetadata, TraceSpanDefinition, TraceSpanResult, TraceStatus,
+    TraceTemporalAssertionDefinition, TraceToolchainProvenance,
 };
 use crate::trace_preview::TracePreviewMetadata;
-use homeboy_lifecycle_contract::timeline::ObservationEvent;
 use homeboy_lifecycle_contract::RigStateSnapshot;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

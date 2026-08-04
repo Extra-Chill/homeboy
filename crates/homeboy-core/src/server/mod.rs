@@ -30,9 +30,8 @@ pub use session::{ManagedSshSession, ManagedSshSessionOutput};
 
 use std::collections::HashMap;
 
-use crate::config::{self, ConfigEntity};
+use crate::config::ConfigEntity;
 use crate::error::{Error, Result};
-use crate::output::{CreateOutput, MergeOutput, RemoveResult};
 use crate::paths;
 use crate::project;
 use serde::{Deserialize, Serialize};

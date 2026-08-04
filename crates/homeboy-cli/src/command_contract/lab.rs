@@ -173,7 +173,6 @@ mod tests;
 // Re-exported here so existing `command_contract::lab::*` (and the top-level
 // `command_contract::*`) call sites are unchanged.
 pub use homeboy_lab_contract::lab::handoff::*;
-pub use homeboy_lab_contract::lab::labels::*;
 pub use homeboy_lab_contract::lab::types::*;
 pub use homeboy_lab_contract::lab::workload::*;
 pub use support::*;

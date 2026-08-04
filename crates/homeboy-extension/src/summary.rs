@@ -8,7 +8,6 @@ use super::{evaluate_core_compatibility, CoreCompatibilityReport};
 use homeboy_core::extension_store::{
     broken_extension_links, is_extension_linked, load_all_extensions,
 };
-use homeboy_core::extension_update_check::read_source_revision;
 
 /// Summary of an extension for list views.
 #[derive(Debug, Clone, Serialize)]

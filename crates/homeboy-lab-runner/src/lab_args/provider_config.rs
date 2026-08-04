@@ -8,7 +8,6 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use clap::Parser;
 use homeboy_agents::agent_task_config_materialization::materialize_provider_config_refs;
 use homeboy_agents::agent_task_dispatch_service::{
     resolve_dispatch_request, AgentTaskDispatchCommand,

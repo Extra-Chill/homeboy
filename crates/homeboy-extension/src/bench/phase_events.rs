@@ -1,7 +1,3 @@
-use std::collections::BTreeMap;
-
-use serde::{Deserialize, Serialize};
-
 use super::parsing::BenchResults;
 pub use homeboy_extension_contract::bench_diagnostics::{
     BenchPhaseEvent, BenchPhaseFailureClassification, BenchPhaseSummary,
@@ -128,6 +124,7 @@ fn is_zero_usize(value: &usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn summarizes_phase_events_and_classifies_timeout() {

@@ -16,11 +16,13 @@ use super::super::persistence::{
 };
 use super::super::types::{
     DaemonActiveJobRecoveryDisposition, DaemonActiveJobRecoveryEvidence, DaemonLeaseJobDiagnostics,
-    DaemonLinkedDurableRunState, Job, JobEvent, JobEventKind, JobStatus,
-    LeaselessOrphanAffectedJob, LeaselessOrphanJobDiagnostics,
+    Job, JobEvent, JobEventKind, JobStatus, LeaselessOrphanAffectedJob,
+    LeaselessOrphanJobDiagnostics,
 };
 use super::JobStore;
 use super::*;
+#[cfg(test)]
+use crate::api_jobs::types::DaemonLinkedDurableRunState;
 use crate::error::{Error, Result};
 
 impl JobStore {

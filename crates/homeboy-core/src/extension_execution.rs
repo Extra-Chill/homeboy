@@ -2,13 +2,14 @@
 //! manifest + Component). Relocated from extension/capability.rs.
 
 use crate::component::Component;
-use crate::engine::run_dir::RunDir;
 use crate::error::{Error, ErrorCode, Result};
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 
 use crate::extension_invocation_context::ResolvedExtensionInvocationContext;
 use crate::extension_store::{extension_path, load_extension};
-use homeboy_extension_contract::{ExtensionCapability, ExtensionManifest};
+use homeboy_extension_contract::ExtensionCapability;
 
 pub fn stderr_tail(stderr: &str) -> String {
     const MAX_LINES: usize = 20;
