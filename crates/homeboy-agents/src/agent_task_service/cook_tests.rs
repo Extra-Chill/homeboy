@@ -6446,6 +6446,10 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         )
         .unwrap();
         source_promotion["status"] = serde_json::json!("applied");
+        source_promotion["provenance"]
+            .as_object_mut()
+            .unwrap()
+            .remove("post_apply");
         agent_task_lifecycle::record_promotion(&source_options.initial_run_id, source_promotion)
             .unwrap();
 

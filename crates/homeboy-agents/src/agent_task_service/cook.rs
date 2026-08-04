@@ -3483,12 +3483,20 @@ fn tracked_promotion_continuation(
     let Some(promotion) = persisted_promotion_for_attempt(&options.initial_run_id)? else {
         return Ok(None);
     };
+    let has_post_apply_checkpoint = ["/post_apply", "/resumed_post_apply_promotion"]
+        .into_iter()
+        .any(|pointer| promotion.provenance.pointer(pointer) == Some(&Value::Bool(true)));
+    let authenticated_legacy_review =
+        if promotion.status == AgentTaskPromotionStatus::Applied && !has_post_apply_checkpoint {
+            let record = agent_task_lifecycle::status(&options.initial_run_id)?;
+            terminal_review_form_continuation_is_eligible(&options.initial_plan, &record)?
+        } else {
+            false
+        };
     if !matches!(
         promotion.status,
         AgentTaskPromotionStatus::VerificationPending | AgentTaskPromotionStatus::Applied
-    ) || !["/post_apply", "/resumed_post_apply_promotion"]
-        .into_iter()
-        .any(|pointer| promotion.provenance.pointer(pointer) == Some(&Value::Bool(true)))
+    ) || (!has_post_apply_checkpoint && !authenticated_legacy_review)
     {
         return Ok(None);
     }
