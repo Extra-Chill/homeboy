@@ -39,6 +39,12 @@ struct ScopedLintOutput {
     child_run_dirs: Vec<RunDir>,
 }
 
+struct FullCandidateBaseline {
+    findings: Vec<HomeboyFinding>,
+    hard_error: bool,
+    exit_code: i32,
+}
+
 /// Run the main lint workflow.
 ///
 /// Handles changed-file scoping, autofix planning, lint runner execution,
@@ -79,6 +85,39 @@ pub fn run_main_lint_workflow(
     // read differently to an operator and to the PR comment.
     if let Some(ref plan) = scoped_plan {
         if plan.runs.is_empty() {
+            let full_candidate =
+                should_verify_full_candidate_baseline(source_path, &args, scoped_plan.as_ref())
+                    .then(|| run_full_candidate_baseline(component, &args))
+                    .transpose()?;
+            if let Some(candidate) = full_candidate {
+                let (baseline_comparison, baseline_exit_override) =
+                    process_baseline(source_path, &args, &candidate.findings)?;
+                let exit_code = if candidate.hard_error {
+                    candidate.exit_code
+                } else {
+                    baseline_exit_override.unwrap_or(0)
+                };
+                return Ok(LintRunWorkflowResult {
+                    status: if exit_code == 0 { "passed" } else { "failed" }.to_string(),
+                    component: args.component_label,
+                    exit_code,
+                    harness_error: false,
+                    infrastructure_failure: false,
+                    autofix: None,
+                    hints: None,
+                    baseline_comparison,
+                    formatting_findings: None,
+                    findings: None,
+                    producer_summaries: Vec::new(),
+                    summary: if args.json_summary {
+                        Some(build_lint_summary(&[], &[], exit_code))
+                    } else {
+                        None
+                    },
+                    self_check_capture: None,
+                    extension_phase_timings: Vec::new(),
+                });
+            }
             let hints = (plan.changed_files_considered > 0).then(|| {
                 vec![format!(
                     "Lint ran no scopes: {} changed file(s) were considered and none matched any \
@@ -211,6 +250,14 @@ pub fn run_main_lint_workflow(
         lint_findings.extend(route_findings);
         producer_summaries.extend(route_producers);
     }
+    // Changed-file routes intentionally omit untouched debt from their output.
+    // Before accepting that scoped result against a baseline, run the same
+    // candidate tree without a route so fingerprint changes remain predictable
+    // after a fast-forward or merge commit with the identical tree.
+    let full_candidate =
+        should_verify_full_candidate_baseline(source_path, &args, scoped_plan.as_ref())
+            .then(|| run_full_candidate_baseline(component, &args))
+            .transpose()?;
     let formatting_findings =
         extract_formatting_findings(&output.stdout, &output.stderr, source_path);
 
@@ -225,8 +272,14 @@ pub fn run_main_lint_workflow(
     let lint_exit_code = normalize_producer_exit_code(runner_exit_code, &producer_summaries);
 
     // Baseline lifecycle
-    let (baseline_comparison, baseline_exit_override) =
-        process_baseline(source_path, &args, &lint_findings)?;
+    let (baseline_comparison, baseline_exit_override) = process_baseline(
+        source_path,
+        &args,
+        full_candidate
+            .as_ref()
+            .map(|candidate| candidate.findings.as_slice())
+            .unwrap_or(&lint_findings),
+    )?;
 
     let harness_error = lint_exit_code != 0
         && self_check_output_is_harness_failure(output.exit_code, &output.stdout, &output.stderr);
@@ -236,6 +289,9 @@ pub fn run_main_lint_workflow(
             && producer.metadata.contains_key("failure")
     });
     let hard_error = output.exit_code >= 2
+        || full_candidate
+            .as_ref()
+            .is_some_and(|candidate| candidate.hard_error)
         || harness_error
         || producer_summaries
             .iter()
@@ -317,6 +373,70 @@ pub fn run_main_lint_workflow(
         producer_summaries,
         self_check_capture: None,
         extension_phase_timings: output.extension_phase_timings,
+    })
+}
+
+fn should_verify_full_candidate_baseline(
+    source_path: &Path,
+    args: &LintRunWorkflowArgs,
+    scoped_plan: Option<&super::types::ScopedLintPlan>,
+) -> bool {
+    scoped_plan.is_some()
+        && args.file.is_none()
+        && args.glob.is_none()
+        && args.category.is_none()
+        && !args.sniff_filters.errors_only
+        && args.sniff_filters.sniffs.is_none()
+        && args.sniff_filters.exclude_sniffs.is_none()
+        && !args.baseline_flags.baseline
+        && !args.baseline_flags.ignore_baseline
+        && lint_baseline::load_baseline(source_path).is_some()
+}
+
+fn run_full_candidate_baseline(
+    component: &Component,
+    args: &LintRunWorkflowArgs,
+) -> homeboy_core::Result<FullCandidateBaseline> {
+    let full_run_dir = RunDir::create()?;
+    let runner = build_lint_runner(
+        component,
+        args.path_override.clone(),
+        &args.settings,
+        true,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &full_run_dir,
+    )?;
+    let runner = args
+        .ci_env
+        .iter()
+        .fold(runner, |runner, (key, value)| runner.env(key, value));
+    let output = runner
+        .env_if(
+            args.changed_since.is_some(),
+            "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
+            "1",
+        )
+        .passthrough(false)
+        .run()?;
+    let findings_file = full_run_dir.step_file(run_dir::files::LINT_FINDINGS);
+    if crate::lint::declares_lint_findings_sidecar(component) && !findings_file.is_file() {
+        full_run_dir.finish(false);
+        return Err(missing_findings_evidence_error(&findings_file));
+    }
+    let findings = lint_baseline::parse_findings_file(&findings_file)?;
+    full_run_dir.finish(output.success);
+
+    Ok(FullCandidateBaseline {
+        findings,
+        hard_error: output.exit_code >= 2,
+        exit_code: output.exit_code,
     })
 }
 
