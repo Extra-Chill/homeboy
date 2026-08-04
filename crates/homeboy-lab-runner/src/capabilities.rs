@@ -552,12 +552,17 @@ fn evaluate_lab_runner_capabilities(
     capabilities: &RunnerCapabilitySnapshot,
     mode: LabRunnerGateMode,
 ) -> LabRunnerGateDecision {
-    let missing_tools = plan
+    let mut missing_tools = plan
         .required_tools
         .iter()
         .filter(|tool| !capabilities.has_tool(tool))
         .cloned()
         .collect::<Vec<_>>();
+    for capability in &plan.required_capabilities {
+        if !capabilities.components.contains(capability.as_str()) {
+            push_unique(&mut missing_tools, RunnerRequiredTool::new(capability));
+        }
+    }
 
     if missing_tools.is_empty() {
         return LabRunnerGateDecision::Eligible;
@@ -832,6 +837,48 @@ mod tests {
                 RunnerRequiredTool::new("runtime"),
                 RunnerRequiredTool::new("workspace-manager"),
             ]
+        );
+    }
+
+    #[test]
+    fn opaque_capability_blocks_then_admits_a_connected_fresh_runner() {
+        let plan = prepare_lab_runner_capability(LabRunnerCapabilityContract {
+            command: "capability audit",
+            required_tools: Vec::new(),
+            required_capabilities: vec!["capability.alpha".to_string()],
+        });
+        let mut runner = Runner {
+            id: "local".to_string(),
+            kind: RunnerKind::Local,
+            server_id: None,
+            workspace_root: None,
+            settings: RunnerSettings::default(),
+            env: HashMap::new(),
+            secret_env: Default::default(),
+            resources: Default::default(),
+            policy: RunnerPolicy::default(),
+        };
+
+        let missing = evaluate_lab_runner_capabilities_for_runner(
+            &runner,
+            &plan,
+            LabRunnerGateMode::Explicit,
+        )
+        .expect("evaluate missing opaque capability");
+        assert!(matches!(missing, LabRunnerGateDecision::Missing { .. }));
+
+        runner.resources.insert(
+            "components".to_string(),
+            serde_json::json!(["capability.alpha"]),
+        );
+        assert_eq!(
+            evaluate_lab_runner_capabilities_for_runner(
+                &runner,
+                &plan,
+                LabRunnerGateMode::Explicit,
+            )
+            .expect("evaluate advertised opaque capability"),
+            LabRunnerGateDecision::Eligible
         );
     }
 
@@ -1281,12 +1328,37 @@ mod tests {
         .expect_err("a present command without a usable toolchain is rejected");
 
         assert!(error.message.contains("fixture:usable-toolchain"));
-        assert!(error.message.contains("PATH="));
+        assert!(error.message.contains("PATH"));
         assert!(error.details["tried"]
             .as_array()
             .expect("remediation")
             .iter()
             .any(|hint| hint.as_str() == Some("repair-fixture-toolchain")));
+    }
+
+    #[test]
+    fn structured_probe_arguments_are_literal_in_generated_transport() {
+        let temp = tempdir().expect("tempdir");
+        let side_effect = temp.path().join("side-effect");
+        let literal = format!("literal; touch {}", side_effect.display());
+        let probes = vec![RunnerToolchainReadinessProbe {
+            extension_id: "fixture".to_string(),
+            id: "fixture:literal".to_string(),
+            program: "printf".to_string(),
+            args: vec!["%s".to_string(), literal.clone()],
+            repair_command: None,
+            diagnostic_env: Vec::new(),
+        }];
+        let script = batch_probe_script(&[], &[], &[], &probes);
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("run generated probe transport");
+
+        assert!(output.status.success());
+        assert!(!side_effect.exists(), "metacharacter argument executed");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("R\t0\t1"));
     }
 
     #[cfg(unix)]

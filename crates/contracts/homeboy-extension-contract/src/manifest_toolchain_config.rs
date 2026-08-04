@@ -24,6 +24,20 @@ pub struct ToolchainReadinessProbe {
     pub diagnostic_env: Vec<String>,
 }
 
+#[cfg(test)]
+mod legacy_probe_tests {
+    use super::ToolchainReadinessProbe;
+
+    #[test]
+    fn legacy_shell_command_probe_is_rejected() {
+        let legacy = serde_json::json!({
+            "id": "legacy",
+            "command": "tool; touch /tmp/owned"
+        });
+        assert!(serde_json::from_value::<ToolchainReadinessProbe>(legacy).is_err());
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequirementsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
