@@ -10,8 +10,8 @@ pub use super::agent_task_fanout::{
 
 mod artifacts;
 pub mod bench_matrix_provider;
-mod command_policy;
 mod capabilities;
+mod command_policy;
 mod executor;
 mod matrix;
 mod outcome;
@@ -32,15 +32,15 @@ pub use artifacts::{
     AgentTaskArtifact, AgentTaskArtifactDeclaration, AgentTaskDiagnostic, AgentTaskEvidenceRef,
     AgentTaskFollowUp, AgentTaskTypedArtifact,
 };
-pub use command_policy::{
-    AgentCommandDecision, AgentCommandDenial, AgentCommandPolicy, AgentCommandPolicyMode,
-    AgentCommandRule, AGENT_COMMAND_POLICY_SCHEMA, COMMAND_DENIAL_REMEDIATION,
-    DEFAULT_COMMAND_DENIAL_REASON,
-};
 pub use capabilities::{
     AgentTaskAttachedToolCapability, AgentTaskCapabilityEvidence, AgentTaskCapabilityRequirements,
     AgentTaskToolCapabilityContribution, AGENT_TASK_CAPABILITY_EVIDENCE_SCHEMA,
     AGENT_TASK_CAPABILITY_REQUIREMENTS_SCHEMA,
+};
+pub use command_policy::{
+    AgentCommandDecision, AgentCommandDenial, AgentCommandPolicy, AgentCommandPolicyMode,
+    AgentCommandRule, AGENT_COMMAND_POLICY_SCHEMA, COMMAND_DENIAL_REMEDIATION,
+    DEFAULT_COMMAND_DENIAL_REASON,
 };
 pub use executor::{
     AgentTaskAttemptWorkspace, AgentTaskCandidateAdoption, AgentTaskExecutor,
