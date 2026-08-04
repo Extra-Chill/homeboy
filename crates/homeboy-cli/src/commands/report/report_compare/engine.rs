@@ -6,10 +6,11 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::observation::runs_service;
-use crate::observation::{ArtifactRecord, ObservationStore};
-use crate::report_compare_render::render_markdown;
-use crate::Error;
+use homeboy_core::observation::runs_service;
+use homeboy_core::observation::{ArtifactRecord, ObservationStore};
+use homeboy_core::Error;
+
+use super::render::render_markdown;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ReportCompareReport {
@@ -103,7 +104,7 @@ struct FindingAggregate {
 pub fn compare_report_artifacts(
     old_input: &str,
     new_input: &str,
-) -> crate::Result<ReportCompareReport> {
+) -> homeboy_core::Result<ReportCompareReport> {
     compare_report_artifacts_with_store(None, old_input, new_input)
 }
 
@@ -111,7 +112,7 @@ pub fn compare_report_artifacts_with_store(
     store: Option<&ObservationStore>,
     old_input: &str,
     new_input: &str,
-) -> crate::Result<ReportCompareReport> {
+) -> homeboy_core::Result<ReportCompareReport> {
     let old = read_artifact_input(store, old_input)?;
     let new = read_artifact_input(store, new_input)?;
     let old_aggregate = aggregate_findings(&old.value);
@@ -144,7 +145,7 @@ pub fn compare_report_artifacts_with_store(
 fn read_artifact_input(
     store: Option<&ObservationStore>,
     input: &str,
-) -> crate::Result<ArtifactInput> {
+) -> homeboy_core::Result<ArtifactInput> {
     let path = PathBuf::from(input);
     if path.is_file() {
         let value = read_json_file(&path)?;
@@ -181,7 +182,7 @@ fn split_artifact_ref(input: &str) -> Option<(&str, &str)> {
 fn select_json_artifact_for_run(
     store: &ObservationStore,
     run_id: &str,
-) -> crate::Result<ArtifactRecord> {
+) -> homeboy_core::Result<ArtifactRecord> {
     let artifacts = runs_service::list_artifacts_for_run(store, run_id)?;
     artifacts
         .into_iter()
@@ -216,7 +217,7 @@ fn is_report_json_artifact(artifact: &ArtifactRecord) -> bool {
                 .is_some_and(|mime| mime.contains("json")))
 }
 
-fn read_artifact_record(artifact: ArtifactRecord) -> crate::Result<(String, Value)> {
+fn read_artifact_record(artifact: ArtifactRecord) -> homeboy_core::Result<(String, Value)> {
     match runs_service::classify_artifact_storage(&artifact) {
         runs_service::ArtifactStorage::LocalFile => {
             let path = PathBuf::from(&artifact.path);
@@ -274,7 +275,7 @@ fn read_artifact_record(artifact: ArtifactRecord) -> crate::Result<(String, Valu
     }
 }
 
-fn read_json_file(path: &Path) -> crate::Result<Value> {
+fn read_json_file(path: &Path) -> homeboy_core::Result<Value> {
     let raw = fs::read_to_string(path)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("read {}", path.display()))))?;
     serde_json::from_str(&raw).map_err(|e| {

@@ -1,8 +1,9 @@
 use std::fs;
 
-use homeboy::commands::report::{compare_report_artifacts_from_args, ReportCompareArgs};
+use homeboy::commands::report::{
+    compare_report_artifacts_from_args, compare_report_artifacts_with_store, ReportCompareArgs,
+};
 use homeboy::core::observation::{NewRunRecord, ObservationStore};
-use homeboy::core::report_compare::compare_report_artifacts_with_store;
 
 #[path = "support/mod.rs"]
 mod support;

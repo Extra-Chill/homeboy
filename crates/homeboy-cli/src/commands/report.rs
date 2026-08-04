@@ -30,7 +30,8 @@ pub use performance_digest::{
     PerformanceDigestReport,
 };
 pub use report_compare::{
-    compare_report_artifacts_from_args, render_report_compare_from_args, ReportCompareArgs,
+    compare_report_artifacts, compare_report_artifacts_from_args,
+    compare_report_artifacts_with_store, render_report_compare_from_args, ReportCompareArgs,
     ReportCompareReport,
 };
 

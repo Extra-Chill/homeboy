@@ -1,13 +1,13 @@
 //! Read-only process-tree activity sampling.
 //!
-//! [`crate::process`] owns the *lifecycle* half of the process tree (signalling,
+//! [`homeboy_core::process`] owns the *lifecycle* half of the process tree (signalling,
 //! scopes, termination). This module owns the *observability* half: answering
 //! "what is this process tree actually doing right now?" without changing it.
 //!
 //! The motivating case is diagnosing a stalled Cook. Before this existed the
 //! only way to learn that a provider agent was compiling instead of editing was
 //! `ps aux | grep` on the host (#11482). The same `ps -axo` walk that
-//! [`crate::process`] already uses for descendant discovery answers it, so the
+//! [`homeboy_core::process`] already uses for descendant discovery answers it, so the
 //! sampling is a plain read of the process table with no signals, no /proc
 //! assumptions, and no platform-specific parsing beyond `ps` itself.
 //!

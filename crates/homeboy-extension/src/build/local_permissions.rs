@@ -2,13 +2,17 @@
 //!
 //! Ensures files in a local component checkout have group read/write before
 //! they're archived, so the build zip carries correct permissions (some tools
-//! create files with restrictive 600 perms). Used by the extension build path;
-//! lives at core level (not under `deploy`) so build doesn't depend on deploy.
+//! create files with restrictive 600 perms).
+//!
+//! Was a top-level `homeboy-core` module whose only consumer anywhere in the
+//! workspace was the extension build path right next to it (#11143). The
+//! original comment justified core placement as "so build doesn't depend on
+//! deploy" — living inside build satisfies that without costing core a module.
 
 use std::process::Command;
 
-use crate::defaults;
-use crate::engine::shell;
+use homeboy_core::defaults;
+use homeboy_engine_primitives::shell;
 
 /// Fix local file permissions before build.
 ///
@@ -18,7 +22,7 @@ pub fn fix_local_permissions(local_path: &str) {
     let quoted_path = shell::quote_path(local_path);
     let perms = defaults::load_defaults().permissions.local;
 
-    log_status!(
+    homeboy_core::log_status!(
         "build",
         "Fixing local file permissions in {} (files: {}, dirs: {})",
         local_path,
