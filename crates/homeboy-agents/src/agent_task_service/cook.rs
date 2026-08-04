@@ -697,6 +697,37 @@ pub struct AgentTaskCookServiceOptions {
     pub harvest_context: crate::agent_task_scheduler::HarvestExecutionContext,
 }
 
+const COOK_CONTINUE_ROUTE_SCHEMA: &str = "homeboy/agent-task-cook-continue-route/v1";
+
+/// Record that the `cook-continue` lifecycle route selected this exact attempt.
+/// This is durable route authority, not caller-controlled plan metadata.
+pub fn authorize_cook_continue_route(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    agent_task_lifecycle::exact_record(&options.initial_run_id)?;
+    agent_task_lifecycle::record_metadata_value(
+        &options.initial_run_id,
+        "cook_continue_route",
+        serde_json::json!({
+            "schema": COOK_CONTINUE_ROUTE_SCHEMA,
+            "cook_id": options.cook_id,
+            "run_id": options.initial_run_id,
+        }),
+    )
+}
+
+fn has_cook_continue_route(options: &AgentTaskCookServiceOptions) -> bool {
+    agent_task_lifecycle::exact_record(&options.initial_run_id)
+        .ok()
+        .and_then(|record| record.metadata.get("cook_continue_route").cloned())
+        .as_ref()
+        .and_then(Value::as_object)
+        .is_some_and(|context| {
+            context.get("schema").and_then(Value::as_str) == Some(COOK_CONTINUE_ROUTE_SCHEMA)
+                && context.get("cook_id").and_then(Value::as_str) == Some(options.cook_id.as_str())
+                && context.get("run_id").and_then(Value::as_str)
+                    == Some(options.initial_run_id.as_str())
+        })
+}
+
 /// Provenance supplied when Homeboy adopts a candidate prepared outside its
 /// provider lifecycle.
 #[derive(Debug, Clone, Default)]
@@ -3651,11 +3682,17 @@ fn tracked_promotion_continuation(
         } else {
             false
         };
-    if !matches!(
+    let normal_continuation = matches!(
         promotion.status,
         AgentTaskPromotionStatus::VerificationPending | AgentTaskPromotionStatus::Applied
-    ) || (!has_post_apply_checkpoint && !authenticated_legacy_review)
-    {
+    ) && (has_post_apply_checkpoint || authenticated_legacy_review);
+    // A gate-failed candidate remains eligible only when this exact lifecycle
+    // route selected its exact Cook attempt. Plan metadata is caller-controlled
+    // and is therefore never authorization for dirty-worktree reuse.
+    let route_authorized_gate_failure = promotion.status.gate_failed()
+        && has_post_apply_checkpoint
+        && has_cook_continue_route(options);
+    if !(normal_continuation || route_authorized_gate_failure) {
         return Ok(None);
     }
     if promotion.to_worktree != options.to_worktree

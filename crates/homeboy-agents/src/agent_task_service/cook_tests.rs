@@ -1583,6 +1583,33 @@ impl AgentTaskExecutorAdapter for RecordingReviewFormExecutor {
 }
 
 #[derive(Clone)]
+struct TerminalSuccessExecutor;
+
+impl AgentTaskExecutorAdapter for TerminalSuccessExecutor {
+    fn execute(
+        &self,
+        request: crate::agent_task::AgentTaskRequest,
+        _context: crate::agent_task_scheduler::AgentTaskExecutionContext,
+    ) -> crate::agent_task::AgentTaskOutcome {
+        crate::agent_task::AgentTaskOutcome {
+            schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id,
+            status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
+            summary: Some("terminal retry fixture succeeded".to_string()),
+            failure_classification: None,
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        }
+    }
+}
+
+#[derive(Clone)]
 struct ProviderMissingExecutor;
 
 impl AgentTaskExecutorAdapter for ProviderMissingExecutor {
@@ -2843,7 +2870,7 @@ fn retryable_pre_provider_retry_returns_terminal_successor_without_reexecution()
             .expect("persist successor retry proof");
         crate::agent_task_service::execution::run_submitted(
             successor_run_id.clone(),
-            ImmediateSuccessExecutor,
+            TerminalSuccessExecutor,
         )
         .expect("complete successor successfully");
 
@@ -6338,7 +6365,10 @@ fn record_tracked_promotion_continuation(
     agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id))
         .unwrap();
     let mut checkpoint = serde_json::to_value(promotion(&options.initial_run_id)).unwrap();
-    checkpoint["status"] = serde_json::json!("verification_pending");
+    checkpoint["status"] = serde_json::json!("gate_failed");
+    checkpoint["deterministic_gates"][0]["status"] = serde_json::json!("failed");
+    checkpoint["deterministic_gates"][0]["exit_code"] = serde_json::json!(1);
+    checkpoint["gate_results"][0]["status"] = serde_json::json!("failed");
     let patch = Command::new("git")
         .args(["diff", "--binary", "--full-index"])
         .current_dir(target)
@@ -6500,6 +6530,19 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         homeboy_core::defaults::save_config(&config).expect("save provider config");
         crate::agent_task_candidate_baseline::register();
 
+        assert!(
+            tracked_promotion_continuation(&options).unwrap().is_none(),
+            "gate-failed promotion requires cook-continue context"
+        );
+        options.initial_plan.metadata["cook_continue_context"] = serde_json::json!({
+            "schema": "homeboy/agent-task-cook-continue-context/v1",
+            "run_id": options.initial_run_id,
+        });
+        assert!(
+            tracked_promotion_continuation(&options).unwrap().is_none(),
+            "forged plan metadata cannot authorize a gate-failed continuation"
+        );
+        authorize_cook_continue_route(&options).unwrap();
         let continuation = tracked_promotion_continuation(&options)
             .unwrap()
             .expect("tracked promotion continuation");
@@ -6515,7 +6558,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             "workspace.resolved_but_dirty"
         );
         validate_cook_workspace(&options)
-            .expect("exact dirty promoted provider destination resumes");
+            .expect("exact gate-failed promoted provider destination resumes");
 
         std::fs::write(target.join("extra.txt"), "unattributed\n").unwrap();
         let error = validate_cook_workspace(&options).expect_err("extra drift is rejected");
@@ -6771,6 +6814,26 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         assert_eq!(trace["first_authoritative_denial"], serde_json::Value::Null);
         assert_eq!(trace["predicates"].as_array().unwrap().len(), 8);
         assert!(trace.to_string().len() < 2048, "trace remains bounded");
+        std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
+        let mut other_cook = tracked_promotion_continuation_options(
+            "cook-other-promotion",
+            "run-other-promotion",
+            &target,
+        );
+        other_cook.to_worktree = options.to_worktree.clone();
+        other_cook.initial_plan.metadata["cook_continue_context"] = serde_json::json!({
+            "schema": "homeboy/agent-task-cook-continue-context/v1",
+            "run_id": other_cook.initial_run_id,
+        });
+        assert!(
+            tracked_promotion_continuation(&other_cook)
+                .unwrap()
+                .is_none(),
+            "a different Cook cannot claim this attempt's promotion"
+        );
+        let error = validate_cook_workspace(&other_cook)
+            .expect_err("another Cook cannot reuse a dirty promoted candidate");
+        assert_eq!(error.details["workspace"]["reason"], "unattributed_drift");
     });
 }
 
