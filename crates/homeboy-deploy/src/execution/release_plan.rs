@@ -1,4 +1,5 @@
 use homeboy_core::component::Component;
+use homeboy_core::error::Error;
 use homeboy_version as release;
 
 use super::super::orchestration_tag_checkout::deploy_tag_for_version;
@@ -78,35 +79,56 @@ pub(crate) fn resolve_planned_release_artifact(
     component: &Component,
     tag: &str,
     store: &mut release_download::ReleaseArtifactStore,
-) -> std::result::Result<release_download::ReleaseArtifactLease, String> {
-    let remote_url = component
-        .remote_url
-        .as_deref()
-        .ok_or_else(|| "component has no remote_url".to_string())?;
-    let github = release_download::parse_github_url(remote_url)
-        .ok_or_else(|| "component remote_url is not a GitHub repository URL".to_string())?;
-    let artifact_name = release_download::resolve_artifact_name(component)
-        .ok_or_else(|| "component has no build_artifact filename".to_string())?;
+) -> std::result::Result<release_download::ReleaseArtifactLease, Error> {
+    let remote_url = component.remote_url.as_deref().ok_or_else(|| {
+        Error::invalid_argument_for(
+            "component.remote_url",
+            "component has no remote_url",
+            component.id.as_str(),
+        )
+    })?;
+    let github = release_download::parse_github_url(remote_url).ok_or_else(|| {
+        Error::invalid_argument_for(
+            "component.remote_url",
+            format!("component remote_url is not a GitHub repository URL: '{remote_url}'"),
+            component.id.as_str(),
+        )
+    })?;
+    let artifact_name = release_download::resolve_artifact_name(component).ok_or_else(|| {
+        Error::invalid_argument_for(
+            "component.build_artifact",
+            "component has no build_artifact filename",
+            component.id.as_str(),
+        )
+    })?;
     store
         .resolve(&github, &component.github, tag, &artifact_name)
         .map_err(|error| release_asset_download_error(component, tag, &artifact_name, error))
 }
 
+/// Wrap a release-asset download failure without discarding it.
+///
+/// The download error is already structured — it carries a code, and details
+/// such as the HTTP status that explains *why* the asset could not be fetched.
+/// Rendering all of that into one sentence (#11135) made release-asset failures
+/// unclassifiable by anything downstream, so instead the code and details are
+/// carried through verbatim, the original is attached as the source, and the
+/// fail-closed policy statement becomes a hint rather than message prose.
 fn release_asset_download_error(
     component: &Component,
     tag: &str,
     artifact_name: &str,
-    error: homeboy_core::error::Error,
-) -> String {
-    let error_details = if error.details.is_null() {
-        error.to_string()
-    } else {
-        format!("{}: {}", error, error.details)
-    };
-
-    format!(
-        "artifact source release_asset failed for '{}' tag {} artifact '{}': {}. Refusing to fall back to local_build; use --tagged to request an explicit local tag build.",
-        component.id, tag, artifact_name, error_details
+    error: Error,
+) -> Error {
+    let message = format!(
+        "artifact source release_asset failed for '{}' tag {} artifact '{}': {}",
+        component.id, tag, artifact_name, error.message
+    );
+    let mut converted = Error::new(error.code, message, error.details.clone());
+    converted.hints = error.hints.clone();
+    converted.retryable = error.retryable;
+    converted.with_source(error).with_hint(
+        "Refusing to fall back to local_build; use --tagged to request an explicit local tag build.",
     )
 }
 
@@ -122,7 +144,7 @@ fn deploy_release_tag(component: &Component, config: &DeployConfig) -> Option<St
 mod tests {
     use super::release_asset_download_error;
     use homeboy_core::component::Component;
-    use homeboy_core::error::Error;
+    use homeboy_core::error::{Error, ErrorCode};
 
     #[test]
     fn release_asset_download_error_fails_closed_without_local_build_fallback() {
@@ -131,7 +153,7 @@ mod tests {
             ..Component::default()
         };
 
-        let message = release_asset_download_error(
+        let error = release_asset_download_error(
             &component,
             "v1.2.3",
             "example.zip",
@@ -141,8 +163,74 @@ mod tests {
             ),
         );
 
-        assert!(message.contains("artifact source release_asset failed"));
-        assert!(message.contains("Refusing to fall back to local_build"));
-        assert!(message.contains("use --tagged"));
+        assert!(error
+            .message
+            .contains("artifact source release_asset failed"));
+        // The fail-closed policy is a next action, so it is carried as a hint.
+        assert!(error.hints.iter().any(|hint| hint
+            .message
+            .contains("Refusing to fall back to local_build")));
+        assert!(error
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("use --tagged")));
+    }
+
+    /// #11135: the download failure's own classification is what makes a
+    /// stranded release-asset deploy machine-readable, so wrapping it must not
+    /// collapse the code, the details, or the causal chain into prose.
+    #[test]
+    fn release_asset_download_error_preserves_the_underlying_classification() {
+        let component = Component {
+            id: "example".to_string(),
+            ..Component::default()
+        };
+
+        let error = release_asset_download_error(
+            &component,
+            "v1.2.3",
+            "example.zip",
+            Error::internal_io(
+                "HTTP 404".to_string(),
+                Some("download release artifact".to_string()),
+            ),
+        );
+
+        assert_eq!(error.code, ErrorCode::InternalIoError);
+        assert_eq!(
+            error.details.get("error").and_then(|value| value.as_str()),
+            Some("HTTP 404")
+        );
+        assert_eq!(
+            error
+                .details
+                .get("context")
+                .and_then(|value| value.as_str()),
+            Some("download release artifact")
+        );
+        assert!(
+            std::error::Error::source(&error).is_some(),
+            "the originating download error stays reachable as the source"
+        );
+    }
+
+    /// A full disk during the download must stay a storage-exhaustion failure
+    /// after wrapping; the `String` channel turned it into an ordinary sentence.
+    #[test]
+    fn release_asset_download_error_keeps_storage_exhaustion_distinguishable() {
+        let component = Component {
+            id: "example".to_string(),
+            ..Component::default()
+        };
+
+        let error = release_asset_download_error(
+            &component,
+            "v1.2.3",
+            "example.zip",
+            Error::storage_exhausted("No space left on device", None),
+        );
+
+        assert!(error.is_storage_exhausted(), "{error:?}");
+        assert_eq!(error.retryable, Some(false));
     }
 }
