@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use homeboy::agents::agent_tasks::dispatch_service;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
+use homeboy::agents::agent_tasks::provider;
 use homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::agents::agent_tasks::scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan,
@@ -660,6 +661,36 @@ pub(crate) fn validate_cook_request(args: &AgentTaskCookArgs) -> homeboy::core::
     validate_cook_request_with_provenance(args, None)
 }
 
+/// Reject a Cook whose selected backend cannot execute, before the destination
+/// worktree is provisioned.
+///
+/// `agent-task providers` reporting `available` used to mean only "declared",
+/// so a Cook could be dispatched to a backend with no credential, materialize a
+/// workspace, and burn its whole execution budget discovering the gap inside
+/// the provider — while other configured backends were sitting there usable
+/// (#11479). The backend's declared credentials are knowable here, so the
+/// remediation is reported instead of a spent budget.
+///
+/// A backend that cannot be resolved at all is left to the resolution
+/// validators; this only speaks about credentials.
+pub(crate) fn preflight_cook_provider_credentials(
+    args: &AgentTaskCookArgs,
+) -> homeboy::core::Result<()> {
+    let dispatch = dispatch_args_for_cook(args);
+    let backend = match dispatch.backend.clone() {
+        Some(backend) => Some(backend),
+        None => provider::default_backend_for_component(dispatch.repo.as_deref())?,
+    };
+    let Some(backend) = backend else {
+        // No backend is resolvable yet; dispatch resolution reports that.
+        return Ok(());
+    };
+    provider::preflight_discovered_provider_credentials_for_backend(
+        &backend,
+        dispatch.selector.as_deref(),
+    )
+}
+
 /// Validates Cook input authority before destination provisioning, provider
 /// discovery, or any other external effect starts.
 pub(crate) fn validate_cook_request_with_provenance(
@@ -804,6 +835,10 @@ where
 {
     let args = resolve_cook_destination(args)?;
     validate_cook_request_with_provenance(&args, provenance)?;
+    // Before any external effect: a backend that cannot execute must say so now
+    // rather than after a workspace exists and an execution has been spent
+    // (#11479).
+    preflight_cook_provider_credentials(&args)?;
     let no_progress = args.no_progress;
     // Deterministic gates exist to make *publication* safe: a green gate is the
     // proof a cook may commit, push, and open a PR. A `--no-finalize` cook does

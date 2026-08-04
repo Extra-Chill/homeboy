@@ -12,7 +12,8 @@ use homeboy::agents::agent_tasks::promotion::{
     AgentTaskPromotionStatus,
 };
 use homeboy::agents::agent_tasks::provider::{
-    AgentTaskExecutorProvider, AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
+    provider_credential_readiness, AgentTaskExecutorProvider, AgentTaskProviderCatalog,
+    AgentTaskProviderCredentialReadiness, ExtensionProviderAgentTaskExecutor,
 };
 use homeboy::agents::agent_tasks::review_dossier::{
     homeboy_tool_disclosure, resolve_review_profile, validate_issue_reference,
@@ -1091,7 +1092,11 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
             "dispatch_config_layers": if args.full { dispatch_config_layers(providers) } else { Value::Null },
             "provider_identity_catalog": if args.full { provider_identity_catalog(providers) } else { Vec::new() },
             "capability_contract": homeboy::agents::agent_tasks::provider::provider_capability_contract(),
-            "providers": if args.full { serde_json::to_value(shown_providers).unwrap_or(Value::Null) } else { Value::Array(shown_providers.iter().map(compact_provider).collect()) },
+            "providers": if args.full { serde_json::to_value(shown_providers.clone()).unwrap_or(Value::Null) } else { Value::Array(shown_providers.iter().map(compact_provider).collect()) },
+            // Availability means dispatchable. Anything that is declared but
+            // not dispatchable reports the credential it is missing here so the
+            // remediation survives the `--full` serde presentation too (#11479).
+            "credential_readiness": credential_readiness_report(&shown_providers),
             "readiness_validation": {
                 "validated": args.validate_readiness,
                 "backend": args.backend,
@@ -1104,7 +1109,27 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     ))
 }
 
+/// A provider's catalog status.
+///
+/// `available` used to mean only "discovery parsed this provider", which made
+/// the catalog claim something Homeboy could not honor: a backend with no
+/// credential still advertised itself (and its `provider_owned_auth`
+/// capability), so a Cook dispatched to it and spent its whole execution budget
+/// discovering the gap inside the provider (#11479). Availability now means
+/// *dispatchable*: a provider whose declared credentials do not resolve here
+/// reports `unavailable`, and the compact presentation's `reason` names the
+/// credential.
 fn provider_status(provider: &AgentTaskExecutorProvider) -> &'static str {
+    provider_status_from_readiness(provider, &provider_credential_readiness(provider))
+}
+
+fn provider_status_from_readiness(
+    provider: &AgentTaskExecutorProvider,
+    readiness: &AgentTaskProviderCredentialReadiness,
+) -> &'static str {
+    if !readiness.dispatchable {
+        return "unavailable";
+    }
     if provider.default_backend {
         "default"
     } else {
@@ -1112,14 +1137,42 @@ fn provider_status(provider: &AgentTaskExecutorProvider) -> &'static str {
     }
 }
 
+/// Per-provider credential readiness for every provider that is not
+/// dispatchable. Emitted in both compact and `--full` presentations so an
+/// operator reading either one gets the remediation, not just a status word.
+fn credential_readiness_report(providers: &[AgentTaskExecutorProvider]) -> Vec<Value> {
+    providers
+        .iter()
+        .map(provider_credential_readiness)
+        .filter(|readiness| !readiness.dispatchable)
+        .map(|readiness| {
+            let remediation = readiness.remediation();
+            let mut value = serde_json::to_value(&readiness).unwrap_or(Value::Null);
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "reason".to_string(),
+                    Value::String(readiness.reason().unwrap_or_default()),
+                );
+                object.insert(
+                    "remediation".to_string(),
+                    Value::Array(remediation.into_iter().map(Value::String).collect()),
+                );
+            }
+            value
+        })
+        .collect()
+}
+
 fn compact_provider(provider: &AgentTaskExecutorProvider) -> Value {
+    let readiness = provider_credential_readiness(provider);
     serde_json::json!({
         "id": bounded_text(&provider.id, 160),
         "label": provider.label.as_deref().map(|value| bounded_text(value, 160)),
         "backend": bounded_text(&provider.backend, 160),
         "runtime_id": provider.runtime_id.as_deref().map(|value| bounded_text(value, 160)),
         "extension_id": provider.extension_id.as_deref().map(|value| bounded_text(value, 160)),
-        "status": provider_status(provider),
+        "status": provider_status_from_readiness(provider, &readiness),
+        "reason": readiness.reason().map(|value| bounded_text(&value, DEFAULT_TEXT_LIMIT)),
         "default_backend": provider.default_backend,
         "capabilities": provider.capabilities.iter().take(8).map(|value| bounded_text(value, 96)).collect::<Vec<_>>(),
     })
@@ -1698,6 +1751,97 @@ mod tests {
             command,
             "homeboy agent-task providers --full --backend 'backend; touch /tmp/unwanted' --selector 'provider id'"
         );
+    }
+
+    /// The claude-code shape from #11479: it advertises `provider_owned_auth`
+    /// and declares its own required credential.
+    fn credential_declaring_provider() -> AgentTaskExecutorProvider {
+        serde_json::from_value(serde_json::json!({
+            "id": "claude-code.agent-task-executor",
+            "backend": "claude-code",
+            "capabilities": ["cli_runtime", "provider_owned_auth"],
+            "provider_defaults": {
+                "claude-code": {
+                    "secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
+                    "required_secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"]
+                }
+            }
+        }))
+        .expect("provider fixture")
+    }
+
+    #[test]
+    fn a_provider_missing_its_declared_credential_is_not_reported_available() {
+        crate::test_support::with_isolated_home(|_| {
+            let provider = credential_declaring_provider();
+
+            assert_eq!(
+                provider_status(&provider),
+                "unavailable",
+                "availability must mean dispatchable, not merely declared (#11479)"
+            );
+
+            let compact = compact_provider(&provider);
+            assert_eq!(compact["status"], "unavailable");
+            assert_eq!(
+                compact["reason"], "missing credential AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN",
+                "the reason must name the credential an operator has to set"
+            );
+        });
+    }
+
+    #[test]
+    fn a_provider_with_no_declared_credential_stays_available() {
+        crate::test_support::with_isolated_home(|_| {
+            let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+                "id": "local-shell.agent-task-executor",
+                "backend": "local-shell",
+            }))
+            .expect("provider fixture");
+
+            assert_eq!(provider_status(&provider), "available");
+            assert!(compact_provider(&provider)["reason"].is_null());
+        });
+    }
+
+    #[test]
+    fn credential_readiness_report_carries_the_remediation() {
+        crate::test_support::with_isolated_home(|_| {
+            let report = credential_readiness_report(&[credential_declaring_provider()]);
+
+            assert_eq!(report.len(), 1, "one undispatchable provider is reported");
+            assert_eq!(report[0]["provider_id"], "claude-code.agent-task-executor");
+            assert_eq!(report[0]["dispatchable"], false);
+            assert_eq!(
+                report[0]["missing"][0],
+                "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"
+            );
+            assert!(
+                report[0]["remediation"]
+                    .as_array()
+                    .expect("remediation lines")
+                    .iter()
+                    .any(|line| {
+                        line.as_str().is_some_and(|line| {
+                            line.contains("AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN")
+                        })
+                    }),
+                "an undispatchable provider must report how to fix it"
+            );
+        });
+    }
+
+    #[test]
+    fn dispatchable_providers_are_absent_from_the_credential_readiness_report() {
+        crate::test_support::with_isolated_home(|_| {
+            let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+                "id": "local-shell.agent-task-executor",
+                "backend": "local-shell",
+            }))
+            .expect("provider fixture");
+
+            assert!(credential_readiness_report(&[provider]).is_empty());
+        });
     }
 
     fn recoverable_review_aggregate(
