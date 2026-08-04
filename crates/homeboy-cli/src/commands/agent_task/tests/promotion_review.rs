@@ -487,6 +487,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                         .to_string(),
                 ],
                 gates: VerifyGateArgs {
+                    accept_inherited_failures: false,
                     gate_package_artifacts: Vec::new(),
                     gate_extension_inputs: Vec::new(),
                     verify: vec!["cargo test --lib".to_string()],
@@ -495,6 +496,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                     gate_execution_policy: "ordered-fail-fast".to_string(),
                     gate_timeout_seconds: 30 * 60,
                     gate_heartbeat_interval_seconds: 5,
+                    gate_no_progress_timeout_seconds: 5 * 60,
                     rerun_completed_gates: false,
                     gate_environment_mode: "inherit".to_string(),
                     gate_environment: Vec::new(),
@@ -856,6 +858,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 provider_command: None,
                 provider_argv: vec!["sh".to_string(), provider.display().to_string()],
                 gates: VerifyGateArgs {
+                    accept_inherited_failures: false,
                     gate_package_artifacts: Vec::new(),
                     gate_extension_inputs: Vec::new(),
                     verify: vec!["true".to_string()],
@@ -864,6 +867,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                     gate_execution_policy: "ordered-fail-fast".to_string(),
                     gate_timeout_seconds: 30 * 60,
                     gate_heartbeat_interval_seconds: 5,
+                    gate_no_progress_timeout_seconds: 5 * 60,
                     rerun_completed_gates: false,
                     gate_environment_mode: "inherit".to_string(),
                     gate_environment: Vec::new(),

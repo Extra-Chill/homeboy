@@ -31,6 +31,9 @@ pub struct AgentTaskPrFinalizationReport {
     pub gate_results: Vec<AgentTaskGateResult>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub normalized_gate_results: Vec<HomeboyGateResult>,
+    /// Explicit policy for a baseline-red gate that proved non-regression.
+    #[serde(default)]
+    pub accept_inherited_failures: bool,
     pub proof: HomeboyProof,
     pub publication_intent: AgentTaskPublicationIntent,
     pub publication_proof: AgentTaskPublicationProof,
@@ -249,6 +252,8 @@ pub struct AgentTaskPrFinalizationOptions {
     pub commit_message: String,
     pub gate_results: Vec<AgentTaskGateResult>,
     pub normalized_gate_results: Vec<HomeboyGateResult>,
+    /// Explicit policy for a baseline-red gate that proved non-regression.
+    pub accept_inherited_failures: bool,
     pub changed_files: Vec<String>,
     pub evidence: AgentTaskPrEvidence,
     pub ai_used_for: String,

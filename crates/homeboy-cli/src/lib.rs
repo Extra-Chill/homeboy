@@ -33,8 +33,16 @@ pub use homeboy_core::{is_zero, is_zero_u32, log_status};
 pub mod cli_runtime;
 pub mod cli_surface;
 pub mod command_capability;
+#[allow(
+    dead_code,
+    reason = "Command contracts retain optional handoff output constructors."
+)]
 pub mod command_contract;
 #[doc(hidden)]
+#[allow(
+    dead_code,
+    reason = "CLI commands retain optional operator and recovery workflows."
+)]
 pub mod commands;
 pub mod help_topics;
 

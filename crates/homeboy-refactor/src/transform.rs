@@ -7,7 +7,7 @@
 
 use glob_match::glob_match;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 

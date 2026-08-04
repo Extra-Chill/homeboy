@@ -537,6 +537,7 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         commit_message,
         gate_results,
         normalized_gate_results,
+        accept_inherited_failures: false,
         changed_files: args.changed_files,
         evidence,
         ai_used_for: args.ai_used_for,
@@ -1403,6 +1404,10 @@ fn append_resume_contract(command: &mut Vec<String>, contract: &Value) {
         (
             "gate_heartbeat_interval_seconds",
             "--gate-heartbeat-interval-seconds",
+        ),
+        (
+            "gate_no_progress_timeout_seconds",
+            "--gate-no-progress-timeout-seconds",
         ),
     ] {
         if let Some(value) = gates.get(key) {

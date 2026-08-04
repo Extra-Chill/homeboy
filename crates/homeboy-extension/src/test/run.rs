@@ -1,7 +1,7 @@
 use crate as extension;
 use crate::runner::tail_lines;
-use crate::test::analyze::{analyze, TestAnalysis, TestAnalysisInput};
-use crate::test::baseline::{self, TestBaselineComparison, TestCounts};
+use crate::test::analyze::{analyze, TestAnalysisInput};
+use crate::test::baseline::{self, TestCounts};
 use crate::test::durations::{
     build_test_durations, parse_duration_samples, parse_test_durations_file, SlowTestPolicy,
     TestDurations,
@@ -10,7 +10,6 @@ use crate::test::{
     build_test_runner, build_test_summary, compute_changed_test_scope,
     normalize_test_passthrough_args, parse_coverage_file, parse_failures_file,
     parse_test_results_file_with_spec, parse_test_results_text, parse_test_results_text_with_spec,
-    CoverageOutput, TestScopeOutput, TestSummaryOutput,
 };
 use crate::{ExtensionCapability, ExtensionPhaseTiming};
 use homeboy_core::component::Component;
@@ -28,7 +27,6 @@ pub use homeboy_extension_contract::test_workflow::RawTestOutput;
 use homeboy_refactor_contract::AppliedRefactor;
 use regex::Regex;
 use serde::Deserialize;
-use serde::Serialize;
 use std::path::Path;
 use std::time::Duration;
 

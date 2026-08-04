@@ -356,8 +356,14 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                         base_ref: base_sha.to_string(),
                         exit_code: baseline.exit_code,
                         failure_fingerprint: failure_fingerprint(
+                            baseline.exit_code,
                             &baseline.stdout,
                             &baseline.stderr,
+                            baseline
+                                .failure_evidence
+                                .as_ref()
+                                .map(|evidence| evidence.diagnostics.as_slice())
+                                .unwrap_or_default(),
                         ),
                         matches_candidate_failure: false,
                         result: AgentTaskGateDifferentialResult::Inconclusive,
@@ -365,14 +371,36 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                     Ok(())
                 }
                 Ok(baseline) if baseline.status == AgentTaskGateStatus::Failed => {
-                    let matches = failure_fingerprint(&gate.stdout, &gate.stderr)
-                        == failure_fingerprint(&baseline.stdout, &baseline.stderr);
+                    let matches = failure_fingerprint(
+                        gate.exit_code,
+                        &gate.stdout,
+                        &gate.stderr,
+                        gate.failure_evidence
+                            .as_ref()
+                            .map(|evidence| evidence.diagnostics.as_slice())
+                            .unwrap_or_default(),
+                    ) == failure_fingerprint(
+                        baseline.exit_code,
+                        &baseline.stdout,
+                        &baseline.stderr,
+                        baseline
+                            .failure_evidence
+                            .as_ref()
+                            .map(|evidence| evidence.diagnostics.as_slice())
+                            .unwrap_or_default(),
+                    );
                     gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
                         base_ref: base_sha.to_string(),
                         exit_code: baseline.exit_code,
                         failure_fingerprint: failure_fingerprint(
+                            baseline.exit_code,
                             &baseline.stdout,
                             &baseline.stderr,
+                            baseline
+                                .failure_evidence
+                                .as_ref()
+                                .map(|evidence| evidence.diagnostics.as_slice())
+                                .unwrap_or_default(),
                         ),
                         matches_candidate_failure: matches,
                         result: if matches {
@@ -391,8 +419,14 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                         base_ref: base_sha.to_string(),
                         exit_code: baseline.exit_code,
                         failure_fingerprint: failure_fingerprint(
+                            baseline.exit_code,
                             &baseline.stdout,
                             &baseline.stderr,
+                            baseline
+                                .failure_evidence
+                                .as_ref()
+                                .map(|evidence| evidence.diagnostics.as_slice())
+                                .unwrap_or_default(),
                         ),
                         matches_candidate_failure: false,
                         result: AgentTaskGateDifferentialResult::CandidateRegression,
@@ -790,7 +824,7 @@ mod tests {
             assert_eq!(
                 promotion.status,
                 if accepted {
-                    crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+                    crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
                 } else {
                     crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
                 }

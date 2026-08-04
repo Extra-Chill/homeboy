@@ -19,9 +19,7 @@ use homeboy_core::command_invocation::COMMAND_INVOCATION_SCHEMA;
 use homeboy_core::{Error, Result};
 use homeboy_extension::{load_extension, ExtensionManifest};
 
-use super::{
-    AgentTaskExecutorProvider, AgentTaskProviderRunnerSource, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
-};
+use super::AgentTaskExecutorProvider;
 
 pub(crate) fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorProvider> {
     discover_agent_task_executor_provider_catalog().providers

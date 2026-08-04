@@ -16,6 +16,10 @@ pub mod content_hash;
 pub mod detail_output;
 pub mod edit_op;
 pub mod edit_op_apply;
+#[allow(
+    dead_code,
+    reason = "Lock configuration is retained for diagnostic and platform-specific behavior."
+)]
 pub mod fs_index_lock;
 pub mod git_changes;
 pub mod grammar;

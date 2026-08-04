@@ -1583,6 +1583,33 @@ impl AgentTaskExecutorAdapter for RecordingReviewFormExecutor {
 }
 
 #[derive(Clone)]
+struct TerminalSuccessExecutor;
+
+impl AgentTaskExecutorAdapter for TerminalSuccessExecutor {
+    fn execute(
+        &self,
+        request: crate::agent_task::AgentTaskRequest,
+        _context: crate::agent_task_scheduler::AgentTaskExecutionContext,
+    ) -> crate::agent_task::AgentTaskOutcome {
+        crate::agent_task::AgentTaskOutcome {
+            schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id,
+            status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
+            summary: Some("terminal retry fixture succeeded".to_string()),
+            failure_classification: None,
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        }
+    }
+}
+
+#[derive(Clone)]
 struct ProviderMissingExecutor;
 
 impl AgentTaskExecutorAdapter for ProviderMissingExecutor {
@@ -2843,7 +2870,7 @@ fn retryable_pre_provider_retry_returns_terminal_successor_without_reexecution()
             .expect("persist successor retry proof");
         crate::agent_task_service::execution::run_submitted(
             successor_run_id.clone(),
-            ImmediateSuccessExecutor,
+            TerminalSuccessExecutor,
         )
         .expect("complete successor successfully");
 
@@ -5816,48 +5843,21 @@ fn resume_promoted_patch_guidance_keeps_the_exhausted_zero_byte_attempt_as_lates
         let context = report.value.failure_context.expect("recovery context");
         assert_eq!(context.latest_run_id, latest_empty_run_id);
         assert_eq!(context.selected_run_id.as_deref(), Some(candidate_run_id));
-        let actions = context.legal_actions;
-        assert!(actions
-            .iter()
-            .all(|action| action.action != "promote_selected_candidate"));
-        let review_action = actions
-            .iter()
-            .find(|action| action.action == "review_selected_candidate")
-            .expect("selected-candidate review action");
         assert_eq!(
-            review_action.command,
-            format!(
-                "homeboy agent-task review {candidate_run_id} --to-worktree fixture@destination"
-            )
+            context
+                .legal_actions
+                .iter()
+                .map(|action| action.action.as_str())
+                .collect::<Vec<_>>(),
+            ["status", "diagnose"],
+            "an exhausted Cook must not advertise lifecycle commands that cannot advance it"
         );
-        assert!(actions.iter().any(|action| {
-            action.command == format!("homeboy agent-task finalize-pr --recover {candidate_run_id}")
-        }));
 
         agent_task_lifecycle::rewrite_record_for_test(candidate_run_id, |record| {
             record.metadata["latest_promotion"]["command_evidence"][0]["exit_code"] =
                 serde_json::json!(1);
         })
         .expect("remove destination proof");
-        let unproven = cook_report(CookReportInput {
-            cook_id: cook_id.to_string(),
-            status: "execution_budget_exhausted",
-            disposition: CookDisposition::Terminal,
-            attempts: Vec::new(),
-            finalization: None,
-            stop_reason: None,
-            exit_code: 1,
-            invocation_latest_run_id: Some(&latest_empty_run_id),
-        })
-        .value
-        .failure_context
-        .expect("unproven destination context");
-        assert!(unproven.legal_actions.iter().any(|action| {
-            action.command == format!(
-                "homeboy agent-task promote {candidate_run_id} --to-worktree fixture@destination --task-id provider --artifact-id candidate"
-            )
-        }));
-
         let selected_record = agent_task_lifecycle::status(candidate_run_id).unwrap();
         let promotion = &selected_record.metadata["latest_promotion"];
         assert_eq!(
@@ -6338,7 +6338,10 @@ fn record_tracked_promotion_continuation(
     agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id))
         .unwrap();
     let mut checkpoint = serde_json::to_value(promotion(&options.initial_run_id)).unwrap();
-    checkpoint["status"] = serde_json::json!("verification_pending");
+    checkpoint["status"] = serde_json::json!("gate_failed");
+    checkpoint["deterministic_gates"][0]["status"] = serde_json::json!("failed");
+    checkpoint["deterministic_gates"][0]["exit_code"] = serde_json::json!(1);
+    checkpoint["gate_results"][0]["status"] = serde_json::json!("failed");
     let patch = Command::new("git")
         .args(["diff", "--binary", "--full-index"])
         .current_dir(target)
@@ -6500,6 +6503,19 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         homeboy_core::defaults::save_config(&config).expect("save provider config");
         crate::agent_task_candidate_baseline::register();
 
+        assert!(
+            tracked_promotion_continuation(&options).unwrap().is_none(),
+            "gate-failed promotion requires cook-continue context"
+        );
+        options.initial_plan.metadata["cook_continue_context"] = serde_json::json!({
+            "schema": "homeboy/agent-task-cook-continue-context/v1",
+            "run_id": options.initial_run_id,
+        });
+        assert!(
+            tracked_promotion_continuation(&options).unwrap().is_none(),
+            "forged plan metadata cannot authorize a gate-failed continuation"
+        );
+        authorize_cook_continue_route(&options).unwrap();
         let continuation = tracked_promotion_continuation(&options)
             .unwrap()
             .expect("tracked promotion continuation");
@@ -6515,7 +6531,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             "workspace.resolved_but_dirty"
         );
         validate_cook_workspace(&options)
-            .expect("exact dirty promoted provider destination resumes");
+            .expect("exact gate-failed promoted provider destination resumes");
 
         std::fs::write(target.join("extra.txt"), "unattributed\n").unwrap();
         let error = validate_cook_workspace(&options).expect_err("extra drift is rejected");
@@ -6756,6 +6772,14 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         )
         .expect("the exact promoted candidate reaches local review dispatch");
         assert_eq!(
+            result.value.attempts[0]
+                .feedback
+                .as_ref()
+                .expect("historical applied promotion requests a form-only retry")
+                .status,
+            AgentTaskCookLoopStatus::RetryRequested
+        );
+        assert_eq!(
             executions.load(Ordering::SeqCst),
             1,
             "continuation status: {}; stop reason: {:?}",
@@ -6771,6 +6795,26 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         assert_eq!(trace["first_authoritative_denial"], serde_json::Value::Null);
         assert_eq!(trace["predicates"].as_array().unwrap().len(), 8);
         assert!(trace.to_string().len() < 2048, "trace remains bounded");
+        std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
+        let mut other_cook = tracked_promotion_continuation_options(
+            "cook-other-promotion",
+            "run-other-promotion",
+            &target,
+        );
+        other_cook.to_worktree = options.to_worktree.clone();
+        other_cook.initial_plan.metadata["cook_continue_context"] = serde_json::json!({
+            "schema": "homeboy/agent-task-cook-continue-context/v1",
+            "run_id": other_cook.initial_run_id,
+        });
+        assert!(
+            tracked_promotion_continuation(&other_cook)
+                .unwrap()
+                .is_none(),
+            "a different Cook cannot claim this attempt's promotion"
+        );
+        let error = validate_cook_workspace(&other_cook)
+            .expect_err("another Cook cannot reuse a dirty promoted candidate");
+        assert_eq!(error.details["workspace"]["reason"], "unattributed_drift");
     });
 }
 
@@ -6795,13 +6839,13 @@ fn adopted_baseline_gate_outcome_is_candidate_bound_and_recovery_safe() {
 
     assert_eq!(
         accepted.status,
-        crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+        crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
     );
     assert_eq!(
         accepted.gate_results[0].status,
-        homeboy_core::gate::HomeboyGateStatus::Passed
+        homeboy_core::gate::HomeboyGateStatus::Failed
     );
-    assert!(accepted.has_visible_passed_gate_for_command(command));
+    assert!(!accepted.has_visible_passed_gate_for_command(command));
 
     let mut regression = accepted.clone();
     regression.status = crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed;
@@ -6831,7 +6875,7 @@ fn adopted_baseline_gate_outcome_is_candidate_bound_and_recovery_safe() {
 }
 
 #[test]
-fn closed_observer_pipe_does_not_stop_promotion_or_finalization() {
+fn closed_observer_pipe_does_not_stop_explicitly_accepted_inherited_gate_finalization() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("repository");
         let root = temp.path();
@@ -6859,6 +6903,7 @@ fn closed_observer_pipe_does_not_stop_promotion_or_finalization() {
         options.to_worktree = root.display().to_string();
         options.source_worktree_path = Some(root.to_path_buf());
         options.max_attempts = 1;
+        options.gates.accept_inherited_failures = true;
         options.gates.verify = vec!["cat failure >&2; exit 1".to_string()];
         options.initial_plan.options.execution_budget =
             crate::agent_task_scheduler::AgentTaskExecutionBudget::new(1, 0, 0);
@@ -6938,6 +6983,11 @@ fn closed_observer_pipe_does_not_stop_promotion_or_finalization() {
         )
         .unwrap();
         assert_eq!(result.value.status, "review_ready", "{:#?}", result.value);
+        assert!(result
+            .value
+            .stop_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("accepted inherited baseline-red")));
         assert_eq!(finalized.load(Ordering::SeqCst), 1);
         assert!(observer_calls.load(Ordering::SeqCst) >= 1);
         let record = agent_task_lifecycle::status(&run_id).unwrap();
@@ -6956,11 +7006,15 @@ fn closed_observer_pipe_does_not_stop_promotion_or_finalization() {
             "the disconnected observer can reconnect to the terminal durable result"
         );
         let persisted = persisted_promotion_for_attempt(&run_id).unwrap().unwrap();
-        assert_eq!(persisted.status, AgentTaskPromotionStatus::Applied);
+        assert_eq!(persisted.status, AgentTaskPromotionStatus::GateFailed);
         assert_eq!(persisted.deterministic_gates[0].exit_code, 1);
         assert_eq!(
             persisted.deterministic_gates[0].status,
             crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure
+        );
+        assert_eq!(
+            persisted.gate_results[0].status,
+            homeboy_core::gate::HomeboyGateStatus::AcceptedInheritedFailure
         );
         assert_eq!(
             persisted.deterministic_gates[0]
@@ -8989,6 +9043,110 @@ fn durable_controller_failure_reports_this_invocation_run_not_the_stale_cook_ind
                 action.command
             );
         }
+    });
+}
+
+#[test]
+fn recovery_context_uses_current_gate_and_finalization_evidence_not_an_older_candidate() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-recovery-phase-truth";
+        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        let current_run_id = options.initial_run_id.clone();
+        let older_run_id = "cook-recovery-phase-truth-older";
+        let artifacts = tempfile::tempdir().expect("candidate artifacts");
+        persist_initial_recipe(&options).expect("persist recipe");
+        for (attempt, run_id) in [(1, older_run_id), (2, current_run_id.as_str())] {
+            agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
+                .expect("persist lifecycle record");
+            agent_task_lifecycle::record_cook_attempt(cook_id, attempt, run_id)
+                .expect("persist Cook attempt");
+        }
+
+        // This older green candidate remains selectable across the Cook history.
+        // It must not influence recovery for the current failed invocation.
+        seed_substantive_candidate_aggregate(
+            older_run_id,
+            &options.initial_plan,
+            &artifacts.path().join("older.patch"),
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+older\n",
+        );
+        agent_task_lifecycle::record_promotion(
+            older_run_id,
+            serde_json::to_value(promotion(older_run_id)).unwrap(),
+        )
+        .unwrap();
+        let mut failed_gate = promotion(&current_run_id);
+        failed_gate.status = AgentTaskPromotionStatus::GateFailed;
+        agent_task_lifecycle::record_promotion(
+            &current_run_id,
+            serde_json::to_value(&failed_gate).unwrap(),
+        )
+        .unwrap();
+
+        let gate_context = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "durable_failure",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 1,
+            invocation_latest_run_id: Some(&current_run_id),
+        })
+        .value
+        .failure_context
+        .expect("gate recovery context");
+        assert_eq!(gate_context.phase, "deterministic_gate");
+        assert_eq!(gate_context.reason_code, "gate_failed");
+        assert_eq!(gate_context.selected_run_id.as_deref(), Some(older_run_id));
+        assert!(gate_context.legal_actions.iter().all(|action| {
+            action.command.contains(&current_run_id) && !action.command.contains(older_run_id)
+        }));
+
+        let applied = promotion(&current_run_id);
+        agent_task_lifecycle::record_promotion(
+            &current_run_id,
+            serde_json::to_value(&applied).unwrap(),
+        )
+        .unwrap();
+        let operation_key = format!("finalize:{current_run_id}");
+        agent_task_lifecycle::claim_cook_operation(
+            &current_run_id,
+            &operation_key,
+            std::time::Duration::from_secs(60),
+        )
+        .unwrap();
+        agent_task_lifecycle::fail_cook_operation(
+            &current_run_id,
+            &operation_key,
+            serde_json::json!({ "code": "publication_rejected" }),
+        )
+        .unwrap();
+
+        let finalization_context = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "durable_failure",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 1,
+            invocation_latest_run_id: Some(&current_run_id),
+        })
+        .value
+        .failure_context
+        .expect("finalization recovery context");
+        assert_eq!(finalization_context.phase, "finalization");
+        assert_eq!(finalization_context.reason_code, "publication_rejected");
+        assert_eq!(
+            finalization_context
+                .diagnostic
+                .expect("durable finalization reason")["code"],
+            "publication_rejected"
+        );
+        assert!(finalization_context.legal_actions.iter().all(|action| {
+            action.command.contains(&current_run_id) && !action.command.contains(older_run_id)
+        }));
     });
 }
 

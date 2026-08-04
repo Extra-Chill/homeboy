@@ -688,12 +688,16 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn script(body: &str) -> NamedTempFile {
+    fn script(body: &str) -> tempfile::TempPath {
         use std::os::unix::fs::PermissionsExt;
-        let file = NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        file
+        // NamedTempFile holds its own write handle open for as long as it
+        // lives, and Linux refuses to exec a file that is open for writing
+        // (ETXTBSY). Convert to a TempPath so the script is closed before the
+        // verifier runs it while the file still outlives the test body.
+        let path = NamedTempFile::new().unwrap().into_temp_path();
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
     }
 
     #[cfg(unix)]
@@ -703,7 +707,7 @@ mod tests {
         let mut output = signed_output(&request);
         output = output.replacen("reviewer", "attacker", 1);
         let file = script(&format!("printf '%s' '{}'", output.replace('\'', "'\\''")));
-        let error = verifier(vec![file.path().display().to_string()], 2_000)
+        let error = verifier(vec![file.display().to_string()], 2_000)
             .verify_acceptance(&request)
             .unwrap_err();
         assert!(
@@ -720,7 +724,7 @@ mod tests {
         let output = signed_output(&request);
         let file = script(&format!("printf '%s' '{}'", output.replace('\'', "'\\''")));
 
-        let attestation = verifier(vec![file.path().display().to_string()], 2_000)
+        let attestation = verifier(vec![file.display().to_string()], 2_000)
             .verify_acceptance(&request)
             .expect("complete valid signed verifier output is accepted");
 
@@ -738,7 +742,7 @@ mod tests {
             output.replace('\'', "'\\''")
         ));
         let started = Instant::now();
-        let error = verifier(vec![file.path().display().to_string()], 2_000)
+        let error = verifier(vec![file.display().to_string()], 2_000)
             .verify_acceptance(&request)
             .unwrap_err();
         assert!(
@@ -789,7 +793,7 @@ mod tests {
     #[test]
     fn command_verifier_times_out_while_stdin_is_backpressured() {
         let file = script("sleep 5");
-        let error = verifier(vec![file.path().display().to_string()], 50)
+        let error = verifier(vec![file.display().to_string()], 50)
             .verify_acceptance(&request(&"x".repeat(512 * 1024)))
             .unwrap_err();
         assert!(error.message.contains("timed out"));
@@ -804,7 +808,7 @@ mod tests {
             "(sleep 1; printf escaped > '{marker_path}') & cat >&2; exit 1"
         ));
         let token = "literal-token-that-must-not-leak";
-        let error = verifier(vec![file.path().display().to_string()], 500)
+        let error = verifier(vec![file.display().to_string()], 500)
             .verify_acceptance(&request(token))
             .unwrap_err();
         assert!(!error.message.contains(token));

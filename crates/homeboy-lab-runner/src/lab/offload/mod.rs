@@ -90,8 +90,8 @@ use super::super::lab_plan::{base_lab_plan, disabled_select_runner_plan, with_st
 use super::super::lab_selection::{
     fail_if_no_default_runner_accepts_jobs, lab_runner_availability_error,
     preflight_lab_runner_availability, prepare_lab_runner_for_offload,
-    release_gate_local_hot_denied_error, resolve_lab_runner_selection, status_tunnel_mode,
-    LabRunnerPreparation, LabRunnerSelection, LabRunnerSelectionSource,
+    release_gate_local_hot_denied_error, status_tunnel_mode, LabRunnerPreparation,
+    LabRunnerSelection, LabRunnerSelectionSource,
 };
 use super::super::lab_workspaces::{
     agent_task_fanout_extra_workspaces, agent_task_plan_extra_workspaces,

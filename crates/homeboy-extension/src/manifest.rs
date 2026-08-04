@@ -2,10 +2,9 @@ pub use homeboy_audit_contract::test_mapping::{
     BehaviorScenarioNames, IncludeWrapperPolicy, PackageNameSource, TestMappingConfig,
     TestVacuityPolicy,
 };
-use homeboy_audit_contract::AuditConfig;
+#[cfg(test)]
 use homeboy_core::config::ConfigEntity;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::paths;
 pub use homeboy_extension_contract::extension_contract_producer::{
     ExtensionContractProducer, ExtensionContractProducerInvocation,
     ExtensionContractProducerOutput, ExtensionContractProducerOutputKind,
@@ -18,9 +17,6 @@ pub use homeboy_extension_contract::manifest_capability_config::{
     ExtensionToolDiagnosticDeclaration, FeatureContextRule, ProvidesConfig, ReleasePreflightConfig,
     RuntimeRequirementsConfig, ScriptsConfig,
 };
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
 
 // Keep broad manifest wiring here while leaf config structs live in focused files.
 pub use super::manifest_config::{
@@ -31,28 +27,25 @@ pub use super::manifest_sidecar::{StructuredSidecarContract, StructuredSidecarDe
 pub use homeboy_extension_contract::ci_config::{
     CiCapability, CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext, CiProfileSpec,
 };
-pub use homeboy_extension_contract::fuzz_config::{FuzzConfig, FuzzWorkloadConfig};
+pub use homeboy_extension_contract::fuzz_config::FuzzConfig;
 pub use homeboy_extension_contract::manifest_action_config::{
     ActionConfig, InputConfig, RuntimeConfig, SelectOption, SettingConfig,
 };
 pub use homeboy_extension_contract::manifest_capabilities::{
-    AgentTaskPolicyConfig, AuditCapability, DeployCapability, ExecutableCapability,
-    PlatformCapability,
+    AuditCapability, DeployCapability, ExecutableCapability, PlatformCapability,
 };
 pub use homeboy_extension_contract::manifest_toolchain_config::{
     BenchConfig, BuildConfig, CliAutoFlag, CliAutoFlagCondition, CliConfig, CliHelpConfig,
     DatabaseCliConfig, DatabaseConfig, DeployOverride, DeployOwnerHint, DeployVerification,
-    DepsConfig, DiscoveryConfig, EnvProviderConfig, FileContainsCondition, LintChangedFileRoute,
-    LintConfig, PortableEnvConfig, RemotePathInferenceRule, RemotePathRootRule, RequirementsConfig,
+    DepsConfig, DiscoveryConfig, FileContainsCondition, LintChangedFileRoute, LintConfig,
+    PortableEnvConfig, RemotePathInferenceRule, RemotePathRootRule, RequirementsConfig,
     SinceTagConfig, SourceSnapshotConfig, TestChangedFileExclusiveEnv, TestChangedFileRouting,
     TestChangedFileRoutingStrategy, TestConfig, TestNoTestsApplicablePolicy,
-    TestSecretEnvProjection, TestSettingStringPredicate, ToolchainReadinessProbe,
-    VersionPatternConfig,
+    TestSecretEnvProjection, TestSettingStringPredicate, VersionPatternConfig,
 };
-pub use homeboy_extension_contract::DeployArchiveInstallPolicy;
 pub use homeboy_extension_contract::{TestPassthroughFilter, TestPassthroughFilterStrategy};
 
-pub use homeboy_extension_contract::action_types::{ActionType, BuiltinAction, HttpMethod};
+pub use homeboy_extension_contract::action_types::{ActionType, HttpMethod};
 
 // ============================================================================
 // Capability Groups

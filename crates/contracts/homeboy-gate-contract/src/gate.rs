@@ -49,6 +49,10 @@ pub enum HomeboyGateKind {
 pub enum HomeboyGateStatus {
     Passed,
     Failed,
+    /// The candidate failed, but the same failure was reproduced against its
+    /// immutable baseline. This remains red unless a caller explicitly accepts
+    /// the proven non-regression for its own policy boundary.
+    AcceptedInheritedFailure,
     Skipped,
     Blocked,
 }

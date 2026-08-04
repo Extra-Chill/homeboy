@@ -13,7 +13,9 @@
 //!    - Resolve the PR's head SHA + head repo coordinates via `gh pr view`.
 //!    - Add a temporary remote for the PR's head repo (if it's not the
 //!      base repo and not already configured) and fetch the head SHA.
-//!    - `git cherry-pick <sha>`.
+//!    - For a merge head, fetch its GitHub `baseRefOid`, identify the unique
+//!      base-side parent, then `git cherry-pick -m <base-side-parent> <sha>`.
+//!      Non-merge heads use ordinary `git cherry-pick <sha>`.
 //!    - On `--allow-empty`-style "nothing to commit" outcome (the PR is
 //!      already in base), skip cleanly.
 //!    - On any other conflict, return [`Error::stack_apply_conflict`] with a
@@ -162,8 +164,17 @@ fn rebuild(
         let head_remote = ensure_head_remote(&path, pr, &head, &mut ensured_remotes)?;
         fetch_sha(&path, &head_remote, &head.sha)?;
 
-        // Cherry-pick.
-        match cherry_pick(&path, &head.sha)? {
+        // A shallow checkout may contain the fetched merge head without its
+        // GitHub-recorded base. Fetch that exact object before ancestry checks.
+        if is_merge_commit(&path, &head.sha)? {
+            let base_sha = required_merge_base_sha(pr, &head)?;
+            fetch_sha(&path, &spec.base.remote, base_sha)?;
+        }
+
+        // A merge head must be picked relative to its base-side parent so the
+        // resulting patch remains the PR's feature change rather than its
+        // base-branch merge.
+        match cherry_pick_pr_head(&path, pr, &head)? {
             CherryPickResult::Picked => {
                 picked += 1;
                 applied.push(AppliedPr {
@@ -456,7 +467,122 @@ pub(super) fn fetch_sha(path: &str, remote: &str, sha: &str) -> Result<()> {
 }
 
 pub(crate) fn cherry_pick(path: &str, sha: &str) -> Result<CherryPickResult> {
-    let output = run_git(path, &["cherry-pick", sha])?;
+    cherry_pick_with_mainline(path, sha, None)
+}
+
+fn cherry_pick_pr_head(path: &str, pr: &StackPrEntry, head: &PrHead) -> Result<CherryPickResult> {
+    let mainline = base_side_merge_parent(path, pr, head)?;
+    cherry_pick_with_mainline(path, &head.sha, mainline)
+}
+
+/// Return the one-based base-side parent number for a merge commit, if any.
+/// Non-merge heads retain ordinary cherry-pick behavior.
+fn base_side_merge_parent(path: &str, pr: &StackPrEntry, head: &PrHead) -> Result<Option<usize>> {
+    let parents = merge_parents(path, &head.sha)?;
+    if parents.len() < 2 {
+        return Ok(None);
+    }
+
+    let base_sha = required_merge_base_sha(pr, head)?;
+    let mut candidates = Vec::new();
+    for (index, parent) in parents.iter().enumerate() {
+        let output = run_git(path, &["merge-base", "--is-ancestor", parent, base_sha])?;
+        if output.status.success() {
+            candidates.push(index + 1);
+        } else if output.status.code() != Some(1) {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Error::git_command_failed(format!(
+                "git merge-base --is-ancestor {} {}: {}",
+                parent,
+                base_sha,
+                stderr.trim()
+            )));
+        }
+    }
+
+    match candidates.as_slice() {
+        [mainline] => Ok(Some(*mainline)),
+        _ => Err(merge_parent_error(
+            pr,
+            head,
+            "zero or multiple merge parents are equal to or ancestors of the authoritative PR base",
+            &candidates,
+        )),
+    }
+}
+
+fn is_merge_commit(path: &str, sha: &str) -> Result<bool> {
+    Ok(merge_parents(path, sha)?.len() >= 2)
+}
+
+fn merge_parents(path: &str, sha: &str) -> Result<Vec<String>> {
+    let output = run_git(path, &["rev-list", "--parents", "-n", "1", sha])?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::git_command_failed(format!(
+            "git rev-list --parents -n 1 {}: {}",
+            sha,
+            stderr.trim()
+        )));
+    }
+    let revision_output = String::from_utf8_lossy(&output.stdout);
+    let mut revisions = revision_output.split_whitespace();
+    let _commit = revisions.next();
+    Ok(revisions.map(str::to_string).collect())
+}
+
+fn required_merge_base_sha<'a>(pr: &StackPrEntry, head: &'a PrHead) -> Result<&'a str> {
+    head.base_sha.as_deref().ok_or_else(|| {
+        merge_parent_error(
+            pr,
+            head,
+            "GitHub returned no baseRefOid for this merge head",
+            &[],
+        )
+    })
+}
+
+fn merge_parent_error(
+    pr: &StackPrEntry,
+    head: &PrHead,
+    reason: &str,
+    candidates: &[usize],
+) -> Error {
+    let candidate_text = if candidates.is_empty() {
+        "none".to_string()
+    } else {
+        candidates
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Error::git_command_failed(format!(
+        "refusing to cherry-pick merge head {} for {}#{}: {} (baseRefOid: {}, candidate parents: {}). \
+         Rebase the PR onto its current base branch and retry; no cherry-pick was started.",
+        head.sha,
+        pr.repo,
+        pr.number,
+        reason,
+        head.base_sha.as_deref().unwrap_or("missing"),
+        candidate_text,
+    ))
+}
+
+fn cherry_pick_with_mainline(
+    path: &str,
+    sha: &str,
+    mainline: Option<usize>,
+) -> Result<CherryPickResult> {
+    let mainline_arg;
+    let args: Vec<&str> = match mainline {
+        Some(parent) => {
+            mainline_arg = parent.to_string();
+            vec!["cherry-pick", "-m", &mainline_arg, sha]
+        }
+        None => vec!["cherry-pick", sha],
+    };
+    let output = run_git(path, &args)?;
     if output.status.success() {
         return Ok(CherryPickResult::Picked);
     }

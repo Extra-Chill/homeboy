@@ -7,7 +7,7 @@ use serde::Serialize;
 use homeboy_agents::agent_task_provider;
 use homeboy_agents::agent_task_scheduler::AgentTaskPlan;
 use homeboy_core::worktree::TaskWorktreeState;
-use homeboy_core::{component, worktree, Error, Result};
+use homeboy_core::{component, Error, Result};
 
 use super::lab_workspaces_deps::{
     accepted_extra_lab_workspaces, add_candidate_extra_workspace, bare_module_imports,
@@ -19,6 +19,7 @@ use super::{
     sync_workspace, RunnerGitDependencyMaterializationOutput, RunnerValidationDependencySyncOutput,
     RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
+use crate::rig_materialization::LabStackComponentMaterialization;
 
 pub(super) const LAB_EXTRA_WORKSPACES_ENV: &str = "HOMEBOY_LAB_EXTRA_WORKSPACES";
 pub(super) const LAB_EXTRA_WORKSPACES_JSON_ENV: &str = "HOMEBOY_LAB_EXTRA_WORKSPACES_JSON";
@@ -329,11 +330,41 @@ pub(super) fn workspace_mapping_entries_for_git_dependency(
     entries
 }
 
+/// A runner-materialized declared stack intentionally has no controller-local
+/// path. Its immutable source and resulting revision stay in the durable
+/// workspace mapping rather than inventing a controller path for remapping.
+pub(super) fn workspace_mapping_entry_for_lab_stack(
+    role: impl Into<String>,
+    materialization: &LabStackComponentMaterialization,
+) -> LabWorkspaceMappingEntry {
+    LabWorkspaceMappingEntry {
+        role: role.into(),
+        local_path: String::new(),
+        remote_path: materialization.remote_path.clone(),
+        sync_mode: "runner_git_stack".to_string(),
+        snapshot_identity: materialization.provenance.resulting_revision.clone(),
+        dependency_freshness: Some(serde_json::json!({
+            "source_kind": materialization.provenance.source_kind,
+            "repository": materialization.provenance.repository,
+            "base": materialization.provenance.base,
+            "prs": materialization.provenance.prs,
+            "resulting_revision": materialization.provenance.resulting_revision,
+            "network_scope": materialization.provenance.network_scope,
+            "credential_scope": materialization.provenance.credential_scope,
+        })),
+        source_provenance: Some(
+            serde_json::to_value(&materialization.provenance)
+                .expect("Lab stack provenance serializes"),
+        ),
+    }
+}
+
 pub(super) fn lab_workspace_mapping_metadata(
     workspace_mapping: &[LabWorkspaceMappingEntry],
 ) -> serde_json::Value {
     let local_to_remote = workspace_mapping
         .iter()
+        .filter(|entry| !entry.local_path.is_empty())
         .map(|entry| {
             (
                 entry.local_path.clone(),

@@ -7,8 +7,6 @@
 
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
-
 use homeboy_core::error::Result;
 use homeboy_engine_primitives::baseline::{self as generic, BaselineConfig};
 pub use homeboy_extension_contract::test_result::TestCounts;

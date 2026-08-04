@@ -75,6 +75,9 @@ pub struct AgentTaskCookLoopReport {
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskCookLoopStatus {
     GreenCompleted,
+    /// The candidate and immutable baseline failed identically. The candidate
+    /// is not a regression, but required verification is still red.
+    BaselineRed,
     IntentionalNoChange,
     NoChanges,
     NoOpGateFailed,
@@ -202,7 +205,12 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         .promotion_report
         .deterministic_gates
         .iter()
-        .filter(|gate| gate.status == AgentTaskGateStatus::Failed)
+        .filter(|gate| {
+            matches!(
+                gate.status,
+                AgentTaskGateStatus::Failed | AgentTaskGateStatus::AcceptedInheritedFailure
+            )
+        })
         .map(|gate| gate_failure(gate, options.source_run_id.as_deref()))
         .collect();
     let failed_gate_results: Vec<HomeboyGateResult> = options
@@ -213,6 +221,18 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         .filter(|gate| gate.status == HomeboyGateStatus::Failed)
         .collect();
     let retry_budget_remaining = options.max_attempts.saturating_sub(options.attempt);
+    let baseline_red = options
+        .promotion_report
+        .deterministic_gates
+        .iter()
+        .any(|gate| {
+            gate.status == AgentTaskGateStatus::AcceptedInheritedFailure
+                && gate.baseline_comparison.as_ref().is_some_and(|comparison| {
+                    comparison.result
+                        == crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed
+                        && comparison.matches_candidate_failure
+                })
+        });
     let intentional_no_change = (options.promotion_report.status
         == AgentTaskPromotionStatus::VerifiedNoChanges)
         .then(|| {
@@ -229,6 +249,7 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
     apply_failure_progression_to_quality(&mut quality, &failure_progression);
     let should_retry = options.promotion_report.status == AgentTaskPromotionStatus::GateFailed
         && !failed_gates.is_empty()
+        && !baseline_red
         && retry_budget_remaining > 0;
     // Deterministic gates take precedence: a red gate must be fixed before the
     // review form is even worth requesting. Only once the change itself is green
@@ -265,6 +286,8 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         AgentTaskCookLoopStatus::IntentionalNoChange
     } else if quality.classification == AgentTaskCookLoopQualityClassification::NoChanges {
         AgentTaskCookLoopStatus::NoChanges
+    } else if baseline_red {
+        AgentTaskCookLoopStatus::BaselineRed
     } else if !failed_gates.is_empty() {
         AgentTaskCookLoopStatus::RetriesExhausted
     } else if matches!(&review_form_gap, Some(Some(_))) {
@@ -289,7 +312,7 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         failed_gate_results,
         follow_up_request,
         intentional_no_change,
-        metadata: report_metadata(options.metadata, &failure_progression),
+        metadata: report_metadata(options.metadata, &failure_progression, baseline_red),
     }
 }
 
@@ -705,9 +728,20 @@ fn follow_up_instructions(
     )
 }
 
-fn report_metadata(metadata: Value, progression: &AgentTaskCookLoopFailureProgression) -> Value {
+fn report_metadata(
+    metadata: Value,
+    progression: &AgentTaskCookLoopFailureProgression,
+    baseline_red: bool,
+) -> Value {
     let mut metadata = metadata.as_object().cloned().unwrap_or_default();
     metadata.insert("failure_progression".to_string(), json!(progression));
+    if baseline_red {
+        metadata.insert("baseline_red".to_string(), Value::Bool(true));
+        metadata.insert(
+            "failure_origin".to_string(),
+            Value::String("inherited_infrastructure".to_string()),
+        );
+    }
     Value::Object(metadata)
 }
 
@@ -1074,39 +1108,93 @@ mod tests {
     }
 
     #[test]
-    fn accepted_inherited_failure_completes_without_hiding_a_regression() {
+    fn baseline_comparison_keeps_required_gate_truthful() {
         let mut inherited = failed_gate();
         inherited.status = AgentTaskGateStatus::AcceptedInheritedFailure;
-        let accepted = evaluate_cook_loop(AgentTaskCookLoopOptions {
+        inherited.baseline_comparison =
+            Some(crate::agent_task_gate::AgentTaskGateBaselineComparison {
+                base_ref: "base".to_string(),
+                exit_code: 1,
+                failure_fingerprint: "rustup unavailable".to_string(),
+                matches_candidate_failure: true,
+                result: crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
+            });
+        let baseline_red = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
-            promotion_report: promotion_report(AgentTaskPromotionStatus::Applied, vec![inherited]),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::GateFailed,
+                vec![inherited],
+            ),
             attempt: 1,
-            max_attempts: 1,
+            max_attempts: 3,
             source_run_id: Some("run-inherited".to_string()),
             current_diff: String::new(),
             require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
-        assert_eq!(accepted.status, AgentTaskCookLoopStatus::GreenCompleted);
-        assert!(accepted.failed_gates.is_empty());
+        assert_eq!(baseline_red.status, AgentTaskCookLoopStatus::BaselineRed);
+        assert_eq!(baseline_red.failed_gates.len(), 1);
+        assert!(baseline_red.follow_up_request.is_none());
+        assert_eq!(
+            baseline_red.metadata["failure_origin"],
+            "inherited_infrastructure"
+        );
 
-        let regression = evaluate_cook_loop(AgentTaskCookLoopOptions {
+        let candidate_only_failure = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
                 AgentTaskPromotionStatus::GateFailed,
                 vec![failed_gate()],
             ),
             attempt: 1,
-            max_attempts: 1,
+            max_attempts: 3,
             source_run_id: Some("run-regression".to_string()),
             current_diff: String::new(),
             require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
-        assert_eq!(regression.status, AgentTaskCookLoopStatus::RetriesExhausted);
-        assert_eq!(regression.failed_gates.len(), 1);
+        assert_eq!(
+            candidate_only_failure.status,
+            AgentTaskCookLoopStatus::RetryRequested
+        );
+
+        // A red baseline does not taint a candidate that passed its required gate.
+        let baseline_only_failure = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::Applied,
+                vec![green_gate()],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-baseline-only".to_string()),
+            current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
+            metadata: Value::Null,
+        });
+        assert_eq!(
+            baseline_only_failure.status,
+            AgentTaskCookLoopStatus::GreenCompleted
+        );
+
+        let true_pass = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::Applied,
+                vec![green_gate()],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-true-pass".to_string()),
+            current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
+            metadata: Value::Null,
+        });
+        assert_eq!(true_pass.status, AgentTaskCookLoopStatus::GreenCompleted);
     }
 
     #[test]

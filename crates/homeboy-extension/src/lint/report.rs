@@ -3,21 +3,19 @@
 //! Mirrors `core/extension/test/report.rs` — the command layer calls a single
 //! builder function to convert a workflow result into the command output tuple.
 
-use crate::lint::baseline::BaselineComparison;
-use crate::self_check::SelfCheckCaptureMetadata;
 use crate::{
     phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
     PhaseFailureCategory, PhaseReport, VerificationPhase,
 };
 use homeboy_core::ci_profile::CiContext;
-use homeboy_core::finding::{FindingProducerSummary, HomeboyFinding};
+use homeboy_core::finding::FindingProducerSummary;
+#[cfg(test)]
+use homeboy_core::finding::HomeboyFinding;
 pub use homeboy_extension_contract::LintCommandOutput;
 use homeboy_refactor_contract::AppliedRefactor;
 use homeboy_refactor_contract::LintFixInput;
-use serde::Serialize;
-use serde_json::Value;
 
-use super::run::{FormattingFindings, LintRunWorkflowResult, LintSummaryOutput};
+use super::run::{FormattingFindings, LintRunWorkflowResult};
 
 /// Build output from a main lint workflow result.
 pub fn from_main_workflow(result: LintRunWorkflowResult) -> (LintCommandOutput, i32) {

@@ -84,6 +84,25 @@ pub struct AgentTaskPromotionGateOutcome {
 }
 
 impl AgentTaskPromotionReport {
+    /// Whether the report can cross the finalization boundary. An accepted
+    /// inherited failure remains a baseline-red required gate in the report;
+    /// only the caller's explicit policy can accept its proven non-regression.
+    pub fn finalization_eligible(&self, accept_inherited_failures: bool) -> bool {
+        !self.deterministic_gates.is_empty()
+            && self.deterministic_gates.iter().all(|gate| match gate.status {
+                AgentTaskGateStatus::Succeeded => gate.exit_code == 0,
+                AgentTaskGateStatus::AcceptedInheritedFailure => {
+                    accept_inherited_failures
+                        && gate.baseline_comparison.as_ref().is_some_and(|comparison| {
+                            comparison.matches_candidate_failure
+                                && comparison.result
+                                    == crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed
+                        })
+                }
+                AgentTaskGateStatus::Failed | AgentTaskGateStatus::Skipped => false,
+            })
+    }
+
     pub fn gate_outcome(&self) -> AgentTaskPromotionGateOutcome {
         let gate_results = self
             .deterministic_gates
@@ -91,8 +110,7 @@ impl AgentTaskPromotionReport {
             .cloned()
             .map(HomeboyGateResult::from)
             .collect::<Vec<_>>();
-        let all_gates_passed = !self.deterministic_gates.is_empty()
-            && self.deterministic_gates.iter().all(durable_gate_passed);
+        let all_gates_passed = self.finalization_eligible(false);
         let status = if self.status == AgentTaskPromotionStatus::GateFailed && all_gates_passed {
             AgentTaskPromotionStatus::Applied
         } else {
@@ -171,13 +189,9 @@ impl AgentTaskPromotionReport {
 fn durable_gate_passed(gate: &AgentTaskGateReport) -> bool {
     match gate.status {
         AgentTaskGateStatus::Succeeded => gate.exit_code == 0,
-        AgentTaskGateStatus::AcceptedInheritedFailure => {
-            gate.exit_code != 0
-                && gate.baseline_comparison.as_ref().is_some_and(|comparison| {
-                    comparison.matches_candidate_failure && !comparison.base_ref.is_empty()
-                })
-        }
-        AgentTaskGateStatus::Failed | AgentTaskGateStatus::Skipped => false,
+        AgentTaskGateStatus::Failed
+        | AgentTaskGateStatus::Skipped
+        | AgentTaskGateStatus::AcceptedInheritedFailure => false,
     }
 }
 

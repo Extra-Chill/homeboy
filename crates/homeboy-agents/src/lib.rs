@@ -9,6 +9,10 @@
 pub mod agent_task;
 pub mod agent_task_aggregate;
 pub mod agent_task_artifacts;
+#[allow(
+    dead_code,
+    reason = "Batch test fixtures cover alternative artifact execution paths."
+)]
 pub mod agent_task_batch;
 pub mod agent_task_candidate_baseline;
 pub mod agent_task_config_materialization;
@@ -22,23 +26,51 @@ pub mod agent_task_dispatch_service;
 pub mod agent_task_executor_evidence;
 pub mod agent_task_fanout;
 pub mod agent_task_fanout_supervisor;
+#[allow(
+    dead_code,
+    reason = "Finalization validation supports recovery-driven finalization."
+)]
 pub mod agent_task_finalization;
 pub mod agent_task_gate;
 pub mod agent_task_gate_executor;
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "Lifecycle test shards share fixtures and recovery helpers."
+)]
 pub mod agent_task_lifecycle;
 pub mod agent_task_loop_controller;
 pub mod agent_task_loop_definition;
 pub mod agent_task_loop_runner_policy;
 mod agent_task_notify;
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "Promotion test shards share fixtures and provider helpers."
+)]
 pub mod agent_task_promotion;
 pub mod agent_task_prompts;
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "Provider discovery and test fixtures support configured optional executors."
+)]
 pub mod agent_task_provider;
 pub mod agent_task_repo_loop_compile;
 pub mod agent_task_review_dossier;
 pub mod agent_task_runtime_dependency_graph;
 pub mod agent_task_schedule;
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "Scheduler adapters and test fixtures support cancellation and recovery execution paths."
+)]
 pub mod agent_task_scheduler;
 pub mod agent_task_secrets;
+#[allow(
+    dead_code,
+    reason = "Cook adoption helpers support recovery and explicit operator flows."
+)]
 pub mod agent_task_service;
 pub mod agent_task_timeout;
 pub mod agent_task_timeout_artifacts;

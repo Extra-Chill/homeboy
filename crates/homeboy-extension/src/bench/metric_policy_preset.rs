@@ -1,14 +1,10 @@
-use serde::{Deserialize, Serialize};
-
 use homeboy_core::error::{Error, Result};
 pub use homeboy_extension_contract::bench_metric_preset::{
     BenchMetricPolicyPreset, BenchMetricPolicyPresetKind,
 };
 
 use super::gate::{BenchGate, BenchGateOp};
-use super::parsing::{
-    BenchMetricDirection, BenchMetricPhase, BenchMetricPolicy, BenchResults, RegressionTest,
-};
+use super::parsing::{BenchMetricDirection, BenchResults};
 
 fn is_false(value: &bool) -> bool {
     !*value

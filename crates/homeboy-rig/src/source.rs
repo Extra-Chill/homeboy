@@ -3,7 +3,7 @@
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
 use homeboy_core::paths;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -14,14 +14,15 @@ use super::install::{
 
 mod types;
 pub use types::{
-    FailedRigSourceUpdate, InvalidRigSourceMetadata, RemovedRigSourceRig, RemovedRigSourceStack,
-    RigSourceGroup, RigSourceListResult, RigSourceRemoveResult, RigSourceRig, RigSourceStack,
-    RigSourceUpdateResult, RigSourceUpdatedRig, RigSourceUpdatedStack, SkippedRigSourceRig,
-    SkippedRigSourceStack, SkippedRigSourceUpdate,
+    FailedRigSourceUpdate, InvalidRigSourceMetadata, OrphanedRigSourceStack, RemovedRigSourceRig,
+    RemovedRigSourceStack, RigSourceGroup, RigSourceListResult, RigSourceRecoveryAction,
+    RigSourceRemoveResult, RigSourceRig, RigSourceStack, RigSourceUpdateResult,
+    RigSourceUpdatedRig, RigSourceUpdatedStack, SkippedRigSourceRig, SkippedRigSourceStack,
+    SkippedRigSourceUpdate,
 };
 
 pub fn list_sources() -> Result<RigSourceListResult> {
-    read_source_entries().map(group_source_entries)
+    read_source_entries().and_then(group_source_entries)
 }
 
 pub fn remove_source(selector: &str) -> Result<RigSourceRemoveResult> {
@@ -276,6 +277,17 @@ pub fn update_source(selector: Option<&str>) -> Result<RigSourceUpdateResult> {
 }
 
 fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
+    if source.discovery_path.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "source",
+            "Installed rig source has no validated discovery path; refusing to refresh",
+            Some(source.source),
+            Some(vec![
+                "Reinstall the package from its authoritative source to record provenance."
+                    .to_string(),
+            ]),
+        ));
+    }
     let source_root = PathBuf::from(&source.source_root);
     if !source_root.exists() {
         return Err(Error::validation_invalid_argument(
@@ -359,6 +371,8 @@ fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
     }
 
     let current_stacks = discover_stacks(Path::new(&source.discovery_path))?;
+    let source_content_hash =
+        super::install::package_content_hash(Path::new(&source.package_path))?;
     for stack in current_stacks {
         let existing = source.stacks.iter().find(|entry| entry.id == stack.id);
         let config_path = paths::stack_config(&stack.id)?;
@@ -385,6 +399,9 @@ fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
             discovery_path: source.discovery_path.clone(),
             linked: false,
             source_revision: source_revision.clone(),
+            source_ref: source_ref.clone(),
+            source_dirty,
+            source_content_hash: Some(source_content_hash.clone()),
         };
         write_stack_source_metadata(&stack.id, &metadata)?;
 
@@ -430,6 +447,12 @@ struct SourceEntries {
     valid: Vec<RigSourceEntry>,
     valid_stacks: Vec<StackSourceEntry>,
     invalid: Vec<InvalidRigSourceMetadata>,
+}
+
+#[derive(Debug)]
+struct InstalledStack {
+    id: String,
+    path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -498,7 +521,12 @@ fn invalid_source_metadata(
     }
 }
 
-fn group_source_entries(entries: SourceEntries) -> RigSourceListResult {
+fn group_source_entries(entries: SourceEntries) -> Result<RigSourceListResult> {
+    let managed_stack_ids = entries
+        .valid_stacks
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect::<HashSet<_>>();
     let mut groups: BTreeMap<String, RigSourceGroup> = BTreeMap::new();
     for entry in entries.valid {
         let key = format!("{}\0{}", entry.metadata.source, entry.metadata.package_path);
@@ -541,28 +569,13 @@ fn group_source_entries(entries: SourceEntries) -> RigSourceListResult {
         source.stacks.sort_by(|a, b| a.id.cmp(&b.id));
     }
 
-    RigSourceListResult {
-        sources,
-        invalid: entries.invalid,
-    }
-}
+    let orphaned_stacks = installed_stacks_without_source_metadata(&managed_stack_ids)?;
 
-fn infer_discovery_path(rig_path: &str) -> String {
-    let path = Path::new(rig_path);
-    match path
-        .parent()
-        .and_then(|parent| parent.file_name())
-        .and_then(|name| name.to_str())
-    {
-        Some("rigs") => path
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string(),
-        _ => path.parent().unwrap_or(path).to_string_lossy().to_string(),
-    }
+    Ok(RigSourceListResult {
+        sources,
+        orphaned_stacks,
+        invalid: entries.invalid,
+    })
 }
 
 fn new_source_group(
@@ -572,9 +585,11 @@ fn new_source_group(
     discovery_path: String,
     linked: bool,
     source_revision: Option<String>,
+    source_content_hash: Option<String>,
 ) -> RigSourceGroup {
     let package_present = Path::new(package_path).exists();
     RigSourceGroup {
+        source_status: "managed",
         source: source.to_string(),
         source_root: source_root.to_string(),
         package_id: package_id_from_path(package_path),
@@ -583,6 +598,7 @@ fn new_source_group(
         discovery_path,
         linked,
         source_revision,
+        source_content_hash,
         stale_reason: stale_source_reason(linked, package_present),
         rigs: Vec::new(),
         stacks: Vec::new(),
@@ -598,13 +614,26 @@ fn new_rig_source_group(metadata: &RigSourceMetadata) -> RigSourceGroup {
         &metadata.source,
         source_root,
         &metadata.package_path,
-        metadata
-            .discovery_path
-            .clone()
-            .unwrap_or_else(|| infer_discovery_path(&metadata.rig_path)),
+        validated_rig_discovery_path(metadata).unwrap_or_default(),
         metadata.linked,
         metadata.source_revision.clone(),
+        metadata.source_content_hash.clone(),
     )
+}
+
+fn validated_rig_discovery_path(metadata: &RigSourceMetadata) -> Option<String> {
+    if let Some(path) = metadata
+        .discovery_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+    {
+        return Some(path.to_string());
+    }
+
+    let package_path = Path::new(&metadata.package_path);
+    let rig_path = Path::new(&metadata.rig_path);
+    (package_path.is_absolute() && rig_path.is_absolute() && rig_path.starts_with(package_path))
+        .then(|| metadata.package_path.clone())
 }
 
 fn new_stack_source_group(metadata: &StackSourceMetadata) -> RigSourceGroup {
@@ -619,6 +648,7 @@ fn new_stack_source_group(metadata: &StackSourceMetadata) -> RigSourceGroup {
         metadata.discovery_path.clone(),
         metadata.linked,
         metadata.source_revision.clone(),
+        metadata.source_content_hash.clone(),
     )
 }
 
@@ -647,6 +677,7 @@ fn source_stack(
     config_owned: bool,
 ) -> RigSourceStack {
     let stack_present = Path::new(&entry.metadata.stack_path).is_file();
+    let (component_path, component_path_present) = stack_component_path(&entry.id);
     RigSourceStack {
         id: entry.id,
         stack_path: entry.metadata.stack_path,
@@ -654,8 +685,68 @@ fn source_stack(
         config_path: source_config_path(config_path),
         config_present,
         config_owned,
+        component_path,
+        component_path_present,
         stale_reason: stale_config_reason(stack_present, config_present),
     }
+}
+
+fn installed_stacks_without_source_metadata(
+    managed_stack_ids: &HashSet<String>,
+) -> Result<Vec<OrphanedRigSourceStack>> {
+    let dir = paths::stacks()?;
+    let entries = super::json_config::sorted_json_config_entries(
+        &dir,
+        "read stacks dir",
+        "read stack entry",
+        |error, context| Error::internal_io(error.to_string(), Some(context.into())),
+    )?;
+
+    Ok(entries
+        .into_iter()
+        .filter(|entry| !managed_stack_ids.contains(&entry.id))
+        .map(|entry| {
+            orphaned_stack(InstalledStack {
+                id: entry.id,
+                path: entry.path,
+            })
+        })
+        .collect())
+}
+
+fn orphaned_stack(stack: InstalledStack) -> OrphanedRigSourceStack {
+    let (component_path, component_path_present) = stack_component_path(&stack.id);
+    let content_identity = fs::read(&stack.path)
+        .map(|content| {
+            format!(
+                "sha256:{}",
+                homeboy_engine_primitives::content_hash::sha256_hex(&content)
+            )
+        })
+        .unwrap_or_else(|_| "unavailable".to_string());
+    OrphanedRigSourceStack {
+        id: stack.id,
+        config_path: stack.path.to_string_lossy().to_string(),
+        content_identity,
+        component_path,
+        component_path_present,
+        source_status: "legacy_missing_metadata",
+        recovery_actions: vec![RigSourceRecoveryAction {
+            kind: "adopt_package_source",
+            description: "Install the authoritative package source to record managed provenance.",
+            command: "homeboy rig install <authoritative-package-source> --all --reinstall",
+            required_parameters: vec!["authoritative-package-source"],
+        }],
+    }
+}
+
+fn stack_component_path(id: &str) -> (Option<String>, Option<bool>) {
+    let Ok(spec) = homeboy_stack::stack::load(id) else {
+        return (None, None);
+    };
+    let component_path = homeboy_stack::stack::expand_path(&spec.component_path);
+    let component_path_present = Path::new(&component_path).exists();
+    (Some(component_path), Some(component_path_present))
 }
 
 fn stale_source_reason(linked: bool, package_present: bool) -> Option<String> {

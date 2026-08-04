@@ -129,7 +129,9 @@ fn validate_homeboy_proof(
     for (index, gate) in proof.gates.iter().enumerate() {
         if matches!(
             gate.status,
-            HomeboyGateStatus::Failed | HomeboyGateStatus::Blocked
+            HomeboyGateStatus::Failed
+                | HomeboyGateStatus::AcceptedInheritedFailure
+                | HomeboyGateStatus::Blocked
         ) {
             diagnostics.push(diagnostic(
                 "gate_not_complete",

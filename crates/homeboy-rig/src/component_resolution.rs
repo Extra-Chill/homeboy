@@ -1,6 +1,5 @@
 //! Rig component resolution helpers.
 
-use crate::expand;
 use homeboy_core::component::{self, Component};
 use homeboy_core::error::{Error, Result};
 
@@ -177,6 +176,7 @@ mod tests {
             remote_url: None,
             triage_remote_url: None,
             stack: None,
+            lab_stack: None,
             branch: None,
             r#ref: None,
             default_ref: None,
@@ -236,5 +236,27 @@ mod tests {
         assert_eq!(component_ref(&spec).as_deref(), Some("origin/main"));
         spec.r#ref = Some("abc123".to_string());
         assert_eq!(component_ref(&spec).as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn lab_stack_contract_rejects_mutable_or_ambiguous_declarations() {
+        let sha = "0123456789abcdef0123456789abcdef01234567".to_string();
+        let stack = crate::spec::LabStackSpec {
+            repository: "https://example.test/app.git".to_string(),
+            base: crate::spec::LabStackRef {
+                reference: "refs/heads/main".to_string(),
+                sha,
+            },
+            prs: vec![crate::spec::LabStackPrSpec {
+                number: 4,
+                head: crate::spec::LabStackRef {
+                    reference: "refs/pull/4/head".to_string(),
+                    sha: "short".to_string(),
+                },
+                merge_mainline: Some(0),
+            }],
+        };
+
+        assert!(stack.validate().unwrap_err().contains("full 40-character"));
     }
 }

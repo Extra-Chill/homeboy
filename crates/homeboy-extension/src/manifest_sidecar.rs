@@ -7,7 +7,7 @@
 use homeboy_core::structured_sidecar;
 
 pub use homeboy_extension_contract::sidecar_config::{
-    StructuredSidecarContract, StructuredSidecarDeclaration, StructuredSidecarDetail,
+    StructuredSidecarContract, StructuredSidecarDeclaration,
 };
 
 /// Resolve a structured-sidecar contract into a concrete declaration for the

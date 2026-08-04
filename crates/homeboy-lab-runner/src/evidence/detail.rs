@@ -4,7 +4,7 @@ use homeboy_core::api_jobs::Job;
 use homeboy_core::error::Result;
 use homeboy_core::observation::{ArtifactRecord, RunRecord};
 
-use super::super::{Runner, RunnerArtifactRef};
+use super::super::Runner;
 use super::tokens::{runner_artifact_token, RemoteArtifactToken};
 use super::util::{
     push_unique_string, requested_fuzz_run_id, required_str, runner_metadata,

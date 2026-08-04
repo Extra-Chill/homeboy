@@ -102,7 +102,9 @@ available planning path before mutating a stack branch.
 homeboy stack status <stack-id>
 ```
 
-Read-only report combining upstream PR state from GitHub with local target-branch state. Use it to spot merged PRs, missing local picks, and review status without mutating the checkout.
+Read-only report combining upstream PR state from GitHub with local target-branch state. It does not clone, fetch, or mutate a checkout.
+
+When `component_path` is absent, status still reports each PR's GitHub metadata. Local branch, ahead, and behind evidence is omitted and `local_evidence_unavailable` explains the missing path with recovery commands. Per-PR `local_state` is `unknown` in that case. Use it to spot merged PRs and review status before materializing a checkout.
 
 ### `sync`
 

@@ -216,6 +216,7 @@ Components are local checkouts used by pipeline steps. Portable package rigs can
 | `remote_url` | string | Optional source repository URL for triage/reporting fallback. |
 | `triage_remote_url` | string | Optional reporting-only GitHub remote override. |
 | `stack` | string | Stack ID synced by `homeboy rig sync` and by explicit `stack` pipeline steps. The component `path` must resolve to the same checkout as the stack's `component_path`. |
+| `lab_stack` | object | Immutable repository stack for Lab materialization without a controller checkout. It declares `repository`, a `base` `{ reference, sha }`, and ordered PR entries with `{ number, head: { reference, sha }, merge_mainline? }`. |
 | `branch` | string | Expected branch hint surfaced to humans in status/spec output. |
 | `ref` | string | Explicit pinned ref for Lab dependency materialization. |
 | `default_ref` | string | Default Lab dependency ref used when `ref` is omitted. |
@@ -234,6 +235,36 @@ Example:
   }
 }
 ```
+
+Portable Lab stack example:
+
+```jsonc
+{
+  "components": {
+    "app": {
+      "lab_stack": {
+        "repository": "https://git.example.test/org/app.git",
+        "base": { "reference": "refs/heads/main", "sha": "0123456789abcdef0123456789abcdef01234567" },
+        "prs": [{
+          "number": 42,
+          "head": { "reference": "refs/pull/42/head", "sha": "89abcdef0123456789abcdef0123456789abcdef" },
+          "merge_mainline": 1
+        }]
+      }
+    }
+  }
+}
+```
+
+Lab materializes `lab_stack` directly on the selected runner and maps
+`${components.<id>.path}` to that runner checkout, so no controller-local
+component path or registry entry is required. It accepts credential-free HTTPS
+or SSH repository URLs, uses only runner-owned Git credentials, and rejects
+configured private/proxied hosts that require controller-routed sync. The
+materialization proof and durable workspace mapping record the immutable base,
+PR heads, merge-mainline selections, stack digest, and resulting revision. A
+mutable, unresolved, or ambiguous ref fails closed. `lab_stack` does not replace
+the path-backed `stack` contract used by local `rig sync`.
 
 Registry-backed example with an env path fallback:
 

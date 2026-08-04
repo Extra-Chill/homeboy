@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use homeboy_error::{Error, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const DEFAULT_CAPTURE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_OBSERVED_LINE_BYTES: usize = 64 * 1024;
@@ -290,12 +291,47 @@ pub fn require_success(success: bool, stderr: &str, operation: &str) -> Result<(
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct CaptureMetadata {
     pub bytes_seen: u64,
     pub bytes_retained: usize,
     pub byte_limit: usize,
+    pub bytes_truncated: u64,
     pub truncated: bool,
+    #[serde(default)]
+    pub sha256: String,
+}
+
+impl<'de> Deserialize<'de> for CaptureMetadata {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Record {
+            bytes_seen: u64,
+            bytes_retained: usize,
+            byte_limit: usize,
+            bytes_truncated: Option<u64>,
+            truncated: bool,
+            #[serde(default)]
+            sha256: String,
+        }
+
+        let record = Record::deserialize(deserializer)?;
+        Ok(Self {
+            bytes_seen: record.bytes_seen,
+            bytes_retained: record.bytes_retained,
+            byte_limit: record.byte_limit,
+            bytes_truncated: record.bytes_truncated.unwrap_or_else(|| {
+                record
+                    .bytes_seen
+                    .saturating_sub(record.bytes_retained as u64)
+            }),
+            truncated: record.truncated,
+            sha256: record.sha256,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -317,6 +353,25 @@ pub enum SupervisedCommandTermination {
     Completed,
     Cancelled,
     TimedOut,
+    NoProgress,
+}
+
+/// A portable command may emit `HOMEBOY_PROGRESS {"phase":"...","current":"..."}`
+/// on either output stream. The marker remains ordinary command output while
+/// supervision uses it to report and enforce meaningful forward progress.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommandProgress {
+    pub phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SupervisedCommandHeartbeat {
+    pub elapsed: Duration,
+    pub last_progress_elapsed: Option<Duration>,
+    pub progress: Option<CommandProgress>,
+    pub output_tail: String,
 }
 
 #[derive(Debug)]
@@ -402,8 +457,32 @@ pub fn wait_with_bounded_output_supervised(
     byte_limit: usize,
     timeout: Duration,
     heartbeat_interval: Duration,
-    mut is_cancelled: impl FnMut() -> bool,
+    is_cancelled: impl FnMut() -> bool,
     mut on_heartbeat: impl FnMut(Duration, &str) -> io::Result<()>,
+) -> io::Result<SupervisedCommandOutput> {
+    wait_with_bounded_output_supervised_with_progress(
+        child,
+        byte_limit,
+        timeout,
+        None,
+        heartbeat_interval,
+        is_cancelled,
+        |heartbeat| on_heartbeat(heartbeat.elapsed, &heartbeat.output_tail),
+    )
+}
+
+/// Supervise a command with wall-clock and optional structured-progress
+/// deadlines. `no_progress_timeout` is measured from spawn until the first
+/// valid `HOMEBOY_PROGRESS` marker and between subsequent markers. Ordinary
+/// output is retained as evidence but cannot mask a stalled test case.
+pub fn wait_with_bounded_output_supervised_with_progress(
+    child: &mut Child,
+    byte_limit: usize,
+    timeout: Duration,
+    no_progress_timeout: Option<Duration>,
+    heartbeat_interval: Duration,
+    mut is_cancelled: impl FnMut() -> bool,
+    mut on_heartbeat: impl FnMut(SupervisedCommandHeartbeat) -> io::Result<()>,
 ) -> io::Result<SupervisedCommandOutput> {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -425,7 +504,9 @@ pub fn wait_with_bounded_output_supervised(
         }
     });
     let started = std::time::Instant::now();
-    let mut last_heartbeat = started;
+    // Persist an initial live record even when a busy runner reaches the
+    // deadline before one full heartbeat interval has elapsed.
+    let mut last_heartbeat = started.checked_sub(heartbeat_interval).unwrap_or(started);
     let (status, termination) = loop {
         if let Some(status) = child.try_wait()? {
             terminate_remaining_process_group(child.id())?;
@@ -443,12 +524,29 @@ pub fn wait_with_bounded_output_supervised(
                 SupervisedCommandTermination::TimedOut,
             );
         }
-        if last_heartbeat.elapsed() >= heartbeat_interval {
-            let tail = live_output
+        if no_progress_timeout.is_some_and(|limit| {
+            live_output
                 .lock()
-                .map(|tail| tail.render())
+                .map(|live| {
+                    live.last_progress
+                        .as_ref()
+                        .map(|(_, progress_at)| progress_at.elapsed())
+                        .unwrap_or_else(|| started.elapsed())
+                        >= limit
+                })
+                .unwrap_or(false)
+        }) {
+            break (
+                terminate_process_tree_and_reap(child)?,
+                SupervisedCommandTermination::NoProgress,
+            );
+        }
+        if last_heartbeat.elapsed() >= heartbeat_interval {
+            let heartbeat = live_output
+                .lock()
+                .map(|tail| tail.heartbeat(started.elapsed()))
                 .unwrap_or_default();
-            if let Err(error) = on_heartbeat(started.elapsed(), &tail) {
+            if let Err(error) = on_heartbeat(heartbeat) {
                 return match terminate_process_tree_and_reap(child) {
                     Ok(_) => Err(error),
                     Err(cleanup_error) => Err(io::Error::other(format!(
@@ -505,6 +603,7 @@ fn terminate_remaining_process_group(_root_pid: u32) -> io::Result<()> {
 struct LiveOutputTail {
     stdout: TailCapture,
     stderr: TailCapture,
+    last_progress: Option<(CommandProgress, std::time::Instant)>,
 }
 
 impl LiveOutputTail {
@@ -512,6 +611,7 @@ impl LiveOutputTail {
         Self {
             stdout: TailCapture::new(byte_limit),
             stderr: TailCapture::new(byte_limit),
+            last_progress: None,
         }
     }
 
@@ -525,6 +625,34 @@ impl LiveOutputTail {
             (stdout, stderr) => format!("stdout:\n{stdout}\nstderr:\n{stderr}"),
         }
     }
+
+    fn record_progress_line(&mut self, line: &[u8]) {
+        const PREFIX: &[u8] = b"HOMEBOY_PROGRESS ";
+        let Some(body) = line.strip_prefix(PREFIX) else {
+            return;
+        };
+        let Ok(progress) = serde_json::from_slice::<CommandProgress>(body) else {
+            return;
+        };
+        if progress.phase.trim().is_empty() {
+            return;
+        }
+        self.last_progress = Some((progress, std::time::Instant::now()));
+    }
+
+    fn heartbeat(&self, elapsed: Duration) -> SupervisedCommandHeartbeat {
+        let (progress, marker_elapsed) = self
+            .last_progress
+            .as_ref()
+            .map(|(progress, at)| (Some(progress.clone()), Some(at.elapsed())))
+            .unwrap_or((None, None));
+        SupervisedCommandHeartbeat {
+            elapsed,
+            last_progress_elapsed: marker_elapsed,
+            progress,
+            output_tail: self.render(),
+        }
+    }
 }
 
 fn capture_tail_with_live_snapshot(
@@ -534,6 +662,8 @@ fn capture_tail_with_live_snapshot(
     live_output: Arc<Mutex<LiveOutputTail>>,
 ) -> io::Result<BoundedStreamCapture> {
     let mut capture = TailCapture::new(byte_limit);
+    let mut pending = Vec::new();
+    let mut discard_until_newline = false;
     let mut buffer = [0_u8; 8_192];
     loop {
         let count = reader.read(&mut buffer)?;
@@ -548,6 +678,23 @@ fn capture_tail_with_live_snapshot(
                 &mut live.stderr
             };
             destination.push(&buffer[..count]);
+            for byte in &buffer[..count] {
+                if discard_until_newline {
+                    if *byte == b'\n' {
+                        discard_until_newline = false;
+                    }
+                    continue;
+                }
+                if *byte == b'\n' {
+                    live.record_progress_line(&pending);
+                    pending.clear();
+                } else if pending.len() < MAX_OBSERVED_LINE_BYTES {
+                    pending.push(*byte);
+                } else {
+                    pending.clear();
+                    discard_until_newline = true;
+                }
+            }
         }
     }
     Ok(capture.finish())
@@ -909,6 +1056,7 @@ struct TailCapture {
     bytes: Vec<u8>,
     bytes_seen: u64,
     byte_limit: usize,
+    hasher: Sha256,
 }
 
 impl Default for TailCapture {
@@ -923,10 +1071,12 @@ impl TailCapture {
             bytes: Vec::new(),
             bytes_seen: 0,
             byte_limit,
+            hasher: Sha256::new(),
         }
     }
 
     fn push(&mut self, chunk: &[u8]) {
+        self.hasher.update(chunk);
         self.bytes_seen = self
             .bytes_seen
             .saturating_add(chunk.len().try_into().unwrap_or(u64::MAX));
@@ -955,7 +1105,9 @@ impl TailCapture {
                 bytes_seen: self.bytes_seen,
                 bytes_retained,
                 byte_limit: self.byte_limit,
+                bytes_truncated: self.bytes_seen.saturating_sub(bytes_retained as u64),
                 truncated: self.bytes_seen > bytes_retained as u64,
+                sha256: format!("sha256:{:x}", self.hasher.finalize()),
             },
         }
     }
@@ -1060,6 +1212,34 @@ mod tests {
         assert_eq!(captured.metadata.bytes_seen, 2);
         assert_eq!(captured.metadata.bytes_retained, 2);
         assert!(!captured.metadata.truncated);
+    }
+
+    #[test]
+    fn capture_metadata_derives_truncation_for_truncated_legacy_records() {
+        let metadata: CaptureMetadata = serde_json::from_value(serde_json::json!({
+            "bytes_seen": 12,
+            "bytes_retained": 8,
+            "byte_limit": 8,
+            "truncated": true
+        }))
+        .expect("legacy capture metadata");
+
+        assert_eq!(metadata.bytes_truncated, 4);
+        assert!(metadata.sha256.is_empty());
+    }
+
+    #[test]
+    fn capture_metadata_derives_truncation_for_untruncated_legacy_records() {
+        let metadata: CaptureMetadata = serde_json::from_value(serde_json::json!({
+            "bytes_seen": 8,
+            "bytes_retained": 8,
+            "byte_limit": 8,
+            "truncated": false
+        }))
+        .expect("legacy capture metadata");
+
+        assert_eq!(metadata.bytes_truncated, 0);
+        assert!(metadata.sha256.is_empty());
     }
 
     #[cfg(unix)]

@@ -1,9 +1,5 @@
 //! Generic diagnostics emitted by bench workloads.
 
-use std::collections::BTreeMap;
-
-use serde::{Deserialize, Serialize};
-
 use super::parsing::BenchResults;
 pub use homeboy_extension_contract::bench_diagnostics::{BenchDiagnostic, BenchDiagnosticSource};
 
@@ -63,6 +59,7 @@ fn with_default_source(
 mod tests {
     use super::*;
     use crate::bench::parsing::{BenchMetrics, BenchRunSnapshot, BenchScenario};
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_collect_diagnostics() {

@@ -54,6 +54,7 @@ fn test_list_sources() {
     assert_eq!(result.invalid.len(), 0);
     assert_eq!(result.sources.len(), 1);
     assert_eq!(result.sources[0].source, package.path().to_string_lossy());
+    assert_eq!(result.sources[0].source_status, "managed");
     assert!(result.sources[0].linked);
     assert_eq!(result.sources[0].rigs.len(), 2);
     assert_eq!(result.sources[0].rigs[0].id, "alpha");
@@ -122,6 +123,55 @@ fn list_sources_reports_stack_specs_from_package() {
     assert_eq!(result.sources[0].stacks[0].id, "alpha-combined");
     assert!(result.sources[0].stacks[0].config_present);
     assert!(result.sources[0].stacks[0].config_owned);
+    assert!(result.sources[0].source_content_hash.is_some());
+    assert!(result.orphaned_stacks.is_empty());
+}
+
+#[test]
+fn sources_list_reports_legacy_stack_without_inferring_or_mutating_provenance() {
+    let _home = HomeGuard::new();
+    let config = homeboy_core::paths::stack_config("legacy").expect("stack config");
+    fs::create_dir_all(config.parent().expect("stacks dir")).expect("stacks dir");
+    let content = minimal_stack("legacy", "legacy")
+        .replace("${env.DEV_ROOT}/legacy", "/definitely/missing/legacy");
+    fs::write(&config, &content).expect("legacy stack");
+
+    let result = list_sources().expect("sources");
+
+    assert!(result.sources.is_empty());
+    assert_eq!(result.orphaned_stacks.len(), 1);
+    let legacy = &result.orphaned_stacks[0];
+    assert_eq!(legacy.id, "legacy");
+    assert_eq!(legacy.source_status, "legacy_missing_metadata");
+    assert_eq!(
+        legacy.component_path.as_deref(),
+        Some("/definitely/missing/legacy")
+    );
+    assert_eq!(legacy.component_path_present, Some(false));
+    assert!(legacy.content_identity.starts_with("sha256:"));
+    assert_eq!(
+        legacy
+            .recovery_actions
+            .iter()
+            .map(|action| action.kind)
+            .collect::<Vec<_>>(),
+        vec!["adopt_package_source"]
+    );
+    assert_eq!(
+        legacy.recovery_actions[0].command,
+        "homeboy rig install <authoritative-package-source> --all --reinstall"
+    );
+    assert_eq!(
+        legacy.recovery_actions[0].required_parameters,
+        vec!["authoritative-package-source"]
+    );
+    assert_eq!(
+        fs::read_to_string(&config).expect("legacy stack unchanged"),
+        content
+    );
+    assert!(!homeboy_core::paths::stack_source_metadata("legacy")
+        .expect("metadata path")
+        .exists());
 }
 
 #[test]
@@ -321,12 +371,20 @@ fn sources_list_skips_non_json_and_collects_invalid_stack_metadata() {
         "not json",
     )
     .expect("broken stack metadata");
+    fs::create_dir_all(homeboy_core::paths::stacks().expect("stacks dir")).expect("stacks dir");
+    fs::write(
+        homeboy_core::paths::stack_config("broken-stack").expect("stack config"),
+        minimal_stack("broken-stack", "broken"),
+    )
+    .expect("installed stack");
 
     let result = list_sources().expect("sources");
 
     assert!(result.sources.is_empty());
     assert_eq!(result.invalid.len(), 1);
     assert_eq!(result.invalid[0].id, "broken-stack");
+    assert_eq!(result.orphaned_stacks.len(), 1);
+    assert_eq!(result.orphaned_stacks[0].id, "broken-stack");
     assert!(result.invalid[0]
         .metadata_path
         .ends_with("stack-sources/broken-stack.json"));
@@ -385,9 +443,14 @@ fn update_git_source_refreshes_owned_stack_specs() {
         .to_string();
 
     install(&source, None, false).expect("install");
-    let before = crate::read_stack_source_metadata("alpha-combined")
-        .expect("stack metadata")
-        .source_revision;
+    let installed_metadata =
+        crate::read_stack_source_metadata("alpha-combined").expect("stack metadata");
+    let before = installed_metadata.source_revision;
+    fs::write(
+        Path::new(&installed_metadata.package_path).join("local-untracked"),
+        "preserve dirty provenance",
+    )
+    .expect("dirty installed package");
 
     fs::write(
         &source_stack,
@@ -406,6 +469,54 @@ fn update_git_source_refreshes_owned_stack_specs() {
         fs::read_to_string(homeboy_core::paths::stack_config("alpha-combined").unwrap())
             .expect("installed stack");
     assert!(installed.contains("updated stack"));
+    let metadata =
+        crate::read_stack_source_metadata("alpha-combined").expect("refreshed stack metadata");
+    assert_eq!(metadata.source_ref.as_deref(), Some("main"));
+    assert!(metadata.source_dirty);
+}
+
+#[test]
+fn legacy_source_without_a_valid_discovery_path_fails_before_refresh_mutation() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    let source_rig = write_rig(package.path(), "alpha", &minimal_rig("alpha"));
+    let bare = create_bare_source(package.path());
+    let source = support::bare_source_path(&bare)
+        .to_string_lossy()
+        .to_string();
+
+    install(&source, None, false).expect("install");
+    let mut metadata = crate::read_source_metadata("alpha").expect("metadata");
+    let installed_root = metadata.source_root.clone().expect("source root");
+    let installed_revision = homeboy_core::git::short_head_revision_at(Path::new(&installed_root));
+    metadata.discovery_path = None;
+    metadata.package_path = "relative-package-with-unknown-provenance".to_string();
+    fs::write(
+        homeboy_core::paths::rig_source_metadata("alpha").expect("metadata path"),
+        serde_json::to_vec_pretty(&metadata).expect("serialize metadata"),
+    )
+    .expect("write legacy metadata");
+
+    fs::write(
+        &source_rig,
+        minimal_rig("alpha").replace("alpha rig", "remote update"),
+    )
+    .expect("update remote package");
+    commit_package(package.path(), "remote update");
+    GitFixture::attach(package.path()).push_main(&source);
+
+    let error = update_source_for_rig("alpha").expect_err("invalid provenance must fail closed");
+
+    assert!(error.message.contains("no validated discovery path"));
+    assert_eq!(
+        homeboy_core::git::short_head_revision_at(Path::new(&installed_root)),
+        installed_revision
+    );
+    assert!(
+        !fs::read_to_string(homeboy_core::paths::rig_config("alpha").unwrap())
+            .expect("installed rig")
+            .contains("remote update")
+    );
 }
 
 #[test]

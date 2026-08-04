@@ -248,6 +248,46 @@ fn explicit_connected_stale_runner_preserves_drift_diagnosis_and_recovery() {
 }
 
 #[test]
+fn persisted_session_drift_rejects_the_real_availability_and_preflight_path() {
+    let mut status = reverse_status("homeboy-lab");
+    status.stale_daemon = Some(
+        RunnerStaleDaemonWarning::new(
+            "homeboy-lab",
+            "0.328.0".to_string(),
+            "0.328.0".to_string(),
+            Some("homeboy 0.328.0+1e63f1ae0369".to_string()),
+            Some("homeboy 0.328.0+1e63f1ae0369".to_string()),
+        )
+        .with_persisted_session_version("homeboy-lab", "0.327.9".to_string()),
+    );
+    let availability = RunnerAvailability::from_status_parts(
+        status.runner_id.clone(),
+        status.connected,
+        status.stale_daemon.is_some(),
+        status.active_jobs.len(),
+        &status.active_job_state,
+        Some(1),
+    );
+
+    let error = lab_runner_availability_error(
+        "agent-task cook",
+        Some(&availability),
+        Some(&status),
+        vec![availability.clone()],
+    );
+
+    assert!(!availability.accepts_jobs);
+    assert_eq!(
+        error.details["runner_status"]["stale_daemon"]["mismatch_predicate"],
+        "session_homeboy_version != job_command_binary_version"
+    );
+    assert_eq!(
+        error.details["stale_daemon_recovery_command"],
+        "homeboy runner refresh-homeboy homeboy-lab --ref 1e63f1ae0369 --reconnect"
+    );
+}
+
+#[test]
 fn disconnected_runner_keeps_existing_availability_diagnosis() {
     let availability = RunnerAvailability::from_status_parts(
         "homeboy-lab",

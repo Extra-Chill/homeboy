@@ -464,6 +464,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         request.allow_dirty_lab_workspace,
     )?;
     let synced_rig_dependencies = rig_component_sync.materializations;
+    let synced_lab_stacks = rig_component_sync.lab_stack_materializations;
     let dependency_cache_saves = rig_component_sync.dependency_cache_saves;
     let rig_component_path_overrides = rig_component_sync.component_path_env;
     let selected_rig_component_path = rig_component_sync.selected_component_path;
@@ -484,6 +485,29 @@ fn prepare_lab_offload_workspace_stage_inner(
                 PlanValues::new()
                     .json("count", synced_rig_dependencies.len())
                     .json("dependencies", &synced_rig_dependencies),
+            )
+            .build(),
+        );
+    }
+    if !synced_lab_stacks.is_empty() {
+        for stack in &synced_lab_stacks {
+            workspace_mapping.push(
+                crate::lab_workspaces::workspace_mapping_entry_for_lab_stack(
+                    "rig_component_lab_stack",
+                    stack,
+                ),
+            );
+        }
+        plan = with_step(
+            plan,
+            PlanStep::ready(
+                "lab.materialize_rig_component_lab_stacks",
+                "lab.materialize_rig_component_lab_stacks",
+            )
+            .inputs(
+                PlanValues::new()
+                    .json("count", synced_lab_stacks.len())
+                    .json("stacks", &synced_lab_stacks),
             )
             .build(),
         );
@@ -653,7 +677,7 @@ pub(crate) fn workspace_path_materialization_plan(
         PathMaterializationEntry::new(
             entry.role(),
             owner,
-            Some(entry.local_path().to_string()),
+            (!entry.local_path().trim().is_empty()).then(|| entry.local_path().to_string()),
             entry.remote_path(),
             &materialization_mode,
             PATH_MATERIALIZATION_STATUS_MATERIALIZED,

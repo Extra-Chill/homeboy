@@ -652,6 +652,30 @@ fn identical_rendered_runtime_identities_are_current_without_refresh() {
 }
 
 #[test]
+fn persisted_session_version_drift_rejects_admission_with_bounded_recovery() {
+    let identity = "homeboy 0.328.0+1e63f1ae0369";
+    let warning = RunnerStaleDaemonWarning::new(
+        "homeboy-lab",
+        "0.328.0".to_string(),
+        "0.328.0".to_string(),
+        Some(identity.to_string()),
+        Some(identity.to_string()),
+    )
+    .with_persisted_session_version("homeboy-lab", "0.327.9".to_string());
+
+    assert_eq!(
+        warning.mismatch_predicate,
+        "session_homeboy_version != job_command_binary_version"
+    );
+    assert_eq!(warning.session_homeboy_version, "0.327.9");
+    assert_eq!(warning.active_daemon_control_plane_version, "0.328.0");
+    assert_eq!(
+        warning.recovery_commands,
+        ["homeboy runner refresh-homeboy homeboy-lab --ref 1e63f1ae0369 --reconnect"]
+    );
+}
+
+#[test]
 fn same_version_different_controller_build_is_incompatible_and_truthful() {
     let warning = RunnerStaleDaemonWarning::new(
         "homeboy-lab",
@@ -694,6 +718,71 @@ fn same_version_different_controller_build_is_incompatible_and_truthful() {
         ["homeboy runner refresh-homeboy homeboy-lab --ref controller --reconnect --allow-downgrade"]
     );
     assert!(!warning.refresh_command.contains("--ref configured"));
+    let diagnostics = serde_json::to_value(&warning).expect("serialize controller build skew");
+    assert_eq!(
+        diagnostics["mismatch_predicate"],
+        "controller_build_commit != job_command_binary_build_commit"
+    );
+    assert_eq!(
+        diagnostics["recovery_commands"][0],
+        "homeboy runner refresh-homeboy homeboy-lab --ref controller --reconnect --allow-downgrade"
+    );
+}
+
+#[test]
+fn controller_dirty_and_version_skew_serialize_distinct_predicates_and_actions() {
+    let identity = "homeboy 0.328.0+1e63f1ae0369";
+    let dirty = RunnerStaleDaemonWarning::new(
+        "homeboy-lab",
+        "0.328.0".to_string(),
+        "0.328.0".to_string(),
+        Some(identity.to_string()),
+        Some(identity.to_string()),
+    )
+    .with_controller_compatibility(
+        "homeboy-lab",
+        "0.328.0".to_string(),
+        "homeboy 0.328.0+dirty-controller-dirty".to_string(),
+        true,
+        true,
+        true,
+    );
+    let version_skew = RunnerStaleDaemonWarning::new(
+        "homeboy-lab",
+        "0.328.0".to_string(),
+        "0.328.0".to_string(),
+        Some(identity.to_string()),
+        Some(identity.to_string()),
+    )
+    .with_controller_compatibility(
+        "homeboy-lab",
+        "0.327.9".to_string(),
+        "homeboy 0.327.9+controller".to_string(),
+        false,
+        true,
+        false,
+    );
+
+    let dirty_diagnostics = serde_json::to_value(&dirty).expect("serialize dirty controller");
+    assert_eq!(
+        dirty_diagnostics["mismatch_predicate"],
+        "controller_git_dirty == true"
+    );
+    assert_eq!(
+        dirty_diagnostics["recovery_commands"][0],
+        "homeboy upgrade --force"
+    );
+
+    let version_diagnostics =
+        serde_json::to_value(&version_skew).expect("serialize controller version skew");
+    assert_eq!(
+        version_diagnostics["mismatch_predicate"],
+        "controller_version != job_command_binary_version"
+    );
+    assert!(version_diagnostics["recovery_commands"]
+        .as_array()
+        .expect("serialized recovery command list")
+        .is_empty());
 }
 
 #[test]
@@ -799,6 +888,39 @@ fn runtime_path_drift_is_stale_and_names_the_changed_generation() {
     assert!(warning.message.contains("HOMEBOY_EXTENSION_PATH"));
     assert!(warning.message.contains("sha256:old"));
     assert!(warning.message.contains("sha256:new"));
+    assert_eq!(
+        warning.mismatch_predicate,
+        "runtime_paths.loaded != runtime_paths.configured"
+    );
+}
+
+#[test]
+fn runtime_path_diagnostics_redact_sensitive_values_without_hiding_path_drift() {
+    let warning = RunnerStaleDaemonWarning::new(
+        "homeboy-lab",
+        "0.328.0".to_string(),
+        "0.328.0".to_string(),
+        Some("homeboy 0.328.0+1e63f1ae0369".to_string()),
+        Some("homeboy 0.328.0+1e63f1ae0369".to_string()),
+    )
+    .with_runtime_paths(
+        "homeboy-lab",
+        Vec::new(),
+        vec![RunnerChangedRuntimePath {
+            env: "HOMEBOY_EXTENSION_PATH".to_string(),
+            loaded_path: Some("/srv/extensions?token=old-secret".to_string()),
+            configured_path: Some("/srv/extensions?token=new-secret".to_string()),
+        }],
+    );
+
+    let serialized = serde_json::to_string(&warning).expect("serialize path diagnostics");
+    assert!(!serialized.contains("old-secret"));
+    assert!(!serialized.contains("new-secret"));
+    assert!(serialized.contains("/srv/extensions?token=[REDACTED]"));
+    assert_eq!(
+        warning.recovery_commands,
+        ["homeboy runner refresh-homeboy homeboy-lab --ref 1e63f1ae0369 --reconnect"]
+    );
 }
 
 #[test]
@@ -850,6 +972,15 @@ fn unverifiable_identity_warning_is_actionable_without_claiming_a_mismatch() {
     assert_eq!(
         warning.recovery_commands,
         ["homeboy runner refresh-homeboy homeboy-lab --reconnect"]
+    );
+    let diagnostics = serde_json::to_value(&warning).expect("serialize unverifiable identity");
+    assert_eq!(
+        diagnostics["mismatch_predicate"],
+        "immutable_build_identity(active_daemon_control_plane_build_identity) && immutable_build_identity(job_command_binary_build_identity) == false"
+    );
+    assert_eq!(
+        diagnostics["recovery_commands"][0],
+        "homeboy runner refresh-homeboy homeboy-lab --reconnect"
     );
 }
 

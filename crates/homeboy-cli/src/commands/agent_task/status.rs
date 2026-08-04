@@ -12,7 +12,6 @@ use std::collections::{HashMap, HashSet};
 
 use homeboy::agents::agent_task_service as agent_task_service_direct;
 use homeboy::agents::agent_tasks::lifecycle::{self as agent_task_lifecycle, AgentTaskRunRecord};
-use homeboy::agents::agent_tasks::promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 use homeboy::agents::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy::agents::agent_tasks::service as agent_task_service;
 use homeboy::agents::agent_tasks::{
@@ -265,33 +264,36 @@ fn project_owning_cook_terminal_status_from_progress(
     else {
         return;
     };
-    if progress.get("terminal_success").and_then(Value::as_bool) == Some(true) {
-        return;
-    }
-    let Some(status) = progress
+    let Some(detail) = progress
         .get("detail")
         .and_then(Value::as_str)
         .filter(|status| !status.trim().is_empty())
-        .map(str::to_string)
     else {
         return;
     };
-    let publication = if progress.get("terminal_success").and_then(Value::as_bool) == Some(false) {
-        "blocked"
-    } else {
-        "unknown"
-    };
+    let projection = cook_lifecycle_projection(
+        value,
+        detail,
+        progress.get("terminal_success").and_then(Value::as_bool) == Some(true),
+    );
     let Some(object) = value.as_object_mut() else {
         return;
     };
     if let Some(run_state) = object.get("state").cloned() {
         object.insert("child_run_state".to_string(), run_state);
     }
-    object.insert("state".to_string(), Value::String(status.clone()));
+    object.insert(
+        "state".to_string(),
+        Value::String(projection.status.to_string()),
+    );
+    project_cook_task_status(object, &projection.status);
+    if let Some(execution_states) = object.get_mut("execution_states") {
+        project_execution_states(execution_states, &projection);
+    }
     let mut cook = json!({
-        "state": status,
+        "state": projection.status,
         "phase": "terminal",
-        "publication": publication,
+        "publication": projection.publication,
     });
     if let Some(source_run_id) = source_run_id {
         cook["source_run_id"] = json!(source_run_id);
@@ -299,13 +301,142 @@ fn project_owning_cook_terminal_status_from_progress(
     object.insert("cook".to_string(), cook);
 }
 
-fn blocked_owning_cook(value: &Value) -> bool {
+/// The Cook result is a lifecycle decision, not the provider's exit status.
+/// Provider success and an applied patch remain useful evidence, but a required
+/// gate or finalization outcome determines whether the Cook is review-ready.
+#[derive(Clone)]
+struct CookLifecycleProjection {
+    status: String,
+    publication: &'static str,
+    candidate: &'static str,
+    gate: &'static str,
+    promotion: String,
+    finalization: String,
+}
+
+fn cook_lifecycle_projection(
+    record: &Value,
+    detail: &str,
+    reported_success: bool,
+) -> CookLifecycleProjection {
+    let promotion = promotion_state(record);
+    let finalization = finalization_state(record);
+    let gate = promotion_gate_state(record, &promotion);
+    let status = if !reported_success {
+        detail
+    } else if gate == "failed" {
+        "gate_failed"
+    } else if finalization == "finalization_failed" {
+        "finalization_failed"
+    } else if finalization == "finalization_pending" {
+        "finalization_pending"
+    } else if promotion == "verification_pending" {
+        "verification_pending"
+    } else if promotion == "applied"
+        && finalization == "not_attempted"
+        && detail != "green_no_finalize"
+    {
+        "finalization_not_attempted"
+    } else {
+        detail
+    }
+    .to_string();
+    let candidate = match (promotion.as_str(), gate, finalization.as_str()) {
+        ("gate_failed", "accepted_inherited_failure", _) => "promoted_accepted_inherited_failure",
+        ("gate_failed", _, _) | (_, "failed", _) => "promoted_gate_failed",
+        ("verification_pending", _, _) => "promoted_verification_pending",
+        ("applied", _, "finalization_failed") => "promoted_finalization_failed",
+        ("applied", _, "finalization_pending") => "promoted_finalization_pending",
+        ("applied", _, "not_attempted") => "promoted_finalization_not_attempted",
+        ("applied", _, _) => "promoted",
+        _ => "unknown",
+    };
+    let publication = if !reported_success {
+        "blocked"
+    } else if matches!(status.as_str(), "review_ready" | "green_no_finalize") {
+        "completed"
+    } else if matches!(status.as_str(), "gate_failed" | "finalization_failed") {
+        "blocked"
+    } else {
+        "pending"
+    };
+    CookLifecycleProjection {
+        status,
+        publication,
+        candidate,
+        gate,
+        promotion,
+        finalization,
+    }
+}
+
+fn promotion_state(record: &Value) -> String {
+    let raw = record
+        .pointer("/metadata/latest_promotion/status")
+        .and_then(Value::as_str)
+        .unwrap_or("not_attempted");
+    raw.to_string()
+}
+
+fn promotion_gate_state(record: &Value, promotion: &str) -> &'static str {
+    if record
+        .pointer("/metadata/latest_promotion/deterministic_gates")
+        .and_then(Value::as_array)
+        .is_some_and(|gates| {
+            gates.iter().any(|gate| {
+                gate.get("status").and_then(Value::as_str) == Some("accepted_inherited_failure")
+            })
+        })
+    {
+        return "accepted_inherited_failure";
+    }
+    match promotion {
+        "applied" | "verified_no_changes" => "passed",
+        "gate_failed" | "no_changes_gate_failed" => "failed",
+        "verification_pending" => "pending",
+        _ => "not_run",
+    }
+}
+
+fn finalization_state(record: &Value) -> String {
+    record
+        .pointer("/metadata/cook_finalization/status")
+        .and_then(Value::as_str)
+        .map(|status| match status {
+            "review_ready" => "completed".to_string(),
+            "failed" | "finalization_failed" => "finalization_failed".to_string(),
+            "pending" | "finalization_pending" => "finalization_pending".to_string(),
+            other => other.to_string(),
+        })
+        .unwrap_or_else(|| "not_attempted".to_string())
+}
+
+fn project_cook_task_status(record: &mut serde_json::Map<String, Value>, status: &str) {
+    let Some(tasks) = record.get_mut("tasks").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for task in tasks {
+        if task.get("state").and_then(Value::as_str) == Some("succeeded") {
+            task["provider_state"] = Value::String("succeeded".to_string());
+            task["state"] = Value::String(status.to_string());
+        }
+    }
+}
+
+fn project_execution_states(states: &mut Value, projection: &CookLifecycleProjection) {
+    states["candidate"]["state"] = Value::String(projection.candidate.to_string());
+    states["gate"]["state"] = Value::String(projection.gate.to_string());
+    states["promotion"]["state"] = Value::String(projection.promotion.clone());
+    states["finalization"]["state"] = Value::String(projection.finalization.clone());
+}
+
+fn cook_requires_action(value: &Value) -> bool {
     value.pointer("/cook/phase").and_then(Value::as_str) == Some("terminal")
         && value.pointer("/cook/publication").and_then(Value::as_str) != Some("completed")
 }
 
 fn status_exit_code(value: &Value) -> i32 {
-    if blocked_owning_cook(value) {
+    if cook_requires_action(value) {
         1
     } else {
         0
@@ -587,7 +718,7 @@ fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
         ..Default::default()
     };
 
-    if blocked_owning_cook(value) {
+    if cook_requires_action(value) {
         metadata.next_actions.push(
             CommandNextAction::new(
                 "diagnose blocked Cook",
@@ -2261,31 +2392,10 @@ pub(crate) fn execution_states_from_aggregate(
             })
         })
         .collect::<Vec<_>>();
-    let promotion_status = record
-        .pointer("/metadata/latest_promotion")
-        .cloned()
-        .and_then(|value| serde_json::from_value::<AgentTaskPromotionReport>(value).ok())
-        .map(|promotion| match promotion.gate_outcome().status {
-            AgentTaskPromotionStatus::DryRun => "dry_run",
-            AgentTaskPromotionStatus::VerificationPending => "verification_pending",
-            AgentTaskPromotionStatus::Applied => "applied",
-            AgentTaskPromotionStatus::GateFailed => "gate_failed",
-            AgentTaskPromotionStatus::VerifiedNoChanges => "verified_no_changes",
-            AgentTaskPromotionStatus::NoChangesGateFailed => "no_changes_gate_failed",
-            AgentTaskPromotionStatus::NoChanges => "no_changes",
-        })
-        .unwrap_or_else(|| {
-            record
-                .pointer("/metadata/latest_promotion/status")
-                .and_then(Value::as_str)
-                .unwrap_or("not_attempted")
-        });
-    let finalization_status = record
-        .pointer("/metadata/cook_finalization/status")
-        .and_then(Value::as_str)
-        .unwrap_or("not_attempted");
+    let promotion_status = promotion_state(record);
+    let finalization_status = finalization_state(record);
     let patch_promoted = matches!(
-        promotion_status,
+        promotion_status.as_str(),
         "verification_pending" | "applied" | "gate_failed"
     );
 
@@ -2303,12 +2413,7 @@ pub(crate) fn execution_states_from_aggregate(
             },
         },
         "gate": {
-            "state": match promotion_status {
-                "applied" => "passed",
-                "gate_failed" => "failed",
-                "verification_pending" => "pending",
-                _ => "not_run",
-            },
+            "state": promotion_gate_state(record, &promotion_status),
         },
         "promotion": {
             "state": promotion_status,
@@ -3713,6 +3818,7 @@ mod tests {
         assert_eq!(status["cook"]["publication"], "blocked");
         assert_eq!(status_exit_code(&status), 1);
         assert!(rendered.contains("Status: gate_failed"));
+        assert!(rendered.contains("Candidate state: promoted_gate_failed"));
         assert!(rendered.contains("Cook: gate_failed (publication blocked)"));
         assert!(rendered.contains("Next: homeboy agent-task diagnose cook-attempt-1 --full"));
         assert!(!rendered.contains("Next: homeboy agent-task review"));
@@ -3792,7 +3898,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_terminal_cook_result_keeps_the_child_status_and_actions() {
+    fn successful_terminal_cook_result_projects_its_declared_cook_status() {
         let mut status = json!({
             "run_id": "cook-attempt-1",
             "state": "succeeded",
@@ -3808,9 +3914,10 @@ mod tests {
 
         project_owning_cook_terminal_status(&mut status);
 
-        assert_eq!(status["state"], "succeeded");
-        assert!(status.get("cook").is_none());
-        assert_eq!(status_exit_code(&status), 0);
+        assert_eq!(status["state"], "future_success_status");
+        assert_eq!(status["child_run_state"], "succeeded");
+        assert_eq!(status["cook"]["publication"], "pending");
+        assert_eq!(status_exit_code(&status), 1);
     }
 
     #[test]
@@ -3830,7 +3937,8 @@ mod tests {
                     "latest_promotion": {
                         "status": "applied",
                         "patch_artifact": { "id": "patch" }
-                    }
+                    },
+                    "cook_finalization": { "status": "review_ready" }
                 }
             });
 
@@ -3843,8 +3951,12 @@ mod tests {
             )
             .expect("status summary");
 
-            assert_eq!(status["state"], "succeeded", "{terminal_status}");
-            assert!(status["cook"].is_null(), "{terminal_status}");
+            assert_eq!(status["state"], terminal_status, "{terminal_status}");
+            assert_eq!(status["child_run_state"], "succeeded", "{terminal_status}");
+            assert_eq!(
+                status["cook"]["publication"], "completed",
+                "{terminal_status}"
+            );
             assert_eq!(status_exit_code(&status), 0, "{terminal_status}");
             assert!(rendered.contains("Next: homeboy agent-task review cook-attempt-1"));
             assert!(status[ACTIONABLE_METADATA_KEY]["next_actions"]
@@ -3863,7 +3975,7 @@ mod tests {
         json!({
             "run_id": "cook-attempt-1",
             "state": "succeeded",
-            "tasks": [],
+            "tasks": [{ "task_id": "cook", "state": "succeeded" }],
             "metadata": {
                 "cook_progress": {
                     "phase": "terminal",
@@ -3883,6 +3995,164 @@ mod tests {
                 "promotion": { "state": promotion_status },
                 "finalization": { "state": finalization_status }
             }
+        })
+    }
+
+    #[test]
+    fn cook_lifecycle_matrix_keeps_provider_patch_gate_and_finalization_truth_separate() {
+        let cases = [
+            (
+                "green",
+                "review_ready",
+                "applied",
+                "review_ready",
+                "review_ready",
+                "promoted",
+                "passed",
+                "completed",
+                "completed",
+            ),
+            (
+                "gate failed",
+                "review_ready",
+                "gate_failed",
+                "not_attempted",
+                "gate_failed",
+                "promoted_gate_failed",
+                "failed",
+                "not_attempted",
+                "blocked",
+            ),
+            (
+                "accepted baseline red",
+                "review_ready",
+                "gate_failed",
+                "review_ready",
+                "review_ready",
+                "promoted_accepted_inherited_failure",
+                "accepted_inherited_failure",
+                "completed",
+                "completed",
+            ),
+            (
+                "finalization failed",
+                "review_ready",
+                "applied",
+                "finalization_failed",
+                "finalization_failed",
+                "promoted_finalization_failed",
+                "passed",
+                "finalization_failed",
+                "blocked",
+            ),
+            (
+                "finalization pending",
+                "review_ready",
+                "applied",
+                "pending",
+                "finalization_pending",
+                "promoted_finalization_pending",
+                "passed",
+                "finalization_pending",
+                "pending",
+            ),
+        ];
+
+        for (
+            name,
+            detail,
+            promotion,
+            finalization,
+            expected_status,
+            candidate,
+            gate,
+            expected_finalization,
+            publication,
+        ) in cases
+        {
+            let mut status = blocked_cook_status_fixture(detail, promotion, finalization);
+            if name == "accepted baseline red" {
+                status["metadata"]["latest_promotion"] = accepted_baseline_red_promotion();
+            }
+            status["metadata"]["cook_progress"]["terminal_success"] = Value::Bool(true);
+            project_owning_cook_terminal_status(&mut status);
+
+            assert_eq!(status["state"], expected_status, "{name}");
+            assert_eq!(status["child_run_state"], "succeeded", "{name}");
+            assert_eq!(status["tasks"][0]["state"], expected_status, "{name}");
+            assert_eq!(status["tasks"][0]["provider_state"], "succeeded", "{name}");
+            assert_eq!(
+                status["execution_states"]["provider"][0]["state"], "succeeded",
+                "{name}"
+            );
+            assert_eq!(
+                status["execution_states"]["candidate"]["state"], candidate,
+                "{name}"
+            );
+            assert_eq!(status["execution_states"]["gate"]["state"], gate, "{name}");
+            assert_eq!(
+                status["execution_states"]["promotion"]["state"], promotion,
+                "{name}"
+            );
+            assert_eq!(
+                status["execution_states"]["finalization"]["state"], expected_finalization,
+                "{name}"
+            );
+            assert_eq!(status["cook"]["publication"], publication, "{name}");
+            assert_eq!(
+                status_exit_code(&status),
+                if publication == "completed" { 0 } else { 1 },
+                "{name}"
+            );
+
+            let mut compact = compact_status_summary(&status, "cook-attempt-1");
+            attach_agent_task_status_actionable(&mut compact, "cook-attempt-1");
+            let rendered = crate::commands::agent_task_summary::render_agent_task_summary(
+                crate::commands::agent_task_summary::AgentTaskSummaryKind::Status,
+                &compact,
+            )
+            .expect("status summary");
+            let review_command = "homeboy agent-task review cook-attempt-1";
+            assert_eq!(
+                rendered.contains(&format!("Next: {review_command}")),
+                publication == "completed",
+                "{name}"
+            );
+            assert_eq!(
+                compact[ACTIONABLE_METADATA_KEY]["next_actions"]
+                    .as_array()
+                    .expect("next actions")
+                    .iter()
+                    .any(|action| action["command"] == review_command),
+                publication == "completed",
+                "{name}"
+            );
+        }
+    }
+
+    fn accepted_baseline_red_promotion() -> Value {
+        json!({
+            "schema": "homeboy/agent-task-promotion-report/v1",
+            "status": "gate_failed",
+            "source": { "kind": "aggregate", "task_id": "cook" },
+            "to_worktree": "fixture",
+            "target": { "worktree": "fixture" },
+            "patch_artifact": { "id": "patch", "kind": "patch", "path": "patch.diff" },
+            "deterministic_gates": [{
+                "schema": "homeboy/agent-task-gate-report/v1",
+                "id": "required-gate",
+                "status": "accepted_inherited_failure",
+                "command": ["cargo", "test"],
+                "exit_code": 1,
+                "baseline_comparison": {
+                    "base_ref": "main",
+                    "exit_code": 1,
+                    "failure_fingerprint": "same-failure",
+                    "matches_candidate_failure": true,
+                    "result": "baseline_red"
+                }
+            }],
+            "operator_notification": { "status": "completed", "message": "accepted baseline red" }
         })
     }
 

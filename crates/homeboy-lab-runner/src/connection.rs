@@ -2877,7 +2877,8 @@ fn stale_daemon_warning(
             daemon_matches_configured,
             controller_identity.git_dirty == Some(true),
         )
-        .with_runtime_paths(&runner.id, stale_runtime_paths, changed_runtime_paths),
+        .with_runtime_paths(&runner.id, stale_runtime_paths, changed_runtime_paths)
+        .with_persisted_session_version(&runner.id, session.homeboy_version.clone()),
     ))
 }
 

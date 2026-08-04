@@ -257,7 +257,9 @@ homeboy rig sources refresh example-org-homeboy-rigs
 homeboy rig sources remove example-org-homeboy-rigs
 ```
 
-`sources list` groups installed rigs and stacks by package source, package path, revision, and ownership. `sources refresh` pulls recorded git-backed package paths, refreshes Homeboy-owned installed rig and stack specs, and reports source, before/after revisions, installed config path, and source spec path. `sources remove` removes Homeboy-owned config links and metadata for one source package; it also removes cloned git packages, while linked local package directories are left in place.
+`sources list` groups managed rigs and stacks by package source, package path, revision, content identity, and ownership. Managed groups carry `source_status: "managed"`; `package_present` and stack `component_path_present` are independent availability observations. The JSON report also includes `orphaned_stacks` for installed stack configs that have no source metadata. These rows are reported as `legacy_missing_metadata`, include a content identity and the `adopt_package_source` recovery action (`homeboy rig install <authoritative-package-source> --all --reinstall`), and never infer provenance from filenames or modify the spec during inspection.
+
+`sources refresh` pulls recorded git-backed package paths, refreshes Homeboy-owned installed rig and stack specs, and reports source, before/after revisions, installed config path, and source spec path. `sources remove` removes Homeboy-owned config links and metadata for one source package; it also removes cloned git packages, while linked local package directories are left in place.
 
 ## Stack Sync
 

@@ -6,7 +6,6 @@ use homeboy_core::observation::ActiveObservation;
 use homeboy_core::stream_capture::StreamCaptureMetadata;
 use homeboy_core::validation_progress::{write_command_artifact, ValidationProgressRecorder};
 pub use homeboy_extension_contract::SelfCheckCaptureMetadata;
-use serde::Serialize;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};

@@ -2103,11 +2103,11 @@ fn promotion_notification_with_gate_summary(
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        let passed = gate_ids(&[
-            AgentTaskGateStatus::Succeeded,
+        let passed = gate_ids(&[AgentTaskGateStatus::Succeeded]);
+        let failed = gate_ids(&[
+            AgentTaskGateStatus::Failed,
             AgentTaskGateStatus::AcceptedInheritedFailure,
         ]);
-        let failed = gate_ids(&[AgentTaskGateStatus::Failed]);
         let skipped = gate_ids(&[AgentTaskGateStatus::Skipped]);
         notification.message.push_str(&format!(
             "; deterministic gates: passed=[{passed}], failed=[{failed}], skipped=[{skipped}]"

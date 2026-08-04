@@ -1451,6 +1451,11 @@ pub struct ComponentSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack: Option<String>,
 
+    /// Immutable Git stack source materialized directly by a Lab runner. This
+    /// is distinct from `stack`, which names a local stack-sync configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lab_stack: Option<LabStackSpec>,
+
     /// Optional branch hint for `rig status`. MVP just reports actual branch;
     /// this field documents expected branch for humans reading specs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1480,6 +1485,71 @@ pub struct ComponentSpec {
     /// inputs and cache paths; Homeboy owns key computation, restore, and save.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency_cache: Option<DependencyCacheSpec>,
+}
+
+/// A reproducible stack that a Lab runner can materialize without a controller
+/// checkout. Every ref is paired with the SHA it resolved to at planning time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabStackSpec {
+    pub repository: String,
+    pub base: LabStackRef,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prs: Vec<LabStackPrSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabStackRef {
+    pub reference: String,
+    pub sha: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabStackPrSpec {
+    pub number: u64,
+    pub head: LabStackRef,
+    /// Parent number of the merge commit to use when a PR head is itself a
+    /// merge commit. The generic stack resolver owns interpretation (#11394).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_mainline: Option<u32>,
+}
+
+impl LabStackSpec {
+    /// Reject incomplete or mutable portable declarations before any runner
+    /// side effect. SHA resolution is verified again by the materializer.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.repository.trim().is_empty() {
+            return Err("lab_stack.repository must be non-empty".to_string());
+        }
+        validate_lab_stack_ref("base", &self.base)?;
+        let mut previous = 0;
+        for pr in &self.prs {
+            if pr.number == 0 || pr.number <= previous {
+                return Err("lab_stack.prs must use strictly increasing PR numbers".to_string());
+            }
+            previous = pr.number;
+            validate_lab_stack_ref(&format!("prs.{}", pr.number), &pr.head)?;
+            if matches!(pr.merge_mainline, Some(0)) {
+                return Err(format!(
+                    "lab_stack.prs.{}.merge_mainline must be positive",
+                    pr.number
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_lab_stack_ref(label: &str, reference: &LabStackRef) -> std::result::Result<(), String> {
+    if reference.reference.trim().is_empty() {
+        return Err(format!("lab_stack.{label}.reference must be non-empty"));
+    }
+    let sha = reference.sha.trim();
+    if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!(
+            "lab_stack.{label}.sha must be a full 40-character commit SHA"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

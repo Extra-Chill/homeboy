@@ -1,6 +1,6 @@
 //! Top-level lint result aggregate contract type.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 
 use homeboy_finding::HomeboyFinding;

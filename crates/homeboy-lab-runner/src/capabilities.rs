@@ -1,6 +1,5 @@
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
-use std::time::Duration;
 
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
@@ -761,6 +760,7 @@ mod tests {
     use homeboy_core::gate::HOMEBOY_GATE_RESULT_SCHEMA;
     use homeboy_core::server::{RunnerPolicy, RunnerSettings};
     use std::fs;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn ssh_runner() -> Runner {

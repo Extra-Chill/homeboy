@@ -181,6 +181,9 @@ pub fn start_candidate_adoption_with_policy(
             gate_started_at: None,
             gate_timeout_seconds: None,
             gate_output_tail: String::new(),
+            gate_elapsed_ms: None,
+            gate_last_progress_ms_ago: None,
+            gate_progress: None,
             resume_count: 0,
             terminal_error: None,
             completed_at: None,
@@ -269,6 +272,9 @@ pub fn start_candidate_adoption_gate(
         attempt.gate_started_at = Some(now.clone());
         attempt.gate_timeout_seconds = Some(timeout_seconds);
         attempt.gate_output_tail.clear();
+        attempt.gate_elapsed_ms = Some(0);
+        attempt.gate_last_progress_ms_ago = None;
+        attempt.gate_progress = None;
         attempt.heartbeat_at = now.clone();
         attempt.updated_at = now.clone();
         record.updated_at = Some(now);
@@ -277,7 +283,33 @@ pub fn start_candidate_adoption_gate(
     Ok(())
 }
 
-pub fn heartbeat_candidate_adoption_gate(run_id: &str, output_tail: &str) -> Result<()> {
+pub(crate) fn heartbeat_candidate_adoption_gate(
+    run_id: &str,
+    visibility: crate::agent_task_gate::AgentTaskGateVisibility,
+    reveal_policy: crate::agent_task_gate::AgentTaskGateRevealPolicy,
+    status: &crate::agent_task_gate::AgentTaskGateLiveStatus,
+) -> Result<()> {
+    let status = match (visibility, reveal_policy) {
+        (
+            crate::agent_task_gate::AgentTaskGateVisibility::Private,
+            crate::agent_task_gate::AgentTaskGateRevealPolicy::SummaryOnly,
+        ) => crate::agent_task_gate::AgentTaskGateLiveStatus {
+            output_tail: "private gate output withheld".to_string(),
+            ..Default::default()
+        },
+        (
+            crate::agent_task_gate::AgentTaskGateVisibility::Private,
+            crate::agent_task_gate::AgentTaskGateRevealPolicy::Redacted,
+        ) => crate::agent_task_gate::AgentTaskGateLiveStatus {
+            output_tail: "private gate progress redacted".to_string(),
+            ..Default::default()
+        },
+        (
+            crate::agent_task_gate::AgentTaskGateVisibility::Private,
+            crate::agent_task_gate::AgentTaskGateRevealPolicy::NoDetail,
+        ) => crate::agent_task_gate::AgentTaskGateLiveStatus::default(),
+        _ => status.clone(),
+    };
     let run_id = sanitize_run_id(run_id);
     store::mutate_record(&run_id, |record| {
         let Some(attempt) = record.candidate_adoption.as_mut() else {
@@ -289,7 +321,10 @@ pub fn heartbeat_candidate_adoption_gate(run_id: &str, output_tail: &str) -> Res
         let now = now_timestamp();
         attempt.heartbeat_at = now.clone();
         attempt.updated_at = now.clone();
-        attempt.gate_output_tail = output_tail.to_string();
+        attempt.gate_output_tail = status.output_tail;
+        attempt.gate_elapsed_ms = Some(status.elapsed_ms);
+        attempt.gate_last_progress_ms_ago = status.last_progress_ms_ago;
+        attempt.gate_progress = status.progress;
         record.updated_at = Some(now);
         true
     })?;
