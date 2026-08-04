@@ -568,6 +568,18 @@ pub(super) fn record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
                 Some(format!("parse agent-task run {}", run.id)),
             )
         })?;
+    if record.schema != super::records::schemas::RUN {
+        return Err(Error::validation_invalid_argument(
+            "agent_task_run.schema",
+            format!(
+                "unsupported durable agent-task run schema `{}`; this Homeboy build supports `{}`",
+                record.schema,
+                super::records::schemas::RUN
+            ),
+            Some(run.id.clone()),
+            None,
+        ));
+    }
     record.hydrate_legacy_lab_handoff();
     if let Some(problem) = record.lab_handoff_validation_error() {
         return Err(Error::internal_json(

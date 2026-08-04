@@ -1,0 +1,31 @@
+{
+  "schema": "homeboy/durable-cook-fixture/v1",
+  "producer": {
+    "runtime": "0.328.1",
+    "run_record_schema": "homeboy/agent-task-run/v1"
+  },
+  "cook": {
+    "id": "cook-11398-production-reproduction",
+    "source_attempt": 1,
+    "continuation_attempt": 2
+  },
+  "source_record": {
+    "schema": "homeboy/agent-task-run/v1",
+    "state": "succeeded",
+    "latest_promotion": {
+      "status": "applied",
+      "post_apply": false
+    }
+  },
+  "continuation_record": {
+    "schema": "homeboy/agent-task-run/v1",
+    "state": "partial_failure",
+    "latest_promotion": {
+      "follow_up_kind": "review_form_only"
+    },
+    "aggregate": {
+      "status": "failed",
+      "outcome_status": "timeout"
+    }
+  }
+}
