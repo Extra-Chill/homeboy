@@ -28,6 +28,8 @@ Run performance benchmarks for a component
 | Option | Value | Description |
 | --- | --- | --- |
 | `--json` | flag | Print the full JSON output instead of the compact human summary. The compact summary is the default for terminals; the full structured payload is always written to `--output <file>` and is printed to stdout with this flag. No data differs between the two — only the default presentation is compact |
+| `--format` | `<FORMAT>` | Output format Values: `auto`, `json`, `markdown`, `text`. |
+| `--detail` | `<DETAIL>` | How much of the result to render Values: `summary`, `full`. |
 | `--path` | `<PATH>` | Override the component checkout path for this invocation |
 | `--extension` | `<ID>` | One-shot extension override for the current invocation |
 | `--iterations` | `<ITERATIONS>` | Iterations per scenario (default 10). Forwarded to the runner via HOMEBOY_BENCH_ITERATIONS. Individual extensions may clamp |
