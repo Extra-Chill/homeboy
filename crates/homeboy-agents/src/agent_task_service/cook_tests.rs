@@ -6952,9 +6952,9 @@ fn closed_observer_pipe_does_not_stop_explicitly_accepted_inherited_gate_finaliz
         let expected_run_id = run_id.clone();
         let observer_calls = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&observer_calls);
-        let observer = move |phase: &str, _: &str, _: &str| {
+        let observer = move |event: &CookProgressEvent<'_>| {
             observed.fetch_add(1, Ordering::SeqCst);
-            if phase == "promotion" {
+            if event.phase == "promotion" {
                 return Err(Error::internal_io(
                     "Broken pipe (os error 32)",
                     Some("write submitting client stdout".to_string()),
