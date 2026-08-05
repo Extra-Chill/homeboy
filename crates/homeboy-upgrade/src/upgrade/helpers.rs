@@ -2140,12 +2140,16 @@ mod convergence_tests {
         let runner = runner("0.301.2", "0.301.2", false);
 
         assert!(runner_convergence_failed(
-            &[runner.clone()],
+            std::slice::from_ref(&runner),
             &[],
             Some("0.304.0")
         ));
-        let disposition =
-            runner_convergence_disposition(false, &[runner.clone()], &[], Some("0.304.0"));
+        let disposition = runner_convergence_disposition(
+            false,
+            std::slice::from_ref(&runner),
+            &[],
+            Some("0.304.0"),
+        );
         assert_eq!(disposition, RunnerConvergenceDisposition::Partial);
         assert!(
             upgrade_message(true, Some("0.304.0"), None, disposition, &[runner], &[])
@@ -2177,8 +2181,12 @@ mod convergence_tests {
     #[test]
     fn converged_runners_still_report_convergence() {
         let runner = runner("0.301.2", "0.310.0", true);
-        let disposition =
-            runner_convergence_disposition(false, &[runner.clone()], &[], Some("0.310.0"));
+        let disposition = runner_convergence_disposition(
+            false,
+            std::slice::from_ref(&runner),
+            &[],
+            Some("0.310.0"),
+        );
         assert_eq!(disposition, RunnerConvergenceDisposition::Converged);
         let message = upgrade_message(true, Some("0.310.0"), None, disposition, &[runner], &[]);
         assert!(
