@@ -130,6 +130,104 @@ impl ObservationStore {
         self.start_run_with_context_and_id(run, context, Some(id))
     }
 
+    /// Atomically claim a singleton running run. A live lease leaves the
+    /// existing owner untouched; an expired lease is taken over in the same
+    /// SQLite statement, so a crash between observation and replacement cannot
+    /// create two workers.
+    pub fn claim_expiring_singleton_run(
+        &self,
+        mut run: NewRunRecord,
+        id: String,
+        owner_token: &str,
+        lease_expires_at_ms: i64,
+    ) -> Result<Option<RunRecord>> {
+        validate_required("kind", &run.kind)?;
+        validate_required("id", &id)?;
+        validate_required("owner_token", owner_token)?;
+        run.metadata_json["owner_token"] = serde_json::Value::String(owner_token.to_string());
+        run.metadata_json["lease_expires_at_ms"] = serde_json::json!(lease_expires_at_ms);
+        let context = run
+            .run_context
+            .clone()
+            .with_missing_from(RunContext::subprocess_compatibility_from_env());
+        let metadata_json =
+            serialize_metadata(&with_run_context_metadata(run.metadata_json, &context))?;
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now().timestamp_millis();
+        let rows = execute_with_retry("claim expiring singleton run", || {
+            self.connection.execute(
+                r#"
+                INSERT INTO runs(id, kind, component_id, started_at, status, command, cwd, homeboy_version, git_sha, rig_id, metadata_json)
+                VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7, ?8, ?9, ?10)
+                ON CONFLICT DO UPDATE SET
+                    started_at = excluded.started_at,
+                    metadata_json = excluded.metadata_json
+                WHERE runs.kind = excluded.kind AND runs.status = 'running'
+                    AND COALESCE(CAST(json_extract(runs.metadata_json, '$.lease_expires_at_ms') AS INTEGER), 0) < ?11
+                "#,
+                params![id, run.kind, run.component_id, started_at, run.command, run.cwd,
+                    run.homeboy_version, run.git_sha, run.rig_id, metadata_json, now],
+            )
+        })?;
+        if rows == 0 {
+            return Ok(None);
+        }
+        let claimed = self
+            .list_runs(RunListFilter {
+                kind: Some(run.kind),
+                status: Some(RunStatus::Running.as_str().to_string()),
+                limit: Some(1),
+                ..RunListFilter::default()
+            })?
+            .into_iter()
+            .next();
+        Ok(claimed
+            .filter(|record| record.metadata_json["owner_token"].as_str() == Some(owner_token)))
+    }
+
+    /// Renew a singleton lease only for its exact live owner token.
+    pub fn renew_running_run_lease(
+        &self,
+        run_id: &str,
+        owner_token: &str,
+        lease_expires_at_ms: i64,
+    ) -> Result<bool> {
+        let rows = execute_with_retry("renew running run lease", || {
+            self.connection.execute(
+                "UPDATE runs SET metadata_json = json_set(metadata_json, '$.lease_expires_at_ms', ?1) WHERE id = ?2 AND status = 'running' AND json_extract(metadata_json, '$.owner_token') = ?3",
+                params![lease_expires_at_ms, run_id, owner_token],
+            )
+        })?;
+        Ok(rows == 1)
+    }
+
+    /// Terminalize a leased singleton only when its ownership token still
+    /// matches. A worker revived after a stale-owner takeover cannot overwrite
+    /// the replacement owner's outcome.
+    pub fn finish_running_run_with_owner_token(
+        &self,
+        run_id: &str,
+        owner_token: &str,
+        status: RunStatus,
+        metadata_json: serde_json::Value,
+    ) -> Result<bool> {
+        let metadata_json = serialize_metadata(&metadata_json)?;
+        let finished_at = chrono::Utc::now().to_rfc3339();
+        let rows = execute_with_retry("finish leased running run", || {
+            self.connection.execute(
+                "UPDATE runs SET finished_at = ?1, status = ?2, metadata_json = ?3 WHERE id = ?4 AND status = 'running' AND json_extract(metadata_json, '$.owner_token') = ?5",
+                params![
+                    finished_at,
+                    status.as_str(),
+                    metadata_json,
+                    run_id,
+                    owner_token,
+                ],
+            )
+        })?;
+        Ok(rows == 1)
+    }
+
     pub fn start_run_with_context(
         &self,
         run: NewRunRecord,

@@ -82,6 +82,7 @@ use policy::{preflight_remote_argv, remote_execution_preflight};
 use broker::*;
 use daemon::*;
 pub(crate) use daemon_api::daemon_api_get_for_session;
+pub(crate) use daemon_api::daemon_api_get_for_session_with_timeout;
 use daemon_api::*;
 use failure::*;
 use handoff::*;
