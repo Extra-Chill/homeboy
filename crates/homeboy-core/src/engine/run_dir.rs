@@ -174,6 +174,22 @@ impl RunDir {
         ("ANNOTATIONS_DIR", Some("annotations")),
     ];
 
+    /// The registry keys core exports a legacy sidecar env var for, whether or
+    /// not any manifest declares them.
+    ///
+    /// This is the measurable form of the narrowing question in #11121: as long
+    /// as a shipped extension's runner reads one of these without declaring it,
+    /// filtering [`Self::legacy_env_vars_for`] down to declared keys breaks
+    /// that extension. `homeboy-extension` pins the current gap against the
+    /// shipped manifest fixtures, so the day the gap closes the pin fails and
+    /// says so.
+    pub fn legacy_env_sidecar_keys() -> Vec<&'static str> {
+        Self::LEGACY_SIDECAR_ENV_KEYS
+            .iter()
+            .filter_map(|(_, key)| *key)
+            .collect()
+    }
+
     /// Generate backward-compatible env var pairs for extension scripts.
     ///
     /// Returns `(key, value)` pairs that map the legacy product-prefixed
@@ -200,7 +216,14 @@ impl RunDir {
     /// `"test.coverage": false`, `wordpress` reads `ANNOTATIONS_DIR` while
     /// declaring `"annotations": false`, and three extensions read
     /// `FIX_RESULTS_FILE`, which has no sidecar key at all). Narrowing before
-    /// those declarations are corrected would break shipped extensions.
+    /// those declarations are corrected would break shipped extensions, and an
+    /// extension declaring no sidecars at all would lose the whole set.
+    ///
+    /// That precondition is now measured rather than asserted in prose:
+    /// [`Self::legacy_env_sidecar_keys`] exposes what core exports
+    /// unconditionally, and `homeboy-extension` pins the undeclared remainder
+    /// against the shipped manifest fixtures. When that pin reports an empty
+    /// gap, this may become a filter.
     ///
     /// Declared paths that are absolute or contain `..` are ignored — a
     /// manifest is extension-authored config and this hands the result to a
