@@ -296,7 +296,7 @@ pub fn runner_agent_task_provider_catalog(
     let client = RunnerCapabilitySnapshot::ssh_client_for_runner(&runner)?;
     let homeboy = remote_runner_homeboy_path(&runner, "runner provider catalog")?;
     let output = client.execute(&format!(
-        "{} agent-task providers",
+        "{} agent-task providers --machine-catalog",
         shell::quote_arg(homeboy)
     ));
     let value: Value = serde_json::from_str(&output.stdout).map_err(|error| {
