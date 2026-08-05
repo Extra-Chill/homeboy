@@ -94,10 +94,8 @@ pub(super) fn collect_provider_config_candidate_paths(
     paths: &mut Vec<String>,
 ) {
     match value {
-        serde_json::Value::String(text) => {
-            if is_controller_path_like(text) {
-                paths.push(text.to_string());
-            }
+        serde_json::Value::String(text) if is_controller_path_like(text) => {
+            paths.push(text.to_string());
         }
         serde_json::Value::Array(items) => {
             for item in items {
@@ -464,7 +462,7 @@ pub(super) fn bootstrap_source_cli_dependencies(
     preflight_remote_argv_path_translation(
         "Lab source-CLI dependency bootstrap",
         runner_id,
-        &command,
+        command,
         Path::new(local_path),
         remote_path,
     )?;
