@@ -43,7 +43,24 @@ cat > "$BIN_DIR/test-member" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' 'member::member_works: test'
 EOF
-chmod +x "$BIN_DIR/test-lib" "$BIN_DIR/test-api" "$BIN_DIR/test-member"
+cat > "$BIN_DIR/test-proc-macro" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' 'macros::expands: test'
+EOF
+cat > "$BIN_DIR/test-rlib" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' 'rlib::works: test'
+EOF
+cat > "$BIN_DIR/bench-audit-self" <<'EOF'
+#!/usr/bin/env bash
+if [ -n "${HOMEBOY_BENCH_LIST_LOG:-}" ]; then
+  printf 'invoked\n' >> "$HOMEBOY_BENCH_LIST_LOG"
+fi
+printf '%s\n' "thread 'main' panicked at src/bin/bench-audit-self.rs:44:40:" >&2
+printf '%s\n' 'CARGO_MANIFEST_DIR not set (run via cargo): NotPresent' >&2
+exit 101
+EOF
+chmod +x "$BIN_DIR/test-lib" "$BIN_DIR/test-api" "$BIN_DIR/test-member" "$BIN_DIR/test-proc-macro" "$BIN_DIR/test-rlib" "$BIN_DIR/bench-audit-self"
 
 cat > "$BIN_DIR/cargo" <<'EOF'
 #!/usr/bin/env bash
@@ -87,9 +104,12 @@ PY
   exit 0
 fi
 if [[ " $* " == *' --workspace '* && " $* " == *' --no-run '* ]]; then
-  printf '{"reason":"compiler-artifact","package_id":"shard-smoke 0.1.0 (path+file:///fixture)","target":{"name":"shard_smoke","kind":["lib"]},"executable":"%s/test-lib"}\n' "$(dirname "$0")"
-  printf '{"reason":"compiler-artifact","package_id":"shard-smoke 0.1.0 (path+file:///fixture)","target":{"name":"api","kind":["test"]},"executable":"%s/test-api"}\n' "$(dirname "$0")"
-  printf '{"reason":"compiler-artifact","package_id":"member-smoke 0.1.0 (path+file:///fixture/member)","target":{"name":"member_smoke","kind":["lib"]},"executable":"%s/test-member"}\n' "$(dirname "$0")"
+  printf '{"reason":"compiler-artifact","package_id":"shard-smoke 0.1.0 (path+file:///fixture)","target":{"name":"shard_smoke","kind":["lib"]},"profile":{"test":true},"executable":"%s/test-lib"}\n' "$(dirname "$0")"
+  printf '{"reason":"compiler-artifact","package_id":"shard-smoke 0.1.0 (path+file:///fixture)","target":{"name":"api","kind":["test"]},"profile":{"test":true},"executable":"%s/test-api"}\n' "$(dirname "$0")"
+  printf '{"reason":"compiler-artifact","package_id":"member-smoke 0.1.0 (path+file:///fixture/member)","target":{"name":"member_smoke","kind":["lib"]},"profile":{"test":true},"executable":"%s/test-member"}\n' "$(dirname "$0")"
+  printf '{"reason":"compiler-artifact","package_id":"shard-smoke 0.1.0 (path+file:///fixture)","target":{"name":"macros","kind":["proc-macro"]},"profile":{"test":true},"executable":"%s/test-proc-macro"}\n' "$(dirname "$0")"
+  printf '{"reason":"compiler-artifact","package_id":"shard-smoke 0.1.0 (path+file:///fixture)","target":{"name":"rlib_fixture","kind":["rlib"]},"profile":{"test":true},"executable":"%s/test-rlib"}\n' "$(dirname "$0")"
+  printf '{"reason":"compiler-artifact","package_id":"shard-smoke 0.1.0 (path+file:///fixture)","target":{"name":"bench-audit-self","kind":["bin"]},"profile":{"test":false},"executable":"%s/bench-audit-self"}\n' "$(dirname "$0")"
   exit 0
 fi
 if [[ " $* " == *' --doc '* && " $* " == *' --list '* ]]; then
@@ -173,10 +193,12 @@ EOF
 INVENTORY_A="$WORK_DIR/inventory-a.json"
 INVENTORY_B="$WORK_DIR/inventory-b.json"
 INVENTORY_NEXTEST="$WORK_DIR/inventory-nextest.json"
+BENCH_LIST_LOG="$WORK_DIR/bench-list.log"
 HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
 HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
 HOMEBOY_TEST_INVENTORY_ONLY=1 \
 HOMEBOY_TEST_INVENTORY_FILE="$INVENTORY_A" \
+HOMEBOY_BENCH_LIST_LOG="$BENCH_LIST_LOG" \
 HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
 HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
 PATH="$BIN_DIR:$PATH" \
@@ -185,6 +207,7 @@ HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
 HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
 HOMEBOY_TEST_INVENTORY_ONLY=1 \
 HOMEBOY_TEST_INVENTORY_FILE="$INVENTORY_B" \
+HOMEBOY_BENCH_LIST_LOG="$BENCH_LIST_LOG" \
 HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
 HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
 PATH="$BIN_DIR:$PATH" \
@@ -216,6 +239,8 @@ assert [test["id"] for test in first["tests"]] == [
     "shard-smoke::lib::shard_smoke::unit::alpha",
     "shard-smoke::lib::shard_smoke::unit::beta",
     "shard-smoke::lib::shard_smoke::unit::ignored",
+    "shard-smoke::proc-macro::macros::macros::expands",
+    "shard-smoke::rlib::rlib_fixture::rlib::works",
     "shard-smoke::test::api::api::works",
 ], first
 assert nextest["runner"] == "nextest", nextest
@@ -235,6 +260,11 @@ json.dump(manifest, open(sys.argv[4], "w"))
 nextest_manifest = dict(manifest, runner=nextest["runner"], inventory_fingerprint=nextest["inventory_fingerprint"], runner_fingerprint=nextest["runner_fingerprint"], workspace_fingerprint=nextest["workspace_fingerprint"], tests=[test["id"] for test in nextest["tests"]])
 json.dump(nextest_manifest, open(sys.argv[5], "w"))
 PY
+
+if [ -e "$BENCH_LIST_LOG" ] || grep -q 'CARGO_MANIFEST_DIR not set' "$WORK_DIR/inventory-a.out"; then
+  printf 'Expected non-test bench artifact to remain uninvoked and unreported\n' >&2
+  exit 1
+fi
 
 if grep -q 'Running pre-test lint checks' "$WORK_DIR/inventory-a.out" || ! grep -q 'Skipping lint (test inventory only)' "$WORK_DIR/inventory-a.out"; then
   printf 'Expected inventory-only run to bypass pre-test lint\n' >&2
@@ -261,13 +291,17 @@ python3 - "$WORK_DIR/cargo.log" <<'PY'
 import sys
 
 lines = open(sys.argv[1]).read().splitlines()
-assert len(lines) == 5, lines
+assert len(lines) == 7, lines
 assert all(" --exact --test-threads=1" in line for line in lines), lines
 assert sum("unit::alpha" in line for line in lines) == 1, lines
 assert sum("unit::beta" in line for line in lines) == 1, lines
 assert sum("unit::ignored" in line for line in lines) == 1, lines
 assert sum("api::works" in line for line in lines) == 1, lines
 assert sum("member::member_works" in line for line in lines) == 1, lines
+assert sum("macros::expands" in line for line in lines) == 1, lines
+assert sum("rlib::works" in line for line in lines) == 1, lines
+assert sum(" --lib " in line and "macros::expands" in line for line in lines) == 1, lines
+assert sum(" --lib " in line and "rlib::works" in line for line in lines) == 1, lines
 PY
 
 python3 - "$WORK_DIR/test-results.json" "$WORK_DIR/annotations/rust-test-shard.json" <<'PY'
@@ -275,9 +309,9 @@ import json
 import sys
 
 results = json.load(open(sys.argv[1]))
-assert results == {"total": 5, "passed": 4, "failed": 0, "skipped": 1, "partial": "rust-shard"}, results
+assert results == {"total": 7, "passed": 6, "failed": 0, "skipped": 1, "partial": "rust-shard"}, results
 record = json.load(open(sys.argv[2]))[0]
-assert (record["executed"], record["passed"], record["failed"], record["skipped"]) == (5, 4, 0, 1), record
+assert (record["executed"], record["passed"], record["failed"], record["skipped"]) == (7, 6, 0, 1), record
 assert record["duration_ms"] >= 0, record
 PY
 
@@ -301,7 +335,7 @@ python3 - "$WORK_DIR/cargo.log" <<'PY'
 import sys
 
 lines = open(sys.argv[1]).read().splitlines()
-nextest = lines[5:]
+nextest = lines[7:]
 assert len(nextest) == 1, lines
 assert "nextest run" in nextest[0] and " --workspace " in nextest[0] and " --test-threads 1 " in nextest[0], nextest
 assert "test(=unit::alpha)" in nextest[0] and "test(=unit::beta)" in nextest[0] and "test(=api::works)" in nextest[0] and "test(=member::member_works)" in nextest[0], nextest
@@ -596,10 +630,10 @@ import json
 import sys
 
 results = json.load(open(sys.argv[1]))
-assert results == {"total": 5, "passed": 3, "failed": 1, "skipped": 1, "partial": "rust-shard"}, results
+assert results == {"total": 7, "passed": 5, "failed": 1, "skipped": 1, "partial": "rust-shard"}, results
 record = json.load(open(sys.argv[2]))[0]
 assert record["status"] == "failed", record
-assert (record["total"], record["executed"], record["passed"], record["failed"], record["skipped"]) == (5, 5, 3, 1, 1), record
+assert (record["total"], record["executed"], record["passed"], record["failed"], record["skipped"]) == (7, 7, 5, 1, 1), record
 assert record["duration_ms"] >= 0, record
 PY
 

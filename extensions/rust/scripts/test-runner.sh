@@ -654,7 +654,7 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_TEST_INVENTORY_FILE:-}${HOMEB
     else
         while IFS=$'\t' read -r package target target_kind name; do
             case "$target_kind" in
-                lib) TARGET_ARGS=(--lib) ;;
+                lib|rlib|proc-macro|cdylib|staticlib|dylib) TARGET_ARGS=(--lib) ;;
                 bin) TARGET_ARGS=(--bin "$target") ;;
                 doc) TARGET_ARGS=(--doc) ;;
                 example) TARGET_ARGS=(--example "$target") ;;
