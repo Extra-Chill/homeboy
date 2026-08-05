@@ -77,6 +77,14 @@ pub enum PlacementReadinessInvocation {
         /// let mutation-free preflight compile the same runner requirements as execution.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         durable_plan: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selector: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// Controller pins are typed data, never caller-provided executable
+        /// readiness probes. They let preflight report materialization drift.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime_identity: Option<homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity>,
     },
     CapabilityAudit {
         source_path: String,
@@ -183,6 +191,7 @@ fn compile_placement_readiness_plan(
             provider,
             source_path,
             durable_plan,
+            ..
         } => (
             "agent-task".to_string(),
             "agent-task cook",
@@ -265,7 +274,7 @@ pub enum PlacementReadinessState {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PlacementReadinessPredicate {
-    pub id: &'static str,
+    pub id: String,
     pub satisfied: bool,
 }
 
@@ -287,6 +296,9 @@ pub struct PlacementReadiness {
     pub runner_id: String,
     pub state: PlacementReadinessState,
     pub predicates: Vec<PlacementReadinessPredicate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_admission:
+        Option<homeboy_agents::agent_task_provider::AgentTaskProviderAdmissionPlan>,
     /// Stable v1 typed recovery actions retained from merged #11455.
     pub recovery_actions: Vec<ExecutableAction>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -338,6 +350,8 @@ fn placement_readiness_from_status(
 ) -> PlacementReadiness {
     let (workload_family, command, provider, source_path_inputs) = admission_identity(request);
     let availability = status.admission_availability(capacity);
+    let provider_admission = provider_admission_for_request(request);
+    let availability = status.admission_availability(capacity);
     let queueable = request.allow_queue
         && request.durable_workload
         && mode == RunnerTunnelMode::Reverse
@@ -349,9 +363,12 @@ fn placement_readiness_from_status(
         && provider
             .as_ref()
             .is_none_or(|provider| !provider.trim().is_empty());
-    let state = if availability.accepts_jobs && compatible && inputs_declared {
+    let provider_ready = provider_admission
+        .as_ref()
+        .is_none_or(|plan| plan.is_ready());
+    let state = if availability.accepts_jobs && compatible && inputs_declared && provider_ready {
         PlacementReadinessState::Ready
-    } else if queueable && compatible && inputs_declared {
+    } else if queueable && compatible && inputs_declared && provider_ready {
         PlacementReadinessState::Queueable
     } else {
         PlacementReadinessState::Blocked
@@ -403,7 +420,7 @@ fn placement_readiness_from_status(
         state,
         predicates: vec![
             PlacementReadinessPredicate {
-                id: "runner_connected",
+                id: "runner_connected".to_string(),
                 satisfied: availability.connected,
             },
             PlacementReadinessPredicate {
@@ -411,40 +428,52 @@ fn placement_readiness_from_status(
                 satisfied: status.daemon_fresh_for_admission(),
             },
             PlacementReadinessPredicate {
-                id: "active_jobs_authoritative",
+                id: "active_jobs_authoritative".to_string(),
                 satisfied: matches!(
                     status.active_job_state,
                     super::RunnerActiveJobState::Available
                 ),
             },
             PlacementReadinessPredicate {
-                id: "capacity_available",
+                id: "capacity_available".to_string(),
                 satisfied: !availability
                     .reasons
                     .iter()
                     .any(|reason| reason == "capacity_reached"),
             },
             PlacementReadinessPredicate {
-                id: "durable_reverse_queue",
+                id: "durable_reverse_queue".to_string(),
                 satisfied: queueable,
             },
             PlacementReadinessPredicate {
-                id: "required_capabilities",
+                id: "required_capabilities".to_string(),
                 satisfied: compatible,
             },
             PlacementReadinessPredicate {
-                id: "source_path_inputs_declared",
+                id: "source_path_inputs_declared".to_string(),
                 satisfied: source_path_inputs
                     .iter()
                     .all(|path| !path.trim().is_empty()),
             },
             PlacementReadinessPredicate {
-                id: "provider_declared",
+                id: "provider_declared".to_string(),
                 satisfied: provider
                     .as_ref()
                     .is_none_or(|provider| !provider.trim().is_empty()),
             },
-        ],
+        ]
+        .into_iter()
+        .chain(
+            provider_admission
+                .iter()
+                .flat_map(|plan| plan.predicates.iter())
+                .map(|predicate| PlacementReadinessPredicate {
+                    id: predicate.id.clone(),
+                    satisfied: predicate.satisfied,
+                }),
+        )
+        .collect(),
+        provider_admission,
         recovery_actions,
         recovery_action_projections,
         compiled_request: request.clone(),
@@ -473,6 +502,31 @@ fn admission_identity(
             vec![source_path.clone()],
         ),
     }
+}
+
+fn provider_admission_for_request(
+    request: &PlacementReadinessRequest,
+) -> Option<homeboy_agents::agent_task_provider::AgentTaskProviderAdmissionPlan> {
+    let PlacementReadinessInvocation::AgentTaskCook {
+        provider,
+        selector,
+        model,
+        runtime_identity,
+        ..
+    } = &request.invocation
+    else {
+        return None;
+    };
+    Some(
+        homeboy_agents::agent_task_provider::AgentTaskProviderAdmissionPlan::compile_unobserved(
+            homeboy_agents::agent_task_provider::AgentTaskProviderAdmissionRequest {
+                backend: provider.clone(),
+                selector: selector.clone(),
+                model: model.clone(),
+                runtime_identity: runtime_identity.clone(),
+            },
+        ),
+    )
 }
 
 static HANDOFF_CONNECT_LOCKS: OnceLock<Mutex<std::collections::BTreeMap<String, Arc<Mutex<()>>>>> =
@@ -1939,6 +1993,9 @@ mod placement_readiness_tests {
             provider: " ".to_string(),
             source_path: " ".to_string(),
             durable_plan: None,
+            selector: None,
+            model: None,
+            runtime_identity: None,
         };
         assert!(compile_placement_readiness_plan(&request).is_err());
     }
