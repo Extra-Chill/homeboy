@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.37] - 2026-08-05
+
+### Fixed
+- parse Node package test counts
+
 ## [3.34.36] - 2026-08-05
 
 ### Fixed
