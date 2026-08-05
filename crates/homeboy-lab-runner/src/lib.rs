@@ -200,11 +200,11 @@ pub use apply::{
     RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus,
 };
 pub use capabilities::{
-    evaluate_lab_runner_capabilities_for_runner, prepare_lab_runner_capability,
-    runner_capability_inventory, LabRunnerCapabilityContract, LabRunnerGateDecision,
-    LabRunnerGateMode, PreparedLabRunnerCapability, RunnerCapabilityInventory,
-    RunnerCapabilityPreflight, RunnerRequiredTool, RunnerToolCapabilityRequirement,
-    RunnerToolchainReadinessProbe,
+    evaluate_lab_runner_capabilities_for_inventory, evaluate_lab_runner_capabilities_for_runner,
+    prepare_lab_runner_capability, runner_capability_inventory, LabRunnerCapabilityContract,
+    LabRunnerGateDecision, LabRunnerGateMode, PreparedLabRunnerCapability,
+    RunnerCapabilityInventory, RunnerCapabilityPreflight, RunnerRequiredTool,
+    RunnerToolCapabilityRequirement, RunnerToolchainReadinessProbe,
 };
 pub(crate) use command_path::normalize_runner_command_env_for_homeboy_path;
 pub use command_path::preflight_remote_argv_path_translation;
