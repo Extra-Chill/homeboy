@@ -292,9 +292,12 @@ mod tests {
 
         // Durable cleanup jobs round-trip `CleanupArgs` as their request, and a
         // checkpoint written before this flag existed must still resume.
+        //
+        // `kebab-case` is the clap `ValueEnum` spelling; serde carries the
+        // variant names verbatim, so a persisted checkpoint reads `RunnerDownloads`.
         let legacy = serde_json::json!({
             "apply": true,
-            "include": ["runner-downloads"],
+            "include": ["RunnerDownloads"],
             "exclude": [],
             "older_than_days": null,
             "runtime_tmp_managed_older_than_days": null,
