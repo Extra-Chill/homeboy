@@ -43,7 +43,7 @@ homeboy server show <server_id>
 ```sh
 homeboy server set <server_id> --json <JSON>
 homeboy server set <server_id> --base64 <BASE64_JSON>
-homeboy server set <server_id> --json '{"auth":{"mode":"key_plus_password_controlmaster"}}'
+homeboy server set <server_id> --json '{"auth":{"mode":"key_plus_password_controlmaster","persist":"4h"}}'
 homeboy server set --json <JSON>   # server_id may be provided in JSON body
 ```
 
@@ -80,7 +80,7 @@ homeboy server list
 homeboy server connect <server_id>
 ```
 
-Opens an operator-authenticated SSH control-master session for servers configured with `auth.mode = "key_plus_password_controlmaster"`. Homeboy reuses the session for later server-backed commands without storing the password.
+Opens an operator-authenticated SSH control-master session for servers configured with `auth.mode = "key_plus_password_controlmaster"`. New managed-session policies require an explicit `auth.persist` OpenSSH `ControlPersist` value. Homeboy reuses the session for later server-backed commands without storing the password.
 
 ### `status`
 
@@ -88,7 +88,7 @@ Opens an operator-authenticated SSH control-master session for servers configure
 homeboy server status <server_id>
 ```
 
-Checks whether the configured control-master session is live.
+Checks whether the configured control-master session is live. Its `persist` value is a local OpenSSH ControlMaster idle lifetime, not a remote server policy.
 
 ### `disconnect`
 
@@ -140,10 +140,14 @@ Session payload (`session`):
 - `action`: `connect` | `status` | `disconnect`
 - `server_id`
 - `control_path`
-- `persist`
+- `persist`: effective local OpenSSH ControlMaster idle lifetime
+- `persist_source`: `configured`, `migrated`, or `legacy_default`
 - `live`
+- `persist_scope`: explains that `persist` is local OpenSSH behavior, not remote policy
 - `stdout`
 - `stderr`
+
+`server show` includes `session_policy` for managed sessions. It reports the effective `control_path`, `persist`, `persist_source`, and `persist_scope`. Source values are engine-owned: `configured` is an explicit operator choice, `legacy_default` is the historic omitted `4h` value, and `migrated` records a legacy configuration updated with an explicit lifetime. Existing records without `persist` retain their historic `4h` lifetime until an operator sets an explicit value.
 
 ## Related
 

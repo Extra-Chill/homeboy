@@ -16,7 +16,8 @@ Server configuration defines SSH server connections stored in `servers/<id>.json
   "auth": {
     "mode": "key_plus_password_controlmaster",
     "control_path": "string",
-    "persist": "string"
+    "persist": "string",
+    "persist_source": "configured | migrated | legacy_default (engine-owned output)"
   },
   "runner": {
     "workspace_root": "string",
@@ -158,6 +159,10 @@ Servers that accept a key and then require an operator-entered password can opt 
 ```
 
 Homeboy never stores the password. Run `homeboy server connect <server_id>` to establish the interactive session, then later `homeboy ssh`, file transfer, deploy, logs, and other server-backed commands reuse the active SSH control master.
+
+`auth.persist` is required when adding a managed-session policy. It is an OpenSSH `ControlPersist` value such as `4h`, `1h30m`, `yes`, or `no`; colon-form values are not accepted. This is the local control-socket idle lifetime, not a policy imposed by the remote server. A shorter lifetime reduces the time an authenticated socket remains usable; a longer lifetime avoids repeated interactive authentication.
+
+`persist_source` is engine-owned output, not a configuration input. `configured` identifies an explicit persisted operator choice. `legacy_default` identifies an older omitted value still using its historic `4h` behavior. Updating that legacy record with an explicit `persist` safely records `migrated`. `homeboy server show` and managed-session output report the effective value and source.
 
 ## SSH Key Management
 

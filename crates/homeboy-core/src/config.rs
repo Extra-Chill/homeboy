@@ -370,6 +370,16 @@ pub trait ConfigEntity: Serialize + DeserializeOwned {
     /// Default: no-op.
     fn post_load(&mut self, _stored_json: &str) {}
 
+    /// Dot-separated fields derived by the engine and reserved from create and
+    /// merge input.
+    fn reserved_derived_fields() -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Recompute derived state after a merge with the pre-merge serialized
+    /// configuration available for provenance-sensitive policies.
+    fn post_merge(&mut self, _previous_json: &str) {}
+
     /// Return IDs of entities that depend on this one (for safe delete).
     /// Override to check referential integrity before deletion.
     /// Default: no dependents.
@@ -383,6 +393,24 @@ pub trait ConfigEntity: Serialize + DeserializeOwned {
     fn on_rename(_old_id: &str, _new_id: &str) -> Result<()> {
         Ok(())
     }
+}
+
+fn reject_reserved_derived_fields<T: ConfigEntity>(value: &serde_json::Value) -> Result<()> {
+    for field in T::reserved_derived_fields() {
+        if field
+            .split('.')
+            .try_fold(value, |value, segment| value.get(segment))
+            .is_some()
+        {
+            return Err(Error::validation_invalid_argument(
+                *field,
+                format!("{field} is derived by Homeboy and cannot be configured"),
+                None,
+                None,
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -663,6 +691,7 @@ fn create_single<T: ConfigEntity>(entity: T) -> Result<CreateResult<T>> {
 /// Internal: create a single entity from JSON string.
 fn create_single_from_json<T: ConfigEntity>(json_spec: &str) -> Result<CreateResult<T>> {
     let value: serde_json::Value = from_str(json_spec)?;
+    reject_reserved_derived_fields::<T>(&value)?;
 
     let id = value
         .get("id")
@@ -791,6 +820,11 @@ pub(crate) fn create_batch<T: ConfigEntity>(
             }
         };
 
+        if let Err(error) = reject_reserved_derived_fields::<T>(&item) {
+            summary.record_error(id, error.message);
+            continue;
+        }
+
         if let Err(e) = identifier::validate_component_id(&id) {
             summary.record_error(id, e.message.clone());
             continue;
@@ -860,10 +894,13 @@ pub fn merge_from_json<T: ConfigEntity>(
     if let Some(obj) = parsed.as_object_mut() {
         obj.remove("id");
     }
+    reject_reserved_derived_fields::<T>(&parsed)?;
 
     let mut entity = load::<T>(&effective_id)?;
+    let previous_json = to_json_string(&entity)?;
     let result = merge_config(&mut entity, parsed, replace_fields)?;
     entity.set_id(effective_id.clone());
+    entity.post_merge(&previous_json);
     save(&entity)?;
 
     Ok(MergeResult {
@@ -900,20 +937,35 @@ pub fn merge_batch_from_json<T: ConfigEntity>(raw_json: &str) -> Result<BatchRes
             obj.remove("id");
         }
 
+        if let Err(error) = reject_reserved_derived_fields::<T>(&patch) {
+            result.record_error(id, error.message);
+            continue;
+        }
+
         match load::<T>(&id) {
-            Ok(mut entity) => match merge_config(&mut entity, patch, &[]) {
-                Ok(_) => {
-                    entity.set_id(id.clone());
-                    if let Err(e) = save(&entity) {
+            Ok(mut entity) => {
+                let previous_json = match to_json_string(&entity) {
+                    Ok(json) => json,
+                    Err(error) => {
+                        result.record_error(id, error.message);
+                        continue;
+                    }
+                };
+                match merge_config(&mut entity, patch, &[]) {
+                    Ok(_) => {
+                        entity.set_id(id.clone());
+                        entity.post_merge(&previous_json);
+                        if let Err(e) = save(&entity) {
+                            result.record_error(id, e.message.clone());
+                        } else {
+                            result.record_updated(id);
+                        }
+                    }
+                    Err(e) => {
                         result.record_error(id, e.message.clone());
-                    } else {
-                        result.record_updated(id);
                     }
                 }
-                Err(e) => {
-                    result.record_error(id, e.message.clone());
-                }
-            },
+            }
             Err(e) => {
                 result.record_error(id, format!("{} not found", T::entity_type()));
                 let _ = e; // Suppress unused warning
