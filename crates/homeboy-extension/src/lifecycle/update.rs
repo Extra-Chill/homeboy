@@ -351,9 +351,6 @@ fn linked_extension_git_root(extension_id: &str, source_dir: &Path) -> Result<Pa
     )))
 }
 
-/// Read the source revision for an installed extension.
-/// Checks (in order): .git directory (git rev-parse), then .source-revision file.
-
 fn source_metadata_file(extension_dir: &std::path::Path, kind: &str) -> String {
     if extension_dir.is_symlink() {
         if let Some(name) = extension_dir.file_name().and_then(|name| name.to_str()) {

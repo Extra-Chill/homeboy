@@ -76,7 +76,7 @@ pub fn analyze(component: &str, input: &TestAnalysisInput) -> TestAnalysis {
         .collect();
 
     // Step 3: Sort by count descending
-    clusters.sort_by(|a, b| b.count.cmp(&a.count));
+    clusters.sort_by_key(|cluster| std::cmp::Reverse(cluster.count));
 
     // Step 4: Generate hints
     let hints = generate_hints(&clusters, failures.len());

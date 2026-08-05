@@ -25,7 +25,7 @@ pub fn validate_required_extensions(component: &homeboy_core::component::Compone
         return Ok(());
     }
 
-    missing.sort_by(|(left, _), (right, _)| left.cmp(right));
+    missing.sort_by_key(|(id, _)| *id);
 
     let missing_ids: Vec<String> = missing.iter().map(|(id, _)| (*id).clone()).collect();
     let extension_list = missing_ids.join(", ");
