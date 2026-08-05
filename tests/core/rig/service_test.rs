@@ -513,7 +513,9 @@ mod log_rotation {
 
     #[test]
     fn the_shipped_bounds_are_finite() {
-        assert!(RIG_LOG_MAX_BYTES > 0);
-        assert!(RIG_LOG_MAX_GENERATIONS > 0);
+        const {
+            assert!(RIG_LOG_MAX_BYTES > 0);
+            assert!(RIG_LOG_MAX_GENERATIONS > 0);
+        }
     }
 }

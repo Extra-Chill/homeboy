@@ -352,7 +352,7 @@ pub enum ReleaseLeaseOutcome {
     Released {
         rig_id: String,
         /// The released lease.
-        lease: RigRunLease,
+        lease: Box<RigRunLease>,
         /// Wall-clock age of the released lease in seconds, when derivable.
         age_seconds: Option<i64>,
         /// Whether the holder was already dead/stale (safe release) vs. a live
@@ -406,7 +406,7 @@ pub fn release_active_run_lease(rig_id: &str, force: bool) -> Result<ReleaseLeas
 
     Ok(ReleaseLeaseOutcome::Released {
         rig_id: rig_id.to_string(),
-        lease,
+        lease: Box::new(lease),
         age_seconds,
         was_reclaimable,
         forced: force && !was_reclaimable,
