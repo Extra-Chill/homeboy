@@ -21,6 +21,17 @@ fn github_command_error_details(
     })
 }
 
+/// Evidence and recovery context for a failed GitHub Release asset upload.
+pub(crate) struct UploadFailedResultRequest<'a> {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub artifact_count: usize,
+    pub repair: GitHubReleaseRepairCommands,
+    pub diagnostics: &'a [GitHubCommandFailureDiagnostic],
+}
+
 pub(crate) fn published_release_url(
     github: &GitHubRepo,
     tag: &str,
@@ -228,16 +239,10 @@ pub(crate) fn create_failed_result(
 pub(crate) fn upload_failed_result(
     tag: &str,
     github: &GitHubRepo,
-    stdout: String,
-    stderr: String,
-    exit_code: Option<i32>,
-    timed_out: bool,
-    artifact_count: usize,
-    repair: GitHubReleaseRepairCommands,
-    diagnostics: &[GitHubCommandFailureDiagnostic],
+    request: UploadFailedResultRequest<'_>,
 ) -> ReleaseStepResult {
-    let stdout = gh_diagnostic_text(&stdout);
-    let stderr = gh_diagnostic_text(&stderr);
+    let stdout = gh_diagnostic_text(&request.stdout);
+    let stderr = gh_diagnostic_text(&request.stderr);
     let mut data = serde_json::json!({
         "skipped": false,
         "release_created": true,
@@ -248,17 +253,17 @@ pub(crate) fn upload_failed_result(
         "repo": github.repo,
         "stdout": stdout,
         "stderr": stderr.clone(),
-        "exit_code": exit_code,
-        "timed_out": timed_out,
-        "artifact_count": artifact_count,
-        "repair": repair_data(&repair),
+        "exit_code": request.exit_code,
+        "timed_out": request.timed_out,
+        "artifact_count": request.artifact_count,
+        "repair": repair_data(&request.repair),
     });
-    if let Some(details) = github_command_error_details(diagnostics) {
+    if let Some(details) = github_command_error_details(request.diagnostics) {
         data["error_details"] = details;
     }
 
     let detail = stderr.trim();
-    let error = if timed_out {
+    let error = if request.timed_out {
         format!("`gh release upload` timed out for {}", tag)
     } else if detail.is_empty() {
         format!("`gh release upload` failed for {}", tag)
@@ -271,7 +276,7 @@ pub(crate) fn upload_failed_result(
         "github.release",
         Some(data),
         Some(error),
-        existing_draft_repair_hints(&repair),
+        existing_draft_repair_hints(&request.repair),
     )
 }
 

@@ -10,7 +10,7 @@ use super::context::{load_component, resolve_extensions};
 use super::executor::artifacts::{
     PACKAGE_RECOVERY_MANIFEST_SCHEMA, PACKAGE_RECOVERY_MANIFEST_SCHEMA_VERSION,
 };
-use super::executor::run_package;
+use super::executor::{run_package, PackageRequest};
 use super::types::{ReleaseArtifact, ReleaseOptions, ReleaseState, ReleaseStepResult};
 
 #[derive(Debug, Clone, Serialize)]
@@ -57,9 +57,11 @@ pub fn package_existing_tag(
         &component,
         component_id,
         &component.local_path,
-        None,
-        component.build_artifact.as_deref(),
-        skip_build_validation,
+        PackageRequest {
+            component_source_path: None,
+            declared_build_artifact: component.build_artifact.as_deref(),
+            skip_build_validation,
+        },
     )?;
     if state.artifacts.is_empty() {
         return Err(Error::internal_unexpected(
