@@ -467,6 +467,11 @@ pub struct DaemonTerminationEvidence {
     pub exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signal: Option<i32>,
+    /// Signal used to terminate the supervising process, if escalation needed
+    /// one. This is additive: older evidence deserializes without it and `None`
+    /// remains omitted from serialized evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_signal: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stdout: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

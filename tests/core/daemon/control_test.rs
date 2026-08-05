@@ -2284,6 +2284,7 @@ fn dead_status_with_unexpected_termination(daemon: super::DaemonStartResult) -> 
         os_evidence: "test".to_string(),
         exit_code: None,
         signal: Some(libc::SIGTERM),
+        supervisor_signal: None,
         stdout: None,
         stderr: None,
         stop_requested: false,

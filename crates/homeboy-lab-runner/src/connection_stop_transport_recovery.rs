@@ -1191,6 +1191,7 @@ mod tests {
                 os_evidence: "test".to_string(),
                 exit_code: None,
                 signal: None,
+                supervisor_signal: None,
                 stdout: None,
                 stderr: None,
                 stop_requested: true,

@@ -138,6 +138,7 @@ fn supervise_child(mut child: std::process::Child) -> Result<()> {
         resource_evidence: "unavailable: launcher does not collect OS resource snapshots".to_string(),
         os_evidence: "unavailable: no OS evidence collected; exit status and signal are launcher observations only".to_string(),
         exit_code, signal,
+        supervisor_signal: None,
         stdout, stderr, stop_requested,
     };
     super::write_termination_evidence(&evidence)
@@ -2632,6 +2633,7 @@ mod termination_tests {
             os_evidence: "unavailable: fixture has no OS evidence".to_string(),
             exit_code: Some(23),
             signal: None,
+            supervisor_signal: None,
             stdout: None,
             stderr: Some("panic: fixture".to_string()),
             stop_requested: false,
