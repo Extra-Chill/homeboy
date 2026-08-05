@@ -1,6 +1,6 @@
 use reqwest::blocking::{Client, RequestBuilder};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use homeboy_core::broker_auth::BROKER_TOKEN_HEADER;
 use homeboy_core::error::{Error, Result};
@@ -39,7 +39,11 @@ pub(crate) fn post_json(
         token,
     )
     .send()
-    .map_err(|err| Error::internal_unexpected(format!("{action}: {err}")))?;
+    .map_err(|err| {
+        let mut error = Error::internal_unexpected(format!("{action}: {err}"));
+        error.details["request_timeout"] = json!(err.is_timeout());
+        error
+    })?;
     let status_code = response.status().as_u16();
     let envelope: BrokerEnvelope = response.json().map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse broker response".to_string()))
@@ -68,7 +72,11 @@ pub(crate) fn get_json(
         token,
     )
     .send()
-    .map_err(|err| Error::internal_unexpected(format!("{action}: {err}")))?;
+    .map_err(|err| {
+        let mut error = Error::internal_unexpected(format!("{action}: {err}"));
+        error.details["request_timeout"] = json!(err.is_timeout());
+        error
+    })?;
     let status_code = response.status().as_u16();
     let envelope: BrokerEnvelope = response.json().map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse broker response".to_string()))
