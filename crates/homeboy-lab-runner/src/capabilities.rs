@@ -199,18 +199,18 @@ pub(crate) fn validate_runner_capability_preflight(
         preflight
             .required_toolchain_probes
             .iter()
-            .filter_map(|probe| {
+            .filter(|probe| {
                 failed_toolchain_probes
                     .iter()
                     .any(|failed| failed.starts_with(&format!("{}:", probe.id)))
-                    .then(|| {
-                        probe.repair_command.clone().unwrap_or_else(|| {
-                            format!(
-                                "Repair extension `{}` toolchain probe `{}` and retry.",
-                                probe.extension_id, probe.id
-                            )
-                        })
-                    })
+            })
+            .map(|probe| {
+                probe.repair_command.clone().unwrap_or_else(|| {
+                    format!(
+                        "Repair extension `{}` toolchain probe `{}` and retry.",
+                        probe.extension_id, probe.id
+                    )
+                })
             }),
     );
     remediation.extend(missing_env.iter().map(|name| {
@@ -274,10 +274,11 @@ pub fn runner_capability_inventory(runner_id: &str) -> Result<RunnerCapabilityIn
         .chain(snapshot.components.iter().cloned())
         .collect::<BTreeSet<_>>();
     capabilities.extend(snapshot.tool_capabilities);
-    let runtime_ids = capabilities
-        .contains("homeboy")
-        .then(|| BTreeSet::from(["homeboy".to_string()]))
-        .unwrap_or_default();
+    let runtime_ids = if capabilities.contains("homeboy") {
+        BTreeSet::from(["homeboy".to_string()])
+    } else {
+        BTreeSet::new()
+    };
     Ok(RunnerCapabilityInventory {
         runtime_ids,
         capabilities,

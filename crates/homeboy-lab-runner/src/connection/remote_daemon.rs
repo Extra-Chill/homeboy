@@ -210,9 +210,11 @@ pub(super) fn compare_identities(left: Option<&str>, right: Option<&str>) -> Ide
         (Some(left), Some(right))
             if immutable_build_identity(left) && immutable_build_identity(right) =>
         {
-            (left.trim() == right.trim())
-                .then_some(IdentityComparison::Match)
-                .unwrap_or(IdentityComparison::Mismatch)
+            if left.trim() == right.trim() {
+                IdentityComparison::Match
+            } else {
+                IdentityComparison::Mismatch
+            }
         }
         _ => IdentityComparison::Unverifiable,
     }
@@ -602,19 +604,36 @@ pub(super) enum RemoteDaemonConnectAction {
     ReplaceUnhealthyExactOwner,
 }
 
+pub(super) struct RemoteDaemonEnsureRequest<'a> {
+    pub(super) client: &'a SshClient,
+    pub(super) homeboy: &'a str,
+    pub(super) runner_id: &'a str,
+    pub(super) previous_session: Option<&'a RunnerSession>,
+    pub(super) configured_identity: &'a str,
+    pub(super) orphan_lease_id: Option<&'a str>,
+    pub(super) confirmed_no_pid_job_ids: &'a [uuid::Uuid],
+    pub(super) live_lease_expectation: Option<(&'a str, u32)>,
+    pub(super) replacement_operation_id: Option<&'a str>,
+    pub(super) admission_fence: Option<&'a crate::generation_store::AdmissionFence>,
+    pub(super) registry_lock_held: bool,
+}
+
 pub(super) fn ensure_remote_daemon(
-    client: &SshClient,
-    homeboy: &str,
-    runner_id: &str,
-    previous_session: Option<&RunnerSession>,
-    configured_identity: &str,
-    orphan_lease_id: Option<&str>,
-    confirmed_no_pid_job_ids: &[uuid::Uuid],
-    live_lease_expectation: Option<(&str, u32)>,
-    replacement_operation_id: Option<&str>,
-    admission_fence: Option<&crate::generation_store::AdmissionFence>,
-    registry_lock_held: bool,
+    request: RemoteDaemonEnsureRequest<'_>,
 ) -> std::result::Result<RemoteDaemon, String> {
+    let RemoteDaemonEnsureRequest {
+        client,
+        homeboy,
+        runner_id,
+        previous_session,
+        configured_identity,
+        orphan_lease_id,
+        confirmed_no_pid_job_ids,
+        live_lease_expectation,
+        replacement_operation_id,
+        admission_fence,
+        registry_lock_held,
+    } = request;
     let mut status = remote_daemon_status(client, homeboy)?;
     probe_remote_daemon_endpoint(client, &mut status, Some(runner_id));
     if let Some(lease_id) = orphan_lease_id {
@@ -658,7 +677,7 @@ pub(super) fn ensure_remote_daemon(
                 "remote daemon reattach selected without a daemon lease".to_string()
             })?;
             daemon.inspected_freshness = Some(inspected_freshness);
-            return Ok(daemon);
+            Ok(daemon)
         }
         RemoteDaemonConnectAction::Start => {
             negotiate_ensure_running_operation_id(client, homeboy, replacement_operation_id)?;
@@ -668,7 +687,7 @@ pub(super) fn ensure_remote_daemon(
                 replacement_operation_id,
                 registry_lock_held,
             )?;
-            return remote_daemon_ensure_running(client, homeboy, replacement_operation_id);
+            remote_daemon_ensure_running(client, homeboy, replacement_operation_id)
         }
         RemoteDaemonConnectAction::ReplaceIdleStale
         | RemoteDaemonConnectAction::ReplaceUnhealthyExactOwner => {
@@ -691,12 +710,7 @@ pub(super) fn ensure_remote_daemon(
             remote_daemon_force_stop(client, homeboy, lease_id)?;
             let replacement =
                 remote_daemon_ensure_running(client, homeboy, replacement_operation_id)?;
-            return verify_remote_daemon_replacement(
-                client,
-                homeboy,
-                &replacement,
-                configured_identity,
-            );
+            verify_remote_daemon_replacement(client, homeboy, &replacement, configured_identity)
         }
     }
 }
@@ -1069,11 +1083,13 @@ fn lease_reconciliation_failure(
 }
 
 fn active_job_recovery_guidance(active_jobs: usize) -> String {
-    (active_jobs > 0)
-        .then(|| format!(
+    if active_jobs > 0 {
+        format!(
             "; {active_jobs} active job(s) were not replaced. Inspect `homeboy daemon status` and use explicit active-job recovery guidance before retrying"
-        ))
-        .unwrap_or_default()
+        )
+    } else {
+        String::new()
+    }
 }
 
 pub(super) fn remote_daemon_status(
