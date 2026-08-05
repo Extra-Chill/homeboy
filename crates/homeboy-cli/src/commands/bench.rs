@@ -17,7 +17,7 @@ use homeboy_extension::ExtensionCapability;
 
 use super::utils::args::{
     filter_passthrough_args, BaselineArgs, ExtensionOverrideArgs, PassthroughCommand,
-    PositionalComponentArgs, SettingArgs,
+    PositionalComponentArgs, PresentationArgs, SettingArgs,
 };
 use super::utils::response::actionable_metadata_value_for_run_ref;
 use super::CmdResult;
@@ -47,8 +47,22 @@ pub struct BenchArgs {
     /// structured payload is always written to `--output <file>` and is
     /// printed to stdout with this flag. No data differs between the two —
     /// only the default presentation is compact.
+    ///
+    /// Equivalent to `--format json`, which is the canonical spelling.
+    /// Both keep working; neither is required to use the other.
     #[arg(long)]
     json: bool,
+
+    // Canonical presentation vocabulary (#11138). `--format json` means
+    // exactly what the `--json` bool above means; `wants_full_json` reads the
+    // two together via `PresentationArgs::json_or_legacy`.
+    //
+    // Declaring `--format` here is safe for bench specifically: `normalize`
+    // runs `mark_explicit_passthrough`, which marks `homeboy bench -- ...`, so
+    // `filter_passthrough_args` returns everything after `--` verbatim and
+    // cannot swallow a runner's own `--format`.
+    #[command(flatten)]
+    presentation: PresentationArgs,
 
     #[command(flatten)]
     run: BenchRunArgs,
@@ -56,9 +70,21 @@ pub struct BenchArgs {
 
 impl BenchArgs {
     /// Whether the caller asked for the full JSON payload on stdout
-    /// (suppressing the compact human summary presentation).
+    /// (suppressing the compact human summary presentation), via either
+    /// the legacy `--json` bool or the canonical `--format json`.
     pub fn wants_full_json(&self) -> bool {
-        self.json
+        self.presentation.json_or_legacy(self.json)
+    }
+
+    /// Fold the canonical `--detail summary` onto `--json-summary`, the
+    /// field every downstream bench consumer already reads (#11138).
+    ///
+    /// The OR is deliberate: the legacy bool has no "off" state to
+    /// distinguish from its default, so the two spellings can only ever
+    /// agree. Applied once at the top of [`run`], before any dispatch, so
+    /// nothing downstream has to learn a second vocabulary.
+    pub(crate) fn apply_presentation_detail(&mut self) {
+        self.run.json_summary |= self.presentation.is_summary();
     }
 
     /// Whether this invocation is a bench *run* (the variants that emit the
@@ -408,6 +434,7 @@ impl RigRunBenchOptions {
         BenchArgs {
             command: None,
             json: false,
+            presentation: PresentationArgs::default(),
             run: BenchRunArgs {
                 comp: PositionalComponentArgs {
                     component: self.component,
@@ -568,6 +595,10 @@ pub enum BenchOutput {
 }
 
 pub fn run(mut args: BenchArgs) -> CmdResult<BenchOutput> {
+    // Canonical detail vocabulary (#11138): `--detail summary` is the shared
+    // spelling for what bench has always called `--json-summary`.
+    args.apply_presentation_detail();
+
     if let Some(command) = &args.command {
         return match command {
             BenchCommand::Matrix(matrix_args) => {

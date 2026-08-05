@@ -449,6 +449,7 @@ pub(super) fn run_args(
     BenchArgs {
         command: None,
         json: false,
+        presentation: PresentationArgs::default(),
         run: BenchRunArgs {
             comp: PositionalComponentArgs {
                 component: component.map(str::to_string),
