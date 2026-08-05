@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, time::Duration};
 
 use rusqlite::{params, params_from_iter, OptionalExtension, ToSql};
 use uuid::Uuid;
@@ -54,7 +54,22 @@ impl ObservationStore {
     }
 
     pub fn open_initialized_at(path: impl Into<PathBuf>) -> Result<Self> {
-        let path = path.into();
+        Self::open_initialized_at_with_busy_timeout(path.into(), Duration::from_secs(5))
+    }
+
+    /// Open a writable store without permitting SQLite lock acquisition to
+    /// outlast an owning operation's absolute deadline.
+    pub fn open_initialized_until(deadline: std::time::Instant) -> Result<Self> {
+        // A zero wait still permits observation-only candidate enumeration so
+        // recovery can report every intact source record as deferred.
+        let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+        Self::open_initialized_at_with_busy_timeout(database_path()?, timeout)
+    }
+
+    fn open_initialized_at_with_busy_timeout(
+        path: PathBuf,
+        busy_timeout: Duration,
+    ) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| {
                 Error::internal_io(
@@ -64,7 +79,7 @@ impl ObservationStore {
             })?;
         }
 
-        let connection = schema::open_connection(&path)?;
+        let connection = schema::open_connection_with_busy_timeout(&path, busy_timeout)?;
         schema::apply_migrations(&connection)?;
         let store = Self {
             connection,

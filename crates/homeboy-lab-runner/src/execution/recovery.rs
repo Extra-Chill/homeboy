@@ -172,16 +172,16 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
     budget: Duration,
     owner: Option<&RecoveryOwner>,
 ) -> Result<(usize, usize)> {
-    let store = ObservationStore::open_initialized()?;
+    let deadline = owner
+        .map(|owner| owner.deadline)
+        .unwrap_or_else(|| Instant::now() + budget);
+    let store = ObservationStore::open_initialized_until(deadline)?;
     let mut reconciled = 0;
     let mut deferred = 0;
     let mut unavailable_endpoints = BTreeSet::new();
     // A scheduled owner owns one absolute budget from creation through every
     // remote read and durable projection. The standalone API creates that
     // deadline here for its own caller-owned budget.
-    let deadline = owner
-        .map(|owner| owner.deadline)
-        .unwrap_or_else(|| Instant::now() + budget);
     let mut sessions = BTreeMap::new();
     let candidates = recovery_candidates(&store)?;
     'candidates: for (index, run) in candidates.iter().enumerate() {
@@ -422,7 +422,10 @@ pub fn run_scheduled_terminal_runner_exec_recovery(
     owner_id: &str,
     owner_token: &str,
 ) -> Result<()> {
-    let store = ObservationStore::open_initialized()?;
+    // The owner budget starts before its first durable-store operation. A
+    // contended SQLite writer therefore cannot consume an unaccounted window.
+    let deadline = Instant::now() + STARTUP_RUNNER_EXEC_RECOVERY_BUDGET;
+    let store = ObservationStore::open_initialized_until(deadline)?;
     let Some(owner) = store.get_run(owner_id)? else {
         return Ok(());
     };
@@ -442,7 +445,7 @@ pub fn run_scheduled_terminal_runner_exec_recovery(
     let owner_context = RecoveryOwner {
         id: owner_id.to_string(),
         token: owner_token.to_string(),
-        deadline: Instant::now() + STARTUP_RUNNER_EXEC_RECOVERY_BUDGET,
+        deadline,
     };
     let stop_heartbeat = Arc::new(AtomicBool::new(false));
     let heartbeat_stop = Arc::clone(&stop_heartbeat);

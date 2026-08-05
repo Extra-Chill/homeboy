@@ -362,12 +362,22 @@ pub(crate) fn status_for_open_connection(
 }
 
 pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
+    open_connection_with_busy_timeout(path, Duration::from_secs(5))
+}
+
+/// Open a writer connection whose SQLite lock wait is bounded by its caller.
+/// Callers with an absolute operation deadline use this instead of allowing the
+/// store's general five-second contention policy to outlive their work.
+pub(crate) fn open_connection_with_busy_timeout(
+    path: &Path,
+    busy_timeout: Duration,
+) -> Result<Connection> {
     let connection = Connection::open(path).map_err(sqlite_error(format!(
         "open observation store {}",
         path.display()
     )))?;
     connection
-        .busy_timeout(Duration::from_secs(5))
+        .busy_timeout(busy_timeout)
         .map_err(sqlite_error("configure observation store busy timeout"))?;
     // WAL journaling lets readers and a single writer proceed concurrently,
     // which sharply reduces transient "database is locked" contention when
