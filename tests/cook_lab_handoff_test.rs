@@ -1,9 +1,115 @@
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::process::Output;
+use std::process::{Output, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
-use homeboy_core::observation::{NewRunRecord, ObservationStore, RunListFilter, RunStatus};
+use homeboy_core::observation::{NewRunRecord, ObservationStore, RunStatus};
 use homeboy_core::test_support::{bounded_output, HermeticTestContext, TestBinary};
+
+struct DelayedUnavailableDaemon {
+    address: String,
+    requests: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl DelayedUnavailableDaemon {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake SSH daemon endpoint");
+        listener
+            .set_nonblocking(true)
+            .expect("make fake daemon nonblocking");
+        let address = listener
+            .local_addr()
+            .expect("fake daemon address")
+            .to_string();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_requests = Arc::clone(&requests);
+        let worker_stop = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            while !worker_stop.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        worker_requests.fetch_add(1, Ordering::SeqCst);
+                        let mut request = [0; 1024];
+                        let _ = stream.read(&mut request);
+                        // Keep an interrupted owner observable long enough to
+                        // replace its lease without relying on a real network.
+                        thread::sleep(Duration::from_millis(25));
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        );
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept fake SSH daemon endpoint: {error}"),
+                }
+            }
+        });
+        Self {
+            address,
+            requests,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn wait_for_request(&self, previous: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while self.requests.load(Ordering::SeqCst) <= previous {
+            assert!(
+                Instant::now() < deadline,
+                "recovery did not reach fake daemon endpoint"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for DelayedUnavailableDaemon {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = TcpStream::connect(&self.address);
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("fake SSH daemon endpoint exits");
+        }
+    }
+}
+
+fn expire_recovery_owner(store: &ObservationStore, owner_id: &str) {
+    let mut owner = store
+        .get_run(owner_id)
+        .expect("read recovery owner")
+        .expect("recovery owner exists");
+    owner.metadata_json["lease_expires_at_ms"] = serde_json::json!(0);
+    store
+        .update_run_metadata(owner_id, owner.metadata_json)
+        .expect("interrupt recovery owner lease");
+}
+
+fn wait_for_detached_process_cleanup(pid: u64) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        #[cfg(unix)]
+        let still_running = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+        #[cfg(not(unix))]
+        let still_running = false;
+        if !still_running {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "detached Cook process {pid} did not exit after cleanup"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
 
 /// Run the fixture binary through the shared hermetic harness.
 ///
@@ -242,7 +348,40 @@ fn cook_detaches_local_placement_instead_of_rejecting_it() {
 /// than a scheduler helper so its output and durable handoff remain observable.
 #[test]
 fn detached_cook_admission_is_bounded_with_a_hundred_unavailable_recovery_records() {
+    let _env_guard = homeboy_core::test_support::home_env_guard();
     let context = HermeticTestContext::new();
+    std::env::set_var("HOME", context.home());
+    std::env::set_var("XDG_CONFIG_HOME", context.root().join(".config"));
+    std::env::set_var("XDG_DATA_HOME", context.root().join("data"));
+    std::env::set_var("HOMEBOY_ARTIFACT_ROOT", context.artifact_dir());
+    std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", context.runtime_dir());
+    std::env::set_var("TMPDIR", context.temp_dir());
+    std::env::set_var("HOMEBOY_CONTROLLER_ID", "cook-admission-fixture");
+    let (_checkout_guard, checkout) =
+        homeboy_core::test_support::shared_committed_git_repo_fixture("cook-admission-source");
+    let task_worktree = context.root().join("cook-admission-worktree");
+    homeboy_core::test_support::run_git_fixture_command(
+        &checkout,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "cook-admission-worktree",
+            task_worktree.to_str().expect("task worktree path"),
+        ],
+    );
+    let provider = context.root().join("fixture-provider.sh");
+    std::fs::write(
+        &provider,
+        "#!/bin/sh\nset -eu\ncat >/dev/null\nprintf '%s\\n' '{\"schema\":\"homeboy/agent-task-outcome/v1\",\"status\":\"succeeded\",\"summary\":\"fixture provider completed\"}'\n",
+    )
+    .expect("write fixture provider");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755))
+            .expect("make fixture provider executable");
+    }
     let database = context.data_dir().join("homeboy.sqlite");
     let store = ObservationStore::open_initialized_at(&database).expect("open fixture store");
     for index in 0..100 {
@@ -260,10 +399,73 @@ fn detached_cook_admission_is_bounded_with_a_hundred_unavailable_recovery_record
             )
             .expect("seed stale runner execution");
     }
-    drop(store);
+    let daemon = DelayedUnavailableDaemon::start();
+    let session_path = context
+        .config_dir()
+        .join("runner-sessions/unavailable-runner/cook-admission-fixture.json");
+    std::fs::create_dir_all(session_path.parent().expect("session directory"))
+        .expect("create direct SSH session directory");
+    std::fs::write(
+        session_path,
+        serde_json::json!({
+            "runner_id": "unavailable-runner",
+            "mode": "direct_ssh",
+            "role": "controller",
+            "server_id": "unavailable-runner",
+            "controller_id": "cook-admission-fixture",
+            "broker_url": null,
+            "remote_daemon_address": daemon.address,
+            "local_port": daemon.address.rsplit(':').next().expect("fake daemon port").parse::<u16>().expect("parse fake daemon port"),
+            "local_url": format!("http://{}", daemon.address),
+            "tunnel_pid": null,
+            "tunnel_process_start_identity": null,
+            "remote_daemon_pid": 4242,
+            "remote_daemon_lease_id": "unavailable-fixture-lease",
+            "homeboy_version": "test",
+            "homeboy_build_identity": null,
+            "connected_at": "2026-01-01T00:00:00Z",
+            "worker_identity": null,
+            "worker_pid": null,
+            "last_seen_at": null,
+            "leaseless_recovery_evidence": null,
+        })
+        .to_string(),
+    )
+    .expect("persist direct SSH runner session");
 
-    let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    // Interrupt an owner before Cook admission. Its replacement remains a
+    // separate, inspectable recovery owner while Cook is handed off.
+    let first = homeboy::runner::schedule_terminal_runner_exec_recovery()
+        .expect("schedule first recovery")
+        .expect("first recovery owner");
+    let before_handoff_requests = daemon.requests.load(Ordering::SeqCst);
+    let first_owner_id = first.owner_id.clone();
+    let first_owner_token = first.owner_token.clone();
+    let interrupted = thread::spawn(move || {
+        homeboy::runner::run_scheduled_terminal_runner_exec_recovery(
+            &first_owner_id,
+            &first_owner_token,
+        )
+        .expect("interrupted recovery returns")
+    });
+    daemon.wait_for_request(before_handoff_requests);
+    expire_recovery_owner(&store, &first.owner_id);
+    let before_handoff = homeboy::runner::schedule_terminal_runner_exec_recovery()
+        .expect("take over interrupted recovery")
+        .expect("replacement owner");
+    interrupted.join().expect("interrupted recovery joins");
+
+    let mut command = context.command(TestBinary::HomeboyFixture);
+    let output_path = context.root().join("cook-admission-handoff.json");
+    let stderr_path = context.root().join("cook-admission.stderr");
     command
+        .env("HOMEBOY_CONTROLLER_ID", "cook-admission-fixture")
+        // The fixture executable is its own immutable runtime. This isolates
+        // the admission budget from pinning a multi-hundred-megabyte debug bin.
+        .env(
+            "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME",
+            context.binary_path(TestBinary::HomeboyFixture),
+        )
         .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "5000")
         .args([
             "--placement",
@@ -271,45 +473,125 @@ fn detached_cook_admission_is_bounded_with_a_hundred_unavailable_recovery_record
             "--detach-after-handoff",
             "agent-task",
             "cook",
+            "--run-id",
+            "cook-admission-11156",
             "--prompt",
             "admit despite stale runner records",
+            "--cwd",
+            checkout.to_str().expect("checkout path"),
             "--to-worktree",
-            "missing@worktree",
+            task_worktree.to_str().expect("task worktree path"),
+            "--backend",
+            "fixture",
+            "--provider-command",
+            provider.to_str().expect("provider path"),
             "--verify",
             "true",
+            "--max-attempts",
+            "1",
+            "--no-finalize",
         ]);
     let started = Instant::now();
-    let output = bounded_output(command);
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "Cook admission must not wait for stale daemon recovery"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "{stdout}");
+    let output = command
+        .stdout(Stdio::from(
+            std::fs::File::create(&output_path).expect("create Cook output file"),
+        ))
+        .stderr(Stdio::from(
+            std::fs::File::create(&stderr_path).expect("create Cook stderr file"),
+        ))
+        .status()
+        .expect("run detached Cook admission command");
+    let stdout = std::fs::read_to_string(&output_path).expect("read Cook output file");
+    let stderr = std::fs::read_to_string(&stderr_path).expect("read Cook stderr file");
+    assert!(output.success(), "{stdout}\nstderr={stderr}");
     let handoff_start = stdout
         .find('{')
         .unwrap_or_else(|| panic!("Cook handoff is durable output\n{stdout}"));
     let handoff: serde_json::Value = serde_json::from_str(stdout[handoff_start..].trim())
         .unwrap_or_else(|error| panic!("Cook handoff is JSON: {error}\n{stdout}"));
+    assert!(
+        handoff["handoff"]["waited_ms"]
+            .as_u64()
+            .is_some_and(|millis| millis <= 5_000),
+        "Cook admission/handoff must settle within five seconds: elapsed={:?}, handoff={handoff}",
+        started.elapsed()
+    );
     assert_eq!(handoff["detached"], true, "{stdout}");
-    assert!(handoff["cook_id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert_eq!(handoff["cook_id"], "cook-admission-11156", "{stdout}");
+    assert_eq!(handoff["handoff"]["state"], "accepted", "{stdout}");
+    assert!(
+        handoff["run_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("cook-admission-11156-attempt-")),
+        "{stdout}"
+    );
+    assert_eq!(
+        handoff["status_command"], "homeboy agent-task status cook-admission-11156",
+        "{stdout}"
+    );
+    assert!(
+        task_worktree.join(".git").exists(),
+        "Cook destination remains owned"
+    );
+    let owner = store
+        .get_run(&before_handoff.owner_id)
+        .expect("read observable recovery owner")
+        .expect("recovery owner remains observable");
+    assert_eq!(owner.status, RunStatus::Running.as_str());
 
-    let store = ObservationStore::open_initialized_at(&database).expect("reopen fixture store");
-    let owners = store
-        .list_runs(RunListFilter {
-            kind: Some("runner_exec_recovery".to_string()),
-            ..RunListFilter::default()
-        })
-        .expect("list recovery owners");
-    assert_eq!(owners.len(), 1, "recovery has its own durable owner");
-    assert_eq!(owners[0].status, RunStatus::Pass.as_str());
-    assert_eq!(owners[0].metadata_json["deferred_count"], 100);
+    // Interrupt the still-observable owner after the Cook handoff, then let its
+    // replacement finish. The former token must not terminalize either owner.
+    let after_handoff_requests = daemon.requests.load(Ordering::SeqCst);
+    let owner_id = before_handoff.owner_id.clone();
+    let owner_token = before_handoff.owner_token.clone();
+    let interrupted = thread::spawn(move || {
+        homeboy::runner::run_scheduled_terminal_runner_exec_recovery(&owner_id, &owner_token)
+            .expect("post-handoff interrupted recovery returns")
+    });
+    daemon.wait_for_request(after_handoff_requests);
+    expire_recovery_owner(&store, &before_handoff.owner_id);
+    let after_handoff = homeboy::runner::schedule_terminal_runner_exec_recovery()
+        .expect("take over post-handoff recovery")
+        .expect("post-handoff replacement owner");
+    assert_ne!(after_handoff.owner_token, before_handoff.owner_token);
+    interrupted
+        .join()
+        .expect("post-handoff interrupted recovery joins");
+    homeboy::runner::run_scheduled_terminal_runner_exec_recovery(
+        &after_handoff.owner_id,
+        &after_handoff.owner_token,
+    )
+    .expect("replacement recovery completes");
+    let owner = store
+        .get_run(&after_handoff.owner_id)
+        .expect("read terminal recovery owner")
+        .expect("terminal recovery owner");
+    assert_eq!(owner.status, RunStatus::Pass.as_str());
+    assert_eq!(owner.metadata_json["phase"], "deferred");
+    assert_eq!(owner.metadata_json["deferred_count"], 100);
+    for index in 0..100 {
+        let source = store
+            .get_run(&format!("stale-runner-exec-{index}"))
+            .expect("read source recovery record")
+            .expect("source recovery record retained");
+        assert_eq!(source.status, RunStatus::Running.as_str());
+        assert_eq!(
+            source.metadata_json["runner_job_id"],
+            format!("stale-job-{index}")
+        );
+    }
+    assert!(
+        daemon.requests.load(Ordering::SeqCst) <= 50,
+        "shared unavailable runner must not receive serial per-record probes (requests={})",
+        daemon.requests.load(Ordering::SeqCst)
+    );
 
     #[cfg(unix)]
     if let Some(pid) = handoff["pid"].as_u64() {
         unsafe {
             libc::kill(pid as libc::pid_t, libc::SIGKILL);
         }
+        wait_for_detached_process_cleanup(pid);
     }
 }
 

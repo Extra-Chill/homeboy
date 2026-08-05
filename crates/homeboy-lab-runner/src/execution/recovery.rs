@@ -182,6 +182,10 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
     let mut reconciled = 0;
     let mut deferred = 0;
     let mut unavailable_endpoints = BTreeSet::new();
+    // The first failed session lookup discovers the endpoint. Remember its
+    // runner alias as well so the following historical records do not each
+    // repeat direct-SSH liveness probes before endpoint identity is available.
+    let mut unavailable_runners = BTreeSet::new();
     let deadline = Instant::now() + budget;
     let mut sessions = BTreeMap::new();
     let candidates = recovery_candidates(&store)?;
@@ -199,6 +203,10 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
         ) else {
             continue;
         };
+        if unavailable_runners.contains(runner_id) {
+            deferred += 1;
+            continue;
+        }
         if let Some(owner) = owner {
             if owner.remaining().is_err() {
                 deferred += candidates.len() - index;
@@ -251,6 +259,7 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 // A 404 is a durable per-job result. Other failures describe the
                 // endpoint, so avoid amplifying one unavailable daemon into N probes.
                 if error.details.get("http_status").and_then(Value::as_u64) != Some(404) {
+                    unavailable_runners.insert(runner_id.to_string());
                     unavailable_endpoints.insert(endpoint);
                 }
                 deferred += 1;
