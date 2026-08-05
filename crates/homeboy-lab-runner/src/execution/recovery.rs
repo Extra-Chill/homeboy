@@ -15,6 +15,7 @@ pub struct RunnerExecRecoverySchedule {
     pub deferred_count: usize,
     pub budget_ms: u64,
     pub inspection_action: String,
+    pub is_new_owner: bool,
 }
 
 /// Reserve a durable, independently inspectable owner before a background
@@ -37,14 +38,14 @@ pub fn schedule_terminal_runner_exec_recovery() -> Result<Option<RunnerExecRecov
             .get("deferred_count")
             .and_then(Value::as_u64)
             .unwrap_or(0) as usize;
-        return Ok(Some(recovery_schedule(&existing.id, deferred_count)));
+        return Ok(Some(recovery_schedule(&existing.id, deferred_count, false)));
     }
     let candidates = recovery_candidates(&store)?;
     if candidates.is_empty() {
         return Ok(None);
     }
     let owner_id = format!("runner-exec-recovery-{}", Uuid::new_v4());
-    store.start_run_with_id(
+    let new_owner = store.start_run_with_id(
         NewRunRecord::builder(RECOVERY_KIND)
             .metadata(json!({
                 "phase": "accepted",
@@ -54,16 +55,41 @@ pub fn schedule_terminal_runner_exec_recovery() -> Result<Option<RunnerExecRecov
             }))
             .build(),
         owner_id.clone(),
-    )?;
-    Ok(Some(recovery_schedule(&owner_id, candidates.len())))
+    );
+    if new_owner.is_err() {
+        let existing = store
+            .list_runs(RunListFilter {
+                kind: Some(RECOVERY_KIND.to_string()),
+                status: Some(RunStatus::Running.as_str().to_string()),
+                limit: Some(1),
+                ..RunListFilter::default()
+            })?
+            .into_iter()
+            .next();
+        if let Some(existing) = existing {
+            let deferred_count = existing
+                .metadata_json
+                .get("deferred_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            return Ok(Some(recovery_schedule(&existing.id, deferred_count, false)));
+        }
+        new_owner?;
+    }
+    Ok(Some(recovery_schedule(&owner_id, candidates.len(), true)))
 }
 
-fn recovery_schedule(owner_id: &str, deferred_count: usize) -> RunnerExecRecoverySchedule {
+fn recovery_schedule(
+    owner_id: &str,
+    deferred_count: usize,
+    is_new_owner: bool,
+) -> RunnerExecRecoverySchedule {
     RunnerExecRecoverySchedule {
         owner_id: owner_id.to_string(),
         deferred_count,
         budget_ms: STARTUP_RUNNER_EXEC_RECOVERY_BUDGET.as_millis() as u64,
         inspection_action: format!("homeboy runs show {owner_id}"),
+        is_new_owner,
     }
 }
 
@@ -254,6 +280,22 @@ pub fn run_scheduled_terminal_runner_exec_recovery(owner_id: &str) -> Result<()>
     metadata["budget_ms"] = json!(STARTUP_RUNNER_EXEC_RECOVERY_BUDGET.as_millis() as u64);
     metadata["inspection_action"] = json!(format!("homeboy runs show {owner_id}"));
     store.finish_running_run(owner_id, RunStatus::Pass, Some(metadata))?;
+    Ok(())
+}
+
+pub fn record_scheduled_terminal_runner_exec_recovery_spawn_failure(
+    owner_id: &str,
+    error: &std::io::Error,
+) -> Result<()> {
+    let store = ObservationStore::open_initialized()?;
+    let Some(owner) = store.get_run(owner_id)? else {
+        return Ok(());
+    };
+    let mut metadata = owner.metadata_json;
+    metadata["phase"] = json!("spawn_failed");
+    metadata["spawn_error"] = json!(error.to_string());
+    metadata["inspection_action"] = json!(format!("homeboy runs show {owner_id}"));
+    store.finish_running_run(owner_id, RunStatus::Error, Some(metadata))?;
     Ok(())
 }
 

@@ -123,8 +123,9 @@ pub(crate) use daemon_api::daemon_api_post_for_session;
 pub use failure::runner_exec_failure_error;
 pub use handoff::{runner_job_cancel, runner_job_cancel_projection};
 pub use recovery::{
-    reconcile_terminal_runner_exec_runs, run_scheduled_terminal_runner_exec_recovery,
-    schedule_terminal_runner_exec_recovery,
+    reconcile_terminal_runner_exec_runs,
+    record_scheduled_terminal_runner_exec_recovery_spawn_failure,
+    run_scheduled_terminal_runner_exec_recovery, schedule_terminal_runner_exec_recovery,
 };
 
 /// Retire a completed direct daemon generation only after controller-owned

@@ -243,6 +243,16 @@ const MIGRATIONS: &[Migration] = &[
             WHERE NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = trace_runs.run_id);
         "#,
     },
+    Migration {
+        // A running runner-exec recovery is a controller-wide singleton. The
+        // unique partial index makes the durable record itself the atomic claim.
+        version: 14,
+        sql: r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_running_runner_exec_recovery
+            ON runs(kind)
+            WHERE kind = 'runner_exec_recovery' AND status = 'running';
+        "#,
+    },
 ];
 
 /// The schema version a freshly initialized store lands on.

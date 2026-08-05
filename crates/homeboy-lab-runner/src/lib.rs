@@ -244,6 +244,7 @@ pub use execution::{
     daemon_api_get, daemon_api_post, exec, promote_runner_exec_artifact_dirs,
     promote_runner_exec_artifacts, promote_runner_exec_summaries, promoted_output,
     reconcile_runner_generation_after_evidence, reconcile_terminal_runner_exec_runs,
+    record_scheduled_terminal_runner_exec_recovery_spawn_failure,
     run_scheduled_terminal_runner_exec_recovery, runner_exec_failure_error,
     runner_exec_structured_summary, runner_job_cancel, runner_job_cancel_for_session,
     runner_job_cancel_projection, schedule_terminal_runner_exec_recovery, RunnerExecDiagnostics,

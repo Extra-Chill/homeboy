@@ -692,15 +692,25 @@ fn schedule_runner_exec_recovery() {
         "runner-exec recovery accepted: owner_id={} deferred_count={} budget_ms={} inspect=`{}`",
         schedule.owner_id, schedule.deferred_count, schedule.budget_ms, schedule.inspection_action
     );
+    if !schedule.is_new_owner {
+        return;
+    }
     let Ok(executable) = std::env::current_exe() else {
         return;
     };
-    let _ = ProcessCommand::new(executable)
+    let mut command = ProcessCommand::new(executable);
+    command
         .env(RUNNER_EXEC_RECOVERY_OWNER_ENV, &schedule.owner_id)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+        .stderr(std::process::Stdio::null());
+    crate::core::process::detach_from_caller_session(&mut command);
+    if let Err(error) = command.spawn() {
+        let _ = crate::runner::record_scheduled_terminal_runner_exec_recovery_spawn_failure(
+            &schedule.owner_id,
+            &error,
+        );
+    }
 }
 
 /// A cook has no durable run record until controller admission. Re-exec before
