@@ -126,7 +126,8 @@ pub use handoff::{runner_job_cancel, runner_job_cancel_projection};
 pub use recovery::{
     reconcile_terminal_runner_exec_runs,
     record_scheduled_terminal_runner_exec_recovery_spawn_failure,
-    run_scheduled_terminal_runner_exec_recovery, schedule_terminal_runner_exec_recovery,
+    run_scheduled_terminal_runner_exec_recovery, run_scheduled_terminal_runner_exec_recovery_child,
+    schedule_terminal_runner_exec_recovery, RunnerExecRecoveryChildSchedule,
 };
 
 /// Retire a completed direct daemon generation only after controller-owned

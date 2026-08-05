@@ -25,6 +25,7 @@ use homeboy_upgrade::upgrade;
 
 const COOK_PINNED_RUNTIME_ENV: &str = "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME";
 const RUNNER_EXEC_RECOVERY_OWNER_ENV: &str = "HOMEBOY_RUNNER_EXEC_RECOVERY_OWNER";
+const RUNNER_EXEC_RECOVERY_CHILD_ENV: &str = "HOMEBOY_RUNNER_EXEC_RECOVERY_CHILD";
 
 pub struct CliRuntime {
     extension_discovery: OnceLock<ExtensionCliDiscovery>,
@@ -357,13 +358,26 @@ impl CliRuntime {
         }
 
         register_startup_providers_before_reconcile();
+        if let Some(child_id) = std::env::var_os(RUNNER_EXEC_RECOVERY_CHILD_ENV) {
+            let child_token =
+                std::env::var_os("HOMEBOY_RUNNER_EXEC_RECOVERY_CHILD_TOKEN").unwrap_or_default();
+            let _ = crate::runner::run_scheduled_terminal_runner_exec_recovery_child(
+                &child_id.to_string_lossy(),
+                &child_token.to_string_lossy(),
+            );
+            return std::process::ExitCode::SUCCESS;
+        }
         if let Some(owner_id) = std::env::var_os(RUNNER_EXEC_RECOVERY_OWNER_ENV) {
             let owner_token =
                 std::env::var_os("HOMEBOY_RUNNER_EXEC_RECOVERY_OWNER_TOKEN").unwrap_or_default();
-            let _ = crate::runner::run_scheduled_terminal_runner_exec_recovery(
+            if let Ok(children) = crate::runner::run_scheduled_terminal_runner_exec_recovery(
                 &owner_id.to_string_lossy(),
                 &owner_token.to_string_lossy(),
-            );
+            ) {
+                for child in children {
+                    spawn_runner_exec_recovery_child(&child);
+                }
+            }
             return std::process::ExitCode::SUCCESS;
         }
         let config = crate::core::defaults::load_config();
@@ -727,6 +741,24 @@ fn schedule_runner_exec_recovery() {
             &error,
         );
     }
+}
+
+fn spawn_runner_exec_recovery_child(child: &crate::runner::RunnerExecRecoveryChildSchedule) {
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let mut command = ProcessCommand::new(executable);
+    command
+        .env(RUNNER_EXEC_RECOVERY_CHILD_ENV, &child.child_id)
+        .env(
+            "HOMEBOY_RUNNER_EXEC_RECOVERY_CHILD_TOKEN",
+            &child.child_token,
+        )
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    crate::core::process::detach_from_caller_session(&mut command);
+    let _ = command.spawn();
 }
 
 /// A cook has no durable run record until controller admission. Re-exec before

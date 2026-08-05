@@ -303,7 +303,14 @@ fn detached_cook_admission_is_bounded_with_a_hundred_unavailable_recovery_record
         .expect("list recovery owners");
     assert_eq!(owners.len(), 1, "recovery has its own durable owner");
     assert_eq!(owners[0].status, RunStatus::Pass.as_str());
-    assert_eq!(owners[0].metadata_json["deferred_count"], 100);
+    assert_eq!(owners[0].metadata_json["scheduled_count"], 100);
+    let children = store
+        .list_runs(RunListFilter {
+            kind: Some("runner_exec_recovery_child".to_string()),
+            ..RunListFilter::default()
+        })
+        .expect("list recovery children");
+    assert_eq!(children.len(), 100, "each source has a durable child");
 
     #[cfg(unix)]
     if let Some(pid) = handoff["pid"].as_u64() {

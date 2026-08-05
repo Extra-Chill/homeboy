@@ -161,9 +161,13 @@ impl ObservationStore {
                 VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7, ?8, ?9, ?10)
                 ON CONFLICT DO UPDATE SET
                     started_at = excluded.started_at,
+                    finished_at = NULL,
+                    status = 'running',
                     metadata_json = excluded.metadata_json
-                WHERE runs.kind = excluded.kind AND runs.status = 'running'
-                    AND COALESCE(CAST(json_extract(runs.metadata_json, '$.lease_expires_at_ms') AS INTEGER), 0) < ?11
+                WHERE runs.kind = excluded.kind AND (
+                    runs.status != 'running'
+                    OR COALESCE(CAST(json_extract(runs.metadata_json, '$.lease_expires_at_ms') AS INTEGER), 0) < ?11
+                )
                 "#,
                 params![id, run.kind, run.component_id, started_at, run.command, run.cwd,
                     run.homeboy_version, run.git_sha, run.rig_id, metadata_json, now],
