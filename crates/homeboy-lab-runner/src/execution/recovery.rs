@@ -2,6 +2,12 @@
 
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+    Arc,
+};
+use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -9,6 +15,60 @@ const STARTUP_RUNNER_EXEC_RECOVERY_LIMIT: i64 = 100;
 pub const STARTUP_RUNNER_EXEC_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
 const RECOVERY_KIND: &str = "runner_exec_recovery";
 const RECOVERY_OWNER_LEASE: Duration = Duration::from_secs(30);
+const RECOVERY_LEASE_HEARTBEAT: Duration = Duration::from_secs(1);
+/// Artifact publication and terminal projection are durable, synchronous store
+/// operations. They do not accept cancellation, so leave this measured minimum
+/// in the owner budget rather than beginning an operation the deadline cannot
+/// reasonably contain.
+const MIN_NON_CANCELLABLE_SIDE_EFFECT: Duration = Duration::from_millis(100);
+
+#[derive(Clone)]
+struct RecoveryOwner {
+    id: String,
+    token: String,
+    deadline: Instant,
+}
+
+impl RecoveryOwner {
+    fn remaining(&self) -> Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "recovery_budget",
+                    "runner-exec recovery owner deadline expired",
+                    None,
+                    None,
+                )
+            })
+    }
+
+    fn before_side_effect(&self, store: &ObservationStore, action: &str) -> Result<()> {
+        if self.remaining()? < MIN_NON_CANCELLABLE_SIDE_EFFECT {
+            return Err(Error::validation_invalid_argument(
+                "recovery_budget",
+                format!("runner-exec recovery deferred before {action}; insufficient owner deadline remaining"),
+                None,
+                None,
+            ));
+        }
+        if !store.renew_running_run_lease(
+            &self.id,
+            &self.token,
+            chrono::Utc::now().timestamp_millis() + RECOVERY_OWNER_LEASE.as_millis() as i64,
+        )? {
+            let mut error = Error::validation_invalid_argument(
+                "recovery_owner",
+                "runner-exec recovery ownership was taken over",
+                Some(self.id.clone()),
+                None,
+            );
+            error.details["ownership_lost"] = json!(true);
+            return Err(error);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RunnerExecRecoverySchedule {
@@ -108,10 +168,17 @@ pub fn reconcile_terminal_runner_exec_runs() -> Result<usize> {
 /// retried for each historical job: all later records on that runner are
 /// deferred with their evidence intact for a later owner.
 pub fn reconcile_terminal_runner_exec_runs_with_budget(budget: Duration) -> Result<(usize, usize)> {
+    reconcile_terminal_runner_exec_runs_with_owner(budget, None)
+}
+
+fn reconcile_terminal_runner_exec_runs_with_owner(
+    budget: Duration,
+    owner: Option<&RecoveryOwner>,
+) -> Result<(usize, usize)> {
     let store = ObservationStore::open_initialized()?;
     let mut reconciled = 0;
     let mut deferred = 0;
-    let mut unavailable_runners = BTreeSet::new();
+    let mut unavailable_endpoints = BTreeSet::new();
     let deadline = Instant::now() + budget;
     let mut sessions = BTreeMap::new();
     let candidates = recovery_candidates(&store)?;
@@ -129,42 +196,59 @@ pub fn reconcile_terminal_runner_exec_runs_with_budget(budget: Duration) -> Resu
         ) else {
             continue;
         };
-        if unavailable_runners.contains(runner_id) {
-            deferred += 1;
-            continue;
+        if let Some(owner) = owner {
+            if owner.remaining().is_err() {
+                deferred += candidates.len() - index;
+                break;
+            }
         }
-        // Cache both healthy sessions and their failures. A stale history must
-        // not turn one unavailable endpoint into 100 status/tunnel attempts.
-        let session = sessions.entry(runner_id.to_string()).or_insert_with(|| {
+        // Resolve a persisted session under the owner deadline, then cache by
+        // its daemon identity. Runner aliases can name the same endpoint.
+        let session = {
             if Instant::now() >= deadline {
-                return Err(Error::validation_invalid_argument(
+                Err(Error::validation_invalid_argument(
                     "recovery_budget",
                     "runner-exec recovery owner deadline expired before session resolution",
                     None,
                     None,
-                ));
-            }
-            crate::persisted_status(runner_id).and_then(|status| {
-                status.session.ok_or_else(|| {
-                    Error::validation_invalid_argument(
-                        "runner",
-                        "runner has no persisted daemon session for recovery",
-                        Some(runner_id.to_string()),
-                        None,
-                    )
+                ))
+            } else {
+                crate::persisted_status(runner_id).and_then(|status| {
+                    status.session.ok_or_else(|| {
+                        Error::validation_invalid_argument(
+                            "runner",
+                            "runner has no persisted daemon session for recovery",
+                            Some(runner_id.to_string()),
+                            None,
+                        )
+                    })
                 })
-            })
-        });
+            }
+        };
+        let endpoint = session
+            .as_ref()
+            .map(endpoint_identity)
+            .unwrap_or_else(|_| runner_id.to_string());
+        if unavailable_endpoints.contains(&endpoint) {
+            deferred += 1;
+            continue;
+        }
+        // Cache both healthy sessions and their failures by resolved endpoint,
+        // never by an arbitrary runner alias.
+        let session = sessions.entry(endpoint.clone()).or_insert(session);
         let snapshot = match session.as_ref().map_err(Clone::clone).and_then(|session| {
             crate::evidence::runner_job_log_snapshot_for_session_until(session, job_id, deadline)
         }) {
             Ok(snapshot) => snapshot,
             Err(error) => {
+                if let Some(owner) = owner {
+                    owner.before_side_effect(&store, "source-run failure projection")?;
+                }
                 record_evicted_evidence_loss(&store, &run, &error)?;
                 // A 404 is a durable per-job result. Other failures describe the
                 // endpoint, so avoid amplifying one unavailable daemon into N probes.
                 if error.details.get("http_status").and_then(Value::as_u64) != Some(404) {
-                    unavailable_runners.insert(runner_id.to_string());
+                    unavailable_endpoints.insert(endpoint);
                     deferred += candidates
                         .iter()
                         .skip(index + 1)
@@ -182,6 +266,9 @@ pub fn reconcile_terminal_runner_exec_runs_with_budget(budget: Duration) -> Resu
         };
         if !snapshot.job.status.is_terminal() {
             continue;
+        }
+        if let Some(owner) = owner {
+            owner.before_side_effect(&store, "terminal checkpoint")?;
         }
         homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint(
             &run.id, &snapshot,
@@ -214,6 +301,9 @@ pub fn reconcile_terminal_runner_exec_runs_with_budget(budget: Duration) -> Resu
             ) {
                 continue;
             }
+            if let Some(owner) = owner {
+                owner.before_side_effect(&store, "artifact promotion")?;
+            }
             let promoted = promote_runner_exec_artifacts(
                 &run.id,
                 &output,
@@ -235,6 +325,9 @@ pub fn reconcile_terminal_runner_exec_runs_with_budget(budget: Duration) -> Resu
                 &declaration,
             ) {
                 continue;
+            }
+            if let Some(owner) = owner {
+                owner.before_side_effect(&store, "artifact directory promotion")?;
             }
             let promoted = promote_runner_exec_artifact_dirs(
                 &run.id,
@@ -258,6 +351,9 @@ pub fn reconcile_terminal_runner_exec_runs_with_budget(budget: Duration) -> Resu
             ) {
                 continue;
             }
+            if let Some(owner) = owner {
+                owner.before_side_effect(&store, "summary promotion")?;
+            }
             let promoted = promote_runner_exec_summaries(
                 &run.id,
                 &output,
@@ -277,11 +373,34 @@ pub fn reconcile_terminal_runner_exec_runs_with_budget(budget: Duration) -> Resu
             .chain(summaries.iter())
             .cloned()
             .collect::<Vec<_>>();
+        if let Some(owner) = owner {
+            owner.before_side_effect(&store, "artifact reference projection")?;
+        }
         homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_refs(&run.id, &retained)?;
+        if let Some(owner) = owner {
+            owner.before_side_effect(&store, "terminal projection")?;
+        }
         homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(&run.id, &snapshot)?;
         reconciled += 1;
     }
     Ok((reconciled, deferred))
+}
+
+fn endpoint_identity(session: &crate::RunnerSession) -> String {
+    session
+        .local_url
+        .clone()
+        .or_else(|| session.broker_url.clone())
+        .unwrap_or_else(|| {
+            format!(
+                "{:?}:{}",
+                session.mode,
+                session
+                    .remote_daemon_lease_id
+                    .as_deref()
+                    .unwrap_or_default()
+            )
+        })
 }
 
 /// Complete one accepted recovery owner and leave deferred source records
@@ -307,8 +426,76 @@ pub fn run_scheduled_terminal_runner_exec_recovery(
     )? {
         return Ok(());
     }
-    let (reconciled, deferred_count) =
-        reconcile_terminal_runner_exec_runs_with_budget(STARTUP_RUNNER_EXEC_RECOVERY_BUDGET)?;
+    let owner_context = RecoveryOwner {
+        id: owner_id.to_string(),
+        token: owner_token.to_string(),
+        deadline: Instant::now() + STARTUP_RUNNER_EXEC_RECOVERY_BUDGET,
+    };
+    let stop_heartbeat = Arc::new(AtomicBool::new(false));
+    let heartbeat_stop = Arc::clone(&stop_heartbeat);
+    let heartbeat_owner = owner_context.clone();
+    let (heartbeat_done, heartbeat_stop_signal) = mpsc::channel();
+    let heartbeat = thread::spawn(move || {
+        while !heartbeat_stop.load(Ordering::Acquire) {
+            if heartbeat_stop_signal
+                .recv_timeout(RECOVERY_LEASE_HEARTBEAT)
+                .is_ok()
+            {
+                break;
+            }
+            if heartbeat_stop.load(Ordering::Acquire) {
+                break;
+            }
+            let Ok(store) = ObservationStore::open_initialized() else {
+                break;
+            };
+            let Ok(owned) = store.renew_running_run_lease(
+                &heartbeat_owner.id,
+                &heartbeat_owner.token,
+                chrono::Utc::now().timestamp_millis() + RECOVERY_OWNER_LEASE.as_millis() as i64,
+            ) else {
+                break;
+            };
+            if !owned {
+                break;
+            }
+        }
+    });
+    let result = reconcile_terminal_runner_exec_runs_with_owner(
+        STARTUP_RUNNER_EXEC_RECOVERY_BUDGET,
+        Some(&owner_context),
+    );
+    stop_heartbeat.store(true, Ordering::Release);
+    let _ = heartbeat_done.send(());
+    let _ = heartbeat.join();
+    let (reconciled, deferred_count) = match result {
+        Ok(result) => result,
+        Err(error) => {
+            if error.details["ownership_lost"].as_bool() == Some(true) {
+                return Ok(());
+            }
+            let Some(owner) = store.get_run(owner_id)? else {
+                return Ok(());
+            };
+            let mut metadata = owner.metadata_json;
+            metadata["phase"] = json!("failed");
+            metadata["failure"] = json!({
+                "schema": "homeboy/runner-exec-recovery-failure/v1",
+                "code": format!("{:?}", error.code),
+                "message": error.message,
+                "details": error.details,
+                "retryable": true,
+                "next_actions": [format!("homeboy runs show {owner_id}"), "retry the original mutation to schedule a new recovery owner"],
+            });
+            store.finish_running_run_with_owner_token(
+                owner_id,
+                owner_token,
+                RunStatus::Error,
+                metadata,
+            )?;
+            return Ok(());
+        }
+    };
     let mut metadata = owner.metadata_json;
     metadata["phase"] = json!(if deferred_count == 0 {
         "completed"
