@@ -1557,10 +1557,7 @@ fn resource_policy_runner_hint<'a>(
     cli.runner.as_deref().or(default_runner)
 }
 
-fn explicit_runner_placement<'a>(
-    cli: &'a Cli,
-    hot_command: resource_policy::HotCommand,
-) -> Option<&'a str> {
+fn explicit_runner_placement(cli: &Cli, hot_command: resource_policy::HotCommand) -> Option<&str> {
     cli.runner.as_deref().filter(|_| {
         hot_command.lab_offload_supported
             && !matches!(cli.placement, crate::cli_surface::Placement::Local)

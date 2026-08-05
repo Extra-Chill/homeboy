@@ -31,26 +31,26 @@
 macro_rules! ops_command_descriptors {
     ($consumer:ident) => {
         $consumer! {
-            (ssh, Ssh, crate::commands::ssh::run),
-            (server, Server, crate::commands::server::run),
-            (db, Db, crate::commands::db::run),
-            (file, File, crate::commands::file::run),
-            (logs, Logs, crate::commands::logs::run),
-            (triage, Triage, crate::commands::triage::run),
-            (deploy, Deploy, crate::commands::deploy::run),
-            (harvest, Harvest, crate::commands::harvest::run),
-            (daemon, Daemon, crate::commands::daemon::run),
+            (ssh, Ssh, $crate::commands::ssh::run),
+            (server, Server, $crate::commands::server::run),
+            (db, Db, $crate::commands::db::run),
+            (file, File, $crate::commands::file::run),
+            (logs, Logs, $crate::commands::logs::run),
+            (triage, Triage, $crate::commands::triage::run),
+            (deploy, Deploy, $crate::commands::deploy::run),
+            (harvest, Harvest, $crate::commands::harvest::run),
+            (daemon, Daemon, $crate::commands::daemon::run),
             (
                 deferred_workload,
                 DeferredWorkload,
-                crate::commands::deferred_workload::run
+                $crate::commands::deferred_workload::run
             ),
-            (schedule, Schedule, crate::commands::schedule::run),
-            (status, Status, crate::commands::status::run),
-            (git, Git, crate::commands::git::run),
-            (self_cmd, SelfCmd, crate::commands::self_cmd::run),
-            (api, Api, crate::commands::api::run),
-            (upgrade, Upgrade, crate::commands::upgrade::run),
+            (schedule, Schedule, $crate::commands::schedule::run),
+            (status, Status, $crate::commands::status::run),
+            (git, Git, $crate::commands::git::run),
+            (self_cmd, SelfCmd, $crate::commands::self_cmd::run),
+            (api, Api, $crate::commands::api::run),
+            (upgrade, Upgrade, $crate::commands::upgrade::run),
         }
     };
 }
