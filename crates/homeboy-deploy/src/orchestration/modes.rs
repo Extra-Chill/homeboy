@@ -19,18 +19,32 @@ use super::super::types::{
 };
 
 /// Check mode: return component status without building or deploying.
-pub(super) fn run_check_mode(
-    components: &[Component],
-    local_versions: &HashMap<String, String>,
-    remote_versions: &HashMap<String, String>,
-    extension_skipped: &[ExtensionSkippedComponent],
-    project: &Project,
-    base_path: &str,
-    config: &DeployConfig,
-    client: &SshClient,
-    canonical_packages: &HashMap<String, ReleaseArtifactLease>,
-    unavailable_canonical_packages: &HashMap<String, String>,
-) -> DeployOrchestrationResult {
+pub(super) struct CheckModeInput<'a> {
+    pub(super) components: &'a [Component],
+    pub(super) local_versions: &'a HashMap<String, String>,
+    pub(super) remote_versions: &'a HashMap<String, String>,
+    pub(super) extension_skipped: &'a [ExtensionSkippedComponent],
+    pub(super) project: &'a Project,
+    pub(super) base_path: &'a str,
+    pub(super) config: &'a DeployConfig,
+    pub(super) client: &'a SshClient,
+    pub(super) canonical_packages: &'a HashMap<String, ReleaseArtifactLease>,
+    pub(super) unavailable_canonical_packages: &'a HashMap<String, String>,
+}
+
+pub(super) fn run_check_mode(input: CheckModeInput<'_>) -> DeployOrchestrationResult {
+    let CheckModeInput {
+        components,
+        local_versions,
+        remote_versions,
+        extension_skipped,
+        project,
+        base_path,
+        config,
+        client,
+        canonical_packages,
+        unavailable_canonical_packages,
+    } = input;
     let mut git_probe_cache = GitProbeCache::default();
     let mut results: Vec<ComponentDeployResult> = components
         .iter()
@@ -683,18 +697,18 @@ mod tests {
             resume_run_id: None,
         };
 
-        let checked = run_check_mode(
-            std::slice::from_ref(&component),
-            &local_versions,
-            &remote_versions,
-            &[],
-            &Project::default(),
-            "/srv/site",
-            &config,
-            &local_client(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let checked = run_check_mode(CheckModeInput {
+            components: std::slice::from_ref(&component),
+            local_versions: &local_versions,
+            remote_versions: &remote_versions,
+            extension_skipped: &[],
+            project: &Project::default(),
+            base_path: "/srv/site",
+            config: &config,
+            client: &local_client(),
+            canonical_packages: &HashMap::new(),
+            unavailable_canonical_packages: &HashMap::new(),
+        });
         assert_eq!(checked.results[0].status, "checked");
         assert_eq!(checked.results[0].local_version.as_deref(), Some("1.2.3"));
         assert_eq!(checked.results[0].remote_version.as_deref(), Some("1.3.0"));
@@ -762,18 +776,18 @@ mod tests {
         let config = DeployConfig::check_all_no_pull_head();
         let packages = HashMap::from([("plugin".to_string(), package)]);
 
-        let clean = run_check_mode(
-            std::slice::from_ref(&component),
-            &versions,
-            &versions,
-            &[],
-            &Project::default(),
-            ".",
-            &config,
-            &local_client(),
-            &packages,
-            &HashMap::new(),
-        );
+        let clean = run_check_mode(CheckModeInput {
+            components: std::slice::from_ref(&component),
+            local_versions: &versions,
+            remote_versions: &versions,
+            extension_skipped: &[],
+            project: &Project::default(),
+            base_path: ".",
+            config: &config,
+            client: &local_client(),
+            canonical_packages: &packages,
+            unavailable_canonical_packages: &HashMap::new(),
+        });
         assert_eq!(
             clean.results[0].component_status,
             Some(ComponentStatus::UpToDate)
@@ -792,36 +806,36 @@ mod tests {
         );
 
         std::fs::write(remote.join("plugin.php"), "modified").expect("drift");
-        let drift = run_check_mode(
-            std::slice::from_ref(&component),
-            &versions,
-            &versions,
-            &[],
-            &Project::default(),
-            ".",
-            &config,
-            &local_client(),
-            &packages,
-            &HashMap::new(),
-        );
+        let drift = run_check_mode(CheckModeInput {
+            components: std::slice::from_ref(&component),
+            local_versions: &versions,
+            remote_versions: &versions,
+            extension_skipped: &[],
+            project: &Project::default(),
+            base_path: ".",
+            config: &config,
+            client: &local_client(),
+            canonical_packages: &packages,
+            unavailable_canonical_packages: &HashMap::new(),
+        });
         assert_eq!(
             drift.results[0].component_status,
             Some(ComponentStatus::RemoteModified)
         );
 
         std::fs::write(&packages["plugin"].path, "mutated after lease").expect("mutate package");
-        let mutated = run_check_mode(
-            std::slice::from_ref(&component),
-            &versions,
-            &versions,
-            &[],
-            &Project::default(),
-            ".",
-            &config,
-            &local_client(),
-            &packages,
-            &HashMap::new(),
-        );
+        let mutated = run_check_mode(CheckModeInput {
+            components: std::slice::from_ref(&component),
+            local_versions: &versions,
+            remote_versions: &versions,
+            extension_skipped: &[],
+            project: &Project::default(),
+            base_path: ".",
+            config: &config,
+            client: &local_client(),
+            canonical_packages: &packages,
+            unavailable_canonical_packages: &HashMap::new(),
+        });
         let manifest = mutated.results[0]
             .content_manifest
             .as_ref()
@@ -889,18 +903,18 @@ mod tests {
             tag: "v1.0.0".to_string(),
             source_commit: "prepared-commit".to_string(),
         });
-        let result = run_check_mode(
-            &[component],
-            &versions,
-            &versions,
-            &[],
-            &Project::default(),
-            ".",
-            &config,
-            &local_client(),
-            &HashMap::from([("plugin".to_string(), release)]),
-            &HashMap::new(),
-        );
+        let result = run_check_mode(CheckModeInput {
+            components: &[component],
+            local_versions: &versions,
+            remote_versions: &versions,
+            extension_skipped: &[],
+            project: &Project::default(),
+            base_path: ".",
+            config: &config,
+            client: &local_client(),
+            canonical_packages: &HashMap::from([("plugin".to_string(), release)]),
+            unavailable_canonical_packages: &HashMap::new(),
+        });
         let manifest = result.results[0]
             .content_manifest
             .as_ref()
@@ -947,18 +961,18 @@ mod tests {
         };
         let local_versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
         let remote_versions = HashMap::from([("plugin".to_string(), "2.0.0".to_string())]);
-        let result = run_check_mode(
-            &[component],
-            &local_versions,
-            &remote_versions,
-            &[],
-            &Project::default(),
-            ".",
-            &DeployConfig::check_all_no_pull_head(),
-            &local_client(),
-            &HashMap::from([("plugin".to_string(), lease)]),
-            &HashMap::new(),
-        );
+        let result = run_check_mode(CheckModeInput {
+            components: &[component],
+            local_versions: &local_versions,
+            remote_versions: &remote_versions,
+            extension_skipped: &[],
+            project: &Project::default(),
+            base_path: ".",
+            config: &DeployConfig::check_all_no_pull_head(),
+            client: &local_client(),
+            canonical_packages: &HashMap::from([("plugin".to_string(), lease)]),
+            unavailable_canonical_packages: &HashMap::new(),
+        });
         assert_eq!(
             result.results[0].component_status,
             Some(ComponentStatus::MixedDrift)
@@ -982,21 +996,21 @@ mod tests {
             ..Component::default()
         };
         let versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
-        let result = run_check_mode(
-            &[component],
-            &versions,
-            &versions,
-            &[],
-            &Project::default(),
-            ".",
-            &DeployConfig::check_all_no_pull_head(),
-            &local_client(),
-            &HashMap::new(),
-            &HashMap::from([(
+        let result = run_check_mode(CheckModeInput {
+            components: &[component],
+            local_versions: &versions,
+            remote_versions: &versions,
+            extension_skipped: &[],
+            project: &Project::default(),
+            base_path: ".",
+            config: &DeployConfig::check_all_no_pull_head(),
+            client: &local_client(),
+            canonical_packages: &HashMap::new(),
+            unavailable_canonical_packages: &HashMap::from([(
                 "plugin".to_string(),
                 "release asset download failed".to_string(),
             )]),
-        );
+        });
         let manifest = result.results[0]
             .content_manifest
             .as_ref()
@@ -1042,18 +1056,18 @@ mod tests {
             },
         ] {
             config.check = true;
-            let result = run_check_mode(
-                std::slice::from_ref(&component),
-                &versions,
-                &versions,
-                &[],
-                &Project::default(),
-                ".",
-                &config,
-                &local_client(),
-                &HashMap::new(),
-                &HashMap::new(),
-            );
+            let result = run_check_mode(CheckModeInput {
+                components: std::slice::from_ref(&component),
+                local_versions: &versions,
+                remote_versions: &versions,
+                extension_skipped: &[],
+                project: &Project::default(),
+                base_path: ".",
+                config: &config,
+                client: &local_client(),
+                canonical_packages: &HashMap::new(),
+                unavailable_canonical_packages: &HashMap::new(),
+            });
             let manifest = result.results[0]
                 .content_manifest
                 .as_ref()
@@ -1079,18 +1093,18 @@ mod tests {
             ..Component::default()
         };
         let versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
-        let result = run_check_mode(
-            &[component],
-            &versions,
-            &versions,
-            &[],
-            &Project::default(),
-            ".",
-            &DeployConfig::check_all_no_pull_head(),
-            &local_client(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let result = run_check_mode(CheckModeInput {
+            components: &[component],
+            local_versions: &versions,
+            remote_versions: &versions,
+            extension_skipped: &[],
+            project: &Project::default(),
+            base_path: ".",
+            config: &DeployConfig::check_all_no_pull_head(),
+            client: &local_client(),
+            canonical_packages: &HashMap::new(),
+            unavailable_canonical_packages: &HashMap::new(),
+        });
         assert_eq!(
             result.results[0]
                 .content_manifest
@@ -1110,18 +1124,18 @@ mod tests {
             ..Component::default()
         };
         let versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
-        let result = run_check_mode(
-            &[component],
-            &versions,
-            &versions,
-            &[],
-            &Project::default(),
-            ".",
-            &DeployConfig::check_all_no_pull_head(),
-            &local_client(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let result = run_check_mode(CheckModeInput {
+            components: &[component],
+            local_versions: &versions,
+            remote_versions: &versions,
+            extension_skipped: &[],
+            project: &Project::default(),
+            base_path: ".",
+            config: &DeployConfig::check_all_no_pull_head(),
+            client: &local_client(),
+            canonical_packages: &HashMap::new(),
+            unavailable_canonical_packages: &HashMap::new(),
+        });
         let manifest = result.results[0]
             .content_manifest
             .as_ref()

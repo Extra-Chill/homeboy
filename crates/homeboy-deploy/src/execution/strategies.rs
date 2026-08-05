@@ -19,23 +19,35 @@ use super::super::version_overrides::{
 use super::prepare::PreparedComponentDeploy;
 
 /// Deploy a component via git push strategy.
-pub(super) fn execute_git_deploy(
-    component: &Component,
-    config: &DeployConfig,
-    ctx: &RemoteProjectContext,
-    base_path: &str,
-    install_dir: &str,
-    local_version: Option<String>,
-    remote_version: Option<String>,
-    mut observation: Option<&mut DeployObservation>,
-) -> ComponentDeployResult {
+pub(super) struct GitDeployInput<'a> {
+    pub(super) component: &'a Component,
+    pub(super) config: &'a DeployConfig,
+    pub(super) ctx: &'a RemoteProjectContext,
+    pub(super) base_path: &'a str,
+    pub(super) install_dir: &'a str,
+    pub(super) local_version: Option<String>,
+    pub(super) remote_version: Option<String>,
+    pub(super) observation: Option<&'a mut DeployObservation>,
+}
+
+pub(super) fn execute_git_deploy(input: GitDeployInput<'_>) -> ComponentDeployResult {
+    let GitDeployInput {
+        component,
+        config,
+        ctx,
+        base_path,
+        install_dir,
+        local_version,
+        remote_version,
+        observation,
+    } = input;
     let git_config = component.git_deploy.clone().unwrap_or_default();
     let deploy_result = deploy_via_git(
         &ctx.client,
         install_dir,
         &git_config,
         local_version.as_deref(),
-        observation.as_deref_mut(),
+        observation,
     );
 
     match deploy_result {
@@ -92,7 +104,7 @@ pub(super) fn execute_file_deploy(
     install_dir: &str,
     local_version: Option<String>,
     remote_version: Option<String>,
-    mut observation: Option<&mut DeployObservation>,
+    observation: Option<&mut DeployObservation>,
 ) -> ComponentDeployResult {
     let local_path = Path::new(&component.local_path);
 
@@ -131,7 +143,7 @@ pub(super) fn execute_file_deploy(
         "mkdir -p {}",
         homeboy_core::engine::shell::quote_path(remote_parent)
     );
-    if let Some(observation) = observation.as_deref_mut() {
+    if let Some(observation) = observation {
         if let Err(error) = observation.phase("transfer", true) {
             return ComponentDeployResult::failed(
                 component,

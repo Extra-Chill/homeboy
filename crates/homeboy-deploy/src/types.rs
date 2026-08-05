@@ -323,6 +323,7 @@ pub enum BuildSource {
 /// makes both facts visible without treating the transfer as a skipped build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum BuildPhase {
     /// The deploy phase built the payload directly.
     Deploy,
@@ -331,13 +332,8 @@ pub enum BuildPhase {
     /// No build ran in this deploy lifecycle.
     NotRun,
     /// The phase was not recorded by an older persisted result.
+    #[default]
     Unknown,
-}
-
-impl Default for BuildPhase {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 /// Content identity of a deployed artifact file, so stale artifacts are detectable.

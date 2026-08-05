@@ -114,16 +114,13 @@ pub(crate) fn bind_project_payloads(
                     None,
                 ));
             }
-            match component.deploy_strategy() {
-                Some("git" | "file") => {
-                    return Err(Error::validation_invalid_argument(
-                        "deploy_strategy",
-                        "Prepared artifacts require an artifact deploy strategy",
-                        None,
-                        None,
-                    ));
-                }
-                _ => {}
+            if let Some("git" | "file") = component.deploy_strategy() {
+                return Err(Error::validation_invalid_argument(
+                    "deploy_strategy",
+                    "Prepared artifacts require an artifact deploy strategy",
+                    None,
+                    None,
+                ));
             }
             let install_dir = resolve_effective_remote_path(project, component, base_path)?;
             validate_deploy_target(
