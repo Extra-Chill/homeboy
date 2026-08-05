@@ -58,6 +58,9 @@ pub struct ContractConstantsOutput {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
+// This is a serialized contract union. Boxing would not change its wire shape
+// but would add allocation to every constants response.
+#[allow(clippy::large_enum_variant)]
 pub enum ContractConstants {
     All(AllContractConstants),
     ArtifactManifest(ArtifactManifestConstants),
@@ -505,4 +508,19 @@ fn represented_artifact_schema_ids() -> Vec<String> {
         GENERIC_MATRIX_SUMMARY_SCHEMA.to_string(),
         MATRIX_ARTIFACT_SUMMARY_SCHEMA.to_string(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_constants_keep_the_untagged_contract_shape() {
+        let output = contract_constants("all").expect("all constants are registered");
+        let value = serde_json::to_value(output).expect("constants serialize");
+
+        assert_eq!(value["schema"], CONTRACT_CONSTANTS_SCHEMA);
+        assert!(value["constants"].get("artifact_manifest").is_some());
+        assert!(value["constants"].get("All").is_none());
+    }
 }
