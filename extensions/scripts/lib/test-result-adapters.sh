@@ -109,11 +109,39 @@ def parse_cargo_test():
     return True
 
 
+def parse_node_test():
+    # A WordPress package script can invoke several nested Node TAP suites. Its
+    # terminal package summary is the authoritative invocation count.
+    summaries = re.findall(
+        r"^passed:\s*(\d+);\s*failed:\s*(\d+);\s*intentionally skipped:\s*(\d+)\s*$",
+        text,
+        flags=re.MULTILINE,
+    )
+    if summaries:
+        passed, failed, skipped = map(int, summaries[-1])
+        emit(passed + failed + skipped, passed, failed, skipped)
+        return True
+
+    # Without a package summary, use one complete Node TAP summary rather than
+    # adding nested summaries from separately invoked test commands.
+    tap_summaries = re.findall(
+        r"^# tests\s+(\d+)\s*$.*?^# pass\s+(\d+)\s*$.*?^# fail\s+(\d+)\s*$.*?^# skipped\s+(\d+)\s*$",
+        text,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if not tap_summaries:
+        return False
+    total, passed, failed, skipped = map(int, tap_summaries[-1])
+    emit(total, passed, failed, skipped)
+    return True
+
+
 adapter_functions = {
     "host-smoke": parse_host_smoke,
     "phpunit": parse_phpunit,
     "phpunit-testdox": parse_phpunit_testdox,
     "cargo-test": parse_cargo_test,
+    "node-test": parse_node_test,
 }
 
 for adapter in adapters:

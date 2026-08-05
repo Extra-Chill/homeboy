@@ -1,0 +1,15 @@
+# tests 259
+# suites 0
+# pass 259
+# fail 0
+# skipped 0
+TAP version 13
+# tests 14
+# suites 0
+# pass 14
+# fail 0
+# skipped 0
+standalone-php: selected 40
+node: selected 10
+passed: 50; failed: 0; intentionally skipped: 0
+JS_TEST_SUMMARY:backend=package-script script=test files=1 status=ok

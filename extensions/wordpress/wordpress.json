@@ -1076,7 +1076,7 @@
   "test": {
     "result_parse": {
       "extension_script": "scripts/test/parse-test-results.sh",
-      "adapters": ["wp-codebox-json"]
+      "adapters": ["wp-codebox-json", "node-test"]
     },
     "changed_file_routing": {
       "strategy": "exclusive_env",

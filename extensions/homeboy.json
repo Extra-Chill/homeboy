@@ -25,6 +25,7 @@
       "bash tests/wordpress-install-command-smoke.sh",
       "bash tests/wordpress-release-artifact-version-smoke.sh",
       "bash tests/wordpress-runtime-helper-resolver-smoke.sh",
+      "bash wordpress/tests/node-test-result-parser-smoke.sh",
       "node tests/wp-codebox-adapter-contract-smoke.mjs",
       "node tests/wp-codebox-callback-data-smoke.mjs",
       "node tests/wp-codebox-install-overrides-persist-smoke.mjs"
