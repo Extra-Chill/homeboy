@@ -46,6 +46,10 @@ fn deferred_timeout_outcome(task_id: &str, timeout_ms: u64, source: &str) -> Age
 }
 
 impl AgentTaskScheduleSupport {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "scheduler inputs are independently bounded resource and lifecycle state"
+    )]
     pub(super) fn next_dispatchable_index(
         queued: &VecDeque<ScheduledTask>,
         running: &[RunningTask],
@@ -201,6 +205,10 @@ impl AgentTaskScheduleSupport {
         task_ids
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "scheduler returns the complete outcome for durable lifecycle recording"
+    )]
     pub(super) fn render_output_dependencies(
         request: &mut AgentTaskRequest,
         completed_by_task: &HashMap<String, AgentTaskOutcome>,
@@ -1414,7 +1422,7 @@ impl AgentTaskScheduleSupport {
         // consumed at all. A limit of zero was never available to exhaust, so
         // blaming it explains nothing about why this attempt failed.
         let exhausted = terminal_is_failure
-            .then(|| {
+            .then_some({
                 if executions_used >= budget.max_provider_executions {
                     Some("total_executions")
                 } else if rotations_used > 0
@@ -1466,6 +1474,10 @@ impl AgentTaskScheduleSupport {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "retry policy preserves separately persisted counters and classifications"
+    )]
     pub(super) fn should_retry(
         outcome: &AgentTaskOutcome,
         attempt: u32,
@@ -1525,6 +1537,10 @@ impl AgentTaskScheduleSupport {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "queue status projects independently observable scheduler dimensions"
+    )]
     pub(super) fn queue_status(
         max_concurrency: usize,
         max_tasks: Option<usize>,

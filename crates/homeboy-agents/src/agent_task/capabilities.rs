@@ -71,9 +71,8 @@ pub(crate) fn ready_attached_tools_from_metadata(metadata: &Value) -> BTreeSet<S
         .and_then(Value::as_object)
         .into_iter()
         .flat_map(|entries| entries.iter())
-        .filter_map(|(id, readiness)| {
-            (readiness.get("state").and_then(Value::as_str) == Some("ready")).then(|| id.clone())
-        })
+        .filter(|&(_id, readiness)| readiness.get("state").and_then(Value::as_str) == Some("ready"))
+        .map(|(id, _readiness)| id.clone())
         .collect()
 }
 

@@ -361,6 +361,10 @@ pub(crate) trait AgentTaskPromotionWorkspaceProvider {
         reveal_policy: AgentTaskGateRevealPolicy,
     ) -> Result<AgentTaskGateReport>;
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "trait adapter preserves the stable gate verifier provider contract"
+    )]
     fn verify_with_runtime_tmpdir(
         &mut self,
         cwd: &Path,

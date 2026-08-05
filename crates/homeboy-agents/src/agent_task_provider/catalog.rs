@@ -220,175 +220,6 @@ fn provider_catalog_version(
     format!("resolved:{}", content_hash::sha256_hex(&content))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn catalog_version_is_deterministic_and_detects_stale_content() {
-        let empty = provider_catalog_version(&[], &[]);
-        assert_eq!(empty, provider_catalog_version(&[], &[]));
-
-        let changed = provider_catalog_version(
-            &[],
-            &[AgentRuntimeDiscoveryDiagnostic {
-                class: "agent_runtime_catalog.conflict".to_string(),
-                message: "runtime collision".to_string(),
-                runtime_id: Some("example".to_string()),
-                extension_id: None,
-                path: None,
-            }],
-        );
-
-        assert_ne!(empty, changed);
-        assert!(empty.starts_with("resolved:"));
-    }
-
-    fn disclosure_provider() -> AgentTaskExecutorProvider {
-        // Deserialize from JSON so schema-string and other required defaults are
-        // populated the same way discovery populates them.
-        serde_json::from_value(serde_json::json!({
-            "id": "test.opencode",
-            "backend": "opencode",
-            "cli": {
-                "default_ai_disclosure": "OpenCode (GPT-5.5)",
-                "profiles": [
-                    {
-                        "name": "terra",
-                        "model": "openai/gpt-5.6-terra",
-                        "ai_disclosure": "OpenCode (GPT-5.6 Terra)"
-                    },
-                    {
-                        "name": "sol",
-                        "model": "openai/gpt-5.6-sol",
-                        "ai_disclosure": "OpenCode (GPT-5.6 Sol)"
-                    }
-                ]
-            }
-        }))
-        .expect("valid provider fixture")
-    }
-
-    fn disclosure_catalog() -> AgentTaskProviderCatalog {
-        AgentTaskProviderCatalog {
-            providers: vec![disclosure_provider()],
-            ..Default::default()
-        }
-    }
-
-    fn provider_with_backend(id: &str, backend: &str) -> AgentTaskExecutorProvider {
-        serde_json::from_value(serde_json::json!({
-            "id": id,
-            "backend": backend,
-        }))
-        .expect("valid provider fixture")
-    }
-
-    #[test]
-    fn backends_are_sorted_deduped_and_skip_blanks() {
-        let catalog = AgentTaskProviderCatalog {
-            providers: vec![
-                provider_with_backend("b.opencode", "opencode"),
-                provider_with_backend("a.pi", "pi"),
-                // Two providers for one backend must not double-list it.
-                provider_with_backend("c.opencode", "opencode"),
-                provider_with_backend("d.claude", "claude-code"),
-                provider_with_backend("e.blank", "   "),
-            ],
-            ..Default::default()
-        };
-
-        assert_eq!(
-            catalog.backends(),
-            vec![
-                "claude-code".to_string(),
-                "opencode".to_string(),
-                "pi".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn backends_of_an_empty_catalog_is_empty() {
-        assert!(AgentTaskProviderCatalog::default().backends().is_empty());
-    }
-
-    #[test]
-    fn ai_disclosure_for_uses_the_model_matching_profile() {
-        let catalog = disclosure_catalog();
-        assert_eq!(
-            catalog
-                .ai_disclosure_for("opencode", None, Some("openai/gpt-5.6-terra"))
-                .as_deref(),
-            Some("OpenCode (GPT-5.6 Terra)"),
-            "a model override must derive its matching profile disclosure"
-        );
-        assert_eq!(
-            catalog
-                .ai_disclosure_for("opencode", None, Some("openai/gpt-5.6-sol"))
-                .as_deref(),
-            Some("OpenCode (GPT-5.6 Sol)")
-        );
-    }
-
-    #[test]
-    fn ai_disclosure_for_falls_back_to_provider_default() {
-        let catalog = disclosure_catalog();
-        // No model and an unknown model both fall back to the provider default.
-        assert_eq!(
-            catalog.ai_disclosure_for("opencode", None, None).as_deref(),
-            Some("OpenCode (GPT-5.5)")
-        );
-        assert_eq!(
-            catalog
-                .ai_disclosure_for("opencode", None, Some("openai/unknown-model"))
-                .as_deref(),
-            Some("OpenCode (GPT-5.5)")
-        );
-    }
-
-    #[test]
-    fn ai_disclosure_for_unknown_backend_is_none() {
-        let catalog = disclosure_catalog();
-        assert_eq!(
-            catalog.ai_disclosure_for("no-such-backend", None, Some("m")),
-            None
-        );
-    }
-
-    #[test]
-    fn declared_provider_rejects_unsupported_explicit_model_with_diagnostics() {
-        let catalog = disclosure_catalog();
-        let mut plan = AgentTaskPlan::new("model-preflight", Vec::new());
-        plan.tasks.push(
-            serde_json::from_value(serde_json::json!({
-                "schema": crate::agent_task::AGENT_TASK_REQUEST_SCHEMA,
-                "task_id": "task",
-                "executor": { "backend": "opencode" },
-                "instructions": "Cook",
-                "workspace": { "mode": "existing" },
-                "metadata": {
-                    "model_selection": {
-                        "requested": "openai/gpt-5.6-unknown",
-                        "selected": "openai/gpt-5.6-unknown",
-                        "reason": "explicit-request"
-                    }
-                }
-            }))
-            .expect("task"),
-        );
-
-        let error = catalog
-            .validate_explicit_models(&plan)
-            .expect_err("unsupported model");
-        assert!(error.message.contains("does not support requested model"));
-        assert_eq!(
-            error.details["tried"][0].as_str(),
-            Some("supported models: openai/gpt-5.6-sol, openai/gpt-5.6-terra")
-        );
-    }
-}
-
 impl ExtensionProviderAgentTaskExecutor {
     pub fn discover() -> Self {
         Self::from_catalog(AgentTaskProviderCatalog::discover())
@@ -796,4 +627,173 @@ pub(super) fn component_default_backend(component: &component::Component) -> Opt
                 .filter(|backend| !backend.trim().is_empty())
                 .map(String::from)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_version_is_deterministic_and_detects_stale_content() {
+        let empty = provider_catalog_version(&[], &[]);
+        assert_eq!(empty, provider_catalog_version(&[], &[]));
+
+        let changed = provider_catalog_version(
+            &[],
+            &[AgentRuntimeDiscoveryDiagnostic {
+                class: "agent_runtime_catalog.conflict".to_string(),
+                message: "runtime collision".to_string(),
+                runtime_id: Some("example".to_string()),
+                extension_id: None,
+                path: None,
+            }],
+        );
+
+        assert_ne!(empty, changed);
+        assert!(empty.starts_with("resolved:"));
+    }
+
+    fn disclosure_provider() -> AgentTaskExecutorProvider {
+        // Deserialize from JSON so schema-string and other required defaults are
+        // populated the same way discovery populates them.
+        serde_json::from_value(serde_json::json!({
+            "id": "test.opencode",
+            "backend": "opencode",
+            "cli": {
+                "default_ai_disclosure": "OpenCode (GPT-5.5)",
+                "profiles": [
+                    {
+                        "name": "terra",
+                        "model": "openai/gpt-5.6-terra",
+                        "ai_disclosure": "OpenCode (GPT-5.6 Terra)"
+                    },
+                    {
+                        "name": "sol",
+                        "model": "openai/gpt-5.6-sol",
+                        "ai_disclosure": "OpenCode (GPT-5.6 Sol)"
+                    }
+                ]
+            }
+        }))
+        .expect("valid provider fixture")
+    }
+
+    fn disclosure_catalog() -> AgentTaskProviderCatalog {
+        AgentTaskProviderCatalog {
+            providers: vec![disclosure_provider()],
+            ..Default::default()
+        }
+    }
+
+    fn provider_with_backend(id: &str, backend: &str) -> AgentTaskExecutorProvider {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "backend": backend,
+        }))
+        .expect("valid provider fixture")
+    }
+
+    #[test]
+    fn backends_are_sorted_deduped_and_skip_blanks() {
+        let catalog = AgentTaskProviderCatalog {
+            providers: vec![
+                provider_with_backend("b.opencode", "opencode"),
+                provider_with_backend("a.pi", "pi"),
+                // Two providers for one backend must not double-list it.
+                provider_with_backend("c.opencode", "opencode"),
+                provider_with_backend("d.claude", "claude-code"),
+                provider_with_backend("e.blank", "   "),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            catalog.backends(),
+            vec![
+                "claude-code".to_string(),
+                "opencode".to_string(),
+                "pi".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn backends_of_an_empty_catalog_is_empty() {
+        assert!(AgentTaskProviderCatalog::default().backends().is_empty());
+    }
+
+    #[test]
+    fn ai_disclosure_for_uses_the_model_matching_profile() {
+        let catalog = disclosure_catalog();
+        assert_eq!(
+            catalog
+                .ai_disclosure_for("opencode", None, Some("openai/gpt-5.6-terra"))
+                .as_deref(),
+            Some("OpenCode (GPT-5.6 Terra)"),
+            "a model override must derive its matching profile disclosure"
+        );
+        assert_eq!(
+            catalog
+                .ai_disclosure_for("opencode", None, Some("openai/gpt-5.6-sol"))
+                .as_deref(),
+            Some("OpenCode (GPT-5.6 Sol)")
+        );
+    }
+
+    #[test]
+    fn ai_disclosure_for_falls_back_to_provider_default() {
+        let catalog = disclosure_catalog();
+        // No model and an unknown model both fall back to the provider default.
+        assert_eq!(
+            catalog.ai_disclosure_for("opencode", None, None).as_deref(),
+            Some("OpenCode (GPT-5.5)")
+        );
+        assert_eq!(
+            catalog
+                .ai_disclosure_for("opencode", None, Some("openai/unknown-model"))
+                .as_deref(),
+            Some("OpenCode (GPT-5.5)")
+        );
+    }
+
+    #[test]
+    fn ai_disclosure_for_unknown_backend_is_none() {
+        let catalog = disclosure_catalog();
+        assert_eq!(
+            catalog.ai_disclosure_for("no-such-backend", None, Some("m")),
+            None
+        );
+    }
+
+    #[test]
+    fn declared_provider_rejects_unsupported_explicit_model_with_diagnostics() {
+        let catalog = disclosure_catalog();
+        let mut plan = AgentTaskPlan::new("model-preflight", Vec::new());
+        plan.tasks.push(
+            serde_json::from_value(serde_json::json!({
+                "schema": crate::agent_task::AGENT_TASK_REQUEST_SCHEMA,
+                "task_id": "task",
+                "executor": { "backend": "opencode" },
+                "instructions": "Cook",
+                "workspace": { "mode": "existing" },
+                "metadata": {
+                    "model_selection": {
+                        "requested": "openai/gpt-5.6-unknown",
+                        "selected": "openai/gpt-5.6-unknown",
+                        "reason": "explicit-request"
+                    }
+                }
+            }))
+            .expect("task"),
+        );
+
+        let error = catalog
+            .validate_explicit_models(&plan)
+            .expect_err("unsupported model");
+        assert!(error.message.contains("does not support requested model"));
+        assert_eq!(
+            error.details["tried"][0].as_str(),
+            Some("supported models: openai/gpt-5.6-sol, openai/gpt-5.6-terra")
+        );
+    }
 }

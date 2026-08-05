@@ -829,7 +829,7 @@ where
             let run_result = agent_task_service::run_next(executor)?;
             let value = match run_result.value {
                 Some(aggregate) => serde_json::to_value(
-                    &crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
+                    crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
                 )
                 .map_err(|error| Error::internal_json(error.to_string(), None))?,
                 None => serde_json::json!({ "claimed": false }),
@@ -907,6 +907,10 @@ fn request_with_controller_dispatch_identity(
     request
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "controller action keeps lifecycle state, dispatch identity, and provider contract explicit"
+)]
 pub(super) fn execute_fan_out_action<E, D>(
     record: &mut AgentTaskLoopControllerRecord,
     action: &AgentTaskLoopPolicyActionRecord,

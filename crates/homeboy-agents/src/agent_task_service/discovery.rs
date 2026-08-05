@@ -319,7 +319,7 @@ fn matches_discovery_options(
     if options
         .state
         .as_deref()
-        .is_some_and(|state| format!("{:?}", record.state).eq_ignore_ascii_case(state) == false)
+        .is_some_and(|state| !format!("{:?}", record.state).eq_ignore_ascii_case(state))
         || submitted_after.is_some_and(|after| {
             chrono::DateTime::parse_from_rfc3339(&record.submitted_at)
                 .map(|submitted| submitted.with_timezone(&chrono::Utc) <= *after)
@@ -327,10 +327,10 @@ fn matches_discovery_options(
         })
         || options.placement.as_deref().is_some_and(|placement| {
             let source = run_source(record);
-            !matches!(
+            !(matches!(
                 (placement, source.as_str()),
                 ("local", "local") | ("remote", "remote")
-            ) && !(placement == "runner" && source.starts_with("runner:"))
+            ) || placement == "runner" && source.starts_with("runner:"))
         })
     {
         return false;

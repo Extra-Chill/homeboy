@@ -34,6 +34,7 @@ pub fn reconcile_deferred_candidate(run_id: &str) -> Result<bool> {
     }
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)
@@ -216,6 +217,7 @@ impl LabHandoffLock {
         }
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&lock_path)
@@ -1903,7 +1905,6 @@ pub fn persisted_status(run_id: &str) -> Result<AgentTaskRunRecord> {
 /// a read model (such as activity) projects lifecycle state. A controller wait
 /// expiry is not terminal after a runner job is recorded: the runner daemon
 /// remains the authority until it reports a terminal job result.
-
 pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRunStatus> {
     let record = status(run_id)?;
     let aggregate = store::read_aggregate(&record.run_id).ok();
@@ -1979,11 +1980,10 @@ pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRu
 pub fn list_records() -> Result<Vec<AgentTaskRunRecord>> {
     let mut records = Vec::new();
     for record in store::read_records()? {
-        match status(&record.run_id) {
-            Ok(record) => records.push(record),
+        if let Ok(record) = status(&record.run_id) {
+            records.push(record);
             // Discovery health owns malformed-record reporting. A transient
             // status refresh failure must not reintroduce stderr-only state.
-            Err(_) => (),
         }
     }
     records.sort_by(|left, right| {
@@ -2343,6 +2343,7 @@ impl RetryLineageLock {
         }
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&path)
@@ -2450,7 +2451,6 @@ pub fn find_unbound_cook_retry_successor(
 /// Rebuild a gate-failed Cook candidate from its controller-owned promotion
 /// before retrying. A persisted follow-up plan names a temporary checkout, not
 /// authority to reuse whatever happens to exist at that path.
-
 pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
     let snapshot = durable_local_read(run_id)?;
     let record = snapshot.record;
@@ -2988,9 +2988,7 @@ fn substantive_candidate_in_aggregate(
             .then(|| aggregate.outcomes.first())
             .flatten()
     });
-    let Some(outcome) = outcome else {
-        return None;
-    };
+    let outcome = outcome?;
     // Metadata alone (and typed artifact envelopes) cannot authorize recovery.
     // Selection requires controller-readable bytes that pass the same integrity
     // and canonical patch normalization used by promotion.
@@ -2998,15 +2996,13 @@ fn substantive_candidate_in_aggregate(
         if !crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact) {
             return None;
         }
-        let Some(path) = crate::agent_task_lifecycle::verified_controller_artifact_projection_path(
+        let path = crate::agent_task_lifecycle::verified_controller_artifact_projection_path(
             run_id,
             &outcome.task_id,
             artifact,
         )
         .ok()
-        .flatten() else {
-            return None;
-        };
+        .flatten()?;
         std::fs::canonicalize(path)
             .ok()
             .and_then(|path| std::fs::read_to_string(path).ok())

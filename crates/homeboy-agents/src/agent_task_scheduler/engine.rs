@@ -705,12 +705,12 @@ where
                                 executor.execute(request, context)
                             }))
                             .unwrap_or_else(|_| provider_worker_panic(task_id.clone()));
-                        let _ = tx.send(SchedulerEvent::TaskResult(TaskResult {
+                        let _ = tx.send(SchedulerEvent::TaskResult(Box::new(TaskResult {
                             task_id,
                             attempt,
                             outcome,
                             scratch,
-                        }));
+                        })));
                     })
                 });
                 running
@@ -1055,6 +1055,10 @@ where
                             continue;
                         }
                     }
+                    #[expect(
+                        clippy::redundant_locals,
+                        reason = "the branch deliberately shadows its pre-retry outcome before terminal mutation"
+                    )]
                     let mut outcome = outcome;
                     cleanup_attempt_workspace(&mut outcome, &running_task);
                     append_unique_artifacts(
@@ -1578,7 +1582,7 @@ fn reset_attempt_request(
 }
 
 enum SchedulerEvent {
-    TaskResult(TaskResult),
+    TaskResult(Box<TaskResult>),
     Cancellation,
 }
 

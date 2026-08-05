@@ -288,15 +288,9 @@ fn controller_next_commands(
                     shell_arg(&action.action_id)
                 ));
             }
-            commands.push(format!(
-                "homeboy agent-task controller from-spec <spec> --resume --fork  # start fresh with a new backend/spec without changing this state"
-            ));
-            commands.push(format!(
-                "homeboy agent-task controller from-spec <spec> --resume --replace  # discard this persisted controller state"
-            ));
-            commands.push(format!(
-                "homeboy agent-task controller from-spec <spec> --resume-existing  # intentionally continue this persisted state"
-            ));
+            commands.push("homeboy agent-task controller from-spec <spec> --resume --fork  # start fresh with a new backend/spec without changing this state".to_string());
+            commands.push("homeboy agent-task controller from-spec <spec> --resume --replace  # discard this persisted controller state".to_string());
+            commands.push("homeboy agent-task controller from-spec <spec> --resume-existing  # intentionally continue this persisted state".to_string());
             commands
         }
         "running_pending_work" => vec![format!("homeboy agent-task controller resume {loop_id}")],

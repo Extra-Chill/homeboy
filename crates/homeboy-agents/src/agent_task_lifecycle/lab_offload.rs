@@ -56,7 +56,7 @@ pub struct LabOffloadProxyPlan<'a> {
 /// identity and is reconciled from that child once it is accepted.
 pub fn record_lab_offload_planned(input: LabOffloadProxyPlan<'_>) -> Result<AgentTaskRunRecord> {
     record_lab_offload_proxy(
-        &input.run_id,
+        input.run_id,
         input.runner_id,
         input.remote_workspace,
         input.remote_command,

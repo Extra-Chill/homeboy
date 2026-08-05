@@ -182,7 +182,7 @@ impl AgentTaskExecutorAdapter for RuntimeBundleOutcomeExecutor {
                     .patch_path
                     .parent()
                     .and_then(|path| path.parent())
-                    .unwrap_or_else(|| self.patch_path.as_path())
+                    .unwrap_or(self.patch_path.as_path())
                     .display()
                     .to_string(),
                 label: Some("Sample runtime artifact bundle".to_string()),

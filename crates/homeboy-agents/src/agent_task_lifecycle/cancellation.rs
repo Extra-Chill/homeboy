@@ -219,7 +219,7 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
             reconcile_runner_job_snapshot(
                 &mut record,
                 &homeboy_core::api_jobs::RunnerJobLogSnapshot {
-                    job: job.clone(),
+                    job: *job.clone(),
                     events: events.clone(),
                 },
             )?;
@@ -424,7 +424,7 @@ pub(super) fn reconcile_controller_job_cancellation(
 enum LiveCancellationOutcome {
     Terminated(homeboy_core::process::ProcessTreeTermination),
     RunnerJobCancelled {
-        job: homeboy_core::api_jobs::Job,
+        job: Box<homeboy_core::api_jobs::Job>,
         events: Vec<homeboy_core::api_jobs::JobEvent>,
     },
     Unsupported(UnsupportedLiveCancellation),
@@ -458,7 +458,10 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
         {
             match cancel_runner_job(runner_id, runner_job_id, &record.run_id) {
                 Ok((job, events)) => {
-                    return Ok(LiveCancellationOutcome::RunnerJobCancelled { job, events });
+                    return Ok(LiveCancellationOutcome::RunnerJobCancelled {
+                        job: Box::new(job),
+                        events,
+                    });
                 }
                 // An accepted Lab handoff has an authoritative remote owner.
                 // Leaving it active while only cancelling this projection loses
@@ -542,57 +545,6 @@ fn cancel_runner_job(
     })
 }
 
-#[cfg(test)]
-pub(super) mod test_cancel_hook {
-    use super::*;
-    use std::cell::RefCell;
-
-    type CancelHook = Box<
-        dyn FnMut(
-            &str,
-            &str,
-            &str,
-        ) -> Result<(
-            homeboy_core::api_jobs::Job,
-            Vec<homeboy_core::api_jobs::JobEvent>,
-        )>,
-    >;
-
-    thread_local! {
-        static HOOK: RefCell<Option<CancelHook>> = const { RefCell::new(None) };
-    }
-
-    pub(in super::super) struct Guard;
-
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            HOOK.with(|cell| *cell.borrow_mut() = None);
-        }
-    }
-
-    pub(in super::super) fn install(hook: CancelHook) -> Guard {
-        HOOK.with(|cell| *cell.borrow_mut() = Some(hook));
-        Guard
-    }
-
-    pub(super) fn take(
-        runner_id: &str,
-        runner_job_id: &str,
-        durable_run_id: &str,
-    ) -> Option<
-        Result<(
-            homeboy_core::api_jobs::Job,
-            Vec<homeboy_core::api_jobs::JobEvent>,
-        )>,
-    > {
-        HOOK.with(|cell| {
-            cell.borrow_mut()
-                .as_mut()
-                .map(|hook| hook(runner_id, runner_job_id, durable_run_id))
-        })
-    }
-}
-
 pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
     if matches!(
@@ -657,5 +609,56 @@ fn terminalize_running_provider_executions(
             execution["state"] = json!("cancelled");
             execution["finished_at"] = json!(finished_at);
         }
+    }
+}
+
+#[cfg(test)]
+pub(super) mod test_cancel_hook {
+    use super::*;
+    use std::cell::RefCell;
+
+    type CancelHook = Box<
+        dyn FnMut(
+            &str,
+            &str,
+            &str,
+        ) -> Result<(
+            homeboy_core::api_jobs::Job,
+            Vec<homeboy_core::api_jobs::JobEvent>,
+        )>,
+    >;
+
+    thread_local! {
+        static HOOK: RefCell<Option<CancelHook>> = const { RefCell::new(None) };
+    }
+
+    pub(in super::super) struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            HOOK.with(|cell| *cell.borrow_mut() = None);
+        }
+    }
+
+    pub(in super::super) fn install(hook: CancelHook) -> Guard {
+        HOOK.with(|cell| *cell.borrow_mut() = Some(hook));
+        Guard
+    }
+
+    pub(super) fn take(
+        runner_id: &str,
+        runner_job_id: &str,
+        durable_run_id: &str,
+    ) -> Option<
+        Result<(
+            homeboy_core::api_jobs::Job,
+            Vec<homeboy_core::api_jobs::JobEvent>,
+        )>,
+    > {
+        HOOK.with(|cell| {
+            cell.borrow_mut()
+                .as_mut()
+                .map(|hook| hook(runner_id, runner_job_id, durable_run_id))
+        })
     }
 }

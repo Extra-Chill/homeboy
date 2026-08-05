@@ -181,7 +181,7 @@ fn reject_gitlinks(git: &impl Fn(&[&str]) -> Result<Vec<u8>>) -> Result<()> {
         ["diff", "--raw", "-z", "--cached"].as_slice(),
         ["diff", "--raw", "-z"].as_slice(),
     ] {
-        if text(git(&args)?)
+        if text(git(args)?)
             .split('\0')
             .any(|entry| entry.starts_with(":160000 ") || entry.get(8..15) == Some("160000 "))
         {
