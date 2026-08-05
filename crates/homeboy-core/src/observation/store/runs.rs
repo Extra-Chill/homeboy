@@ -194,15 +194,7 @@ impl ObservationStore {
         if rows == 0 {
             return Ok(None);
         }
-        let claimed = self
-            .list_runs(RunListFilter {
-                kind: Some(run.kind),
-                status: Some(RunStatus::Running.as_str().to_string()),
-                limit: Some(1),
-                ..RunListFilter::default()
-            })?
-            .into_iter()
-            .next();
+        let claimed = self.get_run(&id)?;
         Ok(claimed
             .filter(|record| record.metadata_json["owner_token"].as_str() == Some(owner_token)))
     }
@@ -260,9 +252,10 @@ impl ObservationStore {
         runner_job_id: &str,
     ) -> Result<bool> {
         let claim = serde_json::to_string(&serde_json::json!({
-            "child_id": child_id,
+            "owner_id": child_id,
             "source_token": child_token,
             "runner_job_id": runner_job_id,
+            "expires_at_ms": chrono::Utc::now().timestamp_millis() + 30_000,
         }))
         .map_err(|error| {
             Error::internal_json(
@@ -272,8 +265,8 @@ impl ObservationStore {
         })?;
         let rows = execute_with_retry("claim runner recovery source", || {
             self.connection.execute(
-                "UPDATE runs SET metadata_json = json_set(metadata_json, '$.runner_exec_recovery', json(?1)) WHERE id = ?2 AND status = 'running' AND json_extract(metadata_json, '$.runner_job_id') = ?3 AND (json_extract(metadata_json, '$.runner_exec_recovery.child_id') IS NULL OR json_extract(metadata_json, '$.runner_exec_recovery.child_id') = ?4)",
-                params![claim, run_id, runner_job_id, child_id],
+                "UPDATE runs SET metadata_json = json_set(metadata_json, '$.runner_exec_source_lease', json(?1)) WHERE id = ?2 AND status = 'running' AND json_extract(metadata_json, '$.runner_job_id') = ?3 AND (json_extract(metadata_json, '$.runner_exec_source_lease.expires_at_ms') IS NULL OR CAST(json_extract(metadata_json, '$.runner_exec_source_lease.expires_at_ms') AS INTEGER) < ?4)",
+                params![claim, run_id, runner_job_id, chrono::Utc::now().timestamp_millis()],
             )
         })?;
         Ok(rows == 1)
@@ -293,9 +286,37 @@ impl ObservationStore {
         let finished_at = chrono::Utc::now().to_rfc3339();
         let rows = execute_with_retry("fail claimed runner recovery source", || {
             self.connection.execute(
-                "UPDATE runs SET finished_at = ?1, status = 'fail', metadata_json = ?2 WHERE id = ?3 AND status = 'running' AND json_extract(metadata_json, '$.runner_job_id') = ?4 AND json_extract(metadata_json, '$.runner_exec_recovery.source_token') = ?5",
+                "UPDATE runs SET finished_at = ?1, status = 'fail', metadata_json = ?2 WHERE id = ?3 AND status = 'running' AND json_extract(metadata_json, '$.runner_job_id') = ?4 AND json_extract(metadata_json, '$.runner_exec_source_lease.source_token') = ?5",
                 params![finished_at, metadata_json, run_id, runner_job_id, child_token],
             )
+        })?;
+        Ok(rows == 1)
+    }
+
+    pub fn renew_running_runner_exec_source_lease(
+        &self,
+        run_id: &str,
+        token: &str,
+    ) -> Result<bool> {
+        let rows = execute_with_retry("renew runner exec source lease", || {
+            self.connection.execute(
+            "UPDATE runs SET metadata_json = json_set(metadata_json, '$.runner_exec_source_lease.expires_at_ms', ?1) WHERE id = ?2 AND status = 'running' AND json_extract(metadata_json, '$.runner_exec_source_lease.source_token') = ?3",
+            params![chrono::Utc::now().timestamp_millis() + 30_000, run_id, token],
+        )
+        })?;
+        Ok(rows == 1)
+    }
+
+    pub fn release_running_runner_exec_source_lease(
+        &self,
+        run_id: &str,
+        token: &str,
+    ) -> Result<bool> {
+        let rows = execute_with_retry("release runner exec source lease", || {
+            self.connection.execute(
+            "UPDATE runs SET metadata_json = json_remove(metadata_json, '$.runner_exec_source_lease') WHERE id = ?1 AND status = 'running' AND json_extract(metadata_json, '$.runner_exec_source_lease.source_token') = ?2",
+            params![run_id, token],
+        )
         })?;
         Ok(rows == 1)
     }
@@ -1398,6 +1419,32 @@ mod tests {
                 complete.runs,
                 "the bounded accessor keeps returning the same rows"
             );
+        });
+    }
+
+    #[test]
+    fn singleton_claim_reads_back_its_exact_id_among_many_running_rows() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            for index in 0..100 {
+                store
+                    .start_run_with_id(
+                        NewRunRecord::builder("recovery-child").build(),
+                        format!("other-running-child-{index}"),
+                    )
+                    .expect("other running child");
+            }
+            let claimed = store
+                .claim_expiring_singleton_run(
+                    NewRunRecord::builder("recovery-child").build(),
+                    "target-child".to_string(),
+                    "target-token",
+                    chrono::Utc::now().timestamp_millis() + 60_000,
+                )
+                .expect("claim")
+                .expect("target claim");
+            assert_eq!(claimed.id, "target-child");
+            assert_eq!(claimed.metadata_json["owner_token"], "target-token");
         });
     }
 }

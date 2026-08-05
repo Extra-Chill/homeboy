@@ -753,6 +753,13 @@ fn recovery_candidates(
                     .and_then(Value::as_str)
                     .is_some()
                 && run.cwd.is_some()
+                && run
+                    .metadata_json
+                    .pointer("/runner_exec_source_lease/expires_at_ms")
+                    .and_then(Value::as_i64)
+                    .is_none_or(|expires_at_ms| {
+                        expires_at_ms < chrono::Utc::now().timestamp_millis()
+                    })
         })
         .collect())
 }
@@ -959,6 +966,48 @@ mod tests {
                 .expect("historical record")
                 .status
                 .eq("running"));
+        });
+    }
+
+    #[test]
+    fn active_source_lease_skips_recovery_and_expired_lease_allows_takeover() {
+        with_isolated_home(|_| {
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
+                "foreground",
+                "runner",
+                "job",
+                "/workspace",
+                &[],
+            )
+            .expect("source");
+            let store = ObservationStore::open_initialized().expect("store");
+            assert!(store
+                .claim_running_runner_exec_recovery_source(
+                    "foreground",
+                    "foreground-runner-exec",
+                    "foreground-token",
+                    "job",
+                )
+                .expect("foreground lease"));
+            let reader = ObservationStore::open_scheduler_reader().expect("reader");
+            assert!(recovery_candidates(&reader).expect("candidates").is_empty());
+            drop(reader);
+            let mut source = store.get_run("foreground").expect("read").expect("source");
+            source.metadata_json["runner_exec_source_lease"]["expires_at_ms"] = json!(0);
+            store
+                .update_run_metadata("foreground", source.metadata_json)
+                .expect("expire foreground lease");
+            let reader = ObservationStore::open_scheduler_reader().expect("reader");
+            assert_eq!(recovery_candidates(&reader).expect("candidates").len(), 1);
+            drop(reader);
+            assert!(store
+                .claim_running_runner_exec_recovery_source(
+                    "foreground",
+                    "recovery-child",
+                    "recovery-token",
+                    "job",
+                )
+                .expect("expired takeover"));
         });
     }
 
