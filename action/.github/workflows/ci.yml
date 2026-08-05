@@ -656,6 +656,9 @@ jobs:
           auto-setup: ${{ inputs.auto-setup }}
           php-version: ${{ inputs.php-version }}
           node-version: ${{ inputs.node-version }}
+          execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
+          test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
+          cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
           pr-comment: 'false'
           auto-issue: 'false'
       - id: plan
@@ -725,6 +728,9 @@ jobs:
           node-version: ${{ inputs.node-version }}
           differential-gating: ${{ inputs.differential-gating }}
           baseline-commands: none
+          execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
+          test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
+          cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
           pr-comment: 'false'
           auto-issue: 'false'
       - name: Write candidate Test shard provenance
@@ -857,6 +863,9 @@ jobs:
           auto-setup: ${{ inputs.auto-setup }}
           php-version: ${{ inputs.php-version }}
           node-version: ${{ inputs.node-version }}
+          execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
+          test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
+          cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
           pr-comment: 'false'
           auto-issue: 'false'
       - id: plan
@@ -926,6 +935,9 @@ jobs:
           node-version: ${{ inputs.node-version }}
           differential-gating: 'true'
           baseline-commands: none
+          execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
+          test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
+          cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
           pr-comment: 'false'
           auto-issue: 'false'
       - name: Write baseline Test shard provenance
