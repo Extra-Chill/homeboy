@@ -171,12 +171,7 @@ impl LabRunnerWorkloadCommandFamily {
     pub fn from_command_label(label: &str) -> Self {
         match label {
             label if label.starts_with("agent-task") => Self::AgentTask,
-            label
-                if matches!(
-                    label,
-                    "review audit" | "review lint" | "review test" | "review build" | "review ci"
-                ) =>
-            {
+            "review audit" | "review lint" | "review test" | "review build" | "review ci" => {
                 Self::Quality
             }
             LINT_LAB_LABEL

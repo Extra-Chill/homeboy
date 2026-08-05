@@ -48,7 +48,7 @@ pub(crate) fn run_report_with_config(
         run_window,
         ..Default::default()
     };
-    let runs = crate::recorded_artifacts::recent_recorded_runs(component_id, run_window as usize);
+    let runs = crate::recorded_artifacts::recent_recorded_runs(component_id, run_window);
     let artifact_root = homeboy_paths::artifact_root().ok();
     let path_policy = config.with_generic_defaults();
 
@@ -67,7 +67,7 @@ pub(crate) fn run_report_with_config(
             if artifact_path_is_portable(&artifact.path, artifact_root.as_deref(), &path_policy) {
                 continue;
             }
-            report.findings.push(artifact_path_finding(&run, &artifact));
+            report.findings.push(artifact_path_finding(&run, artifact));
         }
         let metadata_scan = metadata_path_findings(
             &run,
