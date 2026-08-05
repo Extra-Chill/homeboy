@@ -31,6 +31,9 @@ pub enum SelfCommand {
     Doctor(SelfDoctorArgs),
     /// Plan or delete orphaned Homeboy runtime temp entries
     CleanupRuntimeTmp(SelfCleanupRuntimeTmpArgs),
+    /// Internal durable worker for agent-task managed services
+    #[command(hide = true)]
+    ServiceSupervisorWorker(ServiceSupervisorWorkerArgs),
     /// Execute one persisted artifact-postprocess request. This is an internal
     /// durable worker entrypoint used by the scheduler, not an operator workflow.
     #[command(hide = true)]
@@ -76,6 +79,16 @@ pub struct SelfCleanupRuntimeTmpArgs {
     /// Continue bounded runtime-run inspection from a prior next_cursor.
     #[arg(long)]
     pub cursor: Option<String>,
+}
+
+#[derive(Args)]
+pub struct ServiceSupervisorWorkerArgs {
+    #[arg(long)]
+    pub request: Option<PathBuf>,
+    #[arg(long)]
+    pub run_id: Option<String>,
+    #[arg(long, default_value = "start")]
+    pub operation: String,
 }
 
 #[derive(Args)]
@@ -181,6 +194,32 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
             }
             Ok((json, 0))
         }
+        SelfCommand::ServiceSupervisorWorker(args) => match (args.request, args.run_id) {
+            (Some(request), None) => {
+                homeboy_agents::agent_task_scheduler::managed_services::run_service_worker(
+                    &request,
+                )
+                .map_err(homeboy::core::Error::internal_unexpected)?;
+                Ok((serde_json::json!({ "request": request }), 0))
+            }
+            (None, Some(run_id)) => {
+                homeboy_agents::agent_task_scheduler::managed_services::run_service_worker_operation(
+                        &run_id,
+                        &args.operation,
+                    )
+                    .map_err(homeboy::core::Error::internal_unexpected)?;
+                Ok((
+                    serde_json::json!({ "run_id": run_id, "operation": args.operation }),
+                    0,
+                ))
+            }
+            _ => Err(homeboy::core::Error::validation_invalid_argument(
+                "service_supervisor_worker",
+                "supply exactly one of --request or --run-id",
+                None,
+                None,
+            )),
+        },
         SelfCommand::PostprocessWorker(args) => {
             homeboy::agents::agent_task_scheduler::run_postprocess_worker(&args.request)?;
             Ok((

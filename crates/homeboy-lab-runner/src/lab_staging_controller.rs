@@ -3057,11 +3057,15 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         let mut public_env = request.recipe.job_override_env.clone();
         public_env.extend(runtime_env);
         public_env.extend(crate::lab_env::build_lab_offload_env(&lab_metadata));
-        let secret_handoff = crate::lab::secrets::build_lab_secret_env_handoff_plan(
+        let mut secret_handoff = crate::lab::secrets::build_lab_secret_env_handoff_plan(
             &request.recipe.command.secret_env_sources,
             &request.recipe.normalized_args,
             public_env,
         )?;
+        crate::lab::secrets::merge_managed_service_secret_env(
+            &mut secret_handoff,
+            Some(&request.durable_agent_task_plan),
+        );
         let mut env = secret_handoff.env_delta.clone();
         env.insert(
             "HOMEBOY_RUNNER_PLACEMENT_RESOLVED".to_string(),
@@ -3072,6 +3076,20 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             request.recipe.runner_id.clone(),
         );
         let runner_status = Self::status_for_recipe_transport(request)?;
+        let runner = crate::load(&request.recipe.runner_id)?;
+        crate::lab::secrets::preflight_lab_secret_env_handoff(
+            &request.recipe.runner_id,
+            Some(&runner),
+            &env,
+            &secret_handoff,
+        )?;
+        crate::lab::secrets::preflight_agent_task_runner_secret_env_plan(
+            &request.recipe.runner_id,
+            &runner,
+            &request.recipe.normalized_args,
+            &env,
+            &secret_handoff.secret_env_plan,
+        )?;
         let session = runner_status.session.as_ref().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "runner",
