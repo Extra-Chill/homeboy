@@ -16,6 +16,7 @@ const LOCK_FILE: &str = ".homeboy-lock";
 const LEASE_FILE: &str = ".homeboy-lease";
 const OWNER_FILE: &str = ".homeboy-owner";
 const LAST_USED_FILE: &str = ".homeboy-last-used-ms";
+const LEGACY_LIFECYCLE_INFERRED: &str = "legacy lifecycle metadata inferred";
 
 #[derive(Debug, Clone)]
 pub struct CargoTargetCleanupOptions {
@@ -189,6 +190,7 @@ pub fn cleanup_shared_cargo_targets(
     let mut time_budget_exhausted = false;
     let mut inspected_count = 0;
     let mut last_inspected = None;
+    let mut migration_retry_required = false;
 
     for store in stores.iter().skip(start) {
         if options
@@ -205,6 +207,7 @@ pub fn cleanup_shared_cargo_targets(
         }
         inspected_count += 1;
         last_inspected = Some(store.path.clone());
+        let legacy = is_legacy_store(Path::new(&store.path));
         if let Some(reason) = store
             .reasons
             .iter()
@@ -216,17 +219,33 @@ pub fn cleanup_shared_cargo_targets(
             continue;
         }
         if store.reasons.iter().any(|reason| reason == "active_lease") {
+            migration_retry_required |= legacy && options.apply;
             *retained_by_reason
                 .entry("active lease".to_string())
                 .or_default() += 1;
             continue;
         }
-        let legacy = is_legacy_store(Path::new(&store.path));
+        if legacy && options.apply {
+            match migrate_legacy_lifecycle(Path::new(&store.path))? {
+                MigrationOutcome::Migrated => {}
+                MigrationOutcome::Protected => {
+                    *retained_by_reason
+                        .entry("legacy lifecycle lock unavailable".to_string())
+                        .or_default() += 1;
+                    migration_retry_required = true;
+                    continue;
+                }
+            }
+        }
         let eligible = store.reasons.iter().any(|reason| reason == "age_expired")
-            || (!legacy && remaining > options.max_bytes);
+            || remaining > options.max_bytes;
         if !eligible {
             *retained_by_reason
-                .entry("within age and size budget".to_string())
+                .entry(if legacy {
+                    format!("{LEGACY_LIFECYCLE_INFERRED}; within age and size budget")
+                } else {
+                    "within age and size budget".to_string()
+                })
                 .or_default() += 1;
             continue;
         }
@@ -258,14 +277,23 @@ pub fn cleanup_shared_cargo_targets(
             }
         }
     }
-    let next_cursor = has_more.then_some(last_inspected).flatten();
-    let next_command = next_cursor.as_ref().map(|cursor| {
-        let apply = if options.apply { " --apply" } else { "" };
-        format!(
-            "homeboy cleanup --include shared-cargo-targets{apply} --cursor {}",
-            quote_path(cursor)
-        )
-    });
+    // Retry the current page before advancing its cursor so a lock-contended
+    // legacy store cannot be skipped by the continuation command.
+    let next_cursor = (!migration_retry_required)
+        .then_some(last_inspected)
+        .flatten()
+        .filter(|_| has_more);
+    let next_command = migration_retry_required
+        .then(|| "homeboy cleanup --include shared-cargo-targets --apply".to_string())
+        .or_else(|| {
+            next_cursor.as_ref().map(|cursor| {
+                let apply = if options.apply { " --apply" } else { "" };
+                format!(
+                    "homeboy cleanup --include shared-cargo-targets{apply} --cursor {}",
+                    quote_path(cursor)
+                )
+            })
+        });
     let skipped_count = retained_by_reason.values().sum();
     Ok(CargoTargetCleanupOutput {
         command: "cleanup.shared_cargo_targets",
@@ -279,7 +307,7 @@ pub fn cleanup_shared_cargo_targets(
         applied_count,
         skipped_count,
         reclaimed_bytes,
-        continuation_required: has_more,
+        continuation_required: has_more || migration_retry_required,
         time_budget_exhausted,
         next_cursor,
         next_command,
@@ -459,6 +487,60 @@ enum RemoveOutcome {
     Missing,
 }
 
+#[derive(PartialEq, Eq)]
+enum MigrationOutcome {
+    Migrated,
+    Protected,
+}
+
+/// Give a canonical store that predates lifecycle sidecars the same last-used
+/// evidence as a current store. The lock covers the recheck and write so a
+/// concurrently started producer remains protected.
+fn migrate_legacy_lifecycle(path: &Path) -> Result<MigrationOutcome> {
+    let Some(last_used) = legacy_last_used(path) else {
+        return Ok(MigrationOutcome::Protected);
+    };
+    let lock_path = path.join(LOCK_FILE);
+    let lock = match fs::symlink_metadata(&lock_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Ok(MigrationOutcome::Protected)
+        }
+        Ok(_) => OpenOptions::new().read(true).write(true).open(&lock_path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path),
+        Err(error) => return Err(io_error(error, "stat shared Cargo target lifecycle lock")),
+    };
+    let lock = match lock {
+        Ok(lock) => lock,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotFound
+            ) =>
+        {
+            return Ok(MigrationOutcome::Protected)
+        }
+        Err(error) => {
+            return Err(io_error(
+                error,
+                "open shared Cargo target lock for lifecycle migration",
+            ))
+        }
+    };
+    match lock.try_lock_exclusive() {
+        Ok(true) => {}
+        Ok(false) | Err(_) => return Ok(MigrationOutcome::Protected),
+    }
+    if !is_legacy_store(path) {
+        return Ok(MigrationOutcome::Protected);
+    }
+    write_last_used(path, UNIX_EPOCH + Duration::from_millis(last_used))?;
+    Ok(MigrationOutcome::Migrated)
+}
+
 fn remove_store_if_unleased(
     path: &Path,
     now: SystemTime,
@@ -553,10 +635,13 @@ fn inventory(
             continue;
         };
         let mut reasons = Vec::new();
+        if is_legacy_store(&path) {
+            reasons.push(LEGACY_LIFECYCLE_INFERRED.to_string());
+        }
         if is_expired(last_used_unix_ms, now, older_than) {
             reasons.push("age_expired".to_string());
         }
-        if store_is_active(&path, now, lease_ttl)? {
+        if store_is_active(&path, now, lease_ttl, is_legacy_store(&path))? {
             reasons.push("active_lease".to_string());
         }
         stores.push(CargoTargetStore {
@@ -570,16 +655,31 @@ fn inventory(
     Ok(stores)
 }
 
-fn store_is_active(path: &Path, now: SystemTime, lease_ttl: Duration) -> Result<bool> {
-    let lock = match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path.join(LOCK_FILE))
-    {
-        Ok(lock) => lock,
+fn store_is_active(
+    path: &Path,
+    now: SystemTime,
+    lease_ttl: Duration,
+    legacy: bool,
+) -> Result<bool> {
+    let lock_path = path.join(LOCK_FILE);
+    let metadata = match fs::symlink_metadata(&lock_path) {
+        Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return lease_is_fresh(path, now, lease_ttl)
         }
+        Err(error) => {
+            return Err(io_error(
+                error,
+                "stat shared Cargo target lock for inventory",
+            ))
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Ok(true);
+    }
+    let lock = match OpenOptions::new().read(true).write(true).open(lock_path) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
         Err(error) => {
             return Err(io_error(
                 error,
@@ -593,7 +693,9 @@ fn store_is_active(path: &Path, now: SystemTime, lease_ttl: Duration) -> Result<
                 .map_err(|error| io_error(error, "unlock shared Cargo target inventory lock"))?;
             lease_is_fresh(path, now, lease_ttl)
         }
-        Ok(false) | Err(_) => Ok(true),
+        // A legacy store has no lease sidecar to prove liveness. Let the
+        // migration lock acquire report its distinct retry reason instead.
+        Ok(false) | Err(_) => Ok(!legacy),
     }
 }
 
@@ -649,7 +751,7 @@ fn legacy_last_used(path: &Path) -> Option<u64> {
 }
 
 fn is_legacy_store(path: &Path) -> bool {
-    is_canonical_store(path) && legacy_sidecars_absent(path)
+    is_canonical_store(path) && legacy_lifecycle_sidecars_absent(path)
 }
 
 fn is_canonical_store(path: &Path) -> bool {
@@ -662,12 +764,6 @@ fn is_canonical_store(path: &Path) -> bool {
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
         })
-}
-
-fn legacy_sidecars_absent(path: &Path) -> bool {
-    [LOCK_FILE, LEASE_FILE, OWNER_FILE, LAST_USED_FILE]
-        .iter()
-        .all(|name| sidecar_absent(path, name))
 }
 
 fn legacy_lifecycle_sidecars_absent(path: &Path) -> bool {
@@ -979,6 +1075,112 @@ mod tests {
         assert_eq!(output.candidate_count, 1);
         assert_eq!(output.applied_count, 1);
         assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn installed_controller_lock_only_legacy_store_is_migrated_then_re_evaluated_by_size_retention()
+    {
+        let root = TempDir::new().unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let legacy = legacy_store(root.path(), now, 12);
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(legacy.join(LOCK_FILE))
+            .unwrap();
+
+        let mut dry_run_options = options(root.path(), false, now);
+        dry_run_options.older_than = Duration::from_secs(60 * 60);
+        let dry_run = cleanup_shared_cargo_targets(dry_run_options).unwrap();
+        assert_eq!(dry_run.candidate_count, 0);
+        assert_eq!(dry_run.candidates, Vec::new());
+        assert_eq!(
+            dry_run.retained_by_reason
+                [&format!("{LEGACY_LIFECYCLE_INFERRED}; within age and size budget")],
+            1,
+            "dry-run makes the migration decision visible without mutating the store"
+        );
+        let inventory = shared_cargo_target_inventory(
+            Some(root.path().to_path_buf()),
+            now,
+            Duration::from_secs(60 * 60),
+            Duration::from_secs(3600),
+        )
+        .unwrap();
+        assert!(inventory[0]
+            .reasons
+            .iter()
+            .any(|reason| reason == LEGACY_LIFECYCLE_INFERRED));
+
+        let retained = cleanup_shared_cargo_targets(options(root.path(), true, now)).unwrap();
+        assert!(legacy.join(LAST_USED_FILE).exists());
+        assert!(legacy.exists());
+        assert_eq!(retained.applied_count, 0);
+
+        let mut constrained = options(root.path(), true, now);
+        constrained.max_bytes = 0;
+        let reclaimed = cleanup_shared_cargo_targets(constrained).unwrap();
+        assert_eq!(reclaimed.candidate_count, 1);
+        assert_eq!(reclaimed.applied_count, 1);
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn paginated_lock_contention_retries_legacy_migration_before_advancing_cursor() {
+        let root = TempDir::new().unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let legacy = legacy_store(root.path(), now, 12);
+        let stale = now.checked_sub(Duration::from_secs(61)).unwrap();
+        let lock = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(legacy.join(LOCK_FILE))
+            .unwrap();
+        set_modified(&legacy.join(LOCK_FILE), stale);
+        set_modified(&legacy, stale);
+        lock.lock_shared().unwrap();
+        store(root.path(), "later", 1, Duration::ZERO, now);
+
+        let mut cleanup_options = options(root.path(), true, now);
+        cleanup_options.limit = 1;
+        cleanup_options.max_bytes = 100;
+        let output = cleanup_shared_cargo_targets(cleanup_options.clone()).unwrap();
+
+        assert_eq!(output.applied_count, 0);
+        assert_eq!(
+            output.retained_by_reason["legacy lifecycle lock unavailable"],
+            1
+        );
+        assert!(output.continuation_required);
+        assert_eq!(output.next_cursor, None);
+        assert_eq!(
+            output.next_command.as_deref(),
+            Some("homeboy cleanup --include shared-cargo-targets --apply")
+        );
+        assert!(!legacy.join(LAST_USED_FILE).exists());
+        assert!(legacy.exists());
+
+        FileExt::unlock(&lock).unwrap();
+        let retried = cleanup_shared_cargo_targets(cleanup_options).unwrap();
+        assert_eq!(retried.applied_count, 1);
+        assert!(retried.next_cursor.is_some());
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn non_regular_legacy_lifecycle_lock_is_protected_without_migration() {
+        let root = TempDir::new().unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let legacy = legacy_store(root.path(), now, 12);
+        fs::create_dir(legacy.join(LOCK_FILE)).unwrap();
+
+        let output = cleanup_shared_cargo_targets(options(root.path(), true, now)).unwrap();
+
+        assert_eq!(output.applied_count, 0);
+        assert_eq!(output.retained_by_reason["active lease"], 1);
+        assert!(!legacy.join(LAST_USED_FILE).exists());
+        assert!(legacy.exists());
     }
 
     #[test]
