@@ -259,7 +259,7 @@ fn retention_report_with_references_at(
     let mut retained = BTreeSet::new();
 
     for path in referenced {
-        if content_addressed_pin_path(&root, &path) {
+        if content_addressed_pin_path(&root, path) {
             retained.insert(path.clone());
         }
     }
@@ -663,7 +663,7 @@ fn pin_executable(executable: &Path, identity: &str) -> Result<Value> {
     let pinned_path = pinned_path(identity, &digest)?;
     publish_pin(executable, &pinned_path, &digest)?;
 
-    let runtime = runtime_pin(&identity, executable, &pinned_path, &digest);
+    let runtime = runtime_pin(identity, executable, &pinned_path, &digest);
     validate_pin(&runtime)?;
     Ok(runtime)
 }
@@ -1154,6 +1154,7 @@ fn acquire_admission_lock_for(path: &Path, request_id: &str) -> Result<Admission
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(path)
         .map_err(|error| {
             Error::internal_io(
@@ -1506,6 +1507,7 @@ fn claim_admission_owner(
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(queue_lock_path(lock_path))
         .map_err(|error| {
             Error::internal_io(
@@ -1577,6 +1579,7 @@ fn update_admission_queue(lock_path: &Path, mutate: impl FnOnce(&mut Value)) -> 
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(queue_lock_path(lock_path))
         .map_err(|error| {
             Error::internal_io(
@@ -1683,6 +1686,7 @@ fn admission_lock_is_held(path: &Path) -> bool {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(path)
     else {
         return true;

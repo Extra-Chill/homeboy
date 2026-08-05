@@ -152,6 +152,7 @@ pub(crate) fn acquire_shared_cargo_target_in(
         .map_err(|error| io_error(error, "create shared Cargo target"))?;
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(target_dir.join(LOCK_FILE))
