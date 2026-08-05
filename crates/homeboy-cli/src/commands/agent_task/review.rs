@@ -975,6 +975,15 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     let catalog_version = catalog.version.clone();
     let executor = ExtensionProviderAgentTaskExecutor::from_catalog(catalog);
     let all_providers = executor.providers();
+    if args.machine_catalog {
+        return Ok((
+            serde_json::json!({
+                "schema": "homeboy/agent-task-provider-catalog/v1",
+                "providers": all_providers,
+            }),
+            0,
+        ));
+    }
     if args.validate_readiness {
         // Fall back to the configured default backend the same way Cook selection
         // does, so readiness validation does not demand a flag that policy already

@@ -216,6 +216,9 @@ pub struct CookContinueArgs {
     /// Include the complete Cook report rather than the compact lifecycle view.
     #[arg(long)]
     pub full: bool,
+    /// Emit the unfiltered provider DTO catalog for machine admission clients.
+    #[arg(long, hide = true)]
+    pub machine_catalog: bool,
 }
 
 #[derive(Args, Debug)]
@@ -389,6 +392,9 @@ pub struct ProvidersArgs {
     /// Return the complete provider declarations and discovery diagnostics.
     #[arg(long)]
     pub full: bool,
+    /// Emit the unfiltered provider DTO catalog for machine admission clients.
+    #[arg(long, hide = true)]
+    pub machine_catalog: bool,
 }
 #[derive(Args, Debug)]
 pub struct AgentTaskDoctorArgs {
