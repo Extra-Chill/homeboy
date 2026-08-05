@@ -115,7 +115,7 @@ pub(super) fn run_compare_variant(mut args: TraceArgs) -> CmdResult<TraceCommand
     } else {
         1
     };
-    Ok((TraceCommandOutput::Compare(compare), exit_code))
+    Ok((TraceCommandOutput::Compare(Box::new(compare)), exit_code))
 }
 
 fn run_compare_variant_pair(
@@ -336,7 +336,7 @@ fn run_repeat_output(
 ) -> homeboy::core::Result<extension_trace::TraceAggregateOutput> {
     let (output, _exit_code) = run_repeat(args)?;
     match output {
-        TraceCommandOutput::Aggregate(aggregate) => Ok(aggregate),
+        TraceCommandOutput::Aggregate(aggregate) => Ok(*aggregate),
         _ => Err(homeboy::core::Error::internal_unexpected(
             "trace compare-variant expected aggregate output",
         )),

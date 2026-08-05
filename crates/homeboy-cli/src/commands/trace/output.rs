@@ -175,7 +175,7 @@ pub(super) fn run_compare(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
             compare: &output,
         })?;
     }
-    Ok((TraceCommandOutput::Compare(output), exit_code))
+    Ok((TraceCommandOutput::Compare(Box::new(output)), exit_code))
 }
 
 fn required_compare_path_arg<T>(value: Option<T>, field: &'static str) -> homeboy::core::Result<T> {

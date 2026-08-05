@@ -416,7 +416,7 @@ fn run_variant_aggregate(
     run_args.variants = Vec::new();
     run_args.output_dir = None;
     match run_repeat(run_args)?.0 {
-        TraceCommandOutput::Aggregate(output) => Ok(output),
+        TraceCommandOutput::Aggregate(output) => Ok(*output),
         _ => unreachable!("run_repeat returns aggregate output"),
     }
 }
