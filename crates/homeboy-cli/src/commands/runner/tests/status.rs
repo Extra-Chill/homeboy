@@ -819,8 +819,13 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
     assert_eq!(output.active_daemon_version.as_deref(), Some("0.262.0"));
 }
 
+/// A dirty controller alongside a genuinely version-skewed runner: the skew is
+/// the reportable fact and keeps its runner-side recovery. The controller's
+/// dirty tree only removes the *stronger* exact-commit proof, so it must not
+/// rename the finding or replace the remediation with `homeboy upgrade
+/// --force` (#11101).
 #[test]
-fn compact_status_prioritizes_dirty_controller_before_runner_convergence() {
+fn compact_status_names_runner_version_skew_when_the_controller_is_dirty() {
     let report = RunnerStatusReport {
         runner_id: "homeboy-lab".to_string(),
         connected: true,
@@ -903,20 +908,29 @@ fn compact_status_prioritizes_dirty_controller_before_runner_convergence() {
     assert!(summary
         .risk
         .iter()
-        .any(|risk| risk.contains("controller_dirty")));
+        .any(|risk| risk.contains("controller_configured_version_skew")));
     assert!(summary
         .risk
         .iter()
         .any(|risk| risk.contains("homeboy 0.321.1+configured-dirty")));
-    assert_eq!(summary.next_action, "homeboy upgrade --force");
-    assert!(!summary.next_action.contains("refresh-homeboy"));
-    assert!(!summary.next_action.contains("--ref"));
+    // The remediation converges the runner, which is what is actually skewed.
+    // Telling an operator with uncommitted work to reinstall the controller
+    // answers a question nobody asked.
+    assert!(summary.next_action.contains("refresh-homeboy"));
+    assert!(!summary.next_action.contains("upgrade --force"));
     let warning = report.stale_daemon.as_ref().expect("stale daemon warning");
     assert_eq!(
         warning.recovery_commands,
-        vec!["homeboy upgrade --force".to_string()]
+        vec!["homeboy runner refresh-homeboy homeboy-lab --ref configured --reconnect".to_string()]
     );
-    assert!(warning.message.contains("rerun `homeboy runner status`"));
+    assert_eq!(
+        warning.compatibility_reason,
+        Some("controller_configured_version_skew")
+    );
+    // The dirty tree is still reported — it is why the exact-commit proof is
+    // missing — but it is not the finding.
+    assert!(warning.message.contains("dirty"));
+    assert!(warning.message.contains("different Homeboy version"));
     assert!(
         report.connected,
         "liveness remains independently observable"

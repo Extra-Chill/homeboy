@@ -764,14 +764,26 @@ fn controller_dirty_and_version_skew_serialize_distinct_predicates_and_actions()
     );
 
     let dirty_diagnostics = serde_json::to_value(&dirty).expect("serialize dirty controller");
+    // A dirty controller cannot compare; that is not a claim about the runner,
+    // so it must not serialize as a staleness predicate (#11101).
     assert_eq!(
         dirty_diagnostics["mismatch_predicate"],
-        "controller_git_dirty == true"
+        "controller_build_commit == unverifiable(controller_git_dirty)"
     );
     assert_eq!(
-        dirty_diagnostics["recovery_commands"][0],
-        "homeboy upgrade --force"
+        dirty_diagnostics["compatibility_reason"],
+        "controller_identity_unverifiable"
     );
+    // "Your working tree is dirty" has no correct automated remediation, and
+    // `homeboy upgrade --force` is a destructive answer to a question nobody
+    // asked. Offer none rather than the wrong one.
+    assert!(dirty_diagnostics["recovery_commands"]
+        .as_array()
+        .expect("serialized recovery command list")
+        .is_empty());
+    assert!(!dirty.message.contains("upgrade --force"));
+    assert!(dirty.message.contains("dirty working tree"));
+    assert!(dirty.message.contains("unavailable, not failed"));
 
     let version_diagnostics =
         serde_json::to_value(&version_skew).expect("serialize controller version skew");
@@ -783,6 +795,151 @@ fn controller_dirty_and_version_skew_serialize_distinct_predicates_and_actions()
         .as_array()
         .expect("serialized recovery command list")
         .is_empty());
+}
+
+fn controller_identity(
+    version: &str,
+    commit: &str,
+    dirty: bool,
+) -> homeboy_product_identity::BuildIdentity {
+    homeboy_product_identity::BuildIdentity {
+        version: version.to_string(),
+        git_commit: Some(commit.to_string()),
+        git_dirty: Some(dirty),
+        display: if dirty {
+            format!("homeboy {version}+{commit}-dirty")
+        } else {
+            format!("homeboy {version}+{commit}")
+        },
+    }
+}
+
+/// The reported bug: a controller with uncommitted work — the normal state of a
+/// development controller — made every commit comparison unmatchable, so every
+/// Lab runner read as stale and the whole fleet became ineligible (#11101).
+#[test]
+fn dirty_controller_does_not_mark_a_converged_runner_stale() {
+    let dirty = controller_identity("0.328.0", "1e63f1ae0369", true);
+    assert_eq!(
+        ControllerReference::for_identity(&dirty),
+        ControllerReference::Unverifiable
+    );
+
+    // The runner is on the controller's version but, because the controller
+    // was built from a dirty tree, its commit can equal nothing.
+    assert!(controller_runtime_is_current(
+        ControllerReference::for_identity(&dirty),
+        true,
+        IdentityComparison::Mismatch,
+    ));
+    assert!(controller_runtime_is_current(
+        ControllerReference::for_identity(&dirty),
+        true,
+        IdentityComparison::Unverifiable,
+    ));
+}
+
+/// The safety property this must not trade away: an unavailable commit proof
+/// removes only the *stronger* check. A runner on a different Homeboy version
+/// is conclusively stale whatever the controller's tree looks like, so it is
+/// still caught.
+#[test]
+fn dirty_controller_still_catches_a_version_skewed_runner() {
+    let dirty = controller_identity("0.328.0", "1e63f1ae0369", true);
+
+    assert!(!controller_runtime_is_current(
+        ControllerReference::for_identity(&dirty),
+        false,
+        IdentityComparison::Mismatch,
+    ));
+    // Even a commit that happens to match cannot rescue a version skew.
+    assert!(!controller_runtime_is_current(
+        ControllerReference::for_identity(&dirty),
+        false,
+        IdentityComparison::Match,
+    ));
+}
+
+/// A clean controller keeps the full exact-commit gate. The dirty-tree path is
+/// a fallback for an impossible comparison, never a general relaxation.
+#[test]
+fn clean_controller_still_requires_an_exact_commit_match() {
+    let clean = controller_identity("0.328.0", "1e63f1ae0369", false);
+    assert_eq!(
+        ControllerReference::for_identity(&clean),
+        ControllerReference::Comparable
+    );
+
+    assert!(controller_runtime_is_current(
+        ControllerReference::for_identity(&clean),
+        true,
+        IdentityComparison::Match,
+    ));
+    assert!(!controller_runtime_is_current(
+        ControllerReference::for_identity(&clean),
+        true,
+        IdentityComparison::Mismatch,
+    ));
+    assert!(!controller_runtime_is_current(
+        ControllerReference::for_identity(&clean),
+        true,
+        IdentityComparison::Unverifiable,
+    ));
+}
+
+/// A build with no recorded dirty flag is treated as comparable, because its
+/// commit is still the best available reference. Only a *proven* dirty tree
+/// downgrades the comparison.
+#[test]
+fn unknown_controller_dirty_state_keeps_the_exact_commit_gate() {
+    let unknown = homeboy_product_identity::BuildIdentity {
+        version: "0.328.0".to_string(),
+        git_commit: Some("1e63f1ae0369".to_string()),
+        git_dirty: None,
+        display: "homeboy 0.328.0+1e63f1ae0369".to_string(),
+    };
+
+    assert_eq!(
+        ControllerReference::for_identity(&unknown),
+        ControllerReference::Comparable
+    );
+    assert!(!controller_runtime_is_current(
+        ControllerReference::for_identity(&unknown),
+        true,
+        IdentityComparison::Mismatch,
+    ));
+}
+
+/// A dirty controller must not hijack a real runner-side fault. When the live
+/// daemon disagrees with its own configured binary, that finding and its
+/// runner-side recovery own the report.
+#[test]
+fn dirty_controller_preserves_a_runner_side_daemon_recovery() {
+    let warning = RunnerStaleDaemonWarning::new(
+        "homeboy-lab",
+        "0.327.9".to_string(),
+        "0.328.0".to_string(),
+        Some("homeboy 0.327.9+aaaaaaaaaaaa".to_string()),
+        Some("homeboy 0.328.0+1e63f1ae0369".to_string()),
+    )
+    .with_controller_compatibility(
+        "homeboy-lab",
+        "0.328.0".to_string(),
+        "homeboy 0.328.0+1e63f1ae0369-dirty".to_string(),
+        true,
+        false,
+        true,
+    );
+
+    assert_eq!(
+        warning.mismatch_predicate,
+        "active_daemon_control_plane_version != job_command_binary_version"
+    );
+    assert_eq!(
+        warning.recovery_commands,
+        ["homeboy runner refresh-homeboy homeboy-lab --ref 1e63f1ae0369 --reconnect"]
+    );
+    assert!(!warning.message.contains("upgrade --force"));
 }
 
 #[test]

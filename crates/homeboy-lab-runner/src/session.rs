@@ -1497,6 +1497,13 @@ impl RunnerStaleDaemonWarning {
             .or_else(|| action_from_refresh_command(&self.refresh_command))
     }
 
+    /// Fold the controller↔runner comparison into this warning.
+    ///
+    /// `controller_identity_unverifiable` means the controller cannot name the
+    /// build it is running — today, a dirty working tree. That is a *different
+    /// state* from a skewed runner and must never be rendered as one: it says
+    /// nothing about the runner, is true of every runner simultaneously, and
+    /// has no runner-side remediation (#11101).
     pub fn with_controller_compatibility(
         mut self,
         runner_id: &str,
@@ -1504,58 +1511,80 @@ impl RunnerStaleDaemonWarning {
         controller_build_identity: String,
         controller_version_matches: bool,
         daemon_matches_configured: bool,
-        controller_dirty: bool,
+        controller_identity_unverifiable: bool,
     ) -> Self {
         self.controller_homeboy_version = Some(controller_version.clone());
         self.controller_homeboy_build_identity = Some(controller_build_identity.clone());
-        if controller_dirty {
-            self.compatibility_reason = Some("controller_dirty");
-            self.mismatch_predicate = "controller_git_dirty == true";
-            self.message = format!(
-                "controller `{controller_build_identity}` is dirty and cannot prove compatibility with runner `{}`; rebuild or upgrade the controller first, then rerun `homeboy runner status` to derive runner convergence from the upgraded controller identity",
-                self.job_command_binary_build_identity
-                    .as_deref()
-                    .unwrap_or(&self.job_command_binary_version),
-            );
-            self.set_recovery(vec![ExecutableAction::new(
-                "upgrade.force",
-                "rebuild the controller binary".to_string(),
-                "homeboy",
-                ["upgrade".to_string(), "--force".to_string()],
-                ActionSafety::Mutating,
-            )]);
-        } else if daemon_matches_configured {
-            self.compatibility_reason = Some(if controller_version_matches {
-                "controller_configured_identity_skew"
-            } else {
-                "controller_configured_version_skew"
-            });
-            self.mismatch_predicate = if controller_version_matches {
-                "controller_build_commit != job_command_binary_build_commit"
-            } else {
-                "controller_version != job_command_binary_version"
-            };
-            self.message = format!(
-                "connected runner configured job command binary `{}` is incompatible with controller `{controller_build_identity}`; the daemon matches the configured binary, but controller compatibility requires convergence before admission",
-                self.job_command_binary_build_identity
-                    .as_deref()
-                    .unwrap_or(&self.job_command_binary_version),
-            );
+        if !daemon_matches_configured {
+            // The runner's live daemon disagrees with its own configured
+            // binary. That is a runner-side fact with a runner-side recovery,
+            // already established by `new`; controller-side advice must not
+            // overwrite it — least of all with a controller upgrade, which
+            // would not converge the daemon at all.
+            return self;
+        }
+        let configured_binary = self
+            .job_command_binary_build_identity
+            .clone()
+            .unwrap_or_else(|| self.job_command_binary_version.clone());
+        if controller_identity_unverifiable {
             if controller_version_matches {
-                if let Some(controller_commit) =
-                    homeboy_upgrade::upgrade::parse_build_identity_display(
-                        &controller_build_identity,
-                    )
+                // Nothing about the runner is known to be wrong: the versions
+                // agree and only the exact-commit proof is unavailable.
+                //
+                // `stale_daemon_warning` does not construct a warning at all in
+                // this state — it is the case that used to fail every runner
+                // closed. This branch exists so that any other caller renders
+                // "cannot compare" honestly instead of inheriting a staleness
+                // message and a mutating recovery.
+                self.compatibility_reason = Some("controller_identity_unverifiable");
+                self.mismatch_predicate =
+                    "controller_build_commit == unverifiable(controller_git_dirty)";
+                self.message = format!(
+                    "controller `{controller_build_identity}` was built from a dirty working tree, so its recorded commit does not name the build that is running and cannot be compared against runner `{runner_id}`'s configured job command binary `{configured_binary}`; the comparison is unavailable, not failed — the versions agree and no runner drift is known. Commit or stash the controller working tree, then rerun `homeboy runner status {runner_id}` to restore the exact-commit proof."
+                );
+                // "Your working tree is dirty" has no safe automated fix: every
+                // candidate command either discards the operator's work or
+                // replaces the binary under test. Report no recovery command
+                // rather than a confidently wrong one.
+                self.set_recovery(Vec::new());
+            } else {
+                // The version difference is conclusive on its own, so a runner
+                // that really is behind is still caught here — the unavailable
+                // commit proof only removes the *stronger* check.
+                self.compatibility_reason = Some("controller_configured_version_skew");
+                self.mismatch_predicate = "controller_version != job_command_binary_version";
+                self.message = format!(
+                    "connected runner configured job command binary `{configured_binary}` is a different Homeboy version from controller `{controller_build_identity}`; the controller working tree is dirty so the exact-commit proof is unavailable, but the version difference is conclusive by itself and blocks admission until the runner converges"
+                );
+            }
+            return self;
+        }
+        self.compatibility_reason = Some(if controller_version_matches {
+            "controller_configured_identity_skew"
+        } else {
+            "controller_configured_version_skew"
+        });
+        self.mismatch_predicate = if controller_version_matches {
+            "controller_build_commit != job_command_binary_build_commit"
+        } else {
+            "controller_version != job_command_binary_version"
+        };
+        self.message = format!(
+            "connected runner configured job command binary `{configured_binary}` is incompatible with controller `{controller_build_identity}`; the daemon matches the configured binary, but controller compatibility requires convergence before admission"
+        );
+        if controller_version_matches {
+            if let Some(controller_commit) =
+                homeboy_upgrade::upgrade::parse_build_identity_display(&controller_build_identity)
                     .filter(|identity| identity.git_dirty != Some(true))
                     .and_then(|identity| identity.git_commit)
-                {
-                    self.set_recovery(vec![
-                        crate::daemon_repair::refresh_homeboy_downgrade_action(
-                            runner_id,
-                            &controller_commit,
-                        ),
-                    ]);
-                }
+            {
+                self.set_recovery(vec![
+                    crate::daemon_repair::refresh_homeboy_downgrade_action(
+                        runner_id,
+                        &controller_commit,
+                    ),
+                ]);
             }
         }
         self

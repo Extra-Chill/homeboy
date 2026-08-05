@@ -556,6 +556,28 @@ paths. `homeboy runner status <runner-id>` surfaces those differences in
 development runner with `homeboy runner disconnect <runner-id>` followed by
 `homeboy runner connect <runner-id>` after rebuilding runner-side runtime code.
 
+### Controller identity and a dirty working tree
+
+Runner convergence is normally proven by comparing the controller's embedded
+build commit against the runner's configured job command binary. A controller
+built from a **dirty working tree** records the last commit, not the tree it was
+actually built from, so that commit names no reproducible build and can equal no
+runner's — which is "the comparison is unavailable", not "this runner is stale".
+Homeboy reports the two states separately:
+
+- The controller↔runner **version** check still applies in full. A runner whose
+  configured binary is a different Homeboy version is still refused, with
+  `stale_daemon.compatibility_reason = "controller_configured_version_skew"` and
+  a runner-side `homeboy runner refresh-homeboy` recovery.
+- The **exact-commit** check is skipped while the controller cannot name its own
+  build, so a dirty controller no longer marks every runner stale. The
+  runner-internal check (its live daemon against its own configured binary) is
+  untouched and still blocking.
+- `stale_daemon.compatibility_reason = "controller_identity_unverifiable"`
+  reports an unavailable comparison. It carries no recovery command, because the
+  remediation is to commit or stash the controller working tree and rerun
+  `homeboy runner status <runner-id>` — not to reinstall the controller.
+
 ```json
 {
   "success": true,
