@@ -223,7 +223,7 @@ impl LabStagingRecipe {
         Ok(recipe)
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.schema != LAB_STAGING_RECIPE_SCHEMA
             || self.run_id.trim().is_empty()
             || self.runner_id.trim().is_empty()

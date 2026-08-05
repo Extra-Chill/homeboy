@@ -46,6 +46,7 @@ mod daemon_health;
 mod daemon_http_get;
 mod daemon_repair;
 pub use daemon_repair::codes as daemon_repair_codes;
+pub mod direct_lab_handoff;
 #[allow(
     unused_imports,
     reason = "Evidence helpers are re-exported for optional runner artifact flows."
