@@ -91,7 +91,7 @@ pub enum PlacementReadinessInvocation {
 /// The immutable admission contract shared by mutation-free preflight and the
 /// execution path. Callers construct it before any setup; execution evaluates
 /// it again against its fresh runner snapshot before reserving daemon capacity.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabAdmissionPlan {
     /// The controller source that will be snapshotted and materialized on the
     /// runner. Keeping this in the compiled plan prevents readiness from
@@ -102,6 +102,66 @@ pub struct LabAdmissionPlan {
     /// Public preflight uses runner snapshots only and therefore reports
     /// executable extension probes as an explicit unknown/blocked condition.
     pub executable_probe_required: bool,
+}
+
+/// The sole typed route-to-command boundary for Lab admission. Public
+/// placement supplies its invocation and observed provider decision; execution
+/// supplies the command route selected by its normal command dispatcher.
+pub enum RoutedLabAdmissionInput<'a> {
+    Placement {
+        invocation: &'a PlacementReadinessInvocation,
+        provider_admission:
+            Option<&'a homeboy_agents::agent_task_provider::AgentTaskProviderAdmissionPlan>,
+    },
+    Execution {
+        command: &'a LabOffloadCommand,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct RoutedLabAdmissionCommand {
+    pub command: LabOffloadCommand,
+    pub source_path: std::path::PathBuf,
+}
+
+pub fn build_routed_lab_admission_command(
+    input: RoutedLabAdmissionInput<'_>,
+    source_path: &std::path::Path,
+) -> RoutedLabAdmissionCommand {
+    let command = match input {
+        RoutedLabAdmissionInput::Placement {
+            invocation,
+            provider_admission,
+        } => {
+            let (hot_label, extensions, required_capabilities) = match invocation {
+                PlacementReadinessInvocation::AgentTaskCook { .. } => (
+                    "agent-task cook",
+                    provider_admission
+                        .map(|plan| plan.required_extension_ids.clone())
+                        .unwrap_or_default(),
+                    vec!["extension_parity".to_string()],
+                ),
+                PlacementReadinessInvocation::CapabilityAudit { capability_id, .. } => {
+                    ("audit capability", Vec::new(), vec![capability_id.clone()])
+                }
+            };
+            homeboy_core::lab_routing::lab_offload_command_from_contract(
+                homeboy_core::lab_contract::LabCommandContract::portable(
+                    hot_label,
+                    None,
+                    !extensions.is_empty(),
+                    &[],
+                )
+                .with_extra_required_capabilities(required_capabilities),
+                extensions,
+            )
+        }
+        RoutedLabAdmissionInput::Execution { command } => command.clone(),
+    };
+    RoutedLabAdmissionCommand {
+        command,
+        source_path: source_path.to_path_buf(),
+    }
 }
 
 /// Compile every runner admission requirement from the trusted routed command.
@@ -137,6 +197,22 @@ pub fn compile_lab_admission_plan(
     })
 }
 
+pub(crate) fn compile_execution_lab_admission_plan(
+    command: &LabOffloadCommand,
+    source_path: &std::path::Path,
+    command_prefix_required_tools: &[super::RunnerRequiredTool],
+) -> Result<LabAdmissionPlan> {
+    let routed = build_routed_lab_admission_command(
+        RoutedLabAdmissionInput::Execution { command },
+        source_path,
+    );
+    compile_lab_admission_plan(
+        &routed.command,
+        &routed.source_path,
+        command_prefix_required_tools,
+    )
+}
+
 fn validate_placement_readiness_request(request: &PlacementReadinessRequest) -> Result<()> {
     if request.schema != "homeboy/placement-readiness/v2" {
         return Err(Error::validation_invalid_argument(
@@ -160,39 +236,6 @@ fn validate_placement_readiness_request(request: &PlacementReadinessRequest) -> 
         ));
     }
     Ok(())
-}
-
-/// Build the same routed command used by execution from typed invocation data
-/// and the selected runner catalog. Provider extensions belong to the resolved
-/// provider, not to a backend-name convention.
-fn routed_command_for_placement(
-    request: &PlacementReadinessRequest,
-    provider_admission: Option<
-        &homeboy_agents::agent_task_provider::AgentTaskProviderAdmissionPlan,
-    >,
-) -> homeboy_core::lab_offload::LabOffloadCommand {
-    let (hot_label, extensions, required_capabilities) = match &request.invocation {
-        PlacementReadinessInvocation::AgentTaskCook { .. } => (
-            "agent-task cook",
-            provider_admission
-                .map(|plan| plan.required_extension_ids.clone())
-                .unwrap_or_default(),
-            vec!["extension_parity".to_string()],
-        ),
-        PlacementReadinessInvocation::CapabilityAudit { capability_id, .. } => {
-            ("audit capability", Vec::new(), vec![capability_id.clone()])
-        }
-    };
-    homeboy_core::lab_routing::lab_offload_command_from_contract(
-        homeboy_core::lab_contract::LabCommandContract::portable(
-            hot_label,
-            None,
-            !extensions.is_empty(),
-            &[],
-        )
-        .with_extra_required_capabilities(required_capabilities),
-        extensions,
-    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -293,10 +336,16 @@ fn placement_readiness_with_transport(
     let observation = observe(request, source_path)?;
     let provider_admission =
         provider_admission_for_request(request, observation.provider_catalog.as_deref());
-    let command = routed_command_for_placement(request, provider_admission.as_ref());
-    let mut plan = compile_lab_admission_plan(
-        &command,
+    let routed = build_routed_lab_admission_command(
+        RoutedLabAdmissionInput::Placement {
+            invocation: &request.invocation,
+            provider_admission: provider_admission.as_ref(),
+        },
         source_path,
+    );
+    let mut plan = compile_lab_admission_plan(
+        &routed.command,
+        &routed.source_path,
         &observation.command_prefix_required_tools,
     )?;
     // Public preflight is mutation-free. Execution evaluates the same probes
@@ -1787,6 +1836,18 @@ mod placement_readiness_tests {
         serde_json::from_value(serde_json::json!({ "id": id, "backend": "sol" })).expect("provider")
     }
 
+    fn provider_with_runtime(
+        id: &str,
+        source_revision: &str,
+    ) -> homeboy_agents::agent_tasks::provider::AgentTaskExecutorProvider {
+        let mut provider = provider(id);
+        provider.extra.insert(
+            "runtime_materialization_plan".to_string(),
+            serde_json::json!({ "source_revision": source_revision }),
+        );
+        provider
+    }
+
     fn cook_request(selector: Option<&str>) -> PlacementReadinessRequest {
         PlacementReadinessRequest {
             schema: "homeboy/placement-readiness/v2".to_string(),
@@ -1863,7 +1924,7 @@ mod placement_readiness_tests {
     }
 
     #[test]
-    fn placement_readiness_transport_preserves_pinned_runtime_state() {
+    fn placement_readiness_transport_blocks_incomplete_pinned_runtime() {
         let mut request = cook_request(Some("provider-11"));
         if let PlacementReadinessInvocation::AgentTaskCook {
             runtime_identity, ..
@@ -1882,7 +1943,28 @@ mod placement_readiness_tests {
     }
 
     #[test]
-    fn placement_readiness_transport_blocks_missing_source_derived_tool() {
+    fn placement_readiness_transport_accepts_matching_materialized_pinned_runtime() {
+        let mut request = cook_request(Some("provider-11"));
+        if let PlacementReadinessInvocation::AgentTaskCook {
+            runtime_identity, ..
+        } = &mut request.invocation
+        {
+            *runtime_identity = Some(serde_json::from_value(serde_json::json!({
+                "runtime_id": "runtime-11", "provider_id": "provider-11", "source_selector": "catalog",
+                "source_revision": "abc", "freshness": "pinned", "provider": {}, "materialization_plan": null
+            }))
+            .expect("runtime pin"));
+        }
+        let readiness = placement_readiness_with_transport(&request, |_, _| {
+            Ok(observed(vec![provider_with_runtime("provider-11", "abc")]))
+        })
+        .expect("readiness");
+        assert_eq!(readiness.state, PlacementReadinessState::Ready);
+        assert!(readiness.provider_admission.expect("admission").is_ready());
+    }
+
+    #[test]
+    fn placement_readiness_transport_blocks_then_allows_source_derived_tool() {
         let request = cook_request(Some("provider-0"));
         let readiness = placement_readiness_with_transport(&request, |_, _| {
             Ok(PlacementReadinessObservation {
@@ -1898,6 +1980,11 @@ mod placement_readiness_tests {
         })
         .expect("readiness");
         assert_eq!(readiness.state, PlacementReadinessState::Blocked);
+        let ready = placement_readiness_with_transport(&request, |_, _| {
+            Ok(observed(vec![provider("provider-0")]))
+        })
+        .expect("readiness");
+        assert_eq!(ready.state, PlacementReadinessState::Ready);
     }
 
     #[test]
@@ -1919,14 +2006,35 @@ mod placement_readiness_tests {
             placement_readiness_with_transport(&request, |_, _| Ok(observed(catalog.clone())))
                 .expect("public readiness");
         let provider_admission = provider_admission_for_request(&request, Some(&catalog));
-        let command = routed_command_for_placement(&request, provider_admission.as_ref());
-        let execution = compile_lab_admission_plan(
-            &command,
+        let public_route = build_routed_lab_admission_command(
+            RoutedLabAdmissionInput::Placement {
+                invocation: &request.invocation,
+                provider_admission: provider_admission.as_ref(),
+            },
+            std::path::Path::new("/workspace/source"),
+        );
+        let execution_route = build_routed_lab_admission_command(
+            RoutedLabAdmissionInput::Execution {
+                command: &public_route.command,
+            },
+            std::path::Path::new("/workspace/source"),
+        );
+        let execution = compile_execution_lab_admission_plan(
+            &execution_route.command,
             std::path::Path::new("/workspace/source"),
             &[super::super::RunnerRequiredTool::new("runner-homeboy")],
         )
         .expect("execution plan");
+        let public_plan = compile_lab_admission_plan(
+            &public_route.command,
+            &public_route.source_path,
+            &[super::super::RunnerRequiredTool::new("runner-homeboy")],
+        )
+        .expect("public plan");
         assert_eq!(public.compiled_request, request);
+        assert_eq!(public_route.command, execution_route.command);
+        assert_eq!(public_route.source_path, execution_route.source_path);
+        assert_eq!(public_plan, execution);
         assert_eq!(
             execution.source_path,
             std::path::Path::new("/workspace/source")
