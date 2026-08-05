@@ -794,6 +794,8 @@ jobs:
         env:
           COMMAND: ${{ needs.plan.outputs.test-command }}
         run: |
+          source .homeboy-action/scripts/core/lib.sh
+          result_filename="$(command_result_filename "${COMMAND}")"
           baseline_result="$(jq -r --arg command "${COMMAND}" '.[$command]' homeboy-baseline-results/results.json)"
           case "${baseline_result}" in
             pass) baseline_exit=0 ;;
@@ -801,7 +803,7 @@ jobs:
             *) baseline_exit=1 ;;
           esac
           structured_output=false
-          [ ! -f homeboy-baseline-results/review-test.json ] || structured_output=true
+          [ ! -f "homeboy-baseline-results/${result_filename}" ] || structured_output=true
           jq -cn --arg command "${COMMAND}" --arg status "${baseline_result}" --argjson exit_code "${baseline_exit}" --argjson structured_output "${structured_output}" \
             '{($command):{status:$status,exit_code:$exit_code,command:$command,structured_output:$structured_output}}' > homeboy-baseline-results/baseline-status.json
           python3 .homeboy-action/scripts/core/apply-differential-gate.py "$(cat homeboy-ci-results/results.json)" homeboy-ci-results homeboy-baseline-results > reconciled-results.json

@@ -501,3 +501,7 @@ command_output_stem() {
   fi
   printf '%s\n' "${stem}"
 }
+
+command_result_filename() {
+  printf '%s.json\n' "$(command_output_stem "$1")"
+}

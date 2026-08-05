@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/../core/lib.sh"
+
 OUTPUT_DIR="${HOMEBOY_CI_RESULTS_DIR:-${HOMEBOY_OUTPUT_DIR:-}}"
 RESULTS_JSON="${RESULTS:-"{}"}"
 RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
@@ -53,10 +57,6 @@ append_local_reproduction_commands() {
   } >> "${digest_file}"
 }
 
-command_artifact_stem() {
-  printf '%s' "$1" | sed -E 's/[^[:alnum:]._-]+/-/g; s/^-+//; s/-+$//'
-}
-
 append_differential_evidence() {
   local digest_file="$1"
   local baseline_status_file="${OUTPUT_DIR}/baseline-status.json"
@@ -80,21 +80,21 @@ append_differential_evidence() {
 
   while IFS=$'\t' read -r command status; do
     [ -n "${command}" ] || continue
-    local baseline_command baseline_exit baseline_result candidate_result artifact_stem baseline_json baseline_log
+    local baseline_command baseline_exit baseline_result candidate_result result_filename baseline_json baseline_log
     baseline_command="$(jq -r --arg cmd "${command}" '.[$cmd].command // ("homeboy " + $cmd)' "${baseline_status_file}" 2>/dev/null || printf 'homeboy %s' "${command}")"
     baseline_exit="$(jq -r --arg cmd "${command}" '.[$cmd].exit_code // "unknown"' "${baseline_status_file}" 2>/dev/null || printf 'unknown')"
     baseline_result="$(jq -r --arg cmd "${command}" '.[$cmd].status // "unknown"' "${baseline_status_file}" 2>/dev/null || printf 'unknown')"
     candidate_result="$(jq -r --arg cmd "${command}" '.[$cmd] // "unknown"' <<< "${RESULTS_JSON}" 2>/dev/null || printf 'unknown')"
-    artifact_stem="$(command_artifact_stem "${command}")"
-    baseline_json="baseline-${artifact_stem}.json"
-    baseline_log="baseline-${artifact_stem}.log"
+    result_filename="$(command_result_filename "${command}")"
+    baseline_json="baseline-${result_filename}"
+    baseline_log="baseline-${result_filename%.json}.log"
 
     {
       printf -- '- `%s`: **%s**\n' "${command}" "${status}"
       printf '  - Baseline command: `%s`\n' "${baseline_command}"
       printf '  - Baseline result: `%s` (exit `%s`)\n' "${baseline_result}" "${baseline_exit}"
       printf '  - Candidate result: `%s`\n' "${candidate_result}"
-      printf '  - Artifact refs: `%s`, `%s`, `%s`\n' "${artifact_stem}.json" "${baseline_json}" "${baseline_log}"
+      printf '  - Artifact refs: `%s`, `%s`, `%s`\n' "${result_filename}" "${baseline_json}" "${baseline_log}"
     } >> "${digest_file}"
   done <<< "${rows}"
 }

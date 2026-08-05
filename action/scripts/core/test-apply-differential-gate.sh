@@ -40,6 +40,14 @@ printf '{"review test":{"status":"fail","exit_code":1,"command":"homeboy review 
 result="$(python3 "${APPLY_GATE}" '{"review test":"fail"}' "${current_dir}" "${base_dir}")"
 assert_equals '{"review test":"baseline_red"}' "${result}" "a failure that reproduces unchanged on the baseline is baseline_red, not pass"
 
+# Sharded workflow commands retain their original spelling. A bare `test`
+# command therefore reads `test.json`, not the review-command filename.
+printf '{"success":false,"data":{"test_counts":{"failed":2,"errors":0}}}\n' > "${current_dir}/test.json"
+printf '{"success":false,"data":{"test_counts":{"failed":1,"errors":0}}}\n' > "${base_dir}/test.json"
+printf '{"test":{"status":"fail","exit_code":1,"command":"homeboy review test sample --path .","structured_output":true}}\n' > "${base_dir}/baseline-status.json"
+result="$(python3 "${APPLY_GATE}" '{"test":"fail"}' "${current_dir}" "${base_dir}")"
+assert_equals '{"test":"fail"}' "${result}" "bare test command reads its structured failing baseline and keeps regressions blocking"
+
 printf '{"success":false,"data":{"test_counts":{"failed":2,"errors":0}}}\n' > "${current_dir}/review-test.json"
 printf '{"review test":{"status":"fail","exit_code":1,"command":"homeboy review test sample --path .","structured_output":true}}\n' > "${base_dir}/baseline-status.json"
 result="$(python3 "${APPLY_GATE}" '{"review test":"fail"}' "${current_dir}" "${base_dir}")"

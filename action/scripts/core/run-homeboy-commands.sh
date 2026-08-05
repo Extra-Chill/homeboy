@@ -53,7 +53,7 @@ for CMD in "${CMD_ARRAY[@]}"; do
   if [ "$(printf '%s' "${CMD}" | awk '{print $1}')" = "bench" ]; then
     CI_RESULT_JSON="${HOMEBOY_CI_RESULTS_DIR}/bench.json"
   else
-    CI_RESULT_JSON="${HOMEBOY_CI_RESULTS_DIR}/${OUTPUT_STEM}.json"
+    CI_RESULT_JSON="${HOMEBOY_CI_RESULTS_DIR}/$(command_result_filename "${CMD}")"
   fi
   # This is the one durable result path consumed by artifacts and reporting.
   OUTPUT_JSON="${CI_RESULT_JSON}"

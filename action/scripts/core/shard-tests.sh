@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib.sh"
+
 fail() { echo "::error::$1" >&2; exit 1; }
 digest() { printf '%s' "$1" | shasum -a 256 | awk '{print $1}'; }
 
@@ -67,13 +71,13 @@ aggregate() {
       ' "${manifest}" >/dev/null 2>&1; then matches+=("${manifest}"); fi
     done < <(find "${root}" -path "*/${phase}/manifest.json" -type f -print | sort)
     [ "${#matches[@]}" -eq 1 ] || fail "Expected exactly one valid ${phase} shard evidence manifest for ${id}."
-    manifest="${matches[0]}"; status="$(jq -r --arg command "${command}" '.results[$command]' "${manifest}")"; payload="$(dirname "${manifest}")/homeboy-ci-results/review-test.json"
+    manifest="${matches[0]}"; status="$(jq -r --arg command "${command}" '.results[$command]' "${manifest}")"; payload="$(dirname "${manifest}")/homeboy-ci-results/$(command_result_filename "${command}")"
     case "${status}" in
       timeout) aggregate_status="timeout" ;;
       fail) [ "${aggregate_status}" = timeout ] || aggregate_status="fail" ;;
     esac
     if [ ! -f "${payload}" ]; then
-      [ "${status}" = timeout ] || fail "${phase} shard ${id} is ${status} but has no structured review-test.json result."
+      [ "${status}" = timeout ] || fail "${phase} shard ${id} is ${status} but has no structured $(command_result_filename "${command}") result."
       continue
     fi
     expected_total="$(jq '.tests | length' <<< "${shard}")"
@@ -85,11 +89,11 @@ aggregate() {
       and (if $phase_status == "pass" then .success == true and .exit_code == 0 and .data.test_counts.failed == 0
             elif $phase_status == "fail" then .success == false and .exit_code != 0
             else true end)
-    ' "${payload}" >/dev/null 2>&1 || fail "${phase} shard ${id} has invalid structured review-test.json counts."
+    ' "${payload}" >/dev/null 2>&1 || fail "${phase} shard ${id} has invalid structured $(command_result_filename "${command}") counts."
     if [ "${status}" = pass ]; then
       [ "$(jq '.data.test_counts.total' "${payload}")" = "${expected_total}" ] || fail "${phase} shard ${id} structured total does not match its planned membership."
     fi
-    cp "${payload}" "${output}/${id}-review-test.json"
+    cp "${payload}" "${output}/${id}-$(command_result_filename "${command}")"
     payloads+=("${payload}")
   done < <(jq -c '.shards[]' "${plan}")
   local payload_json='[]'
@@ -103,7 +107,7 @@ aggregate() {
   jq -n --arg root "${command%% *}" --arg plan_digest "${plan_digest}" --arg status "${aggregate_status}" --argjson payloads "${payload_json}" '
     {schema:"homeboy/command-result/v3",command:$root,success:($status == "pass"),status:(if $status == "pass" then "succeeded" else "failed" end),exit_code:(if $status == "pass" then 0 elif $status == "timeout" then 124 else 1 end),
      data:{test_counts:{passed:([$payloads[].data.test_counts.passed] | add // 0),failed:([$payloads[].data.test_counts.failed] | add // 0),skipped:([$payloads[].data.test_counts.skipped] | add // 0),total:([$payloads[].data.test_counts.total] | add // 0)},shard_plan_digest:$plan_digest,shard_count:($payloads|length)}}
-  ' > "${output}/review-test.json"
+  ' > "${output}/$(command_result_filename "${command}")"
   printf '{"%s":"%s"}\n' "${command}" "${aggregate_status}" > "${output}/results.json"
 }
 

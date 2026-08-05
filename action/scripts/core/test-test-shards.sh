@@ -15,8 +15,25 @@ mkdir -p "${tmp}/bin"
 cat > "${tmp}/bin/homeboy" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-[ "${HOMEBOY_TEST_INVENTORY_ONLY:-}" = 1 ] || exit 99
-cp "${FIXTURE_INVENTORY}" "${HOMEBOY_TEST_INVENTORY_FILE}"
+if [ "${HOMEBOY_TEST_INVENTORY_ONLY:-}" = 1 ]; then
+  cp "${FIXTURE_INVENTORY}" "${HOMEBOY_TEST_INVENTORY_FILE}"
+  exit 0
+fi
+
+output=""
+printf '%s\n' "$@" > "${FAKE_HOMEBOY_ARGS}"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output) output="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}" ] && [ -s "${HOMEBOY_TEST_SHARD_MANIFEST}" ] || exit 98
+[ "${HOMEBOY_TEST_SHARD_MANIFEST}" = "${FAKE_EXPECTED_SHARD_MANIFEST}" ] || exit 96
+total="$(jq '.tests | length' "${HOMEBOY_TEST_SHARD_MANIFEST}")"
+[ "${total}" -gt 0 ] || exit 97
+mkdir -p "$(dirname "${output}")"
+jq -n --argjson total "${total}" '{schema:"homeboy/command-result/v3",command:"review",success:true,status:"succeeded",exit_code:0,data:{test_counts:{passed:$total,failed:0,skipped:0,total:$total}}}' > "${output}"
 SH
 chmod +x "${tmp}/bin/homeboy"
 PATH="${tmp}/bin:${PATH}" FIXTURE_INVENTORY="${tmp}/inventory.json" HOMEBOY_TEST_INVENTORY_ONLY=1 HOMEBOY_TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" homeboy review test fixture
@@ -47,6 +64,19 @@ printf 'PASS: deterministic duration-balanced plan has exact membership\n'
 
 plan_digest="$(jq -r .plan_digest "${tmp}/one.json")"
 inventory_digest="$(jq -r .inventory_digest "${tmp}/one.json")"
+shard_manifest="${tmp}/shard-1.json"
+jq --arg id shard-1 '.shards[] | select(.id == $id)' "${tmp}/one.json" > "${shard_manifest}"
+mkdir -p "${tmp}/replay-workspace"
+PATH="${tmp}/bin:${PATH}" GITHUB_ACTION_PATH="${ROOT}" GITHUB_WORKSPACE="${tmp}/replay-workspace" GITHUB_OUTPUT="${tmp}/replay-output" GITHUB_ENV="${tmp}/replay-env" RESOLVED_COMMANDS='review test' COMPONENT_NAME=fixture HOMEBOY_TEST_SHARD_MANIFEST="${shard_manifest}" FAKE_EXPECTED_SHARD_MANIFEST="${shard_manifest}" FAKE_HOMEBOY_ARGS="${tmp}/replay-args" \
+  bash "${ROOT}/scripts/core/run-homeboy-commands.sh"
+replay_result="${tmp}/replay-workspace/homeboy-ci-results/review-test.json"
+replay_total="$(jq '.data.test_counts.total' "${replay_result}")"
+[ "${replay_total}" -gt 0 ] || { printf 'FAIL: non-empty shard manifest replay did not execute tests\n'; exit 1; }
+[ "${replay_total}" = "$(jq '.tests | length' "${shard_manifest}")" ] || { printf 'FAIL: replay total does not match assigned shard membership\n'; exit 1; }
+if grep -Fx -- "$(jq -r '.tests[0]' "${shard_manifest}")" "${tmp}/replay-args" >/dev/null; then
+  printf 'FAIL: action expanded an assigned test ID into the Homeboy command argv\n'; exit 1
+fi
+printf 'PASS: non-empty shard manifest is passed by path and replays assigned tests through the action command wrapper\n'
 for phase in candidate baseline; do
   for shard in shard-1 shard-2; do
     mkdir -p "${tmp}/artifacts/${phase}-${shard}/${phase}/homeboy-ci-results"
@@ -58,6 +88,11 @@ for phase in candidate baseline; do
   TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE="${phase}" TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/${phase}-output" RUN_ATTEMPT=2 \
     bash "${ROOT}/scripts/core/shard-tests.sh" aggregate
 done
+cp "${replay_result}" "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json"
+TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/candidate-replay-output" RUN_ATTEMPT=2 \
+  bash "${ROOT}/scripts/core/shard-tests.sh" aggregate
+jq -e '.data.test_counts.total == 4' "${tmp}/candidate-replay-output/review-test.json" >/dev/null || { printf 'FAIL: aggregate did not include replayed shard evidence\n'; exit 1; }
+jq -e '.data.shard_plan_digest == $digest' --arg digest "${plan_digest}" "${tmp}/candidate-replay-output/review-test.json" >/dev/null || { printf 'FAIL: aggregation did not preserve immutable plan identity\n'; exit 1; }
 jq -e '."review test" == "pass"' "${tmp}/candidate-output/results.json" >/dev/null
 jq -e '.data.test_counts.total == 4' "${tmp}/candidate-output/review-test.json" >/dev/null || { printf 'FAIL: aggregation did not sum actual structured shard counts\n'; exit 1; }
 cp "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json" "${tmp}/passing-shard.json"
@@ -137,4 +172,5 @@ fi
 # The literal workflow expression is the contract.
 # shellcheck disable=SC2016
 grep -F 'baseline_result="$(jq -r --arg command "${COMMAND}"' "${WORKFLOW}" >/dev/null || { printf 'FAIL: differential baseline metadata is not derived from its aggregate result\n'; exit 1; }
+grep -F 'result_filename="$(command_result_filename "${COMMAND}")"' "${WORKFLOW}" >/dev/null || { printf 'FAIL: differential baseline lookup does not use the canonical result filename\n'; exit 1; }
 printf 'PASS: policy waits for sharded Test reconciliation while preserving unsharded behavior\n'
