@@ -90,10 +90,7 @@ mod tests {
         assert!(text.ends_with("Version: 9.9.9"));
     }
 
-    #[test]
-    fn bound_captured_read_default_cap_is_nonzero() {
-        assert!(ARTIFACT_VERSION_READ_LIMIT_BYTES > 0);
-    }
+    const _: () = assert!(ARTIFACT_VERSION_READ_LIMIT_BYTES > 0);
 
     #[test]
     fn test_execute_component_deploy_failure_helper_preserves_build_exit_code() {

@@ -589,443 +589,6 @@ fn dirty_worktree_path_summary(dirty: &[DirtyComponent]) -> String {
         .join("; ")
 }
 
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-    use std::path::Path;
-    use std::process::Command;
-
-    use super::{
-        guard_deployment_provenance, guard_head_matches_invocation_checkout,
-        guard_local_build_downgrades, guard_local_build_source_freshness, local_build_components,
-        warn_non_default_branch,
-    };
-    use crate::DeployConfig;
-    use homeboy_core::component::Component;
-    use homeboy_core::project::{
-        DeploymentForgeEvidence, DeploymentProvenanceMode, DeploymentProvenancePolicy, Project,
-    };
-
-    fn config() -> DeployConfig {
-        DeployConfig {
-            component_ids: vec![],
-            all: false,
-            outdated: false,
-            behind_upstream: false,
-            dry_run: false,
-            check: false,
-            force: false,
-            skip_build: false,
-            keep_deps: false,
-            skip_deps_hydration: false,
-            expected_version: None,
-            no_pull: true,
-            allow_stale_source: false,
-            allow_downgrade: false,
-            head: false,
-            requested_ref: None,
-            requested_refs: Default::default(),
-            resolved_refs: Default::default(),
-            preflighted_source_paths: Default::default(),
-            preflighted_component_identities: Default::default(),
-            prepared_projection: None,
-            tagged: false,
-            prepared_artifact: None,
-            resume_run_id: None,
-        }
-    }
-
-    fn component(path: &Path) -> Component {
-        Component {
-            id: "example".to_string(),
-            local_path: path.to_string_lossy().to_string(),
-            ..Component::default()
-        }
-    }
-
-    fn accepted_ref_project() -> Project {
-        Project {
-            id: "production".to_string(),
-            deployment_provenance: Some(DeploymentProvenancePolicy {
-                mode: DeploymentProvenanceMode::AcceptedRef,
-                forge_evidence: vec![],
-            }),
-            ..Project::default()
-        }
-    }
-
-    #[test]
-    fn deployment_provenance_policy_fails_before_mutable_selectors_can_run() {
-        let component = component(Path::new("/unread-source"));
-        let project = accepted_ref_project();
-        let mut config = config();
-        config.head = true;
-        let error = guard_deployment_provenance(&project, &[component], &mut config)
-            .expect_err("HEAD must fail before source work");
-        assert_eq!(error.details["field"], "deployment_provenance");
-    }
-
-    #[test]
-    fn accepted_ref_policy_accepts_validated_release_set_and_refuses_force() {
-        let component = component(Path::new("/unread-source"));
-        let project = accepted_ref_project();
-        let mut config = config();
-        config
-            .requested_refs
-            .insert("example".to_string(), "v1.2.3".to_string());
-        config
-            .resolved_refs
-            .insert("example".to_string(), "a".repeat(40));
-        config
-            .preflighted_source_paths
-            .insert("example".to_string(), "/unread-source".to_string());
-        config
-            .preflighted_component_identities
-            .insert("example".to_string(), "identity".to_string());
-        let evidence = guard_deployment_provenance(&project, &[component.clone()], &mut config)
-            .expect("validated release set is accepted evidence");
-        assert_eq!(evidence["example"].kind, "release_set");
-
-        config.force = true;
-        let error = guard_deployment_provenance(&project, &[component], &mut config)
-            .expect_err("force must not bypass active policy");
-        assert_eq!(error.details["field"], "force");
-    }
-
-    #[test]
-    fn accepted_ref_policy_accepts_release_tag_and_sha_bound_forge_evidence() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        init_repo_with_commit(temp.path());
-        git(temp.path(), &["tag", "v1.2.3"]);
-        let component = component(temp.path());
-        let project = accepted_ref_project();
-
-        let mut tagged = config();
-        let evidence = guard_deployment_provenance(&project, &[component.clone()], &mut tagged)
-            .expect("latest release tag is accepted");
-        assert_eq!(evidence["example"].kind, "release_tag");
-
-        let sha = homeboy_core::git::run_git(temp.path(), &["rev-parse", "HEAD"], "read SHA")
-            .expect("SHA")
-            .trim()
-            .to_string();
-        let mut project = accepted_ref_project();
-        project
-            .deployment_provenance
-            .as_mut()
-            .expect("policy")
-            .forge_evidence = vec![DeploymentForgeEvidence {
-            sha: sha.clone(),
-            forge: "github".to_string(),
-            reference: "https://github.com/acme/example/pull/42".to_string(),
-        }];
-        let mut direct = config();
-        direct.requested_ref = Some(sha);
-        let evidence = guard_deployment_provenance(&project, &[component], &mut direct)
-            .expect("forge evidence for exact SHA is accepted");
-        assert_eq!(evidence["example"].kind, "forge");
-        assert_eq!(evidence["example"].forge.as_deref(), Some("github"));
-    }
-
-    #[test]
-    fn accepted_ref_policy_refuses_unverifiable_ref() {
-        let component = component(Path::new("/unread-source"));
-        let mut config = config();
-        config.requested_ref = Some("unverifiable".to_string());
-        assert!(
-            guard_deployment_provenance(&accepted_ref_project(), &[component], &mut config)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn omitted_deployment_provenance_policy_preserves_force_compatibility() {
-        let component = component(Path::new("/unread-source"));
-        let mut config = config();
-        config.head = true;
-        config.force = true;
-        guard_deployment_provenance(&Project::default(), &[component], &mut config)
-            .expect("projects without a policy retain legacy force semantics");
-    }
-
-    fn git(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    #[test]
-    fn stale_local_source_refuses_until_explicitly_allowed() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let remote = temp.path().join("remote.git");
-        let source = temp.path().join("source");
-        let updater = temp.path().join("updater");
-        std::fs::create_dir(&source).expect("source dir");
-        git(
-            temp.path(),
-            &["init", "--bare", remote.to_str().expect("remote path")],
-        );
-        git(&source, &["init"]);
-        git(&source, &["config", "user.email", "test@example.com"]);
-        git(&source, &["config", "user.name", "Test"]);
-        std::fs::write(source.join("version.txt"), "1.0.0").expect("version");
-        git(&source, &["add", "."]);
-        git(&source, &["commit", "-m", "initial"]);
-        git(&source, &["branch", "-M", "main"]);
-        git(
-            &source,
-            &[
-                "remote",
-                "add",
-                "origin",
-                remote.to_str().expect("remote path"),
-            ],
-        );
-        git(&source, &["push", "-u", "origin", "main"]);
-        git(
-            temp.path(),
-            &[
-                "clone",
-                "-b",
-                "main",
-                remote.to_str().expect("remote path"),
-                updater.to_str().expect("updater path"),
-            ],
-        );
-        git(&updater, &["config", "user.email", "test@example.com"]);
-        git(&updater, &["config", "user.name", "Test"]);
-        std::fs::write(updater.join("version.txt"), "1.1.0").expect("updated version");
-        git(&updater, &["add", "."]);
-        git(&updater, &["commit", "-m", "update"]);
-        git(&updater, &["push"]);
-
-        let component = component(&source);
-        let error = guard_local_build_source_freshness(&[component.clone()], &config())
-            .expect_err("stale source must refuse");
-        assert!(error.message.contains("1 commit(s) behind upstream"));
-        assert!(error.details.to_string().contains("--allow-stale-source"));
-
-        let mut allowed = config();
-        allowed.allow_stale_source = true;
-        guard_local_build_source_freshness(&[component], &allowed)
-            .expect("explicit stale-source override must proceed");
-    }
-
-    #[test]
-    fn semantic_downgrade_refuses_until_explicitly_allowed() {
-        let component = component(Path::new("."));
-        let local = HashMap::from([("example".to_string(), "1.2.3".to_string())]);
-        let remote = HashMap::from([("example".to_string(), "1.3.0".to_string())]);
-        let error = guard_local_build_downgrades(&[component.clone()], &local, &remote, &config())
-            .expect_err("remote-newer version must refuse");
-        assert!(error.message.contains("remote 1.3.0 > local 1.2.3"));
-        assert!(error.details.to_string().contains("--allow-downgrade"));
-
-        let mut allowed = config();
-        allowed.allow_downgrade = true;
-        guard_local_build_downgrades(&[component], &local, &remote, &allowed)
-            .expect("explicit downgrade override must proceed");
-    }
-
-    #[test]
-    fn equal_or_newer_local_semantic_versions_are_allowed() {
-        let component = component(Path::new("."));
-        for (local_version, remote_version) in [("1.3.0", "1.3.0"), ("1.4.0", "1.3.0")] {
-            let local = HashMap::from([("example".to_string(), local_version.to_string())]);
-            let remote = HashMap::from([("example".to_string(), remote_version.to_string())]);
-            guard_local_build_downgrades(&[component.clone()], &local, &remote, &config())
-                .expect("equal or newer local version must proceed");
-        }
-    }
-
-    #[test]
-    fn unavailable_or_invalid_versions_do_not_create_false_downgrade_refusals() {
-        let component = component(Path::new("."));
-        for (local, remote) in [
-            (
-                HashMap::new(),
-                HashMap::from([("example".to_string(), "1.3.0".to_string())]),
-            ),
-            (
-                HashMap::from([("example".to_string(), "dev".to_string())]),
-                HashMap::from([("example".to_string(), "1.3.0".to_string())]),
-            ),
-        ] {
-            guard_local_build_downgrades(&[component.clone()], &local, &remote, &config())
-                .expect("unavailable or invalid versions are not proven downgrades");
-        }
-    }
-
-    #[test]
-    fn immutable_release_asset_bypasses_local_source_guards() {
-        let component = Component {
-            id: "example".to_string(),
-            local_path: "/not/a/checkout".to_string(),
-            remote_url: Some("https://github.com/example/example".to_string()),
-            build_artifact: Some("example.zip".to_string()),
-            ..Component::default()
-        };
-        let mut config = config();
-        config.expected_version = Some("1.2.3".to_string());
-
-        assert!(local_build_components(&[component], &config).is_empty());
-    }
-
-    #[test]
-    fn non_default_head_requires_force_for_dry_run_and_apply() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        init_repo_with_commit(temp.path());
-        git(temp.path(), &["checkout", "-b", "feature"]);
-        let component = component(temp.path());
-
-        for dry_run in [true, false] {
-            let mut config = config();
-            config.head = true;
-            config.dry_run = dry_run;
-            let error = warn_non_default_branch(&[component.clone()], &config)
-                .expect_err("non-default --head requires --force");
-            assert_eq!(error.details["field"], "head");
-            assert!(error.message.contains("branch 'feature', not 'main'"));
-            assert!(error.details.to_string().contains("Use --force"));
-
-            config.force = true;
-            warn_non_default_branch(&[component.clone()], &config)
-                .expect("--force approves non-default --head for dry-run and apply");
-        }
-    }
-
-    // Serialize the #7599 tests: they mutate the process CWD, which is global.
-    fn cwd_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
-    fn with_cwd<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
-        let _guard = cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-        let previous = std::env::current_dir().expect("cwd");
-        std::env::set_current_dir(dir).expect("set cwd");
-        let result = f();
-        std::env::set_current_dir(previous).expect("restore cwd");
-        result
-    }
-
-    fn init_repo_with_commit(path: &Path) {
-        std::fs::create_dir_all(path).expect("repo dir");
-        git(path, &["init"]);
-        git(path, &["config", "user.email", "test@example.com"]);
-        git(path, &["config", "user.name", "Test"]);
-        std::fs::write(path.join("file.txt"), "a").expect("seed file");
-        git(path, &["add", "."]);
-        git(path, &["commit", "-m", "initial"]);
-        git(path, &["branch", "-M", "main"]);
-    }
-
-    #[test]
-    fn head_deploy_fails_closed_when_invocation_worktree_advanced_past_registered_checkout() {
-        // #7599: registered checkout (primary) is behind the worktree the
-        // operator is standing in. --head would build/report the primary's SHA,
-        // so refuse with an actionable message rather than ship the wrong commit.
-        let temp = tempfile::tempdir().expect("temp dir");
-        let primary = temp.path().join("primary");
-        init_repo_with_commit(&primary);
-        let worktree = temp.path().join("component@feature");
-        git(
-            &primary,
-            &["worktree", "add", worktree.to_str().expect("worktree path")],
-        );
-        // Advance the worktree past the primary.
-        std::fs::write(worktree.join("file.txt"), "b").expect("edit");
-        git(&worktree, &["add", "."]);
-        git(&worktree, &["commit", "-m", "advance worktree"]);
-
-        let mut cfg = config();
-        cfg.head = true;
-
-        let error = with_cwd(&worktree, || {
-            guard_head_matches_invocation_checkout(&[component(&primary)], &cfg)
-                .expect_err("advanced invocation worktree must fail closed")
-        });
-        assert_eq!(error.details["field"], "head");
-        assert!(error.to_string().contains("different checkout"));
-    }
-
-    #[test]
-    fn head_deploy_passes_when_invocation_checkout_matches_registered_head() {
-        // Same repo, same HEAD (e.g. invoked from the registered checkout, or a
-        // worktree that has not advanced): nothing to reconcile.
-        let temp = tempfile::tempdir().expect("temp dir");
-        let primary = temp.path().join("primary");
-        init_repo_with_commit(&primary);
-        let worktree = temp.path().join("component@even");
-        git(
-            &primary,
-            &["worktree", "add", worktree.to_str().expect("worktree path")],
-        );
-
-        let mut cfg = config();
-        cfg.head = true;
-
-        with_cwd(&worktree, || {
-            guard_head_matches_invocation_checkout(&[component(&primary)], &cfg)
-                .expect("matching HEAD passes the guard")
-        });
-    }
-
-    #[test]
-    fn head_deploy_ignores_unrelated_invocation_checkout() {
-        // The operator is standing in a *different* repository (different
-        // git-common-dir). The registered checkout is authoritative; do not
-        // false-positive on an unrelated advanced repo.
-        let temp = tempfile::tempdir().expect("temp dir");
-        let primary = temp.path().join("primary");
-        init_repo_with_commit(&primary);
-        let unrelated = temp.path().join("unrelated");
-        init_repo_with_commit(&unrelated);
-        std::fs::write(unrelated.join("file.txt"), "z").expect("edit");
-        git(&unrelated, &["add", "."]);
-        git(&unrelated, &["commit", "-m", "unrelated advance"]);
-
-        let mut cfg = config();
-        cfg.head = true;
-
-        with_cwd(&unrelated, || {
-            guard_head_matches_invocation_checkout(&[component(&primary)], &cfg)
-                .expect("an unrelated repo must not trip the same-repo guard")
-        });
-    }
-
-    #[test]
-    fn head_deploy_force_bypasses_the_invocation_checkout_guard() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let primary = temp.path().join("primary");
-        init_repo_with_commit(&primary);
-        let worktree = temp.path().join("component@forced");
-        git(
-            &primary,
-            &["worktree", "add", worktree.to_str().expect("worktree path")],
-        );
-        std::fs::write(worktree.join("file.txt"), "b").expect("edit");
-        git(&worktree, &["add", "."]);
-        git(&worktree, &["commit", "-m", "advance worktree"]);
-
-        let mut cfg = config();
-        cfg.head = true;
-        cfg.force = true;
-
-        with_cwd(&worktree, || {
-            guard_head_matches_invocation_checkout(&[component(&primary)], &cfg)
-                .expect("--force bypasses the guard")
-        });
-    }
-}
-
 /// Fetch and pull latest changes for each component before deploying.
 ///
 /// Prevents deploying stale code when the local clone is behind remote.
@@ -1192,4 +755,458 @@ pub(super) fn verify_expected_version(components: &[Component], expected: &str) 
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::process::Command;
+
+    use super::{
+        guard_deployment_provenance, guard_head_matches_invocation_checkout,
+        guard_local_build_downgrades, guard_local_build_source_freshness, local_build_components,
+        warn_non_default_branch,
+    };
+    use crate::DeployConfig;
+    use homeboy_core::component::Component;
+    use homeboy_core::project::{
+        DeploymentForgeEvidence, DeploymentProvenanceMode, DeploymentProvenancePolicy, Project,
+    };
+
+    fn config() -> DeployConfig {
+        DeployConfig {
+            component_ids: vec![],
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: false,
+            check: false,
+            force: false,
+            skip_build: false,
+            keep_deps: false,
+            skip_deps_hydration: false,
+            expected_version: None,
+            no_pull: true,
+            allow_stale_source: false,
+            allow_downgrade: false,
+            head: false,
+            requested_ref: None,
+            requested_refs: Default::default(),
+            resolved_refs: Default::default(),
+            preflighted_source_paths: Default::default(),
+            preflighted_component_identities: Default::default(),
+            prepared_projection: None,
+            tagged: false,
+            prepared_artifact: None,
+            resume_run_id: None,
+        }
+    }
+
+    fn component(path: &Path) -> Component {
+        Component {
+            id: "example".to_string(),
+            local_path: path.to_string_lossy().to_string(),
+            ..Component::default()
+        }
+    }
+
+    fn accepted_ref_project() -> Project {
+        Project {
+            id: "production".to_string(),
+            deployment_provenance: Some(DeploymentProvenancePolicy {
+                mode: DeploymentProvenanceMode::AcceptedRef,
+                forge_evidence: vec![],
+            }),
+            ..Project::default()
+        }
+    }
+
+    #[test]
+    fn deployment_provenance_policy_fails_before_mutable_selectors_can_run() {
+        let component = component(Path::new("/unread-source"));
+        let project = accepted_ref_project();
+        let mut config = config();
+        config.head = true;
+        let error = guard_deployment_provenance(&project, &[component], &mut config)
+            .expect_err("HEAD must fail before source work");
+        assert_eq!(error.details["field"], "deployment_provenance");
+    }
+
+    #[test]
+    fn accepted_ref_policy_accepts_validated_release_set_and_refuses_force() {
+        let component = component(Path::new("/unread-source"));
+        let project = accepted_ref_project();
+        let mut config = config();
+        config
+            .requested_refs
+            .insert("example".to_string(), "v1.2.3".to_string());
+        config
+            .resolved_refs
+            .insert("example".to_string(), "a".repeat(40));
+        config
+            .preflighted_source_paths
+            .insert("example".to_string(), "/unread-source".to_string());
+        config
+            .preflighted_component_identities
+            .insert("example".to_string(), "identity".to_string());
+        let evidence =
+            guard_deployment_provenance(&project, std::slice::from_ref(&component), &mut config)
+                .expect("validated release set is accepted evidence");
+        assert_eq!(evidence["example"].kind, "release_set");
+
+        config.force = true;
+        let error = guard_deployment_provenance(&project, &[component], &mut config)
+            .expect_err("force must not bypass active policy");
+        assert_eq!(error.details["field"], "force");
+    }
+
+    #[test]
+    fn accepted_ref_policy_accepts_release_tag_and_sha_bound_forge_evidence() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        init_repo_with_commit(temp.path());
+        git(temp.path(), &["tag", "v1.2.3"]);
+        let component = component(temp.path());
+        let project = accepted_ref_project();
+
+        let mut tagged = config();
+        let evidence =
+            guard_deployment_provenance(&project, std::slice::from_ref(&component), &mut tagged)
+                .expect("latest release tag is accepted");
+        assert_eq!(evidence["example"].kind, "release_tag");
+
+        let sha = homeboy_core::git::run_git(temp.path(), &["rev-parse", "HEAD"], "read SHA")
+            .expect("SHA")
+            .trim()
+            .to_string();
+        let mut project = accepted_ref_project();
+        project
+            .deployment_provenance
+            .as_mut()
+            .expect("policy")
+            .forge_evidence = vec![DeploymentForgeEvidence {
+            sha: sha.clone(),
+            forge: "github".to_string(),
+            reference: "https://github.com/acme/example/pull/42".to_string(),
+        }];
+        let mut direct = config();
+        direct.requested_ref = Some(sha);
+        let evidence = guard_deployment_provenance(&project, &[component], &mut direct)
+            .expect("forge evidence for exact SHA is accepted");
+        assert_eq!(evidence["example"].kind, "forge");
+        assert_eq!(evidence["example"].forge.as_deref(), Some("github"));
+    }
+
+    #[test]
+    fn accepted_ref_policy_refuses_unverifiable_ref() {
+        let component = component(Path::new("/unread-source"));
+        let mut config = config();
+        config.requested_ref = Some("unverifiable".to_string());
+        assert!(
+            guard_deployment_provenance(&accepted_ref_project(), &[component], &mut config)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn omitted_deployment_provenance_policy_preserves_force_compatibility() {
+        let component = component(Path::new("/unread-source"));
+        let mut config = config();
+        config.head = true;
+        config.force = true;
+        guard_deployment_provenance(&Project::default(), &[component], &mut config)
+            .expect("projects without a policy retain legacy force semantics");
+    }
+
+    fn git(path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn stale_local_source_refuses_until_explicitly_allowed() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let remote = temp.path().join("remote.git");
+        let source = temp.path().join("source");
+        let updater = temp.path().join("updater");
+        std::fs::create_dir(&source).expect("source dir");
+        git(
+            temp.path(),
+            &["init", "--bare", remote.to_str().expect("remote path")],
+        );
+        git(&source, &["init"]);
+        git(&source, &["config", "user.email", "test@example.com"]);
+        git(&source, &["config", "user.name", "Test"]);
+        std::fs::write(source.join("version.txt"), "1.0.0").expect("version");
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-m", "initial"]);
+        git(&source, &["branch", "-M", "main"]);
+        git(
+            &source,
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("remote path"),
+            ],
+        );
+        git(&source, &["push", "-u", "origin", "main"]);
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "-b",
+                "main",
+                remote.to_str().expect("remote path"),
+                updater.to_str().expect("updater path"),
+            ],
+        );
+        git(&updater, &["config", "user.email", "test@example.com"]);
+        git(&updater, &["config", "user.name", "Test"]);
+        std::fs::write(updater.join("version.txt"), "1.1.0").expect("updated version");
+        git(&updater, &["add", "."]);
+        git(&updater, &["commit", "-m", "update"]);
+        git(&updater, &["push"]);
+
+        let component = component(&source);
+        let error = guard_local_build_source_freshness(std::slice::from_ref(&component), &config())
+            .expect_err("stale source must refuse");
+        assert!(error.message.contains("1 commit(s) behind upstream"));
+        assert!(error.details.to_string().contains("--allow-stale-source"));
+
+        let mut allowed = config();
+        allowed.allow_stale_source = true;
+        guard_local_build_source_freshness(&[component], &allowed)
+            .expect("explicit stale-source override must proceed");
+    }
+
+    #[test]
+    fn semantic_downgrade_refuses_until_explicitly_allowed() {
+        let component = component(Path::new("."));
+        let local = HashMap::from([("example".to_string(), "1.2.3".to_string())]);
+        let remote = HashMap::from([("example".to_string(), "1.3.0".to_string())]);
+        let error = guard_local_build_downgrades(
+            std::slice::from_ref(&component),
+            &local,
+            &remote,
+            &config(),
+        )
+        .expect_err("remote-newer version must refuse");
+        assert!(error.message.contains("remote 1.3.0 > local 1.2.3"));
+        assert!(error.details.to_string().contains("--allow-downgrade"));
+
+        let mut allowed = config();
+        allowed.allow_downgrade = true;
+        guard_local_build_downgrades(&[component], &local, &remote, &allowed)
+            .expect("explicit downgrade override must proceed");
+    }
+
+    #[test]
+    fn equal_or_newer_local_semantic_versions_are_allowed() {
+        let component = component(Path::new("."));
+        for (local_version, remote_version) in [("1.3.0", "1.3.0"), ("1.4.0", "1.3.0")] {
+            let local = HashMap::from([("example".to_string(), local_version.to_string())]);
+            let remote = HashMap::from([("example".to_string(), remote_version.to_string())]);
+            guard_local_build_downgrades(
+                std::slice::from_ref(&component),
+                &local,
+                &remote,
+                &config(),
+            )
+            .expect("equal or newer local version must proceed");
+        }
+    }
+
+    #[test]
+    fn unavailable_or_invalid_versions_do_not_create_false_downgrade_refusals() {
+        let component = component(Path::new("."));
+        for (local, remote) in [
+            (
+                HashMap::new(),
+                HashMap::from([("example".to_string(), "1.3.0".to_string())]),
+            ),
+            (
+                HashMap::from([("example".to_string(), "dev".to_string())]),
+                HashMap::from([("example".to_string(), "1.3.0".to_string())]),
+            ),
+        ] {
+            guard_local_build_downgrades(
+                std::slice::from_ref(&component),
+                &local,
+                &remote,
+                &config(),
+            )
+            .expect("unavailable or invalid versions are not proven downgrades");
+        }
+    }
+
+    #[test]
+    fn immutable_release_asset_bypasses_local_source_guards() {
+        let component = Component {
+            id: "example".to_string(),
+            local_path: "/not/a/checkout".to_string(),
+            remote_url: Some("https://github.com/example/example".to_string()),
+            build_artifact: Some("example.zip".to_string()),
+            ..Component::default()
+        };
+        let mut config = config();
+        config.expected_version = Some("1.2.3".to_string());
+
+        assert!(local_build_components(&[component], &config).is_empty());
+    }
+
+    #[test]
+    fn non_default_head_requires_force_for_dry_run_and_apply() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        init_repo_with_commit(temp.path());
+        git(temp.path(), &["checkout", "-b", "feature"]);
+        let component = component(temp.path());
+
+        for dry_run in [true, false] {
+            let mut config = config();
+            config.head = true;
+            config.dry_run = dry_run;
+            let error = warn_non_default_branch(std::slice::from_ref(&component), &config)
+                .expect_err("non-default --head requires --force");
+            assert_eq!(error.details["field"], "head");
+            assert!(error.message.contains("branch 'feature', not 'main'"));
+            assert!(error.details.to_string().contains("Use --force"));
+
+            config.force = true;
+            warn_non_default_branch(std::slice::from_ref(&component), &config)
+                .expect("--force approves non-default --head for dry-run and apply");
+        }
+    }
+
+    // Serialize the #7599 tests: they mutate the process CWD, which is global.
+    fn cwd_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    fn with_cwd<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+        let _guard = cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let previous = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(dir).expect("set cwd");
+        let result = f();
+        std::env::set_current_dir(previous).expect("restore cwd");
+        result
+    }
+
+    fn init_repo_with_commit(path: &Path) {
+        std::fs::create_dir_all(path).expect("repo dir");
+        git(path, &["init"]);
+        git(path, &["config", "user.email", "test@example.com"]);
+        git(path, &["config", "user.name", "Test"]);
+        std::fs::write(path.join("file.txt"), "a").expect("seed file");
+        git(path, &["add", "."]);
+        git(path, &["commit", "-m", "initial"]);
+        git(path, &["branch", "-M", "main"]);
+    }
+
+    #[test]
+    fn head_deploy_fails_closed_when_invocation_worktree_advanced_past_registered_checkout() {
+        // #7599: registered checkout (primary) is behind the worktree the
+        // operator is standing in. --head would build/report the primary's SHA,
+        // so refuse with an actionable message rather than ship the wrong commit.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let primary = temp.path().join("primary");
+        init_repo_with_commit(&primary);
+        let worktree = temp.path().join("component@feature");
+        git(
+            &primary,
+            &["worktree", "add", worktree.to_str().expect("worktree path")],
+        );
+        // Advance the worktree past the primary.
+        std::fs::write(worktree.join("file.txt"), "b").expect("edit");
+        git(&worktree, &["add", "."]);
+        git(&worktree, &["commit", "-m", "advance worktree"]);
+
+        let mut cfg = config();
+        cfg.head = true;
+
+        let error = with_cwd(&worktree, || {
+            guard_head_matches_invocation_checkout(&[component(&primary)], &cfg)
+                .expect_err("advanced invocation worktree must fail closed")
+        });
+        assert_eq!(error.details["field"], "head");
+        assert!(error.to_string().contains("different checkout"));
+    }
+
+    #[test]
+    fn head_deploy_passes_when_invocation_checkout_matches_registered_head() {
+        // Same repo, same HEAD (e.g. invoked from the registered checkout, or a
+        // worktree that has not advanced): nothing to reconcile.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let primary = temp.path().join("primary");
+        init_repo_with_commit(&primary);
+        let worktree = temp.path().join("component@even");
+        git(
+            &primary,
+            &["worktree", "add", worktree.to_str().expect("worktree path")],
+        );
+
+        let mut cfg = config();
+        cfg.head = true;
+
+        with_cwd(&worktree, || {
+            guard_head_matches_invocation_checkout(&[component(&primary)], &cfg)
+                .expect("matching HEAD passes the guard")
+        });
+    }
+
+    #[test]
+    fn head_deploy_ignores_unrelated_invocation_checkout() {
+        // The operator is standing in a *different* repository (different
+        // git-common-dir). The registered checkout is authoritative; do not
+        // false-positive on an unrelated advanced repo.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let primary = temp.path().join("primary");
+        init_repo_with_commit(&primary);
+        let unrelated = temp.path().join("unrelated");
+        init_repo_with_commit(&unrelated);
+        std::fs::write(unrelated.join("file.txt"), "z").expect("edit");
+        git(&unrelated, &["add", "."]);
+        git(&unrelated, &["commit", "-m", "unrelated advance"]);
+
+        let mut cfg = config();
+        cfg.head = true;
+
+        with_cwd(&unrelated, || {
+            guard_head_matches_invocation_checkout(&[component(&primary)], &cfg)
+                .expect("an unrelated repo must not trip the same-repo guard")
+        });
+    }
+
+    #[test]
+    fn head_deploy_force_bypasses_the_invocation_checkout_guard() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let primary = temp.path().join("primary");
+        init_repo_with_commit(&primary);
+        let worktree = temp.path().join("component@forced");
+        git(
+            &primary,
+            &["worktree", "add", worktree.to_str().expect("worktree path")],
+        );
+        std::fs::write(worktree.join("file.txt"), "b").expect("edit");
+        git(&worktree, &["add", "."]);
+        git(&worktree, &["commit", "-m", "advance worktree"]);
+
+        let mut cfg = config();
+        cfg.head = true;
+        cfg.force = true;
+
+        with_cwd(&worktree, || {
+            guard_head_matches_invocation_checkout(&[component(&primary)], &cfg)
+                .expect("--force bypasses the guard")
+        });
+    }
 }

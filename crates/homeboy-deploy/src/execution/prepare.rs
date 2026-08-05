@@ -16,7 +16,9 @@ use super::super::types::{
 use super::super::version_overrides::is_self_deploy;
 use super::preflight::{resolve_preflight_artifact_path, validate_preflight_file_artifact};
 use super::release_plan::{release_artifact_plan, ReleaseArtifactPlan};
-use super::strategies::{execute_artifact_deploy, execute_file_deploy, execute_git_deploy};
+use super::strategies::{
+    execute_artifact_deploy, execute_file_deploy, execute_git_deploy, GitDeployInput,
+};
 use homeboy_core::git::release_download::ReleaseArtifactLease;
 
 pub(crate) struct PreparedComponentDeploy {
@@ -332,16 +334,16 @@ pub(crate) fn execute_preflighted_component_deploy(
     let strategy = component.deploy_strategy.as_deref().unwrap_or("rsync");
 
     if strategy == "git" {
-        return execute_git_deploy(
+        return execute_git_deploy(GitDeployInput {
             component,
-            &prepared.config,
+            config: &prepared.config,
             ctx,
             base_path,
-            &prepared.install_dir,
-            prepared.local_version.clone(),
-            prepared.remote_version.clone(),
+            install_dir: &prepared.install_dir,
+            local_version: prepared.local_version.clone(),
+            remote_version: prepared.remote_version.clone(),
             observation,
-        );
+        });
     }
 
     if strategy == "file" {

@@ -23,7 +23,7 @@ pub(super) fn deploy_via_git(
     remote_path: &str,
     git_config: &component::GitDeployConfig,
     component_version: Option<&str>,
-    mut observation: Option<&mut DeployObservation>,
+    observation: Option<&mut DeployObservation>,
 ) -> Result<DeployResult> {
     // Determine what to checkout
     let checkout_target = if let Some(ref pattern) = git_config.tag_pattern {
@@ -38,7 +38,7 @@ pub(super) fn deploy_via_git(
 
     // Step 1: Fetch latest. `git fetch` writes remote-tracking refs and
     // FETCH_HEAD, so record the mutation boundary before issuing it.
-    if let Some(observation) = observation.as_deref_mut() {
+    if let Some(observation) = observation {
         observation.phase("transfer", true)?;
     }
     homeboy_core::log_status!(
@@ -309,7 +309,7 @@ pub(super) fn deploy_artifact(
 
     // Step 3: Run verification if configured
     if verification.is_some() {
-        if let Some(observation) = observation.as_deref_mut() {
+        if let Some(observation) = observation {
             observation.phase("verify", true)?;
         }
     }

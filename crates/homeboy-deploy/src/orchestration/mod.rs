@@ -30,7 +30,7 @@ mod preflight;
 mod prepared_payloads;
 mod smoke_check;
 
-use modes::{extension_skipped_results, run_check_mode, run_dry_run_mode};
+use modes::{extension_skipped_results, run_check_mode, run_dry_run_mode, CheckModeInput};
 use preflight::{
     check_uncommitted_changes, check_unreleased_commits, guard_head_matches_invocation_checkout,
     guard_local_build_downgrades, guard_local_build_source_freshness, local_build_components,
@@ -235,18 +235,18 @@ pub(super) fn deploy_components(
 
     // Check and dry-run modes return early without building or deploying
     if config.check {
-        let mut result = run_check_mode(
-            &components,
-            &local_versions,
-            &remote_versions,
-            &loaded.extension_skipped,
-            &project,
+        let mut result = run_check_mode(CheckModeInput {
+            components: &components,
+            local_versions: &local_versions,
+            remote_versions: &remote_versions,
+            extension_skipped: &loaded.extension_skipped,
+            project: &project,
             base_path,
             config,
-            &ctx.client,
-            &resolved_release_artifacts,
-            &unavailable_canonical_packages,
-        );
+            client: &ctx.client,
+            canonical_packages: &resolved_release_artifacts,
+            unavailable_canonical_packages: &unavailable_canonical_packages,
+        });
         attach_version_sources(&mut result, &components);
         return Ok(result);
     }
@@ -347,10 +347,7 @@ pub(super) fn deploy_components(
             checkout.hydrate_dependencies(config.skip_deps_hydration)?;
         }
 
-        tag_checkouts = match checkout_resolved_deploy_tags(in_place) {
-            Ok(checkouts) => checkouts,
-            Err(err) => return Err(err),
-        };
+        tag_checkouts = checkout_resolved_deploy_tags(in_place)?;
 
         // Repoint every materialized component at its isolated worktree so
         // version reads, packaging, and provenance all observe the tagged tree.
@@ -540,10 +537,11 @@ pub(super) fn deploy_components(
                 &["rev-parse", "--abbrev-ref", "HEAD"],
             )
             .map(|branch| format!("{} (HEAD)", branch))
-        } else if let Some(prepared_artifact) = config.prepared_artifact.as_ref() {
-            Some(prepared_artifact.tag.clone())
         } else {
-            None
+            config
+                .prepared_artifact
+                .as_ref()
+                .map(|prepared_artifact| prepared_artifact.tag.clone())
         };
 
         if let Some(ref git_ref) = deployed_ref {
@@ -588,16 +586,16 @@ pub(super) fn deploy_components(
             ) {
                 let exclusions = resolve_component_scope(component, ScopeCommand::Deploy).exclude;
                 let version = prepared.local_version.as_deref().unwrap_or_default();
-                if let Err(error) = super::receipt::write(
-                    &project,
-                    &component.id,
-                    &prepared.install_dir,
+                if let Err(error) = super::receipt::write(super::receipt::ReceiptWrite {
+                    project: &project,
+                    component_id: &component.id,
+                    target: &prepared.install_dir,
                     version,
                     manifest,
                     payload_sha256,
                     build_provenance,
                     exclusions,
-                ) {
+                }) {
                     result.status = "failed".to_string();
                     result.error = Some(format!(
                         "deployment completed but authoritative deployed-package receipt could not be persisted: {}",
@@ -625,7 +623,7 @@ pub(super) fn deploy_components(
     // to fresh visitors should fail the deploy here so it gets rolled back
     // instead of sitting live. Catches runtime errors that a syntax-only
     // preflight structurally cannot. See homeboy#5471.
-    if let Some(observation) = observation.as_deref_mut() {
+    if let Some(observation) = observation {
         observation.phase("verify", true)?;
     }
     if succeeded > 0 {
@@ -675,7 +673,7 @@ fn attach_version_sources(result: &mut DeployOrchestrationResult, components: &[
         let artifact = row
             .artifact_path
             .as_ref()
-            .and_then(|_| row.local_version.as_ref())
+            .and(row.local_version.as_ref())
             .and_then(|_| crate::types::artifact_version_source(component));
         let remote = row.remote_version.as_ref().and_then(|_| {
             crate::types::local_version_source(component).map(|source| VersionSource {
@@ -1246,7 +1244,7 @@ mod tests {
             check_config.expected_version = Some("9.9.9".to_string());
             let mut store = ReleaseArtifactStore::default();
             let (resolved, unavailable) = resolve_release_artifacts_for_deploy(
-                &[component.clone()],
+                std::slice::from_ref(&component),
                 &check_config,
                 &mut store,
             )
@@ -1261,7 +1259,7 @@ mod tests {
             dry_run_config.dry_run = true;
             dry_run_config.expected_version = Some("9.9.9".to_string());
             let (resolved, unavailable) = resolve_release_artifacts_for_deploy(
-                &[component.clone()],
+                std::slice::from_ref(&component),
                 &dry_run_config,
                 &mut store,
             )
@@ -2269,7 +2267,7 @@ mod tests {
             config.requested_ref = Some("requested".to_string());
             config.force = true;
             let prepared = prepare_component_deployments(
-                &[checkout.component.clone()],
+                std::slice::from_ref(&checkout.component),
                 &config,
                 &Project::default(),
                 "/srv/site",
@@ -2425,7 +2423,7 @@ mod tests {
         config.force = true;
         let local_versions = HashMap::from([("fixture".to_string(), "1.2.3".to_string())]);
         let prepared = prepare_component_deployments(
-            &[checkout.component.clone()],
+            std::slice::from_ref(&checkout.component),
             &config,
             &project,
             "/srv/site",
@@ -2554,7 +2552,7 @@ mod tests {
         config.requested_ref = Some("target".to_string());
         config.force = true;
         let prepared = prepare_component_deployments(
-            &[checkout.component.clone()],
+            std::slice::from_ref(&checkout.component),
             &config,
             &Project::default(),
             "/srv/site",
