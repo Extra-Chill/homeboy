@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.32.5] - 2026-08-05
+
+### Fixed
+- batch nextest shard manifests
+
 ## [1.32.1] - 2026-08-04
 
 ### Fixed
