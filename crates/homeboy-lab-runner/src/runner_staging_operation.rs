@@ -215,7 +215,7 @@ pub fn submit_remote_runner_staging(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests_support {
     use std::collections::HashMap;
 
     use super::*;
@@ -263,7 +263,7 @@ mod tests {
         }
     }
 
-    fn envelope() -> RemoteRunnerStagingEnvelope {
+    pub(crate) fn envelope() -> RemoteRunnerStagingEnvelope {
         let args = vec![
             "homeboy".to_string(),
             "agent-task".to_string(),
