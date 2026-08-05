@@ -4,7 +4,7 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc, Arc,
+    mpsc, Arc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -27,6 +27,7 @@ struct RecoveryOwner {
     id: String,
     token: String,
     deadline: Instant,
+    heartbeat_error: Option<Arc<Mutex<Option<Error>>>>,
 }
 
 impl RecoveryOwner {
@@ -44,6 +45,7 @@ impl RecoveryOwner {
     }
 
     fn before_side_effect(&self, store: &ObservationStore, action: &str) -> Result<()> {
+        self.check_heartbeat()?;
         if self.remaining()? < MIN_NON_CANCELLABLE_SIDE_EFFECT {
             return Err(Error::validation_invalid_argument(
                 "recovery_budget",
@@ -67,6 +69,27 @@ impl RecoveryOwner {
             return Err(error);
         }
         Ok(())
+    }
+
+    fn check_heartbeat(&self) -> Result<()> {
+        let Some(error) = self
+            .heartbeat_error
+            .as_ref()
+            .and_then(|error| error.lock().expect("recovery heartbeat error lock").clone())
+        else {
+            return Ok(());
+        };
+        let mut terminal = Error::internal_unexpected(format!(
+            "runner-exec recovery owner heartbeat failed: {error}"
+        ))
+        .with_retryable(true);
+        terminal.details["recovery_heartbeat_error"] = json!({
+            "code": format!("{:?}", error.code),
+            "message": error.message,
+            "details": error.details,
+            "source": error.source.as_ref().map(ToString::to_string),
+        });
+        Err(terminal)
     }
 }
 
@@ -302,6 +325,9 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 &output,
                 std::slice::from_ref(&declaration),
             )?;
+            if let Some(owner) = owner {
+                owner.before_side_effect(&store, "artifact declaration promotion record")?;
+            }
             homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
                 &run.id,
                 "artifact",
@@ -327,6 +353,12 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 &output,
                 std::slice::from_ref(&declaration),
             )?;
+            if let Some(owner) = owner {
+                owner.before_side_effect(
+                    &store,
+                    "artifact directory declaration promotion record",
+                )?;
+            }
             homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
                 &run.id,
                 "artifact_dir",
@@ -352,6 +384,9 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 &output,
                 std::slice::from_ref(&declaration),
             )?;
+            if let Some(owner) = owner {
+                owner.before_side_effect(&store, "summary declaration promotion record")?;
+            }
             homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
                 &run.id,
                 "summary",
@@ -419,15 +454,18 @@ pub fn run_scheduled_terminal_runner_exec_recovery(
     )? {
         return Ok(());
     }
+    let heartbeat_error = Arc::new(Mutex::new(None));
     let owner_context = RecoveryOwner {
         id: owner_id.to_string(),
         token: owner_token.to_string(),
         deadline: Instant::now() + STARTUP_RUNNER_EXEC_RECOVERY_BUDGET,
+        heartbeat_error: Some(Arc::clone(&heartbeat_error)),
     };
     let stop_heartbeat = Arc::new(AtomicBool::new(false));
     let heartbeat_stop = Arc::clone(&stop_heartbeat);
     let heartbeat_owner = owner_context.clone();
     let (heartbeat_done, heartbeat_stop_signal) = mpsc::channel();
+    let heartbeat_failure = Arc::clone(&heartbeat_error);
     let heartbeat = thread::spawn(move || {
         while !heartbeat_stop.load(Ordering::Acquire) {
             if heartbeat_stop_signal
@@ -439,17 +477,39 @@ pub fn run_scheduled_terminal_runner_exec_recovery(
             if heartbeat_stop.load(Ordering::Acquire) {
                 break;
             }
-            let Ok(store) = ObservationStore::open_initialized() else {
-                break;
+            let store = match ObservationStore::open_initialized() {
+                Ok(store) => store,
+                Err(error) => {
+                    *heartbeat_failure
+                        .lock()
+                        .expect("recovery heartbeat error lock") = Some(error);
+                    break;
+                }
             };
-            let Ok(owned) = store.renew_running_run_lease(
+            let owned = match store.renew_running_run_lease(
                 &heartbeat_owner.id,
                 &heartbeat_owner.token,
                 chrono::Utc::now().timestamp_millis() + RECOVERY_OWNER_LEASE.as_millis() as i64,
-            ) else {
-                break;
+            ) {
+                Ok(owned) => owned,
+                Err(error) => {
+                    *heartbeat_failure
+                        .lock()
+                        .expect("recovery heartbeat error lock") = Some(error);
+                    break;
+                }
             };
             if !owned {
+                let mut error = Error::validation_invalid_argument(
+                    "recovery_owner",
+                    "runner-exec recovery ownership was taken over",
+                    Some(heartbeat_owner.id.clone()),
+                    None,
+                );
+                error.details["ownership_lost"] = json!(true);
+                *heartbeat_failure
+                    .lock()
+                    .expect("recovery heartbeat error lock") = Some(error);
                 break;
             }
         }
@@ -461,6 +521,7 @@ pub fn run_scheduled_terminal_runner_exec_recovery(
     stop_heartbeat.store(true, Ordering::Release);
     let _ = heartbeat_done.send(());
     let _ = heartbeat.join();
+    let result = result.and_then(|result| owner_context.check_heartbeat().map(|_| result));
     let (reconciled, deferred_count) = match result {
         Ok(result) => result,
         Err(error) => {
@@ -827,6 +888,31 @@ mod tests {
             assert!(second.is_new_owner);
             assert_eq!(second.owner_id, first.owner_id);
             assert_ne!(second.owner_token, first.owner_token);
+        });
+    }
+
+    #[test]
+    fn heartbeat_failure_fences_the_next_durable_side_effect() {
+        with_isolated_home(|_| {
+            let heartbeat_error =
+                Arc::new(Mutex::new(Some(Error::internal_unexpected("disk full"))));
+            let owner = RecoveryOwner {
+                id: "recovery-owner".to_string(),
+                token: "owner-token".to_string(),
+                deadline: Instant::now() + Duration::from_secs(1),
+                heartbeat_error: Some(heartbeat_error),
+            };
+            let store = ObservationStore::open_initialized().expect("store");
+
+            let error = owner
+                .before_side_effect(&store, "terminal checkpoint")
+                .expect_err("heartbeat failure fences the checkpoint");
+
+            assert!(error.retryable.unwrap_or(false));
+            assert_eq!(
+                error.details["recovery_heartbeat_error"]["message"],
+                "disk full"
+            );
         });
     }
 
