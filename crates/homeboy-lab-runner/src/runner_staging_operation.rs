@@ -199,14 +199,11 @@ pub fn submit_remote_runner_staging(
         ));
     }
     if !transport.supports_capability(REMOTE_RUNNER_STAGING_CAPABILITY) {
-        return Err(Error::validation_invalid_argument(
-            "runner_capabilities",
-            format!(
-                "runner `{}` does not support {REMOTE_RUNNER_STAGING_CAPABILITY}",
-                envelope.handoff.runner_id
-            ),
-            Some(envelope.handoff.runner_id.clone()),
-            None,
+        return Err(Error::runner_capability_missing(
+            &envelope.handoff.runner_id,
+            "sealed runner staging",
+            vec![REMOTE_RUNNER_STAGING_CAPABILITY.to_string()],
+            Vec::new(),
         ));
     }
     let receipt = transport.stage_durable(envelope)?;
@@ -341,7 +338,8 @@ pub(crate) mod tests_support {
             compatible: false,
             ..transport()
         };
-        assert!(submit_remote_runner_staging(&mut incompatible, &envelope).is_err());
+        let error = submit_remote_runner_staging(&mut incompatible, &envelope).expect_err("refuse");
+        assert_eq!(error.code, homeboy_core::ErrorCode::RunnerCapabilityMissing);
         assert_eq!(incompatible.calls, 0);
         assert_eq!(incompatible.provider_budget, 0);
         let mut disconnected = Transport {

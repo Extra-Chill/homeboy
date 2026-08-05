@@ -153,10 +153,14 @@ pub(crate) fn daemon_api_post_json_for_session(
         "parse daemon response",
     )?;
     if !envelope.success {
-        return Err(Error::internal_unexpected(format!(
-            "daemon request failed: {}",
-            envelope.error.unwrap_or(Value::Null)
-        )));
+        return Err(Error::new(
+            ErrorCode::InternalUnexpected,
+            format!(
+                "daemon request failed: {}",
+                envelope.error.unwrap_or(Value::Null)
+            ),
+            json!({ "http_status": response.status_code, "path": path }),
+        ));
     }
     envelope
         .data

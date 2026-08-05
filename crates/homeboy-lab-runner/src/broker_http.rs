@@ -1,6 +1,6 @@
 use reqwest::blocking::{Client, RequestBuilder};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use homeboy_core::broker_auth::BROKER_TOKEN_HEADER;
 use homeboy_core::error::{Error, Result};
@@ -45,10 +45,14 @@ pub(crate) fn post_json(
         Error::internal_json(err.to_string(), Some("parse broker response".to_string()))
     })?;
     if status_code >= 400 || !envelope.success {
-        return Err(Error::internal_unexpected(format!(
-            "broker request failed: {}",
-            envelope.error.unwrap_or(Value::Null)
-        )));
+        return Err(Error::new(
+            homeboy_core::ErrorCode::InternalUnexpected,
+            format!(
+                "broker request failed: {}",
+                envelope.error.unwrap_or(Value::Null)
+            ),
+            json!({ "http_status": status_code, "path": path }),
+        ));
     }
     let data = envelope
         .data

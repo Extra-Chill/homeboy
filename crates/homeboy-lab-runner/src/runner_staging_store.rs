@@ -5,9 +5,14 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
+use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
 
 use homeboy_core::{Error, Result};
 
@@ -97,6 +102,7 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
                 None,
             ));
         }
+        let _lock = self.admission_lock()?;
         let mut state = self.load()?;
         let key = &envelope.handoff.idempotency_key;
         if let Some(existing) = state.stages.get(key) {
@@ -111,8 +117,8 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
             return Ok(existing.receipt.clone());
         }
 
-        // Materialization happens before this receipt is acknowledged and only
-        // after the runner, schema, and source authority have all been checked.
+        // The lock covers materialization and receipt publication. Concurrent
+        // requests therefore observe one durable admission, not two writes.
         let artifacts = self.materializer.materialize(envelope)?;
         let receipt = RemoteRunnerStagingReceipt {
             schema: REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA.to_string(),
@@ -153,7 +159,64 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
     }
 
     fn persist(&self, state: &StagingStoreState) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("create {}", parent.display())),
+            )
+        })?;
+        let bytes = serde_json::to_vec(state).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize remote runner staging store".to_string()),
+            )
+        })?;
+        let mut temporary = NamedTempFile::new_in(parent).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("create staging temporary in {}", parent.display())),
+            )
+        })?;
+        temporary.write_all(&bytes).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "write staging temporary for {}",
+                    self.path.display()
+                )),
+            )
+        })?;
+        temporary.as_file().sync_all().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "sync staging temporary for {}",
+                    self.path.display()
+                )),
+            )
+        })?;
+        temporary.persist(&self.path).map_err(|error| {
+            Error::internal_io(
+                error.error.to_string(),
+                Some(format!("publish {}", self.path.display())),
+            )
+        })?;
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("sync {}", parent.display())),
+                )
+            })
+    }
+
+    fn admission_lock(&self) -> Result<File> {
+        const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+        const LOCK_RETRY: Duration = Duration::from_millis(25);
+        let lock_path = self.path.with_extension("lock");
+        if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 Error::internal_io(
                     error.to_string(),
@@ -161,25 +224,49 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
                 )
             })?;
         }
-        let temporary = self.path.with_extension("staging.tmp");
-        let bytes = serde_json::to_vec(state).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("serialize remote runner staging store".to_string()),
-            )
-        })?;
-        fs::write(&temporary, bytes).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("write {}", temporary.display())),
-            )
-        })?;
-        fs::rename(&temporary, &self.path).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("publish {}", self.path.display())),
-            )
-        })
+        let lock = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("open {}", lock_path.display())),
+                )
+            })?;
+        let deadline = Instant::now() + LOCK_TIMEOUT;
+        loop {
+            match lock.try_lock_exclusive() {
+                Ok(true) => return Ok(lock),
+                Ok(false) => {}
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(error) => {
+                    return Err(Error::internal_io(
+                        error.to_string(),
+                        Some(format!("lock {}", lock_path.display())),
+                    ));
+                }
+            }
+            if Instant::now() >= deadline {
+                let mut error = Error::internal_io(
+                    format!(
+                        "timed out after {}ms waiting for staging admission lock",
+                        LOCK_TIMEOUT.as_millis()
+                    ),
+                    Some(format!("lock {}", lock_path.display())),
+                );
+                error.details = serde_json::json!({
+                    "kind": "runner_staging_lock_timeout",
+                    "runner_id": self.runner_id,
+                    "timeout_ms": LOCK_TIMEOUT.as_millis(),
+                });
+                error.retryable = Some(true);
+                return Err(error);
+            }
+            std::thread::sleep(LOCK_RETRY);
+        }
     }
 }
 
@@ -341,7 +428,8 @@ fn production_capabilities(session: &RunnerSession) -> Result<Vec<String>> {
             session,
             "/runner/staging/capabilities",
             &serde_json::json!({ "runner_id": runner_id }),
-        )?,
+        )
+        .map_err(|error| staging_capability_error(runner_id, error))?,
         RunnerTunnelMode::Reverse => {
             let broker_url = session.broker_url.as_deref().ok_or_else(|| {
                 Error::validation_invalid_argument(
@@ -364,7 +452,8 @@ fn production_capabilities(session: &RunnerSession) -> Result<Vec<String>> {
                 serde_json::json!({ "runner_id": runner_id }),
                 "read sealed staging capabilities",
                 broker_submit_token_for_runner(runner_id)?.as_deref(),
-            )?
+            )
+            .map_err(|error| staging_capability_error(runner_id, error))?
         }
     };
     serde_json::from_value(response.get("capabilities").cloned().unwrap_or_default()).map_err(
@@ -375,6 +464,23 @@ fn production_capabilities(session: &RunnerSession) -> Result<Vec<String>> {
             )
         },
     )
+}
+
+fn staging_capability_error(runner_id: &str, error: Error) -> Error {
+    if error
+        .details
+        .get("http_status")
+        .and_then(serde_json::Value::as_u64)
+        == Some(404)
+    {
+        return Error::runner_capability_missing(
+            runner_id,
+            "sealed runner staging",
+            vec![REMOTE_RUNNER_STAGING_CAPABILITY.to_string()],
+            Vec::new(),
+        );
+    }
+    error
 }
 
 struct SealedPayloadMaterializer {
@@ -474,7 +580,10 @@ pub fn register_runner_staging_provider() {
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Barrier, Mutex,
+    };
 
     use super::*;
     use crate::runner_staging_operation::submit_remote_runner_staging;
@@ -550,6 +659,74 @@ mod tests {
         disconnected.connected = false;
         assert!(submit_remote_runner_staging(&mut disconnected, &request).is_err());
         assert_eq!(disconnected.store.materializer.calls, 0);
+    }
+
+    #[derive(Clone)]
+    struct ConcurrentMaterializer {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RunnerStagingMaterializer for ConcurrentMaterializer {
+        fn materialize(
+            &mut self,
+            envelope: &RemoteRunnerStagingEnvelope,
+        ) -> Result<RunnerStagingArtifacts> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            Ok(RunnerStagingArtifacts {
+                lifecycle_id: format!("lifecycle-{}", envelope.handoff.run_id),
+                source_artifact_id: "source-1".to_string(),
+                workspace_artifact_id: "workspace-1".to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn concurrent_admission_materializes_once_and_replays_one_receipt() {
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("staging.json");
+        let request = envelope();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(2));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let path = path.clone();
+            let request = request.clone();
+            let calls = calls.clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                let mut store =
+                    RunnerStagingStore::open(path, "runner-1", ConcurrentMaterializer { calls })
+                        .expect("store");
+                barrier.wait();
+                store.stage_durable(&request).expect("stage")
+            }));
+        }
+        let first = workers.remove(0).join().expect("first worker");
+        let second = workers.remove(0).join().expect("second worker");
+        assert_eq!(first, second);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn old_runner_capability_endpoint_is_a_typed_pre_mutation_refusal() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request).expect("read");
+            let body =
+                serde_json::json!({ "success": false, "error": "unknown route" }).to_string();
+            write!(stream, "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).expect("response");
+        });
+        let session = production_session(RunnerTunnelMode::DirectSsh, &format!("http://{address}"));
+        let error = production_capabilities(&session).expect_err("old runner refusal");
+        assert_eq!(error.code, homeboy_core::ErrorCode::RunnerCapabilityMissing);
+        assert_eq!(
+            error.details["missing_capabilities"][0],
+            REMOTE_RUNNER_STAGING_CAPABILITY
+        );
     }
 
     #[test]
