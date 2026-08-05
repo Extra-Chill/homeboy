@@ -196,6 +196,7 @@ pub fn register_startup_providers_before_reconcile() {
     // the secret-env plan and validate workload dispatch for remote-runner
     // jobs without core depending on runner behavior.
     crate::runner::register_runner_job_preparation_provider();
+    crate::runner::register_runner_staging_provider();
     // Register the lab-workspace provenance provider so the agent-task
     // scheduler can verify lab-materialized workspaces without core depending
     // on runner behavior.

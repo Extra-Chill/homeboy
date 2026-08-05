@@ -37,6 +37,7 @@ pub mod recovery_actions;
 mod remote_runner;
 pub mod runner_exec_driver;
 mod runner_files;
+pub mod runner_staging;
 mod stop;
 pub(crate) use stop::stop_unlocked;
 use stop::{active_daemon_job_ids, active_jobs_block_daemon_stop_error, stop_with_force_for_lease};
@@ -1652,6 +1653,9 @@ where
         | ("POST", "/runner/workspace-owners/validate")
         | ("POST", "/runner/workspace-owners/renew")
         | ("POST", "/runner/workspace-owners/release") => {
+            remote_runner::route(method, path, body, job_store, &broker_auth)
+        }
+        ("POST", "/runner/staging") | ("POST", "/runner/staging/capabilities") => {
             remote_runner::route(method, path, body, job_store, &broker_auth)
         }
         ("GET", "/runner/sessions")

@@ -16,6 +16,7 @@ use crate::runner_staging_operation::{
     RemoteRunnerStagingEnvelope, RemoteRunnerStagingReceipt, RemoteRunnerStagingTransport,
     RunnerStagingArtifacts, REMOTE_RUNNER_STAGING_CAPABILITY, REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA,
 };
+use crate::{broker_submit_token_for_runner, RunnerSession, RunnerTunnelMode};
 
 const STORE_SCHEMA: &str = "homeboy/remote-runner-staging-store/v1";
 
@@ -228,8 +229,253 @@ impl<M: RunnerStagingMaterializer> RemoteRunnerStagingTransport for RunnerStagin
 pub type DirectRunnerStagingTransport<M> = RunnerStagingTransport<M>;
 pub type ReverseRunnerStagingTransport<M> = RunnerStagingTransport<M>;
 
+/// Resolve the connected runner into the production HTTP transport. Capability
+/// discovery is read-only and happens before `submit_remote_runner_staging`
+/// reaches its mutation boundary.
+pub fn resolve_runner_staging_transport(
+    runner_id: &str,
+) -> Result<ProductionRunnerStagingTransport> {
+    let report = crate::status(runner_id)?;
+    let session = report.session.filter(|_| report.connected).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner_connection",
+            format!("runner `{runner_id}` is disconnected"),
+            Some(runner_id.to_string()),
+            None,
+        )
+    })?;
+    let capabilities = production_capabilities(&session)?;
+    Ok(ProductionRunnerStagingTransport {
+        runner_id: runner_id.to_string(),
+        session,
+        capabilities,
+    })
+}
+
+pub struct ProductionRunnerStagingTransport {
+    runner_id: String,
+    session: RunnerSession,
+    capabilities: Vec<String>,
+}
+
+impl RemoteRunnerStagingTransport for ProductionRunnerStagingTransport {
+    fn is_connected(&self) -> bool {
+        true
+    }
+
+    fn supports_capability(&self, capability: &str) -> bool {
+        self.capabilities
+            .iter()
+            .any(|candidate| candidate == capability)
+    }
+
+    fn stage_durable(
+        &mut self,
+        envelope: &RemoteRunnerStagingEnvelope,
+    ) -> Result<RemoteRunnerStagingReceipt> {
+        if envelope.handoff.runner_id != self.runner_id {
+            return Err(Error::validation_invalid_argument(
+                "runner_authority",
+                "sealed staging envelope does not match the resolved runner",
+                Some(envelope.handoff.runner_id.clone()),
+                None,
+            ));
+        }
+        let body = serde_json::to_value(RemoteRunnerStagingRequest::new(envelope.clone()))
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("serialize sealed staging request".to_string()),
+                )
+            })?;
+        let response = match self.session.mode {
+            RunnerTunnelMode::DirectSsh => {
+                let data = crate::execution::daemon_api_post_json_for_session(
+                    &self.session,
+                    "/runner/staging",
+                    &body,
+                )?;
+                crate::execution::canonical_daemon_body(&data, "sealed staging daemon response")
+                    .cloned()?
+            }
+            RunnerTunnelMode::Reverse => {
+                let broker_url = self.session.broker_url.as_deref().ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "runner_connection",
+                        "reverse runner has no broker URL",
+                        Some(self.runner_id.clone()),
+                        None,
+                    )
+                })?;
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()
+                    .map_err(|error| {
+                        Error::internal_unexpected(format!("build staging broker client: {error}"))
+                    })?;
+                crate::broker_http::post_json(
+                    &client,
+                    broker_url,
+                    "/runner/staging",
+                    body,
+                    "submit sealed runner staging",
+                    broker_submit_token_for_runner(&self.runner_id)?.as_deref(),
+                )?
+            }
+        };
+        serde_json::from_value(response.get("receipt").cloned().unwrap_or(response)).map_err(
+            |error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("parse sealed staging receipt".to_string()),
+                )
+            },
+        )
+    }
+}
+
+fn production_capabilities(session: &RunnerSession) -> Result<Vec<String>> {
+    let runner_id = &session.runner_id;
+    let response = match session.mode {
+        RunnerTunnelMode::DirectSsh => crate::execution::daemon_api_post_json_for_session(
+            session,
+            "/runner/staging/capabilities",
+            &serde_json::json!({ "runner_id": runner_id }),
+        )?,
+        RunnerTunnelMode::Reverse => {
+            let broker_url = session.broker_url.as_deref().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "runner_connection",
+                    "reverse runner has no broker URL",
+                    Some(runner_id.clone()),
+                    None,
+                )
+            })?;
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .map_err(|error| {
+                    Error::internal_unexpected(format!("build staging broker client: {error}"))
+                })?;
+            crate::broker_http::post_json(
+                &client,
+                broker_url,
+                "/runner/staging/capabilities",
+                serde_json::json!({ "runner_id": runner_id }),
+                "read sealed staging capabilities",
+                broker_submit_token_for_runner(runner_id)?.as_deref(),
+            )?
+        }
+    };
+    serde_json::from_value(response.get("capabilities").cloned().unwrap_or_default()).map_err(
+        |error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse sealed staging capabilities".to_string()),
+            )
+        },
+    )
+}
+
+struct SealedPayloadMaterializer {
+    root: PathBuf,
+}
+
+impl RunnerStagingMaterializer for SealedPayloadMaterializer {
+    fn materialize(
+        &mut self,
+        envelope: &RemoteRunnerStagingEnvelope,
+    ) -> Result<RunnerStagingArtifacts> {
+        let stage_root = self.root.join(&envelope.materialization.authority_id);
+        fs::create_dir_all(&stage_root).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("create {}", stage_root.display())),
+            )
+        })?;
+        fs::write(
+            stage_root.join("source.sealed"),
+            &envelope.materialization.source.sealed_payload,
+        )
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("persist sealed runner source".to_string()),
+            )
+        })?;
+        let workspace = stage_root.join(&envelope.materialization.workspace_key);
+        fs::create_dir_all(&workspace).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("create {}", workspace.display())),
+            )
+        })?;
+        Ok(RunnerStagingArtifacts {
+            lifecycle_id: format!("staging:{}", envelope.handoff.run_id),
+            source_artifact_id: format!(
+                "sealed:{}",
+                envelope.materialization.source.content_digest
+            ),
+            workspace_artifact_id: format!("workspace:{}", envelope.materialization.workspace_key),
+        })
+    }
+}
+
+struct ProductionStagingProvider;
+
+impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionStagingProvider {
+    fn capabilities(&self, _runner_id: &str) -> Result<Vec<String>> {
+        Ok(vec![REMOTE_RUNNER_STAGING_CAPABILITY.to_string()])
+    }
+
+    fn stage(&self, request: serde_json::Value) -> Result<serde_json::Value> {
+        let request: RemoteRunnerStagingRequest =
+            serde_json::from_value(request).map_err(|error| {
+                Error::validation_invalid_argument(
+                    "remote_runner_staging",
+                    error.to_string(),
+                    None,
+                    None,
+                )
+            })?;
+        if request.schema != RemoteRunnerStagingRequest::SCHEMA {
+            return Err(Error::validation_invalid_argument(
+                "remote_runner_staging",
+                "unsupported sealed staging request schema",
+                Some(request.schema),
+                None,
+            ));
+        }
+        let session_path =
+            homeboy_core::paths::runner_session_file(&request.envelope.handoff.runner_id)?;
+        let root =
+            session_path.with_file_name(format!("{}-staging", request.envelope.handoff.runner_id));
+        let store = RunnerStagingStore::open(
+            root.join("store.json"),
+            request.envelope.handoff.runner_id.clone(),
+            SealedPayloadMaterializer { root },
+        )?;
+        let mut transport = RunnerStagingTransport {
+            connected: true,
+            compatible: true,
+            store,
+        };
+        let receipt = transport.stage_durable(&request.envelope)?;
+        Ok(serde_json::json!({ "receipt": receipt }))
+    }
+}
+
+pub fn register_runner_staging_provider() {
+    homeboy_core::daemon::runner_staging::register_runner_staging_provider(Box::new(
+        ProductionStagingProvider,
+    ));
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+
     use super::*;
     use crate::runner_staging_operation::submit_remote_runner_staging;
     use crate::runner_staging_operation::tests_support::envelope;
@@ -304,5 +550,122 @@ mod tests {
         disconnected.connected = false;
         assert!(submit_remote_runner_staging(&mut disconnected, &request).is_err());
         assert_eq!(disconnected.store.materializer.calls, 0);
+    }
+
+    #[test]
+    fn production_direct_and_reverse_transports_dispatch_the_versioned_endpoint() {
+        let request = envelope();
+        let receipt = RemoteRunnerStagingReceipt {
+            schema: REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA.to_string(),
+            handoff: DirectLabHandoffReceipt::accepted(&request.handoff, "runner-stage-1"),
+            artifacts: RunnerStagingArtifacts {
+                lifecycle_id: "lifecycle-1".to_string(),
+                source_artifact_id: "source-1".to_string(),
+                workspace_artifact_id: "workspace-1".to_string(),
+            },
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = staging_endpoint(receipt.clone(), seen.clone(), 2);
+        let direct_session = production_session(RunnerTunnelMode::DirectSsh, &endpoint);
+        let mut direct = ProductionRunnerStagingTransport {
+            runner_id: "runner-1".to_string(),
+            session: direct_session,
+            capabilities: vec![REMOTE_RUNNER_STAGING_CAPABILITY.to_string()],
+        };
+        assert_eq!(
+            submit_remote_runner_staging(&mut direct, &request).expect("direct"),
+            receipt
+        );
+
+        let reverse_session = production_session(RunnerTunnelMode::Reverse, &endpoint);
+        let mut reverse = ProductionRunnerStagingTransport {
+            runner_id: "runner-1".to_string(),
+            session: reverse_session,
+            capabilities: vec![REMOTE_RUNNER_STAGING_CAPABILITY.to_string()],
+        };
+        assert_eq!(
+            submit_remote_runner_staging(&mut reverse, &request).expect("reverse"),
+            receipt
+        );
+        let paths = seen.lock().expect("paths");
+        assert_eq!(paths.as_slice(), ["/runner/staging", "/runner/staging"]);
+    }
+
+    fn production_session(mode: RunnerTunnelMode, endpoint: &str) -> RunnerSession {
+        RunnerSession {
+            runner_id: "runner-1".to_string(),
+            mode: mode.clone(),
+            role: crate::RunnerSessionRole::Controller,
+            server_id: None,
+            controller_id: Some("controller-1".to_string()),
+            broker_url: (mode == RunnerTunnelMode::Reverse).then(|| endpoint.to_string()),
+            remote_daemon_address: None,
+            local_port: None,
+            local_url: (mode == RunnerTunnelMode::DirectSsh).then(|| endpoint.to_string()),
+            tunnel_pid: None,
+            tunnel_process_start_identity: None,
+            remote_daemon_pid: None,
+            remote_daemon_lease_id: None,
+            homeboy_version: "test".to_string(),
+            homeboy_build_identity: None,
+            connected_at: "2026-08-05T00:00:00Z".to_string(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+            leaseless_recovery_evidence: None,
+        }
+    }
+
+    fn staging_endpoint(
+        receipt: RemoteRunnerStagingReceipt,
+        seen: Arc<Mutex<Vec<String>>>,
+        count: usize,
+    ) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        std::thread::spawn(move || {
+            for _ in 0..count {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut request = Vec::new();
+                let mut chunk = [0; 1024];
+                loop {
+                    let read = stream.read(&mut chunk).expect("read");
+                    request.extend_from_slice(&chunk[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .expect("headers")
+                    + 4;
+                let headers = std::str::from_utf8(&request[..header_end]).expect("headers");
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':')
+                            .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                            .map(|(_, value)| value.trim())
+                    })
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                while request.len() < header_end + length {
+                    let read = stream.read(&mut chunk).expect("read body");
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                let first = std::str::from_utf8(&request)
+                    .expect("request")
+                    .lines()
+                    .next()
+                    .expect("line");
+                seen.lock()
+                    .expect("record")
+                    .push(first.split_whitespace().nth(1).expect("path").to_string());
+                let body = serde_json::json!({ "success": true, "data": { "body": { "receipt": receipt } } }).to_string();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).expect("response");
+            }
+        });
+        format!("http://{address}")
     }
 }

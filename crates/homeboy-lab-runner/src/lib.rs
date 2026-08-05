@@ -301,6 +301,9 @@ pub use resource_metrics::{
 pub use rolling_generation::{
     RollingDrainState, RollingGeneration, RollingGenerations, RollingStart,
 };
+pub use runner_staging_store::{
+    register_runner_staging_provider, resolve_runner_staging_transport,
+};
 pub use runtime_materialization_status::{RunnerBinarySource, RuntimeMaterializationStatus};
 pub use session::{
     LabRunnerHandoff, ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource,

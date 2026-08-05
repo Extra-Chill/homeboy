@@ -126,6 +126,43 @@ pub(crate) fn daemon_api_post_for_session(session: &RunnerSession, path: &str) -
     daemon_post(&client, local_url, path)
 }
 
+pub(crate) fn daemon_api_post_json_for_session(
+    session: &RunnerSession,
+    path: &str,
+    payload: &Value,
+) -> Result<Value> {
+    let local_url = session.local_url.as_deref().ok_or_else(|| {
+        Error::internal_unexpected("known daemon generation has no direct local endpoint")
+    })?;
+    let client = Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| Error::internal_unexpected(format!("build daemon HTTP client: {err}")))?;
+    let response = daemon_post_json_text(
+        &client,
+        local_url,
+        path,
+        payload,
+        DaemonPostOptions::default(),
+    )?;
+    let envelope: DaemonEnvelope = parse_daemon_response_json(
+        &response.body,
+        response.status_code,
+        path,
+        "parse daemon response",
+    )?;
+    if !envelope.success {
+        return Err(Error::internal_unexpected(format!(
+            "daemon request failed: {}",
+            envelope.error.unwrap_or(Value::Null)
+        )));
+    }
+    envelope
+        .data
+        .ok_or_else(|| Error::internal_unexpected("daemon response missing data"))
+}
+
 pub fn daemon_api_post(runner_id: &str, path: &str) -> Result<Value> {
     daemon_api_request(runner_id, path, "POST")
 }
