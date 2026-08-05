@@ -318,7 +318,7 @@ fn default_automatic_retention_max_run_seconds() -> u64 {
     60
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NotificationConfig {
     /// Installed extension transport ID used only when a completed operation has
     /// no route bound to its persisted run record.
