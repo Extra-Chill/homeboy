@@ -108,8 +108,15 @@ impl RuntimeMaterializationStatus {
                 format!("active daemon build `{active}`, job command build `{job}`")
             })
             .unwrap_or_else(|| "inspect the runner stale-daemon diagnostic".to_string());
+        // A severity of `unknown` means nothing was compared, so calling it a
+        // stale daemon would report a mismatch that was never observed.
+        let headline = if severity == crate::session::RUNNER_DAEMON_SEVERITY_UNKNOWN {
+            "daemon compatibility UNVERIFIED"
+        } else {
+            "stale daemon"
+        };
         Some(format!(
-            "Runner `{}` stale daemon severity={severity}: {reason}; active daemon control plane is `{active_daemon}`, job command binary is `{job_binary}`. Refresh with `{refresh}` before using runner/Lab status as version evidence.",
+            "Runner `{}` {headline} severity={severity}: {reason}; active daemon control plane is `{active_daemon}`, job command binary is `{job_binary}`. Run `{refresh}` before using runner/Lab status as version evidence.",
             self.runner_id
         ))
     }

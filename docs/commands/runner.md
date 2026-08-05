@@ -556,6 +556,30 @@ paths. `homeboy runner status <runner-id>` surfaces those differences in
 development runner with `homeboy runner disconnect <runner-id>` followed by
 `homeboy runner connect <runner-id>` after rebuilding runner-side runtime code.
 
+### Daemon compatibility has three states, not two
+
+`stale_daemon.verification` names which question the report answered:
+
+- `compared` — the runner's configured identity was read and compared. The
+  version and build-identity fields are observations, and a mismatch fences
+  admission.
+- `probe_failed` — the identity probe itself failed. Nothing was compared;
+  `stale_daemon.probe_error` carries the verbatim failure and
+  `current_homeboy_version` is the sentinel `unverified` rather than a
+  substituted value. A runner that *has* a probe and could not answer it is
+  still fenced.
+- `unavailable` — this runner has no controller-side identity probe at all.
+  Reverse-connected sessions are reached through the broker, which exposes no
+  identity endpoint, so their compatibility is reported as
+  `compatibility_reason: reverse_unverified`. This is surfaced and ranked below
+  every verified runner in default Lab selection, but it does **not** fence
+  admission — fencing an entire runner class on the strength of a gap rather
+  than a mismatch would take every reverse lab out of service.
+
+Reports with either unverified verdict carry `severity: unknown` and a read-only
+`homeboy runner doctor <runner-id> --scope lab-offload` recovery: replacing a
+binary is not the answer to "I could not look at it".
+
 ### Controller identity and a dirty working tree
 
 Runner convergence is normally proven by comparing the controller's embedded

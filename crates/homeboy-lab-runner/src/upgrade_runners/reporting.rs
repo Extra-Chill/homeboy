@@ -24,7 +24,12 @@ pub fn runner_stale_daemon(
     runner: &Runner,
     status: &impl Fn(&str) -> Result<RunnerStatusReport>,
 ) -> Option<RunnerDaemonDriftEntry> {
-    let warning = status(&runner.id).ok()?.stale_daemon?;
+    // Drift is a claim about two observed versions. A report that compared
+    // nothing has no versions to name, so it is not drift (#11106).
+    let warning = status(&runner.id)
+        .ok()?
+        .stale_daemon
+        .filter(|warning| !warning.is_unverified())?;
     Some(RunnerDaemonDriftEntry {
         session_homeboy_version: warning.session_homeboy_version,
         current_homeboy_version: warning.current_homeboy_version,

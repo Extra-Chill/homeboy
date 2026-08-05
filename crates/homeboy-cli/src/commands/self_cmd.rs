@@ -260,8 +260,10 @@ fn runner_runtime_input(runner: Runner, status: Option<&RunnerStatusReport>) -> 
         .and_then(|report| report.session.as_ref());
     let daemon_version = session.map(|session| session.homeboy_version.clone());
     let daemon_build_identity = session.and_then(|session| session.homeboy_build_identity.clone());
+    // Drift is an observed mismatch. A report that compared nothing is not
+    // drift — it is an unverified runner (#11106).
     let daemon_drift = status
-        .map(|report| report.stale_daemon.is_some())
+        .map(|report| report.admission_blocking_stale_daemon().is_some())
         .unwrap_or(false);
 
     RunnerRuntimeInput {
