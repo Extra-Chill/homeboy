@@ -192,6 +192,39 @@ override and there is no superseded default in play. Residue under the config
 root from before an override was adopted is reported by
 `homeboy cleanup retained-storage`.
 
+## Leaked Test Homes and the `$TMPDIR` Blind Spot
+
+The runtime temp root is not the only temp root on the host, and `runtime-tmp`
+is scoped to the one it owns. Homeboy's own test isolation allocates through
+`tempfile`, which resolves the process `TMPDIR`. When an operator points
+`TMPDIR` at a dedicated volume — the exact move the relocation above encourages
+— the two are different directories, and a `TempDir` that never got to run
+`Drop` because its process was killed leaks into the one `runtime-tmp` does not
+scan. `homeboy cleanup` reported `0` reclaimable runtime-temp bytes on a host
+holding 9.2 GB of exactly that residue (#11073). The report was accurate and
+useless.
+
+`leaked-test-homes` closes it. It scans `$TMPDIR` first, then `/tmp`,
+`/var/tmp`, and `/dev/shm`, and reports every root it considered — an
+unreadable root carries its reason instead of contributing a silent zero.
+Ownership is a `hb-test-<pid>-` marker on the directory name plus a liveness
+probe on that PID, so nothing here needs the observation store and the category
+runs in a degraded sweep alongside `orphaned-artifact-bytes`.
+
+The delete predicate is deliberately narrower than the report. A directory is
+reclaimed only when its owning PID is recorded, is not this process, and is not
+running — *and* the entry is at least an hour old. A live owner is unreachable
+by every path, including the byte ceiling: crossing 2 GiB of retained leak
+relaxes the age floor for the oldest already-abandoned entries and nothing else.
+A name carrying no PID means unknown, never unowned, so it leaves only on the
+age floor.
+
+The byte ceiling exists because a day count cannot bound this directory. Each
+abandoned home can carry a private copy of a debug binary, and they arrive at
+whatever rate the host kills test processes. `runtime_run_max_bytes` set the
+precedent that high-churn reconstructable storage is bounded by bytes; this is
+the same shape for the same reason.
+
 ## Retained Storage Accounting
 
 `homeboy cleanup retained-storage` explains where disk went without deleting

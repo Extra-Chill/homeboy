@@ -37,6 +37,17 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 [dev-dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }
+# Self-referencing dev-dependency: this crate's own integration tests link the
+# library externally, where `cfg(test)` is off. Enabling `test-support` for the
+# test build is what keeps the `fixture` executor double available to them while
+# leaving it out of the shipped binary (#11118).
+homeboy-agents = { version = "0.1.0", path = ".", features = ["test-support"] }
 
 [features]
+# Exposes the in-tree `fixture` agent-task executor double (and the test-only
+# lifecycle record rewriters) to test builds. `fixture` is not a registered
+# agent runtime: it has no provider manifest and is never resolved through the
+# extension catalog, so it must never be compiled into a production binary.
+# Enabled as a dev-dependency feature by homeboy-cli, homeboy-lab-runner, the
+# `homeboy` binary crate, and this crate itself.
 test-support = []

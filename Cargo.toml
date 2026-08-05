@@ -19,7 +19,7 @@ members = ["crates/homeboy-*", "crates/contracts/homeboy-*"]
 
 [package]
 name = "homeboy"
-version = "0.329.1"
+version = "0.330.0"
 edition = "2021"
 default-run = "homeboy"
 license = "MIT"
@@ -34,7 +34,10 @@ publish = false
 dist = true
 
 [package.metadata.cargo-machete]
-ignored = ["homeboy-lab-contract"] # Required as a direct edge by release preflight.
+ignored = [
+    "homeboy-lab-contract", # Required as a direct edge by release preflight.
+    "homeboy-agents",       # Dev-only edge: activates `test-support` in the CARGO_BIN_EXE_homeboy test binary.
+]
 
 [lib]
 name = "homeboy"
@@ -80,13 +83,21 @@ clap = { version = "4.5", features = ["derive", "env", "string"] }
 # (integration tests reach them via `homeboy::test_support`).
 homeboy-core = { version = "0.1.0", path = "crates/homeboy-core", features = ["test-support"] }
 homeboy-extension = { version = "0.1.0", path = "crates/homeboy-extension" }
+homeboy-engine-primitives = { version = "0.1.0", path = "crates/homeboy-engine-primitives" }
+# Integration tests here spawn the real binary via CARGO_BIN_EXE_homeboy and
+# dispatch `--backend fixture` (tests/reverse_cook_queue_acceptance.rs). That
+# executor double is compiled only under `homeboy-agents/test-support`, and this
+# dev-only edge is what activates it for the test build of that binary (#11118).
+homeboy-agents = { version = "0.1.0", path = "crates/homeboy-agents", features = ["test-support"] }
 
 [features]
 default = []
 slow-tests = []
 # Enables the shared hermetic test fixtures (homeboy-core's test_support), used by
-# this crate's integration tests.
-test-support = ["homeboy-core/test-support"]
+# this crate's integration tests, plus the `fixture` agent-task executor double.
+# `cargo run --features test-support` is what makes the deterministic agent-task
+# smoke gate in docs/commands/agent-task.md runnable from a source checkout.
+test-support = ["homeboy-core/test-support", "homeboy-cli/test-support"]
 
 # Hash and compression crates run at optimization even in dev/test builds.
 #

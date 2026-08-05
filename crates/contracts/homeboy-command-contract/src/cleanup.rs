@@ -24,6 +24,17 @@ pub struct CleanupArgs {
     #[arg(long, value_enum, value_delimiter = ',')]
     pub exclude: Vec<CleanupCategoryArg>,
 
+    /// Also reap `runner-downloads` cache directories that carry no download
+    /// intent marker. Untagged caches are treated as operator-owned by default,
+    /// so every one written before intent tagging existed is otherwise retained
+    /// forever. The fixed age floor, the running-run veto, and the never-reap
+    /// rule for operator pulls all still apply.
+    // `#[serde(default)]` because `CleanupArgs` is the durable job request: a
+    // checkpoint written by a binary that predates this flag must still resume.
+    #[serde(default)]
+    #[arg(long)]
+    pub include_untagged: bool,
+
     /// Override the configured terminal-run retention window for this invocation.
     #[arg(long, value_name = "DAYS")]
     pub older_than_days: Option<i64>,
@@ -67,6 +78,10 @@ pub enum CleanupCategoryArg {
     ControllerScratch,
     SharedCargoTargets,
     ControllerRuntimes,
+    /// Isolated test homes abandoned by killed test processes. Proven by a
+    /// filename marker plus the liveness of the PID stamped into it, so it can
+    /// plan and apply with the observation store shut (#11073).
+    LeakedTestHomes,
 }
 
 #[derive(Subcommand, Debug, PartialEq, Eq)]
@@ -198,6 +213,17 @@ pub const RUNNER_DOWNLOADS_METADATA: CleanupInventoryCategoryMetadata =
         apply_command: "homeboy runs artifact cleanup-downloads --apply",
     };
 
+/// Abandoned isolated test homes. There is no specialist command: the reclaim
+/// predicate is one filename marker plus one liveness probe, and a second
+/// spelling of that would be a second place for it to drift.
+pub const LEAKED_TEST_HOMES_METADATA: CleanupInventoryCategoryMetadata =
+    CleanupInventoryCategoryMetadata {
+        category: "leaked_test_homes",
+        include_arg: "leaked-test-homes",
+        dry_run_command: "homeboy cleanup --include leaked-test-homes",
+        apply_command: "homeboy cleanup --include leaked-test-homes --apply",
+    };
+
 /// Renders the aggregate cleanup command for the managed runtime-temp override.
 pub fn runtime_tmp_commands(apply: bool, managed_older_than_days: u64) -> (String, String) {
     let apply_arg = if apply { " --apply" } else { "" };
@@ -237,6 +263,51 @@ mod tests {
             ]
         );
         assert_eq!(parsed.cleanup.exclude, vec![CleanupCategoryArg::RuntimeTmp]);
+    }
+
+    #[test]
+    fn include_untagged_is_an_explicit_opt_in_that_defaults_off() {
+        // #11128. The flag widens the `runner-downloads` delete predicate to
+        // cover caches written before intent tagging existed, so its absence
+        // has to keep meaning exactly what it meant before it existed.
+        let parsed =
+            CleanupParserTest::parse_from(["cleanup", "--include", "runner-downloads", "--apply"]);
+        assert!(!parsed.cleanup.include_untagged);
+
+        let parsed = CleanupParserTest::parse_from([
+            "cleanup",
+            "--include",
+            "runner-downloads",
+            "--include-untagged",
+            "--apply",
+        ]);
+        assert!(parsed.cleanup.include_untagged);
+
+        // It is its own flag, not a `--include` category value: widening a
+        // predicate and selecting a category are different questions.
+        assert_eq!(
+            parsed.cleanup.include,
+            vec![CleanupCategoryArg::RunnerDownloads]
+        );
+
+        // Durable cleanup jobs round-trip `CleanupArgs` as their request, and a
+        // checkpoint written before this flag existed must still resume.
+        //
+        // `kebab-case` is the clap `ValueEnum` spelling; serde carries the
+        // variant names verbatim, so a persisted checkpoint reads `RunnerDownloads`.
+        let legacy = serde_json::json!({
+            "apply": true,
+            "include": ["RunnerDownloads"],
+            "exclude": [],
+            "older_than_days": null,
+            "runtime_tmp_managed_older_than_days": null,
+            "limit": null,
+            "full": false,
+            "cursor": null,
+        });
+        let resumed: CleanupArgs =
+            serde_json::from_value(legacy).expect("resume a pre-flag checkpoint");
+        assert!(!resumed.include_untagged);
     }
 
     #[test]
@@ -299,6 +370,16 @@ mod tests {
         assert_eq!(
             RUNNER_DOWNLOADS_METADATA.canonical_cleanup_command(true),
             "homeboy cleanup --include runner-downloads --apply"
+        );
+        assert_eq!(
+            LEAKED_TEST_HOMES_METADATA.canonical_cleanup_command(false),
+            "homeboy cleanup --include leaked-test-homes"
+        );
+        assert!(
+            CleanupParserTest::parse_from(["cleanup", "--include", "leaked-test-homes"])
+                .cleanup
+                .include
+                .contains(&CleanupCategoryArg::LeakedTestHomes)
         );
         assert_eq!(
             runtime_tmp_commands(false, 0).0,

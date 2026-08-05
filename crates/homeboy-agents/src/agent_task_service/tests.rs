@@ -1128,7 +1128,24 @@ fn discovery_limit_caps_list_and_reports_total() {
 }
 
 #[test]
-fn discovery_998_record_history_pages_without_repeating_or_losing_records() {
+fn discovery_rejects_zero_limit_to_preserve_pagination_progress() {
+    with_isolated_home(|_| {
+        let error = discover_runs_with_options(
+            AgentTaskDiscoveryFilter::Active,
+            AgentTaskDiscoveryOptions {
+                limit: Some(0),
+                ..Default::default()
+            },
+        )
+        .expect_err("zero limit is invalid");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("greater than zero"));
+    });
+}
+
+#[test]
+fn discovery_998_record_history_and_active_pages_do_not_repeat_or_lose_records() {
     with_isolated_home(|_| {
         for index in 0..998 {
             agent_task_lifecycle::submit_plan(
@@ -1165,6 +1182,23 @@ fn discovery_998_record_history_pages_without_repeating_or_losing_records() {
             },
         )
         .expect("full history");
+        let active_first = discover_runs_with_options(
+            AgentTaskDiscoveryFilter::Active,
+            AgentTaskDiscoveryOptions {
+                limit: Some(20),
+                ..Default::default()
+            },
+        )
+        .expect("first active page");
+        let active_second = discover_runs_with_options(
+            AgentTaskDiscoveryFilter::Active,
+            AgentTaskDiscoveryOptions {
+                limit: Some(20),
+                cursor: active_first.next_cursor.expect("active continuation"),
+                ..Default::default()
+            },
+        )
+        .expect("second active page");
 
         assert_eq!(first.total, 998);
         assert_eq!(first.count, 20);
@@ -1176,11 +1210,15 @@ fn discovery_998_record_history_pages_without_repeating_or_losing_records() {
         assert_eq!(exhaustive.count, 998);
         assert!(!exhaustive.truncated);
         assert_eq!(exhaustive.next_cursor, None);
+        assert_eq!(active_first.total, 998);
+        assert_eq!(active_first.next_cursor, Some(20));
+        assert_eq!(active_second.count, 20);
+        assert_ne!(active_first.runs[0].run_id, active_second.runs[0].run_id);
     });
 }
 
 #[test]
-fn discovery_filters_by_cook_identity_and_omits_stale_queued_ghosts_from_active() {
+fn discovery_filters_by_cook_identity_and_classifies_only_live_queued_records_as_active() {
     with_isolated_home(|_| {
         let mut matching = discovery_plan();
         matching.group_key = Some("matching-repo".to_string());
@@ -1197,6 +1235,24 @@ fn discovery_filters_by_cook_identity_and_omits_stale_queued_ghosts_from_active(
             record.updated_at = Some("2000-01-01T00:00:00+00:00".to_string());
         })
         .expect("age ghost");
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-no-update-ghost"))
+            .expect("no-update ghost run");
+        agent_task_lifecycle::rewrite_record_for_test("run-no-update-ghost", |record| {
+            record.tasks[0].state = AgentTaskState::Succeeded;
+            record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+            record.updated_at = None;
+        })
+        .expect("remove ghost heartbeat");
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-ancient-queued-task"))
+            .expect("ancient queued task run");
+        agent_task_lifecycle::rewrite_record_for_test("run-ancient-queued-task", |record| {
+            // Keep the serialized queued task to prove it alone is not ownership.
+            record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+            record.updated_at = None;
+        })
+        .expect("age queued task without ownership");
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-fresh-queued-task"))
+            .expect("fresh queued task run");
 
         let filtered = discover_runs_with_options(
             AgentTaskDiscoveryFilter::All,
@@ -1219,7 +1275,26 @@ fn discovery_filters_by_cook_identity_and_omits_stale_queued_ghosts_from_active(
             .find(|run| run.run_id == "run-queued-ghost")
             .expect("stale ghost remains reconcilable");
         assert_eq!(ghost.liveness, Some(AgentTaskLiveness::Stale));
-        assert_eq!(active.liveness_summary.expect("summary").stale, 1);
+        let no_update_ghost = active
+            .runs
+            .iter()
+            .find(|run| run.run_id == "run-no-update-ghost")
+            .expect("no-update ghost remains reconcilable");
+        assert_eq!(no_update_ghost.liveness, Some(AgentTaskLiveness::Stale));
+        let ancient_queued_task = active
+            .runs
+            .iter()
+            .find(|run| run.run_id == "run-ancient-queued-task")
+            .expect("ancient queued task remains reconcilable");
+        assert_eq!(ancient_queued_task.counts.queued, 1);
+        assert_eq!(ancient_queued_task.liveness, Some(AgentTaskLiveness::Stale));
+        let fresh_queued_task = active
+            .runs
+            .iter()
+            .find(|run| run.run_id == "run-fresh-queued-task")
+            .expect("fresh queued task remains active");
+        assert_eq!(fresh_queued_task.liveness, Some(AgentTaskLiveness::Active));
+        assert_eq!(active.liveness_summary.expect("summary").stale, 3);
     });
 }
 
@@ -1692,6 +1767,7 @@ fn test_plan() -> AgentTaskPlan {
             expected_artifacts: Vec::new(),
             artifact_declarations: Vec::new(),
             output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
             metadata: Value::Null,
         }],
     )

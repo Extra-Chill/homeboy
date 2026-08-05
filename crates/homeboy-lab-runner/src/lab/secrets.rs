@@ -717,6 +717,7 @@ fn agent_task_dispatch_provider_plan_from_args(args: &[String]) -> Result<Option
             expected_artifacts: Vec::new(),
             artifact_declarations: Vec::new(),
             output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
             metadata: serde_json::Value::Null,
         }],
     )))

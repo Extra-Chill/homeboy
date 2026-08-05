@@ -1585,6 +1585,24 @@ fn release_dry_run_establishes_its_branch_instead_of_claiming_release_head() {
     );
 }
 
+/// The release check parses the current extension manifests before the
+/// downstream build job exists. It must therefore run the candidate Homeboy
+/// contract, not the latest published binary, which may predate those manifests.
+#[test]
+fn release_dry_run_bootstraps_with_the_candidate_binary() {
+    let check = job_section(release_workflow(), "check");
+    let dry_run = release_step_block(check, "name: Dry-run release check");
+
+    assert!(
+        dry_run.contains("source: '.'"),
+        "the self-release check must build the candidate before installing current extensions"
+    );
+    assert!(
+        !dry_run.contains("version:"),
+        "the self-release check must not select a published binary"
+    );
+}
+
 /// The attach step's real git behaviour: attach at the tip, refuse otherwise.
 /// Asserting the effect, not the shape of the script.
 #[test]

@@ -119,6 +119,7 @@ pub fn runs_refs(args: RunsRefsArgs) -> CmdResult<RunsOutput> {
         status: args.status.clone(),
         rig_id: args.rig.clone(),
         limit: Some(args.limit.clamp(1, 5000)),
+        ..RunListFilter::default()
     };
     let runs = if let Some(raw_since) = args.since.as_deref() {
         let threshold = since_threshold(raw_since)?;

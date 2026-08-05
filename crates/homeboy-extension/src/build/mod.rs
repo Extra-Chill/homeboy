@@ -9,12 +9,13 @@ use homeboy_core::component::{self, Component};
 use homeboy_core::config::{is_json_input, parse_bulk_ids};
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::local_permissions;
 use homeboy_core::output::{BulkResult, BulkResultBuilder};
 use homeboy_core::paths;
 use homeboy_core::server::execute_local_command_in_dir;
 use homeboy_engine_primitives::command::CapturedOutput;
 use homeboy_engine_primitives::shell;
+
+mod local_permissions;
 
 const DEFAULT_BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const BUILD_TIMEOUT_ENV: &str = "HOMEBOY_BUILD_TIMEOUT_SECS";

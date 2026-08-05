@@ -1,8 +1,12 @@
 //! default_pattern_for_file — extracted from version.rs.
+//!
+//! Pattern resolution and path resolution only. The readers that used to live
+//! here (`read_component_version` and friends) moved to
+//! [`super::component_version`], which is now the single place a component's
+//! `versionTargets` config is read (#11144).
 
 use homeboy_core::component::{self, Component, VersionTarget};
 use homeboy_core::engine::codebase_scan;
-use homeboy_core::engine::local_files;
 use homeboy_core::engine::text;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension_execution::{resolve_owner, SINCE_TAG_SURFACE};
@@ -14,10 +18,7 @@ use std::fs;
 use std::path::Path;
 
 use super::find_version_pattern_in_extension;
-use super::types::{
-    ComponentVersionInfo, ComponentVersionSnapshot, UnconfiguredPattern, VersionTargetInfo,
-    DEFAULT_SINCE_PLACEHOLDER,
-};
+use super::types::{UnconfiguredPattern, DEFAULT_SINCE_PLACEHOLDER};
 
 /// Parse all versions from content using regex pattern.
 /// Content is trimmed to handle trailing newlines in VERSION files.
@@ -91,129 +92,6 @@ pub(crate) fn build_version_parse_error(file: &str, pattern: &str, content: &str
         "Could not parse version from {} using pattern: {}{}\n\nFile preview (first 500 chars):\n{}",
         file, pattern, hints_text, preview
     ))
-}
-
-/// Read the current version from a component's version targets.
-pub fn read_component_version(component: &Component) -> Result<ComponentVersionInfo> {
-    // Validate local_path is absolute and exists before any file operations
-    component::validate_local_path(component)?;
-
-    let targets = component
-        .version_targets
-        .as_ref()
-        .ok_or_else(|| Error::config_missing_key("versionTargets", Some(component.id.clone())))?;
-
-    if targets.is_empty() {
-        return Err(Error::config_invalid_value(
-            "versionTargets",
-            None,
-            format!("Component '{}' has empty versionTargets", component.id),
-        ));
-    }
-
-    let primary = &targets[0];
-    let primary_pattern = resolve_target_pattern(primary)?;
-    let primary_full_path = resolve_version_file_path(&component.local_path, &primary.file);
-
-    let content = local_files::local().read(Path::new(&primary_full_path))?;
-    let versions = parse_versions(&content, &primary_pattern).ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "versionPattern",
-            format!("Invalid version regex pattern '{}'", primary_pattern),
-            None,
-            Some(vec![primary_pattern.clone()]),
-        )
-    })?;
-
-    if versions.is_empty() {
-        return Err(build_version_parse_error(
-            &primary.file,
-            &primary_pattern,
-            &content,
-        ));
-    }
-
-    let version = text::require_identical(&versions, &primary.file)?;
-
-    // Build target info for primary
-    let mut target_infos = vec![VersionTargetInfo {
-        file: primary.file.clone(),
-        pattern: primary_pattern,
-        full_path: primary_full_path,
-        match_count: versions.len(),
-        warning: None,
-    }];
-
-    // Add info for all remaining targets
-    for target in targets.iter().skip(1) {
-        let pattern = resolve_target_pattern(target)?;
-        let full_path = resolve_version_file_path(&component.local_path, &target.file);
-        let content = local_files::local().read(Path::new(&full_path))?;
-        let target_versions = parse_versions(&content, &pattern).ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "versionPattern",
-                format!("Invalid version regex pattern '{}'", pattern),
-                None,
-                Some(vec![pattern.clone()]),
-            )
-        })?;
-
-        let warning = if target_versions.is_empty() {
-            homeboy_core::log_status!(
-                "warning",
-                "Version target {}: pattern '{}' did not match any content",
-                target.file,
-                pattern
-            );
-            Some(format!(
-                "Pattern did not match any content in {}",
-                target.file
-            ))
-        } else {
-            None
-        };
-
-        target_infos.push(VersionTargetInfo {
-            file: target.file.clone(),
-            pattern,
-            full_path,
-            match_count: target_versions.len(),
-            warning,
-        });
-    }
-
-    Ok(ComponentVersionInfo {
-        version,
-        targets: target_infos,
-    })
-}
-
-/// Read version by component ID.
-/// If component_id is None, returns homeboy binary's own version.
-pub fn read_version(component_id: Option<&str>) -> Result<ComponentVersionInfo> {
-    // If no component_id, return homeboy binary's own version
-    let id = match component_id {
-        None => {
-            let version = homeboy_product_identity::product_version().to_string();
-            return Ok(ComponentVersionInfo {
-                version,
-                targets: vec![],
-            });
-        }
-        Some(id) => id,
-    };
-
-    let component = component::load(id)?;
-    read_component_version(&component)
-}
-
-pub fn read_component_snapshot(component: &Component) -> Result<ComponentVersionSnapshot> {
-    let info = read_component_version(component)?;
-    Ok(ComponentVersionSnapshot {
-        component_id: component.id.clone(),
-        version: info.version,
-        targets: info.targets,
-    })
 }
 
 pub fn build_init_warnings(component: &Component) -> Vec<String> {

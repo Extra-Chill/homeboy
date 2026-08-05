@@ -107,10 +107,24 @@ fn client_connection_args(
         push_option(&mut args, "StrictHostKeyChecking=no");
     }
 
+    // Connection multiplexing is enabled only when a managed session exists,
+    // and `SshClient::from_server` populates one only for
+    // `ServerAuthMode::KeyPlusPasswordControlmaster`. So multiplexing is coupled
+    // to a password-recovery auth mode rather than to connection reuse: an
+    // ordinary key-authenticated server gets no `ControlPath` and every command
+    // pays a full connect plus key exchange. That is why 55 concurrent probe
+    // connections reached one Lab runner despite this block existing (#11080).
+    // Probe volume is bounded at the source in
+    // `homeboy_lab_runner::runner_probe_gate`; decoupling multiplexing from the
+    // auth mode is a separate change with its own blast radius (control-socket
+    // lifetime, forwarding, interactive sessions).
     if let Some(session) = auth {
-        push_option(&mut args, "ControlMaster=auto");
+        // A managed session is established explicitly by `server connect`. Command
+        // clients attach to that socket rather than starting a competing master.
+        // `-o ControlPath` is understood by both ssh and scp; scp's `-S` means
+        // the SSH executable path rather than the control socket.
         push_option(&mut args, format!("ControlPath={}", session.control_path));
-        push_option(&mut args, format!("ControlPersist={}", session.persist));
+        push_option(&mut args, "ControlMaster=no");
     }
 
     if options.batch_mode && !options.interactive {
@@ -138,6 +152,7 @@ fn push_option(args: &mut Vec<String>, option: impl Into<String>) {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::process::Command;
 
     use super::*;
 
@@ -151,6 +166,7 @@ mod tests {
             auth: Some(ManagedSshSession {
                 control_path: "/tmp/control path".to_string(),
                 persist: "4h".to_string(),
+                persist_source: crate::server::ManagedSshSessionPersistSource::Configured,
             }),
             is_local: false,
             env: HashMap::new(),
@@ -167,6 +183,67 @@ mod tests {
 
         assert!(rendered.contains("-i '/tmp/key with spaces'"));
         assert!(rendered.contains("-o 'ControlPath=/tmp/control path'"));
+        assert!(rendered.contains("-o ControlMaster=no"));
         assert!(rendered.contains("-p 2222"));
+    }
+
+    #[test]
+    fn installed_openssh_expands_managed_controlpath_for_a_host_alias() {
+        // `ssh -G` parses configuration without opening a network connection. It
+        // proves that the actual OpenSSH client expands Homeboy's `%h/%p/%r`
+        // control path from an alias's configured HostName, port, and user.
+        let fixture = tempfile::tempdir().expect("SSH config fixture");
+        let config = fixture.path().join("ssh_config");
+        let control_path = fixture.path().join("control-%h-%p-%r");
+        std::fs::write(
+            &config,
+            "Host sandbox-alias\n  HostName resolved.example.test\n  Port 2222\n",
+        )
+        .expect("write SSH config");
+        let client = SshClient {
+            host: "sandbox-alias".to_string(),
+            user: "deploy".to_string(),
+            port: 22,
+            identity_file: None,
+            auth: Some(ManagedSshSession {
+                control_path: control_path.to_string_lossy().to_string(),
+                persist: "4h".to_string(),
+                persist_source: crate::server::ManagedSshSessionPersistSource::Configured,
+            }),
+            is_local: false,
+            env: HashMap::new(),
+        };
+        let options = client_option_args(
+            &client,
+            SshArgOptions {
+                batch_mode: true,
+                ..SshArgOptions::default()
+            },
+        );
+
+        let output = Command::new("ssh")
+            .args(["-G", "-F"])
+            .arg(&config)
+            .args(options)
+            .arg("deploy@sandbox-alias")
+            .output()
+            .expect("installed OpenSSH client");
+        assert!(
+            output.status.success(),
+            "ssh -G failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let effective = String::from_utf8(output.stdout).expect("OpenSSH config output");
+        assert!(effective.contains("hostname resolved.example.test\n"));
+        assert!(effective.contains("port 2222\n"));
+        assert!(effective.contains("user deploy\n"));
+        assert!(effective.contains("controlmaster false\n"));
+        assert!(effective.contains(&format!(
+            "controlpath {}\n",
+            fixture
+                .path()
+                .join("control-resolved.example.test-2222-deploy")
+                .display()
+        )));
     }
 }

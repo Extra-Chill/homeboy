@@ -11,7 +11,7 @@
 
 use super::{maybe_expand_default_baseline, BenchArgs, BenchRunArgs};
 use crate::commands::utils::args::{
-    BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
+    BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, PresentationArgs, SettingArgs,
 };
 use crate::test_support::with_isolated_home;
 
@@ -35,6 +35,7 @@ fn make_args(
     BenchArgs {
         command: None,
         json: false,
+        presentation: PresentationArgs::default(),
         run: BenchRunArgs {
             comp: PositionalComponentArgs {
                 component: None,

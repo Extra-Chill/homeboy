@@ -149,6 +149,25 @@ const VERDICT_SITES: &[VerdictSite] = &[
                a measured comparison, not an absence of one.",
     },
     VerdictSite {
+        file: "crates/homeboy-cli/src/commands/agent_task/status.rs",
+        basis: MeasurementBasis::Projection,
+        note: "A match arm rendering an already-decided promotion state as a label: \
+               \"applied\" | \"verified_no_changes\" => \"passed\". It cannot measure anything; \
+               the obligation sits with whatever set the promotion state.",
+    },
+    VerdictSite {
+        file: "crates/homeboy-cli/src/commands/fuzz/report.rs",
+        basis: MeasurementBasis::Unguarded,
+        note: "gate_status returns \"passed\" when `gates.iter().all(..)` holds, and `all` on an \
+               empty slice is true -- a campaign that evaluated no gates renders passed having \
+               measured nothing. This is the invariant, not an exception to it. Left as a debt \
+               marker rather than changed here because the fix is a behaviour change to fuzz \
+               reporting and belongs with an owner who can say what an empty gate set should \
+               mean. Blast radius: the `fuzz` command's rendered gate status only; it feeds no \
+               release or merge gate. It became visible when production_lines stopped \
+               truncating at a #[cfg(test)] import.",
+    },
+    VerdictSite {
         file: "crates/homeboy-cli/src/commands/trace/guardrails.rs",
         basis: MeasurementBasis::PerUnitEvaluation,
         note: "One TraceGuardrailOutput per declared guardrail, from a real evaluate() call. Zero \
@@ -355,6 +374,52 @@ const GATE_LAYER_SITES: &[GateLayerSite] = &[
                is Contradicted and a hard error.",
     },
     GateLayerSite {
+        file: ".github/validate-required-gates.sh",
+        decision: "exit 0",
+        basis: MeasurementBasis::ExplicitlySkipped,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: three exits share this decision and none of them launders an absence. \
+               `--local` \
+               exits after the declaration check, which is the only claim that mode makes. \
+               `--report` exits 0 by construction after recording the live enforcement outcome, \
+               because reporting must never become enforcement (#11084) -- the outcome is written \
+               to the step summary as evidence, so the non-enforcement is stated rather than \
+               hidden. The `enforced | bypassable` exit is a measured verdict read from the live \
+               ruleset, and every unreadable or non-matching state falls to the exit 1 beside it. \
+               Not skip-rendering: this is the gate's own verdict and it starts no downstream job. \
+               Its executing fixtures (report_mode_reports_unenforced_when_the_live_ruleset_requires_no_checks \
+               and siblings, which spawn the real script through Command::new(\"bash\")) live in \
+               tests/required_gates_policy_test.rs, and `fixture` can only name tests in \
+               tests/release_workflow_test.rs, so they are recorded here rather than claimed \
+               falsely.",
+    },
+    GateLayerSite {
+        file: ".github/validate-required-gates.sh",
+        decision: "exit 1",
+        basis: MeasurementBasis::Projection,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: the script's refusal path -- an undeclared or non-strict required-check \
+               policy, and every live enforcement state that is not `enforced` or `bypassable`. A \
+               non-zero exit cannot manufacture a pass, so it carries no measurement obligation; \
+               it is registered because the scan keys on every exit in a gate script and an \
+               unregistered one is indistinguishable from an unexamined one. Exercised by the \
+               same tests/required_gates_policy_test.rs fixtures noted on `exit 0`, which the \
+               `fixture` field cannot name.",
+    },
+    GateLayerSite {
+        file: ".github/validate-required-gates.sh",
+        decision: "exit 2",
+        basis: MeasurementBasis::NotAGate,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: usage error. Reached only when argv names a mode other than \
+               --local/--report/--github, before any policy file is read or any claim is \
+               evaluated. It renders no verdict about the repository at all, and its distinct \
+               exit code keeps a mistyped invocation from being read as a policy failure.",
+    },
+    GateLayerSite {
         file: ".github/workflows/release.yml",
         decision: "blocked=false",
         basis: MeasurementBasis::EmptyPopulation,
@@ -521,17 +586,56 @@ fn is_test_owned(relative: &str) -> bool {
         || relative.contains("/fixtures/")
 }
 
-/// Production lines of a file: everything before the first `#[cfg(test)]`.
+/// Production lines of a file: everything before its `#[cfg(test)]` **module**.
 ///
-/// This mirrors the convention the audit's own source policies use
-/// (`ignore_after_line_equals`), and it fails **open** — a verdict hidden below
-/// a `#[cfg(test)]` is test code by definition, so skipping it can only make
-/// this guard more permissive, never spuriously red.
+/// Stopping at the first `#[cfg(test)]` of any kind is not the same rule.
+/// `#[cfg(test)]` is also an attribute on individual items, and a test-only
+/// import sits at the *top* of a file:
+///
+/// ```ignore
+/// use homeboy_core::ci_profile::CiContext;
+/// #[cfg(test)]
+/// use homeboy_core::finding::HomeboyFinding;   // line 12 of 440
+/// ```
+///
+/// Truncating there left eleven lines of imports as the entire "production" body
+/// of `homeboy-extension/src/{lint,test}/report.rs`, so two files that build
+/// `passed: true` in real code scanned as producing no verdict at all.
+///
+/// The old comment here argued this failed open — that a verdict below a
+/// `#[cfg(test)]` "is test code by definition", so the rule could only be
+/// permissive, "never spuriously red". Both halves were wrong. It is not test
+/// code when the attribute is on a `use`, and being permissive is the failure
+/// mode this registry exists to prevent: a guard blind to a file cannot ask that
+/// file how it established a measurement. It went red too, via
+/// [`no_registration_outlives_the_site_it_describes`], which correctly reported
+/// two live registrations as stale.
 fn production_lines(contents: &str) -> Vec<&str> {
-    contents
-        .lines()
-        .take_while(|line| line.trim() != "#[cfg(test)]")
-        .collect()
+    let lines: Vec<&str> = contents.lines().collect();
+    let test_module = (0..lines.len()).find(|index| {
+        lines[*index].trim() == "#[cfg(test)]"
+            && lines[index + 1..]
+                .iter()
+                .find(|candidate| !candidate.trim().is_empty())
+                .is_some_and(|candidate| declares_a_module(candidate))
+    });
+    match test_module {
+        Some(stop) => lines[..stop].to_vec(),
+        None => lines,
+    }
+}
+
+/// Whether a line declares a module, ignoring any visibility qualifier.
+fn declares_a_module(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let without_visibility = trimmed
+        .strip_prefix("pub")
+        .map(|rest| {
+            rest.trim_start_matches(|c| c != ' ' && c != '\t')
+                .trim_start()
+        })
+        .unwrap_or(trimmed);
+    without_visibility.starts_with("mod ")
 }
 
 fn line_constructs_a_green_verdict(line: &str) -> bool {
@@ -880,6 +984,56 @@ fn production_lines_stop_at_the_test_module() {
         "fn real() -> bool {\n    true\n}\n#[cfg(test)]\nmod tests {\n    passed: true\n}\n";
     let lines = production_lines(source);
     assert_eq!(lines.len(), 3);
+    assert!(!lines.iter().any(|line| line.contains("passed: true")));
+}
+
+/// A `#[cfg(test)]` on an import must not end the production scan.
+///
+/// This is the shape that hid two registered files: a test-only `use` on line 12
+/// of 440 truncated the scan to the import block, so real code building
+/// `passed: true` below it was never seen. The guard reported the live
+/// registrations as stale rather than reporting the files as unguarded, which is
+/// the more dangerous of the two failures — it argues for *deleting* the
+/// registration that still applies.
+#[test]
+fn production_lines_survive_a_test_only_import() {
+    let source = concat!(
+        "use std::fmt;\n",
+        "#[cfg(test)]\n",
+        "use crate::testing::Fixture;\n",
+        "\n",
+        "fn build() -> Report {\n",
+        "    Report { passed: true }\n",
+        "}\n",
+        "#[cfg(test)]\n",
+        "mod tests {\n",
+        "    fn ignored() { let _ = \"passed: true\"; }\n",
+        "}\n",
+    );
+    let lines = production_lines(source);
+    assert!(
+        lines.iter().any(|line| line.contains("passed: true")),
+        "a test-only import truncated the production scan and hid a real verdict"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("fn ignored")),
+        "the scan must still stop at the test module"
+    );
+}
+
+/// Visibility qualifiers must not hide the test module.
+#[test]
+fn production_lines_stop_at_a_qualified_test_module() {
+    let source = concat!(
+        "fn real() -> bool {\n",
+        "    true\n",
+        "}\n",
+        "#[cfg(test)]\n",
+        "pub(crate) mod tests {\n",
+        "    passed: true\n",
+        "}\n",
+    );
+    let lines = production_lines(source);
     assert!(!lines.iter().any(|line| line.contains("passed: true")));
 }
 

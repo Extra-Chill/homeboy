@@ -18,6 +18,7 @@ use homeboy_extension::{
 };
 use homeboy_version::version;
 
+use super::lifecycle::DeployObservation;
 use super::path_roots::resolve_effective_remote_path;
 use super::transfer::scp_file;
 use super::types::{DeployEffect, DeployResult};
@@ -455,6 +456,7 @@ pub(super) fn deploy_with_override(
     domain: Option<&str>,
     remote_owner: Option<&str>,
     cli_path_override: Option<&str>,
+    mut observation: Option<&mut DeployObservation>,
 ) -> Result<DeployResult> {
     let artifact_filename = local_path
         .file_name()
@@ -472,6 +474,9 @@ pub(super) fn deploy_with_override(
     let mut verified = false;
 
     // Step 1: Create staging directory
+    if let Some(observation) = observation.as_deref_mut() {
+        observation.phase("transfer", true)?;
+    }
     let mkdir_cmd = format!(
         "mkdir -p {}",
         shell::quote_path(&override_config.staging_path)
@@ -504,6 +509,9 @@ pub(super) fn deploy_with_override(
     }
 
     // Step 3: Render and execute install command
+    if let Some(observation) = observation.as_deref_mut() {
+        observation.phase("extract", true)?;
+    }
     // Resolution order: component/project cli_path override → extension default → "wp"
     let cli_path = cli_path_override
         .or_else(|| {
@@ -567,6 +575,9 @@ pub(super) fn deploy_with_override(
     // until after this step so extension verifiers can compare installed files
     // against the exact uploaded payload.
     if let Some(v) = verification {
+        if let Some(observation) = observation.as_deref_mut() {
+            observation.phase("verify", true)?;
+        }
         if let Some(ref verify_cmd_template) = v.verify_command {
             let mut verify_vars = vars.clone();
             verify_vars.insert(
@@ -931,6 +942,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("deploy result");
 
@@ -968,6 +980,7 @@ mod tests {
             &extension(),
             Some(&verification),
             Some(temp.path().to_str().expect("site root")),
+            None,
             None,
             None,
             None,
@@ -1010,6 +1023,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("deploy result");
 
@@ -1048,6 +1062,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("deploy result");
 
@@ -1079,6 +1094,7 @@ mod tests {
             &extension(),
             Some(&verification),
             Some(temp.path().to_str().expect("site root")),
+            None,
             None,
             None,
             None,
@@ -1168,6 +1184,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("deploy result");
 
@@ -1217,6 +1234,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("deploy result");
 
@@ -1262,6 +1280,7 @@ mod tests {
             &extension(),
             None,
             Some(temp.path().to_str().expect("site root")),
+            None,
             None,
             None,
             None,
@@ -1404,6 +1423,7 @@ mod tests {
             &extension(),
             Some(&verification),
             Some(temp.path().to_str().expect("site root")),
+            None,
             None,
             None,
             None,

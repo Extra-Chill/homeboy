@@ -16,7 +16,8 @@ Server configuration defines SSH server connections stored in `servers/<id>.json
   "auth": {
     "mode": "key_plus_password_controlmaster",
     "control_path": "string",
-    "persist": "string"
+    "persist": "string",
+    "persist_source": "configured | migrated | legacy_default (engine-owned output)"
   },
   "runner": {
     "workspace_root": "string",
@@ -24,6 +25,8 @@ Server configuration defines SSH server connections stored in `servers/<id>.json
     "daemon": boolean,
     "concurrency_limit": number,
     "artifact_policy": "string",
+    "require_exact_homeboy_version": boolean,
+    "require_fresh_runtime_overlay": boolean,
     "policy": {
       "snapshot_excludes": ["string"]
     },
@@ -119,6 +122,28 @@ Use `runner.secret_env` for values that must be read at execution time instead o
 
 Homeboy rejects likely credential names in newly persisted `runner.env` entries. Use `secret_env` for those values; it is also the explicit sensitivity declaration for non-obvious names. Existing legacy entries can be inspected without values using `homeboy runner doctor <id> --scope secret-env` and migrated into OS keychain-backed references with `--repair`. Homeboy command output redacts sensitive names in `env` and keeps `secret_env` as references only. Secret file contents and referenced environment variable values are not printed by runner config/status diagnostics.
 
+### Lab Offload Safety Gates
+
+Two runner settings decide whether detected drift warns or refuses a Lab offload. Both default to unset, which means warn-and-proceed, and both have a per-run environment override:
+
+| Setting | Env override | Default (unset) | When `true` |
+| --- | --- | --- | --- |
+| `require_exact_homeboy_version` | `HOMEBOY_REQUIRE_EXACT_RUNNER_VERSION` | Patch drift within the same `MAJOR.MINOR` proceeds with a warning; `MAJOR`/`MINOR` drift refuses | The controller↔runner version gate requires a byte-identical Homeboy version on the runner |
+| `require_fresh_runtime_overlay` | `HOMEBOY_REQUIRE_FRESH_RUNTIME_OVERLAY` | A stale runtime-overlay build warns on stderr and the offload runs the old build | A runtime overlay whose built artifact is provably behind its source checkout refuses the offload |
+
+```json
+{
+  "runner": {
+    "require_exact_homeboy_version": true,
+    "require_fresh_runtime_overlay": true
+  }
+}
+```
+
+Precedence for both is the same: a truthy environment value (`1`, `true`, `yes`, `on`) escalates that single run regardless of configuration; anything else — including a falsy value, which is indistinguishable from "not set for this run" — falls through to the runner setting, whose unset default is `false`. The environment variables are escalation overrides only, so neither can relax a runner configured strict.
+
+`require_fresh_runtime_overlay` escalates only builds *proven* stale. An overlay whose freshness cannot be established — no containing checkout, no artifacts, or an unreadable source history — is reported as unknown and never refused. Freshness itself is derived from the artifact's newest file mtime against the containing checkout's history, which is an indication rather than a proof: a freshly created checkout rewrites mtimes and makes every artifact in it look newly built. Set this on runners where silently executing a stale build is worse than a failed dispatch.
+
 ## Managed SSH Sessions
 
 Servers that accept a key and then require an operator-entered password can opt into managed control-master reuse:
@@ -134,6 +159,10 @@ Servers that accept a key and then require an operator-entered password can opt 
 ```
 
 Homeboy never stores the password. Run `homeboy server connect <server_id>` to establish the interactive session, then later `homeboy ssh`, file transfer, deploy, logs, and other server-backed commands reuse the active SSH control master.
+
+`auth.persist` is required when adding a managed-session policy. It is an OpenSSH `ControlPersist` value such as `4h`, `1h30m`, `yes`, or `no`; colon-form values are not accepted. This is the local control-socket idle lifetime, not a policy imposed by the remote server. A shorter lifetime reduces the time an authenticated socket remains usable; a longer lifetime avoids repeated interactive authentication.
+
+`persist_source` is engine-owned output, not a configuration input. `configured` identifies an explicit persisted operator choice. `legacy_default` identifies an older omitted value still using its historic `4h` behavior. Updating that legacy record with an explicit `persist` safely records `migrated`. `homeboy server show` and managed-session output report the effective value and source.
 
 ## SSH Key Management
 

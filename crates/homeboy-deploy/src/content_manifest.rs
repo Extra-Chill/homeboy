@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 
 use homeboy_core::content_diff::{self, TreeEntry, TreeEntryKind, TreeScanOptions};
 use homeboy_core::engine::shell;
-use homeboy_core::server::SshClient;
+use homeboy_core::error::{CommandEvidence, Error};
+use homeboy_core::server::{CommandOutput, SshClient};
 use homeboy_engine_primitives::content_hash;
 
 use super::types::PreparedDeployArtifact;
@@ -22,6 +23,12 @@ const PACKAGE_SCOPE: &str = "canonical-package-installed-tree";
 const PACKAGE_UNAVAILABLE_SCOPE: &str = "canonical-package-unavailable";
 const MAX_DIFFERENCES: usize = 20;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Bound on retained stdout/stderr from the remote manifest probe, matching the
+/// release path's treatment of `gh` output.
+const REMOTE_PROBE_DIAGNOSTIC_BYTES: usize = 4096;
+/// Suffix [`bound_text`] appends when it truncates, used to set
+/// [`CommandEvidence::truncated`] honestly.
+const DIAGNOSTIC_TRUNCATION_MARKER: &str = "...[truncated]";
 
 /// How deploy scans a tree, stated once so the local walk cannot drift from the
 /// remote probe or from the archive reader.
@@ -143,26 +150,77 @@ impl Manifest {
         format!("{:x}", hash.finalize())
     }
 
-    pub(super) fn validate(&self) -> Result<(), String> {
+    pub(super) fn validate(&self) -> Result<(), Error> {
         for (path, entry) in &self.entries {
             if normalize_path(path)? != *path {
-                return Err("receipt manifest contains an invalid entry".to_string());
+                return Err(manifest_entry_error(
+                    "receipt manifest contains an invalid entry",
+                    path,
+                ));
             }
             if entry.kind == TreeEntryKind::File
                 && (entry.mode != "0" && entry.mode != "1"
                     || entry.value.len() != 64
                     || !entry.value.bytes().all(|byte| byte.is_ascii_hexdigit()))
             {
-                return Err("receipt manifest contains an invalid file entry".to_string());
+                return Err(manifest_entry_error(
+                    "receipt manifest contains an invalid file entry",
+                    path,
+                ));
             }
             if entry.kind == TreeEntryKind::Symlink
                 && validate_link_target(path, &entry.value)? != entry.value
             {
-                return Err("receipt manifest contains an invalid symlink entry".to_string());
+                return Err(manifest_entry_error(
+                    "receipt manifest contains an invalid symlink entry",
+                    path,
+                ));
             }
         }
         Ok(())
     }
+}
+
+/// A receipt manifest entry that violates the manifest contract, naming the
+/// offending path.
+///
+/// The path is the whole diagnostic: "receipt manifest contains an invalid
+/// entry" told an operator nothing about *which* entry, so the id is carried
+/// structurally in `details.id` rather than folded into prose (#11135).
+fn manifest_entry_error(problem: &str, path: &str) -> Error {
+    Error::invalid_argument_for("receipt_manifest", problem, path)
+}
+
+/// Render a structured [`Error`] into the single `diagnostic` string a
+/// [`ContentManifestComparison`] can carry.
+///
+/// `ContentManifestComparison::diagnostic` is a `String`, so this is the last
+/// point at which structured evidence can survive into what an operator reads:
+/// the error code, the serialized `details` (which carry the captured remote
+/// probe command evidence), and every hint are folded into the text instead of
+/// being discarded by a bare `{error}` (#11135).
+pub(super) fn diagnostic_text(error: &Error) -> String {
+    let mut text = format!("[{}] {}", error.code.as_str(), error.message);
+    if !error.details.is_null() {
+        text.push_str(&format!(" details={}", error.details));
+    }
+    for hint in &error.hints {
+        text.push_str(&format!(" hint={}", hint.message));
+    }
+    text
+}
+
+/// Truncate on a character boundary, marking the cut so a consumer can tell a
+/// bounded capture from a complete one.
+fn bound_text(value: &str, limit: usize) -> String {
+    if value.len() <= limit {
+        return value.to_string();
+    }
+    let mut end = limit;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{DIAGNOSTIC_TRUNCATION_MARKER}", &value[..end])
 }
 
 pub(super) fn compare(
@@ -175,7 +233,7 @@ pub(super) fn compare(
         Ok(manifest) => manifest,
         Err(error) => {
             return unavailable(
-                format!("local manifest unavailable: {error}"),
+                format!("local manifest unavailable: {}", diagnostic_text(&error)),
                 WORKSPACE_SCOPE,
                 None,
             )
@@ -196,7 +254,7 @@ pub(super) fn compare(
         }
         Err(error) => {
             return unavailable(
-                format!("remote manifest unavailable: {error}"),
+                format!("remote manifest unavailable: {}", diagnostic_text(&error)),
                 WORKSPACE_SCOPE,
                 None,
             )
@@ -232,7 +290,10 @@ pub(super) fn compare_archive(
         Ok(manifest) => manifest,
         Err(error) => {
             return unavailable(
-                format!("canonical package manifest unavailable: {error}"),
+                format!(
+                    "canonical package manifest unavailable: {}",
+                    diagnostic_text(&error)
+                ),
                 PACKAGE_SCOPE,
                 artifact_provenance(artifact),
             )
@@ -253,7 +314,7 @@ pub(super) fn compare_archive(
         }
         Err(error) => {
             return unavailable(
-                format!("remote manifest unavailable: {error}"),
+                format!("remote manifest unavailable: {}", diagnostic_text(&error)),
                 PACKAGE_SCOPE,
                 artifact_provenance(artifact),
             )
@@ -276,7 +337,7 @@ pub(super) fn compare_archive(
     )
 }
 
-pub(super) fn package_manifest(archive: &Path, exclusions: &[String]) -> Result<Manifest, String> {
+pub(super) fn package_manifest(archive: &Path, exclusions: &[String]) -> Result<Manifest, Error> {
     archive_manifest(archive, exclusions)
 }
 
@@ -302,7 +363,7 @@ pub(super) fn compare_saved_package_manifest(
         }
         Err(error) => {
             return unavailable(
-                format!("remote manifest unavailable: {error}"),
+                format!("remote manifest unavailable: {}", diagnostic_text(&error)),
                 PACKAGE_SCOPE,
                 Some(provenance),
             )
@@ -349,7 +410,7 @@ pub(super) fn compare_prepared_archive(
             prepared_artifact_provenance_without_sha(artifact),
         ),
         Err(error) => canonical_package_unavailable_with_provenance(
-            format!("prepared package unavailable: {error}"),
+            format!("prepared package unavailable: {}", diagnostic_text(&error)),
             prepared_artifact_provenance_without_sha(artifact),
         ),
     }
@@ -379,14 +440,24 @@ fn comparison(
 pub(super) fn verify_archive_hash(
     archive: &Path,
     artifact: &ReleaseArtifactLease,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let actual = sha256(archive)?;
     if actual != artifact.sha256 {
-        return Err(format!(
-            "canonical package SHA-256 mismatch for '{}': expected {}, got {}",
-            archive.display(),
-            artifact.sha256,
-            actual
+        return Err(Error::validation_invalid_argument(
+            "release_artifact",
+            format!(
+                "canonical package SHA-256 mismatch for '{}': expected {}, got {}",
+                archive.display(),
+                artifact.sha256,
+                actual
+            ),
+            Some(archive.display().to_string()),
+            None,
+        )
+        .with_hint(
+            "The leased release asset no longer hashes to the digest recorded when it was \
+             resolved; re-resolve the asset before deploying, or use --tagged to request an \
+             explicit local tag build.",
         ));
     }
     Ok(())
@@ -468,7 +539,10 @@ fn compare_archive_with_provenance(
         Ok(manifest) => manifest,
         Err(error) => {
             return canonical_package_unavailable_with_provenance(
-                format!("canonical package manifest unavailable: {error}"),
+                format!(
+                    "canonical package manifest unavailable: {}",
+                    diagnostic_text(&error)
+                ),
                 provenance,
             )
         }
@@ -488,7 +562,7 @@ fn compare_archive_with_provenance(
         }
         Err(error) => {
             return canonical_package_unavailable_with_provenance(
-                format!("remote manifest unavailable: {error}"),
+                format!("remote manifest unavailable: {}", diagnostic_text(&error)),
                 provenance,
             )
         }
@@ -545,22 +619,27 @@ fn unavailable(
     }
 }
 
-fn local_manifest(root: &Path) -> Result<Manifest, String> {
+fn local_manifest(root: &Path) -> Result<Manifest, Error> {
     local_manifest_with_exclusions(root, &[])
 }
 
-fn local_manifest_with_exclusions(root: &Path, exclusions: &[String]) -> Result<Manifest, String> {
+fn local_manifest_with_exclusions(root: &Path, exclusions: &[String]) -> Result<Manifest, Error> {
     if !root.exists() {
-        return Err(format!("{} does not exist", root.display()));
+        return Err(Error::invalid_argument_for(
+            "local_path",
+            format!("{} does not exist", root.display()),
+            root.display().to_string(),
+        ));
     }
+    // `scan_tree` already reports a coded, detailed error. Stringifying it here
+    // is what erased the walker's own diagnosis on the deploy path (#11135).
     let entries = content_diff::scan_tree(
         root,
         &TreeScanOptions {
             excludes: exclusions.to_vec(),
             ..deployed_tree_scan_options()
         },
-    )
-    .map_err(|error| error.to_string())?;
+    )?;
     let entries = entries
         .into_iter()
         .map(|(path, mut entry)| {
@@ -569,16 +648,37 @@ fn local_manifest_with_exclusions(root: &Path, exclusions: &[String]) -> Result<
             }
             Ok((path, entry))
         })
-        .collect::<Result<BTreeMap<_, _>, String>>()?;
+        .collect::<Result<BTreeMap<_, _>, Error>>()?;
     Ok(Manifest { entries })
 }
 
-fn archive_manifest(path: &Path, exclusions: &[String]) -> Result<Manifest, String> {
-    let file = fs::File::open(path).map_err(|error| error.to_string())?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
+/// A failure reading or interpreting the canonical package archive, naming the
+/// archive so the operator does not have to infer which package was inspected.
+fn archive_error(path: &Path, problem: impl std::fmt::Display) -> Error {
+    Error::invalid_argument_for(
+        "package_archive",
+        problem.to_string(),
+        path.display().to_string(),
+    )
+}
+
+fn archive_manifest(path: &Path, exclusions: &[String]) -> Result<Manifest, Error> {
+    let file = fs::File::open(path).map_err(|error| {
+        Error::from_io_error(
+            &error,
+            Some(format!("open package archive '{}'", path.display())),
+        )
+    })?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|error| archive_error(path, format!("package archive is unreadable: {error}")))?;
     let mut names = Vec::new();
     for index in 0..archive.len() {
-        let entry = archive.by_index(index).map_err(|error| error.to_string())?;
+        let entry = archive.by_index(index).map_err(|error| {
+            archive_error(
+                path,
+                format!("package archive entry {index} failed: {error}"),
+            )
+        })?;
         if !entry.is_dir() {
             names.push(normalize_path(entry.name())?);
         }
@@ -586,7 +686,12 @@ fn archive_manifest(path: &Path, exclusions: &[String]) -> Result<Manifest, Stri
     let root = archive_root(&names);
     let mut manifest = Manifest::default();
     for index in 0..archive.len() {
-        let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
+        let mut entry = archive.by_index(index).map_err(|error| {
+            archive_error(
+                path,
+                format!("package archive entry {index} failed: {error}"),
+            )
+        })?;
         if entry.is_dir() {
             continue;
         }
@@ -600,7 +705,10 @@ fn archive_manifest(path: &Path, exclusions: &[String]) -> Result<Manifest, Stri
             .unwrap_or(&name)
             .to_string();
         if relative.is_empty() {
-            return Err("archive entry resolves to the package root".to_string());
+            return Err(archive_error(
+                path,
+                format!("archive entry '{name}' resolves to the package root"),
+            ));
         }
         // Deploy scopes describe the installed payload, not an archive wrapper.
         if ignored(&relative, exclusions) {
@@ -617,13 +725,29 @@ fn archive_manifest(path: &Path, exclusions: &[String]) -> Result<Manifest, Stri
         let mut hash = Sha256::new();
         let value = if kind == TreeEntryKind::Symlink {
             let mut target = String::new();
-            std::io::Read::read_to_string(&mut entry, &mut target)
-                .map_err(|error| error.to_string())?;
+            std::io::Read::read_to_string(&mut entry, &mut target).map_err(|error| {
+                Error::from_io_error(
+                    &error,
+                    Some(format!(
+                        "read symlink target '{relative}' from package archive '{}'",
+                        path.display()
+                    )),
+                )
+            })?;
             validate_link_target(&relative, &target)?
         } else {
-            std::io::copy(&mut entry, &mut hash).map_err(|error| error.to_string())?;
+            std::io::copy(&mut entry, &mut hash).map_err(|error| {
+                Error::from_io_error(
+                    &error,
+                    Some(format!(
+                        "hash entry '{relative}' from package archive '{}'",
+                        path.display()
+                    )),
+                )
+            })?;
             format!("{:x}", hash.finalize())
         };
+        let duplicate = relative.clone();
         if manifest
             .entries
             .insert(
@@ -641,7 +765,10 @@ fn archive_manifest(path: &Path, exclusions: &[String]) -> Result<Manifest, Stri
             )
             .is_some()
         {
-            return Err("archive contains duplicate normalized paths".to_string());
+            return Err(archive_error(
+                path,
+                format!("archive contains duplicate normalized path '{duplicate}'"),
+            ));
         }
     }
     Ok(manifest)
@@ -657,34 +784,111 @@ fn archive_root(names: &[String]) -> Option<String> {
     .then(|| first.to_string())
 }
 
-fn sha256(path: &Path) -> Result<String, String> {
-    content_hash::sha256_file(path).map_err(|error| error.to_string())
+fn sha256(path: &Path) -> Result<String, Error> {
+    // `sha256_file` already classifies its own IO failures (including ENOSPC);
+    // propagate that classification rather than flattening it to a sentence.
+    content_hash::sha256_file(path)
+}
+
+/// Structured evidence for a failed remote content-manifest probe.
+///
+/// The probe is a command, so its exit code and bounded stdout/stderr belong in
+/// [`CommandEvidence`] exactly as the release path carries `gh` output. Before
+/// #11135 this channel returned a bare `String` and the target's stderr — the
+/// only thing that says *why* the probe failed — was discarded outright.
+fn remote_probe_error(
+    root: &str,
+    problem: impl Into<String>,
+    location: &str,
+    output: &CommandOutput,
+) -> Error {
+    let stdout = bound_text(&output.stdout, REMOTE_PROBE_DIAGNOSTIC_BYTES);
+    let stderr = bound_text(&output.stderr, REMOTE_PROBE_DIAGNOSTIC_BYTES);
+    let truncated = stdout.ends_with(DIAGNOSTIC_TRUNCATION_MARKER)
+        || stderr.ends_with(DIAGNOSTIC_TRUNCATION_MARKER);
+    Error::validation_invalid_argument_with_evidence(
+        "remote_manifest",
+        problem,
+        Some(root.to_string()),
+        None,
+        Some(CommandEvidence {
+            command: format!("deploy content-manifest probe of {root}"),
+            cwd: None,
+            location: Some(location.to_string()),
+            // A timeout kills the probe before it reports a status, so there is
+            // no real exit code to report.
+            exit_code: if output.timed_out {
+                -1
+            } else {
+                output.exit_code
+            },
+            stdout,
+            stderr,
+            truncated,
+        }),
+    )
 }
 
 fn remote_manifest(
     root: &str,
     client: &SshClient,
     exclusions: &[String],
-) -> Result<Option<Manifest>, String> {
+) -> Result<Option<Manifest>, Error> {
     if client.is_local {
         return local_manifest_with_exclusions(Path::new(root), exclusions).map(Some);
     }
     // The target computes hashes and returns compact records; content never crosses SSH.
     let command = format!("root={}; test -e \"$root\" || exit 44; if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then exit 45; fi; find \"$root\" -mindepth 1 \\( -path '*/.git/*' -o -name .git -o -name '.homeboy-*' \\) -prune -o -type f -exec sh -c 'for f do rel=${{f#\"$1\"/}}; if command -v sha256sum >/dev/null 2>&1; then set -- $(sha256sum \"$f\"); else set -- $(shasum -a 256 \"$f\"); fi; mode=$(stat -c %a \"$f\" 2>/dev/null || stat -f %Lp \"$f\"); printf \"f\\t%s\\t%s\\t%s\\n\" \"$rel\" \"$mode\" \"$1\"; done' sh \"$root\" {{}} + -o -type l -exec sh -c 'for f do rel=${{f#\"$1\"/}}; mode=$(stat -c %a \"$f\" 2>/dev/null || stat -f %Lp \"$f\"); printf \"l\\t%s\\t%s\\t%s\\n\" \"$rel\" \"$mode\" \"$(readlink \"$f\")\"; done' sh \"$root\" {{}} +", shell::quote_path(root));
+    // The local case returned above, so anything reaching here ran on the target.
     let output = client.execute_with_timeout(&command, PROBE_TIMEOUT);
+    let location = "remote";
     if output.timed_out {
-        return Err(format!("timed out after {}s", PROBE_TIMEOUT.as_secs()));
+        return Err(remote_probe_error(
+            root,
+            format!("timed out after {}s", PROBE_TIMEOUT.as_secs()),
+            location,
+            &output,
+        )
+        .with_hint(format!(
+            "The probe hashes every file under {root}; raise the deploy target's throughput or \
+             narrow the component scope before retrying.",
+        ))
+        .with_retryable(true));
     }
     if output.exit_code == 44 {
         return Ok(None);
     }
+    // Exit 45 is the probe's own signal that no SHA-256 tool exists. Any other
+    // non-zero status is something else entirely, and reporting all of them as
+    // a missing hashing tool is how the target's real stderr got buried.
+    if output.exit_code == 45 {
+        return Err(remote_probe_error(
+            root,
+            "remote does not provide a supported SHA-256 command",
+            location,
+            &output,
+        )
+        .with_hint("Install `sha256sum` (coreutils) or `shasum` on the deploy target."));
+    }
     if !output.success {
-        return Err("remote does not provide a supported SHA-256 command".to_string());
+        return Err(remote_probe_error(
+            root,
+            format!(
+                "remote content manifest probe failed with exit code {}",
+                output.exit_code
+            ),
+            location,
+            &output,
+        )
+        .with_hint(
+            "Inspect the captured `command_evidence.stderr` for the target's own explanation \
+             before retrying.",
+        ));
     }
     parse_remote_manifest(&output.stdout, exclusions).map(Some)
 }
 
-fn parse_remote_manifest(output: &str, exclusions: &[String]) -> Result<Manifest, String> {
+fn parse_remote_manifest(output: &str, exclusions: &[String]) -> Result<Manifest, Error> {
     let mut manifest = Manifest::default();
     for line in output.lines() {
         let mut fields = line.splitn(4, '\t');
@@ -749,7 +953,7 @@ fn parse_remote_manifest(output: &str, exclusions: &[String]) -> Result<Manifest
     Ok(manifest)
 }
 
-fn malformed_remote_field(field: &str, value: &str) -> String {
+fn malformed_remote_field(field: &str, value: &str) -> Error {
     const MAX_DIAGNOSTIC_VALUE_BYTES: usize = 160;
 
     let mut diagnostic = String::new();
@@ -761,7 +965,16 @@ fn malformed_remote_field(field: &str, value: &str) -> String {
         }
         diagnostic.push_str(&escaped);
     }
-    format!("malformed remote manifest field '{field}': '{diagnostic}'")
+    Error::validation_invalid_argument(
+        "remote_manifest",
+        format!("malformed remote manifest field '{field}': '{diagnostic}'"),
+        Some(field.to_string()),
+        None,
+    )
+    .with_hint(
+        "The deploy target's probe emitted a record this build cannot parse; confirm the target's \
+         `find`/`stat`/`sha256sum` are the coreutils implementations the probe assumes.",
+    )
 }
 
 /// Paths excluded from every deploy manifest, whatever produced it.
@@ -773,20 +986,28 @@ fn ignored(path: &str, exclusions: &[String]) -> bool {
     content_diff::excluded(path, exclusions) || content_diff::runtime_artifact(path)
 }
 
-fn normalize_path(path: &str) -> Result<String, String> {
+fn unsafe_manifest_path(path: &str) -> Error {
+    Error::invalid_argument_for(
+        "manifest_path",
+        format!("unsafe manifest path '{path}'"),
+        path,
+    )
+}
+
+fn normalize_path(path: &str) -> Result<String, Error> {
     let path = path.replace('\\', "/");
     if path.starts_with('/')
         || path
             .bytes()
             .any(|byte| matches!(byte, b'\0' | b'\n' | b'\r' | b'\t'))
     {
-        return Err(format!("unsafe manifest path '{path}'"));
+        return Err(unsafe_manifest_path(&path));
     }
     let mut parts = Vec::new();
     for part in path.split('/') {
         match part {
             "" | "." => continue,
-            ".." => return Err(format!("unsafe manifest path '{path}'")),
+            ".." => return Err(unsafe_manifest_path(&path)),
             _ => parts.push(part),
         }
     }
@@ -795,19 +1016,33 @@ fn normalize_path(path: &str) -> Result<String, String> {
             .components()
             .any(|part| matches!(part, PathComponent::Prefix(_)))
     {
-        return Err(format!("unsafe manifest path '{path}'"));
+        return Err(unsafe_manifest_path(&path));
     }
     Ok(parts.join("/"))
 }
 
-fn validate_link_target(entry: &str, target: &str) -> Result<String, String> {
+/// A symlink the manifest refuses to record, naming both the entry that holds
+/// it and the target it points at. Neither survived the `String` channel.
+fn unsafe_symlink_target(problem: &str, entry: &str, target: &str) -> Error {
+    Error::invalid_argument_for(
+        "manifest_symlink",
+        format!("{problem} (entry '{entry}' -> '{target}')"),
+        entry,
+    )
+}
+
+fn validate_link_target(entry: &str, target: &str) -> Result<String, Error> {
     if target.is_empty()
         || target.starts_with('/')
         || target
             .bytes()
             .any(|byte| matches!(byte, b'\0' | b'\n' | b'\r' | b'\t'))
     {
-        return Err("unsafe manifest symlink target".to_string());
+        return Err(unsafe_symlink_target(
+            "unsafe manifest symlink target",
+            entry,
+            target,
+        ));
     }
     let mut resolved: Vec<&str> = entry.split('/').collect();
     resolved.pop();
@@ -816,7 +1051,11 @@ fn validate_link_target(entry: &str, target: &str) -> Result<String, String> {
             "" | "." => continue,
             ".." => {
                 if resolved.pop().is_none() {
-                    return Err("symlink target escapes package root".to_string());
+                    return Err(unsafe_symlink_target(
+                        "symlink target escapes package root",
+                        entry,
+                        target,
+                    ));
                 }
             }
             _ => {
@@ -825,7 +1064,11 @@ fn validate_link_target(entry: &str, target: &str) -> Result<String, String> {
         }
     }
     if resolved.is_empty() {
-        return Err("unsafe manifest symlink target".to_string());
+        return Err(unsafe_symlink_target(
+            "unsafe manifest symlink target",
+            entry,
+            target,
+        ));
     }
     Ok(resolved.join("/"))
 }
@@ -905,21 +1148,44 @@ mod tests {
         assert!(result.differences.iter().any(|p| p == "deleted"));
         assert!(!result.differences.iter().any(|p| p.contains("homeboy")));
     }
+    /// Read the structured `problem` out of an invalid-argument error.
+    ///
+    /// Asserting on this rather than on `Display` is the point of #11135: the
+    /// diagnostic now lives in a machine-readable field, and a test that only
+    /// matched rendered prose would pass just as well against the old `String`
+    /// channel.
+    fn problem(error: &Error) -> String {
+        error
+            .details
+            .get("problem")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("structured problem detail, got {}", error.details))
+            .to_string()
+    }
+
     #[test]
     fn remote_manifest_requires_well_formed_hash_evidence() {
         let missing = parse_remote_manifest("f\tpath\t644\n", &[]).expect_err("missing hash");
         assert_eq!(
-            missing,
+            missing.code,
+            homeboy_core::error::ErrorCode::ValidationInvalidArgument
+        );
+        assert_eq!(
+            problem(&missing),
             "malformed remote manifest field 'value': 'f\\tpath\\t644'"
         );
+        // The remediation is carried as a hint, not buried in the message.
+        assert!(!missing.hints.is_empty());
         let malformed =
             parse_remote_manifest("f\tpath\t644\tnot-a-hash\n", &[]).expect_err("malformed hash");
         assert_eq!(
-            malformed,
+            problem(&malformed),
             "malformed remote manifest field 'sha256': 'not-a-hash'"
         );
-        let oversized = parse_remote_manifest(&format!("f\tpath\t644\t{}\n", "x".repeat(200)), &[])
-            .expect_err("oversized malformed hash");
+        let oversized = problem(
+            &parse_remote_manifest(&format!("f\tpath\t644\t{}\n", "x".repeat(200)), &[])
+                .expect_err("oversized malformed hash"),
+        );
         assert!(oversized.ends_with("...'"), "{oversized}");
         assert!(oversized.len() < 210, "{oversized}");
         assert!(parse_remote_manifest(
@@ -927,6 +1193,152 @@ mod tests {
             &[]
         )
         .is_err());
+    }
+
+    /// #11135: a failed remote probe must reach the caller carrying what ran and
+    /// what the target said, not a sentence that guesses at the cause.
+    #[test]
+    fn remote_probe_failure_retains_command_evidence_and_survives_into_the_diagnostic() {
+        let output = CommandOutput {
+            stdout: "partial\n".to_string(),
+            stderr: "find: '/srv/site': Permission denied".to_string(),
+            success: false,
+            exit_code: 1,
+            timed_out: false,
+            child_resource: None,
+        };
+        let error = remote_probe_error(
+            "/srv/site",
+            "remote content manifest probe failed with exit code 1",
+            "remote",
+            &output,
+        )
+        .with_hint("Inspect the captured `command_evidence.stderr`.");
+
+        let evidence = error
+            .details
+            .get("command_evidence")
+            .expect("command evidence survives the conversion");
+        assert_eq!(evidence.get("exit_code").and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(
+            evidence.get("stderr").and_then(|v| v.as_str()),
+            Some("find: '/srv/site': Permission denied")
+        );
+        assert_eq!(
+            evidence.get("location").and_then(|v| v.as_str()),
+            Some("remote")
+        );
+
+        // `ContentManifestComparison.diagnostic` is a `String`, so the evidence
+        // has to be rendered into it or it is lost at the last hop.
+        let diagnostic = diagnostic_text(&error);
+        assert!(diagnostic.contains("Permission denied"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("validation.invalid_argument"),
+            "{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("hint=Inspect the captured"),
+            "{diagnostic}"
+        );
+    }
+
+    /// A timed-out probe has no exit status to report, and is retryable.
+    #[test]
+    fn remote_probe_timeout_is_marked_retryable_without_a_fabricated_exit_code() {
+        let output = CommandOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            success: false,
+            exit_code: 0,
+            timed_out: true,
+            child_resource: None,
+        };
+        let error = remote_probe_error("/srv/site", "timed out after 20s", "remote", &output)
+            .with_retryable(true);
+        assert_eq!(error.retryable, Some(true));
+        assert_eq!(
+            error
+                .details
+                .get("command_evidence")
+                .and_then(|evidence| evidence.get("exit_code"))
+                .and_then(|code| code.as_i64()),
+            Some(-1)
+        );
+    }
+
+    /// Long probe output is bounded and the truncation is declared, so a
+    /// consumer never mistakes a clipped capture for the whole story.
+    #[test]
+    fn remote_probe_evidence_is_bounded_and_declares_truncation() {
+        let output = CommandOutput {
+            stdout: String::new(),
+            stderr: "x".repeat(REMOTE_PROBE_DIAGNOSTIC_BYTES * 2),
+            success: false,
+            exit_code: 1,
+            timed_out: false,
+            child_resource: None,
+        };
+        let error = remote_probe_error("/srv/site", "probe failed", "remote", &output);
+        let evidence = error
+            .details
+            .get("command_evidence")
+            .expect("command evidence");
+        let stderr = evidence
+            .get("stderr")
+            .and_then(|value| value.as_str())
+            .expect("stderr");
+        assert!(stderr.ends_with(DIAGNOSTIC_TRUNCATION_MARKER));
+        assert!(stderr.len() <= REMOTE_PROBE_DIAGNOSTIC_BYTES + DIAGNOSTIC_TRUNCATION_MARKER.len());
+        assert_eq!(
+            evidence.get("truncated").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+    }
+
+    /// The offending path is the diagnostic for a rejected manifest entry, and
+    /// it is carried structurally rather than dropped.
+    #[test]
+    fn rejected_manifest_entries_name_the_offending_path() {
+        let unsafe_path = normalize_path("../outside").expect_err("traversal rejected");
+        assert_eq!(
+            unsafe_path.details.get("id").and_then(|id| id.as_str()),
+            Some("../outside")
+        );
+
+        let escaping_link =
+            validate_link_target("current", "../outside").expect_err("escaping symlink rejected");
+        assert_eq!(
+            escaping_link.details.get("id").and_then(|id| id.as_str()),
+            Some("current")
+        );
+        assert!(
+            problem(&escaping_link).contains("../outside"),
+            "{escaping_link}"
+        );
+    }
+
+    /// A canonical package whose bytes no longer match the leased digest fails
+    /// with the remediation attached, not just a mismatch sentence.
+    #[test]
+    fn archive_hash_mismatch_carries_the_offending_archive_and_a_next_action() {
+        let temp = tempfile::tempdir().expect("temp");
+        let package = temp.path().join("package.zip");
+        write_zip(&package, &[("plugin/version", "1.0.0")]);
+        let artifact = release_artifact(&package);
+        fs::write(&package, "mutated bytes").expect("mutate");
+
+        let error = verify_archive_hash(&package, &artifact).expect_err("mismatch");
+        let package_id = package.display().to_string();
+        assert_eq!(
+            error.details.get("id").and_then(|id| id.as_str()),
+            Some(package_id.as_str())
+        );
+        assert!(problem(&error).contains("SHA-256 mismatch"));
+        assert!(error
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("--tagged")));
     }
 
     #[test]

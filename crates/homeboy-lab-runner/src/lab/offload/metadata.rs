@@ -400,7 +400,12 @@ pub(crate) fn lab_runner_homeboy_has_blocking_drift_against_configured_identity(
     // Build-identity drift within the runner (active daemon control plane vs the
     // configured job command binary) is an internal-inconsistency signal that is
     // always blocking regardless of the controller↔runner version policy.
-    if status.stale_daemon.is_some() {
+    //
+    // Drift is an *observed* inconsistency. A report that compared nothing
+    // observed no drift, and this branch is exactly where every reverse runner
+    // now lands (#11106) — blocking on it would take the whole class out of
+    // service on the strength of a gap rather than a mismatch.
+    if status.admission_blocking_stale_daemon().is_some() {
         return true;
     }
     match classify_runner_homeboy_version_drift(status) {

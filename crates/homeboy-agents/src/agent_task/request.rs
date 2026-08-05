@@ -4,9 +4,10 @@ use std::path::PathBuf;
 
 use super::schema::request_schema;
 use super::{
-    AgentTaskArtifactDeclaration, AgentTaskCapabilityEvidence, AgentTaskCapabilityRequirements,
-    AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome, AgentTaskPolicy,
-    AgentTaskSourceRef, AgentTaskWorkspace,
+    AgentTaskArtifactDeclaration, AgentTaskAttachedToolCapability, AgentTaskCapabilityEvidence,
+    AgentTaskCapabilityRequirements, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits,
+    AgentTaskOutcome, AgentTaskPolicy, AgentTaskRuntimeTool, AgentTaskSourceRef,
+    AgentTaskWorkspace, ResolvedAgentTaskRuntimeTool,
 };
 
 /// Provider capability payload used by extension discovery and durable run metadata.
@@ -165,20 +166,57 @@ pub struct AgentTaskRequest {
     pub artifact_declarations: Vec<AgentTaskArtifactDeclaration>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub output_declarations: Vec<AgentTaskOutputDeclaration>,
+    /// Provider-neutral runtime processes attached to this task. Runtime adapters
+    /// project these declarations into their native configuration format.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_tools: Vec<AgentTaskRuntimeTool>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
 }
 
 /// Provider-facing request materialized on the host that executes the task.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct AgentTaskExecutorRequest {
-    #[serde(flatten)]
     pub request: AgentTaskRequest,
     pub artifacts_path: PathBuf,
     pub artifacts_path_provenance: AgentTaskArtifactsPathProvenance,
-    #[serde(skip)]
+    /// Host-resolved runtime attachments for the provider adapter. This is
+    /// distinct from the caller declaration carried in the flattened request.
+    pub resolved_runtime_tools: Vec<ResolvedAgentTaskRuntimeTool>,
     pub(crate) artifacts_root_identity:
         crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity,
+}
+
+impl Serialize for AgentTaskExecutorRequest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut value = serde_json::to_value(&self.request).map_err(serde::ser::Error::custom)?;
+        let object = value.as_object_mut().ok_or_else(|| {
+            serde::ser::Error::custom("agent task request must serialize as an object")
+        })?;
+        // Callers retain declarations for durable planning, but providers receive
+        // only Homeboy's validated, host-resolved projection.
+        object.remove("runtime_tools");
+        object.insert(
+            "artifacts_path".to_string(),
+            serde_json::to_value(&self.artifacts_path).map_err(serde::ser::Error::custom)?,
+        );
+        object.insert(
+            "artifacts_path_provenance".to_string(),
+            serde_json::to_value(&self.artifacts_path_provenance)
+                .map_err(serde::ser::Error::custom)?,
+        );
+        if !self.resolved_runtime_tools.is_empty() {
+            object.insert(
+                "resolved_runtime_tools".to_string(),
+                serde_json::to_value(&self.resolved_runtime_tools)
+                    .map_err(serde::ser::Error::custom)?,
+            );
+        }
+        value.serialize(serializer)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -202,10 +240,34 @@ impl std::ops::Deref for AgentTaskExecutorRequest {
 
 impl AgentTaskRequest {
     pub fn capability_requirements(&self) -> Result<AgentTaskCapabilityRequirements, String> {
-        super::capabilities::requirements_from_metadata(
+        let mut requirements = super::capabilities::requirements_from_metadata(
             &self.metadata,
             &self.executor.required_capabilities,
-        )
+        )?;
+        for tool in &self.runtime_tools {
+            if tool.required_capabilities.is_empty() {
+                continue;
+            }
+            if let Some(attached) = requirements
+                .attached_tools
+                .iter_mut()
+                .find(|attached| attached.id == tool.id)
+            {
+                attached
+                    .contributes
+                    .extend(tool.required_capabilities.clone());
+            } else {
+                requirements
+                    .attached_tools
+                    .push(AgentTaskAttachedToolCapability {
+                        id: tool.id.clone(),
+                        contributes: tool.required_capabilities.clone(),
+                    });
+            }
+        }
+        let requirements = requirements.normalized();
+        requirements.validate()?;
+        Ok(requirements)
     }
 
     pub fn record_capability_evidence(&mut self, evidence: AgentTaskCapabilityEvidence) {
@@ -334,6 +396,11 @@ impl AgentTaskRequest {
             .into_iter()
             .map(|declaration| declaration.redacted_with(&policy))
             .collect();
+        redacted.runtime_tools = redacted
+            .runtime_tools
+            .into_iter()
+            .map(|tool| tool.redacted())
+            .collect();
         redacted.metadata = policy.redact_json(&redacted.metadata);
         redacted
     }
@@ -386,6 +453,7 @@ mod runner_execution_envelope_tests {
                 metadata: Value::Null,
             }],
             output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
             metadata: Value::Null,
         };
 

@@ -8,6 +8,7 @@ use homeboy_core::project::Project;
 
 use super::super::effect::remote_version_after_deploy_effect;
 use super::super::generated_artifacts::GeneratedBuildArtifactCleanupGuard;
+use super::super::lifecycle::DeployObservation;
 use super::super::planning::{calculate_directory_size, format_bytes};
 use super::super::safety_and_artifact::{deploy_artifact, deploy_via_git};
 use super::super::types::{ComponentDeployResult, DeployConfig, DeployResult};
@@ -26,6 +27,7 @@ pub(super) fn execute_git_deploy(
     install_dir: &str,
     local_version: Option<String>,
     remote_version: Option<String>,
+    mut observation: Option<&mut DeployObservation>,
 ) -> ComponentDeployResult {
     let git_config = component.git_deploy.clone().unwrap_or_default();
     let deploy_result = deploy_via_git(
@@ -33,6 +35,7 @@ pub(super) fn execute_git_deploy(
         install_dir,
         &git_config,
         local_version.as_deref(),
+        observation.as_deref_mut(),
     );
 
     match deploy_result {
@@ -89,6 +92,7 @@ pub(super) fn execute_file_deploy(
     install_dir: &str,
     local_version: Option<String>,
     remote_version: Option<String>,
+    mut observation: Option<&mut DeployObservation>,
 ) -> ComponentDeployResult {
     let local_path = Path::new(&component.local_path);
 
@@ -127,6 +131,17 @@ pub(super) fn execute_file_deploy(
         "mkdir -p {}",
         homeboy_core::engine::shell::quote_path(remote_parent)
     );
+    if let Some(observation) = observation.as_deref_mut() {
+        if let Err(error) = observation.phase("transfer", true) {
+            return ComponentDeployResult::failed(
+                component,
+                base_path,
+                local_version,
+                remote_version,
+                error.to_string(),
+            );
+        }
+    }
     homeboy_core::log_status!("deploy", "Ensuring remote directory: {}", remote_parent);
     let mkdir_output = ctx.client.execute(&mkdir_cmd);
     if !mkdir_output.success {
@@ -230,6 +245,7 @@ pub(super) fn execute_artifact_deploy(
     ctx: &RemoteProjectContext,
     base_path: &str,
     project: &Project,
+    mut observation: Option<&mut DeployObservation>,
 ) -> ComponentDeployResult {
     let component = &prepared.component;
     let config = &prepared.config;
@@ -287,7 +303,7 @@ pub(super) fn execute_artifact_deploy(
                 base_path,
                 prepared.local_version.clone(),
                 prepared.remote_version.clone(),
-                error,
+                super::super::content_manifest::diagnostic_text(&error),
             )
             .with_remote_path(install_dir.to_string())
             .with_build_exit_code(prepared.build_exit_code);
@@ -327,6 +343,7 @@ pub(super) fn execute_artifact_deploy(
                 project.domain.as_deref(),
                 component.remote_owner.as_deref(),
                 component.cli_path.as_deref(),
+                observation.as_deref_mut(),
             )
         } else {
             deploy_artifact(
@@ -336,6 +353,7 @@ pub(super) fn execute_artifact_deploy(
                 component.extract_command.as_deref(),
                 verification.as_ref(),
                 component.remote_owner.as_deref(),
+                observation,
             )
         };
 

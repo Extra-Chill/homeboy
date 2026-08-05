@@ -616,7 +616,7 @@ pub(super) fn ensure_remote_daemon(
     registry_lock_held: bool,
 ) -> std::result::Result<RemoteDaemon, String> {
     let mut status = remote_daemon_status(client, homeboy)?;
-    probe_remote_daemon_endpoint(client, &mut status);
+    probe_remote_daemon_endpoint(client, &mut status, Some(runner_id));
     if let Some(lease_id) = orphan_lease_id {
         if let Some(fence) = admission_fence {
             return Err(format!(
@@ -1251,7 +1251,11 @@ mod tests {
     }
 }
 
-pub(super) fn probe_remote_daemon_endpoint(client: &SshClient, status: &mut RemoteDaemonStatus) {
+pub(super) fn probe_remote_daemon_endpoint(
+    client: &SshClient,
+    status: &mut RemoteDaemonStatus,
+    runner_id: Option<&str>,
+) {
     if !status.reachable {
         return;
     }
@@ -1269,7 +1273,14 @@ pub(super) fn probe_remote_daemon_endpoint(client: &SshClient, status: &mut Remo
         "curl --fail --silent --show-error --max-time 2 {}/version",
         shell::quote_arg(&format!("http://{}", daemon.address))
     );
-    let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
+    let timeout = crate::readonly_probe::readonly_probe_timeout();
+    let output = client.execute_with_timeout(&command, timeout);
+    crate::readonly_probe::record_probe_outcome(
+        "runner_remote_endpoint_identity",
+        runner_id,
+        timeout,
+        &output,
+    );
     if !output.success {
         status.endpoint_probe_error = Some(command_failure_message(
             "remote daemon endpoint identity probe failed",
@@ -1309,7 +1320,13 @@ pub(super) fn probe_remote_daemon_endpoint(client: &SshClient, status: &mut Remo
         "curl --fail --silent --show-error --max-time 2 {}/jobs",
         shell::quote_arg(&format!("http://{}", daemon.address))
     );
-    let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
+    let output = client.execute_with_timeout(&command, timeout);
+    crate::readonly_probe::record_probe_outcome(
+        "runner_remote_typed_jobs",
+        runner_id,
+        timeout,
+        &output,
+    );
     if !output.success {
         status.endpoint_probe_error = Some(command_failure_message(
             "remote daemon typed job probe failed",
@@ -1574,7 +1591,7 @@ fn verify_remote_daemon_replacement(
     configured_identity: &str,
 ) -> std::result::Result<RemoteDaemon, String> {
     let mut status = remote_daemon_status(client, homeboy)?;
-    probe_remote_daemon_endpoint(client, &mut status);
+    probe_remote_daemon_endpoint(client, &mut status, None);
     let daemon = status.daemon.ok_or_else(|| {
         "remote stale-daemon replacement re-probe returned no daemon state".to_string()
     })?;

@@ -2813,6 +2813,7 @@ fn cook_failure_context(
             < recipe.retry_budget["max_attempts"]
                 .as_u64()
                 .unwrap_or_default(),
+        record.as_ref().and_then(lab_handoff_runtime_recovery),
     );
     let promotion_provenance = promotion.cloned();
     Some(super::AgentTaskCookFailureContext {
@@ -2837,28 +2838,31 @@ fn cook_failure_context(
         provider_executions_consumed,
         recovery_legal,
         recovery_reason: recovery_actions.reason,
-        next_actions: recovery_actions.actions.clone(),
-        legal_actions: recovery_actions.actions,
+        next_actions: recovery_actions.next_actions,
+        legal_actions: recovery_actions.legal_actions,
     })
 }
 
 struct CookRecoveryActions {
-    actions: Vec<super::AgentTaskCookRecoveryAction>,
+    legal_actions: Vec<super::AgentTaskCookRecoveryAction>,
+    next_actions: Vec<super::AgentTaskCookRecoveryAction>,
     reason: String,
 }
 
-/// The recovery contract is deliberately built once: prose, `legal_actions`,
-/// and `next_actions` must never disagree about an executable Cook command.
+/// Standard Cook actions are built once. Lab runtime repair is legal only for
+/// the exact failed admission record, so it is kept out of `next_actions`.
 fn cook_recovery_actions(
     status: &str,
     run_id: &str,
     recovery_legal: bool,
     blocking_claim: bool,
     provider_retry_available: bool,
+    lab_runtime_recovery: Option<agent_task_lifecycle::AgentTaskLabRuntimeRecovery>,
 ) -> CookRecoveryActions {
     if !recovery_legal {
         return CookRecoveryActions {
-            actions: Vec::new(),
+            legal_actions: Vec::new(),
+            next_actions: Vec::new(),
             reason: "No recovery command is legal because the durable recipe has no lifecycle record. Start a fresh Cook after preserving the recipe reference for investigation.".to_string(),
         };
     }
@@ -2895,6 +2899,13 @@ fn cook_recovery_actions(
             command: format!("homeboy agent-task cook-continue {run_id}"),
         });
     }
+    let next_actions = actions.clone();
+    if let Some(recovery) = lab_runtime_recovery {
+        actions.push(super::AgentTaskCookRecoveryAction {
+            action: "refresh_lab_runtime".to_string(),
+            command: recovery.command(),
+        });
+    }
     let names = actions
         .iter()
         .map(|action| action.action.as_str())
@@ -2902,7 +2913,8 @@ fn cook_recovery_actions(
         .join(", ");
     CookRecoveryActions {
         reason: format!("Legal recovery actions for this Cook state: {names}."),
-        actions,
+        legal_actions: actions,
+        next_actions,
     }
 }
 
@@ -2939,9 +2951,10 @@ mod recovery_action_tests {
                 true,
                 false,
                 retry_available,
+                None,
             );
             let actions = recovery
-                .actions
+                .legal_actions
                 .iter()
                 .map(|action| action.action.as_str())
                 .collect::<Vec<_>>();
@@ -2954,19 +2967,19 @@ mod recovery_action_tests {
                 ),
                 "{status} prose must be derived from the commands"
             );
-            assert!(recovery.actions.iter().all(|action| {
+            assert!(recovery.legal_actions.iter().all(|action| {
                 action.command.starts_with("homeboy agent-task ")
                     && action.command.ends_with("cook-state-matrix-attempt-1")
                     || action.command
                         == "homeboy agent-task status cook-state-matrix-attempt-1 --full"
             }));
             assert_eq!(
-                recovery.actions.iter().any(|action| action.command
+                recovery.legal_actions.iter().any(|action| action.command
                     == "homeboy agent-task cook-continue cook-state-matrix-attempt-1"),
                 expected.contains(&"resume"),
                 "{status} must advertise cook-continue exactly when it can advance"
             );
-            assert!(recovery.actions.iter().all(|action| {
+            assert!(recovery.legal_actions.iter().all(|action| {
                 !matches!(
                     action.action.as_str(),
                     "promote_selected_candidate"
@@ -2976,6 +2989,27 @@ mod recovery_action_tests {
             }));
         }
     }
+}
+
+fn lab_handoff_runtime_recovery(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Option<agent_task_lifecycle::AgentTaskLabRuntimeRecovery> {
+    if record
+        .metadata
+        .pointer("/pre_execution_failure/phase")?
+        .as_str()
+        != Some("lab_staging_controller")
+    {
+        return None;
+    }
+    let recovery: agent_task_lifecycle::AgentTaskLabRuntimeRecovery = serde_json::from_value(
+        record
+            .metadata
+            .pointer("/pre_execution_failure/details/lab_handoff_runtime_recovery")?
+            .clone(),
+    )
+    .ok()?;
+    recovery.is_valid().then_some(recovery)
 }
 
 pub(crate) fn source_spec_path(spec: &str) -> Option<PathBuf> {

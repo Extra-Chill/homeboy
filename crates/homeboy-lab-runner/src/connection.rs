@@ -31,6 +31,7 @@ use super::session::{
     RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence, RunnerSession,
     RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath,
     RunnerStatusReport, RunnerTunnelMode, RunnerTunnelProcessStartIdentity,
+    REVERSE_UNVERIFIED_REASON,
 };
 use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
 use homeboy_core::broker_auth;
@@ -409,7 +410,7 @@ fn connect_with_orphan_adoption_and_live_lease(
     let mut replacement_operation_id = None;
     if let Some(pending) = pending_replacement.as_ref() {
         if let Ok(mut observed) = remote_daemon_status(&client, homeboy) {
-            probe_remote_daemon_endpoint(&client, &mut observed);
+            probe_remote_daemon_endpoint(&client, &mut observed, Some(runner_id));
             let exact = observed.daemon.as_ref().is_some_and(|daemon| {
                 daemon.lease_id == pending.remote_daemon_lease_id
                     && daemon.pid == pending.remote_daemon_pid
@@ -1036,7 +1037,7 @@ fn verify_live_lease_adoption(
         return Ok(());
     };
     let mut status = remote_daemon_status(client, homeboy).map_err(Error::internal_unexpected)?;
-    probe_remote_daemon_endpoint(client, &mut status);
+    probe_remote_daemon_endpoint(client, &mut status, None);
     let daemon = status.daemon.ok_or_else(|| {
         Error::validation_invalid_argument(
             "adopt_live_lease",
@@ -1466,8 +1467,8 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     // must be reported as disconnected rather than triggering tunnel recovery.
     // Recovery can wait on shared control-plane state and may open a tunnel, so
     // it belongs to explicit connect/admission operations instead.
-    let session = read_session_or_live_peer(runner_id)?;
-    let state = session_state(session.as_ref());
+    let session = read_session_for_status(runner_id)?;
+    let state = status_session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
     let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected)?;
     let local_daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?;
@@ -1610,8 +1611,8 @@ pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
 /// probing a daemon, or reconciling generation state.
 pub fn persisted_status(runner_id: &str) -> Result<RunnerStatusReport> {
     let session_path = session_path(runner_id)?;
-    let session = read_session_or_live_peer(runner_id)?;
-    let state = session_state(session.as_ref());
+    let session = read_session_for_status(runner_id)?;
+    let state = status_session_state(session.as_ref());
     Ok(RunnerStatusReport {
         runner_id: runner_id.to_string(),
         connected: state == RunnerSessionState::Connected,
@@ -2186,7 +2187,7 @@ fn remote_daemon_recovery_freshness(
     };
     match bounded_remote_daemon_status(&client, homeboy, runner_id) {
         Ok(mut status) => {
-            remote_daemon::probe_remote_daemon_endpoint(&client, &mut status);
+            remote_daemon::probe_remote_daemon_endpoint(&client, &mut status, Some(runner_id));
             Some(remote_daemon_recovery_freshness_from_status(
                 runner_id, &status,
             ))
@@ -2210,7 +2211,7 @@ fn runner_jobs(
     session: &RunnerSession,
 ) -> Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> {
     let client = Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(crate::readonly_probe::readonly_probe_timeout())
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build active job client: {err}")))?;
     let (body, source) = if let Some(local_url) = session.local_url.as_deref() {
@@ -2242,21 +2243,42 @@ fn runner_jobs(
             "runner `{runner_id}` is connected but has no active-job status endpoint"
         )));
     };
-    let active_jobs = parse_runner_jobs(
-        &body,
-        "active_runner_jobs",
-        "parse active runner jobs",
-        runner_id,
-        source,
-    )?;
-    let stale_jobs = parse_runner_jobs(
-        &body,
-        "stale_runner_jobs",
-        "parse stale runner jobs",
-        runner_id,
-        source,
-    )?;
-    Ok((active_jobs, stale_jobs))
+    let result: Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> = (|| {
+        let active_jobs = parse_runner_jobs(
+            &body,
+            "active_runner_jobs",
+            "parse active runner jobs",
+            runner_id,
+            source,
+        )?;
+        let stale_jobs = parse_runner_jobs(
+            &body,
+            "stale_runner_jobs",
+            "parse stale runner jobs",
+            runner_id,
+            source,
+        )?;
+        Ok((active_jobs, stale_jobs))
+    })();
+    if let Err(error) = &result {
+        let timeout = crate::readonly_probe::readonly_probe_timeout();
+        let timed_out = error.message.to_ascii_lowercase().contains("timed out");
+        crate::readonly_probe::record_degradation(crate::readonly_probe::ReadOnlyProbeDegradation {
+            probe: "runner_typed_jobs".to_string(),
+            runner_id: Some(runner_id.to_string()),
+            reason_code: if timed_out {
+                crate::readonly_probe::REASON_PROBE_TIMEOUT
+            } else {
+                crate::readonly_probe::REASON_PROBE_UNAVAILABLE
+            },
+            timeout_seconds: timed_out.then_some(timeout.as_secs()).unwrap_or(0),
+            detail: format!(
+                "read-only typed-job probe for runner `{runner_id}` did not complete; active-job state is partial: {}",
+                error.message
+            ),
+        });
+    }
+    result
 }
 
 fn orphaned_child_run_jobs(
@@ -2785,29 +2807,82 @@ pub(crate) fn local_live_session(
     Ok(session_is_live_with_timeout(&session, timeout).then_some(session))
 }
 
+/// A connected reverse session has no controller-side identity probe.
+///
+/// The direct-SSH path reads the runner's configured binary over SSH; a reverse
+/// runner is reached only through the broker, which exposes no equivalent
+/// identity endpoint today. Reporting `None` here meant "no warning", which
+/// every consumer reads as healthy — so a reverse lab running an arbitrarily
+/// old binary stayed fully eligible with nothing ever checked (#11106).
+///
+/// This names the gap instead. It performs no probing: the verdict is derived
+/// entirely from the session record already in hand, so it adds no request to
+/// the probe budget (#11080). When the broker grows an identity endpoint, this
+/// becomes a real comparison and the `Unavailable` verdict disappears on its
+/// own.
+fn tunnel_verification_gap(
+    runner: &Runner,
+    session: &RunnerSession,
+) -> Option<RunnerStaleDaemonWarning> {
+    if session.mode != RunnerTunnelMode::Reverse {
+        return None;
+    }
+    let reported = session
+        .homeboy_build_identity
+        .as_deref()
+        .unwrap_or(&session.homeboy_version);
+    Some(RunnerStaleDaemonWarning::verification_unavailable(
+        &runner.id,
+        session.homeboy_version.clone(),
+        session.homeboy_build_identity.clone(),
+        REVERSE_UNVERIFIED_REASON,
+        format!(
+            "reverse-connected runner `{}` reports `{reported}`, but this controller has no path to verify it: the identity probe runs over SSH and a reverse session is reached through the broker. Its daemon compatibility is UNVERIFIED — not proven fresh and not proven stale. Confirm it out of band with `homeboy runner doctor {} --scope lab-offload`.",
+            runner.id, runner.id,
+        ),
+    ))
+}
+
 fn stale_daemon_warning(
     runner: &Runner,
     session: Option<&RunnerSession>,
     connected: bool,
 ) -> Result<Option<RunnerStaleDaemonWarning>> {
-    if !connected || runner.kind != RunnerKind::Ssh {
+    if !connected {
         return Ok(None);
     }
     let Some(session) = session else {
         return Ok(None);
     };
-    if session.mode != RunnerTunnelMode::DirectSsh {
+    // The verification gap is a property of the tunnel, not of the runner
+    // transport kind, so it is decided before the SSH-only probe path below.
+    if let Some(gap) = tunnel_verification_gap(runner, session) {
+        return Ok(Some(gap));
+    }
+    if runner.kind != RunnerKind::Ssh || session.mode != RunnerTunnelMode::DirectSsh {
         return Ok(None);
     }
     let homeboy = remote_runner_homeboy_path(runner, "runner status stale-daemon diagnostics")?;
     let Some((_server_id, _server, client)) = resolve_ssh_runner(runner)? else {
         return Ok(None);
     };
-    let current_identity = bounded_remote_homeboy_identity(&client, homeboy, Some(&runner.id))
-        .unwrap_or_else(|_| RemoteHomeboyIdentity {
-            version: session.homeboy_version.clone(),
-            build_identity: None,
-        });
+    // A failed probe read nothing, so there is nothing to compare. Substituting
+    // the session's own version here made `versions_match` trivially true and
+    // published a fabricated "current version" alongside a vague unverifiable
+    // message, hiding the actual SSH failure (#11106).
+    let current_identity = match bounded_remote_homeboy_identity(&client, homeboy, Some(&runner.id))
+    {
+        Ok(identity) => identity,
+        Err(probe_error) => {
+            return Ok(Some(RunnerStaleDaemonWarning::probe_failed(
+                &runner.id,
+                session.homeboy_version.clone(),
+                session.homeboy_build_identity.clone(),
+                homeboy,
+                probe_error,
+            )));
+        }
+    };
     let current_version = current_identity.version.clone();
     let controller_identity = homeboy_product_identity::build_identity();
     let observed_session_version = session
@@ -2848,11 +2923,13 @@ fn stale_daemon_warning(
         &stale_runtime_paths,
         &changed_runtime_paths,
     );
-    let controller_matches_configured =
-        versions_match(&current_version, &controller_identity.version)
-            && controller_commit_comparison == IdentityComparison::Match
-            && controller_identity.git_dirty != Some(true);
+    let controller_reference = ControllerReference::for_identity(&controller_identity);
     let controller_version_matches = versions_match(&current_version, &controller_identity.version);
+    let controller_matches_configured = controller_runtime_is_current(
+        controller_reference,
+        controller_version_matches,
+        controller_commit_comparison,
+    );
     if daemon_matches_configured && controller_matches_configured {
         return Ok(None);
     }
@@ -2875,7 +2952,7 @@ fn stale_daemon_warning(
             controller_identity.display,
             controller_version_matches,
             daemon_matches_configured,
-            controller_identity.git_dirty == Some(true),
+            controller_reference == ControllerReference::Unverifiable,
         )
         .with_runtime_paths(&runner.id, stale_runtime_paths, changed_runtime_paths)
         .with_persisted_session_version(&runner.id, session.homeboy_version.clone()),
@@ -2961,6 +3038,60 @@ fn daemon_runtime_is_current(
         && identity_comparison == IdentityComparison::Match
         && stale_runtime_paths.is_empty()
         && changed_runtime_paths.is_empty()
+}
+
+/// Whether the controller's own build identity can serve as the reference a
+/// runner is compared against.
+///
+/// A controller built from a dirty working tree embeds the *last commit*, not
+/// the tree it was actually built from, so its commit names no reproducible
+/// build. Comparing any runner's commit against it can never match — not
+/// because the runner is behind, but because there is nothing well-defined to
+/// compare with. Rendering that as staleness marked every Lab runner
+/// permanently stale on any development controller (#11101).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControllerReference {
+    /// The controller names a reproducible build. Commit comparison against it
+    /// is authoritative.
+    Comparable,
+    /// The controller cannot name the build it is running, so commit
+    /// comparison is *impossible* rather than *failed*.
+    Unverifiable,
+}
+
+impl ControllerReference {
+    fn for_identity(identity: &homeboy_product_identity::BuildIdentity) -> Self {
+        if identity.git_dirty == Some(true) {
+            Self::Unverifiable
+        } else {
+            Self::Comparable
+        }
+    }
+}
+
+/// Controller↔runner convergence, the mirror of [`daemon_runtime_is_current`]
+/// for the other half of the comparison.
+///
+/// Version equality is enforced in **both** states: the crate version is
+/// compiled in and a dirty working tree does not make the controller misreport
+/// it. So a genuinely stale runner — one whose configured job command binary is
+/// a different Homeboy version — is still caught with a dirty controller, and
+/// the runner-internal daemon↔configured-binary check is untouched. Only the
+/// commit comparison is skipped when the controller cannot name its own build,
+/// because that comparison has no defined answer, not a negative one. Skipping
+/// it never widens the gate past version equality.
+fn controller_runtime_is_current(
+    controller_reference: ControllerReference,
+    controller_version_matches: bool,
+    controller_commit_comparison: IdentityComparison,
+) -> bool {
+    controller_version_matches
+        && match controller_reference {
+            ControllerReference::Comparable => {
+                controller_commit_comparison == IdentityComparison::Match
+            }
+            ControllerReference::Unverifiable => true,
+        }
 }
 
 fn unverifiable_configured_identity_message(homeboy: &str) -> String {
@@ -3053,8 +3184,8 @@ pub fn statuses_indexed() -> Result<Vec<RunnerActiveJobsSnapshot>> {
     for runner in super::list()? {
         // Indexed inspection is read-only: reconnecting here can start SSH work
         // and makes controller discovery depend on the unhealthy runner.
-        let session = read_session_or_live_peer(&runner.id)?;
-        let connected = session_state(session.as_ref()) == RunnerSessionState::Connected;
+        let session = read_session_for_status(&runner.id)?;
+        let connected = status_session_state(session.as_ref()) == RunnerSessionState::Connected;
         let (active_jobs, active_job_state, active_job_error) = if connected {
             match session.as_ref() {
                 Some(session) => match runner_jobs(&runner.id, session) {
@@ -3110,6 +3241,7 @@ mod status_read_purity_tests {
             "generation_store::reconcile_admission_session",
             "write_session(",
             "adopt",
+            "read_session_or_live_peer",
         ] {
             assert!(
                 !status.contains(mutation),

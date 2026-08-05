@@ -608,7 +608,7 @@ pub(super) fn list_runs(
 ) -> CmdResult<Value> {
     let report = agent_task_service_direct::discover_runs_with_options(filter, options)?;
     let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
-    attach_agent_task_discovery_actionable(&mut value);
+    attach_agent_task_discovery_actionable(&mut value, None);
     Ok((value, 0))
 }
 
@@ -637,7 +637,7 @@ pub(super) fn list_active(
             json!("run the per-run `commands.reconcile` preview, then repeat it with `--apply` after reviewing authoritative provider state"),
         );
     }
-    attach_agent_task_discovery_actionable(&mut value);
+    attach_agent_task_discovery_actionable(&mut value, Some("homeboy agent-task active"));
     Ok((value, 0))
 }
 
@@ -879,13 +879,50 @@ mod transport_proxy_tests {
     }
 }
 
-fn attach_agent_task_discovery_actionable(value: &mut Value) {
+const DISCOVERY_NEXT_ACTION_LIMIT: usize = 8;
+
+fn attach_agent_task_discovery_actionable(value: &mut Value, active_command: Option<&str>) {
     let runs = value
         .get("runs")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
     let mut metadata = CommandActionableMetadata::default();
+
+    if value
+        .get("liveness_summary")
+        .and_then(Value::as_object)
+        .is_some_and(|summary| {
+            ["stale", "suspect", "unreconciled"].iter().any(|bucket| {
+                summary
+                    .get(*bucket)
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default()
+                    > 0
+            })
+        })
+    {
+        metadata.next_actions.push(
+            CommandNextAction::new(
+                "preview stale record reconciliation",
+                "homeboy agent-task active --reconcile --dry-run",
+            )
+            .with_kind(CommandNextActionKind::Repair),
+        );
+    }
+    if let (Some(command), Some(cursor), Some(limit)) = (
+        active_command,
+        value.get("next_cursor").and_then(Value::as_u64),
+        value.get("limit").and_then(Value::as_u64),
+    ) {
+        metadata.next_actions.push(
+            CommandNextAction::new(
+                "show next page",
+                format!("{command} --limit {limit} --cursor {cursor}"),
+            )
+            .with_kind(CommandNextActionKind::Show),
+        );
+    }
 
     for run in runs.iter().take(20) {
         let Some(run_id) = run.get("run_id").and_then(Value::as_str) else {
@@ -925,6 +962,7 @@ fn attach_agent_task_discovery_actionable(value: &mut Value) {
             }
         }
     }
+    metadata.next_actions.truncate(DISCOVERY_NEXT_ACTION_LIMIT);
 
     attach_actionable_metadata(value, metadata);
 }
@@ -3821,6 +3859,40 @@ fn diagnose_next_commands(run_id: &str, retry_action: Option<&CommandNextAction>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_actionable_metadata_is_bounded_and_continues_active_pages() {
+        let mut report = json!({
+            "limit": 20,
+            "next_cursor": 20,
+            "liveness_summary": { "stale": 1, "suspect": 0, "unreconciled": 0 },
+            "runs": (0..20).map(|index| json!({
+                "run_id": format!("run-{index}"),
+                "commands": {
+                    "status": format!("homeboy agent-task status run-{index}"),
+                    "logs": format!("homeboy agent-task logs run-{index}"),
+                    "artifacts": format!("homeboy agent-task artifacts run-{index}"),
+                    "reconcile": format!("homeboy agent-task reconcile run-{index} --dry-run"),
+                },
+                "liveness": "stale",
+            })).collect::<Vec<_>>(),
+        });
+
+        attach_agent_task_discovery_actionable(&mut report, Some("homeboy agent-task active"));
+
+        let actions = report[ACTIONABLE_METADATA_KEY]["next_actions"]
+            .as_array()
+            .expect("next actions");
+        assert_eq!(actions.len(), DISCOVERY_NEXT_ACTION_LIMIT);
+        assert_eq!(
+            actions[0]["command"],
+            "homeboy agent-task active --reconcile --dry-run"
+        );
+        assert_eq!(
+            actions[1]["command"],
+            "homeboy agent-task active --limit 20 --cursor 20"
+        );
+    }
 
     #[test]
     fn retry_action_is_typed_and_bound_to_the_controller() {

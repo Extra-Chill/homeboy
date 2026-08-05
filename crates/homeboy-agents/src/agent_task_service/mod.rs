@@ -15,6 +15,13 @@ mod cook_promotion;
 mod cook_recipe;
 mod discovery;
 mod execution;
+/// Read-only process-tree activity sampling for a running Cook.
+///
+/// Lived in `homeboy-core` as a top-level module even though `cook_activity`
+/// here was its only consumer anywhere in the workspace (#11143). Kept `pub`
+/// so the sampling primitives stay addressable evidence rather than becoming
+/// unreachable internals.
+pub mod process_activity;
 mod promotion_service;
 mod reconcile;
 mod status_support;

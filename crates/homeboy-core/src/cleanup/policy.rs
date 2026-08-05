@@ -72,6 +72,32 @@ pub const RUNNER_WORKSPACE_APPLY_PASSES: usize = 10;
 /// needs enough evidence to describe the plan.
 pub const RUNNER_WORKSPACE_DRY_RUN_PASSES: usize = 1;
 
+/// Age floor before an abandoned isolated test home is eligible for removal.
+///
+/// A fixed floor rather than a configuration key, for the same reason as
+/// [`RUNNER_MIN_AGE_HOURS`]: the category's real ownership proof is process
+/// liveness, and the floor exists only to cover the window in which a home has
+/// been created but its owner is not yet observable. That window is a property
+/// of process startup, not of an operator's retention taste, and lowering it
+/// would widen a delete predicate for every future sweep at once.
+///
+/// One hour is far above any such window and far below the multi-day retention
+/// that let 9.2 GB accumulate unreclaimed (#11073).
+pub const LEAKED_TEST_HOME_MIN_AGE_HOURS: u64 = 1;
+
+/// Ceiling on retained abandoned isolated test homes, in bytes.
+///
+/// A day count cannot bound this directory. Each abandoned home can carry a
+/// private copy of a debug binary — hundreds of megabytes — and they arrive at
+/// whatever rate the host kills test processes, so any age window is a promise
+/// to fill the disk before the window closes. `runtime_run_max_bytes` already
+/// set the precedent that high-churn reconstructable storage is bounded by
+/// bytes; this is the same shape for the same reason.
+///
+/// Crossing it relaxes the age floor for the oldest *abandoned* entries only.
+/// It never relaxes the liveness proof.
+pub const LEAKED_TEST_HOME_MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
 /// Stable schema identifier for the serialized policy snapshot.
 pub const CLEANUP_POLICY_SCHEMA: &str = "homeboy/retention-manifest/v1";
 
@@ -118,6 +144,8 @@ pub struct CleanupPolicy {
     pub controller_runtime_max_bytes: u64,
     pub runner_min_age_hours: u64,
     pub runner_workspace_page_limit: usize,
+    pub leaked_test_home_min_age_hours: u64,
+    pub leaked_test_home_max_total_bytes: u64,
     pub limit: i64,
     pub terminal_run_guard: bool,
 }
@@ -163,6 +191,15 @@ impl CleanupPolicy {
     #[must_use]
     pub fn runner_min_age(self) -> Duration {
         Duration::from_secs(self.runner_min_age_hours.saturating_mul(SECONDS_PER_HOUR))
+    }
+
+    /// Age floor for abandoned isolated test homes.
+    #[must_use]
+    pub fn leaked_test_home_min_age(self) -> Duration {
+        Duration::from_secs(
+            self.leaked_test_home_min_age_hours
+                .saturating_mul(SECONDS_PER_HOUR),
+        )
     }
 
     /// Pagination passes for one remote workspace prune invocation.
@@ -243,6 +280,8 @@ pub fn cleanup_policy_from_retention(
         controller_runtime_max_bytes: retention.controller_runtime_max_bytes,
         runner_min_age_hours: RUNNER_MIN_AGE_HOURS,
         runner_workspace_page_limit: RUNNER_WORKSPACE_PAGE_LIMIT,
+        leaked_test_home_min_age_hours: LEAKED_TEST_HOME_MIN_AGE_HOURS,
+        leaked_test_home_max_total_bytes: LEAKED_TEST_HOME_MAX_TOTAL_BYTES,
         limit,
         terminal_run_guard: true,
     })
@@ -436,6 +475,30 @@ mod tests {
             Duration::from_secs(5 * SECONDS_PER_DAY)
         );
         assert_eq!(policy.shared_store_lease_ttl(), Duration::from_secs(61));
+    }
+
+    /// The leaked-test-home floor is a fixed, named value like the runner floor,
+    /// and its byte ceiling is finite. An infinite ceiling would silently
+    /// restore the age-only bound that #11073 showed cannot keep up.
+    #[test]
+    fn the_leaked_test_home_bound_is_both_an_age_floor_and_a_finite_byte_ceiling() {
+        let policy = cleanup_policy_from_retention(&retention(), CleanupPolicyOverrides::default())
+            .expect("resolve policy");
+
+        assert_eq!(
+            policy.leaked_test_home_min_age_hours,
+            LEAKED_TEST_HOME_MIN_AGE_HOURS
+        );
+        assert_eq!(
+            policy.leaked_test_home_min_age(),
+            Duration::from_secs(LEAKED_TEST_HOME_MIN_AGE_HOURS * SECONDS_PER_HOUR)
+        );
+        assert!(policy.leaked_test_home_min_age_hours > 0);
+        assert_eq!(
+            policy.leaked_test_home_max_total_bytes,
+            LEAKED_TEST_HOME_MAX_TOTAL_BYTES
+        );
+        assert!(policy.leaked_test_home_max_total_bytes < u64::MAX);
     }
 
     #[test]

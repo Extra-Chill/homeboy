@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy::core::redaction::RedactionPolicy;
-use homeboy::core::server::{self, Server, ServerSessionConfig, SshClient};
+use homeboy::core::server::{self, ManagedSshSession, Server, SshClient, PERSIST_SCOPE};
 use homeboy::core::{EntityCrudOutput, MergeOutput};
 
 use super::{CmdResult, DynamicSetArgs};
@@ -14,6 +14,8 @@ pub struct ServerExtra {
     pub key: Option<ServerKeyOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<ServerSessionOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_policy: Option<ServerSessionPolicyOutput>,
 }
 
 pub type ServerOutput = EntityCrudOutput<Server, ServerExtra>;
@@ -35,10 +37,18 @@ pub struct ServerSessionOutput {
     action: String,
     server_id: String,
     #[serde(flatten)]
-    session: ServerSessionConfig,
+    session: ManagedSshSession,
     live: bool,
+    persist_scope: &'static str,
     stdout: String,
     stderr: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ServerSessionPolicyOutput {
+    #[serde(flatten)]
+    session: ManagedSshSession,
+    persist_scope: &'static str,
 }
 
 #[derive(Args)]
@@ -308,6 +318,7 @@ fn run_session_action(server_id: &str, action: &str) -> CmdResult<ServerOutput> 
                     server_id: server_id.to_string(),
                     session: result.session,
                     live: result.live,
+                    persist_scope: PERSIST_SCOPE,
                     stdout: result.stdout,
                     stderr: result.stderr,
                 }),
@@ -338,12 +349,20 @@ fn run_key(args: KeyArgs) -> CmdResult<ServerOutput> {
 fn show(server_id: &str) -> CmdResult<ServerOutput> {
     let svr = server::load(server_id)
         .or_else(|original_error| server::find_by_host(server_id).ok_or(original_error))?;
+    let session_policy = svr.auth.as_ref().map(ManagedSshSession::from_auth);
 
     Ok((
         ServerOutput {
             command: "server.show".to_string(),
             id: Some(svr.id.clone()),
             entity: Some(svr),
+            extra: ServerExtra {
+                session_policy: session_policy.map(|session| ServerSessionPolicyOutput {
+                    session,
+                    persist_scope: PERSIST_SCOPE,
+                }),
+                ..Default::default()
+            },
             ..Default::default()
         },
         0,
@@ -546,7 +565,7 @@ fn key_import(server_id: &str, private_key_path: &str) -> CmdResult<ServerOutput
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy::core::server::{RunnerSecretEnvRef, ServerRunner};
+    use homeboy::core::server::{ManagedSshSessionPersistSource, RunnerSecretEnvRef, ServerRunner};
     use std::collections::HashMap;
 
     #[test]
@@ -598,5 +617,37 @@ mod tests {
             "OPENAI_API_KEY"
         );
         assert!(!value.to_string().contains("dummy-secret"));
+    }
+
+    #[test]
+    fn managed_session_output_reports_local_lifetime_provenance() {
+        let session = ManagedSshSession {
+            control_path: "/tmp/control".to_string(),
+            persist: "4h".to_string(),
+            persist_source: ManagedSshSessionPersistSource::LegacyDefault,
+        };
+        let output = serde_json::to_value(ServerSessionOutput {
+            action: "status".to_string(),
+            server_id: "sandbox".to_string(),
+            session: session.clone(),
+            live: true,
+            persist_scope: PERSIST_SCOPE,
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+        .expect("serialize session status");
+        let policy = serde_json::to_value(ServerSessionPolicyOutput {
+            session,
+            persist_scope: PERSIST_SCOPE,
+        })
+        .expect("serialize session policy");
+
+        assert_eq!(output["persist"], "4h");
+        assert_eq!(output["persist_source"], "legacy_default");
+        assert_eq!(policy["persist_source"], "legacy_default");
+        assert_eq!(
+            output["persist_scope"],
+            "local OpenSSH ControlMaster idle lifetime; not a remote server policy"
+        );
     }
 }

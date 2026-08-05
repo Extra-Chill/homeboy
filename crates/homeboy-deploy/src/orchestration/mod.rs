@@ -394,7 +394,13 @@ pub(super) fn deploy_components(
 
     // Build and validate every local artifact before the first remote write.
     if let Some(observation) = observation.as_deref_mut() {
-        observation.phase("artifact_preparation", false)?;
+        observation.phase("build", false)?;
+    }
+    if let Some(observation) = observation.as_deref_mut() {
+        // Payload preparation owns package construction and validation. Persist
+        // its checkpoint before that work begins so interruption never reports
+        // completed package work that was still in progress.
+        observation.phase("package", false)?;
     }
     let prepared_deployments = match prepare_component_deployments(
         &components,
@@ -428,9 +434,6 @@ pub(super) fn deploy_components(
 
     // Re-probe immediately before the first destructive write. A same-version
     // mismatch is remote-only content drift, not an ordinary local update.
-    if let Some(observation) = observation.as_deref_mut() {
-        observation.phase("transfer", true)?;
-    }
     for prepared in prepared_deployments.iter() {
         let exclusions = resolve_component_scope(&prepared.component, ScopeCommand::Deploy).exclude;
         let manifest = match (
@@ -438,11 +441,9 @@ pub(super) fn deploy_components(
             prepared.canonical_release_artifact.as_ref(),
         ) {
             (Some(archive), Some(artifact)) => {
-                super::content_manifest::verify_archive_hash(archive, artifact).map_err(
-                    |error| {
-                        Error::validation_invalid_argument("release_artifact", error, None, None)
-                    },
-                )?;
+                // Already a coded error naming `release_artifact` and carrying
+                // the offending archive; re-wrapping it would only re-flatten it.
+                super::content_manifest::verify_archive_hash(archive, artifact)?;
                 super::content_manifest::compare_archive(
                     archive,
                     &prepared.install_dir,
@@ -497,13 +498,22 @@ pub(super) fn deploy_components(
                     base_path,
                     prepared.local_version.clone(),
                     prepared.remote_version.clone(),
-                    format!("unable to invalidate prior deployed-package receipt: {error}"),
+                    format!(
+                        "unable to invalidate prior deployed-package receipt: {}",
+                        super::content_manifest::diagnostic_text(&error)
+                    ),
                 ));
                 continue;
             }
         }
 
-        let mut result = execute_preflighted_component_deploy(prepared, ctx, base_path, &project);
+        let mut result = execute_preflighted_component_deploy(
+            prepared,
+            ctx,
+            base_path,
+            &project,
+            observation.as_deref_mut(),
+        );
 
         // Record which git ref was deployed. The same label feeds build provenance
         // so `deployed_ref` and `build_provenance.built_from_ref` never disagree.
@@ -590,7 +600,8 @@ pub(super) fn deploy_components(
                 ) {
                     result.status = "failed".to_string();
                     result.error = Some(format!(
-                        "deployment completed but authoritative deployed-package receipt could not be persisted: {error}"
+                        "deployment completed but authoritative deployed-package receipt could not be persisted: {}",
+                        super::content_manifest::diagnostic_text(&error)
                     ));
                 }
             }
@@ -615,7 +626,7 @@ pub(super) fn deploy_components(
     // instead of sitting live. Catches runtime errors that a syntax-only
     // preflight structurally cannot. See homeboy#5471.
     if let Some(observation) = observation.as_deref_mut() {
-        observation.phase("verification", true)?;
+        observation.phase("verify", true)?;
     }
     if succeeded > 0 {
         if let Some(smoke) = run_post_deploy_smoke(&project, &mut results) {
@@ -729,18 +740,15 @@ fn resolve_release_artifacts_for_deploy(
                             "Canonical release package unavailable for '{}' ({error})",
                             component.id
                         );
-                        unavailable_canonical_packages
-                            .insert(component.id.clone(), error.to_string());
+                        unavailable_canonical_packages.insert(
+                            component.id.clone(),
+                            super::content_manifest::diagnostic_text(&error),
+                        );
                         continue;
                     }
-                    Err(error) => {
-                        return Err(Error::validation_invalid_argument(
-                            "releaseArtifact",
-                            error,
-                            None,
-                            None,
-                        ))
-                    }
+                    // Already coded, detailed, and hinted by
+                    // `release_asset_download_error`; return it intact.
+                    Err(error) => return Err(error),
                 };
             homeboy_core::log_status!(
                 "deploy",

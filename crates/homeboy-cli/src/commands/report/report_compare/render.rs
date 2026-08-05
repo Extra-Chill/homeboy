@@ -1,5 +1,6 @@
-use crate::markdown::escape_markdown_table_cell;
-use crate::report_compare::{NamedCountDelta, ReportCompareReport};
+use homeboy_core::markdown::escape_markdown_table_cell;
+
+use super::engine::{NamedCountDelta, ReportCompareReport};
 
 pub(crate) fn render_markdown(report: &ReportCompareReport) -> String {
     let mut out = String::new();

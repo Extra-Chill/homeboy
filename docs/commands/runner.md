@@ -160,14 +160,12 @@ and the configured workspace root are usable on the target machine.
 ### `preflight`
 
 ```sh
-homeboy runner preflight homeboy-lab --workload-family bench --command "bench run"
-homeboy runner preflight homeboy-lab --workload-family agent-task --command "agent-task cook" --allow-queue --durable-workload
-homeboy runner preflight homeboy-lab --workload-family test --command "test" --require-tool node --require-capability browser
-homeboy runner preflight homeboy-lab --workload-family agent-task --command "agent-task cook" --provider openai --source-path ./provider.json
+homeboy runner preflight --request '{"schema":"homeboy/placement-readiness/v2","runner_id":"homeboy-lab","allow_queue":false,"durable_workload":false,"invocation":{"kind":"agent_task_cook","provider":"openai","source_path":"/workspace","selector":"openai.default","model":"gpt-5"}}'
+homeboy runner preflight --request '{"schema":"homeboy/placement-readiness/v2","runner_id":"homeboy-lab","allow_queue":true,"durable_workload":true,"invocation":{"kind":"capability_audit","source_path":"/workspace","capability_id":"browser"}}'
 ```
 
 `preflight` creates no run, rig lease, runner job, workspace, or connection. Its
-`homeboy/placement-readiness/v1` response is `ready`, `queueable`, or `blocked`
+`homeboy/placement-readiness/v2` response is `ready`, `queueable`, or `blocked`
 with exact predicates and typed executable recovery actions (including action
 ID, argv, safety, required confirmations, and evidence). Queueing is limited to a
 durable workload on a full reverse runner. Execution revalidates live admission
@@ -555,6 +553,52 @@ paths. `homeboy runner status <runner-id>` surfaces those differences in
 `stale_daemon.changed_runtime_paths`. This is intentionally read-only: refresh a
 development runner with `homeboy runner disconnect <runner-id>` followed by
 `homeboy runner connect <runner-id>` after rebuilding runner-side runtime code.
+
+### Daemon compatibility has three states, not two
+
+`stale_daemon.verification` names which question the report answered:
+
+- `compared` — the runner's configured identity was read and compared. The
+  version and build-identity fields are observations, and a mismatch fences
+  admission.
+- `probe_failed` — the identity probe itself failed. Nothing was compared;
+  `stale_daemon.probe_error` carries the verbatim failure and
+  `current_homeboy_version` is the sentinel `unverified` rather than a
+  substituted value. A runner that *has* a probe and could not answer it is
+  still fenced.
+- `unavailable` — this runner has no controller-side identity probe at all.
+  Reverse-connected sessions are reached through the broker, which exposes no
+  identity endpoint, so their compatibility is reported as
+  `compatibility_reason: reverse_unverified`. This is surfaced and ranked below
+  every verified runner in default Lab selection, but it does **not** fence
+  admission — fencing an entire runner class on the strength of a gap rather
+  than a mismatch would take every reverse lab out of service.
+
+Reports with either unverified verdict carry `severity: unknown` and a read-only
+`homeboy runner doctor <runner-id> --scope lab-offload` recovery: replacing a
+binary is not the answer to "I could not look at it".
+
+### Controller identity and a dirty working tree
+
+Runner convergence is normally proven by comparing the controller's embedded
+build commit against the runner's configured job command binary. A controller
+built from a **dirty working tree** records the last commit, not the tree it was
+actually built from, so that commit names no reproducible build and can equal no
+runner's — which is "the comparison is unavailable", not "this runner is stale".
+Homeboy reports the two states separately:
+
+- The controller↔runner **version** check still applies in full. A runner whose
+  configured binary is a different Homeboy version is still refused, with
+  `stale_daemon.compatibility_reason = "controller_configured_version_skew"` and
+  a runner-side `homeboy runner refresh-homeboy` recovery.
+- The **exact-commit** check is skipped while the controller cannot name its own
+  build, so a dirty controller no longer marks every runner stale. The
+  runner-internal check (its live daemon against its own configured binary) is
+  untouched and still blocking.
+- `stale_daemon.compatibility_reason = "controller_identity_unverifiable"`
+  reports an unavailable comparison. It carries no recovery command, because the
+  remediation is to commit or stash the controller working tree and rerun
+  `homeboy runner status <runner-id>` — not to reinstall the controller.
 
 ```json
 {

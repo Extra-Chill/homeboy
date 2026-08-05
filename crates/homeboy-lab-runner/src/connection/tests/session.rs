@@ -4,7 +4,7 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 
-use crate::RunnerAvailability;
+use crate::{RunnerAvailability, RunnerDaemonVerification};
 
 use super::*;
 
@@ -764,14 +764,26 @@ fn controller_dirty_and_version_skew_serialize_distinct_predicates_and_actions()
     );
 
     let dirty_diagnostics = serde_json::to_value(&dirty).expect("serialize dirty controller");
+    // A dirty controller cannot compare; that is not a claim about the runner,
+    // so it must not serialize as a staleness predicate (#11101).
     assert_eq!(
         dirty_diagnostics["mismatch_predicate"],
-        "controller_git_dirty == true"
+        "controller_build_commit == unverifiable(controller_git_dirty)"
     );
     assert_eq!(
-        dirty_diagnostics["recovery_commands"][0],
-        "homeboy upgrade --force"
+        dirty_diagnostics["compatibility_reason"],
+        "controller_identity_unverifiable"
     );
+    // "Your working tree is dirty" has no correct automated remediation, and
+    // `homeboy upgrade --force` is a destructive answer to a question nobody
+    // asked. Offer none rather than the wrong one.
+    assert!(dirty_diagnostics["recovery_commands"]
+        .as_array()
+        .expect("serialized recovery command list")
+        .is_empty());
+    assert!(!dirty.message.contains("upgrade --force"));
+    assert!(dirty.message.contains("dirty working tree"));
+    assert!(dirty.message.contains("unavailable, not failed"));
 
     let version_diagnostics =
         serde_json::to_value(&version_skew).expect("serialize controller version skew");
@@ -783,6 +795,151 @@ fn controller_dirty_and_version_skew_serialize_distinct_predicates_and_actions()
         .as_array()
         .expect("serialized recovery command list")
         .is_empty());
+}
+
+fn controller_identity(
+    version: &str,
+    commit: &str,
+    dirty: bool,
+) -> homeboy_product_identity::BuildIdentity {
+    homeboy_product_identity::BuildIdentity {
+        version: version.to_string(),
+        git_commit: Some(commit.to_string()),
+        git_dirty: Some(dirty),
+        display: if dirty {
+            format!("homeboy {version}+{commit}-dirty")
+        } else {
+            format!("homeboy {version}+{commit}")
+        },
+    }
+}
+
+/// The reported bug: a controller with uncommitted work — the normal state of a
+/// development controller — made every commit comparison unmatchable, so every
+/// Lab runner read as stale and the whole fleet became ineligible (#11101).
+#[test]
+fn dirty_controller_does_not_mark_a_converged_runner_stale() {
+    let dirty = controller_identity("0.328.0", "1e63f1ae0369", true);
+    assert_eq!(
+        ControllerReference::for_identity(&dirty),
+        ControllerReference::Unverifiable
+    );
+
+    // The runner is on the controller's version but, because the controller
+    // was built from a dirty tree, its commit can equal nothing.
+    assert!(controller_runtime_is_current(
+        ControllerReference::for_identity(&dirty),
+        true,
+        IdentityComparison::Mismatch,
+    ));
+    assert!(controller_runtime_is_current(
+        ControllerReference::for_identity(&dirty),
+        true,
+        IdentityComparison::Unverifiable,
+    ));
+}
+
+/// The safety property this must not trade away: an unavailable commit proof
+/// removes only the *stronger* check. A runner on a different Homeboy version
+/// is conclusively stale whatever the controller's tree looks like, so it is
+/// still caught.
+#[test]
+fn dirty_controller_still_catches_a_version_skewed_runner() {
+    let dirty = controller_identity("0.328.0", "1e63f1ae0369", true);
+
+    assert!(!controller_runtime_is_current(
+        ControllerReference::for_identity(&dirty),
+        false,
+        IdentityComparison::Mismatch,
+    ));
+    // Even a commit that happens to match cannot rescue a version skew.
+    assert!(!controller_runtime_is_current(
+        ControllerReference::for_identity(&dirty),
+        false,
+        IdentityComparison::Match,
+    ));
+}
+
+/// A clean controller keeps the full exact-commit gate. The dirty-tree path is
+/// a fallback for an impossible comparison, never a general relaxation.
+#[test]
+fn clean_controller_still_requires_an_exact_commit_match() {
+    let clean = controller_identity("0.328.0", "1e63f1ae0369", false);
+    assert_eq!(
+        ControllerReference::for_identity(&clean),
+        ControllerReference::Comparable
+    );
+
+    assert!(controller_runtime_is_current(
+        ControllerReference::for_identity(&clean),
+        true,
+        IdentityComparison::Match,
+    ));
+    assert!(!controller_runtime_is_current(
+        ControllerReference::for_identity(&clean),
+        true,
+        IdentityComparison::Mismatch,
+    ));
+    assert!(!controller_runtime_is_current(
+        ControllerReference::for_identity(&clean),
+        true,
+        IdentityComparison::Unverifiable,
+    ));
+}
+
+/// A build with no recorded dirty flag is treated as comparable, because its
+/// commit is still the best available reference. Only a *proven* dirty tree
+/// downgrades the comparison.
+#[test]
+fn unknown_controller_dirty_state_keeps_the_exact_commit_gate() {
+    let unknown = homeboy_product_identity::BuildIdentity {
+        version: "0.328.0".to_string(),
+        git_commit: Some("1e63f1ae0369".to_string()),
+        git_dirty: None,
+        display: "homeboy 0.328.0+1e63f1ae0369".to_string(),
+    };
+
+    assert_eq!(
+        ControllerReference::for_identity(&unknown),
+        ControllerReference::Comparable
+    );
+    assert!(!controller_runtime_is_current(
+        ControllerReference::for_identity(&unknown),
+        true,
+        IdentityComparison::Mismatch,
+    ));
+}
+
+/// A dirty controller must not hijack a real runner-side fault. When the live
+/// daemon disagrees with its own configured binary, that finding and its
+/// runner-side recovery own the report.
+#[test]
+fn dirty_controller_preserves_a_runner_side_daemon_recovery() {
+    let warning = RunnerStaleDaemonWarning::new(
+        "homeboy-lab",
+        "0.327.9".to_string(),
+        "0.328.0".to_string(),
+        Some("homeboy 0.327.9+aaaaaaaaaaaa".to_string()),
+        Some("homeboy 0.328.0+1e63f1ae0369".to_string()),
+    )
+    .with_controller_compatibility(
+        "homeboy-lab",
+        "0.328.0".to_string(),
+        "homeboy 0.328.0+1e63f1ae0369-dirty".to_string(),
+        true,
+        false,
+        true,
+    );
+
+    assert_eq!(
+        warning.mismatch_predicate,
+        "active_daemon_control_plane_version != job_command_binary_version"
+    );
+    assert_eq!(
+        warning.recovery_commands,
+        ["homeboy runner refresh-homeboy homeboy-lab --ref 1e63f1ae0369 --reconnect"]
+    );
+    assert!(!warning.message.contains("upgrade --force"));
 }
 
 #[test]
@@ -1109,6 +1266,122 @@ fn runtime_path_warning_uses_rebuild_specific_message() {
         warning.recovery_commands,
         ["homeboy runner refresh-homeboy homeboy-lab --ref same --reconnect"]
     );
+}
+
+/// #11106 failure mode 1: the identity probe's error was discarded and the
+/// unread "current" version was replaced with the session's own recorded
+/// version, which made `versions_match` trivially true and published a
+/// fabricated current version. The failure must now be the report.
+#[test]
+fn failed_identity_probe_reports_the_error_instead_of_the_session_version() {
+    let probe_error = "ssh: connect to host lab port 22: Connection refused";
+    let warning = RunnerStaleDaemonWarning::probe_failed(
+        "homeboy-lab",
+        "0.328.0".to_string(),
+        Some("homeboy 0.328.0+session".to_string()),
+        "/opt/homeboy/bin/homeboy",
+        probe_error.to_string(),
+    );
+
+    assert_eq!(warning.probe_error.as_deref(), Some(probe_error));
+    assert!(
+        warning.message.contains(probe_error),
+        "the real probe failure must be visible: {}",
+        warning.message
+    );
+    // The unread side is a sentinel, never a copy of the side it failed to
+    // compare against.
+    assert_eq!(warning.current_homeboy_version, "unverified");
+    assert_ne!(
+        warning.current_homeboy_version,
+        warning.session_homeboy_version
+    );
+    assert!(warning.current_homeboy_build_identity.is_none());
+    assert_eq!(warning.severity, "unknown");
+    assert_eq!(warning.verification, RunnerDaemonVerification::ProbeFailed);
+    assert_eq!(
+        warning.compatibility_reason,
+        Some("identity_probe_failed"),
+        "the vague `with_identity_unverifiable` message is not the diagnosis"
+    );
+    assert!(warning.is_unverified());
+    // A probe that failed on a runner that *has* a probe is a real anomaly and
+    // still fences admission, exactly as the fabricated warning did.
+    assert!(warning.blocks_admission());
+    assert_eq!(
+        warning.recovery_commands,
+        ["homeboy runner doctor homeboy-lab --scope lab-offload"],
+        "the answer to an unread binary is to re-probe it, not to replace it"
+    );
+}
+
+/// #11106 failure mode 2: `stale_daemon_warning` returned `None` for every
+/// non-direct-SSH session, so a reverse-connected lab on an arbitrarily old
+/// binary read as healthy with nothing ever checked.
+#[test]
+fn reverse_session_is_checked_and_reports_an_unverified_verdict() {
+    let runner = Runner {
+        id: "homeboy-lab".to_string(),
+        kind: RunnerKind::Ssh,
+        server_id: None,
+        workspace_root: Some("/srv/homeboy".to_string()),
+        settings: Default::default(),
+        env: Default::default(),
+        secret_env: Default::default(),
+        resources: Default::default(),
+        policy: Default::default(),
+    };
+    let session = super::reverse_controller_session();
+
+    let warning = tunnel_verification_gap(&runner, &session).expect(
+        "a reverse session has no controller-side identity probe and must say so, not stay silent",
+    );
+
+    assert_eq!(warning.severity, "unknown");
+    assert_eq!(warning.verification, RunnerDaemonVerification::Unavailable);
+    assert_eq!(warning.compatibility_reason, Some("reverse_unverified"));
+    assert!(warning.is_unverified());
+    assert!(warning.message.contains("homeboy test+abc123"));
+    assert!(warning.message.contains("UNVERIFIED"));
+    // The counter-property (#11101): unverified is not stale. Fencing every
+    // reverse lab would trade this bug for the opposite one.
+    assert!(!warning.blocks_admission());
+    assert_eq!(
+        warning.recovery_commands,
+        ["homeboy runner doctor homeboy-lab --scope lab-offload"]
+    );
+
+    let mut direct = session.clone();
+    direct.mode = RunnerTunnelMode::DirectSsh;
+    assert!(
+        tunnel_verification_gap(&runner, &direct).is_none(),
+        "a direct-SSH session has a real probe and must be compared, not excused"
+    );
+}
+
+/// The three states must be distinguishable by every admission consumer, not
+/// collapsed back into "there is a warning".
+#[test]
+fn unverified_reports_fence_nothing_while_compared_mismatches_still_do() {
+    let unverified = RunnerStaleDaemonWarning::verification_unavailable(
+        "homeboy-lab",
+        "0.328.0".to_string(),
+        None,
+        "reverse_unverified",
+        "no probe".to_string(),
+    );
+    let mismatch = RunnerStaleDaemonWarning::new(
+        "homeboy-lab",
+        "0.328.0".to_string(),
+        "0.329.0".to_string(),
+        Some("homeboy 0.328.0+a".to_string()),
+        Some("homeboy 0.329.0+b".to_string()),
+    );
+
+    assert!(!mismatch.is_unverified());
+    assert!(mismatch.blocks_admission());
+    assert!(unverified.is_unverified());
+    assert!(!unverified.blocks_admission());
 }
 
 #[test]
@@ -1613,6 +1886,76 @@ fn status_lists_reverse_session_records() {
 
         assert_eq!(report.state, RunnerSessionState::Recorded);
     });
+}
+
+#[test]
+fn full_status_projection_leaves_large_legacy_shared_state_and_observation_db_unchanged() {
+    test_support::with_isolated_home(|home| {
+        crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
+        homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("initialize shared observation database");
+        let session = direct_ssh_session("lease-000");
+        write_session(&session).expect("write disconnected direct session");
+        let mut generations = crate::RollingGenerations::new("lease-000", session.clone());
+        for index in 1..=70 {
+            let generation = format!("lease-{index:03}");
+            let mut endpoint = session.clone();
+            endpoint.remote_daemon_lease_id = Some(generation.clone());
+            generations.begin(generation, endpoint);
+        }
+        crate::generation_store::write("homeboy-lab", &generations)
+            .expect("write generation registry");
+        let registry_path = homeboy_core::paths::runner_sessions_dir()
+            .expect("runner sessions directory")
+            .join("homeboy-lab/generations.json");
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&registry_path).expect("read registry"))
+                .expect("parse registry");
+        legacy
+            .as_object_mut()
+            .expect("registry object")
+            .remove("runner_id");
+        std::fs::write(
+            &registry_path,
+            serde_json::to_vec_pretty(&legacy).expect("serialize legacy registry"),
+        )
+        .expect("write legacy registry");
+        let before = snapshot_directory(home.path());
+
+        let report = status("homeboy-lab").expect("full runner status projection");
+
+        assert!(!report.connected);
+        assert_eq!(report.active_job_count, 0);
+        assert_eq!(snapshot_directory(home.path()), before);
+    });
+}
+
+fn snapshot_directory(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    fn collect(
+        root: &std::path::Path,
+        directory: &std::path::Path,
+        snapshot: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    ) {
+        for entry in std::fs::read_dir(directory).expect("read data directory") {
+            let path = entry.expect("read data entry").path();
+            if path.is_dir() {
+                collect(root, &path, snapshot);
+            } else {
+                snapshot.insert(
+                    path.strip_prefix(root)
+                        .expect("relative data path")
+                        .to_path_buf(),
+                    std::fs::read(&path).expect("read data file"),
+                );
+            }
+        }
+    }
+
+    let mut snapshot = std::collections::BTreeMap::new();
+    collect(root, root, &mut snapshot);
+    snapshot
 }
 
 #[test]

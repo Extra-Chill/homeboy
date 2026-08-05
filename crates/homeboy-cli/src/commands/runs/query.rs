@@ -139,6 +139,7 @@ pub fn runs_query(args: RunsQueryArgs) -> CmdResult<RunsOutput> {
         status: None,
         rig_id: None,
         limit: Some(args.limit.clamp(1, 5000)),
+        ..RunListFilter::default()
     };
     let loaded = load_artifact_rows(&store, filter, args.since.as_deref())?;
     let rows = loaded.rows;

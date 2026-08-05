@@ -78,6 +78,9 @@ pub const REASON_PROBE_INTERRUPTED: &str = "readonly_probe.interrupted";
 /// read-only command can drop the ambient failure from its *streams* without
 /// dropping it from its *answer* (#10525).
 pub const REASON_PROBE_UNAVAILABLE: &str = "readonly_probe.unavailable";
+/// Several persisted peer sessions claimed different live direct-SSH daemon
+/// identities, so status intentionally declined to select one.
+pub const REASON_PROBE_AMBIGUOUS: &str = "readonly_probe.ambiguous";
 
 // Per-thread ledger, mirroring the existing `ACTIVE_PROBE_LIMITS` design in
 // `homeboy-core`'s SSH client. Inspection commands probe and drain on the same

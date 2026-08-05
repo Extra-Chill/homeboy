@@ -1,3 +1,7 @@
+// Loop lifecycle record contracts. Lived in homeboy-core until #11143; this
+// validator is their only consumer.
+pub mod loop_lifecycle;
+
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -17,6 +21,10 @@ use crate::command_contract::{
     RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA, RUNNER_ARTIFACT_MANIFEST_SCHEMA,
     RUNNER_ARTIFACT_ROOT_DIR_SUFFIX, RUN_LOCATION_INDEX_SCHEMA,
 };
+use crate::commands::contract::loop_lifecycle::{
+    LoopEvidenceRecord, LoopIterationRecord, LoopRunRecord, LOOP_EVIDENCE_SCHEMA,
+    LOOP_ITERATION_SCHEMA, LOOP_RUN_SCHEMA,
+};
 use crate::commands::{adapter, CmdResult};
 use crate::core::artifact_ref::{validate_reviewer_facing_artifact_ref, ArtifactReference};
 use crate::core::artifacts::{validate_artifact_postprocess_plan, ArtifactManifest};
@@ -24,10 +32,6 @@ use crate::core::evidence_manifest::{EvidenceManifest, EVIDENCE_MANIFEST_SCHEMA}
 use crate::core::host_mutation_lifecycle::{
     HostMutationLifecycle, HostMutationRevertStrategy, HostMutationStatus,
     HOST_MUTATION_LIFECYCLE_SCHEMA,
-};
-use crate::core::loop_lifecycle::{
-    LoopEvidenceRecord, LoopIterationRecord, LoopRunRecord, LOOP_EVIDENCE_SCHEMA,
-    LOOP_ITERATION_SCHEMA, LOOP_RUN_SCHEMA,
 };
 use crate::core::resource_cleanup_intent::{
     ResourceCleanupIntentContract, RESOURCE_CLEANUP_INTENT_SCHEMA,

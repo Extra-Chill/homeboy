@@ -1,4 +1,5 @@
-use super::validate_exec_apply_boundary;
+use super::{health_indicator, validate_exec_apply_boundary};
+use homeboy::core::server::health::{ServerHealth, ServerHealthState};
 
 #[test]
 fn fleet_exec_requires_apply_for_real_execution() {
@@ -22,4 +23,24 @@ fn fleet_exec_check_and_applied_execution_pass_apply_guard() {
         .expect("--check should not require --apply");
     validate_exec_apply_boundary("production", &command, false, true)
         .expect("--apply should pass guard");
+}
+
+#[test]
+fn fleet_health_indicator_never_marks_unproven_transport_green() {
+    let healthy = ServerHealth {
+        state: ServerHealthState::Healthy,
+        ..Default::default()
+    };
+    let unhealthy = ServerHealth {
+        state: ServerHealthState::Unhealthy,
+        ..Default::default()
+    };
+    let not_checked = ServerHealth {
+        state: ServerHealthState::NotChecked,
+        ..Default::default()
+    };
+
+    assert_eq!(health_indicator(Some(&healthy)), "✅");
+    assert_eq!(health_indicator(Some(&unhealthy)), "❌");
+    assert_eq!(health_indicator(Some(&not_checked)), "❌");
 }

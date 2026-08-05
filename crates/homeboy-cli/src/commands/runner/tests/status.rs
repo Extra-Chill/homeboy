@@ -18,7 +18,8 @@ use super::super::status::{
     declared_executable_requirement_diagnostics, declared_run_followups,
     declared_runtime_diagnostics, declared_runtime_source_diagnostics, declared_tool_diagnostics,
     lab_runner_homeboy_output, operator_summary, runner_artifact_feature_diagnostics,
-    runner_followups, runner_status_operator_commands,
+    runner_followups, runner_followups_with_admission, runner_status_operator_commands,
+    selected_admission_summary,
 };
 use crate::cli_surface::Cli;
 
@@ -302,6 +303,81 @@ fn runner_followups_include_workspace_prune_for_disk_pressure_recovery() {
     assert!(serialized.contains("homeboy runner workspace prune homeboy-lab --apply --passes 10"));
     assert!(serialized.contains("counts and bytes"));
     assert!(serialized.contains("disk pressure"));
+}
+
+#[test]
+fn admission_followups_replace_generic_restart_for_ambiguous_missing_lease() {
+    let mut report = disconnected_report();
+    report.active_job_state = RunnerActiveJobState::Available;
+    report.daemon_freshness = Some(DaemonFreshnessReport {
+        fresh: false,
+        stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),
+        restartable: false,
+        lease_id: None,
+        pid: None,
+        recovery_evidence: Some(homeboy::core::daemon::DaemonRecoveryEvidence::Unavailable),
+        ownership_evidence: Some("ambiguous foreground daemon candidates".to_string()),
+        adoption_command: None,
+        binary_hash: None,
+        daemon_version: None,
+        daemon_build_identity: None,
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    });
+    let admission = report.admission_summary(0);
+
+    let followups =
+        runner_followups_with_admission(Some("homeboy-lab"), Some(&report), Some(&admission));
+
+    assert!(followups.iter().all(|followup| {
+        !matches!(
+            followup.label.as_str(),
+            "refresh_homeboy" | "homeboy_binary_refresh" | "homeboy_binary_upgrade"
+        )
+    }));
+    assert!(followups.iter().any(|followup| {
+        followup.label == "admission_recovery"
+            && Some(&followup.command) == admission.next_action.as_ref()
+    }));
+}
+
+#[test]
+fn unqualified_status_followups_use_selected_admission_action() {
+    let mut report = disconnected_report();
+    report.active_job_state = RunnerActiveJobState::Available;
+    report.daemon_freshness = Some(DaemonFreshnessReport {
+        fresh: false,
+        stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),
+        restartable: false,
+        lease_id: None,
+        pid: None,
+        recovery_evidence: Some(homeboy::core::daemon::DaemonRecoveryEvidence::Unavailable),
+        ownership_evidence: Some("ambiguous foreground daemon candidates".to_string()),
+        adoption_command: None,
+        binary_hash: None,
+        daemon_version: None,
+        daemon_build_identity: None,
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    });
+    let admission = selected_admission_summary(Some(&report)).expect("selected admission");
+    let followups =
+        runner_followups_with_admission(Some("homeboy-lab"), Some(&report), Some(&admission));
+
+    assert!(followups.iter().all(|followup| {
+        !matches!(
+            followup.label.as_str(),
+            "refresh_homeboy" | "homeboy_binary_refresh" | "homeboy_binary_upgrade"
+        )
+    }));
+    assert!(followups.iter().any(|followup| {
+        followup.label == "admission_recovery"
+            && Some(&followup.command) == admission.next_action.as_ref()
+    }));
 }
 
 #[test]
@@ -743,8 +819,13 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
     assert_eq!(output.active_daemon_version.as_deref(), Some("0.262.0"));
 }
 
+/// A dirty controller alongside a genuinely version-skewed runner: the skew is
+/// the reportable fact and keeps its runner-side recovery. The controller's
+/// dirty tree only removes the *stronger* exact-commit proof, so it must not
+/// rename the finding or replace the remediation with `homeboy upgrade
+/// --force` (#11101).
 #[test]
-fn compact_status_prioritizes_dirty_controller_before_runner_convergence() {
+fn compact_status_names_runner_version_skew_when_the_controller_is_dirty() {
     let report = RunnerStatusReport {
         runner_id: "homeboy-lab".to_string(),
         connected: true,
@@ -827,20 +908,29 @@ fn compact_status_prioritizes_dirty_controller_before_runner_convergence() {
     assert!(summary
         .risk
         .iter()
-        .any(|risk| risk.contains("controller_dirty")));
+        .any(|risk| risk.contains("controller_configured_version_skew")));
     assert!(summary
         .risk
         .iter()
         .any(|risk| risk.contains("homeboy 0.321.1+configured-dirty")));
-    assert_eq!(summary.next_action, "homeboy upgrade --force");
-    assert!(!summary.next_action.contains("refresh-homeboy"));
-    assert!(!summary.next_action.contains("--ref"));
+    // The remediation converges the runner, which is what is actually skewed.
+    // Telling an operator with uncommitted work to reinstall the controller
+    // answers a question nobody asked.
+    assert!(summary.next_action.contains("refresh-homeboy"));
+    assert!(!summary.next_action.contains("upgrade --force"));
     let warning = report.stale_daemon.as_ref().expect("stale daemon warning");
     assert_eq!(
         warning.recovery_commands,
-        vec!["homeboy upgrade --force".to_string()]
+        vec!["homeboy runner refresh-homeboy homeboy-lab --ref configured --reconnect".to_string()]
     );
-    assert!(warning.message.contains("rerun `homeboy runner status`"));
+    assert_eq!(
+        warning.compatibility_reason,
+        Some("controller_configured_version_skew")
+    );
+    // The dirty tree is still reported — it is why the exact-commit proof is
+    // missing — but it is not the finding.
+    assert!(warning.message.contains("dirty"));
+    assert!(warning.message.contains("different Homeboy version"));
     assert!(
         report.connected,
         "liveness remains independently observable"

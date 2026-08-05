@@ -1,5 +1,5 @@
 use clap::{Args, Subcommand};
-use homeboy::core::deferred_workload;
+use homeboy::deferred_workload;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::process::{Command, Stdio};

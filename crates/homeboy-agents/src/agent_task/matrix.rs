@@ -849,6 +849,7 @@ mod tests {
             expected_artifacts: vec!["bench-results".to_string()],
             artifact_declarations: Vec::new(),
             output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
             metadata: json!({ "report": "side-by-side" }),
         }
     }

@@ -257,6 +257,88 @@ fn extension_manifest_accepts_real_extension_fixture_shapes() {
     }
 }
 
+/// The shipped manifests are the reason `legacy_env_vars_for` is an override
+/// and not a filter (#11121).
+///
+/// Narrowing core's env-var export to declared sidecars is only safe once every
+/// shipped runner declares what it reads. This measures that precondition
+/// instead of asserting it in prose: it lists, per fixture, the sidecar keys
+/// core exports unconditionally that the manifest never declares. Each of those
+/// is a script that would lose its write target the moment narrowing lands.
+///
+/// This test is designed to retire itself. When the gap reaches zero the final
+/// assertion fails, and that failure is the signal that
+/// `RunDir::legacy_env_vars_for` may become a filter.
+#[test]
+fn shipped_manifests_do_not_yet_declare_every_exported_sidecar() {
+    let exported = homeboy_core::engine::run_dir::RunDir::legacy_env_sidecar_keys();
+    let mut gaps: Vec<(&str, &str)> = Vec::new();
+
+    for (fixture_id, raw) in [
+        (
+            "rust",
+            include_str!("../../../tests/fixtures/extension_manifests/rust.json"),
+        ),
+        (
+            "go",
+            include_str!("../../../tests/fixtures/extension_manifests/go.json"),
+        ),
+        (
+            "swift",
+            include_str!("../../../tests/fixtures/extension_manifests/swift.json"),
+        ),
+        (
+            "wordpress",
+            include_str!("../../../tests/fixtures/extension_manifests/wordpress.json"),
+        ),
+        (
+            "managed-preview",
+            include_str!("../../../tests/fixtures/extension_manifests/managed-preview.json"),
+        ),
+    ] {
+        let manifest: ExtensionManifest = serde_json::from_str(raw)
+            .unwrap_or_else(|err| panic!("{fixture_id} manifest should parse: {err}"));
+        let declared: Vec<String> = super::manifest::structured_sidecars(&manifest)
+            .into_iter()
+            .map(|declaration| declaration.name)
+            .collect();
+
+        for key in &exported {
+            if !declared.iter().any(|name| name.as_str() == *key) {
+                gaps.push((fixture_id, *key));
+            }
+        }
+    }
+
+    // The three cases the deferral comment on `legacy_env_vars_for` names.
+    assert!(
+        gaps.contains(&("rust", "test.coverage")),
+        "rust declares test.coverage:false while its runner reads COVERAGE_FILE"
+    );
+    assert!(
+        gaps.contains(&("wordpress", "annotations")),
+        "wordpress declares annotations:false while its runner reads ANNOTATIONS_DIR"
+    );
+    assert!(
+        gaps.contains(&("rust", "lint.producers")),
+        "rust never declares lint.producers yet lint evidence depends on it"
+    );
+    // An extension with no structured_sidecars at all would lose every key.
+    for key in &exported {
+        assert!(
+            gaps.contains(&("managed-preview", *key)),
+            "managed-preview declares no sidecars, so {key} is undeclared"
+        );
+    }
+
+    assert!(
+        !gaps.is_empty(),
+        "every shipped manifest now declares every exported sidecar — the \
+         precondition for narrowing legacy_env_vars_for to a filter is met, so \
+         land the other half of #11121 and delete this test"
+    );
+}
+
 #[test]
 fn executable_pruned_fields_remain_loadable_as_unknown_manifest_data() {
     let raw = include_str!("../../../tests/fixtures/extension_manifests/swift.json");

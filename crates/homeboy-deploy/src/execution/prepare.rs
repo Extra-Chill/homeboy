@@ -6,6 +6,7 @@ use homeboy_core::project::Project;
 use homeboy_extension::build;
 
 use super::super::generated_artifacts::GeneratedBuildArtifactCleanupGuard;
+use super::super::lifecycle::DeployObservation;
 use super::super::path_roots::{component_remote_path, resolve_effective_remote_path};
 use super::super::policy::{owner_hint_for_path, protected_path_suffixes, validate_deploy_target};
 use super::super::provenance::capture_build_provenance;
@@ -281,7 +282,10 @@ pub(crate) fn prepare_component_deploy(
                     local_version,
                     remote_version,
                     build_exit_code,
-                    format!("unable to capture deployed package receipt: {error}"),
+                    format!(
+                        "unable to capture deployed package receipt: {}",
+                        super::super::content_manifest::diagnostic_text(&error)
+                    ),
                 ));
             }
             (_, Err(error)) => {
@@ -320,6 +324,7 @@ pub(crate) fn execute_preflighted_component_deploy(
     ctx: &RemoteProjectContext,
     base_path: &str,
     project: &Project,
+    observation: Option<&mut DeployObservation>,
 ) -> ComponentDeployResult {
     let component = &prepared.component;
 
@@ -335,6 +340,7 @@ pub(crate) fn execute_preflighted_component_deploy(
             &prepared.install_dir,
             prepared.local_version.clone(),
             prepared.remote_version.clone(),
+            observation,
         );
     }
 
@@ -346,10 +352,11 @@ pub(crate) fn execute_preflighted_component_deploy(
             &prepared.install_dir,
             prepared.local_version.clone(),
             prepared.remote_version.clone(),
+            observation,
         );
     }
 
-    execute_artifact_deploy(prepared, ctx, base_path, project)
+    execute_artifact_deploy(prepared, ctx, base_path, project, observation)
 }
 
 pub(super) fn failed_component_deploy_result(

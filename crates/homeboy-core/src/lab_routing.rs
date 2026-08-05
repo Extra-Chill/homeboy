@@ -353,7 +353,26 @@ fn lab_offload_outcome_to_route_outcome(
             output_file_content,
             ..
         }) => {
-            let retrieval = observer.run_id().map(PersistedRunRetrieval::for_run);
+            // A detached handoff ends the *local* run. This process is about to
+            // exit and will never write to the record again, so leaving it
+            // `Running` created a phantom that nothing would ever close — and
+            // that reconciliation was then structurally forbidden to touch,
+            // pinning its run dir and artifacts forever (#11107).
+            //
+            // `HandedOff` states exactly what happened: the dispatch this run
+            // observes reached its end successfully, and the dispatched work
+            // continues under the remote handles carried across below.
+            let mut finish_metadata = json!({
+                "exit_code": exit_code,
+                "local_disposition": "handed_off",
+                "remote_work_continues": true,
+            });
+            attach_handoff_metadata(&mut finish_metadata, &stdout);
+            attach_in_flight_handoff_metadata(&mut finish_metadata, &stdout);
+            let retrieval = observer.finish(
+                RunStatus::HandedOff,
+                lab_dispatch_metadata(runner_id, "detached_handoff", finish_metadata),
+            );
             let stdout = stdout_with_in_flight_status(&stdout, retrieval.as_ref());
             let output_file_content = output_file_content
                 .as_deref()
@@ -481,6 +500,13 @@ fn bound_terminal_output(mut value: String) -> String {
     value
 }
 
+/// Render a detached-handoff envelope, annotating it with the remote work that
+/// continues and with the terminal disposition of the local record.
+///
+/// `status: "running"` describes the *remote* job, which really is running. The
+/// nested `local_observation` block is what stops a reader inferring that the
+/// controller-side run is also still open — it is not, and has not been since
+/// the handoff arm started finishing it as `handed_off` (#11107).
 fn stdout_with_in_flight_status(stdout: &str, retrieval: Option<&PersistedRunRetrieval>) -> String {
     let mut value = serde_json::from_str::<serde_json::Value>(stdout).unwrap_or_else(|_| {
         json!({
@@ -514,6 +540,15 @@ fn stdout_with_in_flight_status(stdout: &str, retrieval: Option<&PersistedRunRet
                 in_flight_object.insert(
                     "watch_command".to_string(),
                     serde_json::Value::String(format!("homeboy runs watch {}", retrieval.run_id)),
+                );
+                in_flight_object.insert(
+                    "local_observation".to_string(),
+                    json!({
+                        "run_id": retrieval.run_id,
+                        "status": RunStatus::HandedOff.as_str(),
+                        "terminal": true,
+                        "note": "The controller-side dispatch record is settled; the outcome of the dispatched command belongs to the remote work named here.",
+                    }),
                 );
             }
             if let (Some(runner_id), Some(runner_job_id)) = (runner_id, runner_job_id) {
@@ -566,6 +601,84 @@ fn attach_handoff_metadata(metadata: &mut serde_json::Value, stdout: &str) {
     }
     if let Some(evidence) = value.get("evidence") {
         object.insert("evidence".to_string(), evidence.clone());
+    }
+}
+
+/// Carry the remote handles of a detached handoff into the finish metadata of
+/// the local observation.
+///
+/// Three different in-flight envelopes reach the handoff arm — the runner-exec
+/// handoff schema, the daemon-disconnect envelope, and the staging-controller
+/// envelope — and [`attach_handoff_metadata`] only understands the first.
+/// Without the other two, a settled handoff record would name no remote
+/// continuation at all, which is the difference between a terminal state and a
+/// dead end.
+///
+/// Never overwrites a key an earlier extractor already resolved: the typed
+/// handoff schema is the more authoritative source when both are present.
+fn attach_in_flight_handoff_metadata(metadata: &mut serde_json::Value, stdout: &str) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) else {
+        return;
+    };
+    let Some(object) = metadata.as_object_mut() else {
+        return;
+    };
+
+    for (target, paths) in [
+        (
+            "durable_run_id",
+            &[
+                &["data", "durable_run_id"][..],
+                &["durable_run_id"][..],
+                &["identity", "run_id"][..],
+            ][..],
+        ),
+        (
+            "runner_job_id",
+            &[
+                &["identity", "runner_job_id"][..],
+                &["data", "job_id"][..],
+                &["job_id"][..],
+            ][..],
+        ),
+        (
+            "runner_id",
+            &[
+                &["identity", "runner_id"][..],
+                &["data", "runner_id"][..],
+                &["runner_id"][..],
+            ][..],
+        ),
+        (
+            "controller_job_id",
+            &[
+                &["data", "controller_job_id"][..],
+                &["controller_job_id"][..],
+            ][..],
+        ),
+        (
+            "remote_status",
+            &[&["data", "status"][..], &["status"][..]][..],
+        ),
+    ] {
+        if object.contains_key(target) {
+            continue;
+        }
+        let resolved = paths
+            .iter()
+            .find_map(|path| metadata_path_string(&value, *path));
+        if let Some(resolved) = resolved {
+            object.insert(target.to_string(), serde_json::Value::String(resolved));
+        }
+    }
+
+    if !object.contains_key("retrieval_commands") {
+        if let Some(commands) = value
+            .pointer("/data/retrieval_commands")
+            .or_else(|| value.get("retrieval_commands"))
+        {
+            object.insert("retrieval_commands".to_string(), commands.clone());
+        }
     }
 }
 
@@ -1128,8 +1241,17 @@ mod tests {
         assert!(stderr.is_empty());
     }
 
+    /// Renamed from `detached_handoff_maps_to_in_flight_output_and_leaves_run_running`,
+    /// which asserted `finished.is_none()` and so pinned the phantom-run leak in
+    /// place as if it were the contract (#11107).
+    ///
+    /// It is not the contract. The local dispatch record is finished by this
+    /// arm now, because the process that owns it is about to exit; every other
+    /// assertion in this test — the in-flight envelope, the watch commands, the
+    /// remote handles — is unchanged and still passes, which is the evidence
+    /// that the envelope contract was never what was broken.
     #[test]
-    fn detached_handoff_maps_to_in_flight_output_and_leaves_run_running() {
+    fn detached_handoff_maps_to_in_flight_output_and_finishes_run_as_handed_off() {
         let finished = std::sync::Arc::new(std::sync::Mutex::new(None));
         let observer = Box::new(RecordingObserver {
             run_id: Some("dispatch-run-7448".to_string()),
@@ -1181,7 +1303,128 @@ mod tests {
             json["homeboy_in_flight"]["runner_job_watch_command"],
             "homeboy runner job logs homeboy-lab job-7448 --follow"
         );
-        assert!(finished.lock().unwrap().is_none());
+
+        // The envelope must not leave a reader thinking the controller-side run
+        // is still open. It is settled, and says so next to the remote handles.
+        assert_eq!(
+            json["homeboy_in_flight"]["local_observation"]["status"],
+            "handed_off"
+        );
+        assert_eq!(
+            json["homeboy_in_flight"]["local_observation"]["terminal"],
+            true
+        );
+        assert_eq!(
+            json["homeboy_in_flight"]["local_observation"]["run_id"],
+            "dispatch-run-7448"
+        );
+
+        // The leak itself: this used to be `is_none()`.
+        let recorded = finished.lock().unwrap().clone();
+        let (status, metadata) = recorded.expect("handoff finishes the local observation");
+        assert_eq!(status, RunStatus::HandedOff);
+        assert!(status.is_terminal(), "a phantom row is not an outcome");
+        assert_eq!(metadata["lab_dispatch"]["status"], "detached_handoff");
+        assert_eq!(metadata["lab_dispatch"]["local_disposition"], "handed_off");
+        assert_eq!(metadata["lab_dispatch"]["remote_work_continues"], true);
+
+        // The settled record still has to say where the work went, or it is a
+        // dead end rather than a terminal state.
+        assert_eq!(metadata["lab_dispatch"]["runner_id"], "homeboy-lab");
+        assert_eq!(metadata["lab_dispatch"]["runner_job_id"], "job-7448");
+        assert_eq!(
+            metadata["lab_dispatch"]["durable_run_id"],
+            "agent-task-7448"
+        );
+        assert_eq!(
+            metadata["lab_dispatch"]["follow_commands"]["job_logs"],
+            "homeboy runner job logs homeboy-lab job-7448 --follow"
+        );
+    }
+
+    /// The daemon-disconnect envelope is not the typed handoff schema, so
+    /// `attach_handoff_metadata` cannot read it. Its remote handles still have
+    /// to survive into the terminal record — this is the envelope that produced
+    /// the `exit 0` / `"success": true` phantom in the field.
+    #[test]
+    fn daemon_disconnect_handoff_carries_its_remote_handles_into_the_terminal_record() {
+        let finished = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let observer = Box::new(RecordingObserver {
+            run_id: Some("dispatch-run-disconnect".to_string()),
+            finished: finished.clone(),
+        });
+        let stdout = r#"{
+            "success": true,
+            "data": {
+                "status": "remote_in_flight",
+                "durable_run_id": "agent-task-9001",
+                "runner_id": "homeboy-lab",
+                "job_id": "job-9001",
+                "retrieval_commands": {
+                    "status": "homeboy agent-task status agent-task-9001"
+                }
+            }
+        }"#;
+
+        let outcome = lab_offload_outcome_to_route_outcome(
+            Ok(crate::lab_offload::LabOffloadOutcome::InFlight {
+                plan: test_plan(),
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+                exit_code: 0,
+                output_file_content: Some(stdout.to_string()),
+            }),
+            Some("homeboy-lab"),
+            observer,
+        )
+        .expect("route outcome");
+
+        assert!(matches!(outcome, LabRouteOutcome::InFlight(_)));
+        let recorded = finished.lock().unwrap().clone();
+        let (status, metadata) = recorded.expect("handoff finishes the local observation");
+        assert_eq!(status, RunStatus::HandedOff);
+        assert_eq!(
+            metadata["lab_dispatch"]["durable_run_id"],
+            "agent-task-9001"
+        );
+        assert_eq!(metadata["lab_dispatch"]["runner_job_id"], "job-9001");
+        assert_eq!(metadata["lab_dispatch"]["runner_id"], "homeboy-lab");
+        assert_eq!(
+            metadata["lab_dispatch"]["remote_status"],
+            "remote_in_flight"
+        );
+        assert_eq!(
+            metadata["lab_dispatch"]["retrieval_commands"]["status"],
+            "homeboy agent-task status agent-task-9001"
+        );
+    }
+
+    /// A handoff with no observation started must not fabricate one. The Noop
+    /// observer returns no retrieval, and the envelope degrades to the remote
+    /// handles alone rather than claiming a local run id that does not exist.
+    #[test]
+    fn detached_handoff_without_an_observation_records_nothing_locally() {
+        let outcome = lab_offload_outcome_to_route_outcome(
+            Ok(crate::lab_offload::LabOffloadOutcome::InFlight {
+                plan: test_plan(),
+                stdout: r#"{"status":"running","job_id":"job-3","runner_id":"homeboy-lab"}"#
+                    .to_string(),
+                stderr: String::new(),
+                exit_code: 0,
+                output_file_content: None,
+            }),
+            Some("homeboy-lab"),
+            Box::new(NoopLabDispatchObserver),
+        )
+        .expect("route outcome");
+
+        let LabRouteOutcome::InFlight(output) = outcome else {
+            panic!("expected in-flight outcome");
+        };
+        let json: serde_json::Value = serde_json::from_str(&output.stdout).expect("json stdout");
+        assert_eq!(json["homeboy_in_flight"]["status"], "running");
+        assert!(json["homeboy_in_flight"]["local_observation"].is_null());
+        assert!(json["homeboy_persisted_run"].is_null());
     }
 
     #[test]

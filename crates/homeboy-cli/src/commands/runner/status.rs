@@ -9,8 +9,8 @@ use homeboy::core::agent_runtime_manifest::{
 use homeboy::core::daemon::{DaemonRecoveryEvidence, DaemonStaleReasonCode};
 use homeboy::runner::readonly_probe;
 use homeboy::runner::runners::{
-    self as runner, RunnerActiveJobState, RunnerAvailability, RunnerBinarySource, RunnerSession,
-    RunnerStatusReport, RunnerTunnelMode, RuntimeMaterializationStatus,
+    self as runner, RunnerActiveJobState, RunnerBinarySource, RunnerSession, RunnerStatusReport,
+    RunnerTunnelMode, RuntimeMaterializationStatus,
 };
 
 use super::super::CmdResult;
@@ -60,13 +60,15 @@ pub(super) fn status(
             Vec::new()
         };
         if !full {
+            let operator_summary =
+                operator_summary_with_admission(&report, admission_summary.as_ref());
             return Ok((
                 RunnerOutput {
                     command: "runner.status".to_string(),
                     id: Some(id.to_string()),
                     extra: RunnerExtra {
                         admission_summary,
-                        operator_summary: Some(operator_summary(&report)),
+                        operator_summary: Some(operator_summary),
                         truncation: Some(RunnerTruncation {
                             omitted_generations: generation_count
                                 .saturating_sub(generation_inventory.len()),
@@ -87,7 +89,8 @@ pub(super) fn status(
         let mut operator_hints = runner_status_operator_hints(&report);
         let operator_commands = runner_status_operator_commands(&report);
         let selected_lab_runner = selected_lab_runner_status(Some(id), Some(report.clone()))?;
-        let managed_followups = runner_followups(Some(id), Some(&report));
+        let managed_followups =
+            runner_followups_with_admission(Some(id), Some(&report), admission_summary.as_ref());
         // Collected last so every bounded probe issued above is represented.
         operator_hints.extend(probe_degradation_hints());
         return Ok((
@@ -156,8 +159,12 @@ pub(super) fn status(
     });
     let selected_lab_runner =
         selected_lab_runner_status(preferred_lab_runner.as_deref(), selected_status.clone())?;
-    let managed_followups =
-        runner_followups(preferred_lab_runner.as_deref(), selected_status.as_ref());
+    let selected_admission = selected_admission_summary(selected_status.as_ref());
+    let managed_followups = runner_followups_with_admission(
+        preferred_lab_runner.as_deref(),
+        selected_status.as_ref(),
+        selected_admission.as_ref(),
+    );
     // Collected last so every bounded probe issued above is represented.
     operator_hints.extend(probe_degradation_hints());
     Ok((
@@ -298,8 +305,15 @@ pub(super) fn operator_summary(report: &RunnerStatusReport) -> RunnerOperatorSum
     if !report.connected {
         risk.push("disconnected".to_string());
     }
-    if report.stale_daemon.is_some() {
-        risk.push("stale_daemon".to_string());
+    // "unverified" is its own risk, distinct from a proven mismatch. Rendering
+    // both as `stale_daemon` would make "I could not check" indistinguishable
+    // from "it is stale" (#11106).
+    if let Some(warning) = report.stale_daemon.as_ref() {
+        risk.push(if warning.is_unverified() {
+            "unverified_daemon".to_string()
+        } else {
+            "stale_daemon".to_string()
+        });
     }
     if report.active_job_count > 0 {
         risk.push(format!("{} active job(s)", report.active_job_count));
@@ -329,6 +343,17 @@ pub(super) fn operator_summary(report: &RunnerStatusReport) -> RunnerOperatorSum
         risk,
         next_action: report.status_action().render_command(),
     }
+}
+
+fn operator_summary_with_admission(
+    report: &RunnerStatusReport,
+    admission: Option<&runner::RunnerAdmissionSummary>,
+) -> RunnerOperatorSummary {
+    let mut summary = operator_summary(report);
+    if let Some(action) = admission.and_then(|admission| admission.next_action.as_ref()) {
+        summary.next_action = action.clone();
+    }
+    summary
 }
 
 fn bounded_status_text(value: &str) -> String {
@@ -378,14 +403,7 @@ fn selected_lab_runner_status(
         workspace_root: runner_config.workspace_root.clone(),
         readiness_state: format!("{:?}", status.state).to_ascii_lowercase(),
         connected: status.connected,
-        availability: RunnerAvailability::from_status_parts(
-            runner_id,
-            status.connected,
-            status.stale_daemon.is_some(),
-            status.active_job_count,
-            &status.active_job_state,
-            runner_config.settings.concurrency_limit,
-        ),
+        availability: status.admission_availability(runner_config.settings.concurrency_limit),
         status,
     }))
 }
@@ -1051,6 +1069,40 @@ pub(super) fn runner_followups(
         });
     }
     followups
+}
+
+pub(crate) fn runner_followups_with_admission(
+    runner_id: Option<&str>,
+    status: Option<&RunnerStatusReport>,
+    admission: Option<&runner::RunnerAdmissionSummary>,
+) -> Vec<LabFollowup> {
+    let mut followups = runner_followups(runner_id, status);
+    let Some(action) = admission.and_then(|admission| admission.next_action.as_ref()) else {
+        return followups;
+    };
+
+    // A state-specific admission action supersedes generic binary mutation and
+    // restart guidance. In particular, a missing lease with ambiguous daemon
+    // candidates cannot be made safe by refreshing, upgrading, disconnecting,
+    // or reconnecting the controller session.
+    followups.retain(|followup| {
+        !matches!(
+            followup.label.as_str(),
+            "refresh_homeboy" | "homeboy_binary_refresh" | "homeboy_binary_upgrade"
+        )
+    });
+    followups.push(LabFollowup {
+        label: "admission_recovery".to_string(),
+        command: action.clone(),
+        purpose: "Apply the authoritative runner admission recovery selected from the current daemon evidence.".to_string(),
+    });
+    followups
+}
+
+pub(crate) fn selected_admission_summary(
+    selected_status: Option<&RunnerStatusReport>,
+) -> Option<runner::RunnerAdmissionSummary> {
+    selected_status.map(|report| report.admission_summary(0))
 }
 
 fn controller_refresh_ref() -> String {

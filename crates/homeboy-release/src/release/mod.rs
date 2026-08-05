@@ -7,6 +7,9 @@ mod execution_dispatch;
 mod execution_plan;
 mod execution_projection;
 mod executor;
+// Durable operation/finalization records. Lived in homeboy-core until #11143;
+// the release workspace finalizer is their only consumer.
+pub mod operation_record;
 mod orchestrator;
 mod package_recovery;
 mod pipeline;

@@ -408,6 +408,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         lab_runtime_overlays()?,
         &mut workspace_mapping,
         request.skip_deps_hydration,
+        &runner.settings,
     )?;
     let runtime_overlay_env = runtime_overlay_env_overrides(&synced_runtime_overlays);
     let runtime_overlay_metadata = lab_runtime_overlay_metadata(&synced_runtime_overlays);

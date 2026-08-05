@@ -771,6 +771,7 @@ fn test_list_runs() {
                 status: Some("pass".to_string()),
                 rig_id: Some("studio".to_string()),
                 limit: Some(10),
+                ..RunListFilter::default()
             })
             .expect("list filtered");
 

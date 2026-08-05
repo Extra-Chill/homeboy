@@ -661,8 +661,10 @@ pub struct RunnerAdmissionSummary {
     pub blocking_generation: Option<String>,
     /// Number of draining generations, summarized rather than expanded.
     pub draining_generation_count: usize,
-    /// Whether it is safe to rotate the runner now — true only when no
-    /// authoritative job is owned by the selected or draining generations.
+    /// Whether the selected daemon can be safely replaced now. A known stale
+    /// version is rotatable after its typed job view proves idle; ambiguous
+    /// lease ownership is not. Draining generation ownership also keeps this
+    /// false until aggregate work has settled.
     pub safe_to_rotate: bool,
     /// The single next actionable step, state-sensitive and executable.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -676,9 +678,69 @@ impl RunnerStatusReport {
         self.state == RunnerSessionState::Connected
     }
 
-    /// Shared daemon compatibility predicate for Lab admission and repair.
-    pub fn daemon_ready_for_admission(&self) -> bool {
-        self.is_connected() && self.stale_daemon.is_none()
+    /// The stale-daemon report that fences admission.
+    ///
+    /// `None` when the runner carries no report at all *or* when the only
+    /// report present records that this runner class cannot be verified. The
+    /// latter is deliberately not a fence: see
+    /// [`RunnerStaleDaemonWarning::blocks_admission`].
+    pub fn admission_blocking_stale_daemon(&self) -> Option<&RunnerStaleDaemonWarning> {
+        self.stale_daemon
+            .as_ref()
+            .filter(|warning| warning.blocks_admission())
+    }
+
+    /// The report that records an unverifiable runner, as opposed to a proven
+    /// mismatch. Present exactly when freshness was never established.
+    pub fn unverified_daemon(&self) -> Option<&RunnerStaleDaemonWarning> {
+        self.stale_daemon
+            .as_ref()
+            .filter(|warning| !warning.blocks_admission())
+    }
+
+    /// The daemon freshness fence shared by status, placement, and dispatch.
+    /// A compatibility warning or a daemon's own non-fresh observation both
+    /// prohibit new work; rotation safety is evaluated separately.
+    ///
+    /// A report that established nothing is not a fence — it is surfaced as
+    /// `unverified` and scored down instead, so an unprobeable runner is
+    /// neither silently healthy nor uniformly stale.
+    pub fn daemon_fresh_for_admission(&self) -> bool {
+        self.admission_blocking_stale_daemon().is_none()
+            && self
+                .daemon_freshness
+                .as_ref()
+                .is_none_or(|freshness| freshness.fresh)
+    }
+
+    /// Capacity remains owned by `RunnerAvailability`; this method only adds
+    /// the daemon freshness fact so placement does not duplicate capacity logic
+    /// introduced by the aggregate runner accounting path (#9474).
+    pub fn admission_availability(&self, capacity: Option<usize>) -> RunnerAvailability {
+        let mut availability = RunnerAvailability::from_status_parts(
+            self.runner_id.clone(),
+            self.is_connected(),
+            self.admission_blocking_stale_daemon().is_some(),
+            // Aggregate accounting can retain unresolved generations while the
+            // typed view can transiently be ahead of it. Capacity must respect
+            // either owner without duplicating #9474's accounting policy.
+            self.active_job_count.max(self.active_jobs.len()),
+            &self.active_job_state,
+            capacity,
+        );
+        if !self.daemon_fresh_for_admission() && self.admission_blocking_stale_daemon().is_none() {
+            availability
+                .reasons
+                .push("daemon_freshness_unavailable".to_string());
+            availability.accepts_jobs = false;
+        }
+        // A runner whose freshness was never established is named, not fenced.
+        // The reason travels with the availability record so an operator can
+        // see *why* it was deprioritized without it dropping out of service.
+        if self.unverified_daemon().is_some() {
+            availability.reasons.push("daemon_unverified".to_string());
+        }
+        availability
     }
 
     /// Project the authoritative current-state admission summary.
@@ -700,7 +762,11 @@ impl RunnerStatusReport {
         draining_generation_count: usize,
     ) -> RunnerAdmissionSummary {
         let connected = self.is_connected();
-        let daemon_fresh = self.daemon_ready_for_admission();
+        // A compatibility warning and the daemon's own freshness probe both
+        // fence admission. The latter is especially important after losing a
+        // direct SSH session: no warning exists, but a missing lease can still
+        // make replacement unsafe.
+        let daemon_fresh = self.daemon_fresh_for_admission();
         let blocking_generation = generations
             .iter()
             .find(|generation| !generation.admission_owner && generation.active_job_count > 0)
@@ -715,7 +781,11 @@ impl RunnerStatusReport {
         let active_jobs_available = self.active_job_state == RunnerActiveJobState::Available;
         let accepting_jobs =
             connected && daemon_fresh && active_jobs_available && blocking_generation.is_none();
-        let safe_to_rotate = active_jobs_available && active_job_count == 0;
+        let safe_to_rotate = connected
+            && self.rotation_evidence_is_unambiguous()
+            && active_jobs_available
+            && active_job_count == 0
+            && blocking_generation.is_none();
         let daemon_build_identity = self
             .session
             .as_ref()
@@ -751,14 +821,65 @@ impl RunnerStatusReport {
     /// operator projection uses [`Self::status_action`] below. Keeping argv as
     /// the source prevents either surface from dropping the runner id.
     pub fn admission_action(&self) -> Option<ExecutableAction> {
-        if !self.is_connected() {
-            Some(crate::daemon_repair::connect_action(&self.runner_id))
-        } else if let Some(warning) = &self.stale_daemon {
+        if let Some(freshness) = self.daemon_freshness.as_ref() {
+            if let Some(action) = freshness
+                .repair_plan
+                .first()
+                .and_then(|step| step.action.clone())
+            {
+                return Some(action);
+            }
+            if !freshness.fresh {
+                // Missing lease evidence without an authorized repair must be
+                // reprobed, not replaced with a generic reconnect.
+                return Some(crate::daemon_repair::diagnose_action(&self.runner_id));
+            }
+        }
+        if let Some(warning) = &self.stale_daemon {
             warning.primary_recovery_action()
+        } else if !self.is_connected() {
+            Some(crate::daemon_repair::connect_action(&self.runner_id))
         } else if self.active_job_state != RunnerActiveJobState::Available {
             Some(status_action(&self.runner_id))
         } else {
             None
+        }
+    }
+
+    /// Admission freshness and replacement safety are intentionally distinct:
+    /// version drift blocks new work but an identified, authoritatively idle
+    /// daemon may be rotated to converge. Missing or corrupt lease state has no
+    /// such owner proof and must remain fenced.
+    pub(crate) fn rotation_evidence_is_unambiguous(&self) -> bool {
+        let Some(freshness) = self.daemon_freshness.as_ref() else {
+            return false;
+        };
+        match (freshness.fresh, freshness.stale_reason_code) {
+            // A current daemon observation with no stale predicate is an
+            // explicit proof that rotation may proceed once the job view is
+            // drained.
+            (true, None) => true,
+            // These identity/runtime mismatches identify a live daemon without
+            // undermining its lease ownership. Require both coordinates before
+            // allowing the stale-but-idle convergence path (#9474).
+            (
+                false,
+                Some(
+                    homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch
+                    | homeboy_core::daemon::DaemonStaleReasonCode::BuildIdentityMismatch
+                    | homeboy_core::daemon::DaemonStaleReasonCode::BinaryHashMismatch
+                    | homeboy_core::daemon::DaemonStaleReasonCode::RuntimePathsDrift,
+                ),
+            ) => {
+                freshness
+                    .lease_id
+                    .as_deref()
+                    .is_some_and(|lease_id| !lease_id.is_empty())
+                    && freshness.pid.is_some()
+            }
+            // A missing code on a non-fresh report and every present or future
+            // code not allowlisted above leave ownership ambiguous.
+            _ => false,
         }
     }
 
@@ -774,7 +895,7 @@ impl RunnerStatusReport {
     pub fn recovery_state(&self) -> RunnerRecoveryState {
         if !self.is_connected() {
             RunnerRecoveryState::Disconnected
-        } else if self.stale_daemon.is_some() {
+        } else if self.admission_blocking_stale_daemon().is_some() {
             RunnerRecoveryState::StaleDaemon {
                 active_job_count: self.active_job_count,
             }
@@ -946,10 +1067,31 @@ mod status_serialization_tests {
         }
     }
 
+    fn fresh_daemon_freshness() -> DaemonFreshnessReport {
+        DaemonFreshnessReport {
+            fresh: true,
+            stale_reason_code: None,
+            restartable: true,
+            lease_id: Some("known-lease".to_string()),
+            pid: Some(1234),
+            recovery_evidence: None,
+            ownership_evidence: None,
+            adoption_command: None,
+            binary_hash: None,
+            daemon_version: None,
+            daemon_build_identity: None,
+            runtime_paths: None,
+            active_jobs: 0,
+            termination_evidence: None,
+            repair_plan: Vec::new(),
+        }
+    }
+
     #[test]
     fn admission_summary_fresh_idle_accepts_and_is_safe_to_rotate() {
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
+        report.daemon_freshness = Some(fresh_daemon_freshness());
         let summary = report.admission_summary(0);
         assert!(summary.connected);
         assert!(summary.daemon_fresh);
@@ -975,6 +1117,7 @@ mod status_serialization_tests {
     fn admission_summary_busy_is_not_safe_to_rotate_but_still_accepting() {
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
+        report.daemon_freshness = Some(fresh_daemon_freshness());
         report.active_job_count = 3;
         let summary = report.admission_summary(0);
         assert!(
@@ -991,8 +1134,11 @@ mod status_serialization_tests {
     #[test]
     fn admission_summary_stale_daemon_refuses_and_points_to_refresh() {
         let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Available;
         report.stale_daemon = Some(RunnerStaleDaemonWarning {
             severity: "error",
+            verification: RunnerDaemonVerification::Compared,
+            probe_error: None,
             mismatch_predicate: "active_daemon_control_plane_version != job_command_binary_version",
             session_homeboy_version: "0.299.0".to_string(),
             current_homeboy_version: "0.299.2".to_string(),
@@ -1025,6 +1171,7 @@ mod status_serialization_tests {
             Some("homeboy runner refresh-homeboy homeboy-lab --ref c8a6673b6abc --reconnect"),
             "the legacy serialized recovery remains the action source when argv is unavailable"
         );
+        assert!(!summary.safe_to_rotate, "missing daemon evidence is unsafe");
     }
 
     #[test]
@@ -1087,11 +1234,91 @@ mod status_serialization_tests {
     }
 
     #[test]
+    fn admission_summary_lease_missing_without_repair_plan_requires_diagnosis() {
+        let mut report = base_report();
+        report.connected = false;
+        report.state = RunnerSessionState::Disconnected;
+        report.active_job_state = RunnerActiveJobState::Available;
+        report.daemon_freshness = Some(DaemonFreshnessReport {
+            fresh: false,
+            stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing),
+            restartable: false,
+            lease_id: None,
+            pid: None,
+            recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Unavailable),
+            ownership_evidence: Some("ambiguous foreground daemon candidates".to_string()),
+            adoption_command: None,
+            binary_hash: None,
+            daemon_version: None,
+            daemon_build_identity: None,
+            runtime_paths: None,
+            active_jobs: 0,
+            termination_evidence: None,
+            repair_plan: Vec::new(),
+        });
+
+        let summary = report.admission_summary(0);
+
+        assert!(!summary.daemon_fresh);
+        assert!(!summary.accepting_jobs);
+        assert!(!summary.safe_to_rotate);
+        assert_eq!(
+            summary.next_action.as_deref(),
+            Some("homeboy runner doctor homeboy-lab --scope lab-offload")
+        );
+    }
+
+    #[test]
+    fn admission_summary_known_stale_version_is_safe_to_rotate_when_idle() {
+        let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Available;
+        report.daemon_freshness = Some(DaemonFreshnessReport {
+            fresh: false,
+            stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch),
+            restartable: false,
+            lease_id: Some("known-lease".to_string()),
+            pid: Some(1234),
+            recovery_evidence: None,
+            ownership_evidence: Some("reachable daemon lease and PID verified".to_string()),
+            adoption_command: None,
+            binary_hash: None,
+            daemon_version: Some("0.1.0".to_string()),
+            daemon_build_identity: None,
+            runtime_paths: None,
+            active_jobs: 0,
+            termination_evidence: None,
+            repair_plan: Vec::new(),
+        });
+
+        let summary = report.admission_summary(0);
+
+        assert!(!summary.daemon_fresh);
+        assert!(!summary.accepting_jobs);
+        assert!(summary.safe_to_rotate);
+    }
+
+    #[test]
+    fn admission_summary_missing_or_unclassified_freshness_is_not_safe_to_rotate() {
+        let mut missing_report = base_report();
+        missing_report.active_job_state = RunnerActiveJobState::Available;
+        assert!(!missing_report.admission_summary(0).safe_to_rotate);
+
+        let mut unclassified_report = missing_report;
+        unclassified_report.daemon_freshness = Some(DaemonFreshnessReport {
+            fresh: false,
+            stale_reason_code: None,
+            ..fresh_daemon_freshness()
+        });
+        assert!(!unclassified_report.admission_summary(0).safe_to_rotate);
+    }
+
+    #[test]
     fn admission_summary_summarizes_draining_generations_by_count_not_as_load() {
         // The historical draining generations are reported only as a count and
         // never contribute to active_job_count (the #9522 confusion).
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
+        report.daemon_freshness = Some(fresh_daemon_freshness());
         let summary = report.admission_summary(7);
         assert_eq!(summary.draining_generation_count, 7);
         assert_eq!(
@@ -1152,9 +1379,73 @@ mod status_serialization_tests {
     }
 }
 
+/// Whether a stale-daemon report is evidence of an observed mismatch or an
+/// admission that nothing could be compared at all.
+///
+/// A compatibility gate has three answers, not two: fresh, stale, and *not
+/// established*. Collapsing the third into either of the other two is how the
+/// signal becomes untrustworthy — silently fresh (#11106) or uniformly stale
+/// (#11101). The same three-state shape is already used by
+/// `runtime_overlay_freshness::RuntimeOverlayBuildStatus`, whose
+/// `UnknownProbeFailed` variant exists because a failed probe once certified a
+/// stale build as current.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerDaemonVerification {
+    /// The runner's configured identity was read and compared. Everything in
+    /// the warning body is an observation.
+    Compared,
+    /// A verification path exists for this runner, but the probe that feeds it
+    /// failed. Nothing was compared; `probe_error` carries the reason.
+    ProbeFailed,
+    /// This runner has no controller-side identity probe at all, so no
+    /// comparison could be attempted for any reason.
+    Unavailable,
+}
+
+impl RunnerDaemonVerification {
+    /// Whether this verdict rests on an actual comparison.
+    pub fn is_compared(self) -> bool {
+        self == Self::Compared
+    }
+}
+
+/// Reported in the version fields of a warning that compared nothing.
+///
+/// The previous behaviour substituted the session's own recorded version for
+/// the one it failed to read, which guaranteed the version comparison passed
+/// and published a fabricated "current version" (#11106). A sentinel that
+/// cannot be mistaken for a release is the honest alternative.
+pub const UNVERIFIED_HOMEBOY_VERSION: &str = "unverified";
+
+/// Severity of a report that established neither freshness nor staleness.
+pub const RUNNER_DAEMON_SEVERITY_UNKNOWN: &str = "unknown";
+
+/// `compatibility_reason` for a reverse-connected session, which the controller
+/// has no path to probe. See [`RunnerStaleDaemonWarning::verification_unavailable`].
+pub const REVERSE_UNVERIFIED_REASON: &str = "reverse_unverified";
+
+/// `compatibility_reason` for a runner whose identity probe failed outright.
+pub const IDENTITY_PROBE_FAILED_REASON: &str = "identity_probe_failed";
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RunnerStaleDaemonWarning {
     pub severity: &'static str,
+    /// Whether this report compared anything at all.
+    ///
+    /// [`RunnerDaemonVerification::Compared`] for every warning derived from an
+    /// observed version/identity comparison. The other two variants mark a
+    /// report that is neither "fresh" nor "stale" but *unverified*, and are the
+    /// only states for which the version fields are sentinels rather than
+    /// observations.
+    pub verification: RunnerDaemonVerification,
+    /// The verbatim probe failure, when one is what prevented verification.
+    ///
+    /// Previously discarded by an `unwrap_or_else` that replaced the failure
+    /// with the session's own version, so an unreachable runner rendered as a
+    /// vague identity warning instead of the real SSH error (#11106).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_error: Option<String>,
     /// The exact machine-field predicate that made this warning reject admission.
     /// The compared raw fields are serialized alongside this predicate.
     pub mismatch_predicate: &'static str,
@@ -1258,6 +1549,8 @@ impl RunnerStaleDaemonWarning {
         };
         Self {
             severity: "warning",
+            verification: RunnerDaemonVerification::Compared,
+            probe_error: None,
             mismatch_predicate,
             active_daemon_control_plane_version: session_homeboy_version.clone(),
             job_command_binary_version: current_homeboy_version.clone(),
@@ -1277,6 +1570,125 @@ impl RunnerStaleDaemonWarning {
             recovery_commands,
             recovery_actions,
         }
+    }
+
+    /// The honest verdict when reading the runner's configured identity failed.
+    ///
+    /// The probe error is carried verbatim instead of being swallowed, and the
+    /// unread "current" version stays a sentinel rather than a copy of the
+    /// session's own version — the substitution that made an unreachable runner
+    /// satisfy its own version comparison (#11106).
+    pub fn probe_failed(
+        runner_id: &str,
+        session_homeboy_version: String,
+        session_homeboy_build_identity: Option<String>,
+        configured_executable: &str,
+        probe_error: String,
+    ) -> Self {
+        let message = format!(
+            "runner `{runner_id}` daemon compatibility is UNVERIFIED: reading the configured job command binary `{configured_executable}` failed ({probe_error}); neither a match nor a mismatch was established, so this runner's freshness is unknown rather than proven"
+        );
+        Self::unverified(
+            runner_id,
+            RunnerDaemonVerification::ProbeFailed,
+            IDENTITY_PROBE_FAILED_REASON,
+            session_homeboy_version,
+            session_homeboy_build_identity,
+            Some(probe_error),
+            message,
+        )
+    }
+
+    /// The honest verdict for a runner this controller has no way to probe.
+    ///
+    /// A reverse-connected session is reached through the broker, not over SSH,
+    /// so the direct identity probe has nothing to run against. That absence
+    /// used to be reported as no warning at all, which reads as healthy and let
+    /// an arbitrarily old reverse runner stay fully eligible (#11106). It is a
+    /// verification gap, so it is reported as one — visibly, and distinctly
+    /// from a proven mismatch, which is what keeps it from fencing every
+    /// reverse lab out of selection.
+    pub fn verification_unavailable(
+        runner_id: &str,
+        session_homeboy_version: String,
+        session_homeboy_build_identity: Option<String>,
+        compatibility_reason: &'static str,
+        message: String,
+    ) -> Self {
+        Self::unverified(
+            runner_id,
+            RunnerDaemonVerification::Unavailable,
+            compatibility_reason,
+            session_homeboy_version,
+            session_homeboy_build_identity,
+            None,
+            message,
+        )
+    }
+
+    /// Shared body of the two unverified verdicts.
+    ///
+    /// Nothing here is a comparison: the "current"/"job command binary" fields
+    /// hold [`UNVERIFIED_HOMEBOY_VERSION`] so no downstream reader can mistake
+    /// them for something that was read off the runner, and the recovery is a
+    /// read-only re-probe rather than a mutating refresh — replacing a binary
+    /// is not the answer to "I could not look at it".
+    fn unverified(
+        runner_id: &str,
+        verification: RunnerDaemonVerification,
+        compatibility_reason: &'static str,
+        session_homeboy_version: String,
+        session_homeboy_build_identity: Option<String>,
+        probe_error: Option<String>,
+        message: String,
+    ) -> Self {
+        let controller = homeboy_product_identity::build_identity();
+        let mut warning = Self {
+            severity: RUNNER_DAEMON_SEVERITY_UNKNOWN,
+            verification,
+            probe_error,
+            mismatch_predicate: match verification {
+                RunnerDaemonVerification::ProbeFailed => "daemon_identity_probe == failed",
+                _ => "daemon_identity_probe == unavailable",
+            },
+            active_daemon_control_plane_version: session_homeboy_version.clone(),
+            job_command_binary_version: UNVERIFIED_HOMEBOY_VERSION.to_string(),
+            active_daemon_control_plane_build_identity: session_homeboy_build_identity.clone(),
+            job_command_binary_build_identity: None,
+            session_homeboy_version,
+            current_homeboy_version: UNVERIFIED_HOMEBOY_VERSION.to_string(),
+            session_homeboy_build_identity,
+            current_homeboy_build_identity: None,
+            controller_homeboy_version: Some(controller.version),
+            controller_homeboy_build_identity: Some(controller.display),
+            compatibility_reason: Some(compatibility_reason),
+            refresh_command: String::new(),
+            message,
+            stale_runtime_paths: Vec::new(),
+            changed_runtime_paths: Vec::new(),
+            recovery_commands: Vec::new(),
+            recovery_actions: Vec::new(),
+        };
+        warning.set_recovery(vec![crate::daemon_repair::diagnose_action(runner_id)]);
+        warning
+    }
+
+    /// `true` when this report compared nothing, so it proves neither freshness
+    /// nor staleness.
+    pub fn is_unverified(&self) -> bool {
+        !self.verification.is_compared()
+    }
+
+    /// Whether this report may fence admission.
+    ///
+    /// An observed mismatch does, and so does a failed probe on a runner that
+    /// *has* a probe — "I tried and could not verify" is a real anomaly on a
+    /// path that normally answers. A runner with no verification path at all is
+    /// reported and deprioritized instead: fencing it would take every
+    /// reverse-connected lab out of service, which is the opposite failure
+    /// (#11101) rather than a fix.
+    pub fn blocks_admission(&self) -> bool {
+        self.verification != RunnerDaemonVerification::Unavailable
     }
 
     /// The one place a recovery is assigned.
@@ -1302,6 +1714,13 @@ impl RunnerStaleDaemonWarning {
             .or_else(|| action_from_refresh_command(&self.refresh_command))
     }
 
+    /// Fold the controller↔runner comparison into this warning.
+    ///
+    /// `controller_identity_unverifiable` means the controller cannot name the
+    /// build it is running — today, a dirty working tree. That is a *different
+    /// state* from a skewed runner and must never be rendered as one: it says
+    /// nothing about the runner, is true of every runner simultaneously, and
+    /// has no runner-side remediation (#11101).
     pub fn with_controller_compatibility(
         mut self,
         runner_id: &str,
@@ -1309,58 +1728,80 @@ impl RunnerStaleDaemonWarning {
         controller_build_identity: String,
         controller_version_matches: bool,
         daemon_matches_configured: bool,
-        controller_dirty: bool,
+        controller_identity_unverifiable: bool,
     ) -> Self {
         self.controller_homeboy_version = Some(controller_version.clone());
         self.controller_homeboy_build_identity = Some(controller_build_identity.clone());
-        if controller_dirty {
-            self.compatibility_reason = Some("controller_dirty");
-            self.mismatch_predicate = "controller_git_dirty == true";
-            self.message = format!(
-                "controller `{controller_build_identity}` is dirty and cannot prove compatibility with runner `{}`; rebuild or upgrade the controller first, then rerun `homeboy runner status` to derive runner convergence from the upgraded controller identity",
-                self.job_command_binary_build_identity
-                    .as_deref()
-                    .unwrap_or(&self.job_command_binary_version),
-            );
-            self.set_recovery(vec![ExecutableAction::new(
-                "upgrade.force",
-                "rebuild the controller binary".to_string(),
-                "homeboy",
-                ["upgrade".to_string(), "--force".to_string()],
-                ActionSafety::Mutating,
-            )]);
-        } else if daemon_matches_configured {
-            self.compatibility_reason = Some(if controller_version_matches {
-                "controller_configured_identity_skew"
-            } else {
-                "controller_configured_version_skew"
-            });
-            self.mismatch_predicate = if controller_version_matches {
-                "controller_build_commit != job_command_binary_build_commit"
-            } else {
-                "controller_version != job_command_binary_version"
-            };
-            self.message = format!(
-                "connected runner configured job command binary `{}` is incompatible with controller `{controller_build_identity}`; the daemon matches the configured binary, but controller compatibility requires convergence before admission",
-                self.job_command_binary_build_identity
-                    .as_deref()
-                    .unwrap_or(&self.job_command_binary_version),
-            );
+        if !daemon_matches_configured {
+            // The runner's live daemon disagrees with its own configured
+            // binary. That is a runner-side fact with a runner-side recovery,
+            // already established by `new`; controller-side advice must not
+            // overwrite it — least of all with a controller upgrade, which
+            // would not converge the daemon at all.
+            return self;
+        }
+        let configured_binary = self
+            .job_command_binary_build_identity
+            .clone()
+            .unwrap_or_else(|| self.job_command_binary_version.clone());
+        if controller_identity_unverifiable {
             if controller_version_matches {
-                if let Some(controller_commit) =
-                    homeboy_upgrade::upgrade::parse_build_identity_display(
-                        &controller_build_identity,
-                    )
+                // Nothing about the runner is known to be wrong: the versions
+                // agree and only the exact-commit proof is unavailable.
+                //
+                // `stale_daemon_warning` does not construct a warning at all in
+                // this state — it is the case that used to fail every runner
+                // closed. This branch exists so that any other caller renders
+                // "cannot compare" honestly instead of inheriting a staleness
+                // message and a mutating recovery.
+                self.compatibility_reason = Some("controller_identity_unverifiable");
+                self.mismatch_predicate =
+                    "controller_build_commit == unverifiable(controller_git_dirty)";
+                self.message = format!(
+                    "controller `{controller_build_identity}` was built from a dirty working tree, so its recorded commit does not name the build that is running and cannot be compared against runner `{runner_id}`'s configured job command binary `{configured_binary}`; the comparison is unavailable, not failed — the versions agree and no runner drift is known. Commit or stash the controller working tree, then rerun `homeboy runner status {runner_id}` to restore the exact-commit proof."
+                );
+                // "Your working tree is dirty" has no safe automated fix: every
+                // candidate command either discards the operator's work or
+                // replaces the binary under test. Report no recovery command
+                // rather than a confidently wrong one.
+                self.set_recovery(Vec::new());
+            } else {
+                // The version difference is conclusive on its own, so a runner
+                // that really is behind is still caught here — the unavailable
+                // commit proof only removes the *stronger* check.
+                self.compatibility_reason = Some("controller_configured_version_skew");
+                self.mismatch_predicate = "controller_version != job_command_binary_version";
+                self.message = format!(
+                    "connected runner configured job command binary `{configured_binary}` is a different Homeboy version from controller `{controller_build_identity}`; the controller working tree is dirty so the exact-commit proof is unavailable, but the version difference is conclusive by itself and blocks admission until the runner converges"
+                );
+            }
+            return self;
+        }
+        self.compatibility_reason = Some(if controller_version_matches {
+            "controller_configured_identity_skew"
+        } else {
+            "controller_configured_version_skew"
+        });
+        self.mismatch_predicate = if controller_version_matches {
+            "controller_build_commit != job_command_binary_build_commit"
+        } else {
+            "controller_version != job_command_binary_version"
+        };
+        self.message = format!(
+            "connected runner configured job command binary `{configured_binary}` is incompatible with controller `{controller_build_identity}`; the daemon matches the configured binary, but controller compatibility requires convergence before admission"
+        );
+        if controller_version_matches {
+            if let Some(controller_commit) =
+                homeboy_upgrade::upgrade::parse_build_identity_display(&controller_build_identity)
                     .filter(|identity| identity.git_dirty != Some(true))
                     .and_then(|identity| identity.git_commit)
-                {
-                    self.set_recovery(vec![
-                        crate::daemon_repair::refresh_homeboy_downgrade_action(
-                            runner_id,
-                            &controller_commit,
-                        ),
-                    ]);
-                }
+            {
+                self.set_recovery(vec![
+                    crate::daemon_repair::refresh_homeboy_downgrade_action(
+                        runner_id,
+                        &controller_commit,
+                    ),
+                ]);
             }
         }
         self

@@ -1140,7 +1140,10 @@ fn verify_refreshed_daemon_status(
             "runner `{runner_id}` reconnect did not persist an active daemon session"
         )));
     }
-    if let Some(stale_daemon) = &status.stale_daemon {
+    // A refresh must prove convergence. An observed mismatch and a failed probe
+    // both fail that proof; only a runner with no verification path at all is
+    // excused, and it never reaches this SSH-only path (#11106).
+    if let Some(stale_daemon) = status.admission_blocking_stale_daemon() {
         return Err(Error::internal_unexpected(format!(
             "runner `{runner_id}` reconnect retained a stale daemon: {}",
             stale_daemon.message

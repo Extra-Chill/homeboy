@@ -148,3 +148,164 @@ fn parses_dotted_setting_override_for_nested_bench_env() {
         )]
     );
 }
+
+// --- Presentation vocabulary (#11138) -------------------------------------
+//
+// `bench --json` is the output-format sense of `--json`, now also spelled
+// `--format json`. Both must keep working, and neither may fabricate JSON
+// when the caller asked for something else.
+
+#[test]
+fn bare_bench_does_not_want_full_json() {
+    let cli = TestCli::try_parse_from(["bench", "homeboy"]).expect("bench should parse");
+
+    assert!(!cli.bench.wants_full_json());
+}
+
+#[test]
+fn legacy_json_flag_still_wants_full_json() {
+    let cli =
+        TestCli::try_parse_from(["bench", "homeboy", "--json"]).expect("bench --json should parse");
+
+    assert!(cli.bench.wants_full_json());
+}
+
+#[test]
+fn format_json_wants_full_json_identically() {
+    let cli = TestCli::try_parse_from(["bench", "homeboy", "--format", "json"])
+        .expect("bench --format json should parse");
+
+    assert!(cli.bench.wants_full_json());
+}
+
+#[test]
+fn both_json_spellings_together_are_accepted() {
+    let cli = TestCli::try_parse_from(["bench", "homeboy", "--json", "--format=json"])
+        .expect("bench --json --format=json should parse");
+
+    assert!(cli.bench.wants_full_json());
+}
+
+#[test]
+fn non_json_formats_keep_the_compact_bench_summary() {
+    for format in ["auto", "markdown", "text"] {
+        let cli = TestCli::try_parse_from(["bench", "homeboy", "--format", format])
+            .expect("bench --format should parse");
+
+        assert!(
+            !cli.bench.wants_full_json(),
+            "--format {format} must not imply the full JSON payload"
+        );
+    }
+}
+
+/// `run` folds `--detail summary` onto the legacy field before dispatch, so
+/// exercise the fold rather than the raw parse.
+fn folded(args: &[&str]) -> BenchArgs {
+    let mut bench = TestCli::try_parse_from(args)
+        .expect("bench should parse")
+        .bench;
+    bench.apply_presentation_detail();
+    bench
+}
+
+#[test]
+fn detail_summary_is_the_canonical_json_summary_spelling() {
+    assert!(!folded(&["bench", "homeboy"]).run.json_summary);
+    assert!(
+        folded(&["bench", "homeboy", "--json-summary"])
+            .run
+            .json_summary
+    );
+    assert!(
+        folded(&["bench", "homeboy", "--detail", "summary"])
+            .run
+            .json_summary
+    );
+    assert!(
+        !folded(&["bench", "homeboy", "--detail", "full"])
+            .run
+            .json_summary
+    );
+}
+
+#[test]
+fn both_detail_spellings_together_are_accepted() {
+    assert!(
+        folded(&["bench", "homeboy", "--json-summary", "--detail=summary"])
+            .run
+            .json_summary
+    );
+}
+
+#[test]
+fn detail_full_does_not_cancel_the_legacy_json_summary_flag() {
+    // The legacy bool has no "off" state, so `--detail full` cannot be read
+    // as a request to suppress a summary the caller explicitly asked for.
+    assert!(
+        folded(&["bench", "homeboy", "--json-summary", "--detail=full"])
+            .run
+            .json_summary
+    );
+}
+
+#[test]
+fn detail_is_independent_of_format() {
+    let bench = folded(&["bench", "homeboy", "--detail=summary"]);
+
+    assert!(bench.run.json_summary);
+    assert!(
+        !bench.wants_full_json(),
+        "--detail must not imply the full JSON payload"
+    );
+
+    let json_only = folded(&["bench", "homeboy", "--format=json"]);
+    assert!(json_only.wants_full_json());
+    assert!(
+        !json_only.run.json_summary,
+        "--format must not imply the compact summary"
+    );
+}
+
+#[test]
+fn presentation_flags_do_not_disturb_the_bench_run_group() {
+    let bench = folded(&[
+        "bench",
+        "homeboy",
+        "--format=json",
+        "--detail=summary",
+        "--iterations",
+        "3",
+    ]);
+
+    assert!(bench.wants_full_json());
+    assert!(bench.run.json_summary);
+    assert_eq!(bench.run.iterations, 3);
+}
+
+#[test]
+fn explicit_passthrough_preserves_a_runner_owned_format_flag() {
+    // Declaring `--format` on bench must not let `filter_passthrough_args`
+    // swallow a bench runner's own `--format`. `normalize` marks the explicit
+    // `--` boundary with a sentinel, and that is what protects it.
+    let normalized = crate::commands::utils::args::normalize(
+        ["homeboy", "bench", "homeboy", "--", "--format", "terse"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<String>>(),
+    );
+
+    // Everything clap hands to the `last = true` passthrough field: the
+    // sentinel `normalize` inserted, then the runner's own arguments.
+    let passthrough: Vec<String> = normalized
+        .iter()
+        .skip_while(|arg| arg.as_str() != "--")
+        .skip(1)
+        .cloned()
+        .collect();
+
+    assert_eq!(
+        filter_homeboy_flags(&passthrough),
+        vec!["--format".to_string(), "terse".to_string()]
+    );
+}

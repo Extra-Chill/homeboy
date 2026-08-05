@@ -1285,6 +1285,35 @@ pub enum DetailLevel {
 /// the boolean would remove a spelling that CI wrappers and operator
 /// scripts depend on. Migration therefore has to be per-command and
 /// staged, not mechanical.
+///
+/// # Adoption
+///
+/// A migrated command declares **both** spellings — the legacy boolean and
+/// this group — and reads them through [`PresentationArgs::json_or_legacy`],
+/// so `--json` and `--format json` are exactly equivalent and either one
+/// alone is enough. Nothing is removed.
+///
+/// The output-format sense of `--json` (sense 1 above) is fully migrated:
+/// `bench`, `runs show`, `runs proof`, and `runs dossier` all route through
+/// this group.
+///
+/// Still on their own vocabulary, and why:
+///
+/// * `--json-summary` / `--summary` (`audit`, `lint`, `test`, `trace`,
+///   `bench`'s run group) are the *detail* axis, not the format axis. `test`
+///   in particular cannot take a `--format` flag yet: `filter_passthrough_args`
+///   strips homeboy-owned flags from `homeboy test -- <runner args>`, and the
+///   test path has no explicit-passthrough sentinel, so declaring `--format`
+///   here would silently swallow libtest's own `--format <fmt>`. (`bench` is
+///   safe because `mark_explicit_passthrough` marks `homeboy bench -- ...`.)
+/// * `lint` declares `--summary` *and* `--json-summary` as separate fields
+///   that `review` couples with `|=`; collapsing them is a behavior decision.
+/// * `--full` (`status`, `agent-task`), `--compact` (`runner`), `--format`
+///   (`report`, three different `value_parser` sets), and the
+///   `--report markdown` / `--report pr-comment` pair are untouched.
+/// * The input-spec `--json` (`git`, `deploy`, `build`, `project`, `server`,
+///   `runner`) is a *value*, not a presentation flag; renaming it to `--spec`
+///   is a separate, breaking change.
 #[derive(Args, Debug, Clone, Default)]
 pub struct PresentationArgs {
     /// Output format.
@@ -1315,6 +1344,23 @@ impl PresentationArgs {
     /// True when the command should pick its own default presentation.
     pub fn is_auto_format(&self) -> bool {
         matches!(self.format, OutputFormat::Auto)
+    }
+
+    /// Fold a command's legacy boolean `--json` flag into this group.
+    ///
+    /// `bench --json`, `runs show --json`, `runs proof --json`, and
+    /// `runs dossier --json` all mean *"print the full JSON payload instead
+    /// of the compact human summary"*. A migrated command keeps declaring
+    /// that boolean and asks this helper instead of reading the field
+    /// directly, which makes `--json` and `--format json` interchangeable
+    /// without removing either spelling.
+    ///
+    /// The fold is a logical OR on purpose: the legacy flag has no "off"
+    /// state to distinguish from its default, so `--json --format text`
+    /// cannot mean "text". Passing both spellings with the same intent is
+    /// the only combination an operator can express, and it agrees.
+    pub fn json_or_legacy(&self, legacy_json: bool) -> bool {
+        legacy_json || self.is_json()
     }
 }
 
@@ -1377,6 +1423,42 @@ mod presentation_args_tests {
         let markdown = parse(&["rendered", "--format=markdown"]);
         assert!(markdown.is_markdown());
         assert!(!markdown.is_json());
+    }
+
+    #[test]
+    fn legacy_json_bool_alone_still_selects_json() {
+        // A migrated command that saw only the old spelling must behave
+        // exactly as it did before the group existed.
+        let untouched = parse(&["rendered"]);
+        assert!(untouched.json_or_legacy(true));
+        assert!(!untouched.json_or_legacy(false));
+    }
+
+    #[test]
+    fn format_json_alone_still_selects_json() {
+        // ...and the canonical spelling works without the legacy bool.
+        assert!(parse(&["rendered", "--format=json"]).json_or_legacy(false));
+    }
+
+    #[test]
+    fn both_spellings_agree() {
+        assert!(parse(&["rendered", "--format=json"]).json_or_legacy(true));
+    }
+
+    #[test]
+    fn non_json_formats_do_not_fabricate_json() {
+        for format in ["auto", "markdown", "text"] {
+            assert!(
+                !parse(&["rendered", "--format", format]).json_or_legacy(false),
+                "--format {format} must not imply JSON"
+            );
+        }
+    }
+
+    #[test]
+    fn detail_does_not_affect_the_format_fold() {
+        assert!(!parse(&["rendered", "--detail=summary"]).json_or_legacy(false));
+        assert!(parse(&["rendered", "--detail=summary"]).json_or_legacy(true));
     }
 }
 

@@ -688,6 +688,7 @@ fn detached_lab_plan(run_id: &str, input: &DetachedLabRunRecord<'_>) -> AgentTas
         expected_artifacts: Vec::new(),
         artifact_declarations: Vec::new(),
         output_declarations: Vec::new(),
+        runtime_tools: Vec::new(),
         metadata: json!({
             "kind": "lab_offload_detached_handoff",
             "runner_id": input.runner_id,

@@ -195,7 +195,7 @@ pub fn route_after_parse_with_provenance(
         && deferred_resource_admission_refused()
         && std::env::var_os("HOMEBOY_DEFERRED_WORKLOAD_REPLAY").is_none()
     {
-        let deferred = homeboy::core::deferred_workload::defer(deferred_workload_input(
+        let deferred = homeboy::deferred_workload::defer(deferred_workload_input(
             cli,
             &portable_deferred_args(&normalized_args),
             deferred_requirements.expect("review tests always resolve deferred requirements"),
@@ -277,7 +277,7 @@ pub fn route_after_parse_with_provenance(
         .as_deref()
         .filter(|_| review_test_can_defer(cli))
         .map(|runner_id| {
-            homeboy::core::deferred_workload::claim(
+            homeboy::deferred_workload::claim(
                 &deferred_workload_input(
                     cli,
                     &portable_deferred_args(&normalized_args),
@@ -468,7 +468,7 @@ pub fn route_after_parse_with_provenance(
     match outcome {
         LabRouteOutcome::RunLocal => {
             if let Some(record) = deferred_claim.as_ref() {
-                homeboy::core::deferred_workload::terminalize(&record.id, false)?;
+                homeboy::deferred_workload::terminalize(&record.id, false)?;
             }
             if destructive_fuzz_requires_lab(&cli.command) {
                 return Err(destructive_fuzz_local_execution_error());
@@ -482,7 +482,7 @@ pub fn route_after_parse_with_provenance(
         }
         LabRouteOutcome::InFlight(output) | LabRouteOutcome::Offloaded(output) => {
             if let Some(record) = deferred_claim.as_ref() {
-                homeboy::core::deferred_workload::terminalize(&record.id, output.exit_code == 0)?;
+                homeboy::deferred_workload::terminalize(&record.id, output.exit_code == 0)?;
             }
             if !output.stderr.is_empty() {
                 eprint!("{}", output.stderr);
@@ -1851,9 +1851,9 @@ fn review_test_can_defer(cli: &Cli) -> bool {
 fn deferred_workload_input(
     cli: &Cli,
     args: &[String],
-    test_requirements: homeboy::core::deferred_workload::DeferredWorkloadRequirements,
-) -> homeboy::core::Result<homeboy::core::deferred_workload::DeferredWorkloadInput> {
-    Ok(homeboy::core::deferred_workload::DeferredWorkloadInput {
+    test_requirements: homeboy::deferred_workload::DeferredWorkloadRequirements,
+) -> homeboy::core::Result<homeboy::deferred_workload::DeferredWorkloadInput> {
+    Ok(homeboy::deferred_workload::DeferredWorkloadInput {
         command_label: "review test".to_string(),
         args: args.to_vec(),
         placement: match cli.placement {
@@ -1884,7 +1884,7 @@ fn deferred_workload_input(
 
 fn review_test_deferred_requirements(
     cli: &Cli,
-) -> Option<homeboy::core::deferred_workload::DeferredWorkloadRequirements> {
+) -> Option<homeboy::deferred_workload::DeferredWorkloadRequirements> {
     let Commands::Review(review) = &cli.command else {
         return None;
     };
@@ -1893,7 +1893,7 @@ fn review_test_deferred_requirements(
     };
     let contract = test.lab_contract();
     contract.is_portable().then(
-        || homeboy::core::deferred_workload::DeferredWorkloadRequirements {
+        || homeboy::deferred_workload::DeferredWorkloadRequirements {
             required_runtimes: ["homeboy".to_string()].into(),
             required_capabilities: contract
                 .extra_required_capabilities

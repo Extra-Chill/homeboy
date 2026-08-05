@@ -82,6 +82,43 @@ Unmanaged entries continue to use `retention.runtime_tmp_days`. Structured
 output reports these effective floors separately as `runtime_tmp_days` and
 `runtime_tmp_managed_days`.
 
+## Leaked Test Homes
+
+Homeboy's test isolation builds each test a private `HOME` from a `TempDir`.
+`TempDir` reclaims on `Drop`, and `Drop` cannot run when the process is *killed*
+rather than unwound — OOM kill, harness timeout, `SIGKILL` from a supervisor. A
+home that materialized a controller runtime keeps a private copy of the debug
+binary, so one abandoned entry is hundreds of megabytes.
+
+```bash
+homeboy cleanup --include leaked-test-homes
+homeboy cleanup --include leaked-test-homes --apply
+```
+
+`runtime-tmp` does not see these. It scans `HOMEBOY_RUNTIME_TMPDIR`; the leak
+lands wherever `tempfile` resolves `TMPDIR`. On a host that moved `TMPDIR` to a
+dedicated volume those are different directories, and `runtime-tmp` truthfully
+reports zero while gigabytes sit unreclaimed. This category scans `$TMPDIR`
+first, then `/tmp`, `/var/tmp`, and `/dev/shm`, and **reports every root it
+considered** — including the ones it could not read, with the reason. A zero is
+always attributable to a directory rather than to an assumption.
+
+Reclaim requires three independent proofs, and a live test's home fails the
+second one:
+
+1. The directory name starts with `hb-test-` and sits directly under a scanned
+   root. The scan never recurses, never follows a symlink, never touches a file.
+2. The PID stamped into the name is not this process and is not running. An
+   entry whose owner is alive is classified `owner_alive` and is unreachable by
+   every reclaim path here — no age, no budget, no flag. PID reuse fails safe: a
+   recycled PID makes an abandoned entry look alive, so it survives to a later
+   pass. A name carrying *no* PID means unknown, never unowned.
+3. The entry is at least an hour old.
+
+The byte ceiling (2 GiB retained) relaxes step 3, and only step 3, for the
+oldest entries that already passed step 2. An age window alone cannot bound a
+directory accumulating hundreds of megabytes per kill at an unbounded rate.
+
 ## Automatic Retention
 
 Declare the bounded retention pass through Homeboy's scheduler:
@@ -93,7 +130,7 @@ homeboy schedule add automatic-retention \
   --on-overlap skip
 ```
 
-The schedule declaration is the explicit opt-in to unattended mutation. The Homeboy daemon owns cadence, overlap prevention, and stale-run recovery; no external timer is needed. Each pass first reconciles stale agent-task records, then applies the existing terminal-run, persisted-artifact, orphaned-byte, runtime-temp, controller-scratch, controller-runtime, shared-Cargo, and reconstructable repo-artifact cleanup policies. Repo-artifact retention uses controller-accessible registered workspace roots, one global largest-first `retention.limit`, `retention.reconstructable_artifact_days`, and `retention.automatic_retention_max_run_seconds`; a configured `retention.reconstructable_artifact_reserve_bytes` enables early retention under free-space pressure. The output records reclaimed and retained evidence. It also prunes remote lab workspaces and runner binary caches: both accumulate on hosts an operator rarely inspects, and both are cursor-paginated and age-floored, so they fit the pass's wall-clock budget. A disconnected or failing runner degrades only its own category. Runner downloads and task worktrees remain outside unattended scope, because both can hold inputs or uncommitted work that is still live. Cargo retains its configured aggregate byte budget and active-lease predicate. The controller has a process and cross-process single-flight lock, writes combined pass evidence under the Homeboy data directory, and returns `homeboy cleanup automatic-retention` as the exact resume command.
+The schedule declaration is the explicit opt-in to unattended mutation. The Homeboy daemon owns cadence, overlap prevention, and stale-run recovery; no external timer is needed. Each pass first reconciles stale agent-task records, then applies the existing terminal-run, persisted-artifact, orphaned-byte, runtime-temp, leaked-test-home, controller-scratch, controller-runtime, shared-Cargo, and reconstructable repo-artifact cleanup policies. Leaked test homes are unattended for the reason they exist: the process that would have cleaned up after itself was killed, so nothing reclaims them by hand. Repo-artifact retention uses controller-accessible registered workspace roots, one global largest-first `retention.limit`, `retention.reconstructable_artifact_days`, and `retention.automatic_retention_max_run_seconds`; a configured `retention.reconstructable_artifact_reserve_bytes` enables early retention under free-space pressure. The output records reclaimed and retained evidence. It also prunes remote lab workspaces and runner binary caches: both accumulate on hosts an operator rarely inspects, and both are cursor-paginated and age-floored, so they fit the pass's wall-clock budget. A disconnected or failing runner degrades only its own category. Runner downloads and task worktrees remain outside unattended scope, because both can hold inputs or uncommitted work that is still live. Cargo retains its configured aggregate byte budget and active-lease predicate. The controller has a process and cross-process single-flight lock, writes combined pass evidence under the Homeboy data directory, and returns `homeboy cleanup automatic-retention` as the exact resume command.
 
 Terminal agent-task convergence also runs bounded reconstructable artifact retention over controller-accessible task workspace roots. It is best-effort: inaccessible roots and retention failures are retained as terminal evidence while aggregate persistence continues. Later scheduled retention reevaluates registered roots after the age floor expires.
 
@@ -126,10 +163,11 @@ apply.
 | `terminal-runs` | — (aggregate only) | Terminal observation records, their artifact bytes, and lifecycle directories | Durable run row in a terminal state | `retention.terminal_run_days`; unsafe local artifact paths keep the run |
 | `persisted-run-artifacts` | `homeboy runs artifact cleanup-persisted` | Persisted artifact files/directories and their DB rows | `artifacts` row joined to a terminal run | `retention.terminal_run_days`; active/unknown run state, non-local bytes, out-of-root paths, and symlinks are skipped |
 | `orphaned-artifact-bytes` | — (aggregate only) | Two crash-residue name families under the artifact root | Name shape from a single private constructor plus a parsed UUID; the database is deliberately **not** consulted | Fixed 24h floor, not operator-overridable; a failed size measurement changes the verdict in neither direction |
-| `runner-downloads` (opt-in only) | `homeboy runs artifact cleanup-downloads` | Cache directories under `<artifact-root>/runner` | Canonical `<runner-id>/<run-id>` shape emitted by the single writer, **plus an explicit `internal_fetch` intent marker**; the database is deliberately **not** joined | Fixed 24h floor over the *newest* byte in the cache directory, plus a non-terminal-run veto; an absent, unreadable, or `operator_pull` marker retains, as does any unreadable state. Narrowed by `--runner`/`--run-id`, which never waive the predicate |
+| `runner-downloads` (opt-in only) | `homeboy runs artifact cleanup-downloads` | Cache directories under `<artifact-root>/runner` | Canonical `<runner-id>/<run-id>` shape emitted by the single writer, **plus an explicit `internal_fetch` intent marker** (or no marker at all, under `--include-untagged`); the database is deliberately **not** joined | Fixed 24h floor over the *newest* byte in the cache directory, plus a non-terminal-run veto; an unreadable or `operator_pull` marker always retains, and an absent marker retains unless `--include-untagged` is passed. Narrowed by `--runner`/`--run-id`, which never waive the predicate |
 | `runner-binary-caches` | `homeboy runner cache-prune <runner>` | Unselected managed Homeboy binary slots on a runner | Canonical `homeboy-*` / `dev/<16-hex>` slot layout with a regular expected binary | 24h floor; configured binary, process-owned slots, symlinks, and malformed layouts preserved; selection revalidated immediately before removal |
 | `remote-lab-workspaces` | `homeboy runner workspace prune <runner>` | Orphaned runner-side Lab workspaces | `homeboy/runner-workspace/v1` metadata plus a resolvable `local_path`; never outside `_lab_workspaces`. A workspace is also reachable when its *exact* durable owner run is terminal and its lease is `delete_on_success` — an existing controller-side source path is not evidence the runner copy is live | 24h floor; pending apply-back or an unexpired lifecycle TTL preserves the workspace. Live, unavailable, ambiguous, or malformed run authority all retain |
 | `runtime-tmp` | `homeboy self cleanup-runtime-tmp` | Orphaned Homeboy runtime temp entries | Owner id recorded in the entry | `retention.runtime_tmp_days` plus byte/count budgets; entries whose owner process is running are preserved |
+| `leaked-test-homes` | — (aggregate only) | Isolated test homes abandoned by killed test processes, under `$TMPDIR`, `/tmp`, `/var/tmp`, `/dev/shm` | `hb-test-<pid>-` filename marker directly under a scanned root, plus a liveness probe on that PID; the database is deliberately **not** consulted | Fixed 1h floor, not operator-overridable, plus a 2 GiB retained-byte ceiling that relaxes the floor for the oldest *abandoned* entries only. A running owner, an unrecorded owner, a symlink, and a non-directory are all unreachable |
 | `controller-scratch` | — (aggregate only) | Released controller scratch resources, including ephemeral attempt Git worktrees | Scratch index ownership with pid liveness; a linked worktree is proved by Git's own two-way `.git`/`gitdir` pointers, never by a database join | Per-resource retention window (P7D) unless `--older-than-days` is typed. A linked attempt worktree is additionally retained unless every commit reachable from its HEAD is already reachable from a branch, tag, or remote-tracking ref in its source repository. Removal goes through `git worktree remove`; a worktree that cannot be unregistered is reported and retained, never deleted behind Git |
 | `shared-cargo-targets` | — (aggregate only) | Shared Cargo target stores | Store layout below Homeboy's data directory | `retention.shared_store_days` and byte budget; an unexpired lease preserves the store independently |
 | `controller-runtimes` | `homeboy runtime controller-prune` | Unreferenced immutable controller runtime identities | Content-addressed pin path not referenced by a nonterminal durable record or the active generation, under the admission lock | `retention.controller_runtime_days` and byte budget; `--ignore-retention` is the explicit destructive opt-out |
@@ -217,6 +255,39 @@ alternative is inferring intent from bytes that never recorded it — and it mea
 `--include runner-downloads` reclaims nothing until internal fetches have been
 re-run against the tagging writer. The bytes stay visible in
 `cleanup retained-storage` and in the per-row `intent` field the whole time.
+
+### Draining the untagged backlog: `--include-untagged`
+
+Retaining untagged bytes forever is the right default and the wrong terminal
+state — the pre-tagging backlog only grows, and nothing else will ever reach it
+(#11128). `--include-untagged` is the explicit operator opt-in that makes the
+`absent` row above eligible:
+
+```sh
+homeboy cleanup --include runner-downloads --include-untagged
+homeboy cleanup --include runner-downloads --include-untagged --apply
+```
+
+It widens *what* is eligible, and nothing else:
+
+- The **default is unchanged.** Without the flag, untagged still fails closed,
+  and its retain reason now names the flag that would release it.
+- The **age floor still applies.** `--include-untagged` never lowers the fixed
+  24h floor; a stale untagged cache beside a fresh one is still decided per
+  directory, on the newest byte in each.
+- **`operator_pull` is still never reclaimable.** The flag is about *unrecorded*
+  intent, not about overriding a recorded operator claim.
+- An **unreadable marker still retains.** A marker that exists but will not parse
+  may be an `operator_pull` whose bytes on disk went bad, so uncertainty about a
+  *present* marker is not what this widens.
+- The **liveness veto is still honoured.** A non-terminal run claiming the
+  `<run-id>` retains its cache, flag or no flag.
+
+The plan says so: the sweep reports `include_untagged: true`, and every row it
+releases under the opt-in carries a reason naming it rather than the
+internal-fetch reason. The flag is off in the unattended retention pass and in
+the degraded (store-shut) sweep — widening a delete predicate is a decision an
+operator makes at a terminal, and there is nobody there to make it.
 
 The category stays out of the bare sweep for now. Re-evaluating that is a
 separate decision with its own evidence, once the backfill window has passed;

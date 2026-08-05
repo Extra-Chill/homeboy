@@ -61,6 +61,7 @@ use harvest::{
 };
 pub(crate) use harvest::{git_output, HarvestError};
 use outcome::event;
+pub use postprocess::run_postprocess_worker;
 use resources::{
     active_resource_units, adaptive_concurrency_decision, executor_key, model_key,
     task_resource_units,

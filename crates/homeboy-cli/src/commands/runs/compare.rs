@@ -91,6 +91,7 @@ pub(super) fn compare_runs(args: RunsCompareArgs) -> CmdResult<RunsOutput> {
         status: args.status.clone(),
         rig_id: args.rig.clone(),
         limit: Some(limit),
+        ..RunListFilter::default()
     })?;
 
     let mut rows = Vec::new();

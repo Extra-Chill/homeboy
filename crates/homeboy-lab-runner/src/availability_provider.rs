@@ -14,19 +14,30 @@ pub struct RunnerAvailability;
 impl RunnerAvailabilityProvider for RunnerAvailability {
     fn controller_runner_availability(&self, runner_id: &str) -> AgentTaskLoopRunnerAvailability {
         match crate::status(runner_id) {
+            // A report that established nothing does not block execution — it
+            // is surfaced as `daemon_verification` so the operator can see the
+            // gap without the runner dropping out of service (#11106).
             Ok(status)
                 if status.connected
-                    && status.stale_daemon.is_none()
+                    && status.admission_blocking_stale_daemon().is_none()
                     && status.active_job_state == RunnerActiveJobState::Available =>
             {
                 AgentTaskLoopRunnerAvailability::Available
             }
             Ok(status) => AgentTaskLoopRunnerAvailability::Unavailable {
                 reason: format!(
-                    "runner `{runner_id}` is not available for controller action execution: state={:?}, connected={}, stale_daemon={}, active_job_state={:?}",
+                    "runner `{runner_id}` is not available for controller action execution: state={:?}, connected={}, stale_daemon={}, daemon_verification={}, active_job_state={:?}",
                     status.state,
                     status.connected,
-                    status.stale_daemon.is_some(),
+                    status.admission_blocking_stale_daemon().is_some(),
+                    status
+                        .stale_daemon
+                        .as_ref()
+                        .map_or("compared", |warning| if warning.is_unverified() {
+                            "unverified"
+                        } else {
+                            "compared"
+                        }),
                     status.active_job_state
                 ),
             },

@@ -124,6 +124,7 @@ pub fn runs_drift(args: RunsDriftArgs) -> CmdResult<RunsOutput> {
         status: None,
         rig_id: None,
         limit: Some(5000),
+        ..RunListFilter::default()
     };
 
     let window_rows = load_artifact_rows(&store, filter.clone(), Some(&args.window))?.rows;

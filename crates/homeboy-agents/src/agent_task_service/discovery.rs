@@ -242,6 +242,14 @@ fn discovery_report(
     mut records: Vec<AgentTaskRunRecord>,
     record_health: AgentTaskRecordHealthSummary,
 ) -> Result<AgentTaskDiscoveryReport> {
+    if options.limit == Some(0) {
+        return Err(Error::validation_invalid_argument(
+            "limit",
+            "must be greater than zero",
+            Some("0".to_string()),
+            None,
+        ));
+    }
     let is_active = filter == AgentTaskDiscoveryFilter::Active;
     if is_active {
         records.retain(|record| {
@@ -417,16 +425,19 @@ fn classify_liveness(
         if agent_task_lifecycle::has_expired_pending_runner_submission_intent(record, now) {
             return AgentTaskLiveness::Unreconciled;
         }
-        // A queued record with no queued/running task and an expired heartbeat
-        // cannot be claimed by a worker. Keep it visible for reconciliation,
-        // but never project this historical ghost as active work.
-        let has_pending_task = record
-            .tasks
-            .iter()
-            .any(|task| matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running));
-        if !has_pending_task
-            && last_update_age_minutes.is_some_and(|age| age >= STALE_UPDATE_THRESHOLD_MINUTES)
-        {
+        // A serialized queued task is not liveness evidence: it can survive a
+        // controller crash indefinitely. A queued record is live only with a
+        // fresh update (or fresh submission before its first update), a live
+        // local owner, or a complete pending runner submission within its
+        // acceptance deadline.
+        let heartbeat_age =
+            last_update_age_minutes.or_else(|| age_minutes(Some(&record.submitted_at), now));
+        let has_fresh_heartbeat =
+            heartbeat_age.is_some_and(|age| age < STALE_UPDATE_THRESHOLD_MINUTES);
+        let has_live_owner = record.owner_process_is_running();
+        let has_live_submission_intent =
+            agent_task_lifecycle::has_live_pending_runner_submission_intent(record, now);
+        if !has_fresh_heartbeat && !has_live_owner && !has_live_submission_intent {
             return AgentTaskLiveness::Stale;
         }
         return AgentTaskLiveness::Active;

@@ -1531,7 +1531,7 @@ pub(crate) fn run_lab_offload_inner(
     )?;
     // Public preflight constructs the same typed routed command before entering
     // this compiler, so no admission requirement can diverge at this boundary.
-    let mut admission_plan = crate::lab_selection::compile_lab_admission_plan(
+    let mut admission_plan = crate::lab_selection::compile_execution_lab_admission_plan(
         &contract,
         &source_path,
         &command_prefix.required_tools,
@@ -2384,19 +2384,12 @@ fn direct_daemon_admission_coordinates<'a>(
 /// this deeper gate consistent with the preflight gate and preserves the
 /// stale-daemon reason and its exact recovery command in the returned error.
 fn require_available_lab_runner(
-    runner_id: &str,
+    _runner_id: &str,
     runner_status: &RunnerStatusReport,
     concurrency_limit: Option<usize>,
     command_label: &str,
 ) -> Result<()> {
-    let availability = RunnerAvailability::from_status_parts(
-        runner_id.to_string(),
-        runner_status.connected,
-        runner_status.stale_daemon.is_some(),
-        runner_status.active_job_count,
-        &runner_status.active_job_state,
-        concurrency_limit,
-    );
+    let availability = runner_status.admission_availability(concurrency_limit);
     if availability.accepts_jobs {
         return Ok(());
     }
@@ -2886,6 +2879,8 @@ mod tests {
         let mut status = runner_status(true);
         status.stale_daemon = Some(RunnerStaleDaemonWarning {
             severity: "warning",
+            verification: crate::RunnerDaemonVerification::Compared,
+            probe_error: None,
             mismatch_predicate: "active_daemon_control_plane_version != job_command_binary_version",
             session_homeboy_version: "0.289.1".to_string(),
             current_homeboy_version: "0.289.3".to_string(),
@@ -2926,6 +2921,35 @@ mod tests {
             details.contains("refresh-homeboy"),
             "error must surface the exact refresh-homeboy recovery command: {details}"
         );
+    }
+
+    #[test]
+    fn inner_rejects_connected_non_fresh_lease_ambiguity_with_diagnosis() {
+        let mut status = runner_status(true);
+        status.daemon_freshness = Some(homeboy_core::daemon::DaemonFreshnessReport {
+            fresh: false,
+            stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing),
+            restartable: false,
+            lease_id: None,
+            pid: None,
+            recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Unavailable),
+            ownership_evidence: Some("ambiguous daemon candidates".to_string()),
+            adoption_command: None,
+            binary_hash: None,
+            daemon_version: None,
+            daemon_build_identity: None,
+            runtime_paths: None,
+            active_jobs: 0,
+            termination_evidence: None,
+            repair_plan: Vec::new(),
+        });
+
+        let error = require_available_lab_runner("homeboy-lab", &status, None, "cook")
+            .expect_err("non-fresh lease ambiguity must not dispatch");
+        let details = serde_json::to_string(&error.details).expect("serialize details");
+
+        assert!(details.contains("daemon_freshness_unavailable"));
+        assert!(details.contains("runner doctor homeboy-lab --scope lab-offload"));
     }
 
     #[test]

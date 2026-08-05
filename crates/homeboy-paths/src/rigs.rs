@@ -1,6 +1,6 @@
 use super::{expand_tilde_path, homeboy, Result};
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Environment variable selecting the root for rig-specific mutable state.
 pub const RIG_REGISTRY_ROOT_ENV: &str = "HOMEBOY_RIG_REGISTRY_ROOT";
@@ -22,11 +22,11 @@ pub fn rig_registry_root() -> Result<PathBuf> {
 ///
 /// Kept pure so callers can verify the environment contract without mutating
 /// process-global environment state.
-pub fn rig_registry_root_from_env(value: Option<String>, default_root: &PathBuf) -> PathBuf {
+pub fn rig_registry_root_from_env(value: Option<String>, default_root: &Path) -> PathBuf {
     value
         .filter(|path| !path.trim().is_empty())
         .map(expand_tilde_path)
-        .unwrap_or_else(|| default_root.clone())
+        .unwrap_or_else(|| default_root.to_path_buf())
 }
 
 /// Rigs directory (~/.config/homeboy/rigs/)

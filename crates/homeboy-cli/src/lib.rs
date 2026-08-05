@@ -44,6 +44,9 @@ pub mod command_contract;
     reason = "CLI commands retain optional operator and recovery workflows."
 )]
 pub mod commands;
+// Controller-owned durable deferral for portable workloads that have no runner
+// yet. Lived in homeboy-core until #11143; the CLI is its only consumer.
+pub mod deferred_workload;
 pub mod help_topics;
 
 // Test-only fixtures / hermetic process contexts live in homeboy-core (the whole

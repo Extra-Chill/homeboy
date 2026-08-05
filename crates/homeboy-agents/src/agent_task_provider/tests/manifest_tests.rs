@@ -307,6 +307,204 @@ process.stdin.on('end', () => {
 }
 
 #[test]
+fn provider_adapter_receives_and_consumes_resolved_stdio_runtime_tool() {
+    let tool = script("process.stdout.write(process.env.FIXTURE_MODE + ':ping'); process.exit(0);");
+    let provider_script = script(
+        r#"const { spawnSync } = require('child_process');
+process.stdin.once('data', input => {
+  const request = JSON.parse(input); const tool = request.resolved_runtime_tools[0];
+  if (request.runtime_tools !== undefined) throw new Error('raw runtime tools leaked to adapter');
+  const result = spawnSync(tool.argv[0], tool.argv.slice(1), { input: 'ping', encoding: 'utf8', env: { ...process.env, ...tool.env } });
+  process.stdout.write(JSON.stringify({ schema: 'homeboy/agent-task-outcome/v1', task_id: request.task_id, status: 'succeeded', outputs: { tool_result: result.stdout.trim() } }));
+  process.exit(0);
+});"#,
+    );
+    let (mut request, mut provider) =
+        request("runtime-tool-projection", format!("node {provider_script}"));
+    request.runtime_tools = vec![serde_json::from_value(json!({
+        "id": "fixture.mcp",
+        "command": ["node", tool],
+        "env": { "FIXTURE_MODE": "isolated" },
+        "required_capabilities": ["browser"],
+        "readiness": { "capability_probe": { "argv": [] } }
+    }))
+    .expect("runtime tool")];
+    request.policy.tools.tools.insert(
+        "fixture.mcp".to_string(),
+        crate::agent_task::AgentToolPolicyRule {
+            execution_location: crate::agent_task::AgentToolExecutionLocation::Runner,
+            timeout_ms: None,
+            reason: None,
+        },
+    );
+    provider.capabilities = vec!["structured_outcome".to_string()];
+
+    let outcome = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]).execute(
+        request,
+        AgentTaskExecutionContext {
+            plan_id: "runtime-tool-plan".to_string(),
+            run_id: None,
+            attempt: 1,
+            cancellation: Default::default(),
+        },
+    );
+
+    assert_eq!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Succeeded,
+        "{outcome:?}"
+    );
+    assert_eq!(outcome.outputs["tool_result"], "isolated:ping");
+    assert!(outcome.metadata["resolved_runtime_tools"][0]["argv"][0]
+        .as_str()
+        .is_some_and(|argv| argv.ends_with("node")));
+    assert_eq!(
+        outcome.metadata["resolved_runtime_tools"][0]["env"]["FIXTURE_MODE"],
+        "[redacted]"
+    );
+    assert_eq!(
+        outcome.metadata["resolved_runtime_tools"][0]["capability_probe"]["status"],
+        "succeeded"
+    );
+    assert_eq!(
+        outcome.metadata["capability_evidence"]["tool_contributed"][0]["capabilities"][0],
+        "browser"
+    );
+}
+
+#[test]
+fn runtime_tool_cannot_claim_capability_without_a_probe() {
+    let (mut request, provider) = request("runtime-tool-unverified", "/bin/true".to_string());
+    request.metadata = json!({
+        "capability_requirements": {
+            "schema": "homeboy/agent-task-capability-requirements/v1",
+            "attached_tools": [{ "id": "fixture.browser", "contributes": ["browser"] }]
+        }
+    });
+    request.runtime_tools = vec![serde_json::from_value(json!({
+        "id": "fixture.browser",
+        "command": ["/bin/true"],
+        "required_capabilities": ["browser"]
+    }))
+    .expect("runtime tool")];
+    request.policy.tools.tools.insert(
+        "fixture.browser".to_string(),
+        crate::agent_task::AgentToolPolicyRule {
+            execution_location: crate::agent_task::AgentToolExecutionLocation::Runner,
+            timeout_ms: None,
+            reason: None,
+        },
+    );
+
+    let outcome = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]).execute(
+        request,
+        AgentTaskExecutionContext {
+            plan_id: "runtime-tool-unverified-plan".to_string(),
+            run_id: None,
+            attempt: 1,
+            cancellation: Default::default(),
+        },
+    );
+
+    assert_eq!(
+        outcome.diagnostics[0].class,
+        "agent_task.runtime_tool_invalid"
+    );
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::InvalidInput)
+    );
+}
+
+#[test]
+fn runtime_tool_without_capabilities_is_usable_without_a_probe() {
+    let provider_script = script(
+        r#"process.stdin.once('data', input => {
+  const tool = JSON.parse(input).resolved_runtime_tools[0];
+  process.stdout.write(JSON.stringify({ schema: 'homeboy/agent-task-outcome/v1', task_id: 'runtime-tool-no-capabilities', status: tool.capabilities === undefined && tool.capability_probe === undefined ? 'succeeded' : 'failed' }));
+  process.exit(0);
+});"#,
+    );
+    let (mut request, provider) = request(
+        "runtime-tool-no-capabilities",
+        format!("node {provider_script}"),
+    );
+    request.runtime_tools = vec![serde_json::from_value(json!({
+        "id": "fixture.utility",
+        "command": ["true"]
+    }))
+    .expect("runtime tool")];
+    request.policy.tools.tools.insert(
+        "fixture.utility".to_string(),
+        crate::agent_task::AgentToolPolicyRule {
+            execution_location: crate::agent_task::AgentToolExecutionLocation::Runner,
+            timeout_ms: None,
+            reason: None,
+        },
+    );
+
+    let outcome = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]).execute(
+        request,
+        AgentTaskExecutionContext {
+            plan_id: "runtime-tool-no-capabilities-plan".to_string(),
+            run_id: None,
+            attempt: 1,
+            cancellation: Default::default(),
+        },
+    );
+
+    assert_eq!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Succeeded,
+        "{outcome:?}"
+    );
+}
+
+#[test]
+fn runtime_tool_readiness_obeys_the_command_policy() {
+    let script = script("process.exit(0);");
+    let (mut request, provider) = request("runtime-tool-policy", format!("node {script}"));
+    request.runtime_tools = vec![serde_json::from_value(json!({
+        "id": "fixture.mcp",
+        "command": ["node", script],
+        "readiness": { "version_command": ["--version"] }
+    }))
+    .expect("runtime tool")];
+    request.policy.tools.tools.insert(
+        "fixture.mcp".to_string(),
+        crate::agent_task::AgentToolPolicyRule {
+            execution_location: crate::agent_task::AgentToolExecutionLocation::Runner,
+            timeout_ms: None,
+            reason: None,
+        },
+    );
+    request.policy.tools.commands = serde_json::from_value(json!({
+        "mode": "deny_list",
+        "deny": [{ "pattern": "node --version" }]
+    }))
+    .expect("command policy");
+
+    let outcome = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]).execute(
+        request,
+        AgentTaskExecutionContext {
+            plan_id: "runtime-tool-policy-plan".to_string(),
+            run_id: None,
+            attempt: 1,
+            cancellation: Default::default(),
+        },
+    );
+
+    assert_eq!(
+        outcome.diagnostics[0].class,
+        "agent_task.runtime_tool_command_denied"
+    );
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::InvalidInput)
+    );
+}
+
+#[test]
 fn provider_validates_declared_outputs() {
     let script = script(
         r#"const fs = require('fs');

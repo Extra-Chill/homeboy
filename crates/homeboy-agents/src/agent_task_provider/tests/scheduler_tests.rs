@@ -399,12 +399,20 @@ fn scheduler_reports_missing_provider_capability() {
         aggregate.outcomes[0].failure_classification,
         Some(AgentTaskFailureClassification::CapabilityMissing)
     );
+    // #11509 layered a selection-level check ahead of the per-provider one: when
+    // no provider for the backend advertises the capability at all, that is the
+    // more specific diagnosis. The failure classification is unchanged.
     assert_eq!(
         aggregate.outcomes[0].diagnostics[0].class,
-        "agent_task.capability_missing"
+        "agent_task.provider_capability_unavailable"
+    );
+    // The selection-level diagnostic also names the layer it failed at.
+    assert_eq!(
+        aggregate.outcomes[0].diagnostics[0].data["layer"],
+        json!("provider")
     );
     assert_eq!(
-        aggregate.outcomes[0].diagnostics[0].data["missing_capabilities"],
+        aggregate.outcomes[0].diagnostics[0].data["required_capabilities"],
         json!(["workspace_write"])
     );
 }

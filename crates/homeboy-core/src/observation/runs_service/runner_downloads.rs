@@ -41,6 +41,14 @@
 //!    directory written before intent tagging existed is retained rather than
 //!    swept. Age proves bytes are old; only the tag can prove they are
 //!    homeboy's rather than the operator's, and the two are independent.
+//!
+//!    Retaining untagged bytes forever is the right *default* and the wrong
+//!    terminal state: the pre-tagging backlog can only grow. So
+//!    [`RunnerDownloadCleanupOptions::include_untagged`] (#11128) is an explicit
+//!    operator opt-in that moves the untagged case, and only the untagged case,
+//!    into eligibility. It widens *what* is eligible; it never lowers the age
+//!    floor, never bypasses the liveness veto, and never releases an
+//!    `operator_pull` or an unreadable marker.
 //! 1. **Ownership by name shape.** The candidate must be a real directory at
 //!    exactly `<artifact-root>/runner/<a>/<b>` — the only shape the single
 //!    writer above emits — with no symlink at either level. Anything else under
@@ -83,6 +91,11 @@
 //! never bypass a check. An operator naming a run id is asking "clean this
 //! one", not "skip the safety check".
 //!
+//! `--include-untagged` is deliberately **not** one of them and is not carried
+//! on `CleanupFilters`. A filter narrows a set that the predicate then judges;
+//! this widens what the predicate itself will judge reclaimable, so it belongs
+//! to the predicate and is reported on every row it moves.
+//!
 //! # Historical: non-canonical depth
 //!
 //! `RemoteArtifactToken::parse` percent-decodes its components *after* its only
@@ -105,7 +118,8 @@ use super::*;
 // restated here: the reclaimer and the writer must never drift onto two
 // different directories or two different marker names.
 use crate::runner_download_cache::{
-    read_download_ownership, RUNNER_DOWNLOAD_DIR, RUNNER_DOWNLOAD_MARKER_FILE,
+    read_download_ownership, RunnerDownloadReclaimScope, RUNNER_DOWNLOAD_DIR,
+    RUNNER_DOWNLOAD_MARKER_FILE,
 };
 
 /// Age floor before a cached runner artifact download is reclaimable.
@@ -155,6 +169,17 @@ pub struct RunnerDownloadCleanupOptions {
     /// Defaults to `true`: a caller that has not probed must not be silently
     /// downgraded into retaining everything.
     pub store_available: bool,
+    /// Explicit operator opt-in (`--include-untagged`, #11128) making cache
+    /// directories with **no** intent marker eligible.
+    ///
+    /// Defaults to `false`, which is the unchanged #10585 contract: untagged
+    /// fails closed. Setting it moves exactly one verdict — `unrecorded` — and
+    /// nothing else. An `operator_pull` is still never reclaimable, an
+    /// unreadable marker still retains, the fixed [`RUNNER_DOWNLOAD_MIN_AGE`]
+    /// floor still applies, and the liveness veto is still honoured. It exists
+    /// because every directory written before intent tagging is otherwise
+    /// unreapable forever, so the backlog has no drain at all.
+    pub include_untagged: bool,
 }
 
 impl Default for RunnerDownloadCleanupOptions {
@@ -165,6 +190,18 @@ impl Default for RunnerDownloadCleanupOptions {
             run_id: None,
             limit: DEFAULT_INSPECTION_LIMIT,
             store_available: true,
+            include_untagged: false,
+        }
+    }
+}
+
+impl RunnerDownloadCleanupOptions {
+    /// The reclaim scope this invocation runs under.
+    fn reclaim_scope(&self) -> RunnerDownloadReclaimScope {
+        if self.include_untagged {
+            RunnerDownloadReclaimScope::IncludeUntagged
+        } else {
+            RunnerDownloadReclaimScope::TaggedInternalOnly
         }
     }
 }
@@ -193,6 +230,10 @@ pub struct RunnerDownloadCleanupOutcome {
     /// `--runner` / `--run-id` filter.
     pub root: PathBuf,
     pub min_age_seconds: u64,
+    /// True when this sweep ran with the explicit `--include-untagged` opt-in,
+    /// so a plan that reaps untagged bytes says so at the top rather than
+    /// leaving the operator to infer it from per-row reasons (#11128).
+    pub include_untagged: bool,
     pub liveness: RunnerDownloadLiveness,
     pub inspected_count: usize,
     pub planned_count: usize,
@@ -218,8 +259,9 @@ pub struct RunnerDownloadCleanupRow {
     /// Empty for entries that are not the canonical `<runner>/<run>` shape.
     pub run_id: String,
     /// What the intent marker says: `operator_pull`, `internal_fetch`,
-    /// `unrecorded` (no marker), or `unreadable`. Only `internal_fetch` is
-    /// reclaimable. Empty for entries that were never read for one.
+    /// `unrecorded` (no marker), or `unreadable`. `internal_fetch` is always
+    /// reclaimable; `unrecorded` is reclaimable only under `--include-untagged`.
+    /// Empty for entries that were never read for one.
     pub intent: String,
     pub file_count: usize,
     pub directory_count: usize,
@@ -345,10 +387,12 @@ where
     F: FnOnce() -> LivenessVeto,
 {
     let root = artifact_root.join(RUNNER_DOWNLOAD_DIR);
+    let scope = options.reclaim_scope();
     let mut outcome = RunnerDownloadCleanupOutcome {
         dry_run: !options.apply,
         root: filters.scope(&root),
         min_age_seconds: min_age.as_secs(),
+        include_untagged: scope == RunnerDownloadReclaimScope::IncludeUntagged,
         liveness: RunnerDownloadLiveness::NotConsulted,
         inspected_count: 0,
         planned_count: 0,
@@ -440,6 +484,7 @@ where
                     runner_id: &runner_name,
                     run_id: &run_name,
                 },
+                scope,
                 min_age,
                 now,
             );
@@ -489,6 +534,7 @@ fn sweep_candidate(
     liveness: &LivenessVeto,
     artifact_root: &Path,
     candidate: Candidate<'_>,
+    scope: RunnerDownloadReclaimScope,
     min_age: Duration,
     now: SystemTime,
 ) {
@@ -546,8 +592,10 @@ fn sweep_candidate(
     }
     // Age proves the bytes are old. Only the writer's tag can prove they are
     // homeboy's rather than the operator's (#10585), and an absent tag is
-    // deliberately read as operator-owned.
-    if let Some(reason) = ownership.retain_reason() {
+    // deliberately read as operator-owned — unless the operator has explicitly
+    // opted the untagged backlog in (#11128). Ordered after the age floor and
+    // before the liveness veto so widening this never reorders the other two.
+    if let Some(reason) = ownership.retain_reason_in(scope) {
         outcome.skip(
             relative,
             runner_id,
@@ -581,9 +629,10 @@ fn sweep_candidate(
         size_bytes: scan.size_bytes,
         size_measured: scan.size_measured,
         action: "remove".to_string(),
-        reason:
-            "internal fetch past the age floor with no non-terminal owning run; not operator-owned"
-                .to_string(),
+        // Names *why this row* was released, so an untagged entry reaped under
+        // the opt-in never reports the internal-fetch reason (or, worse, still
+        // reports "fail closed") on a row that is about to be removed.
+        reason: ownership.release_reason().to_string(),
     };
     outcome.planned_count += 1;
     outcome.planned_size_bytes += scan.size_bytes;
@@ -681,23 +730,23 @@ impl LivenessVeto {
         let Ok(store) = ObservationStore::open_initialized() else {
             return Self { running: None };
         };
-        // One row over the bound is read so truncation is detectable rather
-        // than silently dropping vetoes.
-        let probe = i64::try_from(RUNNING_RUN_SCAN_LIMIT.saturating_add(1)).unwrap_or(i64::MAX);
-        let Ok(running) = store.list_runs(RunListFilter {
+        // Truncation must be detectable: an unseen running run could own any
+        // candidate. The store reports it directly now, so the bound is asked
+        // for as itself rather than hand-probed one row over (#11177).
+        let scan_limit = i64::try_from(RUNNING_RUN_SCAN_LIMIT).unwrap_or(i64::MAX);
+        let Ok(page) = store.list_runs_page(RunListFilter {
             status: Some(RunStatus::Running.as_str().to_string()),
-            limit: Some(probe),
+            limit: Some(scan_limit),
             ..RunListFilter::default()
         }) else {
             return Self { running: None };
         };
-        if running.len() > RUNNING_RUN_SCAN_LIMIT {
-            // An unseen running run could own any candidate, so degrade to
-            // "retain everything" rather than to "veto nothing".
+        if page.truncated {
+            // Degrade to "retain everything" rather than to "veto nothing".
             return Self { running: None };
         }
         Self {
-            running: Some(running),
+            running: Some(page.runs),
         }
     }
 

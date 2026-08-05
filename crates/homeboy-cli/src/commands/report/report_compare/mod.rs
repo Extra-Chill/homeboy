@@ -1,6 +1,18 @@
+//! `homeboy report compare` — the clap surface plus the artifact-diff engine.
+//!
+//! The engine and its markdown renderer used to sit in `homeboy-core` as two
+//! top-level modules (`report_compare`, `report_compare_render`) even though
+//! this command was their only consumer and the renderer was already
+//! `pub(crate)`. They live with their caller now (#11143).
+
+mod engine;
+mod render;
+
 use clap::Args;
 
-pub use homeboy::core::report_compare::ReportCompareReport;
+pub use engine::{
+    compare_report_artifacts, compare_report_artifacts_with_store, ReportCompareReport,
+};
 
 #[derive(Args, Debug, Clone)]
 pub struct ReportCompareArgs {
@@ -24,5 +36,5 @@ pub fn render_report_compare_from_args(args: &ReportCompareArgs) -> homeboy::cor
 pub fn compare_report_artifacts_from_args(
     args: &ReportCompareArgs,
 ) -> homeboy::core::Result<ReportCompareReport> {
-    homeboy::core::report_compare::compare_report_artifacts(&args.old, &args.new)
+    compare_report_artifacts(&args.old, &args.new)
 }

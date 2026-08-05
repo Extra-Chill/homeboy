@@ -98,11 +98,19 @@ the other capabilities.
 - `--setting-json <key=json>`: Override component settings with typed JSON
   values for arrays, objects, numbers, booleans, or null.
 - `--path <PATH>`: Override the component's `local_path` for this run.
-- `--json`: Print the full JSON output envelope to stdout instead of the
-  compact human summary. The full payload is also always written to
-  `--output <file>`; this flag only changes the default stdout presentation.
+- `--format <auto|json|markdown|text>`: Canonical output-format flag
+  (shared `PresentationArgs` group). `--format json` prints the full JSON
+  output envelope to stdout instead of the compact human summary. The full
+  payload is also always written to `--output <file>`; this only changes
+  the default stdout presentation.
+- `--json`: Exactly equivalent to `--format json`, kept for CI wrappers and
+  operator scripts. Either spelling alone is enough; passing both agrees.
+- `--detail <summary|full>`: Canonical detail flag (shared
+  `PresentationArgs` group). `--detail summary` is exactly equivalent to
+  `--json-summary`; `--detail full` is the default.
 - `--json-summary`: Include a compact machine-readable summary in the
-  JSON output envelope (for CI wrappers).
+  JSON output envelope (for CI wrappers). Exactly equivalent to
+  `--detail summary`; both spellings keep working.
 - `--report side-by-side`: Select the combined side-by-side comparison
   report for a multi-rig bench envelope. The report is emitted under
   `reports.side_by_side` and includes each rig's status, elapsed time,

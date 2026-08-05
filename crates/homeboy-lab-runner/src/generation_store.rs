@@ -298,6 +298,41 @@ pub(crate) fn read(
     }
 }
 
+/// Read generation state for an observation without acquiring a writer lock or
+/// repairing a legacy registry. Status must describe legacy state, not migrate
+/// it: a concurrent writer owns that repair through the normal mutation path.
+fn read_projection(
+    runner_id: &str,
+    legacy: Option<&RunnerSession>,
+) -> Result<Option<RollingGenerations<RunnerSession>>> {
+    let path = path(runner_id)?;
+    if !path.exists() {
+        return Ok(legacy
+            .map(|session| RollingGenerations::new(legacy_generation(session), session.clone())));
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+    validate_registry_shape(&value)?;
+    match serde_json::from_value::<GenerationRegistry<RunnerSession>>(value.clone()) {
+        Ok(registry) if registry.runner_id == runner_id => Ok(Some(registry.generations)),
+        Ok(registry) => Err(Error::config_invalid_value(
+            "runner_id",
+            Some(registry.runner_id),
+            format!("generation registry must match runner-scoped path `{runner_id}`"),
+        )),
+        // This is the precise legacy shape the mutating reader repairs. Keep it
+        // readable here so status remains a projection even while a writer owns
+        // the registry lock.
+        Err(_) => Ok(Some(
+            serde_json::from_value::<RollingGenerations<RunnerSession>>(value)
+                .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?,
+        )),
+    }
+}
+
 /// Read while the caller already holds this runner's registry lock. Legacy
 /// migration stays inside that transaction instead of attempting a re-entrant
 /// `flock` acquisition.
@@ -850,7 +885,7 @@ pub(crate) fn status_projection(
     legacy: Option<&RunnerSession>,
 ) -> Result<Vec<RunnerDaemonGenerationStatus>> {
     Ok(
-        read(runner_id, legacy)?.map_or_else(Vec::new, |generations| {
+        read_projection(runner_id, legacy)?.map_or_else(Vec::new, |generations| {
             generations
                 .generations
                 .into_iter()
@@ -1159,6 +1194,67 @@ impl SshGenerationEndpointOperations<'_> {
 
 fn daemon_health_data(health: &serde_json::Value) -> &serde_json::Value {
     health.get("data").unwrap_or(health)
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    use crate::{RunnerSessionRole, RunnerTunnelMode};
+
+    fn session(lease_id: &str) -> RunnerSession {
+        RunnerSession {
+            runner_id: "shared-lab".to_string(),
+            mode: RunnerTunnelMode::DirectSsh,
+            role: RunnerSessionRole::Controller,
+            server_id: Some("unreachable-lab".to_string()),
+            controller_id: Some("shared-controller".to_string()),
+            broker_url: None,
+            remote_daemon_address: Some("127.0.0.1:49152".to_string()),
+            local_port: Some(49153),
+            local_url: Some("http://127.0.0.1:49153".to_string()),
+            tunnel_pid: Some(u32::MAX),
+            tunnel_process_start_identity: None,
+            remote_daemon_pid: Some(4242),
+            remote_daemon_lease_id: Some(lease_id.to_string()),
+            homeboy_version: "test".to_string(),
+            homeboy_build_identity: Some("homeboy test+shared".to_string()),
+            connected_at: "2026-08-05T00:00:00Z".to_string(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+            leaseless_recovery_evidence: None,
+        }
+    }
+
+    #[test]
+    fn shared_status_projects_a_large_legacy_registry_without_repairing_it() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut generations = RollingGenerations::new("lease-000", session("lease-000"));
+            for index in 1..=70 {
+                let generation = format!("lease-{index:03}");
+                generations.begin(generation.clone(), session(&generation));
+            }
+            write("shared-lab", &generations).expect("write generation registry");
+            let path = path("shared-lab").expect("generation registry path");
+            let mut legacy: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).expect("read registry"))
+                    .expect("parse registry");
+            legacy
+                .as_object_mut()
+                .expect("registry object")
+                .remove("runner_id");
+            let legacy = serde_json::to_vec_pretty(&legacy).expect("serialize legacy registry");
+            std::fs::write(&path, &legacy).expect("write legacy registry");
+
+            let started = Instant::now();
+            let projection = status_projection("shared-lab", Some(&session("lease-000")))
+                .expect("project legacy generation registry");
+
+            assert_eq!(projection.len(), 71);
+            assert!(started.elapsed() < Duration::from_secs(3));
+            assert_eq!(std::fs::read(&path).expect("read after status"), legacy);
+        });
+    }
 }
 
 impl GenerationEndpointOperations for SshGenerationEndpointOperations<'_> {

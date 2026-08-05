@@ -611,9 +611,11 @@ fn pin_update(
 
 #[cfg(test)]
 mod tests {
+    use super::status;
     use clap::Parser;
 
     use crate::cli_surface::Cli;
+    use crate::test_support::with_isolated_home;
 
     #[test]
     fn component_attach_path_and_batch_surface_parse() {
@@ -652,6 +654,39 @@ mod tests {
         ])
         .is_ok());
     }
+
+    #[test]
+    fn status_returns_nonzero_when_a_configured_server_could_not_be_checked() {
+        with_isolated_home(|_| {
+            homeboy::core::server::save(&homeboy::core::server::Server {
+                id: "sandbox".to_string(),
+                host: "sandbox.example.test".to_string(),
+                user: "tester".to_string(),
+                port: 22,
+                identity_file: Some("/missing/homeboy-test-key".to_string()),
+                aliases: Vec::new(),
+                kind: None,
+                auth: None,
+                env: Default::default(),
+                runner: None,
+            })
+            .expect("save server");
+            homeboy::core::project::save(&homeboy::core::project::Project {
+                id: "sandbox-project".to_string(),
+                server_id: Some("sandbox".to_string()),
+                ..Default::default()
+            })
+            .expect("save project");
+
+            let (output, exit_code) = status("sandbox-project", true).expect("status");
+
+            assert_eq!(exit_code, 1);
+            assert_eq!(
+                output.extra.health.expect("health").next_action.as_deref(),
+                Some("homeboy server status sandbox")
+            );
+        });
+    }
 }
 
 fn pin_rename(
@@ -678,8 +713,10 @@ fn map_pin_type(pin_type: ProjectPinType) -> project::PinType {
 fn status(project_id: &str, health_only: bool) -> CmdResult<ProjectOutput> {
     homeboy::log_status!("project", "Checking '{}'...", project_id);
 
-    Ok((
-        project::build_status_output(project_id, project::status_report(project_id, health_only)?),
-        0,
-    ))
+    let report = project::status_report(project_id, health_only)?;
+    let exit_code = report
+        .health
+        .as_ref()
+        .is_some_and(|health| !health.state.is_healthy()) as i32;
+    Ok((project::build_status_output(project_id, report), exit_code))
 }

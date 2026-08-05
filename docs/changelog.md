@@ -4,6 +4,86 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.330.0] - 2026-08-04
+
+### Added
+- make stale runtime-overlay escalation configurable per runner
+- attach provider-neutral runtime tools
+- attach managed services
+- layer capability requirements
+- surface stale reconciliation preview
+- compose artifact postprocess steps
+- serve local Cook detach by re-executing in a new session
+- declarative command policy for cook
+- carry provider activity on cook heartbeats and status
+- report controller binary staleness
+- discover compatible candidates
+- report orphaned stack provenance
+- bound output and report progress
+- materialize portable runner stacks
+- report status without checkout
+- add placement readiness preflight
+- preflight cook continuation
+
+### Changed
+- collapse the three version-target readers into one spine
+- preflight selected runners
+- shard Rust suite across four jobs
+- Preserve inherited gate failure truth
+- Authorize Cook-owned dirty continuation
+- align two cook fixtures with the workspace and lineage contracts
+- add durable Cook compatibility fixture
+- delete source-policing tests and archaeology
+- declare structured sidecars on the routed lint fixture
+
+### Fixed
+- bootstrap checks with candidate binary
+- convert the deploy String error channel to structured errors
+- bound active discovery
+- persist inspectable lifecycle
+- expose typed runtime recovery
+- unify admission readiness
+- converge stale runner generations
+- converge doctor repair with Lab admission
+- repair five contract regressions and their stale fixtures
+- make --to-worktree auto-creation honest
+- omit absent optional archive paths
+- bind retry actions to durable owners
+- clean managed source caches
+- enforce artifact reserve before cook
+- preserve shared Cargo target routing
+- retain runtime temp storage under pressure
+- drop unused PlacementReadinessRequest import in offload tests
+- derive the execution budget from configured rotation
+- clear workspace test-target warnings blocking every open PR
+- complete Lab readiness fixture migration
+- migrate cook progress fixtures
+- constrain Lab preflight invocation
+- enumerate available backends when no default is configured
+- register audit compiler-warning provider at CLI startup
+- contain and reap provider process trees
+- make provider availability mean dispatchable
+- Fix warning-clean and workspace compile regressions
+- reject empty stdin scripts
+- hydrate evidence diagnostics
+- eliminate default build warning flood
+- project truthful lifecycle status
+- handle merge-headed stack PRs
+- report current recovery actions
+- reap remote descendants
+- diagnose persisted session readiness drift
+- share Lab admission planning
+- stop exec'ing a temp script that is still open for writing
+- refresh placement before refusal
+- bound actionable show output
+- recover timeout patch artifacts
+- survive observer disconnects
+- trace continuation admission decisions
+- inspect exact Cook attempts
+- reject only actual runtime identity drift
+- predict full baseline drift in PR scope
+- derive the candidate tree without Git's stat cache
+
 ## [0.329.1] - 2026-08-04
 
 ### Fixed

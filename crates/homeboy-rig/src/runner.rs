@@ -1536,7 +1536,20 @@ impl RigRunObserver {
         index: &ResourceLifecycleIndex,
         pipeline: Option<&PipelineOutcome>,
     ) -> Result<()> {
-        let path = std::env::temp_dir().join(format!(
+        // Staged under the artifact root, not `std::env::temp_dir()`. The
+        // record-then-unlink below is the only thing that ever removed this
+        // file, so a crash between the write and the unlink leaked it to a path
+        // with no owner record, no pin, and no cleanup category (#11128).
+        // Recording it also copies it into the artifact root, so resolving the
+        // root here fails no case that would otherwise have succeeded.
+        let directory = homeboy_core::artifacts::root()?.join("rig-resource-lifecycle");
+        fs::create_dir_all(&directory).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("create {}", directory.display())),
+            )
+        })?;
+        let path = directory.join(format!(
             "homeboy-rig-resource-lifecycle-{}-{}.json",
             self.run_id,
             std::process::id()

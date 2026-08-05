@@ -370,6 +370,10 @@ pub mod promotion {
 
 /// Executor provider contracts used by extensions and routing.
 pub mod provider {
+    /// Compile-time gate for the `fixture` test double. Always `false` in a
+    /// production build: `fixture` is not a registered agent runtime, so no
+    /// caller may branch on the name outside a `test-support` build (#11118).
+    pub use crate::agent_task_provider::is_fixture_backend;
     pub use crate::agent_task_provider::{
         default_backend, default_backend_for_component, dependency_failure_patterns,
         provider_capability_contract, provider_requires_cwd_git_checkout,

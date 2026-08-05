@@ -7,7 +7,7 @@ use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{paths, Error, Result};
+use homeboy_core::{paths, Error, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OperationRecord {
@@ -76,10 +76,10 @@ impl OperationRecordStore {
         let json = serde_json::to_vec_pretty(&next).map_err(|error| {
             Error::internal_json(error.to_string(), Some(owner_run_ref.to_string()))
         })?;
-        crate::io::write_output_file_atomically(
+        homeboy_core::io::write_output_file_atomically(
             &path,
             [json, b"\n".to_vec()].concat(),
-            crate::io::OutputWriteOptions::artifact(),
+            homeboy_core::io::OutputWriteOptions::artifact(),
         )
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
         Ok(next)
@@ -285,7 +285,7 @@ fn read_path(path: &Path) -> Result<Option<OperationRecord>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::with_isolated_home;
+    use homeboy_core::test_support::with_isolated_home;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Barrier,

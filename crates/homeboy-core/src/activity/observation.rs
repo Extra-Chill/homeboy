@@ -91,7 +91,13 @@ fn item_from_run(store: &ObservationStore, run: RunRecord) -> Result<ActivityIte
 pub(super) fn state_from_run_status(status: &str) -> ActivityState {
     match RunStatus::from_label(status) {
         Some(RunStatus::Running) => ActivityState::Running,
-        Some(RunStatus::Pass | RunStatus::Skipped) => ActivityState::Succeeded,
+        // A handed-off record is settled locally: the dispatch it observes
+        // succeeded. Its remote continuation surfaces in activity as the runner
+        // job it created, so reporting this row as still running would
+        // double-count one piece of work as two active items.
+        Some(RunStatus::Pass | RunStatus::Skipped | RunStatus::HandedOff) => {
+            ActivityState::Succeeded
+        }
         Some(RunStatus::Fail | RunStatus::Error) => ActivityState::Failed,
         Some(RunStatus::Stale) => ActivityState::Stale,
         None => ActivityState::Unknown,

@@ -33,6 +33,7 @@ pub(crate) use homeboy_core::secret_env_plan::{SecretEnvPlan, SecretEnvStatus};
 use homeboy_core::{component, defaults, Error};
 use homeboy_extension as extension;
 
+mod admission;
 pub(crate) mod artifact_finalization;
 mod catalog;
 pub(crate) mod command_runner;
@@ -40,11 +41,16 @@ mod config_preflight;
 mod credential_readiness;
 pub mod discovery;
 mod executor;
+mod fixture_gate;
+// The `fixture` backend is a test double, not an agent runtime. Its
+// implementation is compiled only into test builds; see `fixture_gate`.
+#[cfg(any(test, feature = "test-support"))]
 mod fixtures;
 mod outcome_normalization;
 mod resolution;
 mod runner_readiness;
 mod runtime_preflight_checks;
+mod runtime_tool_resolution;
 mod runtime_types;
 mod secret_types;
 mod secrets;
@@ -54,6 +60,11 @@ mod workspace_types;
 #[cfg(test)]
 mod tests;
 
+pub use admission::{
+    AgentTaskProviderAdmissionAction, AgentTaskProviderAdmissionPlan,
+    AgentTaskProviderAdmissionPredicate, AgentTaskProviderAdmissionRequest,
+    AGENT_TASK_PROVIDER_ADMISSION_PLAN_SCHEMA,
+};
 pub use catalog::*;
 pub use command_runner::{
     probe_provider_executor_resolves, provider_command_parts, run_provider_readiness_invocation,
@@ -66,6 +77,8 @@ pub use credential_readiness::{
     AgentTaskProviderCredentialReadiness, AgentTaskProviderCredentialRequirement,
     AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
 };
+pub(crate) use fixture_gate::fixture_provider_outcome;
+pub use fixture_gate::is_fixture_backend;
 pub use resolution::{resolve_provider_for_backend, ProviderResolution};
 pub(crate) use resolution::{
     role_aliases_for_executor, role_aliases_for_provider, selector_runtime_provider_hint,
@@ -75,6 +88,7 @@ pub use runtime_preflight_checks::{
     ensure_runtime_preflight_checks, evaluate_runtime_preflight_checks, RuntimePreflightConflict,
     RuntimePreflightReadiness,
 };
+pub(crate) use runtime_tool_resolution::resolve_runtime_tools;
 pub use runtime_types::*;
 pub use secret_types::*;
 pub use secrets::{

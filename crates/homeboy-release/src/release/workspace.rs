@@ -1,10 +1,10 @@
 use std::path::Path;
 
+use crate::release::operation_record::{FinalizationClaim, OperationRecord, OperationRecordStore};
 use homeboy_core::component::Component;
 use homeboy_core::defaults;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
-use homeboy_core::operation_record::{FinalizationClaim, OperationRecord, OperationRecordStore};
 use homeboy_core::worktree_providers::{
     finalize_apply_enabled_worktree_provider_from_config,
     provision_apply_enabled_worktree_provider_with_lifecycle_from_config,
@@ -512,12 +512,12 @@ fn verify_staging_workspace(
 #[cfg(test)]
 mod tests {
     use super::{finalize_record, in_place_eligible, reconcile_pending};
+    use crate::release::operation_record::{OperationRecord, OperationRecordStore};
     use homeboy_core::component::Component;
     use homeboy_core::defaults::{
         save_config, HomeboyConfig, WorktreeProviderCommands, WorktreeProviderConfig,
         WorktreeProviderKind,
     };
-    use homeboy_core::operation_record::{OperationRecord, OperationRecordStore};
     use homeboy_core::worktree_providers::{
         WorktreeProviderCleanupPolicy, WorktreeProviderHandle, WorktreeProviderHandleSafety,
         WorktreeProviderLifecycleIntent, WorktreeProviderResolution,
