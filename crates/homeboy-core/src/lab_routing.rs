@@ -666,7 +666,7 @@ fn attach_in_flight_handoff_metadata(metadata: &mut serde_json::Value, stdout: &
         }
         let resolved = paths
             .iter()
-            .find_map(|path| metadata_path_string(&value, *path));
+            .find_map(|path| metadata_path_string(&value, path));
         if let Some(resolved) = resolved {
             object.insert(target.to_string(), serde_json::Value::String(resolved));
         }

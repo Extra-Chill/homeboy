@@ -141,16 +141,11 @@ pub enum ResourceLifecycleResourceStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ValueEnum, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceLifecycleCleanupOperation {
+    #[default]
     Delete,
-}
-
-impl Default for ResourceLifecycleCleanupOperation {
-    fn default() -> Self {
-        Self::Delete
-    }
 }
 
 impl std::fmt::Display for ResourceLifecycleCleanupOperation {
