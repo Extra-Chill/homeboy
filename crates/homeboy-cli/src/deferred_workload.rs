@@ -349,6 +349,8 @@ pub fn acquire_worker_start_lock() -> Result<DeferredWorkloadWorkerStartLock> {
     let path = root.join("deferred-workload-worker-start.lock");
     let file = OpenOptions::new()
         .create(true)
+        // This is an advisory lock file; retain its contents for concurrent holders.
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&path)
@@ -499,6 +501,8 @@ fn update<T>(mutate: impl FnOnce(&mut Vec<DeferredWorkload>) -> Result<T>) -> Re
     }
     let lock = OpenOptions::new()
         .create(true)
+        // This is an advisory lock file, not the workload store being replaced below.
+        .truncate(false)
         .read(true)
         .write(true)
         .open(path.with_extension("lock"))
