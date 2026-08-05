@@ -310,8 +310,16 @@ impl ExtensionRunner {
             &extra_env_vars,
         )?;
 
+        // Resolved once and reused by both sidecar seams below. Without a run
+        // dir there are no sidecar files to seed or check, so the manifest
+        // reload is skipped entirely.
+        let declared_sidecars = if self.run_dir_path.is_some() {
+            self.declared_structured_sidecars()
+        } else {
+            Vec::new()
+        };
         if let Some(run_dir_path) = &self.run_dir_path {
-            initialize_structured_sidecars(run_dir_path, &self.declared_structured_sidecars())?;
+            initialize_structured_sidecars(run_dir_path, &declared_sidecars)?;
         }
 
         let output = self.execute_script(
@@ -330,6 +338,8 @@ impl ExtensionRunner {
                     &output,
                 )?;
             }
+        } else if let Some(run_dir_path) = &self.run_dir_path {
+            validate_declared_structured_sidecars(run_dir_path, &declared_sidecars)?;
         }
         if self.strict_validation_dependencies() {
             if let Some(message) =
@@ -692,6 +702,35 @@ fn initialize_structured_sidecars(
             continue;
         };
         write_json_sidecar(&path, &empty)?;
+    }
+    Ok(())
+}
+
+/// Check every structured sidecar *this extension declares* against core's
+/// registry contract once its runner has written them.
+///
+/// Before #11121 `validate_payload` was reached only by parsers that had
+/// already chosen to read one specific sidecar, so a declared sidecar nobody
+/// happened to parse could hold anything at all — a malformed `bench.results`
+/// simply disappeared. A declaration is a promise about output, and this is
+/// where the promise is finally checked.
+///
+/// Scope is deliberately narrow, because this can fail a run:
+/// - only declared keys, so an extension is judged on what it claimed;
+/// - only keys the registry knows, so a vendor key stays the vendor's business;
+/// - only payloads that are present and wrong — absence is never a violation
+///   (see `structured_sidecar::validate_sidecar_file`);
+/// - only after a *successful* run, because a failed one already has core's
+///   failure sidecars written over it and a real failure to report.
+fn validate_declared_structured_sidecars(
+    run_dir_path: &Path,
+    declared: &[crate::StructuredSidecarDeclaration],
+) -> Result<()> {
+    for declaration in declared {
+        let Some(path) = run_dir_relative_sidecar_path(run_dir_path, &declaration.path) else {
+            continue;
+        };
+        homeboy_core::structured_sidecar::validate_sidecar_file(&declaration.name, &path)?;
     }
     Ok(())
 }
@@ -1184,6 +1223,71 @@ mod tests {
             .expect("initialize");
 
         assert!(!run_dir.path().join("vendor.custom").exists());
+
+        run_dir.cleanup();
+    }
+
+    /// A declared sidecar's payload is checked against the registry contract
+    /// after a successful run. Declaring `lint.findings` and then writing an
+    /// object where the contract says array is a producer bug that nothing
+    /// noticed before #11121.
+    #[test]
+    fn validates_declared_sidecar_payloads_after_a_successful_run() {
+        let run_dir = RunDir::create().expect("run dir");
+        let findings = run_dir.step_file(run_dir::files::LINT_FINDINGS);
+
+        std::fs::write(&findings, r#"[{"message":"boom"}]"#).expect("valid findings");
+        validate_declared_structured_sidecars(run_dir.path(), &[declaration("lint.findings")])
+            .expect("a payload matching the declared contract passes");
+
+        std::fs::write(&findings, r#"{"message":"boom"}"#).expect("invalid findings");
+        let err =
+            validate_declared_structured_sidecars(run_dir.path(), &[declaration("lint.findings")])
+                .expect_err("an object is not the declared array shape");
+        assert!(err.to_string().contains("lint.findings"), "{err}");
+
+        run_dir.cleanup();
+    }
+
+    /// Validation judges an extension on what it declared, and only where core
+    /// has a contract. An undeclared file and a vendor key are both left alone.
+    #[test]
+    fn validation_ignores_undeclared_and_registry_unknown_sidecars() {
+        let run_dir = RunDir::create().expect("run dir");
+        std::fs::write(
+            run_dir.step_file(run_dir::files::LINT_FINDINGS),
+            "{ malformed",
+        )
+        .expect("malformed findings");
+        std::fs::write(run_dir.path().join("vendor.custom"), "{ malformed")
+            .expect("malformed vendor sidecar");
+
+        validate_declared_structured_sidecars(run_dir.path(), &[])
+            .expect("a manifest declaring nothing is judged on nothing");
+        validate_declared_structured_sidecars(run_dir.path(), &[declaration("vendor.custom")])
+            .expect("core has no contract for a vendor key");
+
+        run_dir.cleanup();
+    }
+
+    /// Absence is not a violation. Several sidecars are legitimately never
+    /// written (a missing `test.results` is what engages the stdout fallback),
+    /// and two declared paths are directories rather than JSON documents —
+    /// failing a run for any of those is the mistake that made the lint
+    /// evidence gate fail passing lints.
+    #[test]
+    fn validation_does_not_fail_on_absent_or_directory_sidecars() {
+        let run_dir = RunDir::create().expect("run dir");
+
+        validate_declared_structured_sidecars(
+            run_dir.path(),
+            &[
+                declaration("test.results"),
+                declaration("bench.results"),
+                declaration("annotations"),
+            ],
+        )
+        .expect("absent and directory sidecars are not contract violations");
 
         run_dir.cleanup();
     }

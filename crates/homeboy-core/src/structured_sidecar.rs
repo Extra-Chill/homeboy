@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -245,6 +247,66 @@ pub fn validate_payload(key: &str, payload: &Value) -> Result<()> {
     }
 }
 
+/// What a post-run check of one declared sidecar file found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidecarFileCheck {
+    /// Core has no registry contract for this key, so there is nothing to
+    /// judge. Declaring a vendor key is allowed; it simply buys no core
+    /// guarantees, the same reading `empty_payload` and `seeds_on_start` take.
+    Unknown,
+    /// Nothing to validate: no file was written, the file is empty, or the
+    /// declared path is a directory rather than a JSON document (`annotations`
+    /// and `trace.artifacts` are directories).
+    Absent,
+    /// The file was read and its payload satisfies the registry contract.
+    Valid,
+}
+
+/// Validate one declared sidecar's on-disk payload against the registry.
+///
+/// Until #11121 `validate_payload` had six callers, all of them parsers that
+/// had *already* decided to read a specific sidecar. Nothing checked declared
+/// sidecar output generically, so a runner could write a malformed
+/// `bench.results` and every consumer downstream simply saw nothing.
+///
+/// Absence is deliberately not a violation. A missing file is load-bearing for
+/// several keys (`test::run` treats a missing `test.results` as the signal to
+/// parse counts from stdout), and failing a run for a file that was never
+/// written is exactly the mistake that made the lint-findings evidence gate
+/// fail passing lints. This fails only on a payload that is *present and
+/// wrong*, which is an unambiguous contract violation by the producer.
+pub fn validate_sidecar_file(key: &str, path: &Path) -> Result<SidecarFileCheck> {
+    if schema(key).is_none() {
+        return Ok(SidecarFileCheck::Unknown);
+    }
+    if !path.is_file() {
+        return Ok(SidecarFileCheck::Absent);
+    }
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Ok(SidecarFileCheck::Absent);
+    };
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Ok(SidecarFileCheck::Absent);
+    }
+
+    let payload: Value = serde_json::from_str(trimmed).map_err(|err| {
+        Error::validation_invalid_argument(
+            "structured_sidecar",
+            format!(
+                "structured sidecar `{key}` at {} is not valid JSON: {err}",
+                path.display()
+            ),
+            None,
+            None,
+        )
+    })?;
+    validate_payload(key, &payload)?;
+
+    Ok(SidecarFileCheck::Valid)
+}
+
 fn validate_array_payload(schema: &StructuredSidecarSchema, payload: &Value) -> Result<()> {
     let Some(items) = payload.as_array() else {
         return Err(shape_error(schema, "JSON array"));
@@ -441,5 +503,81 @@ mod tests {
     fn accepts_test_failures_without_optional_fields() {
         validate_payload("test.failures", &json!([{ "test_id": "demo" }]))
             .expect("test failures may omit fields supplied by heterogeneous runners");
+    }
+
+    /// Post-run validation is not allowed to invent violations out of absence:
+    /// a sidecar that was never written, or whose declared path is a directory,
+    /// has nothing to check. (#11121)
+    #[test]
+    fn sidecar_file_validation_tolerates_absence_and_unknown_keys() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        assert_eq!(
+            validate_sidecar_file("lint.findings", &dir.path().join("never-written.json"))
+                .expect("missing file"),
+            SidecarFileCheck::Absent
+        );
+
+        let empty = dir.path().join("empty.json");
+        std::fs::write(&empty, "   \n").expect("empty file");
+        assert_eq!(
+            validate_sidecar_file("lint.findings", &empty).expect("empty file"),
+            SidecarFileCheck::Absent
+        );
+
+        let annotations = dir.path().join("annotations");
+        std::fs::create_dir(&annotations).expect("annotations dir");
+        assert_eq!(
+            validate_sidecar_file("annotations", &annotations).expect("directory sidecar"),
+            SidecarFileCheck::Absent
+        );
+
+        // A key core has no contract for is not core's to judge, however
+        // broken its contents are.
+        let vendor = dir.path().join("vendor.json");
+        std::fs::write(&vendor, "{ not json at all").expect("vendor file");
+        assert_eq!(
+            validate_sidecar_file("vendor.custom", &vendor).expect("unknown key"),
+            SidecarFileCheck::Unknown
+        );
+
+        let valid = dir.path().join("lint-findings.json");
+        std::fs::write(&valid, r#"[{"message":"boom"}]"#).expect("findings file");
+        assert_eq!(
+            validate_sidecar_file("lint.findings", &valid).expect("valid payload"),
+            SidecarFileCheck::Valid
+        );
+    }
+
+    /// A payload that is present and wrong is an unambiguous producer bug, and
+    /// this is the seam that finally notices it. (#11121)
+    #[test]
+    fn sidecar_file_validation_rejects_present_but_invalid_payloads() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let malformed = dir.path().join("malformed.json");
+        std::fs::write(&malformed, "{ malformed").expect("malformed file");
+        let err =
+            validate_sidecar_file("lint.findings", &malformed).expect_err("malformed JSON payload");
+        assert!(err.to_string().contains("not valid JSON"), "{err}");
+
+        let wrong_shape = dir.path().join("wrong-shape.json");
+        std::fs::write(&wrong_shape, r#"{"message":"boom"}"#).expect("wrong shape file");
+        let err = validate_sidecar_file("lint.findings", &wrong_shape)
+            .expect_err("lint findings must be an array");
+        assert!(err.to_string().contains("JSON array"), "{err}");
+
+        let missing_field = dir.path().join("missing-field.json");
+        std::fs::write(&missing_field, r#"[{"rule":"demo"}]"#).expect("missing field file");
+        let err = validate_sidecar_file("lint.findings", &missing_field)
+            .expect_err("lint finding message is required");
+        assert!(err.to_string().contains("message"), "{err}");
+
+        // Browser-evidence keys keep their extra validation on this path too.
+        let bench = dir.path().join("bench-results.json");
+        std::fs::write(&bench, r#"{"network":"not-an-array"}"#).expect("bench file");
+        let err =
+            validate_sidecar_file("bench.results", &bench).expect_err("browser evidence shape");
+        assert!(err.to_string().contains("network"), "{err}");
     }
 }
