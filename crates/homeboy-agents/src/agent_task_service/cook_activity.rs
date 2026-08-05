@@ -36,6 +36,13 @@ use super::process_activity::{self, DescendantActivity};
 /// as absent rather than as a zero that reads like a measurement.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CookProviderActivity {
+    /// Attribution for process-derived activity: executor, tool, or unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity_unavailable_reason: Option<String>,
     /// Destination worktree the provider is expected to write into.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_root: Option<String>,
@@ -162,6 +169,13 @@ impl CookActivityProbe {
             activity.command = Some(command);
             activity.command_pid = Some(pid);
             activity.command_elapsed_seconds = Some(elapsed_seconds);
+            activity.activity_source = Some(process.source.to_string());
+            activity.activity_type = Some(process.activity_type.to_string());
+        } else {
+            activity.activity_type = Some("unavailable".to_string());
+            activity.activity_source = Some("process_tree".to_string());
+            activity.activity_unavailable_reason =
+                Some("no executor or tool activity was observable".to_string());
         }
         activity
     }
@@ -331,6 +345,9 @@ mod tests {
     #[test]
     fn activity_round_trips_through_its_durable_projection() {
         let activity = CookProviderActivity {
+            activity_type: Some("executor".to_string()),
+            activity_source: Some("process_tree".to_string()),
+            activity_unavailable_reason: None,
             worktree_root: Some("/tmp/wt".to_string()),
             files_changed: Some(3),
             commits_written: Some(1),

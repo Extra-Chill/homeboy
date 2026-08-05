@@ -46,6 +46,10 @@ pub struct DescendantActivity {
     pub elapsed_seconds: u64,
     /// Command line, truncated to [`MAX_ACTIVITY_COMMAND_CHARS`].
     pub command: String,
+    /// Process-table evidence, rather than a controller lifecycle assertion.
+    pub source: &'static str,
+    /// The selected descendant is the executor itself or a tool it spawned.
+    pub activity_type: &'static str,
     /// Total descendants observed under the owner, so a reader can tell a lone
     /// process from a busy tree without being handed the whole tree.
     pub descendant_count: usize,
@@ -147,7 +151,7 @@ pub fn select_descendant_activity(
     let descendant_count = descendants.len();
     let candidate = descendants
         .iter()
-        .filter(|(row, _)| !row.command.is_empty());
+        .filter(|(row, _)| !row.command.is_empty() && !is_controller_parent_command(&row.command));
     let spawned_work = candidate
         .clone()
         .filter(|(_, depth)| *depth >= 2)
@@ -160,8 +164,18 @@ pub fn select_descendant_activity(
         depth: *depth,
         elapsed_seconds: row.elapsed_seconds,
         command: truncate_command(&row.command),
+        source: "process_tree",
+        activity_type: if *depth == 1 { "executor" } else { "tool" },
         descendant_count,
     })
+}
+
+/// The controller can appear beneath a shell wrapper in its own process tree.
+/// It is lifecycle orchestration, never evidence of provider activity.
+fn is_controller_parent_command(command: &str) -> bool {
+    let command = command.trim();
+    command.contains("homeboy agent-task cook")
+        || command.contains("homeboy --placement local agent-task cook")
 }
 
 /// Walk the owner's descendants, recording hop depth for each.
@@ -311,6 +325,15 @@ mod tests {
             select_descendant_activity(&rows, 1, &[999]).expect("provider is observable");
 
         assert_eq!(activity.pid, 100);
+    }
+
+    #[test]
+    fn controller_parent_fallback_is_not_provider_activity() {
+        let rows = parse_process_activity_rows(
+            "100 1 20:16 homeboy agent-task cook --placement local --wait\n",
+        );
+
+        assert_eq!(select_descendant_activity(&rows, 1, &[]), None);
     }
 
     #[test]

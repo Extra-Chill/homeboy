@@ -357,6 +357,73 @@ pub fn record_execution_placement_outcome(
     store::write_record(&record)
 }
 
+/// Ensure controller-owned records have the same canonical placement evidence
+/// as newly submitted local work. Older records predate the decision contract;
+/// their absent runner identity is authoritative evidence that they are local.
+pub fn normalize_local_execution_placement(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    if record
+        .metadata
+        .get("execution_placement_decision")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Ok(record);
+    }
+    if record.runner_id().is_some() {
+        return Ok(record);
+    }
+    let plan = load_plan(&record.run_id)?;
+    let decision = local_execution_placement_decision(&plan);
+    record.ensure_metadata_object().insert(
+        "execution_placement_decision".to_string(),
+        serde_json::to_value(&decision)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+    );
+    record.ensure_metadata_object().insert(
+        "execution_placement_normalization".to_string(),
+        json!({ "source": "lifecycle_owner", "owner": "controller", "reason": "legacy_or_null_decision" }),
+    );
+    store::write_record(&record)?;
+    Ok(record)
+}
+
+fn local_execution_placement_decision(
+    plan: &AgentTaskPlan,
+) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
+    use homeboy_lab_runner_contract::{
+        EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
+        ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement, Placement,
+    };
+    let task = plan.tasks.first();
+    homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+        "controller-lifecycle-placement",
+        "v1",
+        ExecutionPlacementIdentity {
+            repository: "controller-local".to_string(),
+            workspace: task
+                .and_then(|task| task.workspace.root.clone())
+                .unwrap_or_default(),
+            task: task
+                .map(|task| task.task_id.clone())
+                .unwrap_or_else(|| plan.plan_id.clone()),
+            candidate: None,
+            base: None,
+        },
+        Placement::Local,
+        ExecutionPlacementRequirement::Local,
+        EffectiveExecutionPlacement::Local,
+        None,
+        ExecutionPlacementFallback {
+            local_allowed: false,
+            reason: None,
+        },
+        ExecutionPlacementOverrideAuthorization {
+            authorized: true,
+            authority: Some("controller_lifecycle_owner".to_string()),
+        },
+    )
+}
+
 #[cfg(test)]
 mod execution_placement_tests {
     use super::*;
@@ -514,6 +581,18 @@ where
     let mut normalized_plan = plan.clone();
     if normalized_plan.workspace_identity.is_none() {
         normalized_plan.workspace_identity = identity_for_plan(&normalized_plan)?;
+    }
+    if !normalized_plan
+        .metadata
+        .get("execution_placement_decision")
+        .is_some_and(|value| !value.is_null())
+    {
+        if !normalized_plan.metadata.is_object() {
+            normalized_plan.metadata = json!({});
+        }
+        normalized_plan.metadata["execution_placement_decision"] =
+            serde_json::to_value(local_execution_placement_decision(&normalized_plan))
+                .map_err(|error| Error::internal_json(error.to_string(), None))?;
     }
     let run_id = requested_run_id
         .map(sanitize_run_id)

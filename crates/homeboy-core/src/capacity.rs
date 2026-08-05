@@ -27,9 +27,14 @@
 //!
 //! Only a definite zero blocks. Everything uncertain proceeds.
 
-use std::path::Path;
+use std::collections::hash_map::DefaultHasher;
+use std::fs::{self, File, OpenOptions};
+use std::hash::{Hash, Hasher};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::defaults::RetentionConfig;
 use crate::error::StorageExhaustedDetails;
@@ -46,6 +51,343 @@ use crate::{Error, Result};
 pub struct CapacityReserve {
     pub bytes: u64,
     pub inodes: u64,
+}
+
+/// The bytes and filesystem entries a materialization is expected to create.
+///
+/// Entries are deliberately counted independently from bytes: dependency trees
+/// such as `node_modules` and `vendor` commonly exhaust inodes first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct CapacityDemand {
+    pub bytes: u64,
+    pub inodes: u64,
+}
+
+impl CapacityDemand {
+    pub fn saturating_add(self, other: Self) -> Self {
+        Self {
+            bytes: self.bytes.saturating_add(other.bytes),
+            inodes: self.inodes.saturating_add(other.inodes),
+        }
+    }
+}
+
+/// Measure a tree that will be copied or reconstructed before materialization.
+/// Symlinks are one entry and are not followed. Generated build/cache roots are
+/// excluded because they are reclaimable artifacts, not source demand; this
+/// keeps admission bounded to the materialized source/dependency tree.
+pub fn demand_for_tree(path: &Path) -> Result<CapacityDemand> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(format!("stat {}", path.display())))
+    })?;
+    let mut demand = CapacityDemand {
+        bytes: metadata.len(),
+        inodes: 1,
+    };
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        for entry in std::fs::read_dir(path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("read directory {}", path.display())),
+            )
+        })? {
+            let entry = entry.map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("read directory {}", path.display())),
+                )
+            })?;
+            if matches!(
+                entry.file_name().to_str(),
+                Some(".git" | "target" | "cache" | ".cache")
+            ) {
+                continue;
+            }
+            demand = demand.saturating_add(demand_for_tree(&entry.path())?);
+        }
+    }
+    Ok(demand)
+}
+
+const RESERVATION_TTL: Duration = Duration::from_secs(30 * 60);
+
+/// A durable cross-process capacity claim. Dropping it releases the exact
+/// record on every terminal path, including cancellation and pre-execution
+/// failure.
+#[derive(Debug)]
+pub struct CapacityReservation {
+    ledger: PathBuf,
+    id: String,
+}
+
+impl Drop for CapacityReservation {
+    fn drop(&mut self) {
+        let _ = remove_capacity_reservation(&self.ledger, &self.id);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CapacityReservationRecord {
+    id: String,
+    filesystem: String,
+    root: String,
+    bytes: u64,
+    inodes: u64,
+    owner_pid: u32,
+    owner_process: String,
+    created_unix_seconds: u64,
+    lease_expires_unix_seconds: u64,
+}
+
+/// Reserve projected materialization demand before the first large write.
+///
+/// Capacity is compared after subtracting already-reserved capacity and this
+/// request, then against the configured floor. The reservation is intentionally
+/// process-local: it closes concurrent Cook overcommit while the durable
+/// lifecycle remains the authority for recovering interrupted work.
+pub fn reserve_projected_capacity(
+    path: &Path,
+    subject: &str,
+    demand: CapacityDemand,
+    reserve: CapacityReserve,
+) -> Result<CapacityReservation> {
+    let root = existing_ancestor(path);
+    let filesystem = filesystem_identity(&root)?;
+    let ledger = capacity_ledger_path(&filesystem)?;
+    let budget = disk_budget(
+        &root,
+        subject,
+        "capacity is not measurable on this platform",
+    );
+    reserve_projected_capacity_in(
+        &ledger,
+        &root,
+        &filesystem,
+        subject,
+        budget,
+        demand,
+        reserve,
+        owner_evidence(std::process::id()),
+        now_seconds(),
+    )
+}
+
+fn reserve_projected_capacity_in(
+    ledger: &Path,
+    root: &Path,
+    filesystem: &str,
+    subject: &str,
+    budget: DiskBudget,
+    demand: CapacityDemand,
+    reserve: CapacityReserve,
+    owner: (u32, String),
+    now: u64,
+) -> Result<CapacityReservation> {
+    let lock = lock_capacity_ledger(ledger)?;
+    let mut records = read_capacity_reservations(ledger)?;
+    records.retain(|record| reservation_is_live(record, now));
+    let held = records
+        .iter()
+        .fold(CapacityDemand::default(), |total, record| {
+            total.saturating_add(CapacityDemand {
+                bytes: record.bytes,
+                inodes: record.inodes,
+            })
+        });
+    let projected_bytes = budget.available_bytes.map(|available| {
+        available
+            .saturating_sub(held.bytes)
+            .saturating_sub(demand.bytes)
+    });
+    let projected_inodes = budget.available_inodes.map(|available| {
+        available
+            .saturating_sub(held.inodes)
+            .saturating_sub(demand.inodes)
+    });
+    let bytes_ok = projected_bytes.is_some_and(|available| available >= reserve.bytes);
+    let inodes_ok = projected_inodes.is_some_and(|available| available >= reserve.inodes);
+    if !bytes_ok || !inodes_ok {
+        let mut error = Error::storage_exhausted_detailed(StorageExhaustedDetails {
+            error: format!(
+                "{subject} projected materialization would breach configured capacity floors"
+            ),
+            context: Some(format!("admission before {subject}")),
+            path: Some(root.display().to_string()),
+            available_bytes: budget.available_bytes,
+            available_inodes: budget.available_inodes,
+            reserve_bytes: Some(reserve.bytes),
+            reserve_inodes: Some(reserve.inodes),
+        });
+        error.details["projected_bytes"] = serde_json::json!(projected_bytes);
+        error.details["projected_inodes"] = serde_json::json!(projected_inodes);
+        error.details["demand_bytes"] = serde_json::json!(demand.bytes);
+        error.details["demand_inodes"] = serde_json::json!(demand.inodes);
+        error.details["reserved_bytes"] = serde_json::json!(held.bytes);
+        error.details["reserved_inodes"] = serde_json::json!(held.inodes);
+        error.details["dominant_reclaimable_categories"] = serde_json::json!(["build_output"]);
+        let command = format!(
+            "homeboy cleanup artifacts --path {} --sort size --limit 100 --apply",
+            crate::engine::shell::quote_arg(&root.display().to_string())
+        );
+        error.details["cleanup_commands"] = serde_json::json!([command.clone()]);
+        error = error.with_hint(format!(
+            "Reclaim the dominant `build_output` category with `{command}`."
+        ));
+        return Err(error);
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    records.push(CapacityReservationRecord {
+        id: id.clone(),
+        filesystem: filesystem.to_string(),
+        root: root.display().to_string(),
+        bytes: demand.bytes,
+        inodes: demand.inodes,
+        owner_pid: owner.0,
+        owner_process: owner.1,
+        created_unix_seconds: now,
+        lease_expires_unix_seconds: now.saturating_add(RESERVATION_TTL.as_secs()),
+    });
+    write_capacity_reservations(ledger, &records)?;
+    drop(lock);
+    Ok(CapacityReservation {
+        ledger: ledger.to_path_buf(),
+        id,
+    })
+}
+
+fn existing_ancestor(path: &Path) -> PathBuf {
+    let mut current = path;
+    while !current.exists() {
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+    }
+    current
+        .canonicalize()
+        .unwrap_or_else(|_| current.to_path_buf())
+}
+
+fn capacity_ledger_path(filesystem: &str) -> Result<PathBuf> {
+    let root = crate::paths::homeboy_data()?.join("controller-state/capacity-reservations");
+    fs::create_dir_all(&root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create capacity reservation ledger".to_string()),
+        )
+    })?;
+    let mut hasher = DefaultHasher::new();
+    filesystem.hash(&mut hasher);
+    Ok(root.join(format!("{:016x}.json", hasher.finish())))
+}
+
+fn lock_capacity_ledger(ledger: &Path) -> Result<File> {
+    let lock_path = ledger.with_extension("lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("open capacity reservation lock".to_string()),
+            )
+        })?;
+    crate::config::lock_exclusive_bounded(&lock, &lock_path, "lock capacity reservation ledger")?;
+    Ok(lock)
+}
+
+fn read_capacity_reservations(ledger: &Path) -> Result<Vec<CapacityReservationRecord>> {
+    match fs::read_to_string(ledger) {
+        Ok(value) => serde_json::from_str(&value).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse capacity reservation ledger".to_string()),
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some("read capacity reservation ledger".to_string()),
+        )),
+    }
+}
+
+fn write_capacity_reservations(ledger: &Path, records: &[CapacityReservationRecord]) -> Result<()> {
+    let bytes = serde_json::to_vec(records).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("encode capacity reservation ledger".to_string()),
+        )
+    })?;
+    let mut staged =
+        tempfile::NamedTempFile::new_in(ledger.parent().unwrap_or_else(|| Path::new(".")))
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("stage capacity reservation ledger".to_string()),
+                )
+            })?;
+    staged
+        .write_all(&bytes)
+        .and_then(|_| staged.as_file().sync_all())
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("write capacity reservation ledger".to_string()),
+            )
+        })?;
+    staged.persist(ledger).map_err(|error| {
+        Error::internal_io(
+            error.error.to_string(),
+            Some("publish capacity reservation ledger".to_string()),
+        )
+    })?;
+    Ok(())
+}
+
+fn remove_capacity_reservation(ledger: &Path, id: &str) -> Result<()> {
+    let _lock = lock_capacity_ledger(ledger)?;
+    let mut records = read_capacity_reservations(ledger)?;
+    records.retain(|record| record.id != id);
+    write_capacity_reservations(ledger, &records)
+}
+
+fn reservation_is_live(record: &CapacityReservationRecord, now: u64) -> bool {
+    record.lease_expires_unix_seconds > now && crate::process::pid_is_running(record.owner_pid)
+}
+
+fn owner_evidence(pid: u32) -> (u32, String) {
+    (pid, format!("pid:{pid}"))
+}
+
+fn now_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[cfg(unix)]
+fn filesystem_identity(path: &Path) -> Result<String> {
+    use std::ffi::CString;
+
+    let path = CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return Err(Error::internal_io(
+            std::io::Error::last_os_error().to_string(),
+            Some("identify capacity filesystem".to_string()),
+        ));
+    }
+    Ok(format!("fsid:{}", unsafe { stat.assume_init() }.f_fsid))
+}
+
+#[cfg(not(unix))]
+fn filesystem_identity(path: &Path) -> Result<String> {
+    Ok(format!("path:{}", path.display()))
 }
 
 impl CapacityReserve {
@@ -242,6 +584,26 @@ fn reserve_message(subject: &str, bytes: bool, inodes: bool, reserve: CapacityRe
 mod tests {
     use super::*;
 
+    fn reserve_projected_capacity_from_budget(
+        path: &Path,
+        subject: &str,
+        budget: DiskBudget,
+        demand: CapacityDemand,
+        reserve: CapacityReserve,
+    ) -> Result<CapacityReservation> {
+        reserve_projected_capacity_in(
+            &path.join("capacity-reservations.json"),
+            path,
+            "fixture-filesystem",
+            subject,
+            budget,
+            demand,
+            reserve,
+            owner_evidence(std::process::id()),
+            now_seconds(),
+        )
+    }
+
     fn budget(available_bytes: Option<u64>, available_inodes: Option<u64>) -> DiskBudget {
         DiskBudget {
             path: "/fixture".to_string(),
@@ -361,6 +723,193 @@ mod tests {
 
         assert_eq!(preflight.status, CapacityStatus::Ok);
         assert_eq!(preflight.into_result().expect("no block"), None);
+    }
+
+    #[test]
+    fn large_dependency_tree_near_the_floor_is_rejected_before_materialization() {
+        let dir = tempfile::tempdir().expect("capacity fixture");
+        let demand = CapacityDemand {
+            bytes: 4 * 1024 * 1024 * 1024,
+            inodes: 250_000,
+        };
+        let error = reserve_projected_capacity_from_budget(
+            dir.path(),
+            "Cook workspace materialization",
+            budget(Some(8 * 1024 * 1024 * 1024), Some(500_000)),
+            demand,
+            reserve(),
+        )
+        .expect_err("node_modules/vendor-sized demand must not cross the floor");
+
+        assert_eq!(error.details["demand_bytes"], demand.bytes);
+        assert_eq!(error.details["demand_inodes"], demand.inodes);
+        assert_eq!(
+            error.details["dominant_reclaimable_categories"][0],
+            "build_output"
+        );
+        assert_eq!(
+            error.details["cleanup_commands"][0],
+            format!(
+                "homeboy cleanup artifacts --path {} --sort size --limit 100 --apply",
+                crate::engine::shell::quote_arg(&dir.path().display().to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn sufficient_projected_capacity_acquires_a_reservation() {
+        let dir = tempfile::tempdir().expect("capacity fixture");
+        let reservation = reserve_projected_capacity_from_budget(
+            dir.path(),
+            "Cook workspace materialization",
+            budget(Some(20 * 1024 * 1024 * 1024), Some(800_000)),
+            CapacityDemand {
+                bytes: 4 * 1024 * 1024 * 1024,
+                inodes: 250_000,
+            },
+            reserve(),
+        )
+        .expect("capacity above the post-demand floor admits the Cook");
+        drop(reservation);
+    }
+
+    #[test]
+    fn projected_inode_exhaustion_blocks_even_when_bytes_are_sufficient() {
+        let dir = tempfile::tempdir().expect("capacity fixture");
+        let error = reserve_projected_capacity_from_budget(
+            dir.path(),
+            "Cook workspace materialization",
+            budget(Some(100 * 1024 * 1024 * 1024), Some(150_000)),
+            CapacityDemand {
+                bytes: 1,
+                inodes: 60_000,
+            },
+            reserve(),
+        )
+        .expect_err("inode floor must be enforced independently");
+
+        assert_eq!(error.details["projected_inodes"], 90_000);
+        assert_eq!(error.details["reserve_inodes"], 100_000);
+    }
+
+    #[test]
+    fn dropping_a_reservation_releases_capacity_for_the_next_cook() {
+        let dir = tempfile::tempdir().expect("capacity fixture");
+        let demand = CapacityDemand {
+            bytes: 4 * 1024 * 1024 * 1024,
+            inodes: 1,
+        };
+        let reservation = reserve_projected_capacity_from_budget(
+            dir.path(),
+            "first Cook",
+            budget(Some(10 * 1024 * 1024 * 1024), Some(500_000)),
+            demand,
+            reserve(),
+        )
+        .expect("first Cook reserves capacity");
+        let blocked = reserve_projected_capacity_from_budget(
+            dir.path(),
+            "second Cook",
+            budget(Some(10 * 1024 * 1024 * 1024), Some(500_000)),
+            demand,
+            reserve(),
+        );
+        assert!(blocked.is_err(), "live reservation prevents overcommit");
+
+        drop(reservation);
+        reserve_projected_capacity_from_budget(
+            dir.path(),
+            "second Cook",
+            budget(Some(10 * 1024 * 1024 * 1024), Some(500_000)),
+            demand,
+            reserve(),
+        )
+        .expect("terminal release admits the next Cook");
+    }
+
+    #[test]
+    fn independently_opened_ledgers_cannot_overcommit_a_live_filesystem_claim() {
+        let dir = tempfile::tempdir().expect("capacity fixture");
+        let demand = CapacityDemand {
+            bytes: 4 * 1024 * 1024 * 1024,
+            inodes: 1,
+        };
+        let first = reserve_projected_capacity_from_budget(
+            dir.path(),
+            "first independent Cook",
+            budget(Some(10 * 1024 * 1024 * 1024), Some(500_000)),
+            demand,
+            reserve(),
+        )
+        .expect("first ledger client reserves capacity");
+        let second = reserve_projected_capacity_from_budget(
+            dir.path(),
+            "second independent Cook",
+            budget(Some(10 * 1024 * 1024 * 1024), Some(500_000)),
+            demand,
+            reserve(),
+        );
+        assert!(
+            second.is_err(),
+            "second ledger client observes the first claim"
+        );
+        drop(first);
+    }
+
+    #[test]
+    fn dead_or_expired_reservations_are_reconciled_before_admission() {
+        let dir = tempfile::tempdir().expect("capacity fixture");
+        let ledger = dir.path().join("capacity-reservations.json");
+        write_capacity_reservations(
+            &ledger,
+            &[CapacityReservationRecord {
+                id: "crashed-owner".to_string(),
+                filesystem: "fixture-filesystem".to_string(),
+                root: dir.path().display().to_string(),
+                bytes: 100 * 1024 * 1024 * 1024,
+                inodes: 900_000,
+                owner_pid: u32::MAX,
+                owner_process: "pid:4294967295".to_string(),
+                created_unix_seconds: now_seconds().saturating_sub(1),
+                lease_expires_unix_seconds: now_seconds().saturating_add(RESERVATION_TTL.as_secs()),
+            }],
+        )
+        .expect("seed dead reservation");
+
+        let _replacement = reserve_projected_capacity_from_budget(
+            dir.path(),
+            "replacement Cook",
+            budget(Some(10 * 1024 * 1024 * 1024), Some(500_000)),
+            CapacityDemand {
+                bytes: 1,
+                inodes: 1,
+            },
+            reserve(),
+        )
+        .expect("authoritatively dead owner is reclaimable");
+        let records = read_capacity_reservations(&ledger).expect("read reconciled ledger");
+        assert_eq!(records.len(), 1, "only the live replacement remains");
+        assert_ne!(records[0].id, "crashed-owner");
+    }
+
+    #[test]
+    fn malformed_ledger_fails_closed_without_materialization() {
+        let dir = tempfile::tempdir().expect("capacity fixture");
+        fs::write(dir.path().join("capacity-reservations.json"), "not json")
+            .expect("seed malformed ledger");
+
+        let error = reserve_projected_capacity_from_budget(
+            dir.path(),
+            "Cook workspace materialization",
+            budget(Some(100 * 1024 * 1024 * 1024), Some(900_000)),
+            CapacityDemand {
+                bytes: 1,
+                inodes: 1,
+            },
+            reserve(),
+        )
+        .expect_err("corrupt reservation state must block writes");
+        assert!(error.message.contains("parse capacity reservation ledger"));
     }
 
     /// A real probe of a real path must not panic and must not block a machine
