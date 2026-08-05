@@ -822,7 +822,7 @@ fn run_split_placement_fanout(
                 ),
         }) if args.run_plan => {
             crate::commands::agent_task::fanout::cook_batch_with_attempt_dispatcher(
-                args.clone(),
+                *args.clone(),
                 &attempt_dispatcher,
             )?
         }
@@ -1033,7 +1033,7 @@ fn run_split_placement_cook(
     };
     let (value, exit_code) =
         crate::commands::agent_task::run::run_cook_with_executor_and_dispatcher_with_progress(
-            controller,
+            *controller,
             homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
             Some(dispatcher),
             Some(&progress),
@@ -1718,7 +1718,7 @@ fn materialize_agent_task_cook_plan(
     else {
         return Ok(None);
     };
-    let cook = crate::commands::agent_task::run::resolve_cook_destination(cook.clone())?;
+    let cook = crate::commands::agent_task::run::resolve_cook_destination(*cook.clone())?;
     crate::commands::agent_task::run::validate_cook_request_with_provenance(&cook, provenance)?;
     let provision = crate::commands::agent_task::run::provision_cook_destination(&cook)?;
     let mut plan = crate::commands::agent_task::run::compile_cook_plan(&cook, provision)?;
