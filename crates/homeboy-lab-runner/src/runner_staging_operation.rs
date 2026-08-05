@@ -497,7 +497,7 @@ pub(crate) mod tests_support {
     use crate::lab_staging_controller::LabStagingRecipe;
     use homeboy_core::lab_contract::LabCommandContract;
 
-    struct Transport {
+    pub(crate) struct Transport {
         connected: bool,
         compatible: bool,
         source_artifact_compatible: bool,
@@ -540,8 +540,35 @@ pub(crate) mod tests_support {
             };
             self.receipts
                 .insert(envelope.handoff.idempotency_key.clone(), receipt.clone());
-            self.provider_budget += 1;
             Ok(receipt)
+        }
+    }
+
+    impl Transport {
+        pub(crate) fn compatible() -> Self {
+            transport()
+        }
+
+        pub(crate) fn incompatible() -> Self {
+            Self {
+                compatible: false,
+                ..transport()
+            }
+        }
+
+        pub(crate) fn disconnected() -> Self {
+            Self {
+                connected: false,
+                ..transport()
+            }
+        }
+
+        pub(crate) fn calls(&self) -> usize {
+            self.calls
+        }
+
+        pub(crate) fn provider_budget(&self) -> usize {
+            self.provider_budget
         }
     }
 
@@ -617,7 +644,7 @@ pub(crate) mod tests_support {
         let replay = submit_remote_runner_staging(&mut transport, &envelope).expect("replay");
         assert_eq!(first, replay);
         assert_eq!(transport.receipts.len(), 1);
-        assert_eq!(transport.provider_budget, 1);
+        assert_eq!(transport.provider_budget, 0);
         assert_eq!(first.artifacts.lifecycle_id, "runner-lifecycle-1");
     }
 
