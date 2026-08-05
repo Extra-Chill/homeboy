@@ -471,7 +471,8 @@ mod tests {
     use crate::server::{self, Server};
     use crate::test_support::with_isolated_home;
 
-    use super::{parse_target, transfer, TransferConfig, TransferTarget};
+    use super::{parse_target, scp_args, transfer, TransferConfig, TransferTarget};
+    use crate::server::{ManagedSshSession, SshClient};
 
     fn save_server(id: &str) {
         server::save(&Server {
@@ -555,5 +556,32 @@ mod tests {
             assert!(out.compress);
             assert!(out.dry_run);
         });
+    }
+
+    #[test]
+    fn managed_scp_uses_controlpath_option_not_ssh_executable_flag() {
+        let client = SshClient {
+            host: "sandbox-alias".to_string(),
+            user: "deploy".to_string(),
+            port: 22,
+            identity_file: None,
+            auth: Some(ManagedSshSession {
+                control_path: "/tmp/homeboy-control".to_string(),
+                persist: "4h".to_string(),
+            }),
+            is_local: false,
+            env: HashMap::new(),
+        };
+
+        let args = scp_args(&client);
+
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                "-o".to_string(),
+                "ControlPath=/tmp/homeboy-control".to_string(),
+            ]
+        }));
+        assert!(args.contains(&"ControlMaster=no".to_string()));
+        assert!(!args.contains(&"-S".to_string()));
     }
 }
