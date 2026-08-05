@@ -1610,9 +1610,22 @@ pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
 /// Return the persisted controller-side session projection without reconnecting,
 /// probing a daemon, or reconciling generation state.
 pub fn persisted_status(runner_id: &str) -> Result<RunnerStatusReport> {
+    persisted_status_until(
+        runner_id,
+        std::time::Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+    )
+}
+
+/// Return the persisted session projection under one caller-owned deadline.
+/// This is intentionally observation-only: recovery may read a stale record,
+/// but every direct-session liveness probe receives only the time remaining.
+pub fn persisted_status_until(
+    runner_id: &str,
+    deadline: std::time::Instant,
+) -> Result<RunnerStatusReport> {
     let session_path = session_path(runner_id)?;
-    let session = read_session_for_status(runner_id)?;
-    let state = status_session_state(session.as_ref());
+    let session = read_session_for_status_until(runner_id, deadline)?;
+    let state = status_session_state_until(session.as_ref(), deadline);
     Ok(RunnerStatusReport {
         runner_id: runner_id.to_string(),
         connected: state == RunnerSessionState::Connected,
@@ -2210,40 +2223,50 @@ fn runner_jobs(
     runner_id: &str,
     session: &RunnerSession,
 ) -> Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> {
+    let timeout = crate::readonly_probe::readonly_probe_timeout();
     let client = Client::builder()
-        .timeout(crate::readonly_probe::readonly_probe_timeout())
+        .timeout(timeout)
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build active job client: {err}")))?;
-    let (body, source) = if let Some(local_url) = session.local_url.as_deref() {
-        let data = daemon_get(&client, local_url, "/jobs")?;
-        (
-            data.get("body").cloned().ok_or_else(|| {
-                Error::internal_unexpected("daemon jobs response missing data.body")
-            })?,
-            RunnerJobSource::Daemon,
-        )
-    } else if session.mode == RunnerTunnelMode::Reverse {
-        let Some(broker_url) = session.broker_url.as_deref() else {
+    runner_jobs_with_client(runner_id, session, &client, timeout)
+}
+
+fn runner_jobs_with_client(
+    runner_id: &str,
+    session: &RunnerSession,
+    client: &Client,
+    timeout: Duration,
+) -> Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> {
+    let result: Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> = (|| {
+        let (body, source) = if let Some(local_url) = session.local_url.as_deref() {
+            let data = daemon_get(&client, local_url, "/jobs")?;
+            (
+                data.get("body").cloned().ok_or_else(|| {
+                    Error::internal_unexpected("daemon jobs response missing data.body")
+                })?,
+                RunnerJobSource::Daemon,
+            )
+        } else if session.mode == RunnerTunnelMode::Reverse {
+            let broker_url = session.broker_url.as_deref().ok_or_else(|| {
+                Error::internal_unexpected(format!(
+                    "reverse runner `{runner_id}` is connected but has no broker URL for active-job status"
+                ))
+            })?;
+            (
+                broker_http::get_json(
+                    &client,
+                    broker_url,
+                    "/jobs",
+                    "list reverse runner broker jobs",
+                    None,
+                )?,
+                RunnerJobSource::Broker,
+            )
+        } else {
             return Err(Error::internal_unexpected(format!(
-                "reverse runner `{runner_id}` is connected but has no broker URL for active-job status"
+                "runner `{runner_id}` is connected but has no active-job status endpoint"
             )));
         };
-        (
-            broker_http::get_json(
-                &client,
-                broker_url,
-                "/jobs",
-                "list reverse runner broker jobs",
-                None,
-            )?,
-            RunnerJobSource::Broker,
-        )
-    } else {
-        return Err(Error::internal_unexpected(format!(
-            "runner `{runner_id}` is connected but has no active-job status endpoint"
-        )));
-    };
-    let result: Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> = (|| {
         let active_jobs = parse_runner_jobs(
             &body,
             "active_runner_jobs",
@@ -2261,8 +2284,9 @@ fn runner_jobs(
         Ok((active_jobs, stale_jobs))
     })();
     if let Err(error) = &result {
-        let timeout = crate::readonly_probe::readonly_probe_timeout();
-        let timed_out = error.message.to_ascii_lowercase().contains("timed out");
+        let timed_out = error.details["request_timeout"]
+            .as_bool()
+            .unwrap_or_else(|| error.message.to_ascii_lowercase().contains("timed out"));
         crate::readonly_probe::record_degradation(crate::readonly_probe::ReadOnlyProbeDegradation {
             probe: "runner_typed_jobs".to_string(),
             runner_id: Some(runner_id.to_string()),

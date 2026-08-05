@@ -1069,6 +1069,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "fs4",
  "glob",
  "glob-match",
  "homeboy-agents",

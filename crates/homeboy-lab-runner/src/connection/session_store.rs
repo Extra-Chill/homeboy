@@ -1,5 +1,6 @@
 use super::*;
 use crate::session::RunnerConnectFailureEvidence;
+use std::time::Instant;
 
 pub(super) fn session_is_live(session: &RunnerSession) -> bool {
     session_is_live_with_timeout(session, Duration::from_secs(2))
@@ -181,39 +182,69 @@ pub(super) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
 /// tunnel without allowing historical session directories to turn status into
 /// an unbounded liveness scan.
 pub(super) fn read_session_for_status(runner_id: &str) -> Result<Option<RunnerSession>> {
+    read_session_for_status_until(
+        runner_id,
+        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+    )
+}
+
+/// Resolve the current or a peer session without allowing one runner's status
+/// observation to outlive the caller's absolute operation deadline.
+pub(super) fn read_session_for_status_until(
+    runner_id: &str,
+    deadline: Instant,
+) -> Result<Option<RunnerSession>> {
     let controller_id = controller_id();
     let session = read_session_for_controller(runner_id, &controller_id)?;
-    if session
-        .as_ref()
-        .is_some_and(|session| status_session_state(Some(session)) == RunnerSessionState::Connected)
-    {
+    if session.as_ref().is_some_and(|session| {
+        status_session_state_until(Some(session), deadline) == RunnerSessionState::Connected
+    }) {
         return Ok(session);
     }
     let directory = paths::runner_sessions_dir()?.join(runner_id);
-    match status_peer_session_in(&directory, &controller_id)? {
+    match status_peer_session_in_until(&directory, &controller_id, deadline)? {
         StatusPeerSession::One(peer) => Ok(Some(peer)),
         StatusPeerSession::None => Ok(session),
+        StatusPeerSession::Truncated => {
+            record_partial_peer_projection(
+                runner_id,
+                crate::readonly_probe::REASON_PROBE_TRUNCATED,
+                format!(
+                    "runner `{runner_id}` has more than {STATUS_PEER_SESSION_LIMIT} persisted peer sessions; status did not select a potentially incomplete peer view"
+                ),
+            );
+            Ok(session)
+        }
         StatusPeerSession::Ambiguous => {
-            crate::readonly_probe::record_degradation(
-                crate::readonly_probe::ReadOnlyProbeDegradation {
-                    probe: "runner_peer_session".to_string(),
-                    runner_id: Some(runner_id.to_string()),
-                    reason_code: crate::readonly_probe::REASON_PROBE_AMBIGUOUS,
-                    timeout_seconds: 0,
-                    detail: format!(
-                        "multiple live direct-SSH peer sessions for runner `{runner_id}` disagree on daemon identity; status is partial. Run `homeboy runner reconcile {runner_id}` to select or repair the authoritative session."
-                    ),
-                },
+            record_partial_peer_projection(
+                runner_id,
+                crate::readonly_probe::REASON_PROBE_AMBIGUOUS,
+                format!(
+                    "multiple live direct-SSH peer sessions for runner `{runner_id}` disagree on daemon identity"
+                ),
             );
             Ok(session)
         }
     }
 }
 
+fn record_partial_peer_projection(runner_id: &str, reason_code: &'static str, detail: String) {
+    crate::readonly_probe::record_degradation(crate::readonly_probe::ReadOnlyProbeDegradation {
+        probe: "runner_peer_session".to_string(),
+        runner_id: Some(runner_id.to_string()),
+        reason_code,
+        timeout_seconds: 0,
+        detail: format!(
+            "{detail}; status is partial. Run `homeboy runner reconcile {runner_id}` to select or repair the authoritative session."
+        ),
+    });
+}
+
 enum StatusPeerSession {
     None,
     One(RunnerSession),
     Ambiguous,
+    Truncated,
 }
 
 /// Status observes at most this many persisted peers. The current controller
@@ -223,8 +254,21 @@ const STATUS_PEER_SESSION_LIMIT: usize = 8;
 const STATUS_PEER_SESSION_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn status_peer_session_in(directory: &PathBuf, controller_id: &str) -> Result<StatusPeerSession> {
+    status_peer_session_in_until(
+        directory,
+        controller_id,
+        Instant::now() + STATUS_PEER_SESSION_TIMEOUT,
+    )
+}
+
+fn status_peer_session_in_until(
+    directory: &PathBuf,
+    controller_id: &str,
+    deadline: Instant,
+) -> Result<StatusPeerSession> {
     status_peer_session_in_with(directory, controller_id, |session| {
-        session_is_live_with_timeout(session, STATUS_PEER_SESSION_TIMEOUT)
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        !remaining.is_zero() && session_is_live_with_timeout(session, remaining)
     })
 }
 
@@ -255,12 +299,15 @@ fn status_peer_session_in_with(
             )
         })?;
     paths.sort();
-    let mut peer: Option<RunnerSession> = None;
-    for path in paths
+    let paths = paths
         .into_iter()
         .filter(|path| is_controller_session_file(path))
-        .take(STATUS_PEER_SESSION_LIMIT)
-    {
+        .collect::<Vec<_>>();
+    if paths.len() > STATUS_PEER_SESSION_LIMIT {
+        return Ok(StatusPeerSession::Truncated);
+    }
+    let mut peer: Option<RunnerSession> = None;
+    for path in paths {
         let Some(candidate) = read_session_at(&path)? else {
             continue;
         };
@@ -285,6 +332,16 @@ fn status_peer_session_in_with(
 /// as remote identity and active-job probes. A failed check is disconnected,
 /// not a trigger to scan peers or reconcile a tunnel.
 pub(super) fn status_session_state(session: Option<&RunnerSession>) -> RunnerSessionState {
+    status_session_state_until(
+        session,
+        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+    )
+}
+
+pub(super) fn status_session_state_until(
+    session: Option<&RunnerSession>,
+    deadline: Instant,
+) -> RunnerSessionState {
     match session {
         Some(session)
             if session.mode == RunnerTunnelMode::Reverse
@@ -298,10 +355,10 @@ pub(super) fn status_session_state(session: Option<&RunnerSession>) -> RunnerSes
         }
         Some(session) if session.mode == RunnerTunnelMode::Reverse => RunnerSessionState::Recorded,
         Some(session)
-            if session_is_live_with_timeout(
-                session,
-                crate::readonly_probe::readonly_probe_timeout(),
-            ) =>
+            if {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                !remaining.is_zero() && session_is_live_with_timeout(session, remaining)
+            } =>
         {
             RunnerSessionState::Connected
         }
@@ -1169,6 +1226,45 @@ mod tests {
             read_session_at(&root.path().join("peer-b.json")).expect("read second"),
             Some(second)
         );
+    }
+
+    #[test]
+    fn status_peer_projection_is_truncated_before_a_conflicting_ninth_peer() {
+        let root = TempDir::new().expect("session directory");
+        for index in 0..9 {
+            let lease = if index == 8 {
+                "lease-conflict"
+            } else {
+                "lease-live"
+            };
+            let peer = session(&format!("peer-{index}"), lease);
+            write_session_at(&root.path().join(format!("peer-{index}.json")), &peer)
+                .expect("write peer session");
+        }
+
+        assert!(matches!(
+            status_peer_session_in_with(&root.path().to_path_buf(), "current", |_| true)
+                .expect("project bounded peers"),
+            StatusPeerSession::Truncated
+        ));
+    }
+
+    #[test]
+    fn status_peer_projection_is_truncated_when_only_the_ninth_peer_is_live() {
+        let root = TempDir::new().expect("session directory");
+        for index in 0..9 {
+            let peer = session(&format!("peer-{index}"), "lease-live");
+            write_session_at(&root.path().join(format!("peer-{index}.json")), &peer)
+                .expect("write peer session");
+        }
+
+        assert!(matches!(
+            status_peer_session_in_with(&root.path().to_path_buf(), "current", |peer| {
+                peer.controller_id.as_deref() == Some("peer-8")
+            })
+            .expect("project bounded peers"),
+            StatusPeerSession::Truncated
+        ));
     }
 
     #[test]
