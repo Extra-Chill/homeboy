@@ -301,7 +301,7 @@ fn paths_match(path: &str, prefix: &str) -> bool {
     }
 }
 
-fn path_suffix<'a>(path: &'a str, prefix: &str) -> Option<String> {
+fn path_suffix(path: &str, prefix: &str) -> Option<String> {
     let path = normalize_path_separators(path);
     let prefix = normalize_path_separators(prefix)
         .trim_end_matches('/')

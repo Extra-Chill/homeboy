@@ -368,14 +368,16 @@ fn check_git_checkout(
     };
 
     push_git_reasons(
-        target,
-        path,
-        dirty,
-        branch.as_deref(),
-        upstream.as_deref(),
-        ahead,
-        behind,
-        trusted_exact_sha,
+        GitCheckoutState {
+            target,
+            path,
+            dirty,
+            branch: branch.as_deref(),
+            upstream: upstream.as_deref(),
+            ahead,
+            behind,
+            trusted_exact_sha,
+        },
         reasons,
     );
 
@@ -515,32 +517,37 @@ fn empty_check(target: &str, path: &Path, status: &str) -> TraceCanonicalCheck {
     }
 }
 
-fn push_git_reasons(
-    target: &str,
-    path: &Path,
+struct GitCheckoutState<'a> {
+    target: &'a str,
+    path: &'a Path,
     dirty: bool,
-    branch: Option<&str>,
-    upstream: Option<&str>,
+    branch: Option<&'a str>,
+    upstream: Option<&'a str>,
     ahead: Option<u32>,
     behind: Option<u32>,
     trusted_exact_sha: bool,
-    reasons: &mut Vec<String>,
-) {
-    if dirty {
-        reasons.push(format!("{} checkout is dirty: {}", target, path.display()));
-    }
-    if branch == Some("HEAD") && !trusted_exact_sha {
+}
+
+fn push_git_reasons(checkout: GitCheckoutState<'_>, reasons: &mut Vec<String>) {
+    if checkout.dirty {
         reasons.push(format!(
-            "{} checkout is detached: {}",
-            target,
-            path.display()
+            "{} checkout is dirty: {}",
+            checkout.target,
+            checkout.path.display()
         ));
     }
-    if upstream.is_none() && !trusted_exact_sha {
+    if checkout.branch == Some("HEAD") && !checkout.trusted_exact_sha {
+        reasons.push(format!(
+            "{} checkout is detached: {}",
+            checkout.target,
+            checkout.path.display()
+        ));
+    }
+    if checkout.upstream.is_none() && !checkout.trusted_exact_sha {
         reasons.push(format!(
             "{} checkout has no upstream branch: {}",
-            target,
-            path.display()
+            checkout.target,
+            checkout.path.display()
         ));
     }
     let mut push_divergence = |count: Option<u32>, direction: &str, qualifier: &str| {
@@ -548,16 +555,16 @@ fn push_git_reasons(
         if count > 0 {
             reasons.push(format!(
                 "{} checkout is {} upstream by {} {}commit(s): {}",
-                target,
+                checkout.target,
                 direction,
                 count,
                 qualifier,
-                path.display()
+                checkout.path.display()
             ));
         }
     };
-    push_divergence(behind, "behind", "");
-    push_divergence(ahead, "ahead of", "unmerged ");
+    push_divergence(checkout.behind, "behind", "");
+    push_divergence(checkout.ahead, "ahead of", "unmerged ");
 }
 
 fn checkout_status(

@@ -926,7 +926,7 @@ fn cleanup_unlocked(
         .collect::<Vec<_>>();
     for candidate in &mutation_candidates {
         if options.apply {
-            match remove_candidate(&candidate, now, options.retention_override_seconds)? {
+            match remove_candidate(candidate, now, options.retention_override_seconds)? {
                 ScratchRemoval::Removed(bytes) => {
                     applied_count += 1;
                     reclaimed_bytes += bytes;
@@ -1821,6 +1821,7 @@ fn with_index_lock<T>(index_path: &Path, operation: impl FnOnce() -> Result<T>) 
     }
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)
@@ -1877,7 +1878,7 @@ fn read_index_unlocked() -> Result<ControllerScratchIndex> {
 }
 
 fn read_index_at_unlocked(path: &Path) -> Result<ControllerScratchIndex> {
-    match fs::read_to_string(&path) {
+    match fs::read_to_string(path) {
         Ok(raw) => serde_json::from_str(&raw).map_err(|error| {
             Error::internal_json(error.to_string(), Some(path.display().to_string()))
         }),

@@ -11,6 +11,7 @@ use crate::commands::{contract, fleet, observe};
 pub(crate) type JsonHandlerResult = (homeboy::core::Result<Value>, i32);
 pub(crate) type JsonCommandExecutor<Args> = fn(Args) -> JsonHandlerResult;
 pub(crate) type LabContractResolver<Args> = fn(&Args) -> Option<LabCommandContract>;
+type CommandAdapterResult = Result<BoundCommandAdapter, Box<Commands>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CommandLabRunnerPolicy {
@@ -108,7 +109,7 @@ impl<Args> TypedCommandAdapter<Args> {
 pub(crate) fn command_adapter(
     command: Commands,
     output_file_mode: CommandOutputFileMode,
-) -> Result<BoundCommandAdapter, Commands> {
+) -> CommandAdapterResult {
     match command {
         Commands::Fleet(args) => {
             let executor = fleet::adapter(output_file_mode)
@@ -128,7 +129,7 @@ pub(crate) fn command_adapter(
                 .expect("contract adapter supports JSON execution");
             Ok(BoundCommandAdapter::bind(args, executor))
         }
-        command => Err(command),
+        command => Err(Box::new(command)),
     }
 }
 
@@ -206,6 +207,35 @@ mod tests {
             CommandOutputFileMode::None,
         )
         .is_ok());
+    }
+
+    #[test]
+    fn command_adapter_executes_migrated_command_with_unchanged_json_result() {
+        let Ok(adapter) = command_adapter(
+            parsed_command(&["homeboy", "contract", "manifest"]),
+            CommandOutputFileMode::None,
+        ) else {
+            panic!("contract manifest is adapter-backed");
+        };
+
+        let (result, exit_code) = adapter.run();
+
+        assert_eq!(exit_code, 0);
+        let json = result.expect("contract manifest JSON result");
+        assert_eq!(json["command"], "contract.manifest");
+        assert!(json["commands"].is_array());
+    }
+
+    #[test]
+    fn command_adapter_preserves_unhandled_command_for_existing_dispatch_diagnostics() {
+        let Err(command) = command_adapter(
+            parsed_command(&["homeboy", "status"]),
+            CommandOutputFileMode::None,
+        ) else {
+            panic!("status remains owned by the existing workspace dispatcher");
+        };
+
+        assert!(matches!(*command, Commands::Status(_)));
     }
 
     #[test]

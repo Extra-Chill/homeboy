@@ -161,6 +161,19 @@ pub struct HostPressureDigest {
     pub host: BTreeMap<String, Value>,
 }
 
+struct PerformanceDigestMarkdownContext<'a> {
+    resource_summary: Option<&'a ResourceSummaryDigest>,
+    budget_findings: &'a [BudgetFindingDigest],
+    benchmark_memory: &'a [BenchmarkMemoryDigest],
+    baseline_health: &'a [BaselineHealthDiagnostic],
+    host_pressure: Option<&'a HostPressureDigest>,
+    lab_offload: &'a BTreeMap<String, String>,
+    preview: &'a BTreeMap<String, String>,
+    preview_origin_evidence: &'a [BrowserOriginEvidenceDigest],
+    gaps: &'a [String],
+    run_url: &'a str,
+}
+
 use helpers::*;
 
 pub fn render_performance_digest_from_args(
@@ -218,18 +231,18 @@ pub fn performance_digest_from_args(
 
     let budget_findings = collect_budget_findings(&bench_data);
     let benchmark_memory = collect_benchmark_memory(&bench_data);
-    let markdown = render_markdown(
-        resource_summary.as_ref(),
-        &budget_findings,
-        &benchmark_memory,
-        &baseline_health,
-        host_pressure.as_ref(),
-        &lab_offload,
-        &preview,
-        &preview_origin_evidence,
-        &gaps,
-        args.run_url.as_deref().unwrap_or_default(),
-    );
+    let markdown = render_markdown(PerformanceDigestMarkdownContext {
+        resource_summary: resource_summary.as_ref(),
+        budget_findings: &budget_findings,
+        benchmark_memory: &benchmark_memory,
+        baseline_health: &baseline_health,
+        host_pressure: host_pressure.as_ref(),
+        lab_offload: &lab_offload,
+        preview: &preview,
+        preview_origin_evidence: &preview_origin_evidence,
+        gaps: &gaps,
+        run_url: args.run_url.as_deref().unwrap_or_default(),
+    });
 
     Ok(PerformanceDigestReport {
         markdown,
@@ -601,31 +614,20 @@ mod helpers {
         })
     }
 
-    pub(super) fn render_markdown(
-        resource_summary: Option<&ResourceSummaryDigest>,
-        budget_findings: &[BudgetFindingDigest],
-        benchmark_memory: &[BenchmarkMemoryDigest],
-        baseline_health: &[BaselineHealthDiagnostic],
-        host_pressure: Option<&HostPressureDigest>,
-        lab_offload: &BTreeMap<String, String>,
-        preview: &BTreeMap<String, String>,
-        preview_origin_evidence: &[BrowserOriginEvidenceDigest],
-        gaps: &[String],
-        run_url: &str,
-    ) -> String {
+    pub(super) fn render_markdown(context: PerformanceDigestMarkdownContext<'_>) -> String {
         let mut out = String::new();
         out.push_str("## Performance Digest\n\n");
-        render_resource_summary(&mut out, resource_summary);
-        render_budget_findings(&mut out, budget_findings);
-        render_benchmark_memory(&mut out, benchmark_memory);
-        render_baseline_health(&mut out, baseline_health);
-        render_host_pressure(&mut out, host_pressure);
-        render_lab_offload(&mut out, lab_offload);
-        render_preview(&mut out, preview);
-        render_preview_origin_evidence(&mut out, preview_origin_evidence);
-        render_gaps(&mut out, gaps);
-        if !run_url.is_empty() {
-            let _ = writeln!(out, "### Full run\n- {}\n", run_url);
+        render_resource_summary(&mut out, context.resource_summary);
+        render_budget_findings(&mut out, context.budget_findings);
+        render_benchmark_memory(&mut out, context.benchmark_memory);
+        render_baseline_health(&mut out, context.baseline_health);
+        render_host_pressure(&mut out, context.host_pressure);
+        render_lab_offload(&mut out, context.lab_offload);
+        render_preview(&mut out, context.preview);
+        render_preview_origin_evidence(&mut out, context.preview_origin_evidence);
+        render_gaps(&mut out, context.gaps);
+        if !context.run_url.is_empty() {
+            let _ = writeln!(out, "### Full run\n- {}\n", context.run_url);
         }
         out
     }

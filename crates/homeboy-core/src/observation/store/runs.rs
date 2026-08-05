@@ -515,7 +515,7 @@ impl ObservationStore {
             return Ok(None);
         }
 
-        Ok(self.get_run(run_id)?)
+        self.get_run(run_id)
     }
 
     pub fn update_run_metadata(
@@ -609,21 +609,21 @@ impl ObservationStore {
         let probe = limit + 1;
         let mut predicates = Vec::new();
         let mut values: Vec<&dyn ToSql> = Vec::new();
-        if filter.kind.is_some() {
+        if let Some(kind) = filter.kind.as_ref() {
             predicates.push("kind = ?");
-            values.push(filter.kind.as_ref().expect("checked"));
+            values.push(kind);
         }
-        if filter.component_id.is_some() {
+        if let Some(component_id) = filter.component_id.as_ref() {
             predicates.push("component_id = ?");
-            values.push(filter.component_id.as_ref().expect("checked"));
+            values.push(component_id);
         }
-        if filter.status.is_some() {
+        if let Some(status) = filter.status.as_ref() {
             predicates.push("status = ?");
-            values.push(filter.status.as_ref().expect("checked"));
+            values.push(status);
         }
-        if filter.rig_id.is_some() {
+        if let Some(rig_id) = filter.rig_id.as_ref() {
             predicates.push("rig_id = ?");
-            values.push(filter.rig_id.as_ref().expect("checked"));
+            values.push(rig_id);
         }
         if let Some(cursor) = filter.after.as_ref() {
             // Keyset resume in the canonical `started_at DESC, id DESC` order.

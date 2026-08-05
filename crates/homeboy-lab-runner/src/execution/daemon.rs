@@ -356,7 +356,7 @@ pub(super) fn exec_via_daemon(
     } = runner_job_result_fields(&events, job.status, &env, &secret_env_names);
 
     let mirror = if mirror_evidence {
-        mirror_daemon_evidence(
+        mirror_daemon_evidence(crate::evidence::MirrorEvidenceRequest::new(
             runner,
             &cwd,
             &command,
@@ -367,7 +367,7 @@ pub(super) fn exec_via_daemon(
             lab_runner_workload
                 .as_ref()
                 .and_then(|workload| workload.notification_route.as_ref()),
-        )?
+        ))?
     } else {
         None
     };
@@ -1107,6 +1107,10 @@ fn spawn_admission_renewer(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::items_after_test_module,
+    reason = "Production daemon helpers remain below focused admission tests after the staged source split."
+)]
 mod admission_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1463,6 +1467,10 @@ pub(super) fn validate_daemon_job_identity(requested_job_id: &str, job: &Job) ->
     ))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Detached handoff retains durable job, source, materialization, and mirror identities independently."
+)]
 pub(super) fn detached_handoff_output(
     runner: &Runner,
     mode: RunnerExecMode,

@@ -303,7 +303,7 @@ pub fn derive_fuzz_proof(run: &RunRecord) -> Option<FuzzProof> {
     let overall = metadata
         .get("success")
         .and_then(Value::as_bool)
-        .unwrap_or_else(|| matches!(run.status.as_str(), "pass" | "passed"));
+        .unwrap_or(matches!(run.status.as_str(), "pass" | "passed"));
 
     let failed_case_ids: Vec<String> = cases
         .as_ref()

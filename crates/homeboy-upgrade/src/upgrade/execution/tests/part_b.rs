@@ -130,16 +130,16 @@ fn source_swap_failure_errors_when_active_binary_unchanged() {
     // Issue #5772: the source upgrade command exited 0 but the read-back
     // proves the active binary was not replaced — fail loudly instead of a
     // soft `upgraded: false` "completed".
-    let err = source_swap_failure(
-        InstallMethod::Source,
-        false,
-        Some("0.247.5"),
-        Some("homeboy 0.247.5+old"),
-        Some(Path::new("/src/homeboy")),
-        Some(Path::new("/src/homeboy/target/release/homeboy")),
-        Some(Path::new("/active/homeboy")),
-        Some("homeboy 0.247.5+new"),
-    )
+    let err = source_swap_failure(SourceSwapVerification {
+        method: InstallMethod::Source,
+        success: false,
+        new_version: Some("0.247.5"),
+        new_build_identity: Some("homeboy 0.247.5+old"),
+        source_workspace: Some(Path::new("/src/homeboy")),
+        built_binary: Some(Path::new("/src/homeboy/target/release/homeboy")),
+        replacement_target: Some(Path::new("/active/homeboy")),
+        built_binary_identity: Some("homeboy 0.247.5+new"),
+    })
     .expect("unverified source swap must surface an error");
 
     assert!(err.message.contains("active binary was not replaced"));
@@ -174,16 +174,16 @@ fn source_swap_failure_errors_when_active_binary_unchanged() {
 
 #[test]
 fn source_swap_failure_reports_version_when_no_build_identity() {
-    let err = source_swap_failure(
-        InstallMethod::Source,
-        false,
-        Some("0.247.5"),
-        None,
-        Some(Path::new("/src/homeboy")),
-        Some(Path::new("/src/homeboy/target/release/homeboy")),
-        None,
-        None,
-    )
+    let err = source_swap_failure(SourceSwapVerification {
+        method: InstallMethod::Source,
+        success: false,
+        new_version: Some("0.247.5"),
+        new_build_identity: None,
+        source_workspace: Some(Path::new("/src/homeboy")),
+        built_binary: Some(Path::new("/src/homeboy/target/release/homeboy")),
+        replacement_target: None,
+        built_binary_identity: None,
+    })
     .expect("unverified source swap must surface an error");
 
     assert!(err.message.contains("0.247.5"));
@@ -191,16 +191,16 @@ fn source_swap_failure_reports_version_when_no_build_identity() {
 
 #[test]
 fn source_swap_failure_reports_placeholder_when_version_unverifiable() {
-    let err = source_swap_failure(
-        InstallMethod::Source,
-        false,
-        None,
-        None,
-        Some(Path::new("/src/homeboy")),
-        Some(Path::new("/src/homeboy/target/release/homeboy")),
-        None,
-        None,
-    )
+    let err = source_swap_failure(SourceSwapVerification {
+        method: InstallMethod::Source,
+        success: false,
+        new_version: None,
+        new_build_identity: None,
+        source_workspace: Some(Path::new("/src/homeboy")),
+        built_binary: Some(Path::new("/src/homeboy/target/release/homeboy")),
+        replacement_target: None,
+        built_binary_identity: None,
+    })
     .expect("unverified source swap must surface an error");
 
     assert!(err.message.contains("an unverifiable version"));
@@ -209,16 +209,16 @@ fn source_swap_failure_reports_placeholder_when_version_unverifiable() {
 #[test]
 fn source_swap_failure_silent_on_verified_swap() {
     assert!(
-        source_swap_failure(
-            InstallMethod::Source,
-            true,
-            Some("0.249.0"),
-            None,
-            Some(Path::new("/src/homeboy")),
-            Some(Path::new("/src/homeboy/target/release/homeboy")),
-            None,
-            None,
-        )
+        source_swap_failure(SourceSwapVerification {
+            method: InstallMethod::Source,
+            success: true,
+            new_version: Some("0.249.0"),
+            new_build_identity: None,
+            source_workspace: Some(Path::new("/src/homeboy")),
+            built_binary: Some(Path::new("/src/homeboy/target/release/homeboy")),
+            replacement_target: None,
+            built_binary_identity: None,
+        })
         .is_none(),
         "a verified source swap is not a failure"
     );
@@ -228,27 +228,27 @@ fn source_swap_failure_silent_on_verified_swap() {
 fn source_swap_failure_ignores_non_source_methods() {
     // Non-source methods keep their soft unverified reporting; only source
     // (where the swap is part of the command's contract) fails loudly here.
-    assert!(source_swap_failure(
-        InstallMethod::Binary,
-        false,
-        Some("0.247.5"),
-        None,
-        Some(Path::new("/src/homeboy")),
-        Some(Path::new("/src/homeboy/target/release/homeboy")),
-        None,
-        None,
-    )
+    assert!(source_swap_failure(SourceSwapVerification {
+        method: InstallMethod::Binary,
+        success: false,
+        new_version: Some("0.247.5"),
+        new_build_identity: None,
+        source_workspace: Some(Path::new("/src/homeboy")),
+        built_binary: Some(Path::new("/src/homeboy/target/release/homeboy")),
+        replacement_target: None,
+        built_binary_identity: None,
+    })
     .is_none());
-    assert!(source_swap_failure(
-        InstallMethod::Secondary,
-        false,
-        Some("0.247.5"),
-        None,
-        Some(Path::new("/src/homeboy")),
-        Some(Path::new("/src/homeboy/target/release/homeboy")),
-        None,
-        None,
-    )
+    assert!(source_swap_failure(SourceSwapVerification {
+        method: InstallMethod::Secondary,
+        success: false,
+        new_version: Some("0.247.5"),
+        new_build_identity: None,
+        source_workspace: Some(Path::new("/src/homeboy")),
+        built_binary: Some(Path::new("/src/homeboy/target/release/homeboy")),
+        replacement_target: None,
+        built_binary_identity: None,
+    })
     .is_none());
 }
 
@@ -260,16 +260,16 @@ fn source_swap_failure_diagnostics_use_replacement_target_path() {
     std::fs::create_dir_all(source.join("target/release")).expect("source dirs");
     std::fs::write(&target, "old").expect("target");
 
-    let err = source_swap_failure(
-        InstallMethod::Source,
-        false,
-        Some("0.255.8"),
-        Some("homeboy 0.255.8+old"),
-        Some(&source),
-        Some(&source.join("target/release/homeboy")),
-        Some(&target),
-        Some("homeboy 0.255.8+new"),
-    )
+    let err = source_swap_failure(SourceSwapVerification {
+        method: InstallMethod::Source,
+        success: false,
+        new_version: Some("0.255.8"),
+        new_build_identity: Some("homeboy 0.255.8+old"),
+        source_workspace: Some(&source),
+        built_binary: Some(&source.join("target/release/homeboy")),
+        replacement_target: Some(&target),
+        built_binary_identity: Some("homeboy 0.255.8+new"),
+    })
     .expect("unverified source swap must surface an error");
 
     assert!(err.hints.iter().any(|hint| hint
@@ -905,16 +905,16 @@ fn verify_upgrade_with_retry_terminates_on_identity_mismatch() {
 
 #[test]
 fn source_swap_failure_includes_identity_comparison() {
-    let err = source_swap_failure(
-        InstallMethod::Source,
-        false,
-        Some("0.300.0"),
-        Some("homeboy 0.300.0+old"),
-        Some(Path::new("/src/homeboy")),
-        Some(Path::new("/src/homeboy/target/release/homeboy")),
-        Some(Path::new("/active/homeboy")),
-        Some("homeboy 0.300.0+new"),
-    )
+    let err = source_swap_failure(SourceSwapVerification {
+        method: InstallMethod::Source,
+        success: false,
+        new_version: Some("0.300.0"),
+        new_build_identity: Some("homeboy 0.300.0+old"),
+        source_workspace: Some(Path::new("/src/homeboy")),
+        built_binary: Some(Path::new("/src/homeboy/target/release/homeboy")),
+        replacement_target: Some(Path::new("/active/homeboy")),
+        built_binary_identity: Some("homeboy 0.300.0+new"),
+    })
     .expect("unverified source swap must surface an error");
 
     assert!(err

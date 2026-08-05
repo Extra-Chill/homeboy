@@ -294,13 +294,14 @@ impl AdapterDependencyProvider {
             return Ok(Vec::new());
         }
         let adapter = read_installed_dependency_adapter(&manifest_path)?;
-        Ok(adapter
-            .matches(path)
-            .then(|| adapter.providers(path))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|adapter| Self { adapter })
-            .collect())
+        Ok((if adapter.matches(path) {
+            adapter.providers(path)
+        } else {
+            Default::default()
+        })
+        .into_iter()
+        .map(|adapter| Self { adapter })
+        .collect())
     }
 
     fn load(path: &Path) -> Result<Vec<Self>> {
@@ -1337,10 +1338,11 @@ fn run_adapter_command(
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let status = output.status.code();
-    let allowed = success_exit_codes
-        .is_empty()
-        .then(|| output.status.success())
-        .unwrap_or_else(|| status.is_some_and(|code| success_exit_codes.contains(&code)));
+    let allowed = if success_exit_codes.is_empty() {
+        output.status.success()
+    } else {
+        status.is_some_and(|code| success_exit_codes.contains(&code))
+    };
     if !allowed {
         return Err(Error::validation_invalid_argument(
             "dependency_provider",

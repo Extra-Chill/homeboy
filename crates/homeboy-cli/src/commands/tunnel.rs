@@ -57,7 +57,7 @@ pub enum ServiceTunnelActionOutput {
         service_id: String,
         local_url: String,
     },
-    Status(ServiceTunnelStatus),
+    Status(Box<ServiceTunnelStatus>),
 }
 
 #[derive(Debug, Serialize)]
@@ -71,8 +71,8 @@ pub struct PreviewClientActionOutput {
 #[derive(Debug, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum PreviewIngressActionOutput {
-    Install(PreviewIngressInstallPlan),
-    InstallStatus(PreviewIngressInstallStatusPlan),
+    Install(Box<PreviewIngressInstallPlan>),
+    InstallStatus(Box<PreviewIngressInstallStatusPlan>),
     Route(PreviewIngressRoute),
     Routes { routes: Vec<PreviewIngressRoute> },
     Status(PreviewIngressStatus),
@@ -729,7 +729,7 @@ fn run_preview_ingress(command: TunnelPreviewIngressCommand) -> CmdResult<Tunnel
                     command: "tunnel.preview_ingress.install".to_string(),
                     id: Some(server_id),
                     extra: TunnelExtra {
-                        preview_ingress: Some(PreviewIngressActionOutput::Install(plan)),
+                        preview_ingress: Some(PreviewIngressActionOutput::Install(Box::new(plan))),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -745,7 +745,9 @@ fn run_preview_ingress(command: TunnelPreviewIngressCommand) -> CmdResult<Tunnel
                     command: "tunnel.preview_ingress.install_status".to_string(),
                     id: Some(server_id),
                     extra: TunnelExtra {
-                        preview_ingress: Some(PreviewIngressActionOutput::InstallStatus(status)),
+                        preview_ingress: Some(PreviewIngressActionOutput::InstallStatus(Box::new(
+                            status,
+                        ))),
                         ..Default::default()
                     },
                     ..Default::default()

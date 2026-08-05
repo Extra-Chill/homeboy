@@ -165,6 +165,13 @@ struct PathSurfaceFailure {
     exists_locally: bool,
 }
 
+struct PathFailureContext<'a> {
+    source_path: &'a Path,
+    remote_cwd: &'a str,
+    mappings: &'a [LabPathRemap],
+    failures: &'a mut Vec<PathSurfaceFailure>,
+}
+
 fn collect_path_setting_failures(
     command: &[String],
     source_path: &Path,
@@ -172,6 +179,12 @@ fn collect_path_setting_failures(
     mappings: &[LabPathRemap],
     failures: &mut Vec<PathSurfaceFailure>,
 ) {
+    let mut context = PathFailureContext {
+        source_path,
+        remote_cwd,
+        mappings,
+        failures,
+    };
     let mut iter = command.iter().peekable();
     let mut passthrough = false;
     while let Some(arg) = iter.next() {
@@ -181,15 +194,7 @@ fn collect_path_setting_failures(
         }
         if arg == "--setting" {
             if let Some(raw) = iter.next() {
-                collect_setting_pair_failures(
-                    "--setting",
-                    raw,
-                    source_path,
-                    remote_cwd,
-                    mappings,
-                    !passthrough,
-                    failures,
-                );
+                collect_setting_pair_failures("--setting", raw, !passthrough, &mut context);
             }
             continue;
         }
@@ -198,60 +203,23 @@ fn collect_path_setting_failures(
                 collect_json_setting_pair_failures(
                     "--setting-json",
                     raw,
-                    source_path,
-                    remote_cwd,
-                    mappings,
                     !passthrough,
-                    failures,
+                    &mut context,
                 );
             }
             continue;
         }
         if let Some(raw) = arg.strip_prefix("--setting=") {
-            collect_setting_pair_failures(
-                "--setting",
-                raw,
-                source_path,
-                remote_cwd,
-                mappings,
-                !passthrough,
-                failures,
-            );
+            collect_setting_pair_failures("--setting", raw, !passthrough, &mut context);
         } else if let Some(raw) = arg.strip_prefix("--setting-json=") {
-            collect_json_setting_pair_failures(
-                "--setting-json",
-                raw,
-                source_path,
-                remote_cwd,
-                mappings,
-                !passthrough,
-                failures,
-            );
+            collect_json_setting_pair_failures("--setting-json", raw, !passthrough, &mut context);
         } else if let Some((flag, value)) = arg.split_once('=') {
             if is_path_bearing_flag(flag) {
-                collect_value_path_failures(
-                    "arg",
-                    flag,
-                    value,
-                    source_path,
-                    remote_cwd,
-                    mappings,
-                    !passthrough,
-                    failures,
-                );
+                collect_value_path_failures("arg", flag, value, !passthrough, &mut context);
             }
         } else if is_path_bearing_flag(arg) {
             if let Some(value) = iter.peek() {
-                collect_value_path_failures(
-                    "arg",
-                    arg,
-                    value,
-                    source_path,
-                    remote_cwd,
-                    mappings,
-                    !passthrough,
-                    failures,
-                );
+                collect_value_path_failures("arg", arg, value, !passthrough, &mut context);
             }
         }
     }
@@ -260,11 +228,8 @@ fn collect_path_setting_failures(
 fn collect_setting_pair_failures(
     flag: &str,
     raw: &str,
-    source_path: &Path,
-    remote_cwd: &str,
-    mappings: &[LabPathRemap],
     include_existing_local: bool,
-    failures: &mut Vec<PathSurfaceFailure>,
+    context: &mut PathFailureContext<'_>,
 ) {
     let Some((key, value)) = raw.split_once('=') else {
         return;
@@ -276,22 +241,16 @@ fn collect_setting_pair_failures(
         "setting",
         &format!("{flag} {key}"),
         value,
-        source_path,
-        remote_cwd,
-        mappings,
         include_existing_local,
-        failures,
+        context,
     );
 }
 
 fn collect_json_setting_pair_failures(
     flag: &str,
     raw: &str,
-    source_path: &Path,
-    remote_cwd: &str,
-    mappings: &[LabPathRemap],
     include_existing_local: bool,
-    failures: &mut Vec<PathSurfaceFailure>,
+    context: &mut PathFailureContext<'_>,
 ) {
     let Some((key, value)) = raw.split_once('=') else {
         return;
@@ -304,21 +263,15 @@ fn collect_json_setting_pair_failures(
             "setting-json",
             &format!("{flag} {key}"),
             &json,
-            source_path,
-            remote_cwd,
-            mappings,
             include_existing_local,
-            failures,
+            context,
         ),
         Err(_) => collect_value_path_failures(
             "setting-json",
             &format!("{flag} {key}"),
             value,
-            source_path,
-            remote_cwd,
-            mappings,
             include_existing_local,
-            failures,
+            context,
         ),
     }
 }
@@ -327,34 +280,21 @@ fn collect_json_value_path_failures(
     kind: &'static str,
     surface: &str,
     value: &serde_json::Value,
-    source_path: &Path,
-    remote_cwd: &str,
-    mappings: &[LabPathRemap],
     include_existing_local: bool,
-    failures: &mut Vec<PathSurfaceFailure>,
+    context: &mut PathFailureContext<'_>,
 ) {
     match value {
-        serde_json::Value::String(text) => collect_value_path_failures(
-            kind,
-            surface,
-            text,
-            source_path,
-            remote_cwd,
-            mappings,
-            include_existing_local,
-            failures,
-        ),
+        serde_json::Value::String(text) => {
+            collect_value_path_failures(kind, surface, text, include_existing_local, context)
+        }
         serde_json::Value::Array(items) => {
             for item in items {
                 collect_json_value_path_failures(
                     kind,
                     surface,
                     item,
-                    source_path,
-                    remote_cwd,
-                    mappings,
                     include_existing_local,
-                    failures,
+                    context,
                 );
             }
         }
@@ -364,11 +304,8 @@ fn collect_json_value_path_failures(
                     kind,
                     surface,
                     item,
-                    source_path,
-                    remote_cwd,
-                    mappings,
                     include_existing_local,
-                    failures,
+                    context,
                 );
             }
         }
@@ -383,20 +320,17 @@ fn collect_path_env_failures(
     mappings: &[LabPathRemap],
     failures: &mut Vec<PathSurfaceFailure>,
 ) {
+    let mut context = PathFailureContext {
+        source_path,
+        remote_cwd,
+        mappings,
+        failures,
+    };
     for (key, value) in env {
         if !is_path_bearing_env_key(key) {
             continue;
         }
-        collect_value_path_failures(
-            "env",
-            key,
-            value,
-            source_path,
-            remote_cwd,
-            mappings,
-            true,
-            failures,
-        );
+        collect_value_path_failures("env", key, value, true, &mut context);
     }
 }
 
@@ -404,23 +338,20 @@ fn collect_value_path_failures(
     kind: &'static str,
     surface: &str,
     value: &str,
-    source_path: &Path,
-    remote_cwd: &str,
-    mappings: &[LabPathRemap],
     include_existing_local: bool,
-    failures: &mut Vec<PathSurfaceFailure>,
+    context: &mut PathFailureContext<'_>,
 ) {
     for path in path_candidates(value) {
         if !is_unmapped_controller_path(
             &path,
-            source_path,
-            remote_cwd,
-            mappings,
+            context.source_path,
+            context.remote_cwd,
+            context.mappings,
             include_existing_local,
         ) {
             continue;
         }
-        failures.push(PathSurfaceFailure {
+        context.failures.push(PathSurfaceFailure {
             kind,
             surface: surface.to_string(),
             exists_locally: expanded_path(&path).exists(),

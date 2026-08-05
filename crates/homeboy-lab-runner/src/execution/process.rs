@@ -45,6 +45,10 @@ pub(super) fn exec_local(plan: PreparedRunnerProcess) -> Result<(RunnerExecOutpu
     ))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Diagnostic SSH keeps secret, path, timeout, and run-identity boundaries explicit."
+)]
 pub(super) fn exec_diagnostic_ssh(
     runner: &Runner,
     cwd: String,
@@ -471,6 +475,10 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::items_after_test_module,
+    reason = "Production process helpers remain below focused tests after the staged source split."
+)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Barrier};
@@ -1141,6 +1149,10 @@ pub(super) fn command_output(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Cancellation, progress, child identity, redaction, and resource guard inputs are independently security-relevant."
+)]
 pub(super) fn command_output_until_cancelled_with_progress(
     command: &mut std::process::Command,
     is_cancelled: impl FnMut() -> bool,

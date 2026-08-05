@@ -78,16 +78,16 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             fingerprints,
         } => map_registry(policy::update(
             &runner_id,
-            policy::RunnerPolicyPatch::trust(
-                peers,
-                fingerprints,
-                projects,
-                commands,
+            policy::RunnerPolicyPatch {
+                accepted_peer_ids: peers,
+                accepted_peer_fingerprints: fingerprints,
+                allowed_projects: projects,
+                allowed_commands: commands,
                 allow_raw_exec,
                 allow_homeboy_convergence,
                 workspace_roots,
                 artifact_policy,
-            ),
+            },
             "runner.trust",
         )),
         RunnerCommand::Pair {
@@ -131,7 +131,7 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             },
         )),
         RunnerCommand::Preflight { request } => Ok((
-            RunnerCommandOutput::Preflight(runner::placement_readiness(
+            RunnerCommandOutput::Preflight(Box::new(runner::placement_readiness(
                 &serde_json::from_str(&request).map_err(|error| {
                     homeboy::core::Error::validation_invalid_argument(
                         "request",
@@ -140,7 +140,7 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
                         None,
                     )
                 })?,
-            )?),
+            )?)),
             0,
         )),
         RunnerCommand::Connect {
@@ -296,8 +296,9 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             run_id,
             status,
             exit_code,
-        } => lifecycle::lifecycle(runner_id, workspace, job_id, run_id, status, exit_code)
-            .map(|(output, exit_code)| (RunnerCommandOutput::Lifecycle(output), exit_code)),
+        } => lifecycle::lifecycle(runner_id, workspace, job_id, run_id, status, exit_code).map(
+            |(output, exit_code)| (RunnerCommandOutput::Lifecycle(Box::new(output)), exit_code),
+        ),
         RunnerCommand::Job { command } => map_job(jobs::job(command)),
         RunnerCommand::Work {
             runner_id,
@@ -329,12 +330,15 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
                 broker_retry_limit,
             }))
         }
-        RunnerCommand::Workspace { command } => workspace::run(command)
-            .map(|(output, exit_code)| (RunnerCommandOutput::Workspace(output), exit_code)),
+        RunnerCommand::Workspace { command } => {
+            workspace::run(command).map(|(output, exit_code)| {
+                (RunnerCommandOutput::Workspace(Box::new(output)), exit_code)
+            })
+        }
         RunnerCommand::RefreshPlan(args) => refresh_plan::refresh_plan(args)
-            .map(|output| (RunnerCommandOutput::RefreshPlan(output), 0)),
+            .map(|output| (RunnerCommandOutput::RefreshPlan(Box::new(output)), 0)),
         RunnerCommand::Broker { command } => {
-            run_broker(command).map(|output| (RunnerCommandOutput::Broker(output), 0))
+            run_broker(command).map(|output| (RunnerCommandOutput::Broker(Box::new(output)), 0))
         }
     }
 }
@@ -537,7 +541,7 @@ fn run_json_exec(
         )
         .map(|(output, exit_code)| {
             (
-                RunnerCommandOutput::Execution(runner_exec_command_output(output)),
+                RunnerCommandOutput::Execution(Box::new(runner_exec_command_output(output))),
                 exit_code,
             )
         }),
@@ -719,7 +723,7 @@ pub(super) fn run_compact_exec(
 pub(super) fn compact_exec_command_run(output: RunnerExecOutput, exit_code: i32) -> CommandRun {
     let compact_stdout = render_compact_exec_output(&output);
     let (output_file_result, _) = crate::commands::utils::response::map_cmd_result_to_json(Ok((
-        RunnerCommandOutput::Execution(runner_exec_command_output(output)),
+        RunnerCommandOutput::Execution(Box::new(runner_exec_command_output(output))),
         exit_code,
     )));
 
@@ -789,7 +793,7 @@ pub(super) fn raw_exec_command_run(output: RunnerExecOutput, exit_code: i32) -> 
     let presentation_stdout = output.stdout.clone();
     let presentation_stderr = output.stderr.clone();
     let (stdout_result, _) = crate::commands::utils::response::map_cmd_result_to_json(Ok((
-        RunnerCommandOutput::Execution(runner_exec_command_output(output)),
+        RunnerCommandOutput::Execution(Box::new(runner_exec_command_output(output))),
         exit_code,
     )));
 
@@ -805,7 +809,7 @@ pub(super) fn map_registry(result: CmdResult<RunnerOutput>) -> CmdResult<RunnerC
     result.map(|(mut output, exit_code)| {
         registry::redact_runner_output_env(&mut output);
         output.extra.variant = runner_variant_from_command(&output.command);
-        (RunnerCommandOutput::Registry(output), exit_code)
+        (RunnerCommandOutput::Registry(Box::new(output)), exit_code)
     })
 }
 
@@ -827,13 +831,13 @@ fn runner_variant_from_command(command: &str) -> &'static str {
 }
 
 fn map_doctor(result: CmdResult<doctor::RunnerDoctorOutput>) -> CmdResult<RunnerCommandOutput> {
-    result.map(|(output, exit_code)| (RunnerCommandOutput::Doctor(output), exit_code))
+    result.map(|(output, exit_code)| (RunnerCommandOutput::Doctor(Box::new(output)), exit_code))
 }
 
 fn map_execution(result: CmdResult<RunnerExecOutput>) -> CmdResult<RunnerCommandOutput> {
     result.map(|(output, exit_code)| {
         (
-            RunnerCommandOutput::Execution(runner_exec_command_output(output)),
+            RunnerCommandOutput::Execution(Box::new(runner_exec_command_output(output))),
             exit_code,
         )
     })
@@ -924,10 +928,9 @@ fn map_refresh_homeboy(
             metadata
         });
         (
-            RunnerCommandOutput::RefreshHomeboy(super::types::RunnerRefreshHomeboyCommandOutput {
-                output,
-                actionable,
-            }),
+            RunnerCommandOutput::RefreshHomeboy(Box::new(
+                super::types::RunnerRefreshHomeboyCommandOutput { output, actionable },
+            )),
             exit_code,
         )
     })
@@ -936,17 +939,30 @@ fn map_refresh_homeboy(
 fn map_dev_sync(
     result: homeboy::core::Result<(runner::RunnerDevSyncOutput, i32)>,
 ) -> CmdResult<RunnerCommandOutput> {
-    result.map(|(output, exit_code)| (RunnerCommandOutput::DevSync(output), exit_code))
+    result.map(|(output, exit_code)| (RunnerCommandOutput::DevSync(Box::new(output)), exit_code))
 }
 
 fn map_cache_prune(
     result: homeboy::core::Result<(runner::RunnerBinaryCachePruneOutput, i32)>,
 ) -> CmdResult<RunnerCommandOutput> {
-    result.map(|(output, exit_code)| (RunnerCommandOutput::CachePrune(output), exit_code))
+    result.map(|(output, exit_code)| (RunnerCommandOutput::CachePrune(Box::new(output)), exit_code))
 }
 
 fn map_env(result: CmdResult<RunnerEnvOutput>) -> CmdResult<RunnerCommandOutput> {
-    result.map(|(output, exit_code)| (RunnerCommandOutput::Env(output), exit_code))
+    result.map(|(output, exit_code)| (RunnerCommandOutput::Env(Box::new(output)), exit_code))
+}
+
+fn map_job(result: CmdResult<RunnerJobCommandOutput>) -> CmdResult<RunnerCommandOutput> {
+    result.map(|(output, exit_code)| match output {
+        RunnerJobCommandOutput::Daemon(output) => (RunnerCommandOutput::Job(output), exit_code),
+        RunnerJobCommandOutput::Broker(output) => {
+            (RunnerCommandOutput::BrokerJob(Box::new(output)), exit_code)
+        }
+    })
+}
+
+fn map_worker(result: CmdResult<ReverseRunnerWorkerOutput>) -> CmdResult<RunnerCommandOutput> {
+    result.map(|(output, exit_code)| (RunnerCommandOutput::Worker(Box::new(output)), exit_code))
 }
 
 #[cfg(test)]
@@ -1018,17 +1034,4 @@ mod tests {
             .iter()
             .any(|action| action["command"] == "homeboy retry"));
     }
-}
-
-fn map_job(result: CmdResult<RunnerJobCommandOutput>) -> CmdResult<RunnerCommandOutput> {
-    result.map(|(output, exit_code)| match output {
-        RunnerJobCommandOutput::Daemon(output) => (RunnerCommandOutput::Job(output), exit_code),
-        RunnerJobCommandOutput::Broker(output) => {
-            (RunnerCommandOutput::BrokerJob(output), exit_code)
-        }
-    })
-}
-
-fn map_worker(result: CmdResult<ReverseRunnerWorkerOutput>) -> CmdResult<RunnerCommandOutput> {
-    result.map(|(output, exit_code)| (RunnerCommandOutput::Worker(output), exit_code))
 }

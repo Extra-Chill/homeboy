@@ -144,6 +144,8 @@ pub fn with_config_lock_for<T>(
 
     let lock_file = OpenOptions::new()
         .create(true)
+        // Lock contents identify the current holder, so opening must preserve them.
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)

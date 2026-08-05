@@ -289,6 +289,7 @@ fn expand_rig_setting_value(spec: &RigSpec, value: &mut serde_json::Value) {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

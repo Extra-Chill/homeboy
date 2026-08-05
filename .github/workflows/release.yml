@@ -365,7 +365,7 @@ jobs:
           ref: ${{ github.sha }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -658,7 +658,7 @@ jobs:
       # after bumping Cargo.toml version
       - name: Install Rust toolchain
         if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Preflight release workspace build
         if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'

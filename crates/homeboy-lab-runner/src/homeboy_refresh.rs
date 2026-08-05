@@ -2537,7 +2537,7 @@ fn protect_active_jobs_before_reconnect(
     force: bool,
 ) -> Result<Vec<String>> {
     let job_ids = active_jobs
-        .into_iter()
+        .iter()
         .map(|job| job.job_id.clone())
         .collect::<Vec<_>>();
     if !job_ids.is_empty() && !force {

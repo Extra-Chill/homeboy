@@ -15,6 +15,25 @@ pub use run::{
 
 use homeboy_core::engine::run_dir::RunDir;
 
+pub type LintStringSettings = Vec<(String, String)>;
+pub type LintJsonSettings = Vec<(String, serde_json::Value)>;
+
+pub struct LintRunnerRequest<'a> {
+    pub component: &'a Component,
+    pub path_override: Option<String>,
+    pub settings: &'a [(String, serde_json::Value)],
+    pub summary: bool,
+    pub file: Option<&'a str>,
+    pub glob: Option<&'a str>,
+    pub errors_only: bool,
+    pub sniffs: Option<&'a str>,
+    pub exclude_sniffs: Option<&'a str>,
+    pub category: Option<&'a str>,
+    pub step: Option<&'a str>,
+    pub changed_files: Option<&'a [String]>,
+    pub run_dir: &'a RunDir,
+}
+
 pub fn resolve_lint_command(
     component: &Component,
 ) -> homeboy_core::error::Result<ExtensionExecutionContext> {
@@ -54,24 +73,9 @@ pub fn declares_lint_findings_sidecar(component: &Component) -> bool {
         .any(|declaration| declaration.name == LINT_FINDINGS_SIDECAR)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn build_lint_runner(
-    component: &Component,
-    path_override: Option<String>,
-    settings: &[(String, serde_json::Value)],
-    summary: bool,
-    file: Option<&str>,
-    glob: Option<&str>,
-    errors_only: bool,
-    sniffs: Option<&str>,
-    exclude_sniffs: Option<&str>,
-    category: Option<&str>,
-    step: Option<&str>,
-    changed_files: Option<&[String]>,
-    run_dir: &RunDir,
-) -> homeboy_core::Result<ExtensionRunner> {
-    let resolved = resolve_lint_command(component)?;
-    let (string_settings, json_settings) = split_lint_settings(settings);
+pub fn build_lint_runner(request: LintRunnerRequest<'_>) -> homeboy_core::Result<ExtensionRunner> {
+    let resolved = resolve_lint_command(request.component)?;
+    let (string_settings, json_settings) = split_lint_settings(request.settings);
 
     // Additive: hand the runner core's authoritative changed-file list, resolved
     // via the three-dot merge-base diff in `get_files_changed_since`. Downstream
@@ -79,29 +83,29 @@ pub fn build_lint_runner(
     // re-deriving a weaker two-dot diff. Leaves the var unset for full/glob runs,
     // so existing `HOMEBOY_LINT_GLOB`/`HOMEBOY_LINT_FILE`/`HOMEBOY_CHANGED_SINCE`
     // semantics are untouched.
-    let changed_files_file = write_changed_files_manifest(run_dir, changed_files)?;
+    let changed_files_file = write_changed_files_manifest(request.run_dir, request.changed_files)?;
 
     Ok(ExtensionRunner::for_context(resolved)
-        .component(component.clone())
-        .path_override(path_override)
+        .component(request.component.clone())
+        .path_override(request.path_override)
         .settings(&string_settings)
         .settings_json(&json_settings)
-        .with_run_dir(run_dir)
+        .with_run_dir(request.run_dir)
         // Summary mode captures the lint/clippy stream into evidence rather than
         // tee-ing the full warning output to the terminal, so `--summary` renders
         // only the compact findings envelope on large repositories (#9845).
-        .passthrough(!summary)
-        .env_if(summary, "HOMEBOY_SUMMARY_MODE", "1")
-        .env_opt("HOMEBOY_LINT_FILE", &file.map(str::to_string))
-        .env_opt("HOMEBOY_LINT_GLOB", &glob.map(str::to_string))
-        .env_if(errors_only, "HOMEBOY_ERRORS_ONLY", "1")
-        .env_opt("HOMEBOY_SNIFFS", &sniffs.map(str::to_string))
-        .env_opt("HOMEBOY_STEP", &step.map(str::to_string))
+        .passthrough(!request.summary)
+        .env_if(request.summary, "HOMEBOY_SUMMARY_MODE", "1")
+        .env_opt("HOMEBOY_LINT_FILE", &request.file.map(str::to_string))
+        .env_opt("HOMEBOY_LINT_GLOB", &request.glob.map(str::to_string))
+        .env_if(request.errors_only, "HOMEBOY_ERRORS_ONLY", "1")
+        .env_opt("HOMEBOY_SNIFFS", &request.sniffs.map(str::to_string))
+        .env_opt("HOMEBOY_STEP", &request.step.map(str::to_string))
         .env_opt(
             "HOMEBOY_EXCLUDE_SNIFFS",
-            &exclude_sniffs.map(str::to_string),
+            &request.exclude_sniffs.map(str::to_string),
         )
-        .env_opt("HOMEBOY_CATEGORY", &category.map(str::to_string))
+        .env_opt("HOMEBOY_CATEGORY", &request.category.map(str::to_string))
         .env_opt("HOMEBOY_LINT_CHANGED_FILES_FILE", &changed_files_file))
 }
 
@@ -135,7 +139,7 @@ fn write_changed_files_manifest(
 
 fn split_lint_settings(
     settings: &[(String, serde_json::Value)],
-) -> (Vec<(String, String)>, Vec<(String, serde_json::Value)>) {
+) -> (LintStringSettings, LintJsonSettings) {
     settings
         .iter()
         .cloned()

@@ -1615,9 +1615,7 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     Ok(value)
 }
 
-fn manual_finalization_run_ids<'a>(
-    recipe: &'a super::cook_recipe::AgentTaskCookRecipe,
-) -> Vec<&'a str> {
+fn manual_finalization_run_ids(recipe: &super::cook_recipe::AgentTaskCookRecipe) -> Vec<&str> {
     recipe
         .attempts
         .iter()

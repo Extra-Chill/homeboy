@@ -110,7 +110,7 @@ pub struct ContractShowArgs {
 #[serde(untagged)]
 pub enum ContractOutput {
     Export(ContractExportOutput),
-    Constants(ContractConstantsOutput),
+    Constants(Box<ContractConstantsOutput>),
     List(ContractListOutput),
     Show(ContractShowOutput),
     Validate(ContractValidateOutput),
@@ -227,7 +227,7 @@ pub enum ContractNormalizeOutput {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ContractMaterializeOutput {
     SecretEnvHandoff(SecretEnvMaterializedHandoff),
-    SecretEnvPlan(SecretEnvPlanMaterialization),
+    SecretEnvPlan(Box<SecretEnvPlanMaterialization>),
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -484,7 +484,7 @@ fn constants(contract_id: &str) -> CmdResult<ContractOutput> {
         )
     })?;
 
-    Ok((ContractOutput::Constants(output), 0))
+    Ok((ContractOutput::Constants(Box::new(output)), 0))
 }
 
 fn normalize(args: ContractNormalizeArgs) -> Result<ContractNormalizeOutput> {
@@ -516,9 +516,9 @@ fn materialize(args: ContractMaterializeArgs) -> Result<ContractMaterializeOutpu
         ContractMaterializeKind::SecretEnvHandoff => {
             materialize_secret_env_handoff(value).map(ContractMaterializeOutput::SecretEnvHandoff)
         }
-        ContractMaterializeKind::SecretEnvPlan => {
-            materialize_secret_env_plan(value).map(ContractMaterializeOutput::SecretEnvPlan)
-        }
+        ContractMaterializeKind::SecretEnvPlan => materialize_secret_env_plan(value)
+            .map(Box::new)
+            .map(ContractMaterializeOutput::SecretEnvPlan),
     }
 }
 

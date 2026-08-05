@@ -46,6 +46,10 @@ pub(super) fn claim_job(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Progress must carry the exact claim and workspace lease bindings that authorize the event."
+)]
 pub(super) fn append_progress_data(
     client: &Client,
     broker_url: &str,
@@ -75,6 +79,10 @@ pub(super) fn append_progress_data(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Terminal result submission preserves independently verified claim and workspace lease bindings."
+)]
 pub(super) fn finish_job(
     client: &Client,
     broker_url: &str,
@@ -109,6 +117,10 @@ pub(super) fn finish_job(
     Ok(job)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Receipt consumption must keep its context, claim, and workspace lease evidence distinct."
+)]
 pub(super) fn consume_execution(
     client: &Client,
     broker_url: &str,
@@ -177,6 +189,10 @@ pub(super) fn validate_workspace_owner(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Lease renewal carries every current authorization binding to prevent stale-owner renewal."
+)]
 fn renew_claim(
     client: &Client,
     broker_url: &str,

@@ -190,13 +190,11 @@ pub fn validate_dependency_materialization_steps(rig: &RigSpec) -> Vec<String> {
             (None, None) => errors.push(format!(
                 "{context} must declare exactly one of command or provider"
             )),
-            (Some(command), None) => {
-                if command_starts_with_env_assignment(command) {
-                    errors.push(format!(
-                        "{context} command must not start with shell-style environment assignments; declare environment values in env instead"
-                    ));
-                }
-            }
+            (Some(command), None) if command_starts_with_env_assignment(command) => errors.push(
+                format!(
+                    "{context} command must not start with shell-style environment assignments; declare environment values in env instead"
+                ),
+            ),
             _ => {}
         }
 

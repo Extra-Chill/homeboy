@@ -263,9 +263,9 @@ pub struct ArtifactSourceAuthorityOutput {
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum ReleaseCommandOutput {
-    Single(ReleaseOutput),
+    Single(Box<ReleaseOutput>),
     Batch(BatchReleaseOutput),
-    Package(ReleasePackageOutput),
+    Package(Box<ReleasePackageOutput>),
     ArtifactSourceAuthority(ArtifactSourceAuthorityOutput),
     Changes(changes::ChangesCommandOutput),
     Changelog(changelog::ChangelogOutput),
@@ -367,52 +367,6 @@ impl ReleaseExecuteArgs {
     }
 }
 
-#[cfg(test)]
-impl ReleaseExecuteArgs {
-    /// Construct ReleaseExecuteArgs programmatically for tests and internal callers.
-    fn from_parts(
-        components: Vec<String>,
-        project: Option<String>,
-        outdated: bool,
-        path: Option<String>,
-        dry_run: bool,
-        deploy: bool,
-        recover: bool,
-        head: bool,
-        from_artifacts: Option<String>,
-        skip_checks: bool,
-        skip_publish: bool,
-        bump: Option<String>,
-    ) -> Self {
-        Self {
-            components,
-            project,
-            outdated,
-            path,
-            dry_run_args: DryRunArgs { dry_run },
-            apply: false,
-            deploy,
-            recover,
-            owner_run_ref: None,
-            retag: false,
-            head,
-            from_artifacts,
-            package_only: false,
-            tag: None,
-            skip_checks: if skip_checks { Some(Vec::new()) } else { None },
-            skip_build_validation: false,
-            bump,
-            force_lower_bump: false,
-            skip_publish,
-            no_github_release: false,
-            i_know_ci_creates_the_github_release: false,
-            i_know_this_is_a_manual_tag_only_release: false,
-            git_identity: None,
-            cascade: false,
-        }
-    }
-}
-
 pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
     match args.command {
         Some(ReleaseSubcommand::Changes(args)) => {
@@ -489,13 +443,13 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
         let cascade = run_cascade_if_requested(&args, component_id, &result, &input)?;
 
         return Ok((
-            ReleaseCommandOutput::Single(ReleaseOutput {
+            ReleaseCommandOutput::Single(Box::new(ReleaseOutput {
                 variant: "single",
                 actionable: recovery_actionable_metadata(&result),
                 result,
                 workspace: workspace_result.workspace,
                 cascade,
-            }),
+            })),
             exit_code,
         ));
     }
@@ -701,10 +655,10 @@ fn run_package_only(
     )?;
 
     Ok((
-        ReleaseCommandOutput::Package(ReleasePackageOutput {
+        ReleaseCommandOutput::Package(Box::new(ReleasePackageOutput {
             variant: "package",
             result,
-        }),
+        })),
         0,
     ))
 }
@@ -1007,20 +961,32 @@ mod tests {
     use super::*;
 
     fn args(components: &[&str]) -> ReleaseExecuteArgs {
-        ReleaseExecuteArgs::from_parts(
-            components.iter().map(|value| value.to_string()).collect(),
-            None,
-            false,
-            None,
-            true,
-            false,
-            false,
-            false,
-            None,
-            false,
-            false,
-            None,
-        )
+        ReleaseExecuteArgs {
+            components: components.iter().map(|value| value.to_string()).collect(),
+            project: None,
+            outdated: false,
+            path: None,
+            dry_run_args: DryRunArgs { dry_run: true },
+            apply: false,
+            deploy: false,
+            recover: false,
+            owner_run_ref: None,
+            retag: false,
+            head: false,
+            from_artifacts: None,
+            package_only: false,
+            tag: None,
+            skip_checks: None,
+            skip_build_validation: false,
+            bump: None,
+            force_lower_bump: false,
+            skip_publish: false,
+            no_github_release: false,
+            i_know_ci_creates_the_github_release: false,
+            i_know_this_is_a_manual_tag_only_release: false,
+            git_identity: None,
+            cascade: false,
+        }
     }
 
     #[test]

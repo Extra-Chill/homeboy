@@ -5,7 +5,6 @@
 //! inputs after individual argument transforms.
 
 use super::*;
-use homeboy_rig;
 
 pub(crate) struct PathMaterializationPlanner {
     pub(crate) args: Vec<String>,

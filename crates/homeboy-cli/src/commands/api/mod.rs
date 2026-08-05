@@ -94,13 +94,15 @@ pub(crate) enum ApiCommand {
 #[serde(untagged)]
 pub enum ApiCommandOutput {
     Project(api::ApiOutput),
-    Auth(auth::AuthOutput),
+    Auth(Box<auth::AuthOutput>),
     Http(homeboy::core::http_request::HttpRequestOutput),
 }
 
 pub fn run(args: ApiArgs) -> CmdResult<ApiCommandOutput> {
     match args.command {
-        ApiCommand::Auth(args) => map_nested(auth::run(args), ApiCommandOutput::Auth),
+        ApiCommand::Auth(args) => map_nested(auth::run(args), |output| {
+            ApiCommandOutput::Auth(Box::new(output))
+        }),
         ApiCommand::Http(args) => map_nested(http::run(args), ApiCommandOutput::Http),
         command => run_project(ApiArgs { command })
             .map(|(output, code)| (ApiCommandOutput::Project(output), code)),

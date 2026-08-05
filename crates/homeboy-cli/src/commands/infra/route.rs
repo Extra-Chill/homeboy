@@ -335,7 +335,7 @@ pub fn route_after_parse_with_provenance(
         lab_route_source_path_args(&cli.command, normalized_args, capture_mutation_patch);
     let routed_args = rewritten_args.as_deref().unwrap_or(normalized_args);
     let generic_detached_source_path = needs_generic_detached_handoff
-        .then(|| source_path_for_generic_detached_lab_handoff(&normalized_args))
+        .then(|| source_path_for_generic_detached_lab_handoff(normalized_args))
         .transpose()?;
     // Resolve this once on the controller. The decision records the same source
     // worktree that will be snapshotted, never an ambient identity inferred by a
@@ -822,7 +822,7 @@ fn run_split_placement_fanout(
                 ),
         }) if args.run_plan => {
             crate::commands::agent_task::fanout::cook_batch_with_attempt_dispatcher(
-                args.clone(),
+                *args.clone(),
                 &attempt_dispatcher,
             )?
         }
@@ -1033,7 +1033,7 @@ fn run_split_placement_cook(
     };
     let (value, exit_code) =
         crate::commands::agent_task::run::run_cook_with_executor_and_dispatcher_with_progress(
-            controller,
+            *controller,
             homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
             Some(dispatcher),
             Some(&progress),
@@ -1128,7 +1128,7 @@ pub(crate) fn reconstruct_cook_attempt_dispatcher(
             recipe
                 .get("detach_after_handoff")
                 .cloned()
-                .unwrap_or_else(|| serde_json::json!(false)),
+                .unwrap_or(serde_json::json!(false)),
         )?,
         source_path: decode_cook_dispatch_field("source_path", value("source_path")?)?,
         job_overrides: runners::LabJobOverrides {
@@ -1718,7 +1718,7 @@ fn materialize_agent_task_cook_plan(
     else {
         return Ok(None);
     };
-    let cook = crate::commands::agent_task::run::resolve_cook_destination(cook.clone())?;
+    let cook = crate::commands::agent_task::run::resolve_cook_destination(*cook.clone())?;
     crate::commands::agent_task::run::validate_cook_request_with_provenance(&cook, provenance)?;
     let provision = crate::commands::agent_task::run::provision_cook_destination(&cook)?;
     let mut plan = crate::commands::agent_task::run::compile_cook_plan(&cook, provision)?;
@@ -3025,7 +3025,7 @@ fn agent_task_fanout_cook_batch_dispatch_id(
             .issues
             .first()
             .and_then(|issue| issue.split_once("/issues/").map(|(_, number)| number))
-            .and_then(|number| number.split(|c| matches!(c, '/' | '?' | '#')).next())
+            .and_then(|number| number.split(['/', '?', '#']).next())
             .filter(|value| !value.is_empty())
             .unwrap_or("batch");
         format!(

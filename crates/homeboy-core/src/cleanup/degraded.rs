@@ -265,11 +265,9 @@ pub fn degraded_cleanup(
     store: StoreAvailability,
     reason: impl Into<String>,
 ) -> DegradedCleanupOutcome {
-    let mut categories = Vec::new();
-
     // The only category that genuinely reclaims with the store shut. It never
     // consults the database in either direction.
-    categories.push(
+    let categories = vec![
         match runs_service::cleanup_orphaned_artifact_bytes(OrphanedArtifactBytesCleanupOptions {
             apply: options.apply,
             limit: options.limit,
@@ -286,12 +284,9 @@ pub fn degraded_cleanup(
             },
             Err(error) => DegradedCleanupCategory::failed("orphaned-artifact-bytes", true, error),
         },
-    );
-
-    // Ownership is a filename prefix plus a liveness probe on the owning PID.
-    // Neither reads a row, and both stay available on a filesystem that has
-    // nothing left to give.
-    categories.push(
+        // Ownership is a filename prefix plus a liveness probe on the owning PID.
+        // Neither reads a row, and both stay available on a filesystem that has
+        // nothing left to give.
         match cleanup_leaked_test_homes(LeakedTestHomeCleanupOptions {
             apply: options.apply,
             min_age: options.leaked_test_home_min_age,
@@ -311,11 +306,8 @@ pub fn degraded_cleanup(
             },
             Err(error) => DegradedCleanupCategory::failed("leaked-test-homes", true, error),
         },
-    );
-
-    // Its store read is an advisory protection that fails open, and its real
-    // liveness signals (owner PID, invocation lease) are filesystem-local.
-    categories.push(
+        // Its store read is an advisory protection that fails open, and its real
+        // liveness signals (owner PID, invocation lease) are filesystem-local.
         match temp::cleanup_runtime_tmp_bounded(RuntimeTempCleanupOptions {
             apply: options.apply,
             older_than_days: options.runtime_tmp_days,
@@ -338,12 +330,9 @@ pub fn degraded_cleanup(
             },
             Err(error) => DegradedCleanupCategory::failed("runtime-tmp", true, error),
         },
-    );
-
-    // Runs safely, reclaims nothing: its liveness veto fails closed, so a
-    // closed store retains every candidate. Reported so the retained bytes stay
-    // visible instead of vanishing from the degraded report entirely.
-    categories.push(
+        // Runs safely, reclaims nothing: its liveness veto fails closed, so a
+        // closed store retains every candidate. Reported so the retained bytes stay
+        // visible instead of vanishing from the degraded report entirely.
         match runs_service::cleanup_runner_downloads(RunnerDownloadCleanupOptions {
             apply: options.apply,
             runner: None,
@@ -367,7 +356,7 @@ pub fn degraded_cleanup(
             },
             Err(error) => DegradedCleanupCategory::failed("runner-downloads", false, error),
         },
-    );
+    ];
 
     DegradedCleanupOutcome {
         command: "cleanup.degraded",

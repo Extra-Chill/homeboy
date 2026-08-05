@@ -93,16 +93,16 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
     let candidate_path = output_dir.join("candidate.aggregate.json");
     let summary_path = output_dir.join("summary.md");
 
-    let mut compare = compare_trace_aggregates_with_focus(
-        &baseline_path,
-        aggregate_to_compare_input(&baseline_aggregate),
-        &candidate_path,
-        aggregate_to_compare_input(&candidate_aggregate),
-        &args.focus_spans,
-        args.regression_threshold,
-        args.regression_min_delta_ms,
-        &args.metric_guardrails,
-    );
+    let mut compare = compare_trace_aggregates_with_focus(super::output::TraceCompareRequest {
+        before_path: &baseline_path,
+        before: aggregate_to_compare_input(&baseline_aggregate),
+        after_path: &candidate_path,
+        after: aggregate_to_compare_input(&candidate_aggregate),
+        focus_span_ids: &args.focus_spans,
+        regression_threshold_percent: args.regression_threshold,
+        regression_min_delta_ms: args.regression_min_delta_ms,
+        metric_guardrail_specs: &args.metric_guardrails,
+    });
     compare.before_target = Some(baseline_target.input.clone());
     compare.after_target = Some(candidate_target.input.clone());
     compare.before_git_sha = baseline_target.git_sha;
@@ -201,7 +201,7 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
         }),
     );
     Ok((
-        TraceCommandOutput::Compare(compare),
+        TraceCommandOutput::Compare(Box::new(compare)),
         if failed { 1 } else { 0 },
     ))
 }

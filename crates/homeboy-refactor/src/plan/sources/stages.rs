@@ -313,21 +313,21 @@ pub(super) fn run_lint_stage(
     // Helper: build the lint runner with the current stage options.
     // Used by both the diagnostic pass and the fix-only pass.
     let build_lint_runner = |effective_glob: Option<&str>, step: Option<&str>| {
-        extension::lint::build_lint_runner(
+        extension::lint::build_lint_runner(extension::lint::LintRunnerRequest {
             component,
-            None,
+            path_override: None,
             settings,
-            false,
-            options.file.as_deref(),
-            effective_glob,
-            options.sniff_filters.errors_only,
-            options.sniff_filters.sniffs.as_deref(),
-            options.sniff_filters.exclude_sniffs.as_deref(),
-            options.category.as_deref(),
+            summary: false,
+            file: options.file.as_deref(),
+            glob: effective_glob,
+            errors_only: options.sniff_filters.errors_only,
+            sniffs: options.sniff_filters.sniffs.as_deref(),
+            exclude_sniffs: options.sniff_filters.exclude_sniffs.as_deref(),
+            category: options.category.as_deref(),
             step,
-            None,
+            changed_files: None,
             run_dir,
-        )
+        })
     };
 
     // ── Phase 1: Diagnose ──────────────────────────────────────────────
@@ -712,9 +712,12 @@ pub(super) fn run_test_stage(
     })
 }
 
+type StringSettings = Vec<(String, String)>;
+type JsonSettings = Vec<(String, serde_json::Value)>;
+
 fn split_refactor_settings(
     settings: &[(String, serde_json::Value)],
-) -> (Vec<(String, String)>, Vec<(String, serde_json::Value)>) {
+) -> (StringSettings, JsonSettings) {
     settings
         .iter()
         .cloned()

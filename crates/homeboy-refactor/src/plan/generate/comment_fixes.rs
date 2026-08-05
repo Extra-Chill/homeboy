@@ -284,8 +284,8 @@ fn classify_and_bound(lines: &[&str], comment_idx: usize) -> (BlockKind, usize, 
 
 /// Find the next non-blank, non-comment line starting from `start_idx`.
 fn find_next_code_line(lines: &[&str], start_idx: usize) -> Option<usize> {
-    for i in start_idx..lines.len() {
-        let trimmed = lines[i].trim();
+    for (i, line) in lines.iter().enumerate().skip(start_idx) {
+        let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
@@ -383,8 +383,8 @@ fn find_enclosing_else_end(lines: &[&str], comment_idx: usize) -> Option<usize> 
     if trimmed.starts_with("} else") || trimmed.starts_with("}else") {
         // The else block opened on this line — find its close starting from the next line.
         let mut depth = 1i32; // the `{` from `} else {`
-        for i in (else_start + 1)..lines.len() {
-            for ch in lines[i].chars() {
+        for (i, line) in lines.iter().enumerate().skip(else_start + 1) {
+            for ch in line.chars() {
                 match ch {
                     '{' => depth += 1,
                     '}' => {
@@ -410,8 +410,8 @@ fn find_brace_block_end(lines: &[&str], start_idx: usize) -> Option<usize> {
     let mut depth = 0i32;
     let mut found_opening = false;
 
-    for i in start_idx..lines.len() {
-        for ch in lines[i].chars() {
+    for (i, line) in lines.iter().enumerate().skip(start_idx) {
+        for ch in line.chars() {
             match ch {
                 '{' => {
                     depth += 1;
@@ -496,8 +496,8 @@ fn find_match_arm_end(lines: &[&str], arm_idx: usize) -> Option<usize> {
     let arm_indent = leading_indent(lines[arm_idx]);
     let mut end = arm_idx;
 
-    for i in (arm_idx + 1)..lines.len() {
-        let trimmed = lines[i].trim();
+    for (i, line) in lines.iter().enumerate().skip(arm_idx + 1) {
+        let trimmed = line.trim();
 
         // Next arm or end of match.
         if trimmed.contains("=>") || trimmed == "}" {
@@ -510,7 +510,7 @@ fn find_match_arm_end(lines: &[&str], arm_idx: usize) -> Option<usize> {
         }
 
         // Lines at same or lower indent are outside this arm.
-        if leading_indent(lines[i]) <= arm_indent && !trimmed.is_empty() {
+        if leading_indent(line) <= arm_indent && !trimmed.is_empty() {
             break;
         }
 
@@ -526,15 +526,15 @@ fn find_code_section_end(lines: &[&str], comment_idx: usize) -> usize {
     let base_indent = leading_indent(lines[comment_idx]);
     let mut end = comment_idx;
 
-    for i in (comment_idx + 1)..lines.len() {
-        let trimmed = lines[i].trim();
+    for (i, line) in lines.iter().enumerate().skip(comment_idx + 1) {
+        let trimmed = line.trim();
 
         // Blank line ends the section.
         if trimmed.is_empty() {
             break;
         }
 
-        let indent = leading_indent(lines[i]);
+        let indent = leading_indent(line);
 
         // De-indent means we've left the section.
         if indent < base_indent {

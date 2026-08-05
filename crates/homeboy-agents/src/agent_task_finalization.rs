@@ -831,6 +831,10 @@ fn publication_proof(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "finalization report preserves independently persisted publication proof fields"
+)]
 fn report(
     options: &AgentTaskPrFinalizationOptions,
     mut publication_intent: AgentTaskPublicationIntent,
@@ -1050,6 +1054,10 @@ fn durable_model(lifecycle: &RunLifecycleRecord) -> Result<String> {
     Ok(model)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "outcome fields mirror the durable finalization schema"
+)]
 fn finalization_outcome(
     intent: &AgentTaskPublicationIntent,
     publication_proof: &AgentTaskPublicationProof,

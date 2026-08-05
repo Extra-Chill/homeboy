@@ -279,7 +279,7 @@ pub fn resolve_path(path: &Path) -> Result<ProjectPathResolutionReport> {
         }
     }
 
-    matches.sort_by(|(_, a), (_, b)| b.to_string_lossy().len().cmp(&a.to_string_lossy().len()));
+    matches.sort_by_key(|(_, base)| std::cmp::Reverse(base.to_string_lossy().len()));
 
     let (project, matched_base_path) = matches.into_iter().next().ok_or_else(|| {
         Error::validation_invalid_argument(

@@ -537,7 +537,7 @@ fn open_test_artifact_no_follow(
 
     #[cfg(unix)]
     {
-        return open_test_artifact_no_follow_unix(files_root, relative_path);
+        open_test_artifact_no_follow_unix(files_root, relative_path)
     }
 
     #[cfg(not(any(unix, windows)))]

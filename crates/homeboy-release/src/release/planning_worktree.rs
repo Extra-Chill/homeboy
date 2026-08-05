@@ -338,11 +338,11 @@ fn untracked_entry_is_only_release_notes(
     }
 
     let entry_path = repo_root.join(&entry);
-    let Ok(mut entries) = std::fs::read_dir(entry_path) else {
+    let Ok(entries) = std::fs::read_dir(entry_path) else {
         return false;
     };
     let mut files = Vec::new();
-    while let Some(entry) = entries.next() {
+    for entry in entries {
         let Ok(dir_entry) = entry else {
             return false;
         };

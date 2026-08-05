@@ -47,6 +47,12 @@ pub use args::{
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
+pub(crate) type CookProgressCallback<'a> = dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
+    + Send
+    + Sync
+    + 'a;
+pub(crate) type CookProgress<'a> = Option<&'a CookProgressCallback<'a>>;
+
 pub fn run(args: AgentTaskArgs) -> CmdResult<Value> {
     // Announce durable identity exactly once, on the first progress event that
     // carries a run id, and do it outside the TTY gate. Phase chatter stays
@@ -201,22 +207,14 @@ fn next_machine_progress_message(
 
 pub(crate) fn run_with_cook_progress(
     args: AgentTaskArgs,
-    progress: Option<
-        &(dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
-              + Send
-              + Sync),
-    >,
+    progress: CookProgress<'_>,
 ) -> CmdResult<Value> {
     run_with_cook_progress_and_provenance(args, progress, None)
 }
 
 pub(crate) fn run_with_cook_progress_and_provenance(
     args: AgentTaskArgs,
-    progress: Option<
-        &(dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
-              + Send
-              + Sync),
-    >,
+    progress: CookProgress<'_>,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value> {
     match args.command {
@@ -227,14 +225,14 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             run::validate_cook_request_with_provenance(&cook_args, provenance)?;
             if progress.is_some() {
                 run::run_cook_with_executor_and_dispatcher_with_progress(
-                    cook_args,
+                    *cook_args,
                     homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
                     None,
                     progress,
                     provenance,
                 )
             } else {
-                run::run_cook(cook_args)
+                run::run_cook(*cook_args)
             }
         }
         AgentTaskCommand::CookContinue(args) if args.preflight => {
@@ -279,12 +277,14 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::Retry(retry_args) => run::retry(retry_args),
         AgentTaskCommand::Fanout(fanout_args) => fanout::fanout(fanout_args),
         AgentTaskCommand::Review(review_args) => review::review(review_args),
-        AgentTaskCommand::Promote(promote_args) => review::promote_artifact(promote_args),
+        AgentTaskCommand::Promote(promote_args) => review::promote_artifact(*promote_args),
         AgentTaskCommand::Adopt(adopt_args) => review::adopt_candidate(adopt_args),
         AgentTaskCommand::PromotionProvider(provider_args) => {
             run::promotion_provider(provider_args)
         }
-        AgentTaskCommand::FinalizePr(finalize_args) => review::finalize_pull_request(finalize_args),
+        AgentTaskCommand::FinalizePr(finalize_args) => {
+            review::finalize_pull_request(*finalize_args)
+        }
         AgentTaskCommand::RecordReplacementGateProof(args) => {
             review::record_replacement_gate_proof(args)
         }

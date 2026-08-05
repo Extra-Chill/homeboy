@@ -310,12 +310,12 @@ pub fn process_identity_state_with_start_identity(
             Ok(None) => return ProcessIdentityState::Dead,
             Err(_) => return ProcessIdentityState::Unverifiable,
         };
-        return match expected_start_identity {
+        match expected_start_identity {
             Some(expected) if expected != &actual => ProcessIdentityState::IdentityMismatch,
             Some(_) => ProcessIdentityState::Live,
             None if expected_linux_starttime_ticks.is_some() => ProcessIdentityState::Unverifiable,
             None => ProcessIdentityState::Live,
-        };
+        }
     }
 
     #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
@@ -383,10 +383,10 @@ pub fn process_start_identity(
         if read != std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int {
             return Err(format!("inspect process {pid}: incomplete proc_bsdinfo"));
         }
-        return Ok(Some(ProcessStartIdentity::Macos {
+        Ok(Some(ProcessStartIdentity::Macos {
             start_seconds: info.pbi_start_tvsec,
             start_microseconds: info.pbi_start_tvusec,
-        }));
+        }))
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -495,11 +495,11 @@ pub fn pid_has_ownership_token(pid: u32, key: &str, value: &str) -> Result<bool>
         if !output.status.success() {
             return Ok(false);
         }
-        return Ok(command_has_option_value(
+        Ok(command_has_option_value(
             &String::from_utf8_lossy(&output.stdout),
             "--startup-token",
             value,
-        ));
+        ))
     }
 
     #[cfg(not(unix))]
@@ -708,7 +708,7 @@ pub fn isolated_process_group_is_running(pgid: u32) -> std::result::Result<bool,
 
     #[cfg(unix)]
     unsafe {
-        return Ok(libc::kill(-(pgid as libc::pid_t), 0) == 0);
+        Ok(libc::kill(-(pgid as libc::pid_t), 0) == 0)
     }
 
     #[cfg(not(unix))]
@@ -766,7 +766,7 @@ pub fn terminate_isolated_process_group(owner_pid: u32) -> Result<()> {
                 let _ = libc::kill(-(owner_pid as libc::pid_t), libc::SIGKILL);
             }
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(unix))]
@@ -828,11 +828,11 @@ pub fn force_terminate_process_tree_bounded(pid: u32, timeout: Duration) -> Resu
         if survivors.is_empty() {
             return Ok(());
         }
-        return Err(Error::internal_unexpected(format!(
+        Err(Error::internal_unexpected(format!(
             "owned process tree {pid} did not exit within {} ms; surviving pids: {}",
             timeout.as_millis(),
             join_pids(&survivors)
-        )));
+        )))
     }
 
     #[cfg(target_os = "windows")]
@@ -1015,7 +1015,7 @@ pub fn terminate_process_tree(owner_pid: u32) -> Result<ProcessTreeTermination> 
             recovery_commands.push(format!("kill -KILL {}", join_pids(&surviving_pids)));
         }
 
-        return Ok(ProcessTreeTermination {
+        Ok(ProcessTreeTermination {
             owner_pid,
             descendant_pids,
             signalled_pids: targets,
@@ -1023,7 +1023,7 @@ pub fn terminate_process_tree(owner_pid: u32) -> Result<ProcessTreeTermination> 
             killed_pids,
             surviving_pids,
             recovery_commands,
-        });
+        })
     }
 
     #[cfg(not(unix))]

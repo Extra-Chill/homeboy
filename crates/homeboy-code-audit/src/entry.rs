@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use super::detectors::source_policy;
-use super::engine::audit_internal;
+use super::engine::{audit_internal, AuditExecution};
 use super::execution_plan::AuditExecutionPlan;
 use super::findings::Finding;
 use super::types::{AuditWithAnalysis, CodeAuditResult};
@@ -66,10 +66,12 @@ pub fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeA
         source_path,
         None,
         None,
-        &ref_paths,
-        &AuditExecutionPlan::full(),
-        &[],
-        None,
+        AuditExecution {
+            plan: &AuditExecutionPlan::full(),
+            reference_paths: &ref_paths,
+            extension_overrides: &[],
+            dead_code_references: None,
+        },
     )
     .map(|audit| audit.result)
 }
@@ -117,10 +119,12 @@ pub(crate) fn audit_path_with_id_with_plan_and_analysis(
         source_path,
         None,
         None,
-        reference_paths,
-        plan,
-        extension_overrides,
-        None,
+        AuditExecution {
+            plan,
+            reference_paths,
+            extension_overrides,
+            dead_code_references: None,
+        },
     )
 }
 
@@ -146,10 +150,12 @@ pub fn audit_path_scoped(
         source_path,
         Some(file_filter),
         git_ref,
-        &ref_paths,
-        &AuditExecutionPlan::full(),
-        &[],
-        None,
+        AuditExecution {
+            plan: &AuditExecutionPlan::full(),
+            reference_paths: &ref_paths,
+            extension_overrides: &[],
+            dead_code_references: None,
+        },
     )
     .map(|audit| audit.result)
 }
@@ -159,20 +165,14 @@ pub(crate) fn audit_path_scoped_with_plan_and_analysis(
     source_path: &str,
     file_filter: &[String],
     git_ref: Option<&str>,
-    plan: &AuditExecutionPlan,
-    reference_paths: &[String],
-    extension_overrides: &[String],
-    dead_code_references: Option<super::reference::DeadCodeReferenceAnalysis>,
+    execution: AuditExecution<'_>,
 ) -> Result<AuditWithAnalysis> {
     audit_internal(
         component_id,
         source_path,
         Some(file_filter),
         git_ref,
-        reference_paths,
-        plan,
-        extension_overrides,
-        dead_code_references,
+        execution,
     )
 }
 

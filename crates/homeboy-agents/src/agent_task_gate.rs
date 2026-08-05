@@ -34,13 +34,15 @@ const GATE_TOOLCHAIN_CAPTURE_LIMIT_BYTES: usize = 64 * 1024;
 
 pub type AgentTaskGateVisibility = HomeboyGateVisibility;
 pub type AgentTaskGateRevealPolicy = HomeboyGateRevealPolicy;
+type GateSpawnCallback = Arc<dyn Fn(u32, &str) -> Result<()> + Send + Sync>;
+type GateHeartbeatCallback = Arc<dyn Fn(&AgentTaskGateLiveStatus) -> Result<()> + Send + Sync>;
 
 pub(crate) struct GateSupervision {
     pub timeout: Duration,
     pub no_progress_timeout: Duration,
     pub heartbeat_interval: Duration,
-    pub on_spawn: Arc<dyn Fn(u32, &str) -> Result<()> + Send + Sync>,
-    pub on_heartbeat: Arc<dyn Fn(&AgentTaskGateLiveStatus) -> Result<()> + Send + Sync>,
+    pub on_spawn: GateSpawnCallback,
+    pub on_heartbeat: GateHeartbeatCallback,
     pub is_cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
@@ -887,6 +889,10 @@ fn gate_diagnostic_record_schema() -> String {
 }
 
 impl AgentTaskGateReport {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "constructor mirrors persisted gate result fields"
+    )]
     pub fn new(
         id: impl Into<String>,
         command: Vec<String>,
@@ -1064,8 +1070,7 @@ pub(crate) fn failure_fingerprint(
 }
 
 fn normalize_failure_record(line: &str) -> String {
-    line.trim()
-        .split_whitespace()
+    line.split_whitespace()
         .map(|token| {
             if token.contains('T')
                 && token.contains(':')
@@ -1229,6 +1234,10 @@ pub(crate) fn run_gate_command_with_policy_and_runtime_tmpdir(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "gate execution inputs remain explicit across lifecycle and provider boundaries"
+)]
 pub(crate) fn run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
     cwd: &Path,
     index: usize,
@@ -1252,6 +1261,10 @@ pub(crate) fn run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "supervision callbacks and durable gate inputs remain independently auditable"
+)]
 pub(crate) fn run_gate_command_with_supervision(
     cwd: &Path,
     index: usize,
@@ -1407,6 +1420,10 @@ pub(crate) fn run_gate_command_with_supervision(
 /// Run a comparison gate with a hard wall-clock limit. The bounded path keeps
 /// candidate adoption inspectable instead of allowing a known-red baseline to
 /// consume an unbounded second broad-suite run.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "legacy gate provider entrypoint preserves mixed-version callers"
+)]
 pub(crate) fn run_gate_command_with_timeout(
     cwd: &Path,
     index: usize,
@@ -2753,7 +2770,12 @@ mod tests {
                 schema: "example/producer-output/v1".to_string(),
             },
         };
-        ingest_gate_diagnostic_sidecars(temp.path(), &[mapping.clone()], &mut report, "evidence");
+        ingest_gate_diagnostic_sidecars(
+            temp.path(),
+            std::slice::from_ref(&mapping),
+            &mut report,
+            "evidence",
+        );
         fs::write(temp.path().join("diagnostics.json"), "not json")
             .expect("write malformed sidecar");
         ingest_gate_diagnostic_sidecars(temp.path(), &[mapping], &mut report, "evidence");

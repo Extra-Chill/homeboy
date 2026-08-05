@@ -221,10 +221,21 @@ pub struct JobRunner {
     pub handle: JoinHandle<()>,
 }
 
+/// Durable inputs shared by local-runner job creation and capacity admission.
+#[derive(Clone)]
+pub(crate) struct LocalRunnerJobRequest {
+    pub(crate) operation: String,
+    pub(crate) source_snapshot: Option<SourceSnapshot>,
+    pub(crate) metadata: Option<Value>,
+    pub(crate) path_materialization_plan: Option<PathMaterializationPlan>,
+    pub(crate) local_runner: Option<LocalRunnerJob>,
+    pub(crate) admission_idempotency_key: Option<String>,
+}
+
 /// The durable result of a controller submission lookup or admission.
 pub(crate) enum ControllerJobSubmissionOutcome {
     Submitted(Uuid),
-    Existing(Job),
+    Existing(Box<Job>),
 }
 
 pub(crate) enum ControllerJobStartOutcome {
@@ -268,6 +279,8 @@ impl JobStore {
             .read(true)
             .write(true)
             .create(true)
+            // This persistent lock has no payload; opening it must retain any existing bytes.
+            .truncate(false)
             .open(&path)
             .map_err(|error| {
                 Error::internal_io(error.to_string(), Some(format!("open {}", path.display())))
@@ -810,14 +823,14 @@ impl JobStore {
         path_materialization_plan: Option<PathMaterializationPlan>,
         local_runner: Option<LocalRunnerJob>,
     ) -> Job {
-        self.create_or_reuse_active_local_runner_job(
-            operation,
+        self.create_or_reuse_active_local_runner_job(LocalRunnerJobRequest {
+            operation: operation.into(),
             source_snapshot,
             metadata,
             path_materialization_plan,
             local_runner,
-            None,
-        )
+            admission_idempotency_key: None,
+        })
         .0
     }
 
@@ -929,14 +942,14 @@ impl JobStore {
         metadata: Value,
         idempotency_key: &str,
     ) -> (Job, bool) {
-        self.create_or_reuse_active_local_runner_job(
-            "runner.admission",
-            None,
-            Some(metadata),
-            None,
-            None,
-            Some(idempotency_key.to_string()),
-        )
+        self.create_or_reuse_active_local_runner_job(LocalRunnerJobRequest {
+            operation: "runner.admission".to_string(),
+            source_snapshot: None,
+            metadata: Some(metadata),
+            path_materialization_plan: None,
+            local_runner: None,
+            admission_idempotency_key: Some(idempotency_key.to_string()),
+        })
     }
 
     fn create_admission_inner(
@@ -950,19 +963,21 @@ impl JobStore {
     ) -> Result<AdmissionReservation> {
         let (job, created) = self.create_or_reuse_active_local_runner_job_inner(
             inner,
-            "runner.admission",
-            None,
-            Some(metadata),
-            None,
-            Some(LocalRunnerJob {
-                runner_id: "admission".to_string(),
-                command: Vec::new(),
-                cwd: None,
-                lifecycle: None,
-                workspace_claim_binding,
-                workspace_owner_lease: workspace_owner_lease.clone(),
-            }),
-            idempotency_key.clone(),
+            LocalRunnerJobRequest {
+                operation: "runner.admission".to_string(),
+                source_snapshot: None,
+                metadata: Some(metadata),
+                path_materialization_plan: None,
+                local_runner: Some(LocalRunnerJob {
+                    runner_id: "admission".to_string(),
+                    command: Vec::new(),
+                    cwd: None,
+                    lifecycle: None,
+                    workspace_claim_binding,
+                    workspace_owner_lease: workspace_owner_lease.clone(),
+                }),
+                admission_idempotency_key: idempotency_key.clone(),
+            },
         )?;
         let stored = inner.jobs.get_mut(&job.id).expect("admission exists");
         if !created {
@@ -1311,23 +1326,10 @@ impl JobStore {
     /// spawning a duplicate worker for it.
     fn create_or_reuse_active_local_runner_job(
         &self,
-        operation: impl Into<String>,
-        source_snapshot: Option<SourceSnapshot>,
-        metadata: Option<Value>,
-        path_materialization_plan: Option<PathMaterializationPlan>,
-        local_runner: Option<LocalRunnerJob>,
-        admission_idempotency_key: Option<String>,
+        request: LocalRunnerJobRequest,
     ) -> (Job, bool) {
         self.durable_transaction(|inner| {
-            self.create_or_reuse_active_local_runner_job_inner(
-                inner,
-                operation,
-                source_snapshot,
-                metadata,
-                path_materialization_plan,
-                local_runner,
-                admission_idempotency_key,
-            )
+            self.create_or_reuse_active_local_runner_job_inner(inner, request)
         })
         .expect("local runner job creation must persist")
     }
@@ -1335,15 +1337,17 @@ impl JobStore {
     fn create_or_reuse_active_local_runner_job_inner(
         &self,
         inner: &mut JobStoreInner,
-        operation: impl Into<String>,
-        source_snapshot: Option<SourceSnapshot>,
-        metadata: Option<Value>,
-        path_materialization_plan: Option<PathMaterializationPlan>,
-        local_runner: Option<LocalRunnerJob>,
-        admission_idempotency_key: Option<String>,
+        request: LocalRunnerJobRequest,
     ) -> Result<(Job, bool)> {
         let now = timestamp_ms();
-        let operation = operation.into();
+        let LocalRunnerJobRequest {
+            operation,
+            source_snapshot,
+            metadata,
+            path_materialization_plan,
+            local_runner,
+            admission_idempotency_key,
+        } = request;
         let runner_job_projection = metadata
             .as_ref()
             .and_then(|metadata| metadata.get("runner_job_projection"))
@@ -1879,7 +1883,7 @@ impl JobStore {
             let job = inner.jobs.get(&existing.job_id).ok_or_else(|| {
                 Error::internal_unexpected("controller submission index points at a missing job")
             })?;
-                return Ok(ControllerJobSubmissionOutcome::Existing(job.job.clone()));
+                return Ok(ControllerJobSubmissionOutcome::Existing(Box::new(job.job.clone())));
         }
         if inner
             .expired_controller_submissions
@@ -1893,7 +1897,7 @@ impl JobStore {
                 return Err(controller_idempotency_conflict(&idempotency_key));
             }
             if let Some(job) = submission.terminal_job.clone() {
-                return Ok(ControllerJobSubmissionOutcome::Existing(job));
+                return Ok(ControllerJobSubmissionOutcome::Existing(Box::new(job)));
             }
             return Err(Error::validation_invalid_argument(
                 "idempotency_key",
@@ -1919,7 +1923,7 @@ impl JobStore {
                 return Err(controller_idempotency_conflict(&idempotency_key));
             }
             if let Some(job) = tombstone.terminal_job {
-                return Ok(ControllerJobSubmissionOutcome::Existing(job));
+                return Ok(ControllerJobSubmissionOutcome::Existing(Box::new(job)));
             }
             return Err(Error::validation_invalid_argument(
                 "idempotency_key",
@@ -2250,12 +2254,7 @@ impl JobStore {
         F,
     >(
         &self,
-        operation: impl Into<String>,
-        source_snapshot: Option<SourceSnapshot>,
-        metadata: Option<Value>,
-        path_materialization_plan: Option<PathMaterializationPlan>,
-        local_runner: LocalRunnerJob,
-        admission_idempotency_key: Option<String>,
+        request: LocalRunnerJobRequest,
         capacity: usize,
         run: F,
     ) -> JobRunner
@@ -2264,12 +2263,7 @@ impl JobStore {
         F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
     {
         self.try_run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
-            operation,
-            source_snapshot,
-            metadata,
-            path_materialization_plan,
-            local_runner,
-            admission_idempotency_key,
+            request,
             capacity,
             run,
         )
@@ -2283,12 +2277,7 @@ impl JobStore {
         F,
     >(
         &self,
-        operation: impl Into<String>,
-        source_snapshot: Option<SourceSnapshot>,
-        metadata: Option<Value>,
-        path_materialization_plan: Option<PathMaterializationPlan>,
-        local_runner: LocalRunnerJob,
-        admission_idempotency_key: Option<String>,
+        request: LocalRunnerJobRequest,
         capacity: usize,
         run: F,
     ) -> Result<JobRunner>
@@ -2297,15 +2286,7 @@ impl JobStore {
         F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
     {
         let (job, created) = self.durable_transaction(|inner| {
-            self.create_or_reuse_active_local_runner_job_inner(
-                inner,
-                operation,
-                source_snapshot,
-                metadata,
-                path_materialization_plan,
-                Some(local_runner.clone()),
-                admission_idempotency_key,
-            )
+            self.create_or_reuse_active_local_runner_job_inner(inner, request.clone())
         })?;
         let job_id = job.id;
         // An idempotent resubmission reused an already-enqueued job that already
@@ -2329,7 +2310,11 @@ impl JobStore {
                 }
                 match worker_store.reserve_local_child_with_runner_capacity(
                     job_id,
-                    &local_runner.runner_id,
+                    &request
+                        .local_runner
+                        .as_ref()
+                        .expect("capacity admission requires a local runner")
+                        .runner_id,
                     capacity,
                 ) {
                     Ok(true) => break,

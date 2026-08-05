@@ -456,6 +456,12 @@ impl AuditGuard {
     }
 }
 
+impl Default for AuditGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AuditHomeGuard {
     pub fn new() -> Self {
         let home = HomeGuard::new();
@@ -464,6 +470,12 @@ impl AuditHomeGuard {
             _guard: guard,
             home,
         }
+    }
+}
+
+impl Default for AuditHomeGuard {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -541,6 +553,12 @@ impl HomeGuard {
             context,
             _guard: guard,
         }
+    }
+}
+
+impl Default for HomeGuard {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

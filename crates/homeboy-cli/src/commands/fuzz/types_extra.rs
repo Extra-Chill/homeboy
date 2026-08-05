@@ -11,6 +11,7 @@ use homeboy::fuzz::{
 
 #[derive(Serialize)]
 #[serde(tag = "variant", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum FuzzOutput {
     Contract(FuzzContractOutput),
     Doctor(FuzzDoctorOutput),

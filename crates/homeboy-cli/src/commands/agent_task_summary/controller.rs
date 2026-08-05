@@ -60,7 +60,7 @@ pub(super) fn render_controller_summary(payload: &Value) -> Option<String> {
     Some(finish(lines))
 }
 
-fn controller_payload<'a>(payload: &'a Value) -> Option<&'a Value> {
+fn controller_payload(payload: &Value) -> Option<&Value> {
     value_at(payload, &["controller"])
         .or_else(|| value_at(payload, &["resume", "controller"]))
         .or_else(|| value_at(payload, &["from_spec", "controller"]))
@@ -192,7 +192,7 @@ fn controller_last_failure<'a>(payload: &'a Value, controller: &'a Value) -> Opt
         })
 }
 
-fn best_failure_diagnostic<'a>(candidates: [Option<&'a str>; 2]) -> Option<&'a str> {
+fn best_failure_diagnostic(candidates: [Option<&str>; 2]) -> Option<&str> {
     candidates
         .into_iter()
         .flatten()

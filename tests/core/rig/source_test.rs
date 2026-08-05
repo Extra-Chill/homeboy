@@ -8,10 +8,9 @@ use homeboy_core::test_support::HomeGuard;
 use std::fs;
 use std::path::Path;
 
-#[path = "support.rs"]
-mod support;
-
-use support::{minimal_rig, minimal_stack, run_git, write_rig, write_stack, GitFixture};
+use crate::rig_test_support::{
+    bare_source_path, minimal_rig, minimal_stack, run_git, write_rig, write_stack, GitFixture,
+};
 
 /// Source-update-only fixture helpers. These live here rather than in the
 /// shared `support.rs` because only the source-update tests attach to an
@@ -396,9 +395,7 @@ fn update_git_source_fast_forwards_package_and_refreshes_metadata() {
     let package = tempfile::tempdir().expect("package");
     let source_rig = write_rig(package.path(), "alpha", &minimal_rig("alpha"));
     let bare = create_bare_source(package.path());
-    let source = support::bare_source_path(&bare)
-        .to_string_lossy()
-        .to_string();
+    let source = bare_source_path(&bare).to_string_lossy().to_string();
 
     install(&source, None, false).expect("install");
     let before = crate::read_source_metadata("alpha")
@@ -438,9 +435,7 @@ fn update_git_source_refreshes_owned_stack_specs() {
     write_rig(package.path(), "alpha", &minimal_rig("alpha"));
     let source_stack = write_stack(package.path(), "alpha-combined", "alpha");
     let bare = create_bare_source(package.path());
-    let source = support::bare_source_path(&bare)
-        .to_string_lossy()
-        .to_string();
+    let source = bare_source_path(&bare).to_string_lossy().to_string();
 
     install(&source, None, false).expect("install");
     let installed_metadata =
@@ -481,9 +476,7 @@ fn legacy_source_without_a_valid_discovery_path_fails_before_refresh_mutation() 
     let package = tempfile::tempdir().expect("package");
     let source_rig = write_rig(package.path(), "alpha", &minimal_rig("alpha"));
     let bare = create_bare_source(package.path());
-    let source = support::bare_source_path(&bare)
-        .to_string_lossy()
-        .to_string();
+    let source = bare_source_path(&bare).to_string_lossy().to_string();
 
     install(&source, None, false).expect("install");
     let mut metadata = crate::read_source_metadata("alpha").expect("metadata");
@@ -526,9 +519,7 @@ fn update_all_reports_broken_sources_and_continues() {
     let broken_package = tempfile::tempdir().expect("broken package");
     write_rig(broken_package.path(), "broken", &minimal_rig("broken"));
     let broken_bare = create_bare_source(broken_package.path());
-    let broken_source = support::bare_source_path(&broken_bare)
-        .to_string_lossy()
-        .to_string();
+    let broken_source = bare_source_path(&broken_bare).to_string_lossy().to_string();
     install(&broken_source, None, false).expect("install broken source");
     let broken_metadata = crate::read_source_metadata("broken").expect("broken metadata");
     fs::remove_dir_all(&broken_metadata.package_path).expect("remove installed package clone");
@@ -536,9 +527,7 @@ fn update_all_reports_broken_sources_and_continues() {
     let good_package = tempfile::tempdir().expect("good package");
     let good_rig = write_rig(good_package.path(), "good", &minimal_rig("good"));
     let good_bare = create_bare_source(good_package.path());
-    let good_source = support::bare_source_path(&good_bare)
-        .to_string_lossy()
-        .to_string();
+    let good_source = bare_source_path(&good_bare).to_string_lossy().to_string();
     install(&good_source, None, false).expect("install good source");
     fs::write(
         &good_rig,
@@ -566,9 +555,7 @@ fn refresh_source_selector_updates_recorded_package() {
     let package = tempfile::tempdir().expect("package");
     let source_rig = write_rig(package.path(), "alpha", &minimal_rig("alpha"));
     let bare = create_bare_source(package.path());
-    let source = support::bare_source_path(&bare)
-        .to_string_lossy()
-        .to_string();
+    let source = bare_source_path(&bare).to_string_lossy().to_string();
 
     install(&source, None, false).expect("install");
     let before = crate::read_source_metadata("alpha")
@@ -612,9 +599,7 @@ fn refresh_without_selector_updates_all_sources() {
     let package = tempfile::tempdir().expect("package");
     let source_rig = write_rig(package.path(), "alpha", &minimal_rig("alpha"));
     let bare = create_bare_source(package.path());
-    let source = support::bare_source_path(&bare)
-        .to_string_lossy()
-        .to_string();
+    let source = bare_source_path(&bare).to_string_lossy().to_string();
 
     install(&source, None, false).expect("install");
     fs::write(
@@ -640,9 +625,7 @@ fn update_git_source_skips_user_replaced_stack_specs() {
     write_rig(package.path(), "alpha", &minimal_rig("alpha"));
     let source_stack = write_stack(package.path(), "alpha-combined", "alpha");
     let bare = create_bare_source(package.path());
-    let source = support::bare_source_path(&bare)
-        .to_string_lossy()
-        .to_string();
+    let source = bare_source_path(&bare).to_string_lossy().to_string();
 
     install(&source, None, false).expect("install");
     let config = homeboy_core::paths::stack_config("alpha-combined").expect("stack config");

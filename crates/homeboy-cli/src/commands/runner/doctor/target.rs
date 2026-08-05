@@ -8,7 +8,7 @@ pub enum RunnerTarget {
     Ssh {
         id: String,
         runner: Runner,
-        server: Server,
+        server: Box<Server>,
         client: SshClient,
     },
 }
@@ -45,7 +45,7 @@ fn from_registry(runner_id: &str, runner: Runner) -> homeboy::core::Result<Runne
             Ok(RunnerTarget::Ssh {
                 id: runner_id.to_string(),
                 runner,
-                server,
+                server: Box::new(server),
                 client,
             })
         }

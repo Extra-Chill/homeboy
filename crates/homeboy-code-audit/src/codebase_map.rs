@@ -282,7 +282,7 @@ pub fn build_map(config: &MapConfig) -> Result<CodebaseMap, Error> {
             HierarchyEntry { parent, children }
         })
         .collect();
-    class_hierarchy.sort_by(|a, b| b.children.len().cmp(&a.children.len()));
+    class_hierarchy.sort_by_key(|entry| std::cmp::Reverse(entry.children.len()));
 
     // Build hook summary
     let mut action_count = 0usize;
@@ -304,7 +304,7 @@ pub fn build_map(config: &MapConfig) -> Result<CodebaseMap, Error> {
         }
     }
     let mut top_prefixes: Vec<(String, usize)> = prefix_counts.into_iter().collect();
-    top_prefixes.sort_by(|a, b| b.1.cmp(&a.1));
+    top_prefixes.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     top_prefixes.truncate(10);
 
     let total_files = all_fingerprints.len();

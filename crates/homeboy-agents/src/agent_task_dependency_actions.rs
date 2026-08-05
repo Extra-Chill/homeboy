@@ -327,7 +327,8 @@ mod tests {
             target_base: "main".into(),
         };
         let mut first = Fake::default();
-        execute_resolved_dependency_actions(&id, &[resolution.clone()], &mut first).unwrap();
+        execute_resolved_dependency_actions(&id, std::slice::from_ref(&resolution), &mut first)
+            .unwrap();
         assert_eq!(first.calls, ["fetch", "rebase", "push"]);
         let mut resumed = Fake::default();
         execute_resolved_dependency_actions(&id, &[resolution], &mut resumed).unwrap();

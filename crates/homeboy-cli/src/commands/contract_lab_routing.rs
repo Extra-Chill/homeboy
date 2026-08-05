@@ -123,22 +123,16 @@ impl Commands {
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
-                        command:
-                            agent_task::AgentTaskFanoutCommand::CookBatch(
-                                agent_task::AgentTaskFanoutCookBatchArgs { dry_run: true, .. },
-                            ),
+                        command: agent_task::AgentTaskFanoutCommand::CookBatch(args),
                     }),
-            }) => agent_task_fanout_local_only_contract(
+            }) if args.dry_run => agent_task_fanout_local_only_contract(
                 AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
                 AGENT_TASK_FANOUT_COOK_BATCH_DRY_RUN_CONTROLLER_REASON,
             ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
-                        command:
-                            agent_task::AgentTaskFanoutCommand::CookBatch(
-                                agent_task::AgentTaskFanoutCookBatchArgs { dry_run: false, .. },
-                            ),
+                        command: agent_task::AgentTaskFanoutCommand::CookBatch(_),
                     }),
             }) => agent_task_fanout_local_only_contract(
                 AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
@@ -292,11 +286,8 @@ impl Commands {
         if matches!(
             self,
             Commands::AgentTask(agent_task::AgentTaskArgs {
-                command: agent_task::AgentTaskCommand::Promote(agent_task::PromoteArgs {
-                    dry_run: true,
-                    ..
-                }),
-            })
+                command: agent_task::AgentTaskCommand::Promote(args),
+            }) if args.dry_run
         ) {
             return false;
         }
@@ -371,10 +362,10 @@ pub(crate) fn agent_task_provider_requires_cwd_git_checkout_with(
     provider_requires_cwd_git_checkout: impl Fn(&str, Option<&str>) -> bool,
 ) -> bool {
     match command {
-        agent_task::AgentTaskCommand::Cook(agent_task::AgentTaskCookArgs { dispatch, .. }) => {
+        agent_task::AgentTaskCommand::Cook(cook) => {
             provider_requires_cwd_git_checkout_for_dispatch(
-                dispatch.backend.as_deref(),
-                dispatch.selector.as_deref(),
+                cook.dispatch.backend.as_deref(),
+                cook.dispatch.selector.as_deref(),
                 default_backend,
                 provider_requires_cwd_git_checkout,
             )

@@ -411,7 +411,7 @@ fn is_repo_directory_claim(path: &str) -> bool {
         "assets/",
         ".github/",
     ];
-    REPO_ROOTS.iter().any(|root| path == *root)
+    REPO_ROOTS.contains(&path)
 }
 
 #[derive(Clone, Copy)]

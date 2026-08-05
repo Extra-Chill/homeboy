@@ -527,6 +527,8 @@ impl ObservationStore {
 
     /// Persist an opened file under a stable lifecycle identity after verifying
     /// the exact descriptor-copied bytes against the supplied digest.
+    // This established storage API carries the verified identity and digest separately.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_verified_artifact_from_open_file_with_id(
         &self,
         run_id: &str,
@@ -611,6 +613,8 @@ impl ObservationStore {
     /// Import bytes whose stable identity and integrity metadata were published
     /// by another durable store. Validate before publishing so a mirror never
     /// turns an advertised artifact into controller-owned corrupt evidence.
+    // This established storage API carries the verified identity and digest separately.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_verified_artifact_with_id(
         &self,
         run_id: &str,
@@ -1059,27 +1063,36 @@ impl ObservationStore {
     pub fn list_artifacts(&self, run_id: &str) -> Result<Vec<ArtifactRecord>> {
         validate_required("run_id", run_id)?;
         let columns = self.artifact_columns_for_read()?;
-        let artifact_type = columns
-            .contains("artifact_type")
-            .then_some("artifact_type")
-            .unwrap_or("'file'");
-        let url = columns.contains("url").then_some("url").unwrap_or("NULL");
-        let public_url = columns
-            .contains("public_url")
-            .then_some("public_url")
-            .unwrap_or("NULL");
-        let viewer_url = columns
-            .contains("viewer_url")
-            .then_some("viewer_url")
-            .unwrap_or("NULL");
-        let viewer_links = columns
-            .contains("viewer_links_json")
-            .then_some("viewer_links_json")
-            .unwrap_or("'[]'");
-        let metadata = columns
-            .contains("metadata_json")
-            .then_some("metadata_json")
-            .unwrap_or("'{}'");
+        let artifact_type = if columns.contains("artifact_type") {
+            "artifact_type"
+        } else {
+            "'file'"
+        };
+        let url = if columns.contains("url") {
+            "url"
+        } else {
+            "NULL"
+        };
+        let public_url = if columns.contains("public_url") {
+            "public_url"
+        } else {
+            "NULL"
+        };
+        let viewer_url = if columns.contains("viewer_url") {
+            "viewer_url"
+        } else {
+            "NULL"
+        };
+        let viewer_links = if columns.contains("viewer_links_json") {
+            "viewer_links_json"
+        } else {
+            "'[]'"
+        };
+        let metadata = if columns.contains("metadata_json") {
+            "metadata_json"
+        } else {
+            "'{}'"
+        };
         let mut statement = self
             .connection
             .prepare(&format!(

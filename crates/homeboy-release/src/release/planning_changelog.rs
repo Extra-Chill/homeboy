@@ -272,14 +272,11 @@ fn format_changelog_entry(commit: &git::CommitInfo) -> String {
 /// Inline `#` characters remain product-history text rather than metadata.
 fn strip_trailing_reference_groups(subject: &str) -> String {
     let mut subject = subject.trim_end();
-    loop {
-        let Some((open, close)) = subject.chars().last().and_then(|close| match close {
-            ')' => Some(('(', ')')),
-            ']' => Some(('[', ']')),
-            _ => None,
-        }) else {
-            break;
-        };
+    while let Some((open, close)) = subject.chars().last().and_then(|close| match close {
+        ')' => Some(('(', ')')),
+        ']' => Some(('[', ']')),
+        _ => None,
+    }) {
         let Some(start) = subject.rfind(open) else {
             break;
         };

@@ -436,15 +436,15 @@ pub fn run(args: RefactorArgs) -> CmdResult<RefactorOutput> {
             full_match_details,
             target,
             write_mode,
-        }) => transform_command::run_transform(
-            &find,
-            &replace,
-            &files,
-            &context,
+        }) => transform_command::run_transform(transform_command::TransformRequest {
+            find: &find,
+            replace: &replace,
+            files: &files,
+            context: &context,
             full_match_details,
-            &target,
-            write_mode.write,
-        ),
+            target: &target,
+            write: write_mode.write,
+        }),
 
         Some(RefactorCommand::Decompose {
             file,
@@ -588,7 +588,7 @@ pub enum RefactorOutput {
 
     #[serde(rename = "refactor.decompose")]
     Decompose {
-        plan: homeboy::refactor::DecomposePlan,
+        plan: Box<homeboy::refactor::DecomposePlan>,
         move_results: Vec<homeboy::refactor::MoveResult>,
         dry_run: bool,
         applied: bool,
