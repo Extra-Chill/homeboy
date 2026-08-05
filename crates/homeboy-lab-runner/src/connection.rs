@@ -410,7 +410,7 @@ fn connect_with_orphan_adoption_and_live_lease(
     let mut replacement_operation_id = None;
     if let Some(pending) = pending_replacement.as_ref() {
         if let Ok(mut observed) = remote_daemon_status(&client, homeboy) {
-            probe_remote_daemon_endpoint(&client, &mut observed);
+            probe_remote_daemon_endpoint(&client, &mut observed, Some(runner_id));
             let exact = observed.daemon.as_ref().is_some_and(|daemon| {
                 daemon.lease_id == pending.remote_daemon_lease_id
                     && daemon.pid == pending.remote_daemon_pid
@@ -1037,7 +1037,7 @@ fn verify_live_lease_adoption(
         return Ok(());
     };
     let mut status = remote_daemon_status(client, homeboy).map_err(Error::internal_unexpected)?;
-    probe_remote_daemon_endpoint(client, &mut status);
+    probe_remote_daemon_endpoint(client, &mut status, None);
     let daemon = status.daemon.ok_or_else(|| {
         Error::validation_invalid_argument(
             "adopt_live_lease",
@@ -2187,7 +2187,7 @@ fn remote_daemon_recovery_freshness(
     };
     match bounded_remote_daemon_status(&client, homeboy, runner_id) {
         Ok(mut status) => {
-            remote_daemon::probe_remote_daemon_endpoint(&client, &mut status);
+            remote_daemon::probe_remote_daemon_endpoint(&client, &mut status, Some(runner_id));
             Some(remote_daemon_recovery_freshness_from_status(
                 runner_id, &status,
             ))
@@ -2243,21 +2243,42 @@ fn runner_jobs(
             "runner `{runner_id}` is connected but has no active-job status endpoint"
         )));
     };
-    let active_jobs = parse_runner_jobs(
-        &body,
-        "active_runner_jobs",
-        "parse active runner jobs",
-        runner_id,
-        source,
-    )?;
-    let stale_jobs = parse_runner_jobs(
-        &body,
-        "stale_runner_jobs",
-        "parse stale runner jobs",
-        runner_id,
-        source,
-    )?;
-    Ok((active_jobs, stale_jobs))
+    let result: Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> = (|| {
+        let active_jobs = parse_runner_jobs(
+            &body,
+            "active_runner_jobs",
+            "parse active runner jobs",
+            runner_id,
+            source,
+        )?;
+        let stale_jobs = parse_runner_jobs(
+            &body,
+            "stale_runner_jobs",
+            "parse stale runner jobs",
+            runner_id,
+            source,
+        )?;
+        Ok((active_jobs, stale_jobs))
+    })();
+    if let Err(error) = &result {
+        let timeout = crate::readonly_probe::readonly_probe_timeout();
+        let timed_out = error.message.to_ascii_lowercase().contains("timed out");
+        crate::readonly_probe::record_degradation(crate::readonly_probe::ReadOnlyProbeDegradation {
+            probe: "runner_typed_jobs".to_string(),
+            runner_id: Some(runner_id.to_string()),
+            reason_code: if timed_out {
+                crate::readonly_probe::REASON_PROBE_TIMEOUT
+            } else {
+                crate::readonly_probe::REASON_PROBE_UNAVAILABLE
+            },
+            timeout_seconds: timed_out.then_some(timeout.as_secs()).unwrap_or(0),
+            detail: format!(
+                "read-only typed-job probe for runner `{runner_id}` did not complete; active-job state is partial: {}",
+                error.message
+            ),
+        });
+    }
+    result
 }
 
 fn orphaned_child_run_jobs(

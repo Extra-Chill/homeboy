@@ -270,7 +270,7 @@ fn probe_authoritative_daemon_status(runner_id: &str) -> Result<remote_daemon::R
             None,
         )
     })?;
-    remote_daemon::probe_remote_daemon_endpoint(&client, &mut status);
+    remote_daemon::probe_remote_daemon_endpoint(&client, &mut status, Some(runner_id));
     Ok(status)
 }
 

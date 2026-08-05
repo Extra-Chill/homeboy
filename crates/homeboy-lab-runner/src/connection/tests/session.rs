@@ -1889,6 +1889,76 @@ fn status_lists_reverse_session_records() {
 }
 
 #[test]
+fn full_status_projection_leaves_large_legacy_shared_state_and_observation_db_unchanged() {
+    test_support::with_isolated_home(|home| {
+        crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
+        homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("initialize shared observation database");
+        let session = direct_ssh_session("lease-000");
+        write_session(&session).expect("write disconnected direct session");
+        let mut generations = crate::RollingGenerations::new("lease-000", session.clone());
+        for index in 1..=70 {
+            let generation = format!("lease-{index:03}");
+            let mut endpoint = session.clone();
+            endpoint.remote_daemon_lease_id = Some(generation.clone());
+            generations.begin(generation, endpoint);
+        }
+        crate::generation_store::write("homeboy-lab", &generations)
+            .expect("write generation registry");
+        let registry_path = homeboy_core::paths::runner_sessions_dir()
+            .expect("runner sessions directory")
+            .join("homeboy-lab/generations.json");
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&registry_path).expect("read registry"))
+                .expect("parse registry");
+        legacy
+            .as_object_mut()
+            .expect("registry object")
+            .remove("runner_id");
+        std::fs::write(
+            &registry_path,
+            serde_json::to_vec_pretty(&legacy).expect("serialize legacy registry"),
+        )
+        .expect("write legacy registry");
+        let before = snapshot_directory(home.path());
+
+        let report = status("homeboy-lab").expect("full runner status projection");
+
+        assert!(!report.connected);
+        assert_eq!(report.active_job_count, 0);
+        assert_eq!(snapshot_directory(home.path()), before);
+    });
+}
+
+fn snapshot_directory(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    fn collect(
+        root: &std::path::Path,
+        directory: &std::path::Path,
+        snapshot: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    ) {
+        for entry in std::fs::read_dir(directory).expect("read data directory") {
+            let path = entry.expect("read data entry").path();
+            if path.is_dir() {
+                collect(root, &path, snapshot);
+            } else {
+                snapshot.insert(
+                    path.strip_prefix(root)
+                        .expect("relative data path")
+                        .to_path_buf(),
+                    std::fs::read(&path).expect("read data file"),
+                );
+            }
+        }
+    }
+
+    let mut snapshot = std::collections::BTreeMap::new();
+    collect(root, root, &mut snapshot);
+    snapshot
+}
+
+#[test]
 fn status_marks_connected_reverse_active_jobs_unavailable_without_broker_url() {
     test_support::with_isolated_home(|_| {
         crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");

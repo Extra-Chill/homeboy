@@ -176,11 +176,109 @@ pub(super) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
     read_session_for_controller(runner_id, &controller_id())
 }
 
-/// Status is a projection of this controller's durable session. Peer discovery
-/// performs one liveness probe per historical controller record, so it belongs
-/// to handoff/admission paths rather than a read-only status command.
+/// Status reads the current controller session first, then performs a bounded
+/// projection of peer-owned direct tunnels. This preserves a usable shared
+/// tunnel without allowing historical session directories to turn status into
+/// an unbounded liveness scan.
 pub(super) fn read_session_for_status(runner_id: &str) -> Result<Option<RunnerSession>> {
-    read_session(runner_id)
+    let controller_id = controller_id();
+    let session = read_session_for_controller(runner_id, &controller_id)?;
+    if session
+        .as_ref()
+        .is_some_and(|session| status_session_state(Some(session)) == RunnerSessionState::Connected)
+    {
+        return Ok(session);
+    }
+    let directory = paths::runner_sessions_dir()?.join(runner_id);
+    match status_peer_session_in(&directory, &controller_id)? {
+        StatusPeerSession::One(peer) => Ok(Some(peer)),
+        StatusPeerSession::None => Ok(session),
+        StatusPeerSession::Ambiguous => {
+            crate::readonly_probe::record_degradation(
+                crate::readonly_probe::ReadOnlyProbeDegradation {
+                    probe: "runner_peer_session".to_string(),
+                    runner_id: Some(runner_id.to_string()),
+                    reason_code: crate::readonly_probe::REASON_PROBE_AMBIGUOUS,
+                    timeout_seconds: 0,
+                    detail: format!(
+                        "multiple live direct-SSH peer sessions for runner `{runner_id}` disagree on daemon identity; status is partial. Run `homeboy runner reconcile {runner_id}` to select or repair the authoritative session."
+                    ),
+                },
+            );
+            Ok(session)
+        }
+    }
+}
+
+enum StatusPeerSession {
+    None,
+    One(RunnerSession),
+    Ambiguous,
+}
+
+/// Status observes at most this many persisted peers. The current controller
+/// session is always inspected separately above, so this is only historical
+/// shared state and never an admission scan.
+const STATUS_PEER_SESSION_LIMIT: usize = 8;
+const STATUS_PEER_SESSION_TIMEOUT: Duration = Duration::from_secs(1);
+
+fn status_peer_session_in(directory: &PathBuf, controller_id: &str) -> Result<StatusPeerSession> {
+    status_peer_session_in_with(directory, controller_id, |session| {
+        session_is_live_with_timeout(session, STATUS_PEER_SESSION_TIMEOUT)
+    })
+}
+
+fn status_peer_session_in_with(
+    directory: &PathBuf,
+    controller_id: &str,
+    is_live: impl Fn(&RunnerSession) -> bool,
+) -> Result<StatusPeerSession> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(StatusPeerSession::None)
+        }
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some("read runner controller sessions".to_string()),
+            ))
+        }
+    };
+    let mut paths = entries
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read runner controller session".to_string()),
+            )
+        })?;
+    paths.sort();
+    let mut peer: Option<RunnerSession> = None;
+    for path in paths
+        .into_iter()
+        .filter(|path| is_controller_session_file(path))
+        .take(STATUS_PEER_SESSION_LIMIT)
+    {
+        let Some(candidate) = read_session_at(&path)? else {
+            continue;
+        };
+        if candidate.controller_id.as_deref() == Some(controller_id)
+            || candidate.mode != RunnerTunnelMode::DirectSsh
+            || !is_live(&candidate)
+        {
+            continue;
+        }
+        if peer
+            .as_ref()
+            .is_some_and(|peer| !same_direct_daemon_identity(peer, &candidate))
+        {
+            return Ok(StatusPeerSession::Ambiguous);
+        }
+        peer = Some(candidate);
+    }
+    Ok(peer.map_or(StatusPeerSession::None, StatusPeerSession::One))
 }
 
 /// Keep the local tunnel observation inside the same explicit read-only budget
@@ -1033,6 +1131,43 @@ mod tests {
         assert_eq!(
             read_session_at(&path).expect("read stored session"),
             Some(peer)
+        );
+    }
+
+    #[test]
+    fn status_projects_one_live_peer_without_creating_a_local_session() {
+        let root = TempDir::new().expect("session directory");
+        let peer = session("peer-controller", "lease-live");
+        write_session_at(&root.path().join("peer-controller.json"), &peer)
+            .expect("write peer session");
+
+        let projected =
+            status_peer_session_in_with(&root.path().to_path_buf(), "current-controller", |_| true)
+                .expect("project peer session");
+
+        assert!(matches!(projected, StatusPeerSession::One(session) if session == peer));
+        assert!(root.path().join("peer-controller.json").exists());
+        assert!(!root.path().join("current-controller.json").exists());
+    }
+
+    #[test]
+    fn status_peer_projection_refuses_ambiguous_live_daemons_without_mutation() {
+        let root = TempDir::new().expect("session directory");
+        let first = session("peer-a", "lease-a");
+        let second = session("peer-b", "lease-b");
+        write_session_at(&root.path().join("peer-a.json"), &first).expect("write first peer");
+        write_session_at(&root.path().join("peer-b.json"), &second).expect("write second peer");
+
+        let peer = status_peer_session_in_with(&root.path().to_path_buf(), "current", |_| true)
+            .expect("scan live peers");
+        assert!(matches!(peer, StatusPeerSession::Ambiguous));
+        assert_eq!(
+            read_session_at(&root.path().join("peer-a.json")).expect("read first"),
+            Some(first)
+        );
+        assert_eq!(
+            read_session_at(&root.path().join("peer-b.json")).expect("read second"),
+            Some(second)
         );
     }
 
