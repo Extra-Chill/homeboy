@@ -1504,24 +1504,6 @@ pub struct RunnerChangedRuntimePath {
 }
 
 impl RunnerStaleDaemonWarning {
-    pub(crate) fn for_runner(&self, runner_id: &str) -> Self {
-        let mut warning = self.clone();
-        let actions = (warning.verification == RunnerDaemonVerification::Compared
-            && (warning.active_daemon_control_plane_version != warning.job_command_binary_version
-                || warning.active_daemon_control_plane_build_identity
-                    != warning.job_command_binary_build_identity))
-            .then(|| {
-                recovery_action(
-                    runner_id,
-                    warning.job_command_binary_build_identity.as_deref(),
-                    &homeboy_product_identity::build_identity(),
-                )
-            })
-            .unwrap_or_default();
-        warning.set_recovery(actions);
-        warning
-    }
-
     pub fn new(
         runner_id: &str,
         session_homeboy_version: String,

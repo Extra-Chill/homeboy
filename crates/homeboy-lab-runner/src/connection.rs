@@ -143,9 +143,7 @@ fn endpoint_groups<'a>(
 
 #[derive(Clone)]
 struct EndpointStatusObservation {
-    state: RunnerSessionState,
-    stale_daemon: Option<RunnerStaleDaemonWarning>,
-    daemon_freshness: Option<DaemonFreshnessReport>,
+    remote_daemon_freshness: Option<DaemonFreshnessReport>,
 }
 #[path = "connection_daemon.rs"]
 mod connection_daemon;
@@ -1583,22 +1581,16 @@ fn status_with_endpoint_observation(
         Some(session) => Some(session),
         None => read_session_for_status(runner_id)?,
     };
-    let state = endpoint_observation
-        .map(|observation| observation.state.clone())
-        .unwrap_or_else(|| status_session_state(session.as_ref()));
+    // A tunnel PID/port and a reverse heartbeat belong to this controller-side
+    // alias. Sharing either would let one live alias mask another dead tunnel.
+    let state = status_session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
-    let stale_daemon = match endpoint_observation {
-        Some(observation) => observation
-            .stale_daemon
-            .as_ref()
-            .map(|warning| warning.for_runner(runner_id)),
-        None => stale_daemon_warning(&runner, session.as_ref(), connected)?,
-    };
-    let local_daemon_freshness = match endpoint_observation {
-        Some(observation) => observation.daemon_freshness.clone(),
-        None => runner_daemon_freshness(&runner, session.as_ref(), connected)?,
-    };
+    // Warning fields and recovery actions include runner-specific commands, so
+    // they are always rebuilt from this alias's runner/session record.
+    let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected)?;
+    let local_daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?;
     let mut daemon_freshness = match endpoint_observation {
+        Some(observation) if !connected => observation.remote_daemon_freshness.clone(),
         Some(_) => local_daemon_freshness,
         None => {
             local_daemon_freshness.or_else(|| remote_daemon_recovery_freshness(runner_id, &runner))
@@ -3314,7 +3306,21 @@ pub fn statuses() -> Result<Vec<RunnerStatusReport>> {
     let mut observations = BTreeMap::new();
     let mut reports = Vec::new();
     for (identity, aliases) in groups {
-        let representative = aliases.first().expect("endpoint group has a runner");
+        // Prefer a disconnected alias for the remote observation. Its status
+        // necessarily reaches the stable remote endpoint, allowing every other
+        // disconnected alias to reuse the same unavailable/freshness result.
+        // Liveness remains an alias-local evaluation below.
+        let representative = aliases
+            .iter()
+            .copied()
+            .find(|alias| {
+                let index = runners
+                    .iter()
+                    .position(|runner| runner.id == *alias)
+                    .expect("endpoint group runner exists");
+                status_session_state(sessions[index].as_ref()) != RunnerSessionState::Connected
+            })
+            .unwrap_or_else(|| *aliases.first().expect("endpoint group has a runner"));
         let representative_index = runners
             .iter()
             .position(|runner| runner.id == *representative)
@@ -3327,13 +3333,13 @@ pub fn statuses() -> Result<Vec<RunnerStatusReport>> {
         observations
             .entry(identity.clone())
             .or_insert_with(|| EndpointStatusObservation {
-                state: report.state.clone(),
-                stale_daemon: report.stale_daemon.clone(),
-                daemon_freshness: report.daemon_freshness.clone(),
+                remote_daemon_freshness: (!report.connected)
+                    .then(|| report.daemon_freshness.clone())
+                    .flatten(),
             });
         reports.push(report);
         let observation = observations.get(&identity).expect("observation recorded");
-        for alias in aliases.into_iter().skip(1) {
+        for alias in aliases.into_iter().filter(|alias| *alias != representative) {
             let index = runners
                 .iter()
                 .position(|runner| runner.id == alias)
