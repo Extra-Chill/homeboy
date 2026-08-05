@@ -1921,13 +1921,7 @@ fn endpoint_grouping_resolves_one_direct_ssh_endpoint_for_a_hundred_aliases() {
     );
 
     assert_eq!(groups.len(), 1);
-    assert_eq!(
-        endpoint_probe_counters(&groups),
-        EndpointProbeCounters {
-            endpoint_resolutions: 1,
-            aliases_reused: 99,
-        }
-    );
+    assert_eq!(groups.values().next().expect("one endpoint").len(), 100);
 }
 
 #[test]
@@ -1960,13 +1954,7 @@ fn endpoint_grouping_reuses_one_unavailable_endpoint_for_a_hundred_aliases() {
     );
 
     assert_eq!(groups.len(), 1);
-    assert_eq!(
-        endpoint_probe_counters(&groups),
-        EndpointProbeCounters {
-            endpoint_resolutions: 1,
-            aliases_reused: 99,
-        }
-    );
+    assert_eq!(groups.values().next().expect("one endpoint").len(), 100);
 }
 
 #[test]

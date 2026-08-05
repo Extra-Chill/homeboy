@@ -52,6 +52,7 @@ enum RunnerEndpointIdentity {
     DirectSsh {
         server_id: String,
         daemon_address: String,
+        homeboy_path: String,
     },
     Local {
         daemon_address: String,
@@ -82,6 +83,13 @@ fn stable_endpoint_identity(
                 RunnerEndpointIdentity::DirectSsh {
                     server_id: server_id.trim().to_string(),
                     daemon_address: daemon_address.trim().to_string(),
+                    homeboy_path: runner
+                        .settings
+                        .homeboy_path
+                        .as_deref()
+                        .unwrap_or("homeboy")
+                        .trim()
+                        .to_string(),
                 }
             }
             _ => RunnerEndpointIdentity::Unresolved(runner.id.clone()),
@@ -133,28 +141,11 @@ fn endpoint_groups<'a>(
     groups
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
-struct EndpointProbeCounters {
-    endpoint_resolutions: usize,
-    aliases_reused: usize,
-}
-
 #[derive(Clone)]
 struct EndpointStatusObservation {
+    state: RunnerSessionState,
     stale_daemon: Option<RunnerStaleDaemonWarning>,
-    remote_daemon_freshness: Option<DaemonFreshnessReport>,
-}
-
-fn endpoint_probe_counters(
-    groups: &BTreeMap<RunnerEndpointIdentity, Vec<&str>>,
-) -> EndpointProbeCounters {
-    EndpointProbeCounters {
-        endpoint_resolutions: groups.len(),
-        aliases_reused: groups
-            .values()
-            .map(|aliases| aliases.len().saturating_sub(1))
-            .sum(),
-    }
+    daemon_freshness: Option<DaemonFreshnessReport>,
 }
 #[path = "connection_daemon.rs"]
 mod connection_daemon;
@@ -1574,11 +1565,12 @@ fn register_reverse_session_with_broker(broker_url: &str, session: &RunnerSessio
 }
 
 pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
-    status_with_endpoint_observation(runner_id, None)
+    status_with_endpoint_observation(runner_id, None, None)
 }
 
 fn status_with_endpoint_observation(
     runner_id: &str,
+    known_session: Option<RunnerSession>,
     endpoint_observation: Option<&EndpointStatusObservation>,
 ) -> Result<RunnerStatusReport> {
     let runner = load(runner_id)?;
@@ -1587,19 +1579,31 @@ fn status_with_endpoint_observation(
     // must be reported as disconnected rather than triggering tunnel recovery.
     // Recovery can wait on shared control-plane state and may open a tunnel, so
     // it belongs to explicit connect/admission operations instead.
-    let session = read_session_for_status(runner_id)?;
-    let state = status_session_state(session.as_ref());
+    let session = match known_session {
+        Some(session) => Some(session),
+        None => read_session_for_status(runner_id)?,
+    };
+    let state = endpoint_observation
+        .map(|observation| observation.state.clone())
+        .unwrap_or_else(|| status_session_state(session.as_ref()));
     let connected = state == RunnerSessionState::Connected;
     let stale_daemon = match endpoint_observation {
-        Some(observation) => observation.stale_daemon.clone(),
+        Some(observation) => observation
+            .stale_daemon
+            .as_ref()
+            .map(|warning| warning.for_runner(runner_id)),
         None => stale_daemon_warning(&runner, session.as_ref(), connected)?,
     };
-    let local_daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?;
-    let mut daemon_freshness = local_daemon_freshness
-        .or_else(|| {
-            endpoint_observation.and_then(|observation| observation.remote_daemon_freshness.clone())
-        })
-        .or_else(|| remote_daemon_recovery_freshness(runner_id, &runner));
+    let local_daemon_freshness = match endpoint_observation {
+        Some(observation) => observation.daemon_freshness.clone(),
+        None => runner_daemon_freshness(&runner, session.as_ref(), connected)?,
+    };
+    let mut daemon_freshness = match endpoint_observation {
+        Some(_) => local_daemon_freshness,
+        None => {
+            local_daemon_freshness.or_else(|| remote_daemon_recovery_freshness(runner_id, &runner))
+        }
+    };
     let active_job_source = session.as_ref().and_then(active_runner_job_source);
     let direct_daemon_active_jobs =
         matches!(active_job_source, Some(RunnerActiveJobSource::DirectDaemon))
@@ -3307,22 +3311,41 @@ pub fn statuses() -> Result<Vec<RunnerStatusReport>> {
             .zip(sessions.iter())
             .map(|(runner, session)| (runner, session.as_ref())),
     );
-    let _counters = endpoint_probe_counters(&groups);
     let mut observations = BTreeMap::new();
     let mut reports = Vec::new();
-    for (index, runner) in runners.iter().enumerate() {
-        let identity = local_endpoint_identity(runner, sessions[index].as_ref());
-        let report = status_with_endpoint_observation(&runner.id, observations.get(&identity))?;
+    for (identity, aliases) in groups {
+        let representative = aliases.first().expect("endpoint group has a runner");
+        let representative_index = runners
+            .iter()
+            .position(|runner| runner.id == *representative)
+            .expect("endpoint group runner exists");
+        let report = status_with_endpoint_observation(
+            representative,
+            sessions[representative_index].clone(),
+            None,
+        )?;
         observations
-            .entry(identity)
+            .entry(identity.clone())
             .or_insert_with(|| EndpointStatusObservation {
+                state: report.state.clone(),
                 stale_daemon: report.stale_daemon.clone(),
-                remote_daemon_freshness: (!report.connected)
-                    .then(|| report.daemon_freshness.clone())
-                    .flatten(),
+                daemon_freshness: report.daemon_freshness.clone(),
             });
         reports.push(report);
+        let observation = observations.get(&identity).expect("observation recorded");
+        for alias in aliases.into_iter().skip(1) {
+            let index = runners
+                .iter()
+                .position(|runner| runner.id == alias)
+                .expect("endpoint group runner exists");
+            reports.push(status_with_endpoint_observation(
+                alias,
+                sessions[index].clone(),
+                Some(observation),
+            )?);
+        }
     }
+    reports.sort_by(|left, right| left.runner_id.cmp(&right.runner_id));
     Ok(reports)
 }
 
