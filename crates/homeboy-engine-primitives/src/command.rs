@@ -128,11 +128,54 @@ impl Drop for ControllerChildGuard {
     }
 }
 
+/// Close every descriptor this process inherited except `keep`.
+///
+/// Runs in a forked child, so it stays inside async-signal-safe libc calls and
+/// walks a bounded descriptor range rather than allocating to enumerate
+/// `/proc/self/fd`.
+#[cfg(unix)]
+fn close_inherited_descriptors_except(keep: RawFd) {
+    let max = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+    let max = if max > 0 { max as RawFd } else { 1024 };
+    for fd in 3..max {
+        if fd != keep {
+            unsafe {
+                libc::close(fd);
+            }
+        }
+    }
+    // stdio is replaced rather than simply closed so a later write in this
+    // process cannot land on a descriptor the kernel has since recycled.
+    let devnull = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR) };
+    if devnull >= 0 {
+        for fd in 0..3 {
+            if fd != keep {
+                unsafe {
+                    libc::dup2(devnull, fd);
+                }
+            }
+        }
+        if devnull > 2 && devnull != keep {
+            unsafe {
+                libc::close(devnull);
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 fn controller_death_guard_loop(read_fd: RawFd, write_fd: RawFd, process_group: u32) -> ! {
     unsafe {
         libc::close(write_fd);
     }
+    // `attach` forks after the child is spawned, so this guard inherits every
+    // descriptor the controller held at that moment — including the write end
+    // of the child's stdin pipe, which the controller has not yet written and
+    // dropped. Holding a duplicate of that end means the child never sees EOF
+    // on stdin: a provider that reads its request from stdin blocks until its
+    // timeout instead of running. Close everything except the liveness read
+    // end, which is the only descriptor this loop uses.
+    close_inherited_descriptors_except(read_fd);
     if unsafe { libc::setpgid(0, process_group as libc::pid_t) } != 0 {
         unsafe {
             libc::_exit(1);
