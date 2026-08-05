@@ -444,87 +444,99 @@ homeboy_wordpress_is_node_test_file() {
 #   3. the first declared package script from
 #      HOMEBOY_WORDPRESS_JS_TEST_SCRIPT_CANDIDATES
 #
-# Sets JS_TEST_SCRIPT and JS_TEST_SCRIPT_SOURCE. Returns 0 when a repository
-# runner is declared, 1 when none is declared, and 2 when an explicitly
-# declared script is missing from the package manifest.
-JS_TEST_SCRIPT=""
-JS_TEST_SCRIPT_SOURCE=""
-JS_TEST_SCRIPT_RESOLVED=0
-JS_TEST_SCRIPT_STATUS=1
+homeboy_wordpress_js_package_owner() {
+    local rel_path="$1"
+    local current="${PLUGIN_PATH}/$(dirname "$rel_path")"
+    local component_root="${PLUGIN_PATH%/}"
 
+    while :; do
+        if [ -f "${current}/package.json" ]; then
+            printf '%s\n' "$current"
+            return 0
+        fi
+        [ "$current" != "$component_root" ] || break
+        current="$(dirname "$current")"
+    done
+    printf '%s\n' "$component_root"
+}
+
+# Sets JS_TEST_SCRIPT and JS_TEST_SCRIPT_SOURCE for the package in
+# HOMEBOY_PROJECT_ROOT. Returns 0 when a runner is declared, 1 when none is
+# declared, and 2 when an explicitly declared script or package contract is
+# missing.
 homeboy_wordpress_resolve_js_test_script() {
-    local configured candidate
+    local package_root="$1"
+    local configured candidate package_rel
 
-    if [ "$JS_TEST_SCRIPT_RESOLVED" -eq 1 ]; then
-        return "$JS_TEST_SCRIPT_STATUS"
-    fi
-    JS_TEST_SCRIPT_RESOLVED=1
-    JS_TEST_SCRIPT_STATUS=1
+    JS_TEST_SCRIPT=""
+    JS_TEST_SCRIPT_SOURCE=""
 
     configured="${HOMEBOY_WORDPRESS_JS_TEST_SCRIPT:-}"
     if [ -z "$configured" ]; then
         configured="$(homeboy_setting wordpress_js_test_script '.wordpress_js_test_script // .js_test_script // empty')"
     fi
 
-    if [ ! -f "${PLUGIN_PATH}/package.json" ] || ! type homeboy_project_init >/dev/null 2>&1; then
+    if [ ! -f "${package_root}/package.json" ] || ! type homeboy_project_init >/dev/null 2>&1; then
         if [ -n "$configured" ]; then
-            echo "ERROR: declared JavaScript test script '${configured}' requires a package manifest at ${PLUGIN_PATH}/package.json" >&2
-            JS_TEST_SCRIPT_STATUS=2
+            echo "ERROR: declared JavaScript test script '${configured}' requires an owning package manifest at ${package_root}/package.json" >&2
+            return 2
         fi
-        return "$JS_TEST_SCRIPT_STATUS"
+        return 1
     fi
 
-    if ! homeboy_project_init --ecosystem nodejs --path "$PLUGIN_PATH" >/dev/null 2>&1; then
+    if ! homeboy_project_init --ecosystem nodejs --path "$package_root" >/dev/null 2>&1; then
         if [ -n "$configured" ]; then
-            echo "ERROR: could not resolve the Node.js project contract for ${PLUGIN_PATH}" >&2
-            JS_TEST_SCRIPT_STATUS=2
+            echo "ERROR: could not resolve the Node.js project contract for owning package ${package_root}" >&2
+            return 2
         fi
-        return "$JS_TEST_SCRIPT_STATUS"
+        return 1
     fi
 
     if [ -n "$configured" ]; then
         if ! homeboy_project_has_script "$configured"; then
-            echo "ERROR: declared JavaScript test script '${configured}' is not defined in ${PLUGIN_PATH}/package.json" >&2
-            JS_TEST_SCRIPT_STATUS=2
-            return "$JS_TEST_SCRIPT_STATUS"
+            echo "ERROR: declared JavaScript test script '${configured}' is not defined in owning package ${package_root}/package.json" >&2
+            return 2
         fi
         JS_TEST_SCRIPT="$configured"
-        JS_TEST_SCRIPT_SOURCE="declared setting wordpress_js_test_script -> package.json scripts.${configured}"
-        JS_TEST_SCRIPT_STATUS=0
+        package_rel="${package_root#"${PLUGIN_PATH%/}/"}"
+        [ "$package_rel" != "$package_root" ] || package_rel=""
+        JS_TEST_SCRIPT_SOURCE="${package_rel:+${package_rel}/}package.json scripts.${configured}"
         return 0
     fi
 
-    for candidate in ${HOMEBOY_WORDPRESS_JS_TEST_SCRIPT_CANDIDATES:-test:unit test:unit:js test:js}; do
+    for candidate in ${HOMEBOY_WORDPRESS_JS_TEST_SCRIPT_CANDIDATES:-test:unit test:unit:js test:js test}; do
         if homeboy_project_has_script "$candidate"; then
             JS_TEST_SCRIPT="$candidate"
-            JS_TEST_SCRIPT_SOURCE="package.json scripts.${candidate}"
-            JS_TEST_SCRIPT_STATUS=0
+            package_rel="${package_root#"${PLUGIN_PATH%/}/"}"
+            [ "$package_rel" != "$package_root" ] || package_rel=""
+            JS_TEST_SCRIPT_SOURCE="${package_rel:+${package_rel}/}package.json scripts.${candidate}"
             return 0
         fi
     done
 
-    return "$JS_TEST_SCRIPT_STATUS"
+    return 1
 }
 
 # True when the file itself imports Node's built-in test runner, which is the
 # only extension-independent evidence that `node --test` is the right backend.
 homeboy_wordpress_is_native_node_test_file() {
     local rel_path="$1"
-    grep -qE "(require\(|from[[:space:]]+|import[[:space:]]*\()[[:space:]]*['\"]node:test['\"]" "${PLUGIN_PATH}/${rel_path}" 2>/dev/null
+    local test_path="$rel_path"
+    if [ "${rel_path#/}" = "$rel_path" ]; then
+        test_path="${PLUGIN_PATH}/${rel_path}"
+    fi
+    grep -qE "(require\(|from[[:space:]]+|import[[:space:]]*\()[[:space:]]*['\"]node:test['\"]" "$test_path" 2>/dev/null
 }
 
 homeboy_wordpress_run_declared_js_test_files() {
-    local test_files_raw="$1"
+    local package_root="$1"
+    local test_files_raw="$2"
     local test_file rel_path run_command exit_code
     local selected=()
 
     while IFS= read -r test_file; do
         [ -n "$test_file" ] || continue
-        if ! rel_path="$(homeboy_wordpress_rel_test_file "$test_file")"; then
-            echo "ERROR: requested JavaScript test file not found or outside the component: ${test_file}" >&2
-            return 2
-        fi
-        selected+=("$rel_path")
+        selected+=("$test_file")
     done <<< "$test_files_raw"
 
     if [ "${#selected[@]}" -eq 0 ]; then
@@ -533,14 +545,18 @@ homeboy_wordpress_run_declared_js_test_files() {
     fi
 
     if ! run_command="$(homeboy_project_run_script_command "$JS_TEST_SCRIPT")"; then
-        echo "ERROR: could not resolve the package runner command for script '${JS_TEST_SCRIPT}'" >&2
+        echo "ERROR: could not resolve the package runner command for script '${JS_TEST_SCRIPT}' in owning package ${package_root}" >&2
         return 2
     fi
 
-    homeboy_project_ensure_dependencies
+    if ! homeboy_project_ensure_dependencies; then
+        echo "ERROR: could not hydrate dependencies for owning package ${package_root}; install its lockfile dependencies before running '${JS_TEST_SCRIPT}'" >&2
+        return 2
+    fi
 
     echo "Running declared JavaScript tests..."
     echo "  Component: ${HOMEBOY_COMPONENT_ID:-$(basename "$PLUGIN_PATH")} (${PLUGIN_PATH})"
+    echo "  Package: ${package_root}"
     echo "  Backend: package-script"
     echo "  Contract: ${JS_TEST_SCRIPT_SOURCE}"
     echo "  Command: ${run_command} -- ${selected[*]}"
@@ -550,7 +566,7 @@ homeboy_wordpress_run_declared_js_test_files() {
 
     exit_code=0
     # shellcheck disable=SC2086
-    (cd "$PLUGIN_PATH" && $run_command -- "${selected[@]}") || exit_code=$?
+    (cd "$package_root" && $run_command -- "${selected[@]}") || exit_code=$?
 
     if [ "$exit_code" -eq 0 ]; then
         echo "JS_TEST_SUMMARY:backend=package-script script=${JS_TEST_SCRIPT} files=${#selected[@]} status=ok"
@@ -566,18 +582,16 @@ homeboy_wordpress_run_declared_js_test_files() {
 # neither is knowable.
 homeboy_wordpress_run_js_unit_test_files() {
     local test_files_raw="$1"
-    local resolve_status=0
-    local test_file rel_path
+    local test_file rel_path package_root package_files resolve_status
+    local component_root package_rel
     local ambiguous=()
+    local owner_list=()
+    local owner_key
+    local status=0
+    declare -A owner_files
+    declare -A seen_owner
 
-    homeboy_wordpress_resolve_js_test_script || resolve_status=$?
-    if [ "$resolve_status" -eq 2 ]; then
-        return 2
-    fi
-    if [ "$resolve_status" -eq 0 ]; then
-        homeboy_wordpress_run_declared_js_test_files "$test_files_raw"
-        return $?
-    fi
+    component_root="${PLUGIN_PATH%/}"
 
     while IFS= read -r test_file; do
         [ -n "$test_file" ] || continue
@@ -585,23 +599,55 @@ homeboy_wordpress_run_js_unit_test_files() {
             echo "ERROR: requested JavaScript test file not found or outside the component: ${test_file}" >&2
             return 2
         fi
-        if ! homeboy_wordpress_is_native_node_test_file "$rel_path"; then
-            ambiguous+=("$rel_path")
+        package_root="$(homeboy_wordpress_js_package_owner "$rel_path")"
+        package_rel="${package_root#"${component_root}/"}"
+        if [ "$package_root" = "$component_root" ] || [ "$package_rel" = "$package_root" ]; then
+            package_files="$rel_path"
+        else
+            package_files="${rel_path#"${package_rel}/"}"
+        fi
+        owner_files["$package_root"]+="${owner_files[$package_root]:+$'\n'}${package_files}"
+        if [ -z "${seen_owner[$package_root]:-}" ]; then
+            owner_list+=("$package_root")
+            seen_owner["$package_root"]=1
         fi
     done <<< "$test_files_raw"
 
-    if [ "${#ambiguous[@]}" -gt 0 ]; then
-        echo "ERROR: cannot select a JavaScript test framework for: ${ambiguous[*]}" >&2
-        echo "  The files do not import Node's built-in 'node:test' runner and the component declares no JavaScript test script." >&2
-        echo "  Add a package.json test script (for example \"test:unit\": \"wp-scripts test-unit-js\"), set the wordpress_js_test_script setting, or import 'node:test' in the tests." >&2
-        return 2
-    fi
-
-    homeboy_wordpress_run_node_test_files "$test_files_raw"
+    for owner_key in "${owner_list[@]}"; do
+        package_files="${owner_files[$owner_key]}"
+        JS_TEST_SCRIPT=""
+        JS_TEST_SCRIPT_SOURCE=""
+        if homeboy_wordpress_resolve_js_test_script "$owner_key"; then
+            homeboy_wordpress_run_declared_js_test_files "$owner_key" "$package_files" || status=$?
+        else
+            resolve_status=$?
+            if [ "$resolve_status" -eq 2 ]; then
+                status=2
+                continue
+            fi
+            ambiguous=()
+            while IFS= read -r rel_path; do
+                [ -n "$rel_path" ] || continue
+                if ! homeboy_wordpress_is_native_node_test_file "${owner_key}/${rel_path}"; then
+                    ambiguous+=("$rel_path")
+                fi
+            done <<< "$package_files"
+            if [ "${#ambiguous[@]}" -gt 0 ]; then
+                echo "ERROR: cannot select a JavaScript test framework for: ${ambiguous[*]} (owning package ${owner_key})" >&2
+                echo "  The files do not import Node's built-in 'node:test' runner and owning package ${owner_key}/package.json declares no JavaScript test script." >&2
+                echo "  Add a package.json test script (for example \"test:unit\": \"wp-scripts test-unit-js\"), set the wordpress_js_test_script setting, or import 'node:test' in the tests." >&2
+                status=2
+                continue
+            fi
+            homeboy_wordpress_run_node_test_files "$owner_key" "$package_files" || status=$?
+        fi
+    done
+    return "$status"
 }
 
 homeboy_wordpress_run_node_test_files() {
-    local test_files_raw="$1"
+    local package_root="$1"
+    local test_files_raw="$2"
     local node_bin="${HOMEBOY_NODE_BIN:-node}"
     local test_file test_abs rel_path exit_code
     local passed=0
@@ -610,18 +656,16 @@ homeboy_wordpress_run_node_test_files() {
 
     echo "Running Node test files..."
     echo "  Component: ${HOMEBOY_COMPONENT_ID:-$(basename "$PLUGIN_PATH")} (${PLUGIN_PATH})"
+    echo "  Package: ${package_root}"
     echo "  Backend: node-test"
     echo "  Contract: ${JS_TEST_SCRIPT_SOURCE:-native node:test import}"
 
     while IFS= read -r test_file; do
         [ -n "$test_file" ] || continue
-        if ! rel_path="$(homeboy_wordpress_rel_test_file "$test_file")"; then
-            echo "ERROR: requested Node test file not found or outside the component: ${test_file}" >&2
-            return 2
-        fi
-        test_abs="${PLUGIN_PATH}/${rel_path}"
+        rel_path="$test_file"
+        test_abs="${package_root}/${rel_path}"
         echo "NODE_TEST_BEGIN:${rel_path}"
-        if "$node_bin" --test "$test_abs"; then
+        if (cd "$package_root" && "$node_bin" --test "$test_abs"); then
             echo "NODE_TEST_OK:${rel_path}"
             passed=$((passed + 1))
         else

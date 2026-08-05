@@ -47,8 +47,9 @@ mkdir -p "$stubs"
 cat > "${stubs}/npm" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+printf 'NPM_CWD:%s\n' "$PWD"
 printf 'NPM_INVOKED:%s\n' "$*"
-if [ "${1:-}" = "run" ] && [ "${2:-}" = "test:unit" ]; then
+if [ "${1:-}" = "run" ] && { [ "${2:-}" = "test:unit" ] || [ "${2:-}" = "test:js" ] || [ "${2:-}" = "test" ]; }; then
     echo "PASS ${*:4}"
     echo "Test Suites: 1 passed, 1 total"
     exit 0
@@ -106,6 +107,80 @@ HOMEBOY_COMPONENT_SHAPE="plugin" \
 
 assert_contains "${WORK_DIR}/jest-file.out" "Backend: package-script"
 assert_not_contains "${WORK_DIR}/jest-file.out" "Backend: node-test"
+
+# --- Nested packages: nearest package owns script, cwd, and relative paths --
+nested_component="${WORK_DIR}/nested-component"
+calendar_package="${nested_component}/inc/Blocks/Calendar"
+player_package="${nested_component}/blocks/Player"
+mkdir -p "${nested_component}/src" "${nested_component}/node_modules" \
+    "${calendar_package}/src" "${calendar_package}/node_modules" \
+    "${player_package}/src" "${player_package}/node_modules"
+cat > "${nested_component}/package.json" <<'JSON'
+{
+  "name": "nested-root",
+  "scripts": {
+    "test": "root-default-tests",
+    "test:unit": "root-tests"
+  }
+}
+JSON
+cat > "${player_package}/package.json" <<'JSON'
+{
+  "name": "player",
+  "scripts": {
+    "test:js": "player-tests"
+  }
+}
+JSON
+cat > "${calendar_package}/package.json" <<'JSON'
+{
+  "name": "calendar",
+  "scripts": {
+    "test": "wp-scripts test-unit-js"
+  }
+}
+JSON
+cat > "${nested_component}/src/root.test.js" <<'JS'
+describe( 'root package', () => {
+	it( 'uses the root runner', () => expect( true ).toBe( true ) );
+} );
+JS
+cat > "${calendar_package}/src/frontend.test.ts" <<'JS'
+describe( 'calendar package', () => {
+	it( 'uses the nested runner', () => expect( true ).toBe( true ) );
+} );
+JS
+cat > "${player_package}/src/player.test.js" <<'JS'
+describe( 'player package', () => {
+	it( 'uses its own nested runner', () => expect( true ).toBe( true ) );
+} );
+JS
+
+PATH="${stubs}:${PATH}" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude" \
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="nested" \
+HOMEBOY_COMPONENT_PATH="$nested_component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_CHANGED_TEST_FILES=$'src/root.test.js\ninc/Blocks/Calendar/src/frontend.test.ts\nblocks/Player/src/player.test.js' \
+    bash "$RUNNER" > "${WORK_DIR}/nested.out" 2>&1
+
+assert_contains "${WORK_DIR}/nested.out" "Package: ${nested_component}"
+assert_contains "${WORK_DIR}/nested.out" "Contract: package.json scripts.test:unit"
+assert_contains "${WORK_DIR}/nested.out" "NPM_CWD:${nested_component}"
+assert_contains "${WORK_DIR}/nested.out" "NPM_INVOKED:run test:unit -- src/root.test.js"
+assert_contains "${WORK_DIR}/nested.out" "Package: ${calendar_package}"
+assert_contains "${WORK_DIR}/nested.out" "Contract: inc/Blocks/Calendar/package.json scripts.test"
+assert_contains "${WORK_DIR}/nested.out" "NPM_CWD:${calendar_package}"
+assert_contains "${WORK_DIR}/nested.out" "NPM_INVOKED:run test -- src/frontend.test.ts"
+assert_not_contains "${WORK_DIR}/nested.out" "run test -- inc/Blocks/Calendar/src/frontend.test.ts"
+assert_contains "${WORK_DIR}/nested.out" "Package: ${player_package}"
+assert_contains "${WORK_DIR}/nested.out" "Contract: blocks/Player/package.json scripts.test:js"
+assert_contains "${WORK_DIR}/nested.out" "NPM_CWD:${player_package}"
+assert_contains "${WORK_DIR}/nested.out" "NPM_INVOKED:run test:js -- src/player.test.js"
+assert_contains "${WORK_DIR}/nested.out" "JS_TEST_SUMMARY:backend=package-script script=test:unit files=1 status=ok"
+assert_contains "${WORK_DIR}/nested.out" "JS_TEST_SUMMARY:backend=package-script script=test files=1 status=ok"
+assert_contains "${WORK_DIR}/nested.out" "JS_TEST_SUMMARY:backend=package-script script=test:js files=1 status=ok"
 
 # --- Native node:test component: built-in runner stays selected ------------
 native_component="${WORK_DIR}/native-component"
@@ -197,5 +272,40 @@ if [ "$status" -ne 2 ]; then
     exit 1
 fi
 assert_contains "${WORK_DIR}/missing-script.out" "declared JavaScript test script 'test:missing' is not defined"
+
+# --- Nested package without a runner: diagnostics identify the owner --------
+missing_owner_component="${WORK_DIR}/missing-owner-component"
+missing_owner_package="${missing_owner_component}/blocks/widget"
+mkdir -p "${missing_owner_package}/src"
+cat > "${missing_owner_package}/package.json" <<'JSON'
+{
+  "name": "widget",
+  "scripts": {}
+}
+JSON
+cat > "${missing_owner_package}/src/widget.test.js" <<'JS'
+describe( 'widget', () => {
+	it( 'has no package runner', () => expect( true ).toBe( true ) );
+} );
+JS
+
+set +e
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude" \
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="missing-owner" \
+HOMEBOY_COMPONENT_PATH="$missing_owner_component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_CHANGED_TEST_FILES="blocks/widget/src/widget.test.js" \
+    bash "$RUNNER" > "${WORK_DIR}/missing-owner.out" 2>&1
+status=$?
+set -e
+
+if [ "$status" -ne 2 ]; then
+    echo "Expected a nested package without a runner to exit 2, got $status" >&2
+    sed 's/^/  /' "${WORK_DIR}/missing-owner.out" >&2
+    exit 1
+fi
+assert_contains "${WORK_DIR}/missing-owner.out" "owning package ${missing_owner_package}"
+assert_contains "${WORK_DIR}/missing-owner.out" "${missing_owner_package}/package.json declares no JavaScript test script"
 
 echo "WordPress JavaScript test framework routing smoke passed"
