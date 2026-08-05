@@ -853,7 +853,7 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
         args.setting_args.setting_json.clone(),
     );
     resolve_options.extension_overrides =
-        effective_extension_overrides(&args.extension_override.extensions, rig_spec.as_deref());
+        effective_extension_overrides(&args.extension_override.extensions, rig_spec);
 
     let ctx = execution_context::resolve_with_component(&resolve_options, component_override)?;
     warn_unknown_setting_keys(
