@@ -301,10 +301,10 @@ pub use session::{
     LabRunnerHandoff, ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource,
     RunnerActiveJobState, RunnerActiveJobsSnapshot, RunnerAdmissionSummary, RunnerArtifactRef,
     RunnerAvailability, RunnerChangedRuntimePath, RunnerConnectReport,
-    RunnerDaemonGenerationStatus, RunnerDisconnectReport, RunnerFailureKind, RunnerJob,
-    RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence, RunnerLifecycleOwner,
-    RunnerMutationArtifacts, RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerResult,
-    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
+    RunnerDaemonGenerationStatus, RunnerDaemonVerification, RunnerDisconnectReport,
+    RunnerFailureKind, RunnerJob, RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence,
+    RunnerLifecycleOwner, RunnerMutationArtifacts, RunnerNamedWorkspaceLease, RunnerRecoveryState,
+    RunnerResult, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
     RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceLease,
     RunnerWorkspaceLeaseSet,
 };
@@ -743,7 +743,8 @@ pub fn lab_runner_readiness() -> Result<LabRunnerReadiness> {
                 mode,
                 connected: status.connected,
                 capacity: runner.settings.concurrency_limit,
-                stale_daemon: status.stale_daemon.is_some(),
+                stale_daemon: status.admission_blocking_stale_daemon().is_some(),
+                unverified_daemon: status.unverified_daemon().is_some(),
                 admission_fresh: status.daemon_fresh_for_admission(),
                 admission_remediation: status
                     .admission_action()
@@ -786,7 +787,8 @@ pub fn refresh_detached_queue_runner() -> Result<Option<String>> {
             mode,
             connected: status.connected,
             capacity: runner.settings.concurrency_limit,
-            stale_daemon: status.stale_daemon.is_some(),
+            stale_daemon: status.admission_blocking_stale_daemon().is_some(),
+            unverified_daemon: status.unverified_daemon().is_some(),
             admission_fresh: status.daemon_fresh_for_admission(),
             admission_remediation: status
                 .admission_action()
@@ -894,7 +896,13 @@ struct DefaultLabRunnerCandidate {
     mode: RunnerTunnelMode,
     connected: bool,
     capacity: Option<usize>,
+    /// A *proven* compatibility mismatch, or a probe that failed on a runner
+    /// that has one. Hard-fences selection.
     stale_daemon: bool,
+    /// The runner has no controller-side verification path at all, so its
+    /// freshness was never established. Deliberately not a fence — see
+    /// `DefaultLabRunnerCandidate::readiness`.
+    unverified_daemon: bool,
     admission_fresh: bool,
     admission_remediation: Option<String>,
     active_jobs: usize,
@@ -907,6 +915,11 @@ struct DefaultLabRunnerReadiness {
     eligible: bool,
     score: i32,
 }
+
+/// How far an unverified runner ranks below an otherwise identical verified
+/// one. Large enough that any verified candidate wins, small enough that the
+/// score stays positive so the runner remains eligible.
+const UNVERIFIED_DAEMON_SELECTION_PENALTY: i32 = 50;
 
 impl DefaultLabRunnerCandidate {
     fn availability(&self) -> RunnerAvailability {
@@ -927,6 +940,11 @@ impl DefaultLabRunnerCandidate {
                 .reasons
                 .push("daemon_freshness_unavailable".to_string());
             availability.accepts_jobs = false;
+        }
+        // Named, not fenced: an unverifiable runner keeps accepting work, but
+        // an operator reading availability can see that nothing checked it.
+        if self.unverified_daemon {
+            availability.reasons.push("daemon_unverified".to_string());
         }
         availability
     }
@@ -969,6 +987,14 @@ impl DefaultLabRunnerCandidate {
         if self.mode == RunnerTunnelMode::DirectSsh {
             score += 5;
         }
+        // A runner whose freshness was never established ranks below every
+        // verified peer but stays selectable. Excluding it would take every
+        // reverse-connected lab out of service the moment the gap is reported,
+        // which trades this bug for #11101's — an unverified runner is neither
+        // healthy nor stale, and the ordering is where that shows up.
+        if self.unverified_daemon {
+            score -= UNVERIFIED_DAEMON_SELECTION_PENALTY;
+        }
         score -= self.active_jobs.min(50) as i32;
 
         DefaultLabRunnerReadiness {
@@ -997,7 +1023,8 @@ pub(crate) fn default_lab_runner_availability() -> Result<Vec<RunnerAvailability
                 mode,
                 connected: status.connected,
                 capacity: runner.settings.concurrency_limit,
-                stale_daemon: status.stale_daemon.is_some(),
+                stale_daemon: status.admission_blocking_stale_daemon().is_some(),
+                unverified_daemon: status.unverified_daemon().is_some(),
                 admission_fresh: status.daemon_fresh_for_admission(),
                 admission_remediation: status
                     .admission_action()
@@ -1488,6 +1515,7 @@ mod tests {
             connected,
             capacity: None,
             stale_daemon: false,
+            unverified_daemon: false,
             admission_fresh: true,
             admission_remediation: None,
             active_jobs: 0,
@@ -1514,6 +1542,53 @@ mod tests {
         );
         assert_eq!(refreshed.state, LabRunnerReadinessState::ConnectedReady);
         assert_eq!(refreshed.selected_runner_id.as_deref(), Some("lab-a"));
+    }
+
+    /// #11106's counter-property. Reverse runners now report an `unverified`
+    /// daemon where they previously reported nothing at all. That must rank
+    /// them below a verified peer without fencing them, because fencing every
+    /// reverse lab is #11101's failure mode wearing this fix's clothes.
+    #[test]
+    fn unverified_runner_ranks_below_verified_without_dropping_out() {
+        let mut unverified =
+            default_lab_candidate("lab-unverified", RunnerTunnelMode::Reverse, true);
+        unverified.unverified_daemon = true;
+
+        let readiness = unverified.readiness();
+        assert!(
+            readiness.eligible,
+            "an unverified runner is not a stale runner and must stay selectable"
+        );
+        let verified = default_lab_candidate("lab-verified", RunnerTunnelMode::Reverse, true);
+        assert!(
+            readiness.score < verified.readiness().score,
+            "unverified must rank strictly below an otherwise identical verified runner"
+        );
+        assert!(readiness.score > 0);
+
+        // Alone, it is still the default: a deprioritized runner is not an
+        // absent one.
+        assert_eq!(
+            resolve_default_lab_runner_from_candidates(None, vec![unverified.clone()]).as_deref(),
+            Some("lab-unverified")
+        );
+        // Against a verified peer, the verified one wins.
+        assert_eq!(
+            resolve_default_lab_runner_from_candidates(None, vec![unverified.clone(), verified])
+                .as_deref(),
+            Some("lab-verified")
+        );
+
+        // And it is reported, not silent.
+        let readiness = lab_runner_readiness_from_candidates(None, vec![unverified]);
+        assert_eq!(readiness.state, LabRunnerReadinessState::ConnectedReady);
+        assert!(readiness.reasons.contains(&"daemon_unverified".to_string()));
+        assert_eq!(readiness.available_runner_ids, ["lab-unverified"]);
+
+        // A *proven* mismatch still fences, so the two states never converge.
+        let mut stale = default_lab_candidate("lab-stale", RunnerTunnelMode::Reverse, true);
+        stale.stale_daemon = true;
+        assert!(!stale.readiness().eligible);
     }
 
     #[test]

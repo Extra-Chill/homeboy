@@ -488,7 +488,14 @@ fn lab_homeboy_provenance_from_parts(
     if let Some(stale_daemon) = stale_daemon {
         diagnostics.push(LabHomeboyProvenanceDiagnostic {
             severity: stale_daemon.severity,
-            code: "runner_stale_daemon",
+            // A report that compared nothing is not a stale-daemon claim
+            // (#11106); giving it the same code would make the two
+            // indistinguishable to anything reading the diagnostic stream.
+            code: if stale_daemon.is_unverified() {
+                "runner_daemon_unverified"
+            } else {
+                "runner_stale_daemon"
+            },
             message: stale_daemon.message.clone(),
             action: stale_daemon.refresh_command.clone(),
         });

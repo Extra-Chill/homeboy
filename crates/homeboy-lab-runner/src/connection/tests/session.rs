@@ -4,7 +4,7 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 
-use crate::RunnerAvailability;
+use crate::{RunnerAvailability, RunnerDaemonVerification};
 
 use super::*;
 
@@ -1266,6 +1266,122 @@ fn runtime_path_warning_uses_rebuild_specific_message() {
         warning.recovery_commands,
         ["homeboy runner refresh-homeboy homeboy-lab --ref same --reconnect"]
     );
+}
+
+/// #11106 failure mode 1: the identity probe's error was discarded and the
+/// unread "current" version was replaced with the session's own recorded
+/// version, which made `versions_match` trivially true and published a
+/// fabricated current version. The failure must now be the report.
+#[test]
+fn failed_identity_probe_reports_the_error_instead_of_the_session_version() {
+    let probe_error = "ssh: connect to host lab port 22: Connection refused";
+    let warning = RunnerStaleDaemonWarning::probe_failed(
+        "homeboy-lab",
+        "0.328.0".to_string(),
+        Some("homeboy 0.328.0+session".to_string()),
+        "/opt/homeboy/bin/homeboy",
+        probe_error.to_string(),
+    );
+
+    assert_eq!(warning.probe_error.as_deref(), Some(probe_error));
+    assert!(
+        warning.message.contains(probe_error),
+        "the real probe failure must be visible: {}",
+        warning.message
+    );
+    // The unread side is a sentinel, never a copy of the side it failed to
+    // compare against.
+    assert_eq!(warning.current_homeboy_version, "unverified");
+    assert_ne!(
+        warning.current_homeboy_version,
+        warning.session_homeboy_version
+    );
+    assert!(warning.current_homeboy_build_identity.is_none());
+    assert_eq!(warning.severity, "unknown");
+    assert_eq!(warning.verification, RunnerDaemonVerification::ProbeFailed);
+    assert_eq!(
+        warning.compatibility_reason,
+        Some("identity_probe_failed"),
+        "the vague `with_identity_unverifiable` message is not the diagnosis"
+    );
+    assert!(warning.is_unverified());
+    // A probe that failed on a runner that *has* a probe is a real anomaly and
+    // still fences admission, exactly as the fabricated warning did.
+    assert!(warning.blocks_admission());
+    assert_eq!(
+        warning.recovery_commands,
+        ["homeboy runner doctor homeboy-lab --scope lab-offload"],
+        "the answer to an unread binary is to re-probe it, not to replace it"
+    );
+}
+
+/// #11106 failure mode 2: `stale_daemon_warning` returned `None` for every
+/// non-direct-SSH session, so a reverse-connected lab on an arbitrarily old
+/// binary read as healthy with nothing ever checked.
+#[test]
+fn reverse_session_is_checked_and_reports_an_unverified_verdict() {
+    let runner = Runner {
+        id: "homeboy-lab".to_string(),
+        kind: RunnerKind::Ssh,
+        server_id: None,
+        workspace_root: Some("/srv/homeboy".to_string()),
+        settings: Default::default(),
+        env: Default::default(),
+        secret_env: Default::default(),
+        resources: Default::default(),
+        policy: Default::default(),
+    };
+    let session = super::reverse_controller_session();
+
+    let warning = tunnel_verification_gap(&runner, &session).expect(
+        "a reverse session has no controller-side identity probe and must say so, not stay silent",
+    );
+
+    assert_eq!(warning.severity, "unknown");
+    assert_eq!(warning.verification, RunnerDaemonVerification::Unavailable);
+    assert_eq!(warning.compatibility_reason, Some("reverse_unverified"));
+    assert!(warning.is_unverified());
+    assert!(warning.message.contains("homeboy test+abc123"));
+    assert!(warning.message.contains("UNVERIFIED"));
+    // The counter-property (#11101): unverified is not stale. Fencing every
+    // reverse lab would trade this bug for the opposite one.
+    assert!(!warning.blocks_admission());
+    assert_eq!(
+        warning.recovery_commands,
+        ["homeboy runner doctor homeboy-lab --scope lab-offload"]
+    );
+
+    let mut direct = session.clone();
+    direct.mode = RunnerTunnelMode::DirectSsh;
+    assert!(
+        tunnel_verification_gap(&runner, &direct).is_none(),
+        "a direct-SSH session has a real probe and must be compared, not excused"
+    );
+}
+
+/// The three states must be distinguishable by every admission consumer, not
+/// collapsed back into "there is a warning".
+#[test]
+fn unverified_reports_fence_nothing_while_compared_mismatches_still_do() {
+    let unverified = RunnerStaleDaemonWarning::verification_unavailable(
+        "homeboy-lab",
+        "0.328.0".to_string(),
+        None,
+        "reverse_unverified",
+        "no probe".to_string(),
+    );
+    let mismatch = RunnerStaleDaemonWarning::new(
+        "homeboy-lab",
+        "0.328.0".to_string(),
+        "0.329.0".to_string(),
+        Some("homeboy 0.328.0+a".to_string()),
+        Some("homeboy 0.329.0+b".to_string()),
+    );
+
+    assert!(!mismatch.is_unverified());
+    assert!(mismatch.blocks_admission());
+    assert!(unverified.is_unverified());
+    assert!(!unverified.blocks_admission());
 }
 
 #[test]

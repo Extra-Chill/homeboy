@@ -305,8 +305,15 @@ pub(super) fn operator_summary(report: &RunnerStatusReport) -> RunnerOperatorSum
     if !report.connected {
         risk.push("disconnected".to_string());
     }
-    if report.stale_daemon.is_some() {
-        risk.push("stale_daemon".to_string());
+    // "unverified" is its own risk, distinct from a proven mismatch. Rendering
+    // both as `stale_daemon` would make "I could not check" indistinguishable
+    // from "it is stale" (#11106).
+    if let Some(warning) = report.stale_daemon.as_ref() {
+        risk.push(if warning.is_unverified() {
+            "unverified_daemon".to_string()
+        } else {
+            "stale_daemon".to_string()
+        });
     }
     if report.active_job_count > 0 {
         risk.push(format!("{} active job(s)", report.active_job_count));

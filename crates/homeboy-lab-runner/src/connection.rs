@@ -31,6 +31,7 @@ use super::session::{
     RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence, RunnerSession,
     RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath,
     RunnerStatusReport, RunnerTunnelMode, RunnerTunnelProcessStartIdentity,
+    REVERSE_UNVERIFIED_REASON,
 };
 use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
 use homeboy_core::broker_auth;
@@ -2785,29 +2786,82 @@ pub(crate) fn local_live_session(
     Ok(session_is_live_with_timeout(&session, timeout).then_some(session))
 }
 
+/// A connected reverse session has no controller-side identity probe.
+///
+/// The direct-SSH path reads the runner's configured binary over SSH; a reverse
+/// runner is reached only through the broker, which exposes no equivalent
+/// identity endpoint today. Reporting `None` here meant "no warning", which
+/// every consumer reads as healthy — so a reverse lab running an arbitrarily
+/// old binary stayed fully eligible with nothing ever checked (#11106).
+///
+/// This names the gap instead. It performs no probing: the verdict is derived
+/// entirely from the session record already in hand, so it adds no request to
+/// the probe budget (#11080). When the broker grows an identity endpoint, this
+/// becomes a real comparison and the `Unavailable` verdict disappears on its
+/// own.
+fn tunnel_verification_gap(
+    runner: &Runner,
+    session: &RunnerSession,
+) -> Option<RunnerStaleDaemonWarning> {
+    if session.mode != RunnerTunnelMode::Reverse {
+        return None;
+    }
+    let reported = session
+        .homeboy_build_identity
+        .as_deref()
+        .unwrap_or(&session.homeboy_version);
+    Some(RunnerStaleDaemonWarning::verification_unavailable(
+        &runner.id,
+        session.homeboy_version.clone(),
+        session.homeboy_build_identity.clone(),
+        REVERSE_UNVERIFIED_REASON,
+        format!(
+            "reverse-connected runner `{}` reports `{reported}`, but this controller has no path to verify it: the identity probe runs over SSH and a reverse session is reached through the broker. Its daemon compatibility is UNVERIFIED — not proven fresh and not proven stale. Confirm it out of band with `homeboy runner doctor {} --scope lab-offload`.",
+            runner.id, runner.id,
+        ),
+    ))
+}
+
 fn stale_daemon_warning(
     runner: &Runner,
     session: Option<&RunnerSession>,
     connected: bool,
 ) -> Result<Option<RunnerStaleDaemonWarning>> {
-    if !connected || runner.kind != RunnerKind::Ssh {
+    if !connected {
         return Ok(None);
     }
     let Some(session) = session else {
         return Ok(None);
     };
-    if session.mode != RunnerTunnelMode::DirectSsh {
+    // The verification gap is a property of the tunnel, not of the runner
+    // transport kind, so it is decided before the SSH-only probe path below.
+    if let Some(gap) = tunnel_verification_gap(runner, session) {
+        return Ok(Some(gap));
+    }
+    if runner.kind != RunnerKind::Ssh || session.mode != RunnerTunnelMode::DirectSsh {
         return Ok(None);
     }
     let homeboy = remote_runner_homeboy_path(runner, "runner status stale-daemon diagnostics")?;
     let Some((_server_id, _server, client)) = resolve_ssh_runner(runner)? else {
         return Ok(None);
     };
-    let current_identity = bounded_remote_homeboy_identity(&client, homeboy, Some(&runner.id))
-        .unwrap_or_else(|_| RemoteHomeboyIdentity {
-            version: session.homeboy_version.clone(),
-            build_identity: None,
-        });
+    // A failed probe read nothing, so there is nothing to compare. Substituting
+    // the session's own version here made `versions_match` trivially true and
+    // published a fabricated "current version" alongside a vague unverifiable
+    // message, hiding the actual SSH failure (#11106).
+    let current_identity = match bounded_remote_homeboy_identity(&client, homeboy, Some(&runner.id))
+    {
+        Ok(identity) => identity,
+        Err(probe_error) => {
+            return Ok(Some(RunnerStaleDaemonWarning::probe_failed(
+                &runner.id,
+                session.homeboy_version.clone(),
+                session.homeboy_build_identity.clone(),
+                homeboy,
+                probe_error,
+            )));
+        }
+    };
     let current_version = current_identity.version.clone();
     let controller_identity = homeboy_product_identity::build_identity();
     let observed_session_version = session

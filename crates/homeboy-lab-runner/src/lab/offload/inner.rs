@@ -2878,6 +2878,8 @@ mod tests {
         let mut status = runner_status(true);
         status.stale_daemon = Some(RunnerStaleDaemonWarning {
             severity: "warning",
+            verification: crate::RunnerDaemonVerification::Compared,
+            probe_error: None,
             mismatch_predicate: "active_daemon_control_plane_version != job_command_binary_version",
             session_homeboy_version: "0.289.1".to_string(),
             current_homeboy_version: "0.289.3".to_string(),
