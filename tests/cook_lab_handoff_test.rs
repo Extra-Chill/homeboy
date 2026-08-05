@@ -281,7 +281,7 @@ fn detached_cook_admission_is_bounded_with_a_hundred_unavailable_recovery_record
     let started = Instant::now();
     let output = bounded_output(command);
     assert!(
-        started.elapsed() < Duration::from_secs(15),
+        started.elapsed() < Duration::from_secs(10),
         "Cook admission must not wait for stale daemon recovery"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
