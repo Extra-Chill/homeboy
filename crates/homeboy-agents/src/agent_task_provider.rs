@@ -40,6 +40,10 @@ mod config_preflight;
 mod credential_readiness;
 pub mod discovery;
 mod executor;
+mod fixture_gate;
+// The `fixture` backend is a test double, not an agent runtime. Its
+// implementation is compiled only into test builds; see `fixture_gate`.
+#[cfg(any(test, feature = "test-support"))]
 mod fixtures;
 mod outcome_normalization;
 mod resolution;
@@ -67,6 +71,8 @@ pub use credential_readiness::{
     AgentTaskProviderCredentialReadiness, AgentTaskProviderCredentialRequirement,
     AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
 };
+pub(crate) use fixture_gate::fixture_provider_outcome;
+pub use fixture_gate::is_fixture_backend;
 pub use resolution::{resolve_provider_for_backend, ProviderResolution};
 pub(crate) use resolution::{
     role_aliases_for_executor, role_aliases_for_provider, selector_runtime_provider_hint,

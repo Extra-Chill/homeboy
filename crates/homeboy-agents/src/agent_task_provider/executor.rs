@@ -1,5 +1,4 @@
 use super::command_runner::{failure_outcome, run_materialized_provider_command};
-use super::fixtures::run_fixture_provider;
 use super::*;
 
 impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
@@ -29,8 +28,11 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                 )
             }
         };
-        if request.executor.backend == "fixture" {
-            return run_fixture_provider(&request, &request.artifacts_path);
+        // Compiles to `None` in a production build: the test double is gated
+        // behind `test-support` so no backend-name comparison sits ahead of
+        // provider resolution in the shipped binary (#11118).
+        if let Some(outcome) = fixture_provider_outcome(&request) {
+            return outcome;
         }
         if is_repo_local_gate_request(&request) {
             return run_repo_local_gate_task(&request);

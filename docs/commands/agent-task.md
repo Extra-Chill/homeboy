@@ -918,6 +918,16 @@ Issue #3392 is covered by a no-secret fixture plan at
 `tests/fixtures/agent_task_smoke_plan.json`. It exercises the operator path
 without provider credentials, chat state, or long-running external services.
 
+The plan selects `"backend": "fixture"`. That backend is a **test double, not an
+agent runtime**: it has no provider manifest under `_extensions/agent-runtimes/`
+and is compiled only behind the `test-support` feature, so a released `homeboy`
+binary rejects it with the normal "no selectable provider found for backend"
+diagnostic. Run the gate from a source checkout with the feature enabled:
+
+```bash
+alias homeboy='cargo run --features test-support --quiet --'
+```
+
 Run it from a disposable Homeboy worktree:
 
 ```bash

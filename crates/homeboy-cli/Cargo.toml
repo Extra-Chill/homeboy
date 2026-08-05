@@ -13,6 +13,12 @@ build = "build.rs"
 name = "homeboy_cli"
 path = "src/lib.rs"
 
+[features]
+# Forwards the shared hermetic test fixtures and the `fixture` agent-task
+# executor double so a source build can opt into them explicitly. Never enabled
+# for a shipped binary.
+test-support = ["homeboy-core/test-support", "homeboy-agents/test-support"]
+
 [dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
 homeboy-command-contract = { version = "0.1.0", path = "../contracts/homeboy-command-contract" }
