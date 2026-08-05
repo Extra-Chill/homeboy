@@ -1596,6 +1596,11 @@ fn status_with_endpoint_observation(
             local_daemon_freshness.or_else(|| remote_daemon_recovery_freshness(runner_id, &runner))
         }
     };
+    if let Some(freshness) = daemon_freshness.as_mut() {
+        if freshness.stale_reason_code == Some(DaemonStaleReasonCode::TransportUnreachable) {
+            freshness.repair_plan = crate::daemon_repair::reconnect_plan(runner_id);
+        }
+    }
     let active_job_source = session.as_ref().and_then(active_runner_job_source);
     let direct_daemon_active_jobs =
         matches!(active_job_source, Some(RunnerActiveJobSource::DirectDaemon))
