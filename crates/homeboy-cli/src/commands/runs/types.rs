@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use crate::commands::utils::args::MutationArgs;
+use crate::commands::utils::args::{MutationArgs, PresentationArgs};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
@@ -101,8 +101,16 @@ pub(super) enum RunsCommand {
         /// The compact summary surfaces status, key metadata, and artifact
         /// pointers with inspect commands; the full payload is unchanged and
         /// always available with this flag or via `--output <file>`.
+        ///
+        /// Equivalent to `--format json`, which is the canonical spelling.
+        /// Both keep working; neither is required to use the other.
         #[arg(long)]
         json: bool,
+        // Canonical presentation vocabulary (#11138). `--format json` means
+        // exactly what the `--json` bool above means; `RunsArgs`'s eligibility
+        // helpers read the two together via `PresentationArgs::json_or_legacy`.
+        #[command(flatten)]
+        presentation: PresentationArgs,
         /// JSONPath selector(s) projected over the run detail so callers
         /// extract only specific fields instead of the whole structure.
         /// Repeat or comma-separate. Rooted at the run detail, e.g.
@@ -116,15 +124,23 @@ pub(super) enum RunsCommand {
     Proof {
         run_id: String,
         /// Print the full JSON output instead of the compact human summary.
+        /// Equivalent to `--format json`; both spellings keep working.
         #[arg(long)]
         json: bool,
+        // Canonical presentation vocabulary (#11138).
+        #[command(flatten)]
+        presentation: PresentationArgs,
     },
     /// Aggregate the actionable read-only dossier for one persisted run
     Dossier {
         run_id: String,
         /// Print the full JSON output instead of the compact human dossier.
+        /// Equivalent to `--format json`; both spellings keep working.
         #[arg(long)]
         json: bool,
+        // Canonical presentation vocabulary (#11138).
+        #[command(flatten)]
+        presentation: PresentationArgs,
     },
     /// Show a generic resume plan for a validation-progress run
     ResumePlan { run_id: String },
