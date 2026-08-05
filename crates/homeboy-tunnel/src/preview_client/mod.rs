@@ -359,6 +359,8 @@ fn forward_to_local_origin_result(
 /// request when the upstream fails with a transient connection-level error.
 const LOCAL_ORIGIN_MAX_ATTEMPTS: u32 = 4;
 
+type LocalOriginResponse = (u16, Vec<(String, String)>, reqwest::blocking::Response);
+
 /// Build the HTTP client used to forward requests to the local preview origin.
 ///
 /// Keep-alive connection pooling is disabled (`pool_max_idle_per_host(0)`): under
@@ -395,10 +397,7 @@ fn open_local_origin_response(
     client: &Client,
     local_origin: &str,
     request: &PreviewIngressRequest,
-) -> std::result::Result<
-    (u16, Vec<(String, String)>, reqwest::blocking::Response),
-    PreviewClientForwardError,
-> {
+) -> std::result::Result<LocalOriginResponse, PreviewClientForwardError> {
     let method: reqwest::Method =
         request
             .method
