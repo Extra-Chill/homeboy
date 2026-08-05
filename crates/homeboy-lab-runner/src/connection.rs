@@ -43,6 +43,119 @@ const REMOTE_RUNNER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 // A reader may wait for an in-flight reconnect, but never indefinitely behind a
 // controller-local tunnel that disappeared during a link flap.
 const DIRECT_TUNNEL_RECOVERY_WAIT: Duration = Duration::from_secs(30);
+
+/// Stable identity for an endpoint that may be represented by several runner
+/// records. Controller-local tunnel URLs and runner IDs are deliberately not
+/// part of this key: neither identifies the daemon that receives the probe.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum RunnerEndpointIdentity {
+    DirectSsh {
+        server_id: String,
+        daemon_address: String,
+    },
+    Local {
+        daemon_address: String,
+    },
+    Broker {
+        broker_url: String,
+        controller_id: String,
+    },
+    /// An incomplete record must never be merged speculatively.
+    Unresolved(String),
+}
+
+fn stable_endpoint_identity(
+    runner: &Runner,
+    session: Option<&RunnerSession>,
+) -> RunnerEndpointIdentity {
+    let Some(session) = session else {
+        return RunnerEndpointIdentity::Unresolved(runner.id.clone());
+    };
+    match session.mode {
+        RunnerTunnelMode::DirectSsh => match (
+            runner.server_id.as_deref().or(session.server_id.as_deref()),
+            session.remote_daemon_address.as_deref(),
+        ) {
+            (Some(server_id), Some(daemon_address))
+                if !server_id.trim().is_empty() && !daemon_address.trim().is_empty() =>
+            {
+                RunnerEndpointIdentity::DirectSsh {
+                    server_id: server_id.trim().to_string(),
+                    daemon_address: daemon_address.trim().to_string(),
+                }
+            }
+            _ => RunnerEndpointIdentity::Unresolved(runner.id.clone()),
+        },
+        RunnerTunnelMode::Reverse => match (
+            session.broker_url.as_deref(),
+            session.controller_id.as_deref(),
+        ) {
+            (Some(broker_url), Some(controller_id))
+                if !broker_url.trim().is_empty() && !controller_id.trim().is_empty() =>
+            {
+                RunnerEndpointIdentity::Broker {
+                    broker_url: broker_url.trim().to_string(),
+                    controller_id: controller_id.trim().to_string(),
+                }
+            }
+            _ => RunnerEndpointIdentity::Unresolved(runner.id.clone()),
+        },
+    }
+}
+
+fn local_endpoint_identity(
+    runner: &Runner,
+    session: Option<&RunnerSession>,
+) -> RunnerEndpointIdentity {
+    if runner.kind != RunnerKind::Local {
+        return stable_endpoint_identity(runner, session);
+    }
+    match session.and_then(|session| session.remote_daemon_address.as_deref()) {
+        Some(daemon_address) if !daemon_address.trim().is_empty() => {
+            RunnerEndpointIdentity::Local {
+                daemon_address: daemon_address.trim().to_string(),
+            }
+        }
+        _ => RunnerEndpointIdentity::Unresolved(runner.id.clone()),
+    }
+}
+
+fn endpoint_groups<'a>(
+    records: impl IntoIterator<Item = (&'a Runner, Option<&'a RunnerSession>)>,
+) -> BTreeMap<RunnerEndpointIdentity, Vec<&'a str>> {
+    let mut groups = BTreeMap::new();
+    for (runner, session) in records {
+        groups
+            .entry(local_endpoint_identity(runner, session))
+            .or_insert_with(Vec::new)
+            .push(runner.id.as_str());
+    }
+    groups
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct EndpointProbeCounters {
+    endpoint_resolutions: usize,
+    aliases_reused: usize,
+}
+
+#[derive(Clone)]
+struct EndpointStatusObservation {
+    stale_daemon: Option<RunnerStaleDaemonWarning>,
+    remote_daemon_freshness: Option<DaemonFreshnessReport>,
+}
+
+fn endpoint_probe_counters(
+    groups: &BTreeMap<RunnerEndpointIdentity, Vec<&str>>,
+) -> EndpointProbeCounters {
+    EndpointProbeCounters {
+        endpoint_resolutions: groups.len(),
+        aliases_reused: groups
+            .values()
+            .map(|aliases| aliases.len().saturating_sub(1))
+            .sum(),
+    }
+}
 #[path = "connection_daemon.rs"]
 mod connection_daemon;
 pub(crate) use connection_daemon::versions_match;
@@ -1461,6 +1574,13 @@ fn register_reverse_session_with_broker(broker_url: &str, session: &RunnerSessio
 }
 
 pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
+    status_with_endpoint_observation(runner_id, None)
+}
+
+fn status_with_endpoint_observation(
+    runner_id: &str,
+    endpoint_observation: Option<&EndpointStatusObservation>,
+) -> Result<RunnerStatusReport> {
     let runner = load(runner_id)?;
     let session_path = session_path(runner_id)?;
     // Status is an observation path. In particular, a stale direct-SSH record
@@ -1470,10 +1590,16 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     let session = read_session_for_status(runner_id)?;
     let state = status_session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
-    let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected)?;
+    let stale_daemon = match endpoint_observation {
+        Some(observation) => observation.stale_daemon.clone(),
+        None => stale_daemon_warning(&runner, session.as_ref(), connected)?,
+    };
     let local_daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?;
-    let mut daemon_freshness =
-        local_daemon_freshness.or_else(|| remote_daemon_recovery_freshness(runner_id, &runner));
+    let mut daemon_freshness = local_daemon_freshness
+        .or_else(|| {
+            endpoint_observation.and_then(|observation| observation.remote_daemon_freshness.clone())
+        })
+        .or_else(|| remote_daemon_recovery_freshness(runner_id, &runner));
     let active_job_source = session.as_ref().and_then(active_runner_job_source);
     let direct_daemon_active_jobs =
         matches!(active_job_source, Some(RunnerActiveJobSource::DirectDaemon))
@@ -3167,9 +3293,35 @@ fn is_runtime_path_env(name: &str) -> bool {
 }
 
 pub fn statuses() -> Result<Vec<RunnerStatusReport>> {
+    let runners = super::list()?;
+    // Read endpoint identities before liveness or remote status work. Alias
+    // records retain their own /jobs fetch below, while daemon-level evidence
+    // comes from exactly one representative of the stable endpoint.
+    let sessions: Vec<_> = runners
+        .iter()
+        .map(|runner| read_session_for_status(&runner.id))
+        .collect::<Result<_>>()?;
+    let groups = endpoint_groups(
+        runners
+            .iter()
+            .zip(sessions.iter())
+            .map(|(runner, session)| (runner, session.as_ref())),
+    );
+    let _counters = endpoint_probe_counters(&groups);
+    let mut observations = BTreeMap::new();
     let mut reports = Vec::new();
-    for runner in super::list()? {
-        reports.push(status(&runner.id)?);
+    for (index, runner) in runners.iter().enumerate() {
+        let identity = local_endpoint_identity(runner, sessions[index].as_ref());
+        let report = status_with_endpoint_observation(&runner.id, observations.get(&identity))?;
+        observations
+            .entry(identity)
+            .or_insert_with(|| EndpointStatusObservation {
+                stale_daemon: report.stale_daemon.clone(),
+                remote_daemon_freshness: (!report.connected)
+                    .then(|| report.daemon_freshness.clone())
+                    .flatten(),
+            });
+        reports.push(report);
     }
     Ok(reports)
 }

@@ -1889,6 +1889,87 @@ fn status_lists_reverse_session_records() {
 }
 
 #[test]
+fn endpoint_grouping_resolves_one_direct_ssh_endpoint_for_a_hundred_aliases() {
+    let mut runners = Vec::new();
+    let mut sessions = Vec::new();
+    for index in 0..100 {
+        let id = format!("lab-alias-{index}");
+        runners.push(Runner {
+            id: id.clone(),
+            kind: RunnerKind::Ssh,
+            server_id: Some("shared-lab".to_string()),
+            workspace_root: None,
+            settings: Default::default(),
+            env: HashMap::new(),
+            secret_env: HashMap::new(),
+            resources: HashMap::new(),
+            policy: Default::default(),
+        });
+        let mut session = direct_ssh_session("lease-shared");
+        session.runner_id = id;
+        // Every alias has its own controller-local forwarding URL. It is not
+        // endpoint identity and therefore cannot trigger a probe storm.
+        session.local_url = Some(format!("http://127.0.0.1:{}", 49000 + index));
+        sessions.push(session);
+    }
+
+    let groups = endpoint_groups(
+        runners
+            .iter()
+            .zip(sessions.iter())
+            .map(|(runner, session)| (runner, Some(session))),
+    );
+
+    assert_eq!(groups.len(), 1);
+    assert_eq!(
+        endpoint_probe_counters(&groups),
+        EndpointProbeCounters {
+            endpoint_resolutions: 1,
+            aliases_reused: 99,
+        }
+    );
+}
+
+#[test]
+fn endpoint_grouping_reuses_one_unavailable_endpoint_for_a_hundred_aliases() {
+    let mut runners = Vec::new();
+    let mut sessions = Vec::new();
+    for index in 0..100 {
+        let id = format!("unavailable-alias-{index}");
+        runners.push(Runner {
+            id: id.clone(),
+            kind: RunnerKind::Ssh,
+            server_id: Some("shared-unavailable-lab".to_string()),
+            workspace_root: None,
+            settings: Default::default(),
+            env: HashMap::new(),
+            secret_env: HashMap::new(),
+            resources: HashMap::new(),
+            policy: Default::default(),
+        });
+        let mut session = direct_ssh_session("lease-unavailable");
+        session.runner_id = id;
+        session.remote_daemon_address = Some("127.0.0.1:49999".to_string());
+        sessions.push(session);
+    }
+    let groups = endpoint_groups(
+        runners
+            .iter()
+            .zip(sessions.iter())
+            .map(|(runner, session)| (runner, Some(session))),
+    );
+
+    assert_eq!(groups.len(), 1);
+    assert_eq!(
+        endpoint_probe_counters(&groups),
+        EndpointProbeCounters {
+            endpoint_resolutions: 1,
+            aliases_reused: 99,
+        }
+    );
+}
+
+#[test]
 fn full_status_projection_leaves_large_legacy_shared_state_and_observation_db_unchanged() {
     test_support::with_isolated_home(|home| {
         crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
