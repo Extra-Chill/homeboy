@@ -142,7 +142,7 @@ pub fn ensure_worker() -> homeboy::core::Result<()> {
 }
 
 pub fn restart_worker_if_pending() -> homeboy::core::Result<()> {
-    restart_worker_if_pending_with(deferred_workload::worker_is_live, || ensure_worker())
+    restart_worker_if_pending_with(deferred_workload::worker_is_live, ensure_worker)
 }
 
 fn ensure_worker_with(
@@ -285,7 +285,7 @@ pub(crate) fn run_worker_with(
             format!("{} via {runner_id}", record.id),
         )?;
         deferred_workload::append_worker_log(format!("claimed {} via {runner_id}", record.id))?;
-        let success = match dispatch(&record, &runner_id, owner) {
+        let success = match dispatch(&record, runner_id, owner) {
             Ok(success) => success,
             Err(error) if error.message == CAPABILITY_MISMATCH_ERROR => {
                 deferred_workload::defer_claim(&record.id, owner)?;
