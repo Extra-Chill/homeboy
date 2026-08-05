@@ -16,12 +16,6 @@ const RECOVERY_KIND: &str = "runner_exec_recovery";
 const RECOVERY_OWNER_ID: &str = "runner-exec-recovery";
 const RECOVERY_OWNER_LEASE: Duration = Duration::from_secs(30);
 const RECOVERY_LEASE_HEARTBEAT: Duration = Duration::from_secs(1);
-/// Artifact publication and terminal projection are durable, synchronous store
-/// operations. They do not accept cancellation, so leave this measured minimum
-/// in the owner budget rather than beginning an operation the deadline cannot
-/// reasonably contain.
-const MIN_NON_CANCELLABLE_SIDE_EFFECT: Duration = Duration::from_millis(100);
-
 #[derive(Clone)]
 struct RecoveryOwner {
     id: String,
@@ -43,14 +37,14 @@ impl RecoveryOwner {
             })
     }
 
-    fn before_side_effect(&self, store: &ObservationStore, action: &str) -> Result<()> {
-        if self.remaining()? < MIN_NON_CANCELLABLE_SIDE_EFFECT {
-            return Err(Error::validation_invalid_argument(
-                "recovery_budget",
-                format!("runner-exec recovery deferred before {action}; insufficient owner deadline remaining"),
-                None,
-                None,
-            ));
+    /// Returns false when the caller must defer the current source record.
+    /// Ownership loss remains an error because another owner may be writing it.
+    fn before_side_effect(&self, store: &ObservationStore) -> Result<bool> {
+        // Do not invent a second reserve for synchronous durable writes. The
+        // owner deadline is the only recovery budget; callers defer before
+        // beginning a record once it is exhausted.
+        if self.remaining().is_err() {
+            return Ok(false);
         }
         if !store.renew_running_run_lease(
             &self.id,
@@ -66,7 +60,7 @@ impl RecoveryOwner {
             error.details["ownership_lost"] = json!(true);
             return Err(error);
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -182,10 +176,15 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
     let mut reconciled = 0;
     let mut deferred = 0;
     let mut unavailable_endpoints = BTreeSet::new();
-    let deadline = Instant::now() + budget;
+    // A scheduled owner owns one absolute budget from creation through every
+    // remote read and durable projection. The standalone API creates that
+    // deadline here for its own caller-owned budget.
+    let deadline = owner
+        .map(|owner| owner.deadline)
+        .unwrap_or_else(|| Instant::now() + budget);
     let mut sessions = BTreeMap::new();
     let candidates = recovery_candidates(&store)?;
-    for (index, run) in candidates.iter().enumerate() {
+    'candidates: for (index, run) in candidates.iter().enumerate() {
         if Instant::now() >= deadline {
             deferred += candidates.len() - index;
             break;
@@ -245,7 +244,10 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
             Ok(snapshot) => snapshot,
             Err(error) => {
                 if let Some(owner) = owner {
-                    owner.before_side_effect(&store, "source-run failure projection")?;
+                    if !owner.before_side_effect(&store)? {
+                        deferred += candidates.len() - index;
+                        break 'candidates;
+                    }
                 }
                 record_evicted_evidence_loss(&store, &run, &error)?;
                 // A 404 is a durable per-job result. Other failures describe the
@@ -261,7 +263,10 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
             continue;
         }
         if let Some(owner) = owner {
-            owner.before_side_effect(&store, "terminal checkpoint")?;
+            if !owner.before_side_effect(&store)? {
+                deferred += candidates.len() - index;
+                break;
+            }
         }
         homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint(
             &run.id, &snapshot,
@@ -295,7 +300,10 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 continue;
             }
             if let Some(owner) = owner {
-                owner.before_side_effect(&store, "artifact promotion")?;
+                if !owner.before_side_effect(&store)? {
+                    deferred += candidates.len() - index;
+                    break 'candidates;
+                }
             }
             let promoted = promote_runner_exec_artifacts(
                 &run.id,
@@ -320,7 +328,10 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 continue;
             }
             if let Some(owner) = owner {
-                owner.before_side_effect(&store, "artifact directory promotion")?;
+                if !owner.before_side_effect(&store)? {
+                    deferred += candidates.len() - index;
+                    break 'candidates;
+                }
             }
             let promoted = promote_runner_exec_artifact_dirs(
                 &run.id,
@@ -345,7 +356,10 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 continue;
             }
             if let Some(owner) = owner {
-                owner.before_side_effect(&store, "summary promotion")?;
+                if !owner.before_side_effect(&store)? {
+                    deferred += candidates.len() - index;
+                    break 'candidates;
+                }
             }
             let promoted = promote_runner_exec_summaries(
                 &run.id,
@@ -367,11 +381,17 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
             .cloned()
             .collect::<Vec<_>>();
         if let Some(owner) = owner {
-            owner.before_side_effect(&store, "artifact reference projection")?;
+            if !owner.before_side_effect(&store)? {
+                deferred += candidates.len() - index;
+                break;
+            }
         }
         homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_refs(&run.id, &retained)?;
         if let Some(owner) = owner {
-            owner.before_side_effect(&store, "terminal projection")?;
+            if !owner.before_side_effect(&store)? {
+                deferred += candidates.len() - index;
+                break;
+            }
         }
         homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(&run.id, &snapshot)?;
         reconciled += 1;
@@ -752,6 +772,50 @@ mod tests {
                 .expect("historical record")
                 .status
                 .eq("running"));
+        });
+    }
+
+    #[test]
+    fn expired_owner_deadline_defers_without_starting_a_second_budget() {
+        with_isolated_home(|_| {
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
+                "stale",
+                "unavailable-runner",
+                "job",
+                "/workspace",
+                &[],
+            )
+            .expect("historical runner job");
+            let owner = RecoveryOwner {
+                id: RECOVERY_OWNER_ID.to_string(),
+                token: "test-owner".to_string(),
+                deadline: Instant::now() + Duration::from_millis(20),
+            };
+            thread::sleep(Duration::from_millis(30));
+
+            let started = Instant::now();
+            assert_eq!(
+                reconcile_terminal_runner_exec_runs_with_owner(
+                    Duration::from_secs(5),
+                    Some(&owner),
+                )
+                .expect("expired owner defers source evidence"),
+                (0, 1)
+            );
+            assert!(
+                started.elapsed() < Duration::from_millis(100),
+                "an expired owner must not recreate a five-second recovery budget"
+            );
+            let store = ObservationStore::open_initialized().expect("store");
+            assert_eq!(
+                store
+                    .get_run("stale")
+                    .expect("read")
+                    .expect("source record")
+                    .status,
+                RunStatus::Running.as_str(),
+                "deferred source evidence remains recoverable"
+            );
         });
     }
 
