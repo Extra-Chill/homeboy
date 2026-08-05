@@ -404,19 +404,21 @@ pub(super) fn exec_via_reverse_broker(
         &redaction_secret_env_names,
     );
     let mirror = if mirror_evidence {
-        mirror_reverse_broker_evidence(
-            runner,
+        mirror_reverse_broker_evidence(crate::evidence::ReverseBrokerEvidenceContext {
+            request: crate::evidence::MirrorEvidenceRequest::new(
+                runner,
+                &cwd,
+                &command,
+                &job,
+                &events,
+                &result,
+                run_id.as_deref(),
+                lab_runner_workload
+                    .as_ref()
+                    .and_then(|workload| workload.notification_route.as_ref()),
+            ),
             broker_url,
-            &cwd,
-            &command,
-            &job,
-            &events,
-            &result,
-            run_id.as_deref(),
-            lab_runner_workload
-                .as_ref()
-                .and_then(|workload| workload.notification_route.as_ref()),
-        )?
+        })?
     } else {
         None
     };

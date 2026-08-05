@@ -41,10 +41,11 @@ fn recovery_lock_path(runner_id: &str, generation: &str) -> Result<PathBuf> {
     let generation = generation
         .chars()
         .map(|character| {
-            character
-                .is_ascii_alphanumeric()
-                .then_some(character)
-                .unwrap_or('_')
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '_'
+            }
         })
         .collect::<String>();
     Ok(paths::runner_sessions_dir()?
@@ -168,6 +169,7 @@ fn with_lock<T>(
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(&lock_path)
         .map_err(|error| {
             Error::internal_io(error.to_string(), Some("open generation lock".to_string()))
@@ -957,9 +959,8 @@ fn job_owner_ids_for(
     generations
         .job_owners
         .iter()
-        .filter_map(|(job_id, owner)| {
-            owner_matches_generation(owner, generation, endpoint).then(|| job_id.clone())
-        })
+        .filter(|(_, owner)| owner_matches_generation(owner, generation, endpoint))
+        .map(|(job_id, _)| job_id.clone())
         .collect()
 }
 
@@ -1856,6 +1857,21 @@ mod tests {
         RunnerTunnelMode,
     };
 
+    #[test]
+    fn durable_json_write_overwrites_existing_file() {
+        let directory = tempfile::tempdir().expect("create journal directory");
+        let path = directory.path().join("journal.json");
+        std::fs::write(&path, "stale payload that is longer than the replacement")
+            .expect("write stale journal");
+
+        write_durable_json(&path, &json!({ "state": "current" })).expect("overwrite journal");
+
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read replacement journal"),
+            "{\n  \"state\": \"current\"\n}"
+        );
+    }
+
     fn session(lease: &str, endpoint: &str, tunnel_pid: Option<u32>) -> RunnerSession {
         RunnerSession {
             runner_id: "runner-a".to_string(),
@@ -2086,7 +2102,6 @@ mod tests {
             .expect("activate current generation");
             let registry_path = path("runner-a").expect("registry path");
             let before = std::fs::read(&registry_path).expect("snapshot durable state");
-            let operations = std::sync::Arc::new(FakeEndpointOperations::default());
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
 
             let observers = (0..2)
@@ -2109,9 +2124,6 @@ mod tests {
                 std::fs::read(registry_path).expect("read durable state"),
                 before
             );
-            assert!(operations.terminal_reconciled_leases.borrow().is_empty());
-            assert!(operations.stopped_leases.borrow().is_empty());
-            assert!(operations.terminated_pids.borrow().is_empty());
         });
     }
 
