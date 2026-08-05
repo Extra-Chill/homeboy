@@ -332,12 +332,19 @@ pub fn placement_readiness(request: &PlacementReadinessRequest) -> Result<Placem
         &plan.capability,
         super::LabRunnerGateMode::Explicit,
     )?;
-    Ok(placement_readiness_from_status(
+    let provider_catalog = match &request.invocation {
+        PlacementReadinessInvocation::AgentTaskCook { .. } => Some(
+            crate::capabilities::runner_agent_task_provider_catalog(&request.runner_id)?,
+        ),
+        PlacementReadinessInvocation::CapabilityAudit { .. } => None,
+    };
+    Ok(placement_readiness_from_status_with_catalog(
         request,
         &status,
         runner.settings.concurrency_limit,
         status_tunnel_mode(&status),
         capability,
+        provider_catalog.as_deref(),
     ))
 }
 
@@ -348,9 +355,19 @@ fn placement_readiness_from_status(
     mode: RunnerTunnelMode,
     capability: super::LabRunnerGateDecision,
 ) -> PlacementReadiness {
+    placement_readiness_from_status_with_catalog(request, status, capacity, mode, capability, None)
+}
+
+fn placement_readiness_from_status_with_catalog(
+    request: &PlacementReadinessRequest,
+    status: &RunnerStatusReport,
+    capacity: Option<usize>,
+    mode: RunnerTunnelMode,
+    capability: super::LabRunnerGateDecision,
+    provider_catalog: Option<&[homeboy_agents::agent_tasks::provider::AgentTaskExecutorProvider]>,
+) -> PlacementReadiness {
     let (workload_family, command, provider, source_path_inputs) = admission_identity(request);
-    let availability = status.admission_availability(capacity);
-    let provider_admission = provider_admission_for_request(request);
+    let provider_admission = provider_admission_for_request(request, provider_catalog);
     let availability = status.admission_availability(capacity);
     let queueable = request.allow_queue
         && request.durable_workload
@@ -506,6 +523,7 @@ fn admission_identity(
 
 fn provider_admission_for_request(
     request: &PlacementReadinessRequest,
+    provider_catalog: Option<&[homeboy_agents::agent_tasks::provider::AgentTaskExecutorProvider]>,
 ) -> Option<homeboy_agents::agent_task_provider::AgentTaskProviderAdmissionPlan> {
     let PlacementReadinessInvocation::AgentTaskCook {
         provider,
@@ -517,16 +535,29 @@ fn provider_admission_for_request(
     else {
         return None;
     };
-    Some(
-        homeboy_agents::agent_task_provider::AgentTaskProviderAdmissionPlan::compile_unobserved(
-            homeboy_agents::agent_task_provider::AgentTaskProviderAdmissionRequest {
-                backend: provider.clone(),
-                selector: selector.clone(),
-                model: model.clone(),
-                runtime_identity: runtime_identity.clone(),
-            },
-        ),
-    )
+    Some(match provider_catalog {
+        Some(catalog) => {
+            homeboy_agents::agent_task_provider::AgentTaskProviderAdmissionPlan::compile(
+                homeboy_agents::agent_task_provider::AgentTaskProviderAdmissionRequest {
+                    backend: provider.clone(),
+                    selector: selector.clone(),
+                    model: model.clone(),
+                    runtime_identity: runtime_identity.clone(),
+                },
+                catalog,
+            )
+        }
+        None => {
+            homeboy_agents::agent_task_provider::AgentTaskProviderAdmissionPlan::compile_unobserved(
+                homeboy_agents::agent_task_provider::AgentTaskProviderAdmissionRequest {
+                    backend: provider.clone(),
+                    selector: selector.clone(),
+                    model: model.clone(),
+                    runtime_identity: runtime_identity.clone(),
+                },
+            )
+        }
+    })
 }
 
 static HANDOFF_CONNECT_LOCKS: OnceLock<Mutex<std::collections::BTreeMap<String, Arc<Mutex<()>>>>> =

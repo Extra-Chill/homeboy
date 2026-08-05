@@ -160,14 +160,12 @@ and the configured workspace root are usable on the target machine.
 ### `preflight`
 
 ```sh
-homeboy runner preflight homeboy-lab --workload-family bench --command "bench run"
-homeboy runner preflight homeboy-lab --workload-family agent-task --command "agent-task cook" --allow-queue --durable-workload
-homeboy runner preflight homeboy-lab --workload-family test --command "test" --require-tool node --require-capability browser
-homeboy runner preflight homeboy-lab --workload-family agent-task --command "agent-task cook" --provider openai --source-path ./provider.json
+homeboy runner preflight --request '{"schema":"homeboy/placement-readiness/v2","runner_id":"homeboy-lab","allow_queue":false,"durable_workload":false,"invocation":{"kind":"agent_task_cook","provider":"openai","source_path":"/workspace","selector":"openai.default","model":"gpt-5"}}'
+homeboy runner preflight --request '{"schema":"homeboy/placement-readiness/v2","runner_id":"homeboy-lab","allow_queue":true,"durable_workload":true,"invocation":{"kind":"capability_audit","source_path":"/workspace","capability_id":"browser"}}'
 ```
 
 `preflight` creates no run, rig lease, runner job, workspace, or connection. Its
-`homeboy/placement-readiness/v1` response is `ready`, `queueable`, or `blocked`
+`homeboy/placement-readiness/v2` response is `ready`, `queueable`, or `blocked`
 with exact predicates and typed executable recovery actions (including action
 ID, argv, safety, required confirmations, and evidence). Queueing is limited to a
 durable workload on a full reverse runner. Execution revalidates live admission
