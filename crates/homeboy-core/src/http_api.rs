@@ -1224,6 +1224,10 @@ fn reconciled_stale_status_note(run: &RunRecord) -> Option<String> {
             "running status had no owner metadata; run was marked stale during read reconciliation"
                 .to_string(),
         ),
+        "runner_backed_run_exceeded_exemption" => Some(
+            "a runner-backed run outlived its reconciliation exemption without recording a terminal outcome; run was marked stale"
+                .to_string(),
+        ),
         _ => None,
     }
 }

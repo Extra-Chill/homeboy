@@ -15,6 +15,21 @@ use crate::commands::CmdResult;
 
 const OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES: i64 = 30;
 
+/// Upper bound on how long a runner-backed running record stays exempt from
+/// reconciliation.
+///
+/// The exemption itself is right: a live remote job is authoritative, and
+/// calling its record stale would contradict a job that is genuinely working.
+/// But the exemption keyed on the *presence* of a runner job id and on a
+/// `/lab/remote_job_status` field that nothing updates when a handoff dies, so
+/// it had no end. A record whose owner is gone kept its exemption forever,
+/// which is what made phantom `Running` rows permanent and unreachable by
+/// `homeboy runs reconcile` (#11107).
+///
+/// 24h is deliberately far beyond any real Lab job. Crossing it is not evidence
+/// that a job is slow; it is evidence that nothing is coming back.
+const RUNNER_BACKED_RUNNING_STALE_THRESHOLD_MINUTES: i64 = 24 * 60;
+
 #[derive(Args, Clone, Default)]
 pub struct RunsReconcileArgs {
     /// Preview orphaned running records without mutating them
@@ -156,7 +171,10 @@ pub(crate) fn stale_running_reason<F>(run: &RunRecord, pid_is_alive: &F) -> Opti
 where
     F: Fn(u32) -> bool,
 {
-    if run_has_active_remote_job(run) {
+    // `/lab/remote_job_status` is written at dispatch and never corrected if
+    // the offload dies, so an unbounded read of it is a claim about the past.
+    // Honour it inside the exemption window, and stop honouring it after.
+    if run_has_active_remote_job(run) && !runner_backed_exemption_expired(run) {
         return None;
     }
 
@@ -164,20 +182,45 @@ where
         return (!pid_is_alive(owner_pid)).then_some("owner_process_not_running");
     }
 
-    ownerless_running_is_stale(run).then_some("owner_metadata_missing")
+    if ownerless_running_is_stale(run) {
+        return Some(if runner_backed_run(run) {
+            "runner_backed_run_exceeded_exemption"
+        } else {
+            "owner_metadata_missing"
+        });
+    }
+
+    None
 }
 
 fn ownerless_running_is_stale(run: &RunRecord) -> bool {
-    if runner_backed_run(run) {
-        return false;
-    }
+    // A runner-backed row still gets the benefit of the doubt — just not
+    // forever. Its window is the long one; everything else uses the short one.
+    let threshold = if runner_backed_run(run) {
+        RUNNER_BACKED_RUNNING_STALE_THRESHOLD_MINUTES
+    } else {
+        OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES
+    };
 
+    run_started_at_least_minutes_ago(run, threshold)
+}
+
+/// Whether a runner-backed record has outlived its reconciliation exemption.
+///
+/// A record with an unparseable `started_at` is treated as still inside the
+/// window: reconciliation must not mark a run stale on the strength of a
+/// timestamp it could not read.
+pub(crate) fn runner_backed_exemption_expired(run: &RunRecord) -> bool {
+    run_started_at_least_minutes_ago(run, RUNNER_BACKED_RUNNING_STALE_THRESHOLD_MINUTES)
+}
+
+fn run_started_at_least_minutes_ago(run: &RunRecord, minutes: i64) -> bool {
     chrono::DateTime::parse_from_rfc3339(&run.started_at)
         .map(|started_at| {
             chrono::Utc::now()
                 .signed_duration_since(started_at.with_timezone(&chrono::Utc))
                 .num_minutes()
-                >= OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES
+                >= minutes
         })
         .unwrap_or(false)
 }
@@ -374,6 +417,23 @@ mod tests {
         }
     }
 
+    /// The exact shape a lost Lab handoff leaves behind: no owner metadata, a
+    /// runner job id, and a `remote_job_status` frozen at whatever it was when
+    /// the offload was dispatched.
+    fn phantom_handoff_run(id: &str, started_at: String) -> RunRecord {
+        RunRecord {
+            metadata_json: serde_json::json!({
+                "runner_job_id": "job-7448",
+                "lab": { "remote_job_status": "running" },
+            }),
+            ..ownerless_running_run(id, started_at)
+        }
+    }
+
+    fn minutes_ago(minutes: i64) -> String {
+        (chrono::Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339()
+    }
+
     #[test]
     fn reconcile_marks_dead_owner_stale_and_preserves_artifacts() {
         with_isolated_home(|home| {
@@ -439,6 +499,104 @@ mod tests {
             assert_eq!(unchanged.status, "running");
             assert!(unchanged.finished_at.is_none());
         });
+    }
+
+    /// The exemption is still the default answer. A runner-backed row inside
+    /// its window is left alone even though its owner metadata is missing and
+    /// its remote status is unverifiable — calling a working job stale is the
+    /// worse error, and the ceiling exists to bound that deference, not to
+    /// remove it.
+    #[test]
+    fn reconcile_keeps_a_recent_runner_backed_running_record_running() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            store
+                .import_run(&phantom_handoff_run("recent-handoff-run", minutes_ago(90)))
+                .expect("import runner-backed run");
+
+            let reconciled =
+                reconcile_orphaned_running_runs(&store, 1000, false, |_| false).expect("reconcile");
+            let unchanged = store
+                .get_run("recent-handoff-run")
+                .expect("get run")
+                .expect("run exists");
+
+            assert!(reconciled.is_empty());
+            assert_eq!(unchanged.status, "running");
+        });
+    }
+
+    /// The leak this closes from the other end: a lost handoff leaves a row
+    /// whose `remote_job_status` nothing will ever correct and whose runner job
+    /// id used to buy it a permanent exemption. Past the ceiling it becomes
+    /// reconcilable, with a reason that names why.
+    #[test]
+    fn reconcile_marks_a_runner_backed_running_record_stale_past_the_ceiling() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            store
+                .import_run(&phantom_handoff_run(
+                    "phantom-handoff-run",
+                    minutes_ago(RUNNER_BACKED_RUNNING_STALE_THRESHOLD_MINUTES + 60),
+                ))
+                .expect("import runner-backed run");
+
+            let reconciled =
+                reconcile_orphaned_running_runs(&store, 1000, false, |_| false).expect("reconcile");
+            let updated = store
+                .get_run("phantom-handoff-run")
+                .expect("get run")
+                .expect("run exists");
+
+            assert_eq!(reconciled.len(), 1);
+            assert_eq!(reconciled[0].id, "phantom-handoff-run");
+            assert_eq!(reconciled[0].reason, "runner_backed_run_exceeded_exemption");
+            assert_eq!(updated.status, "stale");
+            assert!(updated.finished_at.is_some());
+        });
+    }
+
+    /// The exemption ceiling is a property of the record's age, readable
+    /// without a store, and it must never fire on a timestamp it could not
+    /// parse — an unreadable `started_at` is not evidence of an old run.
+    #[test]
+    fn runner_backed_exemption_expires_only_on_a_readable_old_timestamp() {
+        assert!(!runner_backed_exemption_expired(&phantom_handoff_run(
+            "fresh",
+            minutes_ago(1),
+        )));
+        assert!(runner_backed_exemption_expired(&phantom_handoff_run(
+            "ancient",
+            minutes_ago(RUNNER_BACKED_RUNNING_STALE_THRESHOLD_MINUTES + 1),
+        )));
+        assert!(!runner_backed_exemption_expired(&phantom_handoff_run(
+            "unreadable",
+            "not-a-timestamp".to_string(),
+        )));
+    }
+
+    /// A runner-backed row that still has a live owner process is not stale at
+    /// any age. The ceiling removes the blanket exemption; it does not override
+    /// direct evidence that the local owner is alive and working.
+    #[test]
+    fn a_live_owner_outranks_the_exemption_ceiling() {
+        let mut run = phantom_handoff_run(
+            "owned-long-runner",
+            minutes_ago(RUNNER_BACKED_RUNNING_STALE_THRESHOLD_MINUTES + 600),
+        );
+        run.metadata_json = serde_json::json!({
+            "runner_job_id": "job-7448",
+            "lab": { "remote_job_status": "running" },
+            "homeboy_run_owner": { "pid": 4242 },
+        });
+
+        assert_eq!(stale_running_reason(&run, &|_pid: u32| true), None);
+        assert_eq!(
+            stale_running_reason(&run, &|_pid: u32| false),
+            Some("owner_process_not_running")
+        );
     }
 
     #[test]

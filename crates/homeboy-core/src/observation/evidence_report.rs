@@ -904,7 +904,12 @@ pub fn derive_evidence_manifest(inputs: EvidenceManifestDerivation<'_>) -> Evide
         Some(RunStatus::Pass) => EvidenceManifestState::Passed,
         Some(RunStatus::Fail) | Some(RunStatus::Error) => EvidenceManifestState::Failed,
         Some(RunStatus::Stale) => EvidenceManifestState::Blocked,
-        Some(RunStatus::Skipped) | None => EvidenceManifestState::Unknown,
+        // A handoff settled this record without proving anything through it.
+        // `Unknown` is the honest read: the evidence exists, on the remote run
+        // this record points at, and the blocking condition below says so.
+        Some(RunStatus::Skipped) | Some(RunStatus::HandedOff) | None => {
+            EvidenceManifestState::Unknown
+        }
     };
     let terminal = matches!(
         status,
@@ -1076,6 +1081,12 @@ fn derived_blocking_conditions(
             severity: Some(BlockingSeverity::Warning),
             refs: refs.clone(),
         }),
+        Some(RunStatus::HandedOff) => conditions.push(BlockingCondition {
+            kind: "run_handed_off".to_string(),
+            summary: handed_off_blocking_summary(run),
+            severity: Some(BlockingSeverity::Warning),
+            refs: refs.clone(),
+        }),
         None => conditions.push(BlockingCondition {
             kind: "unknown_run_status".to_string(),
             summary: format!(
@@ -1097,6 +1108,45 @@ fn derived_blocking_conditions(
     }
 
     conditions
+}
+
+/// Name where a handed-off run's outcome actually lives.
+///
+/// A blocking condition that only says "handed off" leaves the reader stuck, so
+/// this reaches into the dispatch metadata the routing service wrote and names
+/// the remote run and runner job when they are recorded.
+fn handed_off_blocking_summary(run: &RunRecord) -> String {
+    let dispatch = run.metadata_json.get("lab_dispatch");
+    let durable_run_id = dispatch
+        .and_then(|dispatch| string_field(dispatch, "durable_run_id"))
+        .or_else(|| string_field(&run.metadata_json, "durable_run_id"));
+    let runner_job_id = dispatch
+        .and_then(|dispatch| {
+            string_field(dispatch, "runner_job_id").or_else(|| string_field(dispatch, "job_id"))
+        })
+        .or_else(|| string_field(&run.metadata_json, "runner_job_id"));
+
+    let mut summary = String::from(
+        "The run handed execution to a remote runner and settled locally, so it proves nothing by itself.",
+    );
+    match (durable_run_id, runner_job_id) {
+        (Some(run_id), _) => {
+            summary.push_str(&format!(
+                " The outcome belongs to remote run `{run_id}`; read it with `homeboy agent-task status {run_id}`."
+            ));
+        }
+        (None, Some(job_id)) => {
+            summary.push_str(&format!(
+                " The outcome belongs to runner job `{job_id}`; read it with `homeboy runner job show {job_id}`."
+            ));
+        }
+        (None, None) => {
+            summary.push_str(
+                " No remote handle was recorded, so the outcome is unrecoverable from this record.",
+            );
+        }
+    }
+    summary
 }
 
 fn is_evidence_manifest_artifact(artifact: &ArtifactRecord) -> bool {
@@ -1222,7 +1272,16 @@ mod tests {
     /// consumer of `homeboy/evidence-manifest/v1`.
     #[test]
     fn derived_manifest_satisfies_the_contract_for_every_status_label() {
-        for status in ["running", "pass", "fail", "error", "skipped", "stale", "?"] {
+        for status in [
+            "running",
+            "pass",
+            "fail",
+            "error",
+            "skipped",
+            "stale",
+            "handed_off",
+            "?",
+        ] {
             let mut run = sample_run();
             run.status = status.to_string();
             let manifest = derived_manifest(&run, &[url_artifact()]);
@@ -1245,6 +1304,7 @@ mod tests {
             ("error", EvidenceManifestState::Failed),
             ("stale", EvidenceManifestState::Blocked),
             ("skipped", EvidenceManifestState::Unknown),
+            ("handed_off", EvidenceManifestState::Unknown),
         ];
 
         for (status, expected) in cases {
@@ -1275,6 +1335,54 @@ mod tests {
             .blocking_conditions
             .iter()
             .any(|condition| condition.kind == "unknown_run_status"));
+    }
+
+    /// A handed-off run is terminal, so nothing will reopen it, but its outcome
+    /// is elsewhere. The manifest must say both, and name where "elsewhere" is,
+    /// or the reader is left with a settled record and no way to finish reading
+    /// it.
+    #[test]
+    fn derived_manifest_points_a_handed_off_run_at_its_remote_run() {
+        let mut run = sample_run();
+        run.status = "handed_off".to_string();
+        run.metadata_json = serde_json::json!({
+            "lab_dispatch": {
+                "phase": "route_lab_dispatch",
+                "status": "detached_handoff",
+                "runner_id": "homeboy-lab",
+                "runner_job_id": "job-7448",
+                "durable_run_id": "agent-task-7448",
+            }
+        });
+        let manifest = derived_manifest(&run, &[url_artifact()]);
+
+        assert_eq!(manifest.status.state, EvidenceManifestState::Unknown);
+        let condition = manifest
+            .blocking_conditions
+            .iter()
+            .find(|condition| condition.kind == "run_handed_off")
+            .expect("handed-off blocking condition");
+        assert!(condition.summary.contains("agent-task-7448"));
+        assert!(condition
+            .summary
+            .contains("homeboy agent-task status agent-task-7448"));
+    }
+
+    /// Without a recorded remote handle the outcome is genuinely unrecoverable.
+    /// Say that, rather than implying a lookup that cannot be performed.
+    #[test]
+    fn derived_manifest_admits_a_handed_off_run_with_no_remote_handle() {
+        let mut run = sample_run();
+        run.status = "handed_off".to_string();
+        run.metadata_json = serde_json::json!({ "lab_dispatch": { "status": "detached_handoff" } });
+        let manifest = derived_manifest(&run, &[url_artifact()]);
+
+        let condition = manifest
+            .blocking_conditions
+            .iter()
+            .find(|condition| condition.kind == "run_handed_off")
+            .expect("handed-off blocking condition");
+        assert!(condition.summary.contains("No remote handle was recorded"));
     }
 
     /// A pass that also recorded a gate failure is contradictory metadata. The
