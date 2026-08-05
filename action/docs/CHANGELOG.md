@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.8] - 2026-08-05
+
+### Changed
+- Propagate timeout budgets to reusable test shards
+
 ## [2.11.7] - 2026-08-05
 
 ### Fixed
