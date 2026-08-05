@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.6] - 2026-08-05
+
+### Fixed
+- replay shard manifests with canonical result paths
+
 ## [2.11.5] - 2026-08-04
 
 ### Fixed
