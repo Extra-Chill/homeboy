@@ -205,7 +205,7 @@ pub(super) fn run_repeat(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
         profile: resolved_profile_output_for_args(&args),
     };
 
-    Ok((TraceCommandOutput::Aggregate(output), exit_code))
+    Ok((TraceCommandOutput::Aggregate(Box::new(output)), exit_code))
 }
 
 pub(super) fn focus_aggregate_spans(

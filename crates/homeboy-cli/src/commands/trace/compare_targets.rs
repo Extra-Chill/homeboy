@@ -201,7 +201,7 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
         }),
     );
     Ok((
-        TraceCommandOutput::Compare(compare),
+        TraceCommandOutput::Compare(Box::new(compare)),
         if failed { 1 } else { 0 },
     ))
 }

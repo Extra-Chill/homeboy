@@ -163,21 +163,21 @@ pub fn run_main_lint_workflow(
             None,
             vec![("lint runner".to_string(), args.component_label.clone())],
         )?;
-        let runner = build_lint_runner(
+        let runner = build_lint_runner(crate::lint::LintRunnerRequest {
             component,
-            args.path_override.clone(),
-            &args.settings,
-            args.summary || args.json_summary,
-            args.file.as_deref(),
-            args.glob.as_deref(),
-            args.sniff_filters.errors_only,
-            args.sniff_filters.sniffs.as_deref(),
-            args.sniff_filters.exclude_sniffs.as_deref(),
-            args.category.as_deref(),
-            None,
-            None,
+            path_override: args.path_override.clone(),
+            settings: &args.settings,
+            summary: args.summary || args.json_summary,
+            file: args.file.as_deref(),
+            glob: args.glob.as_deref(),
+            errors_only: args.sniff_filters.errors_only,
+            sniffs: args.sniff_filters.sniffs.as_deref(),
+            exclude_sniffs: args.sniff_filters.exclude_sniffs.as_deref(),
+            category: args.category.as_deref(),
+            step: None,
+            changed_files: None,
             run_dir,
-        )?;
+        })?;
         let runner = args
             .ci_env
             .iter()
@@ -398,21 +398,21 @@ fn run_full_candidate_baseline(
     args: &LintRunWorkflowArgs,
 ) -> homeboy_core::Result<FullCandidateBaseline> {
     let full_run_dir = RunDir::create()?;
-    let runner = build_lint_runner(
+    let runner = build_lint_runner(crate::lint::LintRunnerRequest {
         component,
-        args.path_override.clone(),
-        &args.settings,
-        true,
-        None,
-        None,
-        false,
-        None,
-        None,
-        None,
-        None,
-        None,
-        &full_run_dir,
-    )?;
+        path_override: args.path_override.clone(),
+        settings: &args.settings,
+        summary: true,
+        file: None,
+        glob: None,
+        errors_only: false,
+        sniffs: None,
+        exclude_sniffs: None,
+        category: None,
+        step: None,
+        changed_files: None,
+        run_dir: &full_run_dir,
+    })?;
     let runner = args
         .ci_env
         .iter()
@@ -477,21 +477,21 @@ fn run_scoped_lint_runs(
         let scoped_run_dir = (index > 0).then(RunDir::create).transpose()?;
         let active_run_dir = scoped_run_dir.as_ref().unwrap_or(run_dir);
 
-        let runner = build_lint_runner(
+        let runner = build_lint_runner(crate::lint::LintRunnerRequest {
             component,
-            args.path_override.clone(),
-            &args.settings,
-            args.summary || args.json_summary,
-            args.file.as_deref(),
-            Some(run.glob.as_str()),
-            args.sniff_filters.errors_only,
-            args.sniff_filters.sniffs.as_deref(),
-            args.sniff_filters.exclude_sniffs.as_deref(),
-            args.category.as_deref(),
-            run.step.as_deref(),
-            Some(run.changed_files.as_slice()),
-            active_run_dir,
-        )?;
+            path_override: args.path_override.clone(),
+            settings: &args.settings,
+            summary: args.summary || args.json_summary,
+            file: args.file.as_deref(),
+            glob: Some(run.glob.as_str()),
+            errors_only: args.sniff_filters.errors_only,
+            sniffs: args.sniff_filters.sniffs.as_deref(),
+            exclude_sniffs: args.sniff_filters.exclude_sniffs.as_deref(),
+            category: args.category.as_deref(),
+            step: run.step.as_deref(),
+            changed_files: Some(run.changed_files.as_slice()),
+            run_dir: active_run_dir,
+        })?;
         let runner = args
             .ci_env
             .iter()

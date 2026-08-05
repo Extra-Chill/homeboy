@@ -33,9 +33,9 @@ mod envelope_types {
     #[serde(untagged)]
     pub enum TraceCommandOutput {
         Run(Box<TraceRunOutput>),
-        Summary(TraceRunSummaryOutput),
-        Aggregate(TraceAggregateOutput),
-        Compare(TraceCompareOutput),
+        Summary(Box<TraceRunSummaryOutput>),
+        Aggregate(Box<TraceAggregateOutput>),
+        Compare(Box<TraceCompareOutput>),
         Matrix(TraceVariantMatrixOutput),
         ScenarioMatrix(TraceScenarioMatrixOutput),
         List(TraceListOutput),
@@ -632,7 +632,7 @@ mod builders {
                 profile: None,
             };
             return (
-                TraceCommandOutput::Summary(output),
+                TraceCommandOutput::Summary(Box::new(output)),
                 Some(full_output),
                 exit_code,
             );
@@ -1068,6 +1068,42 @@ mod tests {
             "submit_to_cli"
         );
         assert_eq!(artifact_value["results"]["timeline"][0]["event"], "submit");
+    }
+
+    #[test]
+    fn boxed_trace_output_variants_preserve_untagged_serialization() {
+        let aggregate = TraceCommandOutput::Aggregate(Box::new(TraceAggregateOutput {
+            command: "trace.repeat",
+            passed: true,
+            status: "pass".to_string(),
+            component: "Studio".to_string(),
+            scenario_id: "create-site".to_string(),
+            phase_preset: None,
+            repeat: 1,
+            run_count: 1,
+            failure_count: 0,
+            exit_code: 0,
+            schedule: None,
+            run_order: Vec::new(),
+            rig_state: None,
+            overlays: Vec::new(),
+            runs: Vec::new(),
+            spans: Vec::new(),
+            metrics: Vec::new(),
+            guardrails: Vec::new(),
+            guardrail_failure_count: 0,
+            focus_span_ids: Vec::new(),
+            focus_spans: Vec::new(),
+            classification_summaries: Vec::new(),
+            unmatched_span_metadata_ids: Vec::new(),
+            profile: None,
+        }));
+
+        let value = serde_json::to_value(aggregate).expect("aggregate output serializes");
+
+        assert_eq!(value["command"], "trace.repeat");
+        assert_eq!(value["component"], "Studio");
+        assert!(value.get("Aggregate").is_none());
     }
 
     #[test]
