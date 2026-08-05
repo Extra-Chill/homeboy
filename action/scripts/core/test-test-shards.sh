@@ -195,6 +195,10 @@ mv "${tmp}/bad.json" "${tmp}/artifacts/candidate-shard-2/candidate/manifest.json
 rm "${tmp}/artifacts/candidate-shard-2/candidate/homeboy-ci-results/review-test.json"
 TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/timeout-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate
 jq -e '."review test" == "timeout"' "${tmp}/timeout-output/results.json" >/dev/null || { printf 'FAIL: timeout without payload must not pass\n'; exit 1; }
+jq -n '{schema:"homeboy/command-result/v3",command:"review",success:false,status:"failed",exit_code:124,summary:"test phase timed out before reporting test counts",data:{failure:{category:"infrastructure",phase:"test"}}}' > "${tmp}/artifacts/candidate-shard-2/candidate/homeboy-ci-results/review-test.json"
+TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/structured-timeout-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate
+jq -e '.schema == "homeboy/command-result/v3" and .success == false and .status == "failed" and .exit_code == 124 and .data.test_counts == {passed:0,failed:0,skipped:0,total:0}' "${tmp}/structured-timeout-output/review-test.json" >/dev/null || { printf 'FAIL: structured timeout without completed counts did not aggregate deterministically\n'; exit 1; }
+jq -e '."review test" == "timeout"' "${tmp}/structured-timeout-output/results.json" >/dev/null || { printf 'FAIL: structured timeout did not retain its timeout result\n'; exit 1; }
 
 jq '.data.test_counts.total = 999' "${tmp}/artifacts/baseline-shard-2/baseline/homeboy-ci-results/review-test.json" > "${tmp}/bad.json"
 mv "${tmp}/bad.json" "${tmp}/artifacts/baseline-shard-2/baseline/homeboy-ci-results/review-test.json"
