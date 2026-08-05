@@ -149,36 +149,36 @@ fn record_declared_artifact(
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             result.missing_declared_artifacts += 1;
-            record_declared_artifact_finding(
+            record_declared_artifact_finding(DeclaredArtifactFinding {
                 store,
                 run_id,
-                "trace.artifact.missing",
-                "error",
-                format!(
+                rule: "trace.artifact.missing",
+                severity: "error",
+                message: format!(
                     "trace result declared artifact '{}' at '{}', but the path does not exist",
                     artifact.label, artifact.path
                 ),
                 artifact,
                 run_root,
                 resolved,
-            );
+            });
             return;
         }
         Err(error) => {
             result.invalid_declared_artifacts += 1;
-            record_declared_artifact_finding(
+            record_declared_artifact_finding(DeclaredArtifactFinding {
                 store,
                 run_id,
-                "trace.artifact.metadata_error",
-                "error",
-                format!(
+                rule: "trace.artifact.metadata_error",
+                severity: "error",
+                message: format!(
                     "trace result declared artifact '{}' at '{}' could not be inspected: {error}",
                     artifact.label, artifact.path
                 ),
                 artifact,
                 run_root,
                 resolved,
-            );
+            });
             return;
         }
     };
@@ -189,19 +189,19 @@ fn record_declared_artifact(
         store.record_directory_artifact(run_id, "trace-artifact", resolved)
     } else {
         result.invalid_declared_artifacts += 1;
-        record_declared_artifact_finding(
+        record_declared_artifact_finding(DeclaredArtifactFinding {
             store,
             run_id,
-            "trace.artifact.unsupported_type",
-            "error",
-            format!(
+            rule: "trace.artifact.unsupported_type",
+            severity: "error",
+            message: format!(
                 "trace result declared artifact '{}' at '{}' is neither a file nor a directory",
                 artifact.label, artifact.path
             ),
             artifact,
             run_root,
             resolved,
-        );
+        });
         return;
     };
 
@@ -214,19 +214,19 @@ fn record_declared_artifact(
         Err(error) => {
             result.invalid_declared_artifacts += 1;
             result.persistence_failures += 1;
-            record_declared_artifact_finding(
+            record_declared_artifact_finding(DeclaredArtifactFinding {
                 store,
                 run_id,
-                "trace.artifact.record_failed",
-                "error",
-                format!(
+                rule: "trace.artifact.record_failed",
+                severity: "error",
+                message: format!(
                     "trace result declared artifact '{}' at '{}' could not be persisted: {}",
                     artifact.label, artifact.path, error.message
                 ),
                 artifact,
                 run_root,
                 resolved,
-            );
+            });
         }
     }
 }
@@ -244,19 +244,19 @@ fn record_unresolved_declared_artifact(
         .any(|component| matches!(component, std::path::Component::ParentDir))
     {
         result.invalid_declared_artifacts += 1;
-        record_declared_artifact_finding(
+        record_declared_artifact_finding(DeclaredArtifactFinding {
             store,
             run_id,
-            "trace.artifact.invalid_path",
-            "error",
-            format!(
+            rule: "trace.artifact.invalid_path",
+            severity: "error",
+            message: format!(
                 "trace result declared artifact '{}' at '{}' is outside the trace run directory",
                 artifact.label, artifact.path
             ),
             artifact,
             run_root,
-            declared_path,
-        );
+            resolved: declared_path,
+        });
         return;
     }
 
@@ -266,52 +266,54 @@ fn record_unresolved_declared_artifact(
     } else {
         run_root.join(declared_path)
     };
-    record_declared_artifact_finding(
+    record_declared_artifact_finding(DeclaredArtifactFinding {
         store,
         run_id,
-        "trace.artifact.missing",
-        "error",
-        format!(
+        rule: "trace.artifact.missing",
+        severity: "error",
+        message: format!(
             "trace result declared artifact '{}' at '{}', but the path does not exist",
             artifact.label, artifact.path
         ),
         artifact,
         run_root,
-        &resolved,
-    );
+        resolved: &resolved,
+    });
 }
 
-fn record_declared_artifact_finding(
-    store: &ObservationStore,
-    run_id: &str,
-    rule: &str,
-    severity: &str,
-    message: String,
-    artifact: &extension_trace::TraceArtifact,
-    run_root: &Path,
-    resolved: &Path,
-) {
-    let _ = store.record_finding(&NewFindingRecord {
-        run_id: run_id.to_string(),
+fn record_declared_artifact_finding(request: DeclaredArtifactFinding<'_>) {
+    let _ = request.store.record_finding(&NewFindingRecord {
+        run_id: request.run_id.to_string(),
         tool: "trace".to_string(),
-        rule: Some(rule.to_string()),
+        rule: Some(request.rule.to_string()),
         file: None,
         line: None,
-        severity: Some(severity.to_string()),
-        fingerprint: Some(format!("{rule}:{}", artifact.path)),
-        message,
+        severity: Some(request.severity.to_string()),
+        fingerprint: Some(format!("{}:{}", request.rule, request.artifact.path)),
+        message: request.message,
         fixable: Some(false),
         metadata_json: serde_json::json!({
             "declared_artifact": {
-                "label": artifact.label,
-                "path": artifact.path,
-                "resolved_path": resolved.to_string_lossy(),
-                "relative_to_run_dir": resolved.strip_prefix(run_root)
+                "label": request.artifact.label,
+                "path": request.artifact.path,
+                "resolved_path": request.resolved.to_string_lossy(),
+                "relative_to_run_dir": request.resolved.strip_prefix(request.run_root)
                     .ok()
                     .map(|path| path.to_string_lossy().to_string()),
             }
         }),
     });
+}
+
+struct DeclaredArtifactFinding<'a> {
+    store: &'a ObservationStore,
+    run_id: &'a str,
+    rule: &'a str,
+    severity: &'a str,
+    message: String,
+    artifact: &'a extension_trace::TraceArtifact,
+    run_root: &'a Path,
+    resolved: &'a Path,
 }
 
 #[cfg(test)]

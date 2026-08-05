@@ -5,43 +5,36 @@ use homeboy::refactor::{self, RuleResult, TransformResult};
 use super::{run_across_targets, RefactorOutput, RefactorTargetArgs};
 use crate::commands::CmdResult;
 
-pub(super) fn run_transform(
-    find: &str,
-    replace: &str,
-    files: &str,
-    context: &str,
-    full_match_details: bool,
-    target: &RefactorTargetArgs,
-    write: bool,
-) -> CmdResult<RefactorOutput> {
-    let targets = target.resolve_targets()?;
+pub(super) struct TransformRequest<'a> {
+    pub(super) find: &'a str,
+    pub(super) replace: &'a str,
+    pub(super) files: &'a str,
+    pub(super) context: &'a str,
+    pub(super) full_match_details: bool,
+    pub(super) target: &'a RefactorTargetArgs,
+    pub(super) write: bool,
+}
+
+pub(super) fn run_transform(request: TransformRequest<'_>) -> CmdResult<RefactorOutput> {
+    let targets = request.target.resolve_targets()?;
     run_across_targets("transform", targets, |component_id, path| {
-        run_transform_single(
-            find,
-            replace,
-            files,
-            context,
-            full_match_details,
-            component_id,
-            path,
-            write,
-        )
+        run_transform_single(&request, component_id, path)
     })
 }
 
 fn run_transform_single(
-    find: &str,
-    replace: &str,
-    files: &str,
-    context: &str,
-    full_match_details: bool,
+    request: &TransformRequest<'_>,
     component_id: Option<&str>,
     path: Option<&str>,
-    write: bool,
 ) -> CmdResult<RefactorOutput> {
     let root = refactor::move_items::resolve_root(component_id, path)?;
     let set_name = "ad-hoc";
-    let set = refactor::ad_hoc_transform(find, replace, files, context);
+    let set = refactor::ad_hoc_transform(
+        request.find,
+        request.replace,
+        request.files,
+        request.context,
+    );
 
     homeboy::log_status!(
         "transform",
@@ -55,7 +48,7 @@ fn run_transform_single(
         homeboy::log_status!("info", "{}", set.description);
     }
 
-    if write {
+    if request.write {
         if let Ok(preview) = refactor::apply_transforms(
             &root,
             set_name,
@@ -77,9 +70,9 @@ fn run_transform_single(
         &root,
         set_name,
         &set,
-        write,
+        request.write,
         None,
-        if full_match_details {
+        if request.full_match_details {
             None
         } else {
             Some(refactor::DEFAULT_MATCH_DETAIL_LIMIT)
@@ -87,7 +80,7 @@ fn run_transform_single(
     )?;
 
     log_transform_rules(&result);
-    log_transform_summary(&result, write);
+    log_transform_summary(&result, request.write);
 
     let exit_code = 0;
     Ok((RefactorOutput::Transform { result }, exit_code))
@@ -175,15 +168,20 @@ mod tests {
         fs::create_dir_all(&src).expect("src dir");
         fs::write(src.join("sample.txt"), "hello world\n").expect("fixture file");
 
+        let target = RefactorTargetArgs::default();
+        let request = TransformRequest {
+            find: "NO_MATCH_TOKEN",
+            replace: "NEW",
+            files: "src/**/*.txt",
+            context: "line",
+            full_match_details: false,
+            target: &target,
+            write: false,
+        };
         let (output, exit_code) = run_transform_single(
-            "NO_MATCH_TOKEN",
-            "NEW",
-            "src/**/*.txt",
-            "line",
-            false,
+            &request,
             None,
             Some(dir.path().to_str().expect("utf8 path")),
-            false,
         )
         .expect("transform should return structured output");
 

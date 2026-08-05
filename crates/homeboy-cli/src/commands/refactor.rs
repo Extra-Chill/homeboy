@@ -436,15 +436,15 @@ pub fn run(args: RefactorArgs) -> CmdResult<RefactorOutput> {
             full_match_details,
             target,
             write_mode,
-        }) => transform_command::run_transform(
-            &find,
-            &replace,
-            &files,
-            &context,
+        }) => transform_command::run_transform(transform_command::TransformRequest {
+            find: &find,
+            replace: &replace,
+            files: &files,
+            context: &context,
             full_match_details,
-            &target,
-            write_mode.write,
-        ),
+            target: &target,
+            write: write_mode.write,
+        }),
 
         Some(RefactorCommand::Decompose {
             file,
