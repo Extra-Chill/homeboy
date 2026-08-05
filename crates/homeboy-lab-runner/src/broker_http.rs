@@ -39,15 +39,9 @@ pub(crate) fn post_json(
         token,
     )
     .send()
-    .map_err(|err| {
-        let mut error = Error::internal_unexpected(format!("{action}: {err}"));
-        error.details["request_timeout"] = json!(err.is_timeout());
-        error
-    })?;
+    .map_err(|err| broker_transport_error(action, err))?;
     let status_code = response.status().as_u16();
-    let envelope: BrokerEnvelope = response.json().map_err(|err| {
-        Error::internal_json(err.to_string(), Some("parse broker response".to_string()))
-    })?;
+    let envelope: BrokerEnvelope = response.json().map_err(broker_response_error)?;
     if status_code >= 400 || !envelope.success {
         return Err(Error::internal_unexpected(format!(
             "broker request failed: {}",
@@ -72,15 +66,9 @@ pub(crate) fn get_json(
         token,
     )
     .send()
-    .map_err(|err| {
-        let mut error = Error::internal_unexpected(format!("{action}: {err}"));
-        error.details["request_timeout"] = json!(err.is_timeout());
-        error
-    })?;
+    .map_err(|err| broker_transport_error(action, err))?;
     let status_code = response.status().as_u16();
-    let envelope: BrokerEnvelope = response.json().map_err(|err| {
-        Error::internal_json(err.to_string(), Some("parse broker response".to_string()))
-    })?;
+    let envelope: BrokerEnvelope = response.json().map_err(broker_response_error)?;
     if status_code >= 400 || !envelope.success {
         return Err(Error::internal_unexpected(format!(
             "broker request failed: {}",
@@ -99,10 +87,26 @@ fn canonical_broker_body(data: &Value) -> Result<Value> {
         .ok_or_else(|| Error::internal_unexpected("broker response missing canonical data.body"))
 }
 
+fn broker_transport_error(action: &str, err: reqwest::Error) -> Error {
+    let mut error = Error::internal_unexpected(format!("{action}: {err}"));
+    error.details["request_timeout"] = json!(err.is_timeout());
+    error
+}
+
+fn broker_response_error(err: reqwest::Error) -> Error {
+    let mut error =
+        Error::internal_json(err.to_string(), Some("parse broker response".to_string()));
+    error.details["request_timeout"] = json!(err.is_timeout());
+    error
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::time::Duration;
 
     #[test]
     fn canonical_broker_body_requires_data_body() {
@@ -115,5 +119,35 @@ mod tests {
         let body =
             canonical_broker_body(&json!({ "body": { "job": { "id": "job-1" } } })).expect("body");
         assert_eq!(body["job"]["id"], "job-1");
+    }
+
+    #[test]
+    fn get_json_preserves_timeout_when_headers_arrive_before_the_body_stalls() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 128\r\nConnection: close\r\n\r\n")
+                .expect("headers");
+            stream.flush().expect("flush headers");
+            std::thread::sleep(Duration::from_millis(100));
+        });
+        let client = Client::builder()
+            .timeout(Duration::from_millis(10))
+            .build()
+            .expect("client");
+
+        let error = get_json(
+            &client,
+            &format!("http://{address}"),
+            "/jobs",
+            "read stalled broker jobs",
+            None,
+        )
+        .expect_err("stalled broker body must time out");
+
+        server.join().expect("server");
+        assert_eq!(error.details["request_timeout"], true);
     }
 }
