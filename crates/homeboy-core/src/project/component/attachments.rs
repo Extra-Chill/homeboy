@@ -264,14 +264,17 @@ fn rebase_monorepo_component_paths_unlocked(
         if id == &root_id || has_component(&project, id) {
             selected.insert(id.clone());
             let path = paths[0].to_string_lossy().to_string();
-            let status = project
+            let status = if project
                 .components
                 .iter()
                 .find(|component| component.id == *id)
                 .map(|component| component.local_path == path)
                 .unwrap_or(false)
-                .then_some(MonorepoComponentPathStatus::Unchanged)
-                .unwrap_or(MonorepoComponentPathStatus::Attached);
+            {
+                MonorepoComponentPathStatus::Unchanged
+            } else {
+                MonorepoComponentPathStatus::Attached
+            };
             if status == MonorepoComponentPathStatus::Attached {
                 preserve_remote_path_on_reattach(&mut project, id, &path);
                 if let Some(component) = project
