@@ -121,6 +121,17 @@ pub fn classify(args: &[String]) -> CommandCapability {
 /// already-durable aggregate unavailable during a Lab outage.
 pub fn requires_startup_reconciliation(args: &[String]) -> bool {
     classify(args) == CommandCapability::Mutation
+        // The lifecycle command that launches these internal processes already
+        // performs startup recovery. Repeating it here delays lease publication
+        // and can make the supervisor kill an otherwise healthy cold start.
+        && !args
+            .get(1..)
+            .unwrap_or_default()
+            .windows(2)
+            .any(|args| {
+                matches!(args, [command, subcommand]
+                    if command == "daemon" && matches!(subcommand.as_str(), "supervise" | "serve"))
+            })
         && !args
             .get(1..)
             .unwrap_or_default()
@@ -227,5 +238,39 @@ mod tests {
             "run-1",
             "--run",
         ])));
+    }
+
+    #[test]
+    fn internal_daemon_processes_publish_their_lease_without_repeating_recovery() {
+        for command in [
+            args(&[
+                "homeboy",
+                "daemon",
+                "supervise",
+                "--addr",
+                "127.0.0.1:0",
+                "--startup-token",
+                "token",
+            ]),
+            args(&[
+                "homeboy",
+                "daemon",
+                "serve",
+                "--addr",
+                "127.0.0.1:0",
+                "--startup-token",
+                "token",
+            ]),
+        ] {
+            assert_eq!(classify(&command), CommandCapability::Mutation);
+            assert!(!requires_startup_reconciliation(&command));
+        }
+
+        for command in [
+            args(&["homeboy", "daemon", "start"]),
+            args(&["homeboy", "daemon", "ensure-running"]),
+        ] {
+            assert!(requires_startup_reconciliation(&command));
+        }
     }
 }
