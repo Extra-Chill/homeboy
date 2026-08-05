@@ -4,6 +4,8 @@ Remove or inspect reconstructable artifacts that Homeboy can safely recreate.
 
 This is the canonical artifact cleanup path. Worktree lifecycle cleanup is handled by `homeboy worktree cleanup`; artifact removal stays dry-run here until `--apply` is passed.
 
+Aggregate `--apply` submits a durable asynchronous controller job by default. For a bounded, controller-owned cleanup when the daemon is unavailable, explicitly select the existing local execution contract: `homeboy --placement local cleanup --include shared-cargo-targets --apply --full`. This executes synchronously through the same category safety checks, locks, and apply-time revalidation, and reports `execution.placement: "local"` with `durable: false`. Remote cleanup categories retain their normal remote runner behavior.
+
 ## `homeboy cleanup artifacts`
 
 Scans the current repository and its managed Git worktrees for built-in and declared artifact paths. The command defaults to dry-run output and only removes files when `--apply` is passed.

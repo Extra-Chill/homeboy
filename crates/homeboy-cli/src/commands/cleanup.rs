@@ -118,7 +118,7 @@ const AUTOMATIC_RETENTION_OUT_OF_SCOPE: [(CleanupCategoryArg, &str); 4] = [
     ),
 ];
 
-pub fn run(args: CleanupArgs) -> CmdResult<Value> {
+pub fn run(args: CleanupArgs, placement: homeboy::cli_surface::Placement) -> CmdResult<Value> {
     match args.command {
         Some(CleanupCommand::Artifacts(args)) => cleanup::cleanup_resources_from_config(
             ResourceCleanupOptions {
@@ -189,7 +189,7 @@ pub fn run(args: CleanupArgs) -> CmdResult<Value> {
         Some(CleanupCommand::Resume(args)) => {
             cleanup_job_resume(&args.job_id).map(|output| (output, 0))
         }
-        None if args.apply => apply_cleanup(args).map(|output| (output, 0)),
+        None if args.apply => apply_cleanup(args, placement),
         None => cleanup_inventory(args).map(|result| (result.output, result.exit_code)),
     }
 }
@@ -349,7 +349,21 @@ fn cleanup_job_parse_error(error: serde_json::Error) -> homeboy::core::Error {
 /// database that is merely corrupt, still surfaces its own error — silently
 /// downgrading a durable `--apply` into a partial in-process sweep for an
 /// unrelated fault would be worse than failing.
-fn apply_cleanup(args: CleanupArgs) -> homeboy::core::Result<Value> {
+fn apply_cleanup(
+    args: CleanupArgs,
+    placement: homeboy::cli_surface::Placement,
+) -> CmdResult<Value> {
+    if placement.is_explicit_local_override() {
+        let mut result = cleanup_inventory(args)?;
+        result.output["execution"] = serde_json::json!({
+            "placement": "local",
+            "mode": "synchronous",
+            "durable": false,
+            "reason": "explicit operator --placement local",
+        });
+        return Ok((result.output, result.exit_code));
+    }
+
     // Captured before `args` is consumed. The subcommand is `None` on this
     // path, so these are the only fields the degraded sweep needs.
     let overrides = CleanupPolicyOverrides {
@@ -358,7 +372,7 @@ fn apply_cleanup(args: CleanupArgs) -> homeboy::core::Result<Value> {
         ..CleanupPolicyOverrides::default()
     };
     let error = match submit_cleanup(args) {
-        Ok(output) => return Ok(output),
+        Ok(output) => return Ok((output, 0)),
         Err(error) => error,
     };
 
@@ -377,12 +391,14 @@ fn apply_cleanup(args: CleanupArgs) -> homeboy::core::Result<Value> {
             error.message
         ),
     );
-    serde_json::to_value(outcome).map_err(|error| {
-        homeboy::core::Error::internal_json(
-            error.to_string(),
-            Some("serialize degraded cleanup output".to_string()),
-        )
-    })
+    serde_json::to_value(outcome)
+        .map(|output| (output, 0))
+        .map_err(|error| {
+            homeboy::core::Error::internal_json(
+                error.to_string(),
+                Some("serialize degraded cleanup output".to_string()),
+            )
+        })
 }
 
 fn submit_cleanup(args: CleanupArgs) -> homeboy::core::Result<Value> {
@@ -4057,28 +4073,31 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_runtime_tmp_failure_returns_partial_json_and_continues() {
+    fn local_aggregate_failure_isolated_across_categories() {
         homeboy::test_support::with_isolated_home(|root| {
             let blocked_root = root.path().join("runtime-tmp-file");
             std::fs::write(&blocked_root, "not a directory").expect("runtime temp fixture");
             let previous = std::env::var_os("HOMEBOY_RUNTIME_TMPDIR");
             std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", &blocked_root);
 
-            let result = run(CleanupArgs {
-                apply: true,
-                include: vec![
-                    CleanupCategoryArg::RuntimeTmp,
-                    CleanupCategoryArg::ControllerScratch,
-                    CleanupCategoryArg::ControllerRuntimes,
-                ],
-                exclude: Vec::new(),
-                older_than_days: None,
-                runtime_tmp_managed_older_than_days: Some(3),
-                limit: Some(10),
-                full: false,
-                cursor: None,
-                command: None,
-            });
+            let result = run(
+                CleanupArgs {
+                    apply: true,
+                    include: vec![
+                        CleanupCategoryArg::RuntimeTmp,
+                        CleanupCategoryArg::ControllerScratch,
+                        CleanupCategoryArg::ControllerRuntimes,
+                    ],
+                    exclude: Vec::new(),
+                    older_than_days: None,
+                    runtime_tmp_managed_older_than_days: Some(3),
+                    limit: Some(10),
+                    full: false,
+                    cursor: None,
+                    command: None,
+                },
+                homeboy::cli_surface::Placement::Local,
+            );
 
             match previous {
                 Some(value) => std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", value),
@@ -4088,6 +4107,9 @@ mod tests {
             let (output, exit_code) = result.expect("aggregate result");
             assert_eq!(exit_code, 1);
             assert_eq!(output["status"], "partial_failure");
+            assert_eq!(output["execution"]["placement"], "local");
+            assert_eq!(output["execution"]["mode"], "synchronous");
+            assert_eq!(output["execution"]["durable"], false);
             assert_eq!(output["failed_category_count"], 1);
             let categories = output["categories"].as_array().expect("categories");
             assert_eq!(categories.len(), 3);

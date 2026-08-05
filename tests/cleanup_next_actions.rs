@@ -197,6 +197,77 @@ fn aggregate_runner_binary_cache_next_action_applies_owned_candidate() {
     assert!(!slot.exists());
 }
 
+#[test]
+#[cfg(unix)]
+fn explicit_local_shared_cargo_apply_succeeds_without_a_daemon() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let invocation_dir = fixture.path().join("operator-cwd");
+    let cargo_root = fixture.path().join("cargo-targets");
+    let store = cargo_root.join(format!("homeboy-{}", "a".repeat(64)));
+    let leased_store = cargo_root.join(format!("homeboy-{}", "b".repeat(64)));
+    std::fs::create_dir_all(&store).expect("cargo target store");
+    std::fs::create_dir_all(&leased_store).expect("leased cargo target store");
+    std::fs::write(store.join("artifact"), "artifact").expect("cargo target artifact");
+    std::fs::write(leased_store.join("artifact"), "active artifact").expect("active artifact");
+    std::fs::write(leased_store.join(".homeboy-lock"), "").expect("cargo target lock");
+    std::fs::write(leased_store.join(".homeboy-lease"), "active").expect("cargo target lease");
+    std::fs::create_dir_all(&invocation_dir).expect("operator directory");
+    let touch = Command::new("touch")
+        .args([
+            "-t",
+            "202001010000",
+            store.join("artifact").to_str().expect("artifact path"),
+            store.to_str().expect("store path"),
+        ])
+        .output()
+        .expect("age cargo target store");
+    assert!(
+        touch.status.success(),
+        "{}",
+        String::from_utf8_lossy(&touch.stderr)
+    );
+
+    // No daemon is started: explicit local placement must run the bounded
+    // controller-owned category synchronously instead of submitting a job.
+    let output = Command::new(homeboy_bin())
+        .args([
+            "cleanup",
+            "--placement",
+            "local",
+            "--include",
+            "shared-cargo-targets",
+            "--apply",
+            "--full",
+        ])
+        .current_dir(&invocation_dir)
+        .env("HOME", fixture.path())
+        .env("HOMEBOY_CARGO_TARGET_ROOT", &cargo_root)
+        .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+        .output()
+        .expect("run local cleanup");
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "cleanup output was not JSON ({error}); status={:?}; stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+
+    assert_eq!(result["success"], true, "{result:#}");
+    assert_eq!(result["data"]["execution"]["placement"], "local");
+    assert_eq!(result["data"]["execution"]["mode"], "synchronous");
+    assert_eq!(result["data"]["execution"]["durable"], false);
+    assert_eq!(result["data"]["applied_count"], 1, "{result:#}");
+    assert!(
+        !store.exists(),
+        "local apply must use the normal delete path"
+    );
+    assert!(
+        leased_store.exists(),
+        "an active shared-target lease must win"
+    );
+}
+
 fn run_cleanup(home: &Path, cwd: &Path, args: &[&str]) -> Value {
     run_cleanup_with_path(home, cwd, args, &std::env::var("PATH").unwrap_or_default())
 }

@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Args, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleanupArgs {
     /// Apply cleanup across the selected categories. Omit for inventory dry-run output.
+    /// Use the global `--placement local` to execute synchronously on this controller;
+    /// the default submits a durable asynchronous controller job.
     #[arg(long)]
     pub apply: bool,
 

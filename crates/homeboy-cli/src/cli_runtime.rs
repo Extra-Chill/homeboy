@@ -644,6 +644,7 @@ impl CliRuntime {
                 output_file.as_deref(),
                 &command_identity,
                 command_provenance,
+                cli.placement,
             )
         });
         // The command's initial outcome is now durable and returned. Historical
