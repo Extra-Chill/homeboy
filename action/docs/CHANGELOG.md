@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.9] - 2026-08-05
+
+### Changed
+- Handle structured shard timeout evidence
+
 ## [2.11.8] - 2026-08-05
 
 ### Changed
