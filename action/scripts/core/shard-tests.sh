@@ -84,13 +84,18 @@ aggregate() (
     expected_total="$(jq '.tests | length' <<< "${shard}")"
     jq -ce --arg root "${command%% *}" --arg phase_status "${status}" '
       if .schema == "homeboy/command-result/v3" and .command == $root and (.success | type == "boolean") and (.status | type == "string") and (.exit_code | type == "number" and floor == .)
-        and (if .success then .status == "succeeded" and .exit_code == 0 else .status == "failed" and .exit_code != 0 end)
-        and (.data.test_counts | type == "object") and all(.data.test_counts.passed, .data.test_counts.failed, .data.test_counts.skipped, .data.test_counts.total; type == "number" and . >= 0 and floor == .)
-        and (.data.test_counts.passed + .data.test_counts.failed + .data.test_counts.skipped == .data.test_counts.total)
-        and (if $phase_status == "pass" then .success == true and .exit_code == 0 and .data.test_counts.failed == 0
-              elif $phase_status == "fail" then .success == false and .exit_code != 0
-              else true end)
-      then {data:{test_counts:{passed:.data.test_counts.passed,failed:.data.test_counts.failed,skipped:.data.test_counts.skipped,total:.data.test_counts.total}}}
+        and (if $phase_status == "timeout"
+          then .success == false and .status == "failed" and .exit_code == 124
+          else (if .success then .status == "succeeded" and .exit_code == 0 else .status == "failed" and .exit_code != 0 end)
+            and (.data.test_counts | type == "object") and all(.data.test_counts.passed, .data.test_counts.failed, .data.test_counts.skipped, .data.test_counts.total; type == "number" and . >= 0 and floor == .)
+            and (.data.test_counts.passed + .data.test_counts.failed + .data.test_counts.skipped == .data.test_counts.total)
+            and (if $phase_status == "pass" then .success == true and .exit_code == 0 and .data.test_counts.failed == 0
+                  else .success == false and .exit_code != 0 end)
+          end)
+      then if $phase_status == "timeout"
+        then {data:{test_counts:{passed:0,failed:0,skipped:0,total:0}}}
+        else {data:{test_counts:{passed:.data.test_counts.passed,failed:.data.test_counts.failed,skipped:.data.test_counts.skipped,total:.data.test_counts.total}}}
+        end
       else empty
       end
     ' "${payload}" >> "${payload_stream}" || fail "${phase} shard ${id} has invalid structured $(command_result_filename "${command}") counts."
