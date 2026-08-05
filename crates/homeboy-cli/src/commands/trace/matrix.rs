@@ -347,16 +347,16 @@ pub(super) fn run_variant_matrix(args: TraceArgs) -> CmdResult<TraceCommandOutpu
         let aggregate_path = output_dir.join(format!("{}.aggregate.json", slug));
         let compare_path = output_dir.join(format!("{}.compare.json", slug));
         write_json_artifact(&aggregate_path, &aggregate)?;
-        let compare = compare_trace_aggregates_with_focus(
-            &baseline_path,
-            aggregate_to_compare_input(&baseline),
-            &aggregate_path,
-            aggregate_to_compare_input(&aggregate),
-            &args.focus_spans,
-            args.regression_threshold,
-            args.regression_min_delta_ms,
-            &args.metric_guardrails,
-        );
+        let compare = compare_trace_aggregates_with_focus(super::output::TraceCompareRequest {
+            before_path: &baseline_path,
+            before: aggregate_to_compare_input(&baseline),
+            after_path: &aggregate_path,
+            after: aggregate_to_compare_input(&aggregate),
+            focus_span_ids: &args.focus_spans,
+            regression_threshold_percent: args.regression_threshold,
+            regression_min_delta_ms: args.regression_min_delta_ms,
+            metric_guardrail_specs: &args.metric_guardrails,
+        });
         write_json_artifact(&compare_path, &compare)?;
         if !aggregate.passed
             || compare.focus_status.as_deref() == Some("fail")
