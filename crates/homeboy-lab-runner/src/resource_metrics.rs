@@ -25,14 +25,19 @@ const PREFERRED_HOST_HEADROOM_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 #[cfg(any(target_os = "linux", test))]
 const HOST_HEADROOM_DIVISOR: u64 = 10;
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const DEFAULT_PROCESS_COUNT_LIMIT: u64 = 128;
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const RSS_LIMIT_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES";
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const PROCESS_COUNT_LIMIT_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT";
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const DEFAULT_PROCESS_COUNT_LIMIT_CEILING: u64 = 256;
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const PROCESS_COUNT_LIMIT_CEILING_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT";
 
 fn require_process_tree_isolation() -> Result<()> {
@@ -110,6 +115,10 @@ pub(crate) fn measured_command_output(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The execution boundary keeps cancellation, progress, identity acknowledgement, and resource-limit inputs explicit."
+)]
 pub(crate) fn measured_command_output_until_cancelled_with_progress(
     command: &mut Command,
     mut is_cancelled: impl FnMut() -> bool,
@@ -713,6 +722,7 @@ struct ResolvedProcessCountLimit {
 }
 
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn resolved_process_count_limit(
     resource_guard_env: &HashMap<String, String>,
 ) -> ResolvedProcessCountLimit {
@@ -786,6 +796,7 @@ fn classify_resource_guard_violation(
 }
 
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn resource_guard_limit(env_name: &str, default_value: u64) -> u64 {
     std::env::var(env_name)
         .ok()

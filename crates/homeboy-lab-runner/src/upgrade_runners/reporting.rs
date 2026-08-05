@@ -37,6 +37,10 @@ pub fn runner_stale_daemon(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Upgrade reporting preserves independent drift and extension result fields for compatible detail output."
+)]
 pub fn runner_upgrade_final_detail(
     runner_id: &str,
     detail: String,

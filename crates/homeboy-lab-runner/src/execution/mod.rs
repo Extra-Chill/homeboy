@@ -382,6 +382,10 @@ pub struct RunnerExecOutput {
     pub diagnostics: Option<RunnerExecDiagnostics>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "RunnerExecutionRecord preserves separately typed compatibility fields from every transport."
+)]
 fn runner_execution_record_for_output(
     runner: &Runner,
     transport: &str,
