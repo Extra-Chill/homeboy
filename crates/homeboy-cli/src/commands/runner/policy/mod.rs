@@ -16,28 +16,6 @@ pub(super) struct RunnerPolicyPatch {
 }
 
 impl RunnerPolicyPatch {
-    pub(super) fn trust(
-        peers: Vec<String>,
-        fingerprints: Vec<String>,
-        projects: Vec<String>,
-        commands: Vec<String>,
-        allow_raw_exec: Option<bool>,
-        allow_homeboy_convergence: Option<bool>,
-        workspace_roots: Vec<String>,
-        artifact_policy: Option<String>,
-    ) -> Self {
-        Self {
-            accepted_peer_ids: peers,
-            accepted_peer_fingerprints: fingerprints,
-            allowed_projects: projects,
-            allowed_commands: commands,
-            allow_raw_exec,
-            allow_homeboy_convergence,
-            workspace_roots,
-            artifact_policy,
-        }
-    }
-
     pub(super) fn pair(
         peers: Vec<String>,
         fingerprints: Vec<String>,

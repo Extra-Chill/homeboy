@@ -439,7 +439,7 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
             command: "runner.connect".to_string(),
             id: Some(report.runner_id.clone()),
             extra: RunnerExtra {
-                connection: Some(RunnerConnectionOutput::Connect(report)),
+                connection: Some(RunnerConnectionOutput::Connect(Box::new(report))),
                 ..Default::default()
             },
             ..Default::default()
@@ -454,11 +454,13 @@ pub(super) fn disconnect(id: &str, local_recovery: bool) -> CmdResult<RunnerOutp
             command: "runner.disconnect".to_string(),
             id: Some(id.to_string()),
             extra: RunnerExtra {
-                connection: Some(RunnerConnectionOutput::Disconnect(if local_recovery {
-                    runner::disconnect_local_recovery(id)?
-                } else {
-                    runner::disconnect(id)?
-                })),
+                connection: Some(RunnerConnectionOutput::Disconnect(Box::new(
+                    if local_recovery {
+                        runner::disconnect_local_recovery(id)?
+                    } else {
+                        runner::disconnect(id)?
+                    },
+                ))),
                 ..Default::default()
             },
             ..Default::default()
@@ -474,6 +476,17 @@ pub(super) fn redact_runner_output_env(output: &mut RunnerOutput) {
 
     for runner in &mut output.entities {
         redact_runner_env(runner);
+    }
+}
+
+fn redact_runner_env(runner: &mut Runner) {
+    let policy = RedactionPolicy::default();
+    for (key, value) in runner.env.iter_mut() {
+        if policy.is_sensitive_key(key) {
+            *value = REDACTED_ENV_VALUE.to_string();
+        } else {
+            *value = policy.redact_string(value);
+        }
     }
 }
 
@@ -713,17 +726,6 @@ mod tests {
             let error = validate_connect_input(&input)
                 .expect_err("multiple recovery modes must fail before SSH");
             assert!(error.message.contains("mutually exclusive"));
-        }
-    }
-}
-
-fn redact_runner_env(runner: &mut Runner) {
-    let policy = RedactionPolicy::default();
-    for (key, value) in runner.env.iter_mut() {
-        if policy.is_sensitive_key(key) {
-            *value = REDACTED_ENV_VALUE.to_string();
-        } else {
-            *value = policy.redact_string(value);
         }
     }
 }
