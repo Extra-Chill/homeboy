@@ -85,13 +85,16 @@ impl AgentTaskProviderAdmissionPlan {
         request: AgentTaskProviderAdmissionRequest,
         providers: &[AgentTaskExecutorProvider],
     ) -> Self {
+        // Catalog ordering is transport-dependent and cannot affect admission.
+        let mut providers = providers.to_vec();
+        providers.sort_by(|left, right| left.id.cmp(&right.id));
         let resolution =
-            resolve_provider_for_backend(providers, &request.backend, request.selector.as_deref());
+            resolve_provider_for_backend(&providers, &request.backend, request.selector.as_deref());
         let resolved = match resolution {
             ProviderResolution::Resolved(provider) => Some(provider),
             _ => None,
         };
-        let mut predicates = vec![predicate_for_resolution(&request, providers, &resolution)];
+        let mut predicates = vec![predicate_for_resolution(&request, &providers, &resolution)];
         let mut actions = Vec::new();
         let mut required_extension_ids = Vec::new();
         let mut required_runtime_sources = Vec::new();
@@ -164,6 +167,14 @@ impl AgentTaskProviderAdmissionPlan {
             }
         }
 
+        required_extension_ids.sort();
+        required_extension_ids.dedup();
+        required_runtime_sources.sort();
+        required_runtime_sources.dedup();
+        predicates.sort_by(|left, right| left.id.cmp(&right.id));
+        actions.sort_by_key(|action| {
+            serde_json::to_string(action).expect("admission action serializes")
+        });
         let mut plan = Self {
             schema: AGENT_TASK_PROVIDER_ADMISSION_PLAN_SCHEMA.to_string(),
             request,
@@ -374,5 +385,49 @@ mod tests {
             ready.revalidate(&[provider("alpha.a", "alpha", None)])
         );
         assert_ne!(planned.hash, ready.hash);
+    }
+
+    #[test]
+    fn catalog_permutations_preserve_admission_identity() {
+        let mut first = provider("alpha.a", "alpha", None);
+        first.extension_id = Some("extension".to_string());
+        let mut second = provider("alpha.b", "alpha", None);
+        second.extension_id = Some("extension".to_string());
+        for request in [
+            AgentTaskProviderAdmissionRequest {
+                backend: "alpha".to_string(),
+                selector: None,
+                model: None,
+                runtime_identity: None,
+            },
+            AgentTaskProviderAdmissionRequest {
+                backend: "missing".to_string(),
+                selector: None,
+                model: None,
+                runtime_identity: None,
+            },
+            AgentTaskProviderAdmissionRequest {
+                backend: "alpha".to_string(),
+                selector: Some("wrong".to_string()),
+                model: None,
+                runtime_identity: None,
+            },
+            AgentTaskProviderAdmissionRequest {
+                backend: "extension".to_string(),
+                selector: None,
+                model: None,
+                runtime_identity: None,
+            },
+        ] {
+            let forward = AgentTaskProviderAdmissionPlan::compile(
+                request.clone(),
+                &[first.clone(), second.clone()],
+            );
+            let reverse =
+                AgentTaskProviderAdmissionPlan::compile(request, &[second.clone(), first.clone()]);
+            assert_eq!(forward.hash, reverse.hash);
+            assert_eq!(forward.actions, reverse.actions);
+            assert_eq!(forward.predicates, reverse.predicates);
+        }
     }
 }
