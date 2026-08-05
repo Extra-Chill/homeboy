@@ -236,6 +236,8 @@ Show one persisted observation run
 | Option | Value | Description |
 | --- | --- | --- |
 | `--json` | flag | Print the full JSON output instead of the compact human summary. The compact summary surfaces status, key metadata, and artifact pointers with inspect commands; the full payload is unchanged and always available with this flag or via `--output <file>` |
+| `--format` | `<FORMAT>` | Output format Values: `auto`, `json`, `markdown`, `text`. |
+| `--detail` | `<DETAIL>` | How much of the result to render Values: `summary`, `full`. |
 | `-q`, `--field` | `<FIELD>` | JSONPath selector(s) projected over the run detail so callers extract only specific fields instead of the whole structure. Repeat or comma-separate. Rooted at the run detail, e.g. `-q '$.status'`, `-q '$.metadata.run_dir'` |
 
 ## `homeboy runs proof`
@@ -252,7 +254,9 @@ Show only the compact proof signals for one run: verdict, gate failures, and dec
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--json` | flag | Print the full JSON output instead of the compact human summary |
+| `--json` | flag | Print the full JSON output instead of the compact human summary. Equivalent to `--format json`; both spellings keep working |
+| `--format` | `<FORMAT>` | Output format Values: `auto`, `json`, `markdown`, `text`. |
+| `--detail` | `<DETAIL>` | How much of the result to render Values: `summary`, `full`. |
 
 ## `homeboy runs dossier`
 
@@ -268,7 +272,9 @@ Aggregate the actionable read-only dossier for one persisted run
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--json` | flag | Print the full JSON output instead of the compact human dossier |
+| `--json` | flag | Print the full JSON output instead of the compact human dossier. Equivalent to `--format json`; both spellings keep working |
+| `--format` | `<FORMAT>` | Output format Values: `auto`, `json`, `markdown`, `text`. |
+| `--detail` | `<DETAIL>` | How much of the result to render Values: `summary`, `full`. |
 
 ## `homeboy runs resume-plan`
 
