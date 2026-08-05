@@ -140,12 +140,14 @@ Session payload (`session`):
 - `action`: `connect` | `status` | `disconnect`
 - `server_id`
 - `control_path`
-- `persist`
+- `persist`: effective local OpenSSH ControlMaster idle lifetime
+- `persist_source`: `configured`, `migrated`, or `legacy_default`
 - `live`
+- `persist_scope`: explains that `persist` is local OpenSSH behavior, not remote policy
 - `stdout`
 - `stderr`
 
-`server show` includes `session_policy` for managed sessions. It reports the effective `control_path`, `persist`, and `persist_source` (`configured` or `legacy_default`), plus `persist_scope`. Existing records without `persist` retain their historic `4h` lifetime and report `legacy_default` until an operator sets an explicit value.
+`server show` includes `session_policy` for managed sessions. It reports the effective `control_path`, `persist`, `persist_source`, and `persist_scope`. Source values are engine-owned: `configured` is an explicit operator choice, `legacy_default` is the historic omitted `4h` value, and `migrated` records a legacy configuration updated with an explicit lifetime. Existing records without `persist` retain their historic `4h` lifetime until an operator sets an explicit value.
 
 ## Related
 

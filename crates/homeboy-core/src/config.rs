@@ -864,6 +864,8 @@ pub fn merge_from_json<T: ConfigEntity>(
     let mut entity = load::<T>(&effective_id)?;
     let result = merge_config(&mut entity, parsed, replace_fields)?;
     entity.set_id(effective_id.clone());
+    let merged_json = to_json_string(&entity)?;
+    entity.post_load(&merged_json);
     save(&entity)?;
 
     Ok(MergeResult {
@@ -904,6 +906,14 @@ pub fn merge_batch_from_json<T: ConfigEntity>(raw_json: &str) -> Result<BatchRes
             Ok(mut entity) => match merge_config(&mut entity, patch, &[]) {
                 Ok(_) => {
                     entity.set_id(id.clone());
+                    let merged_json = match to_json_string(&entity) {
+                        Ok(json) => json,
+                        Err(error) => {
+                            result.record_error(id, error.message);
+                            continue;
+                        }
+                    };
+                    entity.post_load(&merged_json);
                     if let Err(e) = save(&entity) {
                         result.record_error(id, e.message.clone());
                     } else {
