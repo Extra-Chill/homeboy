@@ -225,6 +225,9 @@ impl ControllerJobDriver for CleanupJobDriver {
             "mode": "apply",
             "include_count": args.include.len(),
             "exclude_count": args.exclude.len(),
+            // Reported by name, not folded into a count: this one widens a
+            // delete predicate, so a durable job record must show it (#11128).
+            "include_untagged": args.include_untagged,
             "full_evidence": args.full,
         }))
     }
@@ -1142,7 +1145,7 @@ fn artifact_root_records(
         records.push(RetainedStorageRecord {
             category: "runner_downloads".to_string(),
             reason: format!(
-                "{} cached runner download(s) retained: younger than the age floor, claimed by a non-terminal run, or not the canonical <runner>/<run> shape; bytes not measured",
+                "{} cached runner download(s) retained: younger than the age floor, claimed by a non-terminal run, operator-owned or untagged (add --include-untagged to reap untagged caches), or not the canonical <runner>/<run> shape; bytes not measured",
                 downloads.skipped_count
             ),
             owner: "homeboy".to_string(),
@@ -1541,6 +1544,8 @@ fn automatic_retention() -> CmdResult<Value> {
             apply: true,
             include: AUTOMATIC_RETENTION_CATEGORIES.to_vec(),
             exclude: Vec::new(),
+            // Unattended. Widening a delete predicate is an operator decision.
+            include_untagged: false,
             older_than_days: None,
             runtime_tmp_managed_older_than_days: None,
             limit: None,
@@ -1638,6 +1643,10 @@ fn cleanup_inventory_with_deadline(
 ) -> homeboy::core::Result<CleanupInventoryResult> {
     let selected = CleanupCategorySelection::new(args.include.clone(), args.exclude.clone());
     let apply = args.apply;
+    // Copied out for the same reason as `apply`: the per-category closures
+    // below borrow `args` for their replay strings, and a `Copy` bool keeps
+    // this one out of that borrow entirely.
+    let include_untagged = args.include_untagged;
     let config = defaults::load_config();
     // One resolver for every category and every specialist command. The
     // aggregate no longer derives its own windows.
@@ -1860,6 +1869,12 @@ fn cleanup_inventory_with_deadline(
                         // retains everything. Passing the probed answer keeps
                         // that verdict without a second failing open.
                         store_available: store.is_available(),
+                        // Off unless the operator typed it. This widens the
+                        // delete predicate to cover caches written before
+                        // intent tagging existed (#11128); the age floor, the
+                        // running-run veto, and the never-reap rule for
+                        // operator pulls are all untouched by it.
+                        include_untagged,
                     })?;
                 // `planned_count`, not `inspected_count`: a candidate is a resource
                 // selected for removal, not every entry the sweep walked past. Using
@@ -2189,6 +2204,9 @@ fn cleanup_replay_command(args: &CleanupArgs, full: bool, include_cursor: bool) 
                 .collect::<Vec<_>>()
                 .join(",")
         ));
+    }
+    if args.include_untagged {
+        command.push_str(" --include-untagged");
     }
     if args.apply {
         command.push_str(" --apply");
@@ -4072,6 +4090,7 @@ mod tests {
                     CleanupCategoryArg::ControllerRuntimes,
                 ],
                 exclude: Vec::new(),
+                include_untagged: false,
                 older_than_days: None,
                 runtime_tmp_managed_older_than_days: Some(3),
                 limit: Some(10),
@@ -4182,6 +4201,44 @@ mod tests {
             );
         }
         assert!(!bare.includes(CleanupCategoryArg::RunnerDownloads));
+    }
+
+    #[test]
+    fn the_untagged_opt_in_is_replayable_and_visible_in_the_durable_request() {
+        // #11128. A flag that widens a delete predicate has to survive into the
+        // command an operator can re-run, and into the durable job record that
+        // says what was asked for. Neither may report it by default.
+        let mut args = CleanupArgs {
+            apply: true,
+            include: vec![CleanupCategoryArg::RunnerDownloads],
+            exclude: Vec::new(),
+            include_untagged: false,
+            older_than_days: None,
+            runtime_tmp_managed_older_than_days: None,
+            limit: None,
+            full: false,
+            cursor: None,
+            command: None,
+        };
+
+        let replay = cleanup_replay_command(&args, false, false);
+        assert_eq!(replay, "homeboy cleanup --include runner-downloads --apply");
+        let request = serde_json::to_value(&args).expect("serialize request");
+        assert_eq!(
+            CleanupJobDriver.public_request(&request).unwrap()["include_untagged"],
+            serde_json::Value::Bool(false)
+        );
+
+        args.include_untagged = true;
+        assert_eq!(
+            cleanup_replay_command(&args, false, false),
+            "homeboy cleanup --include runner-downloads --include-untagged --apply"
+        );
+        let request = serde_json::to_value(&args).expect("serialize request");
+        assert_eq!(
+            CleanupJobDriver.public_request(&request).unwrap()["include_untagged"],
+            serde_json::Value::Bool(true)
+        );
     }
 
     #[test]

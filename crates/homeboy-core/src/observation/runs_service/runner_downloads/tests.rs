@@ -65,7 +65,8 @@ fn write_cached_download(
 }
 
 /// The same bytes with no intent marker: either an operator pull, or any cache
-/// directory written before intent tagging existed. Retained unconditionally.
+/// directory written before intent tagging existed. Retained by default, and
+/// reclaimable only under the explicit `include_untagged` opt-in (#11128).
 fn write_untagged_download(
     root: &Path,
     runner: &str,
@@ -602,25 +603,191 @@ fn a_symlink_inside_a_cache_is_counted_but_never_followed() {
 }
 
 #[test]
-fn an_untagged_cache_is_retained_forever_no_matter_how_old() {
-    // #10585. Age proves the bytes are old; it cannot prove they are homeboy's.
-    // Every cache directory written before intent tagging existed is untagged,
-    // and untagged means operator-owned.
+fn an_untagged_cache_is_retained_by_default_no_matter_how_old() {
+    // #10585, still the default contract. Age proves the bytes are old; it
+    // cannot prove they are homeboy's. Every cache directory written before
+    // intent tagging existed is untagged, and untagged means operator-owned.
+    //
+    // #11128 revised only the *terminal* half of that reasoning — see
+    // `an_untagged_cache_past_the_floor_is_reaped_under_the_explicit_opt_in`.
+    // The bare sweep below must keep behaving exactly as it did before that
+    // opt-in existed, so the widening can never arrive by default.
     let home = tempfile::tempdir().expect("home");
     let cache = write_untagged_download(home.path(), "lab", "run-1", "trace.zip", b"trace");
     let options = options(true);
+    assert!(
+        !options.include_untagged,
+        "the opt-in must be off by default"
+    );
 
     let outcome = aged_sweep(home.path(), &options, no_running_runs);
 
+    assert!(!outcome.include_untagged);
     assert_eq!(outcome.planned_count, 0);
     assert_eq!(outcome.removed_count, 0);
     assert_eq!(outcome.skipped_count, 1);
     let row = row_for(&outcome, "lab/run-1");
     assert_eq!(row.intent, "unrecorded");
     assert!(row.reason.contains("fail closed"));
+    // The retain reason names the way out, so a plan tells the operator what to
+    // type rather than only that homeboy declined.
+    assert!(row.reason.contains("--include-untagged"));
     // The age is still reported, so an operator can see what is accumulating.
     assert!(row.age_seconds >= RUNNER_DOWNLOAD_MIN_AGE.as_secs());
     assert!(cache.join("trace.zip").exists());
+}
+
+#[test]
+fn an_untagged_cache_past_the_floor_is_reaped_under_the_explicit_opt_in() {
+    // #11128. Retaining untagged bytes forever is the right default and the
+    // wrong terminal state: intent tagging arrived part way through this
+    // cache's life, so the pre-tagging backlog can only grow and nothing else
+    // will ever reach it. `--include-untagged` is the operator saying, once and
+    // explicitly, that they own that judgement — it is not age acquiring a
+    // licence it did not have.
+    let home = tempfile::tempdir().expect("home");
+    let cache = write_untagged_download(home.path(), "lab", "run-1", "trace.zip", b"trace");
+    let opted_in = RunnerDownloadCleanupOptions {
+        apply: true,
+        include_untagged: true,
+        ..RunnerDownloadCleanupOptions::default()
+    };
+
+    let outcome = aged_sweep(home.path(), &opted_in, no_running_runs);
+
+    // The plan says the widening happened, at the top and on the row.
+    assert!(outcome.include_untagged);
+    assert_eq!(outcome.planned_count, 1);
+    assert_eq!(outcome.removed_count, 1);
+    assert_eq!(outcome.skipped_count, 0);
+    let row = row_for(&outcome, "lab/run-1");
+    assert_eq!(row.intent, "unrecorded");
+    assert_eq!(row.action, "removed");
+    assert!(row.reason.contains("--include-untagged"));
+    assert!(
+        !row.reason.contains("fail closed"),
+        "a row that was just removed must not report the retain reason: {}",
+        row.reason
+    );
+    assert!(!cache.exists());
+}
+
+#[test]
+fn the_opt_in_widens_what_is_eligible_and_never_how_old_it_must_be() {
+    // The age floor is the authorization, and #11128 does not touch it. A
+    // young untagged cache is retained with the opt-in set, for the same reason
+    // a young tagged one is.
+    let home = tempfile::tempdir().expect("home");
+    let cache = write_untagged_download(home.path(), "lab", "run-1", "trace.zip", b"trace");
+    let opted_in = RunnerDownloadCleanupOptions {
+        apply: true,
+        include_untagged: true,
+        ..RunnerDownloadCleanupOptions::default()
+    };
+
+    // The real clock, so the untagged cache written a moment ago is seconds old.
+    let outcome = sweep_with(
+        home.path(),
+        &opted_in,
+        &filters(&opted_in),
+        RUNNER_DOWNLOAD_MIN_AGE,
+        SystemTime::now(),
+        no_running_runs,
+    )
+    .expect("sweep");
+
+    assert!(outcome.include_untagged);
+    assert_eq!(outcome.removed_count, 0);
+    assert_eq!(outcome.skipped_count, 1);
+    assert!(row_for(&outcome, "lab/run-1")
+        .reason
+        .contains("newer than the runner download age floor"));
+    assert!(cache.join("trace.zip").exists());
+}
+
+#[test]
+fn the_opt_in_does_not_release_an_operator_pull_or_an_unreadable_marker() {
+    // The flag is about *unrecorded* intent. A recorded operator claim is not
+    // unrecorded, and a marker that exists but will not parse may be exactly
+    // such a claim with bad bytes on disk — so neither moves with the opt-in.
+    let home = tempfile::tempdir().expect("home");
+    let pulled = write_untagged_download(home.path(), "lab", "run-1", "trace.zip", b"trace");
+    record_download_intent(&pulled, RunnerDownloadIntent::OperatorPull, "artifact-1");
+    let corrupt = write_cached_download(home.path(), "lab", "run-2", "trace.zip", b"trace");
+    fs::write(corrupt.join(RUNNER_DOWNLOAD_MARKER_FILE), b"{ truncated").expect("corrupt marker");
+    let untagged = write_untagged_download(home.path(), "lab", "run-3", "trace.zip", b"trace");
+
+    let opted_in = RunnerDownloadCleanupOptions {
+        apply: true,
+        include_untagged: true,
+        ..RunnerDownloadCleanupOptions::default()
+    };
+    let outcome = aged_sweep(home.path(), &opted_in, no_running_runs);
+
+    assert_eq!(
+        outcome.removed_count, 1,
+        "only the untagged cache is reaped"
+    );
+    assert_eq!(outcome.skipped_count, 2);
+    assert!(
+        pulled.exists(),
+        "an operator pull survives --include-untagged"
+    );
+    assert!(
+        corrupt.exists(),
+        "an unreadable marker survives --include-untagged"
+    );
+    assert!(!untagged.exists());
+    assert_eq!(row_for(&outcome, "lab/run-1").intent, "operator_pull");
+    assert!(row_for(&outcome, "lab/run-1")
+        .reason
+        .contains("only the operator releases them"));
+    assert_eq!(row_for(&outcome, "lab/run-2").intent, "unreadable");
+    assert!(row_for(&outcome, "lab/run-2")
+        .reason
+        .contains("fail closed"));
+}
+
+#[test]
+fn the_opt_in_still_honours_the_liveness_veto_on_an_untagged_cache() {
+    // Never reap something a running run claims. The veto is evaluated after
+    // the intent check, so widening the intent check must not reorder it.
+    let home = tempfile::tempdir().expect("home");
+    let claimed = write_untagged_download(home.path(), "lab", "run-1", "trace.zip", b"trace");
+    let unclaimed = write_untagged_download(home.path(), "lab", "run-2", "trace.zip", b"trace");
+    let opted_in = RunnerDownloadCleanupOptions {
+        apply: true,
+        include_untagged: true,
+        ..RunnerDownloadCleanupOptions::default()
+    };
+
+    let outcome = sweep_with(
+        home.path(),
+        &opted_in,
+        &filters(&opted_in),
+        RUNNER_DOWNLOAD_MIN_AGE,
+        clock_past_the_floor(),
+        || LivenessVeto {
+            running: Some(vec![running_run("run-1")]),
+        },
+    )
+    .expect("sweep");
+
+    assert_eq!(outcome.removed_count, 1);
+    assert!(claimed.exists());
+    assert!(!unclaimed.exists());
+    assert!(row_for(&outcome, "lab/run-1")
+        .reason
+        .contains("non-terminal run"));
+
+    // And an unavailable store still retains everything, opt-in or not.
+    let degraded = write_untagged_download(home.path(), "lab", "run-3", "trace.zip", b"trace");
+    let outcome = aged_sweep(home.path(), &opted_in, unavailable_liveness);
+    assert_eq!(outcome.removed_count, 0);
+    assert!(degraded.exists());
+    assert!(row_for(&outcome, "lab/run-3")
+        .reason
+        .contains("fail closed"));
 }
 
 #[test]
