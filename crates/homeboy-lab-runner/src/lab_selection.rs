@@ -288,7 +288,7 @@ struct PlacementReadinessObservation {
     status: RunnerStatusReport,
     capacity: Option<usize>,
     mode: RunnerTunnelMode,
-    capability: Option<super::LabRunnerGateDecision>,
+    capability_inventory: Option<super::RunnerCapabilityInventory>,
     provider_catalog: Option<Vec<homeboy_agents::agent_tasks::provider::AgentTaskExecutorProvider>>,
     command_prefix_required_tools: Vec<super::RunnerRequiredTool>,
 }
@@ -304,7 +304,7 @@ pub fn placement_readiness(request: &PlacementReadinessRequest) -> Result<Placem
         Ok(PlacementReadinessObservation {
             capacity: runner.settings.concurrency_limit,
             mode: status_tunnel_mode(&status),
-            capability: None,
+            capability_inventory: None,
             provider_catalog: matches!(
                 request.invocation,
                 PlacementReadinessInvocation::AgentTaskCook { .. }
@@ -360,8 +360,13 @@ fn placement_readiness_with_transport(
             None,
         ));
     }
-    let capability = match observation.capability {
-        Some(capability) => capability,
+    let capability = match observation.capability_inventory {
+        Some(inventory) => super::evaluate_lab_runner_capabilities_for_inventory(
+            &request.runner_id,
+            &plan.capability,
+            &inventory,
+            super::LabRunnerGateMode::Explicit,
+        ),
         None => super::evaluate_lab_runner_capabilities_for_runner(
             &load(&request.runner_id)?,
             &plan.capability,
@@ -1871,7 +1876,14 @@ mod placement_readiness_tests {
             status: status(),
             capacity: Some(1),
             mode: RunnerTunnelMode::DirectSsh,
-            capability: Some(super::super::LabRunnerGateDecision::Eligible),
+            capability_inventory: Some(super::super::RunnerCapabilityInventory {
+                runtime_ids: std::collections::BTreeSet::from(["runner-homeboy".to_string()]),
+                capabilities: std::collections::BTreeSet::from([
+                    "git".to_string(),
+                    "runner-homeboy".to_string(),
+                    "extension_parity".to_string(),
+                ]),
+            }),
             provider_catalog: Some(catalog),
             command_prefix_required_tools: vec![super::super::RunnerRequiredTool::new(
                 "runner-homeboy",
@@ -1968,18 +1980,22 @@ mod placement_readiness_tests {
         let request = cook_request(Some("provider-0"));
         let readiness = placement_readiness_with_transport(&request, |_, _| {
             Ok(PlacementReadinessObservation {
-                capability: Some(super::super::LabRunnerGateDecision::Missing {
-                    runner_id: "lab".to_string(),
-                    command: "agent-task cook",
-                    missing_tools: vec![super::super::RunnerRequiredTool::new("runner-homeboy")],
-                    reason: "missing source-derived tool".to_string(),
-                    remediation: Vec::new(),
+                capability_inventory: Some(super::super::RunnerCapabilityInventory {
+                    runtime_ids: std::collections::BTreeSet::new(),
+                    capabilities: std::collections::BTreeSet::from([
+                        "git".to_string(),
+                        "extension_parity".to_string(),
+                    ]),
                 }),
                 ..observed(vec![provider("provider-0")])
             })
         })
         .expect("readiness");
         assert_eq!(readiness.state, PlacementReadinessState::Blocked);
+        assert!(readiness
+            .predicates
+            .iter()
+            .any(|predicate| { predicate.id == "required_capabilities" && !predicate.satisfied }));
         let ready = placement_readiness_with_transport(&request, |_, _| {
             Ok(observed(vec![provider("provider-0")]))
         })
@@ -2013,9 +2029,20 @@ mod placement_readiness_tests {
             },
             std::path::Path::new("/workspace/source"),
         );
+        let execution_dispatch_contract =
+            homeboy_core::lab_routing::lab_offload_command_from_contract(
+                homeboy_core::lab_contract::LabCommandContract::portable(
+                    "agent-task cook",
+                    None,
+                    false,
+                    &[],
+                )
+                .with_extra_required_capabilities(vec!["extension_parity".to_string()]),
+                Vec::new(),
+            );
         let execution_route = build_routed_lab_admission_command(
             RoutedLabAdmissionInput::Execution {
-                command: &public_route.command,
+                command: &execution_dispatch_contract,
             },
             std::path::Path::new("/workspace/source"),
         );

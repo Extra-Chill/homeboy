@@ -83,6 +83,27 @@ pub fn evaluate_lab_runner_capabilities_for_runner(
     ))
 }
 
+/// Evaluate a previously observed raw runner inventory. Placement transport
+/// tests and read-only consumers can exercise the production gate without
+/// inventing a terminal gate decision.
+pub fn evaluate_lab_runner_capabilities_for_inventory(
+    runner_id: &str,
+    plan: &PreparedLabRunnerCapability,
+    inventory: &RunnerCapabilityInventory,
+    mode: LabRunnerGateMode,
+) -> LabRunnerGateDecision {
+    let capabilities = RunnerCapabilitySnapshot {
+        tools: inventory
+            .capabilities
+            .iter()
+            .map(RunnerRequiredTool::new)
+            .collect(),
+        components: inventory.capabilities.clone(),
+        ..Default::default()
+    };
+    evaluate_lab_runner_capabilities(runner_id, plan, &capabilities, mode)
+}
+
 pub(crate) fn runner_capability_snapshot_for_preflight(
     runner: &Runner,
     preflight: &RunnerCapabilityPreflight,
