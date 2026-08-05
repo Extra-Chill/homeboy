@@ -117,6 +117,8 @@ struct PortLease {
     _file: File,
 }
 
+type PortLeaseAllocation = (Option<u16>, Option<PortLease>, Option<TcpListener>);
+
 impl Drop for PortLease {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
@@ -489,9 +491,7 @@ impl ManagedServices {
     }
 }
 
-fn lease_port(
-    spec: &AgentTaskManagedService,
-) -> Result<(Option<u16>, Option<PortLease>, Option<TcpListener>), String> {
+fn lease_port(spec: &AgentTaskManagedService) -> Result<PortLeaseAllocation, String> {
     let Some(requested) = spec.port else {
         return Ok((None, None, None));
     };
