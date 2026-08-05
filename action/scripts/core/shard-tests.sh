@@ -45,7 +45,7 @@ plan() {
   rm -f "${output}.tmp"
 }
 
-aggregate() {
+aggregate() (
   local root="${TEST_SHARD_ARTIFACT_ROOT:?TEST_SHARD_ARTIFACT_ROOT is required}"
   local plan="${TEST_SHARD_PLAN_FILE:?TEST_SHARD_PLAN_FILE is required}"
   local inventory="${TEST_INVENTORY_FILE:?TEST_INVENTORY_FILE is required}"
@@ -61,8 +61,9 @@ aggregate() {
   [ "$(digest "$(jq -cS 'del(.plan_digest)' "${plan}")")" = "${plan_digest}" ] || fail "Test shard plan digest does not match its immutable contents."
   mkdir -p "${output}"
 
-  local shard id manifest payload status aggregate_status="pass" expected_total
-  local -a payloads=()
+  local shard id manifest payload status aggregate_status="pass" expected_total payload_stream
+  payload_stream="$(mktemp)"
+  trap 'rm -f -- "${payload_stream:-}"' EXIT
   while IFS= read -r shard; do
     id="$(jq -r .id <<< "${shard}")"; matches=()
     while IFS= read -r manifest; do
@@ -81,34 +82,33 @@ aggregate() {
       continue
     fi
     expected_total="$(jq '.tests | length' <<< "${shard}")"
-    jq -e --arg root "${command%% *}" --arg phase_status "${status}" '
-      .schema == "homeboy/command-result/v3" and .command == $root and (.success | type == "boolean") and (.status | type == "string") and (.exit_code | type == "number" and floor == .)
-      and (if .success then .status == "succeeded" and .exit_code == 0 else .status == "failed" and .exit_code != 0 end)
-      and (.data.test_counts | type == "object") and all(.data.test_counts.passed, .data.test_counts.failed, .data.test_counts.skipped, .data.test_counts.total; type == "number" and . >= 0 and floor == .)
-      and (.data.test_counts.passed + .data.test_counts.failed + .data.test_counts.skipped == .data.test_counts.total)
-      and (if $phase_status == "pass" then .success == true and .exit_code == 0 and .data.test_counts.failed == 0
-            elif $phase_status == "fail" then .success == false and .exit_code != 0
-            else true end)
-    ' "${payload}" >/dev/null 2>&1 || fail "${phase} shard ${id} has invalid structured $(command_result_filename "${command}") counts."
+    jq -ce --arg root "${command%% *}" --arg phase_status "${status}" '
+      if .schema == "homeboy/command-result/v3" and .command == $root and (.success | type == "boolean") and (.status | type == "string") and (.exit_code | type == "number" and floor == .)
+        and (if .success then .status == "succeeded" and .exit_code == 0 else .status == "failed" and .exit_code != 0 end)
+        and (.data.test_counts | type == "object") and all(.data.test_counts.passed, .data.test_counts.failed, .data.test_counts.skipped, .data.test_counts.total; type == "number" and . >= 0 and floor == .)
+        and (.data.test_counts.passed + .data.test_counts.failed + .data.test_counts.skipped == .data.test_counts.total)
+        and (if $phase_status == "pass" then .success == true and .exit_code == 0 and .data.test_counts.failed == 0
+              elif $phase_status == "fail" then .success == false and .exit_code != 0
+              else true end)
+      then {data:{test_counts:{passed:.data.test_counts.passed,failed:.data.test_counts.failed,skipped:.data.test_counts.skipped,total:.data.test_counts.total}}}
+      else empty
+      end
+    ' "${payload}" >> "${payload_stream}" || fail "${phase} shard ${id} has invalid structured $(command_result_filename "${command}") counts."
     if [ "${status}" = pass ]; then
       [ "$(jq '.data.test_counts.total' "${payload}")" = "${expected_total}" ] || fail "${phase} shard ${id} structured total does not match its planned membership."
     fi
     cp "${payload}" "${output}/${id}-$(command_result_filename "${command}")"
-    payloads+=("${payload}")
   done < <(jq -c '.shards[]' "${plan}")
-  local payload_json='[]'
-  [ "${#payloads[@]}" -eq 0 ] || payload_json="$(jq -s '.' "${payloads[@]}")"
-  local inventory_total aggregate_total
+  local inventory_total
   inventory_total="$(jq '.tests | length' "${inventory}")"
-  aggregate_total="$(jq '[.[].data.test_counts.total] | add // 0' <<< "${payload_json}")"
-  if [ "${aggregate_status}" = pass ] && [ "${aggregate_total}" != "${inventory_total}" ]; then
-    fail "${phase} shard totals do not cover the complete inventory."
-  fi
-  jq -n --arg root "${command%% *}" --arg plan_digest "${plan_digest}" --arg status "${aggregate_status}" --argjson payloads "${payload_json}" '
+  if ! jq -n --slurpfile payloads /dev/stdin --arg root "${command%% *}" --arg plan_digest "${plan_digest}" --arg status "${aggregate_status}" --argjson inventory_total "${inventory_total}" '
     {schema:"homeboy/command-result/v3",command:$root,success:($status == "pass"),status:(if $status == "pass" then "succeeded" else "failed" end),exit_code:(if $status == "pass" then 0 elif $status == "timeout" then 124 else 1 end),
      data:{test_counts:{passed:([$payloads[].data.test_counts.passed] | add // 0),failed:([$payloads[].data.test_counts.failed] | add // 0),skipped:([$payloads[].data.test_counts.skipped] | add // 0),total:([$payloads[].data.test_counts.total] | add // 0)},shard_plan_digest:$plan_digest,shard_count:($payloads|length)}}
-  ' > "${output}/$(command_result_filename "${command}")"
+    | if $status != "pass" or .data.test_counts.total == $inventory_total then . else error("incomplete shard totals") end
+  ' < "${payload_stream}" > "${output}/$(command_result_filename "${command}")"; then
+    fail "${phase} shard totals do not cover the complete inventory."
+  fi
   printf '{"%s":"%s"}\n' "${command}" "${aggregate_status}" > "${output}/results.json"
-}
+)
 
 case "${1:-}" in plan) plan ;; aggregate) aggregate ;; *) echo "usage: $0 plan|aggregate" >&2; exit 2 ;; esac
