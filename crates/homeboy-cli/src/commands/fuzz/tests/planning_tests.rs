@@ -564,16 +564,8 @@ fn direct_run_with_multi_workload_profile_and_workload_is_still_rejected() {
 
 #[test]
 fn generic_lab_profile_expands_safe_destructive_evidence_defaults() {
-    let cli = FuzzCli::try_parse_from([
-        "fuzz",
-        "run",
-        "component-a",
-        "--workload",
-        "api-fuzz",
-        "--profile",
-        "lab",
-    ])
-    .expect("parse generic lab profile");
+    let cli = FuzzCli::try_parse_from(["fuzz", "run", "component-a", "--profile", "lab"])
+        .expect("parse generic lab profile");
     let Some(FuzzCommand::Run(args)) = cli.args.command else {
         panic!("expected fuzz run command");
     };
