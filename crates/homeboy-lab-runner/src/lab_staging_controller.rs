@@ -314,20 +314,15 @@ struct LabHandoffHomeboyIdentity {
 
 /// Compatibility is declared by the durable handoff protocol, rather than
 /// inferred from a product name or a particular runner implementation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum RuntimeSetCompatibility {
     /// A record persisted before runtime-set compatibility was declared.
+    #[default]
     UnknownLegacy,
     Exact,
     CompatiblePatchDrift,
     WireOrLifecycleIncompatible,
-}
-
-impl Default for RuntimeSetCompatibility {
-    fn default() -> Self {
-        Self::UnknownLegacy
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3719,25 +3714,22 @@ impl LabStagingDispatchDriver {
         } else {
             adapter.execute(&request, checkpoint, token, job.clone())
         };
-        let checkpoint = result.map_err(|error| {
-            if !job.is_cancelled() {
-                if homeboy_agents::agent_task_lifecycle::record_pre_execution_failure(
+        let checkpoint = result.inspect_err(|error| {
+            if !job.is_cancelled()
+                && homeboy_agents::agent_task_lifecycle::record_pre_execution_failure(
                     &request.recipe.run_id,
                     &request.durable_agent_task_plan,
                     "lab_staging_controller",
-                    &error,
+                    error,
                 )
                 .is_ok()
-                {
-                    let _ =
-                        homeboy_agents::agent_task_lifecycle::record_lab_staging_controller_failure(
-                            &request.recipe.run_id,
-                            &format!("{:?}", expected_identity.phase),
-                            &job.job_id(),
-                        );
-                }
+            {
+                let _ = homeboy_agents::agent_task_lifecycle::record_lab_staging_controller_failure(
+                    &request.recipe.run_id,
+                    &format!("{:?}", expected_identity.phase),
+                    &job.job_id(),
+                );
             }
-            error
         })?;
         checkpoint.validate()?;
         let checkpoint =
@@ -3748,12 +3740,12 @@ impl LabStagingDispatchDriver {
                 Some("serialize Lab staging checkpoint".to_string()),
             )
         })?)?;
-        Ok(serde_json::to_value(checkpoint).map_err(|error| {
+        serde_json::to_value(checkpoint).map_err(|error| {
             Error::internal_json(
                 error.to_string(),
                 Some("serialize Lab staging result".to_string()),
             )
-        })?)
+        })
     }
 }
 

@@ -76,16 +76,16 @@ pub(super) fn preflight_agent_task_provider_on_runner(
             remote_cwd,
         )?;
     }
-    let probe = probe_agent_task_providers_on_runner(
+    let probe = probe_agent_task_providers_on_runner(ProviderProbeRequest {
         runner_id,
         remote_cwd,
-        &command,
-        env.clone(),
-        source_snapshot.clone(),
-        required_extensions.clone(),
-        capability_preflight.clone(),
-        runner_status.clone(),
-    )?;
+        command: &command,
+        env: env.clone(),
+        source_snapshot: source_snapshot.clone(),
+        required_extensions: required_extensions.clone(),
+        capability_preflight: capability_preflight.clone(),
+        status_snapshot: runner_status.clone(),
+    })?;
 
     let local_providers = ExtensionProviderAgentTaskExecutor::discover()
         .providers()
@@ -157,16 +157,16 @@ pub(super) fn preflight_agent_task_provider_on_runner(
             .cloned();
         refresh_result = Some(refresh.map(|_| ()));
         if let Some(replacement_status) = replacement_status {
-            let probe = probe_agent_task_providers_on_runner(
+            let probe = probe_agent_task_providers_on_runner(ProviderProbeRequest {
                 runner_id,
                 remote_cwd,
-                &command,
+                command: &command,
                 env,
                 source_snapshot,
                 required_extensions,
                 capability_preflight,
-                replacement_status,
-            )?;
+                status_snapshot: replacement_status,
+            })?;
             if probe.exit_code == 0 {
                 if let Ok(providers) = parse_agent_task_providers_output(&probe.stdout) {
                     runner_unavailable_reason = selection
@@ -317,25 +317,30 @@ struct AgentTaskProviderProbeOutput {
     exit_code: i32,
 }
 
-fn probe_agent_task_providers_on_runner(
-    runner_id: &str,
-    remote_cwd: &str,
-    command: &[String],
+struct ProviderProbeRequest<'a> {
+    runner_id: &'a str,
+    remote_cwd: &'a str,
+    command: &'a [String],
     env: std::collections::HashMap<String, String>,
     source_snapshot: Option<SourceSnapshot>,
     required_extensions: Vec<String>,
     capability_preflight: Option<RunnerCapabilityPreflight>,
     status_snapshot: RunnerStatusReport,
+}
+
+fn probe_agent_task_providers_on_runner(
+    request: ProviderProbeRequest<'_>,
 ) -> Result<AgentTaskProviderProbeOutput> {
     let options = provider_probe_options(
-        command,
-        remote_cwd,
-        env,
-        source_snapshot,
-        required_extensions,
-        capability_preflight,
+        request.command,
+        request.remote_cwd,
+        request.env,
+        request.source_snapshot,
+        request.required_extensions,
+        request.capability_preflight,
     );
-    let (output, exit_code) = exec_with_status_snapshot(runner_id, options, Some(status_snapshot))?;
+    let (output, exit_code) =
+        exec_with_status_snapshot(request.runner_id, options, Some(request.status_snapshot))?;
 
     Ok(AgentTaskProviderProbeOutput {
         stdout: output.stdout,
