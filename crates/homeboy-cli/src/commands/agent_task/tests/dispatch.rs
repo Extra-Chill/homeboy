@@ -37,7 +37,7 @@ fn cook_args_from_cli(args: Vec<String>) -> AgentTaskCookArgs {
     let AgentTaskCommand::Cook(cook) = agent_task.command else {
         panic!("cook command");
     };
-    cook
+    *cook
 }
 
 #[test]
@@ -144,7 +144,7 @@ fn cook_rejects_queue_only_before_creating_a_durable_recipe() {
         };
 
         let error = super::super::run::run_cook_with_executor(
-            cook,
+            *cook,
             ExtensionProviderAgentTaskExecutor::default(),
         )
         .expect_err("queue-only cook must fail before resolving its worktree");
@@ -236,7 +236,7 @@ fn cook_goal_frames_explicit_task_without_creating_another_provider_cell() {
         };
 
         let _ = run_cook_with_executor_and_dispatcher(
-            cook,
+            *cook,
             CapturingExecutor::default(),
             Some(Arc::new(RecipeOnlyDispatcher)),
         );
@@ -287,7 +287,7 @@ fn cook_goal_without_explicit_work_remains_one_provider_cell() {
         };
 
         let _ = run_cook_with_executor_and_dispatcher(
-            cook,
+            *cook,
             CapturingExecutor::default(),
             Some(Arc::new(RecipeOnlyDispatcher)),
         );
@@ -426,7 +426,7 @@ fn invalid_cook_inputs_do_not_mutate_a_configured_provider_destination() {
             let AgentTaskCommand::Cook(cook) = agent_task.command else {
                 panic!("cook command")
             };
-            run_cook_with_executor(cook, ExtensionProviderAgentTaskExecutor::default())
+            run_cook_with_executor(*cook, ExtensionProviderAgentTaskExecutor::default())
                 .expect_err("invalid Cook input is rejected before provider ensure");
         }
         assert!(

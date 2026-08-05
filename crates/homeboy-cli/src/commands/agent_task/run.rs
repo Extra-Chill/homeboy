@@ -638,7 +638,7 @@ pub(crate) fn resolve_cook_destination(
 fn derived_cook_branch(task_url: &str) -> homeboy::core::Result<String> {
     let issue = task_url
         .trim()
-        .split(|character| matches!(character, '?' | '#'))
+        .split(['?', '#'])
         .next()
         .unwrap_or_default()
         .trim_end_matches('/');
@@ -865,11 +865,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress<E>(
     attempt_dispatcher: Option<
         Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>,
     >,
-    progress: Option<
-        &(dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
-              + Send
-              + Sync),
-    >,
+    progress: super::CookProgress<'_>,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value>
 where

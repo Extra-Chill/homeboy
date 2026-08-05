@@ -83,7 +83,7 @@ fn cook_args_from_cli(args: Vec<String>) -> AgentTaskCookArgs {
     let AgentTaskCommand::Cook(cook) = agent_task.command else {
         panic!("cook command");
     };
-    cook
+    *cook
 }
 
 #[test]
@@ -282,7 +282,7 @@ fn recoverable_runner_cook_args(
     let AgentTaskCommand::Cook(cook) = agent_task.command else {
         panic!("cook command");
     };
-    cook
+    *cook
 }
 
 #[test]
@@ -2283,7 +2283,7 @@ fn gate_requirement_cook_args(
     let AgentTaskCommand::Cook(cook) = agent_task.command else {
         panic!("cook command");
     };
-    cook
+    *cook
 }
 
 #[test]
