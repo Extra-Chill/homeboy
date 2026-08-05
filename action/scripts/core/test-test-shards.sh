@@ -53,7 +53,7 @@ for phase in candidate baseline; do
     jq -cn --arg phase "${phase}" --arg command 'review test' --arg shard "${shard}" --arg inventory "${inventory_digest}" --arg plan "${plan_digest}" \
       '{phase:$phase,command:$command,shard_id:$shard,inventory_digest:$inventory,plan_digest:$plan,run_attempt:2,results:{"review test":"pass"}}' > "${tmp}/artifacts/${phase}-${shard}/${phase}/manifest.json"
     total="$(jq -r --arg id "${shard}" '.shards[] | select(.id == $id) | .tests | length' "${tmp}/one.json")"
-    jq -cn --argjson total "${total}" '{schema:"homeboy/command-result/v3",command:"review",success:true,status:"succeeded",exit_code:0,data:{test_counts:{passed:$total,failed:0,errors:0,total:$total}}}' > "${tmp}/artifacts/${phase}-${shard}/${phase}/homeboy-ci-results/review-test.json"
+    jq -cn --argjson total "${total}" '{schema:"homeboy/command-result/v3",command:"review",success:true,status:"succeeded",exit_code:0,data:{test_counts:{passed:$total,failed:0,skipped:0,total:$total}}}' > "${tmp}/artifacts/${phase}-${shard}/${phase}/homeboy-ci-results/review-test.json"
   done
   TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE="${phase}" TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/${phase}-output" RUN_ATTEMPT=2 \
     bash "${ROOT}/scripts/core/shard-tests.sh" aggregate
@@ -65,7 +65,23 @@ jq '.data.test_counts.failed = 1 | .data.test_counts.passed -= 1' "${tmp}/passin
 if TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/false-pass-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate >/dev/null 2>&1; then
   printf 'FAIL: passing shard evidence with failed counts must fail closed\n'; exit 1
 fi
-mv "${tmp}/passing-shard.json" "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json"
+cp "${tmp}/passing-shard.json" "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json"
+cp "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json" "${tmp}/valid-passing-shard.json"
+jq '.status = "failed"' "${tmp}/valid-passing-shard.json" > "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json"
+if TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/incoherent-status-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate >/dev/null 2>&1; then
+  printf 'FAIL: passing shard evidence with failed status must fail closed\n'; exit 1
+fi
+jq '.data.test_counts.passed = 0.5 | .data.test_counts.total = 0.5' "${tmp}/valid-passing-shard.json" > "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json"
+if TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/fractional-count-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate >/dev/null 2>&1; then
+  printf 'FAIL: fractional structured counts must fail closed\n'; exit 1
+fi
+cp "${tmp}/valid-passing-shard.json" "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json"
+total="$(jq -r '.data.test_counts.total' "${tmp}/passing-shard.json")"
+jq --argjson total "$((total - 1))" '.data.test_counts.passed = $total | .data.test_counts.total = $total' "${tmp}/passing-shard.json" > "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json"
+if TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/incomplete-pass-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate >/dev/null 2>&1; then
+  printf 'FAIL: passing shard evidence with incomplete planned membership must fail closed\n'; exit 1
+fi
+cp "${tmp}/passing-shard.json" "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json"
 for phase in candidate baseline; do
   jq '.results["review test"] = "fail"' "${tmp}/artifacts/${phase}-shard-1/${phase}/manifest.json" > "${tmp}/bad.json"
   mv "${tmp}/bad.json" "${tmp}/artifacts/${phase}-shard-1/${phase}/manifest.json"
@@ -75,6 +91,21 @@ for phase in candidate baseline; do
   jq -e '."review test" == "fail"' "${tmp}/${phase}-failed-output/results.json" >/dev/null || { printf 'FAIL: failed shard did not retain a failure result\n'; exit 1; }
 done
 printf 'PASS: complete provenance-bound shard sets aggregate into Test\n'
+
+jq '.results["review test"] = "fail"' "${tmp}/artifacts/candidate-shard-1/candidate/manifest.json" > "${tmp}/bad.json"
+mv "${tmp}/bad.json" "${tmp}/artifacts/candidate-shard-1/candidate/manifest.json"
+jq '{schema,command,success:false,status:"failed",exit_code:1,data:{test_counts:{passed:0,failed:0,skipped:0,total:0}}}' "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json" > "${tmp}/bad.json"
+mv "${tmp}/bad.json" "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json"
+TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/zero-count-failed-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate
+jq -e '."review test" == "fail"' "${tmp}/zero-count-failed-output/results.json" >/dev/null || { printf 'FAIL: failed zero-count shard did not retain a failure result\n'; exit 1; }
+jq -e '.schema == "homeboy/command-result/v3" and .success == false and .status == "failed" and .exit_code == 1 and (.data.test_counts.passed + .data.test_counts.failed + .data.test_counts.skipped == .data.test_counts.total)' "${tmp}/zero-count-failed-output/review-test.json" >/dev/null || { printf 'FAIL: failed zero-count shard did not emit an aggregate failed v3 result\n'; exit 1; }
+cp "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json" "${tmp}/valid-failed-shard.json"
+jq '.exit_code = 0' "${tmp}/valid-failed-shard.json" > "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json"
+if TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/incoherent-exit-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate >/dev/null 2>&1; then
+  printf 'FAIL: failed shard evidence with zero exit code must fail closed\n'; exit 1
+fi
+cp "${tmp}/valid-failed-shard.json" "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json"
+printf 'PASS: failed zero-count v3 shard aggregates without obsolete errors counts\n'
 
 jq '.results["review test"] = "timeout"' "${tmp}/artifacts/candidate-shard-2/candidate/manifest.json" > "${tmp}/bad.json"
 mv "${tmp}/bad.json" "${tmp}/artifacts/candidate-shard-2/candidate/manifest.json"
