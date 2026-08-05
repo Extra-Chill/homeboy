@@ -376,6 +376,80 @@ fn declaration_replay_uses_literal_path_and_tilde_keys() {
     });
 }
 
+#[test]
+fn taken_over_recovery_owner_cannot_commit_any_runner_exec_projection() {
+    with_isolated_home(|_| {
+        let run_id = "fenced-recovery-source";
+        record_runner_exec_job_identity(
+            run_id,
+            "homeboy-lab",
+            "00000000-0000-0000-0000-000000000123",
+            "/runner/workspace",
+            &["true".to_string()],
+        )
+        .expect("source run");
+        record_runner_exec_artifact_declarations(run_id, &["result.json".to_string()], &[], &[])
+            .expect("declarations");
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+        let now = chrono::Utc::now().timestamp_millis();
+        store
+            .claim_expiring_singleton_run(
+                homeboy_core::observation::NewRunRecord::builder("runner_exec_recovery").build(),
+                "fenced-recovery-owner".to_string(),
+                "old-token",
+                now + 60_000,
+            )
+            .expect("old owner")
+            .expect("owner claimed");
+        let mut owner = store
+            .get_run("fenced-recovery-owner")
+            .expect("owner")
+            .expect("owner record");
+        owner.metadata_json["lease_expires_at_ms"] = serde_json::json!(0);
+        store
+            .update_run_metadata(&owner.id, owner.metadata_json)
+            .expect("expire old owner");
+        store
+            .claim_expiring_singleton_run(
+                homeboy_core::observation::NewRunRecord::builder("runner_exec_recovery").build(),
+                "fenced-recovery-owner".to_string(),
+                "new-token",
+                now + 60_000,
+            )
+            .expect("takeover")
+            .expect("new owner claimed");
+        let source_before = store
+            .get_run(run_id)
+            .expect("source")
+            .expect("source record");
+        drop(store);
+
+        let snapshot = runner_snapshot("succeeded");
+        let owner = Some(("fenced-recovery-owner", "old-token"));
+        assert!(
+            record_runner_exec_terminal_checkpoint_with_owner(run_id, &snapshot, owner).is_err()
+        );
+        assert!(record_runner_exec_declaration_promotion_with_owner(
+            run_id,
+            "artifact",
+            "result.json",
+            &[],
+            owner,
+        )
+        .is_err());
+        assert!(record_runner_exec_artifact_refs_with_owner(run_id, &[], owner).is_err());
+        assert!(project_terminal_runner_exec_result_with_owner(run_id, &snapshot, owner).is_err());
+
+        let source_after = homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("store")
+            .get_run(run_id)
+            .expect("source")
+            .expect("source record");
+        assert_eq!(source_after.status, source_before.status);
+        assert_eq!(source_after.metadata_json, source_before.metadata_json);
+    });
+}
+
 fn runner_snapshot(status: &str) -> RunnerJobLogSnapshot {
     let job_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").expect("job id");
     let status = match status {

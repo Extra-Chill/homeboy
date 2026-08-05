@@ -358,6 +358,42 @@ impl ObservationStore {
         })
     }
 
+    /// Finish a source run only while the separate recovery-owner row still
+    /// carries this exact live token. The owner predicate is evaluated by the
+    /// same SQLite statement as the source mutation, so a taken-over worker
+    /// cannot commit after observing an earlier lease renewal.
+    pub fn finish_run_with_owner_token(
+        &self,
+        run_id: &str,
+        status: RunStatus,
+        metadata_json: serde_json::Value,
+        owner_id: &str,
+        owner_token: &str,
+    ) -> Result<bool> {
+        validate_required("run_id", run_id)?;
+        validate_required("owner_id", owner_id)?;
+        validate_required("owner_token", owner_token)?;
+        let serialized = serialize_metadata(&metadata_json)?;
+        let finished_at = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now().timestamp_millis();
+        let rows = execute_with_retry("finish run record with recovery owner", || {
+            self.connection.execute(
+                r#"
+                UPDATE runs SET finished_at = ?1, status = ?2, metadata_json = ?3
+                WHERE id = ?4 AND EXISTS (
+                    SELECT 1 FROM runs AS owner
+                    WHERE owner.id = ?5
+                      AND owner.status = 'running'
+                      AND json_extract(owner.metadata_json, '$.owner_token') = ?6
+                      AND COALESCE(CAST(json_extract(owner.metadata_json, '$.lease_expires_at_ms') AS INTEGER), 0) > ?7
+                )
+                "#,
+                params![finished_at, status.as_str(), serialized, run_id, owner_id, owner_token, now],
+            )
+        })?;
+        Ok(rows == 1)
+    }
+
     /// Finish a run only while it is still active. This prevents concurrent
     /// lifecycle owners from replacing an already-recorded terminal outcome.
     pub fn finish_running_run(
@@ -903,6 +939,47 @@ impl ObservationStore {
     /// to replace a settled observation.
     pub fn upsert_imported_run_preserving_terminal(&self, run: &RunRecord) -> Result<()> {
         self.upsert_imported_run_with_terminal_guard(run, true)
+    }
+
+    /// Owner-fenced variant for recovery projections. It updates only an
+    /// existing source row and atomically verifies the recovery owner at the
+    /// commit boundary.
+    pub fn upsert_imported_run_preserving_terminal_with_owner_token(
+        &self,
+        run: &RunRecord,
+        owner_id: &str,
+        owner_token: &str,
+    ) -> Result<bool> {
+        validate_required("run.id", &run.id)?;
+        validate_required("owner_id", owner_id)?;
+        validate_required("owner_token", owner_token)?;
+        let metadata_json = serialize_metadata(&run.metadata_json)?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let rows = execute_with_retry("upsert imported run record with recovery owner", || {
+            self.connection.execute(
+                r#"
+                UPDATE runs SET
+                    kind = ?1, component_id = ?2, started_at = ?3, finished_at = ?4,
+                    status = ?5, command = ?6, cwd = ?7, homeboy_version = ?8,
+                    git_sha = ?9, rig_id = ?10, metadata_json = ?11
+                WHERE id = ?12
+                  AND (status = 'running' OR ?5 != 'running')
+                  AND EXISTS (
+                    SELECT 1 FROM runs AS owner
+                    WHERE owner.id = ?13
+                      AND owner.status = 'running'
+                      AND json_extract(owner.metadata_json, '$.owner_token') = ?14
+                      AND COALESCE(CAST(json_extract(owner.metadata_json, '$.lease_expires_at_ms') AS INTEGER), 0) > ?15
+                  )
+                "#,
+                params![
+                    run.kind, run.component_id, run.started_at, run.finished_at, run.status,
+                    run.command, run.cwd, run.homeboy_version, run.git_sha, run.rig_id,
+                    metadata_json, run.id, owner_id, owner_token, now,
+                ],
+            )
+        })?;
+        Ok(rows == 1)
     }
 
     fn upsert_imported_run_with_terminal_guard(

@@ -226,6 +226,14 @@ pub fn record_runner_exec_terminal_checkpoint(
     run_id: &str,
     snapshot: &RunnerJobLogSnapshot,
 ) -> Result<()> {
+    record_runner_exec_terminal_checkpoint_with_owner(run_id, snapshot, None)
+}
+
+pub fn record_runner_exec_terminal_checkpoint_with_owner(
+    run_id: &str,
+    snapshot: &RunnerJobLogSnapshot,
+    owner: Option<(&str, &str)>,
+) -> Result<()> {
     if !snapshot.job.status.is_terminal() {
         return Ok(());
     }
@@ -251,7 +259,7 @@ pub fn record_runner_exec_terminal_checkpoint(
                 "event_count": snapshot.events.len(),
             }),
         );
-    store.upsert_imported_run_preserving_terminal(&run)
+    write_runner_exec_projection(&store, &run, owner)
 }
 
 /// Retain controller-owned artifact IDs alongside the original declarations.
@@ -259,6 +267,14 @@ pub fn record_runner_exec_terminal_checkpoint(
 pub fn record_runner_exec_artifact_refs(
     run_id: &str,
     artifacts: &[homeboy_core::observation::ArtifactRecord],
+) -> Result<()> {
+    record_runner_exec_artifact_refs_with_owner(run_id, artifacts, None)
+}
+
+pub fn record_runner_exec_artifact_refs_with_owner(
+    run_id: &str,
+    artifacts: &[homeboy_core::observation::ArtifactRecord],
+    owner: Option<(&str, &str)>,
 ) -> Result<()> {
     let store = homeboy_core::observation::ObservationStore::open_initialized()?;
     let run_id = sanitize_run_id(run_id);
@@ -294,7 +310,7 @@ pub fn record_runner_exec_artifact_refs(
             "artifact_count": artifact_count,
         }),
     );
-    store.upsert_imported_run_preserving_terminal(&run)
+    write_runner_exec_projection(&store, &run, owner)
 }
 
 /// Persist one declaration's completed promotion immediately. The artifact IDs
@@ -305,6 +321,16 @@ pub fn record_runner_exec_declaration_promotion(
     role: &str,
     declaration: &str,
     artifacts: &[homeboy_core::observation::ArtifactRecord],
+) -> Result<()> {
+    record_runner_exec_declaration_promotion_with_owner(run_id, role, declaration, artifacts, None)
+}
+
+pub fn record_runner_exec_declaration_promotion_with_owner(
+    run_id: &str,
+    role: &str,
+    declaration: &str,
+    artifacts: &[homeboy_core::observation::ArtifactRecord],
+    owner: Option<(&str, &str)>,
 ) -> Result<()> {
     let store = homeboy_core::observation::ObservationStore::open_initialized()?;
     let run_id = sanitize_run_id(run_id);
@@ -338,7 +364,7 @@ pub fn record_runner_exec_declaration_promotion(
         "runner_exec_declaration_promotions".to_string(),
         Value::Object(states),
     );
-    store.upsert_imported_run_preserving_terminal(&run)
+    write_runner_exec_projection(&store, &run, owner)
 }
 
 pub fn runner_exec_declaration_is_promoted(
@@ -471,6 +497,14 @@ pub fn project_terminal_runner_exec_result(
     run_id: &str,
     snapshot: &RunnerJobLogSnapshot,
 ) -> Result<bool> {
+    project_terminal_runner_exec_result_with_owner(run_id, snapshot, None)
+}
+
+pub fn project_terminal_runner_exec_result_with_owner(
+    run_id: &str,
+    snapshot: &RunnerJobLogSnapshot,
+    owner: Option<(&str, &str)>,
+) -> Result<bool> {
     if !snapshot.job.status.is_terminal() {
         return Ok(false);
     }
@@ -540,8 +574,50 @@ pub fn project_terminal_runner_exec_result(
     } else {
         RunStatus::Fail
     };
-    store.finish_run(&run.id, status, Some(run.metadata_json))?;
+    if let Some((owner_id, owner_token)) = owner {
+        if !store.finish_run_with_owner_token(
+            &run.id,
+            status,
+            run.metadata_json,
+            owner_id,
+            owner_token,
+        )? {
+            return Err(stale_recovery_owner(owner_id));
+        }
+    } else {
+        store.finish_run(&run.id, status, Some(run.metadata_json))?;
+    }
     Ok(true)
+}
+
+fn write_runner_exec_projection(
+    store: &homeboy_core::observation::ObservationStore,
+    run: &homeboy_core::observation::RunRecord,
+    owner: Option<(&str, &str)>,
+) -> Result<()> {
+    if let Some((owner_id, owner_token)) = owner {
+        if !store.upsert_imported_run_preserving_terminal_with_owner_token(
+            run,
+            owner_id,
+            owner_token,
+        )? {
+            return Err(stale_recovery_owner(owner_id));
+        }
+    } else {
+        store.upsert_imported_run_preserving_terminal(run)?;
+    }
+    Ok(())
+}
+
+fn stale_recovery_owner(owner_id: &str) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "recovery_owner",
+        "runner-exec recovery ownership was taken over",
+        Some(owner_id.to_string()),
+        None,
+    );
+    error.details["ownership_lost"] = json!(true);
+    error
 }
 
 /// Finish a synchronous transport that has no daemon job identity (diagnostic

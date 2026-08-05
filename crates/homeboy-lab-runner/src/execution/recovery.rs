@@ -267,10 +267,7 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
         }) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                if let Some(owner) = owner {
-                    owner.before_side_effect(&store, "source-run failure projection")?;
-                }
-                record_evicted_evidence_loss(&store, &run, &error)?;
+                record_evicted_evidence_loss(&store, &run, &error, owner)?;
                 // A 404 is a durable per-job result. Other failures describe the
                 // endpoint, so avoid amplifying one unavailable daemon into N probes.
                 if error.details.get("http_status").and_then(Value::as_u64) != Some(404) {
@@ -283,11 +280,10 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
         if !snapshot.job.status.is_terminal() {
             continue;
         }
-        if let Some(owner) = owner {
-            owner.before_side_effect(&store, "terminal checkpoint")?;
-        }
-        homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint(
-            &run.id, &snapshot,
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint_with_owner(
+            &run.id,
+            &snapshot,
+            owner.map(|owner| (owner.id.as_str(), owner.token.as_str())),
         )?;
         let declarations = run
             .metadata_json
@@ -325,14 +321,12 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 &output,
                 std::slice::from_ref(&declaration),
             )?;
-            if let Some(owner) = owner {
-                owner.before_side_effect(&store, "artifact declaration promotion record")?;
-            }
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion_with_owner(
                 &run.id,
                 "artifact",
                 &declaration,
                 &promoted,
+                owner.map(|owner| (owner.id.as_str(), owner.token.as_str())),
             )?;
             artifacts.extend(promoted);
         }
@@ -353,17 +347,12 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 &output,
                 std::slice::from_ref(&declaration),
             )?;
-            if let Some(owner) = owner {
-                owner.before_side_effect(
-                    &store,
-                    "artifact directory declaration promotion record",
-                )?;
-            }
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion_with_owner(
                 &run.id,
                 "artifact_dir",
                 &declaration,
                 &promoted,
+                owner.map(|owner| (owner.id.as_str(), owner.token.as_str())),
             )?;
             directories.extend(promoted);
         }
@@ -384,14 +373,12 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 &output,
                 std::slice::from_ref(&declaration),
             )?;
-            if let Some(owner) = owner {
-                owner.before_side_effect(&store, "summary declaration promotion record")?;
-            }
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion_with_owner(
                 &run.id,
                 "summary",
                 &declaration,
                 &promoted,
+                owner.map(|owner| (owner.id.as_str(), owner.token.as_str())),
             )?;
             summaries.extend(promoted);
         }
@@ -401,14 +388,16 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
             .chain(summaries.iter())
             .cloned()
             .collect::<Vec<_>>();
-        if let Some(owner) = owner {
-            owner.before_side_effect(&store, "artifact reference projection")?;
-        }
-        homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_refs(&run.id, &retained)?;
-        if let Some(owner) = owner {
-            owner.before_side_effect(&store, "terminal projection")?;
-        }
-        homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(&run.id, &snapshot)?;
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_refs_with_owner(
+            &run.id,
+            &retained,
+            owner.map(|owner| (owner.id.as_str(), owner.token.as_str())),
+        )?;
+        homeboy_agents::agent_task_lifecycle::project_terminal_runner_exec_result_with_owner(
+            &run.id,
+            &snapshot,
+            owner.map(|owner| (owner.id.as_str(), owner.token.as_str())),
+        )?;
         reconciled += 1;
     }
     Ok((reconciled, deferred))
@@ -664,6 +653,7 @@ fn record_evicted_evidence_loss(
     store: &ObservationStore,
     run: &homeboy_core::observation::RunRecord,
     error: &Error,
+    owner: Option<&RecoveryOwner>,
 ) -> Result<()> {
     let checkpointed = run
         .metadata_json
@@ -692,8 +682,31 @@ fn record_evicted_evidence_loss(
         "runner_id": run.metadata_json["runner_id"],
         "runner_job_id": run.metadata_json["runner_job_id"],
     });
-    store.finish_run(&run.id, RunStatus::Fail, Some(metadata))?;
+    if let Some(owner) = owner {
+        if !store.finish_run_with_owner_token(
+            &run.id,
+            RunStatus::Fail,
+            metadata,
+            &owner.id,
+            &owner.token,
+        )? {
+            return Err(stale_recovery_owner(&owner.id));
+        }
+    } else {
+        store.finish_run(&run.id, RunStatus::Fail, Some(metadata))?;
+    }
     Ok(())
+}
+
+fn stale_recovery_owner(owner_id: &str) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "recovery_owner",
+        "runner-exec recovery ownership was taken over",
+        Some(owner_id.to_string()),
+        None,
+    );
+    error.details["ownership_lost"] = json!(true);
+    error
 }
 
 #[cfg(test)]
@@ -945,7 +958,7 @@ mod tests {
                 retryable: None,
                 source: None,
             };
-            record_evicted_evidence_loss(&store, &run, &error).expect("eviction recorded");
+            record_evicted_evidence_loss(&store, &run, &error, None).expect("eviction recorded");
             let terminal = store.get_run(run_id).expect("read").expect("terminal run");
             assert_eq!(terminal.status, "fail");
             assert_eq!(
