@@ -1283,7 +1283,7 @@ mod tests {
         let helper = home.path().join("postprocess-helper");
         std::fs::write(
             &helper,
-            "#!/bin/sh\ncase \"$1\" in\n  copy) cp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\"; printf x >> \"$HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT/count\" ;;\n  report) printf x >> \"$HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT/count\"; printf report > \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\" ;;\n  fail) exit 3 ;;\nesac\n",
+            "#!/bin/sh\nset -e\ncase \"$1\" in\n  copy) cp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\"; printf x >> \"$HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT/count\" ;;\n  report) printf x >> \"$HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT/count\"; printf report > \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\" ;;\n  fail) exit 3 ;;\nesac\n",
         )
         .expect("helper");
         #[cfg(unix)]
@@ -1370,9 +1370,17 @@ mod tests {
                 &AgentTaskCancellationToken::default(),
             );
             let result = outcomes.last().expect("postprocess outcome");
-            assert_eq!(result.status, AgentTaskOutcomeStatus::Succeeded);
             assert_eq!(
-                std::fs::read(result.artifacts[0].path.as_deref().expect("path")).expect("output"),
+                result.status,
+                AgentTaskOutcomeStatus::Succeeded,
+                "postprocess step did not succeed; outcome: {result:#?}"
+            );
+            let output_path = result.artifacts[0].path.as_deref().expect("path");
+            assert_eq!(
+                std::fs::read(output_path).unwrap_or_else(|error| panic!(
+                    "helper reported success but wrote no output at {output_path}: {error}; \
+                     outcome: {result:#?}"
+                )),
                 [0, 255, 17, 42]
             );
             assert_eq!(
@@ -1514,7 +1522,13 @@ mod tests {
                 &mut events,
                 &AgentTaskCancellationToken::default(),
             );
-            assert_eq!(std::fs::read_to_string(count).expect("count"), "x");
+            assert_eq!(
+                std::fs::read_to_string(&count).unwrap_or_else(|error| panic!(
+                    "helper wrote no count file at {}: {error}; resumed outcomes: {resumed:#?}",
+                    count.display()
+                )),
+                "x"
+            );
             assert_eq!(
                 resumed.last().expect("resumed outcome").artifacts[0]
                     .path
