@@ -613,8 +613,8 @@ fn list_run_artifacts(gh: &GhClient, gh_run_id: u64) -> homeboy::core::Result<Ve
         "repos/{}/actions/runs/{gh_run_id}/artifacts?per_page=100",
         gh.repo_path()?
     );
-    let args = vec!["api".to_string(), "--paginate".into(), api_path.clone()];
-    let output = gh.output(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+    let args = ["api", "--paginate", api_path.as_str()];
+    let output = gh.output(&args)?;
     if !output.status.success() {
         return Err(Error::internal_io(
             format!(

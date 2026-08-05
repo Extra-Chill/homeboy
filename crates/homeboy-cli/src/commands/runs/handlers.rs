@@ -90,10 +90,11 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
     let limit = args.limit.max(0) as usize;
     let run_records = run_records.into_iter().take(limit).collect::<Vec<_>>();
 
-    let active_runner_jobs = args
-        .include_active_runner_jobs
-        .then(|| active_runner_job_summaries(status_filter.as_deref()))
-        .unwrap_or_default();
+    let active_runner_jobs = if args.include_active_runner_jobs {
+        active_runner_job_summaries(status_filter.as_deref())
+    } else {
+        ActiveRunnerJobEnrichment::default()
+    };
     let stale_runs = stale_run_summary(
         &run_records,
         &active_runner_jobs.durable_run_ids,
@@ -1294,7 +1295,8 @@ mod pull_tests {
                 .record_artifact(&run.id, "finding-packets", &source)
                 .expect("artifact");
 
-            let summary = pull_artifacts_to_local(&[artifact.clone()], None).expect("pull summary");
+            let summary = pull_artifacts_to_local(std::slice::from_ref(&artifact), None)
+                .expect("pull summary");
 
             assert_eq!(summary.already_local_count, 1);
             assert_eq!(summary.pulled_count, 0);

@@ -161,7 +161,7 @@ fn read_related_fuzz_artifact_json(artifact: &ArtifactRecord) -> Option<Value> {
     let path = Path::new(&artifact.path);
     let file = File::open(path).ok()?;
     let json = serde_json::from_reader::<_, Value>(file).ok()?;
-    is_related_fuzz_json(&json).then(|| json)
+    is_related_fuzz_json(&json).then_some(json)
 }
 
 fn is_related_fuzz_json(value: &Value) -> bool {
