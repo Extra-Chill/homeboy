@@ -301,10 +301,12 @@ fn lock_capacity_ledger(ledger: &Path) -> Result<File> {
 fn read_capacity_reservations(ledger: &Path) -> Result<Vec<CapacityReservationRecord>> {
     match fs::read_to_string(ledger) {
         Ok(value) => serde_json::from_str(&value).map_err(|error| {
-            Error::internal_json(
+            let mut error = Error::internal_json(
                 error.to_string(),
                 Some("parse capacity reservation ledger".to_string()),
-            )
+            );
+            error.message = "Failed to parse capacity reservation ledger".to_string();
+            error
         }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(error) => Err(Error::internal_io(
