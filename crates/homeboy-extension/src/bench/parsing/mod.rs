@@ -281,8 +281,8 @@ fn scenario_ids_with_single_preferred_workspace_source(
 ) -> BTreeSet<String> {
     let duplicates = duplicate_scenario_sources(scenarios, Some(workspace));
     duplicates
-        .into_iter()
-        .filter_map(|(id, _)| {
+        .into_keys()
+        .filter_map(|id| {
             let preferred_paths = scenarios
                 .iter()
                 .filter(|scenario| {

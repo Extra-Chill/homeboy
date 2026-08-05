@@ -422,15 +422,12 @@ fn resolve_bench_artifact_file_pointer(
     }
 
     let filename = url.and_then(artifact_filename_from_url)?;
-    for candidate in [
+    [
         run_dir.path().join("artifacts").join(&filename),
         run_dir.path().join(&filename),
-    ] {
-        if candidate.is_file() || candidate.is_dir() {
-            return Some(candidate);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file() || candidate.is_dir())
 }
 
 fn artifact_filename_from_url(url: &str) -> Option<String> {
