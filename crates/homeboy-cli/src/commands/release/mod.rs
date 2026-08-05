@@ -263,9 +263,9 @@ pub struct ArtifactSourceAuthorityOutput {
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum ReleaseCommandOutput {
-    Single(ReleaseOutput),
+    Single(Box<ReleaseOutput>),
     Batch(BatchReleaseOutput),
-    Package(ReleasePackageOutput),
+    Package(Box<ReleasePackageOutput>),
     ArtifactSourceAuthority(ArtifactSourceAuthorityOutput),
     Changes(changes::ChangesCommandOutput),
     Changelog(changelog::ChangelogOutput),
@@ -489,13 +489,13 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
         let cascade = run_cascade_if_requested(&args, component_id, &result, &input)?;
 
         return Ok((
-            ReleaseCommandOutput::Single(ReleaseOutput {
+            ReleaseCommandOutput::Single(Box::new(ReleaseOutput {
                 variant: "single",
                 actionable: recovery_actionable_metadata(&result),
                 result,
                 workspace: workspace_result.workspace,
                 cascade,
-            }),
+            })),
             exit_code,
         ));
     }
@@ -701,10 +701,10 @@ fn run_package_only(
     )?;
 
     Ok((
-        ReleaseCommandOutput::Package(ReleasePackageOutput {
+        ReleaseCommandOutput::Package(Box::new(ReleasePackageOutput {
             variant: "package",
             result,
-        }),
+        })),
         0,
     ))
 }

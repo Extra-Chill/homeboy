@@ -514,7 +514,7 @@ fn run_decompose_single(
 
     Ok((
         RefactorOutput::Decompose {
-            plan,
+            plan: Box::new(plan),
             move_results,
             dry_run: !write,
             applied: write,

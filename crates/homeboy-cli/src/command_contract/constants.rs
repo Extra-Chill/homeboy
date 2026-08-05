@@ -59,7 +59,7 @@ pub struct ContractConstantsOutput {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum ContractConstants {
-    All(AllContractConstants),
+    All(Box<AllContractConstants>),
     ArtifactManifest(ArtifactManifestConstants),
     ArtifactPaths(ArtifactPathsConstants),
     ArtifactPostprocess(ArtifactPostprocessConstants),
@@ -73,7 +73,7 @@ pub enum ContractConstants {
     PathMaterializationPlan(PathMaterializationPlanConstants),
     RunOutcomeEnvelope(RunOutcomeEnvelopeConstants),
     RunArtifactFiles(RunArtifactFilesConstants),
-    RuntimeArtifacts(RuntimeArtifactConstants),
+    RuntimeArtifacts(Box<RuntimeArtifactConstants>),
     RunnerArtifactManifestRef(RunnerArtifactManifestRefConstants),
     ReviewerFacingRef(ReviewerFacingRefConstants),
 }
@@ -234,7 +234,7 @@ pub struct ReviewerFacingRefConstants {
 pub fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> {
     let normalized = contract_id.trim();
     let constants = match normalized {
-        "all" => ContractConstants::All(AllContractConstants {
+        "all" => ContractConstants::All(Box::new(AllContractConstants {
             artifact_manifest: artifact_manifest_constants(),
             artifact_paths: artifact_paths_constants(),
             artifact_postprocess: artifact_postprocess_constants(),
@@ -251,7 +251,7 @@ pub fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> 
             runtime_artifacts: runtime_artifact_constants(),
             runner_artifact_manifest_ref: runner_artifact_manifest_ref_constants(),
             reviewer_facing_ref: reviewer_facing_ref_constants(),
-        }),
+        })),
         "artifact-manifest" => ContractConstants::ArtifactManifest(artifact_manifest_constants()),
         "artifact-paths" => ContractConstants::ArtifactPaths(artifact_paths_constants()),
         "artifact-postprocess" => {
@@ -280,7 +280,7 @@ pub fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> 
         }
         "run-artifact-files" => ContractConstants::RunArtifactFiles(run_artifact_files_constants()),
         "runtime-artifacts" | "runtime-agent-artifacts" => {
-            ContractConstants::RuntimeArtifacts(runtime_artifact_constants())
+            ContractConstants::RuntimeArtifacts(Box::new(runtime_artifact_constants()))
         }
         "runner-artifact-manifest-ref" => {
             ContractConstants::RunnerArtifactManifestRef(runner_artifact_manifest_ref_constants())

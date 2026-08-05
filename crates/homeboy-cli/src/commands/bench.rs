@@ -586,10 +586,10 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
 #[derive(Serialize)]
 #[serde(tag = "variant", content = "payload", rename_all = "snake_case")]
 pub enum BenchOutput {
-    Single(BenchCommandOutput),
+    Single(Box<BenchCommandOutput>),
     Comparison(BenchComparisonOutput),
     ComparisonSummary(BenchComparisonSummaryOutput),
-    MatrixFanout(fanout::BenchMatrixFanoutOutput),
+    MatrixFanout(Box<fanout::BenchMatrixFanoutOutput>),
     SettingsMatrix(settings_matrix::BenchSettingsMatrixOutput),
     List(BenchListWorkflowResult),
 }
@@ -613,7 +613,7 @@ pub fn run(mut args: BenchArgs) -> CmdResult<BenchOutput> {
     if !args.run.matrix.is_empty() {
         let output = fanout::run_matrix_fanout(&args.run)?;
         let exit = if output.matrix.passed { 0 } else { 1 };
-        return Ok((BenchOutput::MatrixFanout(output), exit));
+        return Ok((BenchOutput::MatrixFanout(Box::new(output)), exit));
     }
 
     // No --rig: single component run. No rig pinning, no rig
@@ -622,7 +622,7 @@ pub fn run(mut args: BenchArgs) -> CmdResult<BenchOutput> {
         validate_report_selection_for_single_run(&args.run)?;
         let passthrough_args = filter_homeboy_flags(&args.run.args);
         let (output, exit) = matrix::run_single(&args.run, &passthrough_args, None)?;
-        let mut output = BenchOutput::Single(output);
+        let mut output = BenchOutput::Single(Box::new(output));
         attach_bench_actionable(&mut output);
         return Ok((output, exit));
     }
@@ -652,7 +652,7 @@ pub fn run(mut args: BenchArgs) -> CmdResult<BenchOutput> {
         validate_report_selection_for_single_run(run_args)?;
         let rig_id = run_args.rig[0].clone();
         let (output, exit) = matrix::run_single_rig(run_args, &passthrough_args, rig_id)?;
-        let mut output = BenchOutput::Single(output);
+        let mut output = BenchOutput::Single(Box::new(output));
         attach_bench_actionable(&mut output);
         return Ok((output, exit));
     }

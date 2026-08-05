@@ -588,7 +588,7 @@ pub enum RefactorOutput {
 
     #[serde(rename = "refactor.decompose")]
     Decompose {
-        plan: homeboy::refactor::DecomposePlan,
+        plan: Box<homeboy::refactor::DecomposePlan>,
         move_results: Vec<homeboy::refactor::MoveResult>,
         dry_run: bool,
         applied: bool,

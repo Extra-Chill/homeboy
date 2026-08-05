@@ -22,7 +22,7 @@ fn bench_output_single_serializes_with_tagged_payload() {
         persisted_run: None,
         actionable: None,
     };
-    let value = serde_json::to_value(BenchOutput::Single(single)).unwrap();
+    let value = serde_json::to_value(BenchOutput::Single(Box::new(single))).unwrap();
     assert_eq!(
         value.get("variant"),
         Some(&serde_json::Value::String("single".to_string()))
