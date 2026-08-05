@@ -43,6 +43,13 @@
 //!   reported here for visibility, flagged
 //!   [`DegradedCleanupCategory::reclaims_without_store`] `= false`, rather than
 //!   quietly omitted or dishonestly counted.
+//! * [`crate::cleanup::leaked_test_homes::cleanup_leaked_test_homes`] —
+//!   genuinely store-free, and the largest single reclaim on a host that has
+//!   been killing test processes. Its ownership proof is a filename prefix plus
+//!   a `kill(pid, 0)`; neither reads a row. It belongs in a degraded sweep
+//!   precisely because the state it reclaims from — a host under disk pressure
+//!   after OOM kills — is the state that shuts the store in the first place
+//!   (#11073).
 //!
 //! # Why this is not just "let each category fail"
 //!
@@ -54,9 +61,12 @@
 //! failing writes with one, and turns N generic failures into one named
 //! degraded mode the operator can act on.
 
+use std::time::Duration;
+
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::cleanup::leaked_test_homes::{cleanup_leaked_test_homes, LeakedTestHomeCleanupOptions};
 use crate::engine::temp::{self, RuntimeTempCleanupOptions};
 use crate::observation::runs_service::{
     self, OrphanedArtifactBytesCleanupOptions, RunnerDownloadCleanupOptions,
@@ -67,8 +77,12 @@ use crate::Error;
 ///
 /// Ordered by how much they can actually reclaim in that state, so an operator
 /// reading the list top-down reaches the useful ones first.
-pub const STORE_INDEPENDENT_CLEANUP_CATEGORIES: &[&str] =
-    &["orphaned-artifact-bytes", "runtime-tmp", "runner-downloads"];
+pub const STORE_INDEPENDENT_CLEANUP_CATEGORIES: &[&str] = &[
+    "orphaned-artifact-bytes",
+    "leaked-test-homes",
+    "runtime-tmp",
+    "runner-downloads",
+];
 
 /// Whether the observation store can be opened at all.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -152,6 +166,10 @@ pub struct DegradedCleanupOptions {
     pub limit: usize,
     pub runtime_tmp_days: u64,
     pub runtime_tmp_managed_days: Option<u64>,
+    /// Age floor for abandoned isolated test homes.
+    pub leaked_test_home_min_age: Duration,
+    /// Byte ceiling on retained abandoned isolated test homes.
+    pub leaked_test_home_max_total_bytes: u64,
 }
 
 impl DegradedCleanupOptions {
@@ -162,6 +180,25 @@ impl DegradedCleanupOptions {
             limit: policy.scan_limit(),
             runtime_tmp_days: policy.runtime_tmp_days,
             runtime_tmp_managed_days: Some(policy.runtime_tmp_managed_days),
+            leaked_test_home_min_age: policy.leaked_test_home_min_age(),
+            leaked_test_home_max_total_bytes: policy.leaked_test_home_max_total_bytes,
+        }
+    }
+}
+
+impl Default for DegradedCleanupOptions {
+    /// A dry run that reclaims nothing, so a partially-filled literal cannot
+    /// widen a delete predicate by omission.
+    fn default() -> Self {
+        Self {
+            apply: false,
+            limit: 0,
+            runtime_tmp_days: crate::defaults::RetentionConfig::default().runtime_tmp_days,
+            runtime_tmp_managed_days: None,
+            leaked_test_home_min_age: Duration::from_secs(
+                super::LEAKED_TEST_HOME_MIN_AGE_HOURS.saturating_mul(3_600),
+            ),
+            leaked_test_home_max_total_bytes: super::LEAKED_TEST_HOME_MAX_TOTAL_BYTES,
         }
     }
 }
@@ -248,6 +285,31 @@ pub fn degraded_cleanup(
                 failure: None,
             },
             Err(error) => DegradedCleanupCategory::failed("orphaned-artifact-bytes", true, error),
+        },
+    );
+
+    // Ownership is a filename prefix plus a liveness probe on the owning PID.
+    // Neither reads a row, and both stay available on a filesystem that has
+    // nothing left to give.
+    categories.push(
+        match cleanup_leaked_test_homes(LeakedTestHomeCleanupOptions {
+            apply: options.apply,
+            min_age: options.leaked_test_home_min_age,
+            max_total_bytes: options.leaked_test_home_max_total_bytes,
+            limit: options.limit,
+            roots: Vec::new(),
+        }) {
+            Ok(outcome) => DegradedCleanupCategory {
+                category: "leaked-test-homes",
+                reclaims_without_store: true,
+                planned_bytes: outcome.planned_size_bytes,
+                reclaimed_bytes: outcome.removed_size_bytes,
+                planned_count: outcome.planned_count,
+                removed_count: outcome.removed_count,
+                detail: serde_json::to_value(&outcome).unwrap_or(Value::Null),
+                failure: None,
+            },
+            Err(error) => DegradedCleanupCategory::failed("leaked-test-homes", true, error),
         },
     );
 
@@ -366,6 +428,7 @@ mod tests {
         let reason = exhausted().skip_reason().expect("degraded skip reason");
 
         assert!(reason.contains("orphaned-artifact-bytes"), "{reason}");
+        assert!(reason.contains("leaked-test-homes"), "{reason}");
         assert!(reason.contains("runtime-tmp"), "{reason}");
         assert!(
             reason.contains("database-backed cleanup cannot plan"),
@@ -396,10 +459,9 @@ mod tests {
 
             let outcome = degraded_cleanup(
                 DegradedCleanupOptions {
-                    apply: false,
                     limit: 100,
                     runtime_tmp_days: 7,
-                    runtime_tmp_managed_days: None,
+                    ..DegradedCleanupOptions::default()
                 },
                 exhausted(),
                 "test",
@@ -437,10 +499,9 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let outcome = degraded_cleanup(
                 DegradedCleanupOptions {
-                    apply: false,
                     limit: 100,
                     runtime_tmp_days: 7,
-                    runtime_tmp_managed_days: None,
+                    ..DegradedCleanupOptions::default()
                 },
                 exhausted(),
                 "test",
@@ -452,7 +513,14 @@ mod tests {
                 .filter(|entry| entry.reclaims_without_store)
                 .map(|entry| entry.category)
                 .collect();
-            assert_eq!(reclaiming, ["orphaned-artifact-bytes", "runtime-tmp"]);
+            assert_eq!(
+                reclaiming,
+                [
+                    "orphaned-artifact-bytes",
+                    "leaked-test-homes",
+                    "runtime-tmp"
+                ]
+            );
         });
     }
 
@@ -475,8 +543,30 @@ mod tests {
     fn the_store_independent_category_list_matches_the_categories_that_run() {
         assert_eq!(
             STORE_INDEPENDENT_CLEANUP_CATEGORIES,
-            ["orphaned-artifact-bytes", "runtime-tmp", "runner-downloads"]
+            [
+                "orphaned-artifact-bytes",
+                "leaked-test-homes",
+                "runtime-tmp",
+                "runner-downloads"
+            ]
         );
+    }
+
+    /// A degraded sweep is a recovery path an operator reaches for under disk
+    /// pressure, so its defaults must not delete on their own. The dry-run
+    /// default plus the finite byte ceiling are what make a partially-filled
+    /// literal safe.
+    #[test]
+    fn degraded_defaults_reclaim_nothing_and_still_bound_leaked_test_homes() {
+        let options = DegradedCleanupOptions::default();
+
+        assert!(!options.apply);
+        assert_eq!(options.limit, 0);
+        assert_eq!(
+            options.leaked_test_home_min_age,
+            std::time::Duration::from_secs(super::super::LEAKED_TEST_HOME_MIN_AGE_HOURS * 3_600)
+        );
+        assert!(options.leaked_test_home_max_total_bytes < u64::MAX);
     }
 
     fn exhausted_error() -> Error {

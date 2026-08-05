@@ -32,7 +32,8 @@ use homeboy::runner::runners::{
 pub use homeboy_command_contract::cleanup::{
     runtime_tmp_commands, CleanupArgs, CleanupArtifactsArgs, CleanupArtifactsSortArg,
     CleanupCategoryArg, CleanupCommand, CleanupInventoryCategoryMetadata,
-    CleanupRetainedStorageArgs, CleanupWorktreesArgs, RUNNER_DOWNLOADS_METADATA,
+    CleanupRetainedStorageArgs, CleanupWorktreesArgs, LEAKED_TEST_HOMES_METADATA,
+    RUNNER_DOWNLOADS_METADATA,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -71,12 +72,19 @@ struct AutomaticRetentionControllerOutput {
 /// age-floored pass -- so they fit the pass's wall-clock budget, and every
 /// category runs through `isolate_cleanup_category`, so a disconnected or
 /// failing runner degrades that one category instead of the sweep.
-const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 9] = [
+///
+/// `leaked-test-homes` is unattended for the reason it exists: the process that
+/// would have cleaned up after itself was killed, so *nothing* reclaims these
+/// bytes by hand, and they arrive at hundreds of megabytes each (#11073). It is
+/// bounded by an age floor, a byte ceiling, and the scan limit, and it can only
+/// ever reach a directory whose owning process is gone.
+const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 10] = [
     CleanupCategoryArg::WorktreeProviders,
     CleanupCategoryArg::TerminalRuns,
     CleanupCategoryArg::PersistedRunArtifacts,
     CleanupCategoryArg::OrphanedArtifactBytes,
     CleanupCategoryArg::RuntimeTmp,
+    CleanupCategoryArg::LeakedTestHomes,
     CleanupCategoryArg::ControllerScratch,
     CleanupCategoryArg::ControllerRuntimes,
     CleanupCategoryArg::RemoteLabWorkspaces,
@@ -1952,6 +1960,43 @@ fn cleanup_inventory_with_deadline(
         );
     }
 
+    // Sits beside `runtime-tmp` because operators reach for them together and
+    // apart because they prove ownership differently: `runtime-tmp` reads pin
+    // files under the Homeboy runtime root, this reads a filename marker under
+    // the roots `tempfile` actually resolves. When `TMPDIR` and the runtime root
+    // differ — and on any host that moved `TMPDIR` to a dedicated volume they do
+    // — the second category is the only one looking at the leak (#11073).
+    if selected.includes(CleanupCategoryArg::LeakedTestHomes) {
+        isolate_cleanup_category(
+            &mut categories,
+            LEAKED_TEST_HOMES_METADATA,
+            apply,
+            None,
+            None,
+            || {
+                let output =
+                    cleanup::cleanup_leaked_test_homes(cleanup::LeakedTestHomeCleanupOptions {
+                        apply,
+                        min_age: policy.leaked_test_home_min_age(),
+                        max_total_bytes: policy.leaked_test_home_max_total_bytes,
+                        limit: policy.scan_limit(),
+                        roots: Vec::new(),
+                    })?;
+                category_from_output(
+                    LEAKED_TEST_HOMES_METADATA,
+                    apply,
+                    output.planned_count,
+                    output.removed_count,
+                    output.skipped_count,
+                    output.planned_size_bytes,
+                    output.removed_size_bytes,
+                    output,
+                )
+                .map(|category| vec![category])
+            },
+        );
+    }
+
     if selected.includes(CleanupCategoryArg::ControllerScratch) {
         isolate_cleanup_category(
             &mut categories,
@@ -2183,6 +2228,7 @@ fn cleanup_category_arg_name(category: &CleanupCategoryArg) -> &'static str {
         CleanupCategoryArg::ControllerScratch => "controller-scratch",
         CleanupCategoryArg::SharedCargoTargets => "shared-cargo-targets",
         CleanupCategoryArg::ControllerRuntimes => "controller-runtimes",
+        CleanupCategoryArg::LeakedTestHomes => "leaked-test-homes",
     }
 }
 
@@ -3774,6 +3820,45 @@ mod tests {
         assert!(policy.runner_min_age_hours > 0);
     }
 
+    /// The category exists because nothing else reclaims these bytes: the
+    /// process that owned them was killed, so its `Drop` never ran and no
+    /// operator ever looks in `$TMPDIR`. Leaving it opt-in would reproduce the
+    /// silence #11073 reported.
+    #[test]
+    fn unattended_retention_reaches_the_test_homes_no_process_survived_to_clean_up() {
+        assert!(AUTOMATIC_RETENTION_CATEGORIES.contains(&CleanupCategoryArg::LeakedTestHomes));
+        assert!(!OPT_IN_ONLY_CATEGORIES.contains(&CleanupCategoryArg::LeakedTestHomes));
+        assert_eq!(
+            cleanup_category_arg_name(&CleanupCategoryArg::LeakedTestHomes),
+            "leaked-test-homes"
+        );
+        assert!(
+            CleanupCategorySelection::new(Vec::new(), Vec::new())
+                .includes(CleanupCategoryArg::LeakedTestHomes),
+            "a bare sweep must reach the category"
+        );
+        assert!(
+            !CleanupCategorySelection::new(Vec::new(), vec![CleanupCategoryArg::LeakedTestHomes])
+                .includes(CleanupCategoryArg::LeakedTestHomes),
+            "an operator must still be able to exclude it"
+        );
+    }
+
+    /// Bounded before it is automatic, exactly like the remote categories: an
+    /// age floor, a finite byte ceiling, and the shared scan limit.
+    #[test]
+    fn the_leaked_test_home_category_is_bounded_before_it_is_automatic() {
+        let policy = cleanup::cleanup_policy_from_retention(
+            &defaults::RetentionConfig::default(),
+            CleanupPolicyOverrides::default(),
+        )
+        .expect("resolve policy");
+
+        assert!(policy.leaked_test_home_min_age() > Duration::ZERO);
+        assert!(policy.leaked_test_home_max_total_bytes < u64::MAX);
+        assert!(policy.scan_limit() > 0);
+    }
+
     /// Inputs a running job may still need, and uncommitted operator work, are
     /// never reclaimed without an operator asking.
     #[test]
@@ -4327,6 +4412,13 @@ mod tests {
                 "controller-runtimes",
                 "homeboy runtime controller-prune",
                 "homeboy runtime controller-prune --apply",
+            ),
+            (
+                LEAKED_TEST_HOMES_METADATA,
+                "leaked_test_homes",
+                "leaked-test-homes",
+                "homeboy cleanup --include leaked-test-homes",
+                "homeboy cleanup --include leaked-test-homes --apply",
             ),
         ];
 

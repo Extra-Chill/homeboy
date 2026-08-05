@@ -571,8 +571,19 @@ fn short_invocation_tempdir() -> TempDir {
     }
     #[cfg(not(unix))]
     {
-        TempDir::new().expect("invocation runtime tempdir")
+        marked_tempdir("invocation runtime tempdir")
     }
+}
+
+/// A tempdir carrying the owned marker prefix, for the platforms with no
+/// exec-probe path. Every isolated home must be recognizable by name, on every
+/// platform, or the reaper cannot tell it apart from someone else's scratch.
+#[cfg(not(unix))]
+fn marked_tempdir(context: &str) -> TempDir {
+    tempfile::Builder::new()
+        .prefix(&crate::cleanup::leaked_test_homes::owned_test_tempdir_prefix())
+        .tempdir()
+        .unwrap_or_else(|error| panic!("{context}: {error}"))
 }
 
 /// Ordered short base directories to consider for the invocation runtime root.
@@ -627,9 +638,18 @@ fn dir_allows_exec(dir: &Path) -> bool {
     allowed
 }
 
-/// Filename prefix for every tempdir a test process owns.
+// The marker contract lives in production code, not here.
+//
+// A leaked tempdir outlives the process that made it, so the only code that can
+// reclaim it is code with no test fixtures compiled in — the
+// `leaked-test-homes` cleanup category. Two spellings of the same prefix would
+// be two chances for the creator and the reaper to look at different names,
+// which is the failure #11073 is made of. There is one spelling.
 #[cfg(unix)]
-const TEST_TEMPDIR_PREFIX: &str = "hb-test-";
+use crate::cleanup::leaked_test_homes::{
+    owned_test_tempdir_prefix as owned_tempdir_prefix, test_tempdir_owner_pid as tempdir_owner_pid,
+    TEST_TEMPDIR_PREFIX,
+};
 
 /// Age past which a leaked tempdir with *no owner PID in its name* is
 /// considered abandoned.
@@ -639,28 +659,6 @@ const TEST_TEMPDIR_PREFIX: &str = "hb-test-";
 /// PID and are reclaimed on liveness instead, without waiting out a timer.
 #[cfg(unix)]
 const LEAKED_TEMPDIR_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
-
-/// Tempdir prefix that records the creating process, e.g. `hb-test-4127-`.
-///
-/// Ownership is a fact, not something to infer from a clock. Stamping the PID
-/// into the name lets the sweep ask "is the process that made this still
-/// alive?" instead of "has enough time passed that it probably is not?".
-#[cfg(unix)]
-fn owned_tempdir_prefix() -> String {
-    format!("{TEST_TEMPDIR_PREFIX}{}-", std::process::id())
-}
-
-/// Recover the owning PID from a tempdir name produced by
-/// [`owned_tempdir_prefix`].
-///
-/// Returns `None` for any name that does not carry one — notably directories
-/// left by older binaries, which fall back to the age heuristic.
-#[cfg(unix)]
-fn tempdir_owner_pid(name: &str) -> Option<u32> {
-    name.strip_prefix(TEST_TEMPDIR_PREFIX)?
-        .split_once('-')
-        .and_then(|(pid, _)| pid.parse::<u32>().ok())
-}
 
 /// Sweep `hb-test-*` tempdirs abandoned by dead test processes.
 ///
@@ -791,7 +789,16 @@ fn tempdir_with_cached_exec_base(
         // Not exec-capable (e.g. `noexec` mount) — drop it and try the next
         // candidate rather than handing back a dir scripts cannot run from.
     }
-    TempDir::new().expect("exec-capable tempdir fallback")
+    // The fallback keeps the owned prefix. It used to be a bare `TempDir::new`,
+    // which produced an *unmarked* `.tmpXXXXXX` directory — invisible to the
+    // in-process sweep below and to the `leaked-test-homes` cleanup category,
+    // because both identify a home by its name. On any host where no candidate
+    // root passes the exec probe, that is every isolated home in the run, and it
+    // leaks with nothing able to recognize it (#11073).
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir()
+        .expect("exec-capable tempdir fallback")
 }
 
 #[cfg(unix)]
@@ -835,7 +842,7 @@ pub fn exec_capable_tempdir() -> TempDir {
     }
     #[cfg(not(unix))]
     {
-        TempDir::new().expect("exec-capable tempdir")
+        marked_tempdir("exec-capable tempdir")
     }
 }
 
@@ -1789,6 +1796,44 @@ mod tests {
             tempdir_owner_pid(&format!("{prefix}AbCdEf")),
             Some(std::process::id())
         );
+    }
+
+    /// The marker is the only thing that makes a leaked home recognizable after
+    /// its process is gone, so *every* allocation path has to carry it —
+    /// including the fallback taken when no candidate root passes the exec
+    /// probe. That path used to hand back an unmarked `.tmpXXXXXX` directory,
+    /// which no sweep and no cleanup category could attribute (#11073).
+    #[cfg(unix)]
+    #[test]
+    fn every_allocation_path_marks_its_tempdir_including_the_fallback() {
+        // Force the fallback: one candidate root that exists, and a probe that
+        // refuses it, so the ordered loop exhausts without a match.
+        let base = TempDir::new().expect("temp base");
+        let cache = Mutex::new(None);
+        let fallback = tempdir_with_cached_exec_base(
+            &cache,
+            vec![base.path().to_path_buf()],
+            &owned_tempdir_prefix(),
+            |_| false,
+        );
+
+        let probed = exec_capable_tempdir();
+
+        for directory in [fallback.path(), probed.path()] {
+            let name = directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("tempdir name");
+            assert!(
+                name.starts_with(TEST_TEMPDIR_PREFIX),
+                "{name} carries no ownership marker"
+            );
+            assert_eq!(
+                tempdir_owner_pid(name),
+                Some(std::process::id()),
+                "{name} does not name its owner"
+            );
+        }
     }
 
     /// Directories written before the PID prefix existed must stay on the age

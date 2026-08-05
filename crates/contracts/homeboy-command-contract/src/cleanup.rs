@@ -67,6 +67,10 @@ pub enum CleanupCategoryArg {
     ControllerScratch,
     SharedCargoTargets,
     ControllerRuntimes,
+    /// Isolated test homes abandoned by killed test processes. Proven by a
+    /// filename marker plus the liveness of the PID stamped into it, so it can
+    /// plan and apply with the observation store shut (#11073).
+    LeakedTestHomes,
 }
 
 #[derive(Subcommand, Debug, PartialEq, Eq)]
@@ -198,6 +202,17 @@ pub const RUNNER_DOWNLOADS_METADATA: CleanupInventoryCategoryMetadata =
         apply_command: "homeboy runs artifact cleanup-downloads --apply",
     };
 
+/// Abandoned isolated test homes. There is no specialist command: the reclaim
+/// predicate is one filename marker plus one liveness probe, and a second
+/// spelling of that would be a second place for it to drift.
+pub const LEAKED_TEST_HOMES_METADATA: CleanupInventoryCategoryMetadata =
+    CleanupInventoryCategoryMetadata {
+        category: "leaked_test_homes",
+        include_arg: "leaked-test-homes",
+        dry_run_command: "homeboy cleanup --include leaked-test-homes",
+        apply_command: "homeboy cleanup --include leaked-test-homes --apply",
+    };
+
 /// Renders the aggregate cleanup command for the managed runtime-temp override.
 pub fn runtime_tmp_commands(apply: bool, managed_older_than_days: u64) -> (String, String) {
     let apply_arg = if apply { " --apply" } else { "" };
@@ -299,6 +314,16 @@ mod tests {
         assert_eq!(
             RUNNER_DOWNLOADS_METADATA.canonical_cleanup_command(true),
             "homeboy cleanup --include runner-downloads --apply"
+        );
+        assert_eq!(
+            LEAKED_TEST_HOMES_METADATA.canonical_cleanup_command(false),
+            "homeboy cleanup --include leaked-test-homes"
+        );
+        assert!(
+            CleanupParserTest::parse_from(["cleanup", "--include", "leaked-test-homes"])
+                .cleanup
+                .include
+                .contains(&CleanupCategoryArg::LeakedTestHomes)
         );
         assert_eq!(
             runtime_tmp_commands(false, 0).0,

@@ -35,11 +35,18 @@ pub use degraded::{
     STORE_INDEPENDENT_CLEANUP_CATEGORIES,
 };
 mod extension_declarations;
+pub mod leaked_test_homes;
+pub use leaked_test_homes::{
+    cleanup_leaked_test_homes, effective_temp_roots, owned_test_tempdir_prefix,
+    test_tempdir_owner_pid, LeakedTestHome, LeakedTestHomeCleanupOptions,
+    LeakedTestHomeCleanupOutput, LeakedTestHomeRoot, LeakedTestHomeVerdict, TEST_TEMPDIR_PREFIX,
+};
 mod policy;
 pub use policy::{
     cleanup_policy_from_retention, resolve_cleanup_policy, CleanupPolicy, CleanupPolicyOverrides,
-    CLEANUP_POLICY_SCHEMA, RUNNER_MIN_AGE_HOURS, RUNNER_WORKSPACE_APPLY_PASSES,
-    RUNNER_WORKSPACE_DRY_RUN_PASSES, RUNNER_WORKSPACE_PAGE_LIMIT,
+    CLEANUP_POLICY_SCHEMA, LEAKED_TEST_HOME_MAX_TOTAL_BYTES, LEAKED_TEST_HOME_MIN_AGE_HOURS,
+    RUNNER_MIN_AGE_HOURS, RUNNER_WORKSPACE_APPLY_PASSES, RUNNER_WORKSPACE_DRY_RUN_PASSES,
+    RUNNER_WORKSPACE_PAGE_LIMIT,
 };
 mod self_artifacts;
 
