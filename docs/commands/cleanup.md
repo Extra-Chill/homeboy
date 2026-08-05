@@ -163,7 +163,7 @@ apply.
 | `terminal-runs` | — (aggregate only) | Terminal observation records, their artifact bytes, and lifecycle directories | Durable run row in a terminal state | `retention.terminal_run_days`; unsafe local artifact paths keep the run |
 | `persisted-run-artifacts` | `homeboy runs artifact cleanup-persisted` | Persisted artifact files/directories and their DB rows | `artifacts` row joined to a terminal run | `retention.terminal_run_days`; active/unknown run state, non-local bytes, out-of-root paths, and symlinks are skipped |
 | `orphaned-artifact-bytes` | — (aggregate only) | Two crash-residue name families under the artifact root | Name shape from a single private constructor plus a parsed UUID; the database is deliberately **not** consulted | Fixed 24h floor, not operator-overridable; a failed size measurement changes the verdict in neither direction |
-| `runner-downloads` (opt-in only) | `homeboy runs artifact cleanup-downloads` | Cache directories under `<artifact-root>/runner` | Canonical `<runner-id>/<run-id>` shape emitted by the single writer, **plus an explicit `internal_fetch` intent marker**; the database is deliberately **not** joined | Fixed 24h floor over the *newest* byte in the cache directory, plus a non-terminal-run veto; an absent, unreadable, or `operator_pull` marker retains, as does any unreadable state. Narrowed by `--runner`/`--run-id`, which never waive the predicate |
+| `runner-downloads` (opt-in only) | `homeboy runs artifact cleanup-downloads` | Cache directories under `<artifact-root>/runner` | Canonical `<runner-id>/<run-id>` shape emitted by the single writer, **plus an explicit `internal_fetch` intent marker** (or no marker at all, under `--include-untagged`); the database is deliberately **not** joined | Fixed 24h floor over the *newest* byte in the cache directory, plus a non-terminal-run veto; an unreadable or `operator_pull` marker always retains, and an absent marker retains unless `--include-untagged` is passed. Narrowed by `--runner`/`--run-id`, which never waive the predicate |
 | `runner-binary-caches` | `homeboy runner cache-prune <runner>` | Unselected managed Homeboy binary slots on a runner | Canonical `homeboy-*` / `dev/<16-hex>` slot layout with a regular expected binary | 24h floor; configured binary, process-owned slots, symlinks, and malformed layouts preserved; selection revalidated immediately before removal |
 | `remote-lab-workspaces` | `homeboy runner workspace prune <runner>` | Orphaned runner-side Lab workspaces | `homeboy/runner-workspace/v1` metadata plus a resolvable `local_path`; never outside `_lab_workspaces`. A workspace is also reachable when its *exact* durable owner run is terminal and its lease is `delete_on_success` — an existing controller-side source path is not evidence the runner copy is live | 24h floor; pending apply-back or an unexpired lifecycle TTL preserves the workspace. Live, unavailable, ambiguous, or malformed run authority all retain |
 | `runtime-tmp` | `homeboy self cleanup-runtime-tmp` | Orphaned Homeboy runtime temp entries | Owner id recorded in the entry | `retention.runtime_tmp_days` plus byte/count budgets; entries whose owner process is running are preserved |
@@ -255,6 +255,39 @@ alternative is inferring intent from bytes that never recorded it — and it mea
 `--include runner-downloads` reclaims nothing until internal fetches have been
 re-run against the tagging writer. The bytes stay visible in
 `cleanup retained-storage` and in the per-row `intent` field the whole time.
+
+### Draining the untagged backlog: `--include-untagged`
+
+Retaining untagged bytes forever is the right default and the wrong terminal
+state — the pre-tagging backlog only grows, and nothing else will ever reach it
+(#11128). `--include-untagged` is the explicit operator opt-in that makes the
+`absent` row above eligible:
+
+```sh
+homeboy cleanup --include runner-downloads --include-untagged
+homeboy cleanup --include runner-downloads --include-untagged --apply
+```
+
+It widens *what* is eligible, and nothing else:
+
+- The **default is unchanged.** Without the flag, untagged still fails closed,
+  and its retain reason now names the flag that would release it.
+- The **age floor still applies.** `--include-untagged` never lowers the fixed
+  24h floor; a stale untagged cache beside a fresh one is still decided per
+  directory, on the newest byte in each.
+- **`operator_pull` is still never reclaimable.** The flag is about *unrecorded*
+  intent, not about overriding a recorded operator claim.
+- An **unreadable marker still retains.** A marker that exists but will not parse
+  may be an `operator_pull` whose bytes on disk went bad, so uncertainty about a
+  *present* marker is not what this widens.
+- The **liveness veto is still honoured.** A non-terminal run claiming the
+  `<run-id>` retains its cache, flag or no flag.
+
+The plan says so: the sweep reports `include_untagged: true`, and every row it
+releases under the opt-in carries a reason naming it rather than the
+internal-fetch reason. The flag is off in the unattended retention pass and in
+the degraded (store-shut) sweep — widening a delete predicate is a decision an
+operator makes at a terminal, and there is nobody there to make it.
 
 The category stays out of the bare sweep for now. Re-evaluating that is a
 separate decision with its own evidence, once the backfill window has passed;

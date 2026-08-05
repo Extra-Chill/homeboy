@@ -1531,7 +1531,7 @@ pub(crate) fn run_lab_offload_inner(
     )?;
     // Public preflight constructs the same typed routed command before entering
     // this compiler, so no admission requirement can diverge at this boundary.
-    let mut admission_plan = crate::lab_selection::compile_lab_admission_plan(
+    let mut admission_plan = crate::lab_selection::compile_execution_lab_admission_plan(
         &contract,
         &source_path,
         &command_prefix.required_tools,

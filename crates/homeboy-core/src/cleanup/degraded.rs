@@ -350,6 +350,10 @@ pub fn degraded_cleanup(
             run_id: None,
             limit: options.limit,
             store_available: store.is_available(),
+            // A degraded sweep is unattended recovery, not an operator sitting
+            // at a terminal. Widening the delete predicate is an explicit
+            // decision and there is nobody here to make it (#11128).
+            include_untagged: false,
         }) {
             Ok(outcome) => DegradedCleanupCategory {
                 category: "runner-downloads",
