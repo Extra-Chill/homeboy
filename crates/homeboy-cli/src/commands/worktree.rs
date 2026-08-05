@@ -244,7 +244,7 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             homeboy::core::worktree::persist_terminal_workspace_authority(
                 &record.id,
                 record.lifecycle_revision,
-                proof,
+                *proof,
             )?;
             match homeboy::agents::agent_task_lifecycle::acquire_composite_workspace_claim(
                 workspace,
