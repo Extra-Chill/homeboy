@@ -587,8 +587,12 @@ fn prepare_payload(
 }
 
 fn copy_prepared_artifact(source: &Path) -> Result<(PathBuf, PreparedArtifactCleanup)> {
-    let directory = std::env::temp_dir()
-        .join("homeboy-deploy-payload")
+    // Prepared payloads are whole release artifacts. Staging them in
+    // `std::env::temp_dir()` left them with no owner record, no pin, and no
+    // cleanup category, so a crash between the copy and `PreparedArtifactCleanup`
+    // leaked them permanently and invisibly (#11128).
+    let directory = homeboy_core::artifacts::root()?
+        .join("deploy-payload")
         .join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir_all(&directory).map_err(|error| {
         Error::internal_io(

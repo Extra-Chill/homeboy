@@ -163,6 +163,29 @@ fn subsystem_owned_artifact_root_subtrees_are_never_candidates() {
         fs::create_dir_all(&path).expect("subsystem tree");
         fs::write(path.join("evidence.json"), b"{}").expect("subsystem bytes");
     }
+    // Owners that moved off `std::env::temp_dir()` and onto the artifact root
+    // in #11128. Each writer removes its own scratch; none of them is a
+    // candidate for this sweep, so routing them here must not put live state in
+    // front of a reaper. `deploy-ref` and `cook-baseline` hold whole `git`
+    // worktrees, which is exactly the shape a row-join reaper would eat.
+    for owned in [
+        "deploy-ref/00000000-0000-4000-8000-00000000000a",
+        "deploy-payload/00000000-0000-4000-8000-00000000000b",
+        "cook-baseline/baseline-00000000-0000-4000-8000-00000000000c",
+        "repo-local-gates/gate-task",
+    ] {
+        let path = root.join(owned);
+        fs::create_dir_all(&path).expect("relocated tree");
+        fs::write(path.join("evidence.json"), b"{}").expect("relocated bytes");
+    }
+    // The rig lifecycle index stages a plain *file* at depth two, which is the
+    // same depth and entry type as the staging family. It survives because the
+    // name is not staging-shaped, not because files are exempt.
+    let rig_staging = root
+        .join("rig-resource-lifecycle")
+        .join("homeboy-rig-resource-lifecycle-run-1-42.json");
+    fs::create_dir_all(rig_staging.parent().expect("rig parent")).expect("rig tree");
+    fs::write(&rig_staging, b"{}").expect("rig bytes");
     // A published artifact that has not yet been inserted is the create-then-
     // register window. It must survive too.
     let run_dir = root.join("run-1");
@@ -174,6 +197,7 @@ fn subsystem_owned_artifact_root_subtrees_are_never_candidates() {
     assert_eq!(outcome.inspected_count, 0, "{:#?}", outcome.rows);
     assert_eq!(outcome.removed_count, 0);
     assert!(published.exists());
+    assert!(rig_staging.exists(), "rig lifecycle staging was reaped");
     for owned in [
         "runner",
         "runner-attach",
@@ -184,6 +208,11 @@ fn subsystem_owned_artifact_root_subtrees_are_never_candidates() {
         "recovered-runner-artifacts",
         "executor-finalized",
         "preview-consumer",
+        "deploy-ref",
+        "deploy-payload",
+        "cook-baseline",
+        "repo-local-gates",
+        "rig-resource-lifecycle",
     ] {
         assert!(root.join(owned).exists(), "{owned} was reaped");
     }
@@ -292,6 +321,157 @@ fn owned_name_shapes_match_their_constructors() {
         "scratch-after-{id}"
     )));
     assert!(!is_patch_capture_scratch_name("patch-"));
+}
+
+/// The module docstring's headline invariant: size is advisory and never gates
+/// removal. `best_effort_size` gives up past `MAX_DEPTH` and returns `None`,
+/// which is the same shape a failed `read_dir` produces. The candidate must
+/// still be removed, with `size_measured: false` marking the number as a floor
+/// rather than a fact -- the opposite of the lab workspace pruner, which
+/// silently became a no-op whenever `du` failed.
+#[test]
+fn an_unmeasurable_candidate_is_still_removed_and_reported_as_unmeasured() {
+    let home = tempfile::tempdir().expect("home");
+    let root = home.path();
+    let scratch = root.join("_scratch").join(scratch_name("baseline"));
+    // Past the 64-level walk bound, so the size walk returns `None`.
+    let mut deep = scratch.clone();
+    for level in 0..70 {
+        deep = deep.join(format!("d{level}"));
+    }
+    fs::create_dir_all(&deep).expect("deep tree");
+    fs::write(deep.join("leaf"), b"unreachable by the size walk").expect("leaf bytes");
+
+    let dry = aged_sweep(root, false);
+    assert_eq!(dry.planned_count, 1);
+    assert_eq!(dry.rows.len(), 1);
+    assert_eq!(dry.rows[0].action, "remove");
+    assert!(
+        !dry.rows[0].size_measured,
+        "a walk that gave up must not claim a measurement"
+    );
+    assert_eq!(dry.rows[0].size_bytes, 0);
+    assert_eq!(dry.planned_size_bytes, 0);
+    assert!(scratch.exists(), "dry run must not delete");
+
+    let applied = aged_sweep(root, true);
+    assert_eq!(applied.removed_count, 1, "{:#?}", applied.rows);
+    assert_eq!(applied.skipped_count, 0);
+    assert!(!applied.rows[0].size_measured);
+    assert_eq!(applied.removed_size_bytes, 0);
+    assert!(
+        !scratch.exists(),
+        "an unmeasurable candidate is still reaped"
+    );
+}
+
+/// A missing artifact root is an empty sweep, but an *unreadable* one is an
+/// error. The two must not collapse: reporting "nothing to reap" for a root
+/// that could not be read would hide the leak the sweep exists to surface.
+#[test]
+fn an_artifact_root_that_is_not_a_directory_is_an_error_not_an_empty_sweep() {
+    let home = tempfile::tempdir().expect("home");
+    let not_a_directory = home.path().join("artifacts");
+    fs::write(&not_a_directory, b"an operator put a file here").expect("root file");
+
+    let error = sweep(
+        &not_a_directory,
+        options(true),
+        ORPHANED_ARTIFACT_BYTES_MIN_AGE,
+        clock_past_the_floor(),
+    )
+    .expect_err("an unreadable artifact root is an error");
+    assert_eq!(error.code, crate::ErrorCode::InternalIoError);
+    assert!(
+        error.details["context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("artifact root"),
+        "the error must name the artifact root it could not read: {:?}",
+        error.details
+    );
+    // The contrast that matters: absence is not failure.
+    let absent = aged_sweep(&home.path().join("never-created"), true);
+    assert_eq!(absent.inspected_count, 0);
+}
+
+fn presentable_row(index: usize) -> OrphanedArtifactBytesRow {
+    OrphanedArtifactBytesRow {
+        path: format!("/artifacts/_scratch/patch-baseline-{index}"),
+        owner: "patch-capture-scratch",
+        entry_type: "directory",
+        age_seconds: 90_000,
+        size_bytes: 4096,
+        size_measured: true,
+        action: "remove".to_string(),
+        reason: "crash-orphaned scratch owned by a single private constructor".to_string(),
+    }
+}
+
+fn presentable_outcome(row_count: usize) -> OrphanedArtifactBytesCleanupOutcome {
+    OrphanedArtifactBytesCleanupOutcome {
+        dry_run: true,
+        artifact_root: PathBuf::from("/artifacts"),
+        min_age_seconds: ORPHANED_ARTIFACT_BYTES_MIN_AGE.as_secs(),
+        inspected_count: row_count,
+        planned_count: row_count,
+        removed_count: 0,
+        skipped_count: 0,
+        planned_size_bytes: 4096 * row_count as u64,
+        removed_size_bytes: 0,
+        truncated: false,
+        rows: (0..row_count).map(presentable_row).collect(),
+        row_detail: None,
+    }
+}
+
+/// The default reader is bounded: more candidates than `OutputBudget::COLLECTION`
+/// allows are trimmed, and the omission is reported with a continue command
+/// rather than silently dropped.
+#[test]
+fn the_default_presentation_bounds_rows_and_reports_the_omission() {
+    let row_count = OutputBudget::COLLECTION.max_items + 5;
+    let mut outcome = presentable_outcome(row_count);
+
+    present_orphaned_artifact_bytes_cleanup(&mut outcome, false, "export".to_string())
+        .expect("present");
+
+    assert_eq!(outcome.rows.len(), OutputBudget::COLLECTION.max_items);
+    let detail = outcome.row_detail.expect("row detail");
+    assert_eq!(detail.presentation, OutputPresentation::BoundedCollection);
+    assert_eq!(detail.total_items, row_count);
+    assert_eq!(detail.returned_items, OutputBudget::COLLECTION.max_items);
+    assert_eq!(detail.omitted_items, 5);
+    assert!(detail.truncated);
+    assert!(
+        !detail.total_bytes_known,
+        "a trimmed page cannot know the total"
+    );
+    assert_eq!(detail.export_command, "export");
+    // The counts describe the whole sweep, not the trimmed page: an operator
+    // must not read a bounded reader as "only 20 paths leaked".
+    assert_eq!(outcome.planned_count, row_count);
+}
+
+/// An explicit export is lossless: every row is returned and nothing is
+/// reported as omitted, so `truncated` cannot be true on the export path.
+#[test]
+fn the_export_presentation_returns_every_row_untruncated() {
+    let row_count = OutputBudget::COLLECTION.max_items + 5;
+    let mut outcome = presentable_outcome(row_count);
+
+    present_orphaned_artifact_bytes_cleanup(&mut outcome, true, "export".to_string())
+        .expect("present");
+
+    assert_eq!(outcome.rows.len(), row_count, "export must not drop rows");
+    let detail = outcome.row_detail.expect("row detail");
+    assert_eq!(detail.presentation, OutputPresentation::LosslessExport);
+    assert_eq!(detail.returned_items, row_count);
+    assert_eq!(detail.omitted_items, 0);
+    assert_eq!(detail.omitted_bytes, 0);
+    assert!(!detail.truncated);
+    assert!(detail.total_bytes_known);
+    assert!(detail.total_bytes > 0);
 }
 
 #[cfg(unix)]

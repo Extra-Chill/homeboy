@@ -216,7 +216,13 @@ pub(crate) fn materialize_initial_candidate_baseline(
         ],
         &[("GIT_INDEX_FILE", &index_path)],
     )?;
-    let parent = std::env::temp_dir().join("homeboy-cook-initial-baselines");
+    // A Cook baseline is a full `git worktree` checkout of the candidate tree.
+    // Placing it in `std::env::temp_dir()` put a whole working tree outside
+    // every cleanup surface -- no owner record, no pin, no run binding, and
+    // invisible to the retained-storage report -- and broke outright on a
+    // `noexec` `/tmp` (#11128). The artifact root is the volume the operator
+    // already sized for run bytes.
+    let parent = homeboy_core::artifacts::root()?.join("cook-baseline");
     std::fs::create_dir_all(&parent).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -592,7 +598,10 @@ fn materialize_follow_up_baseline_at(
     let path = match target_path {
         Some(p) => p.to_path_buf(),
         None => {
-            let parent = std::env::temp_dir().join("homeboy-cook-follow-up-baselines");
+            // Same reasoning as the initial-candidate baseline above: a whole
+            // working-tree checkout belongs under the artifact root, not in
+            // the process temp dir where nothing can see or reap it (#11128).
+            let parent = homeboy_core::artifacts::root()?.join("cook-baseline");
             std::fs::create_dir_all(&parent).map_err(|error| {
                 Error::internal_io(
                     error.to_string(),

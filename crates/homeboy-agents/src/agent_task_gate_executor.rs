@@ -104,15 +104,20 @@ fn build_execution(request: &AgentTaskRequest) -> Result<RepoLocalGateExecution>
                 .collect()
         })
         .unwrap_or_default();
-    let artifact_root = config
-        .get("artifact_root")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::temp_dir()
-                .join("homeboy-repo-local-gates")
-                .join(safe_path_segment(&request.task_id))
-        });
+    // An explicit `artifact_root` wins; otherwise the gate writes under the
+    // configured artifact root. The fallback used to be
+    // `std::env::temp_dir().join("homeboy-repo-local-gates")`, which discarded
+    // the operator's artifact-root configuration entirely and wrote gate
+    // evidence to a path with no owner record, no pin, and no cleanup category
+    // -- invisible to `cleanup --include runtime-tmp` and every other reaper
+    // (#11128). If the artifact root cannot be resolved, that is the error to
+    // report, not a directory to invent.
+    let artifact_root = match config.get("artifact_root").and_then(Value::as_str) {
+        Some(configured) => PathBuf::from(configured),
+        None => homeboy_core::artifacts::root()?
+            .join("repo-local-gates")
+            .join(safe_path_segment(&request.task_id)),
+    };
 
     Ok(RepoLocalGateExecution {
         execution_kind,
@@ -509,35 +514,89 @@ mod tests {
 
     #[test]
     fn repo_local_gate_materializes_inputs_and_typed_outputs() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let script = temp.path().join("gate.mjs");
-        fs::write(
-            &script,
-            "import fs from 'node:fs'; const input = JSON.parse(fs.readFileSync(process.env.INPUT_PACKET_PATH, 'utf8')); fs.writeFileSync(process.env.GATE_RESULT_PATH, JSON.stringify({publish_allowed: input.ok}));",
-        )
-        .expect("write script");
-        let request = request(
-            temp.path(),
-            json!({
-                "execution_kind": "repo_local_gate",
-                "script": "gate.mjs",
-                "inputs": { "input_packet": { "ok": true } },
-                "artifact_outputs": {
-                    "gate_result": { "schema": "example/GateResult/v1", "type": "GateResult" }
-                }
-            }),
-        );
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let script = temp.path().join("gate.mjs");
+            fs::write(
+                &script,
+                "import fs from 'node:fs'; const input = JSON.parse(fs.readFileSync(process.env.INPUT_PACKET_PATH, 'utf8')); fs.writeFileSync(process.env.GATE_RESULT_PATH, JSON.stringify({publish_allowed: input.ok}));",
+            )
+            .expect("write script");
+            let request = request(
+                temp.path(),
+                json!({
+                    "execution_kind": "repo_local_gate",
+                    "script": "gate.mjs",
+                    "inputs": { "input_packet": { "ok": true } },
+                    "artifact_outputs": {
+                        "gate_result": { "schema": "example/GateResult/v1", "type": "GateResult" }
+                    }
+                }),
+            );
 
-        let outcome = run_repo_local_gate_task(&request);
+            let outcome = run_repo_local_gate_task(&request);
 
-        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-        assert_eq!(outcome.outputs["gate_result"]["publish_allowed"], true);
-        assert_eq!(outcome.typed_artifacts.len(), 1);
-        assert_eq!(outcome.typed_artifacts[0].name, "gate_result");
-        assert_eq!(
-            outcome.typed_artifacts[0].artifact_schema.as_deref(),
-            Some("example/GateResult/v1")
-        );
+            assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+            assert_eq!(outcome.outputs["gate_result"]["publish_allowed"], true);
+            assert_eq!(outcome.typed_artifacts.len(), 1);
+            assert_eq!(outcome.typed_artifacts[0].name, "gate_result");
+            assert_eq!(
+                outcome.typed_artifacts[0].artifact_schema.as_deref(),
+                Some("example/GateResult/v1")
+            );
+        });
+    }
+
+    /// The default gate artifact root is derived from the configured artifact
+    /// root, not from `std::env::temp_dir()` (#11128). Before this, a gate with
+    /// no explicit `artifact_root` silently discarded the operator's
+    /// artifact-root configuration and wrote its evidence to a process temp
+    /// path that no cleanup surface could see.
+    #[test]
+    fn gate_artifact_root_defaults_under_the_configured_artifact_root() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            fs::write(temp.path().join("gate.mjs"), "").expect("write script");
+            let request = request(
+                temp.path(),
+                json!({ "execution_kind": "repo_local_gate", "script": "gate.mjs" }),
+            );
+
+            let execution = build_execution(&request).expect("execution");
+
+            let expected = homeboy_core::artifacts::root()
+                .expect("artifact root")
+                .join("repo-local-gates")
+                .join("gate-task");
+            assert_eq!(execution.artifact_root, expected);
+            assert!(
+                !execution.artifact_root.starts_with(std::env::temp_dir()),
+                "gate artifacts must not fall back to the process temp dir"
+            );
+        });
+    }
+
+    /// An explicit `artifact_root` still wins over the artifact-root default,
+    /// so an operator or caller that pins a location keeps it.
+    #[test]
+    fn explicit_gate_artifact_root_overrides_the_artifact_root_default() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            fs::write(temp.path().join("gate.mjs"), "").expect("write script");
+            let pinned = temp.path().join("pinned-gate-artifacts");
+            let request = request(
+                temp.path(),
+                json!({
+                    "execution_kind": "repo_local_gate",
+                    "script": "gate.mjs",
+                    "artifact_root": pinned.display().to_string()
+                }),
+            );
+
+            let execution = build_execution(&request).expect("execution");
+
+            assert_eq!(execution.artifact_root, pinned);
+        });
     }
 
     #[test]
