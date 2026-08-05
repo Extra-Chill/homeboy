@@ -2,7 +2,7 @@
   "schema": "homeboy/agent-runtime-manifest/v1",
   "id": "pi",
   "name": "Pi",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Conservative Pi agent runtime integration for generic Homeboy agent task requests.",
   "contract_producers": [
     {

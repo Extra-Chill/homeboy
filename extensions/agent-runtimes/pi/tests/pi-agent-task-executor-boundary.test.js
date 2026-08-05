@@ -1,5 +1,7 @@
 'use strict';
 
+require('../../../runtime-agent-ci/tests/helpers/runtime-contract-constants-fixture.cjs');
+
 /**
  * External dependencies
  */
@@ -106,6 +108,27 @@ process.stdin.on('end', () => {
 		},
 		instructions: 'Validate the Pi provider boundary through a configured command.',
 	};
+	const declaredWorkspace = path.join(root, 'declared-workspace');
+	const declaredArtifacts = path.join(root, 'declared-artifacts');
+	fs.mkdirSync(declaredWorkspace);
+	fs.mkdirSync(declaredArtifacts);
+	const declaredPiPath = path.join(root, 'mock-pi-declared.cjs');
+	fs.writeFileSync(declaredPiPath, `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.writeFileSync('pi-report.md', '# Pi report\\n');
+process.stdin.resume();
+process.stdin.on('end', () => process.exit(0));
+`);
+	const declaredResult = executePiAgentTask({
+		...configuredRequest,
+		task_id: 'pi-declared-artifact',
+		workspace_path: declaredWorkspace,
+		artifacts_path: declaredArtifacts,
+		artifact_declarations: [{ name: 'report', path: 'pi-report.md', kind: 'markdown', required: true }],
+		executor: { backend: 'pi', runtime: 'pi', config: { command: process.execPath, command_args: [declaredPiPath], cwd: declaredWorkspace } },
+	});
+	assert.equal(declaredResult.artifacts.some((artifact) => artifact.name === 'report'), true);
+	assert.equal(declaredResult.evidence_refs.some((ref) => ref.label === 'report'), true);
 	const runResult = spawnSync(process.execPath, [scriptPath], {
 		encoding: 'utf8',
 		env: { ...process.env, UNDECLARED_SECRET: 'must-not-reach-pi' },

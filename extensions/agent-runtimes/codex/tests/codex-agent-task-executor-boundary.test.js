@@ -147,7 +147,9 @@ process.exit(0);
 	});
 	assert.equal(omittedModelResult.status, 'succeeded', JSON.stringify(omittedModelResult.diagnostics));
 	const declaredWorkspace = path.join(root, 'declared-workspace');
+	const declaredArtifactRoot = path.join(root, 'declared-artifacts');
 	fs.mkdirSync(declaredWorkspace);
+	fs.mkdirSync(declaredArtifactRoot);
 	const declaredResult = executeCodexAgentTask({
 		...request,
 		task_id: 'codex-declared-artifacts',
@@ -158,7 +160,7 @@ process.exit(0);
 				command: process.execPath,
 				command_args: [declaredArtifactCliPath, 'exec'],
 				cwd: declaredWorkspace,
-				artifacts_path: path.join(root, 'declared-artifacts'),
+				artifacts_path: declaredArtifactRoot,
 			},
 		},
 		artifact_declarations: [
@@ -172,6 +174,8 @@ process.exit(0);
 	assert.equal(fs.readFileSync(declaredReport.path, 'utf8'), '# Captured report\n');
 	assert.deepEqual(fs.readFileSync(path.join(declaredScreenshots.path, 'image.bin')), Buffer.from([0, 255, 1]));
 	assert.equal(declaredScreenshots.file_count, 1);
+	const missingDeclaredArtifactRoot = path.join(root, 'missing-declared-artifacts');
+	fs.mkdirSync(missingDeclaredArtifactRoot);
 	const missingDeclaredResult = executeCodexAgentTask({
 		...request,
 		task_id: 'codex-missing-declared-artifact',
@@ -182,7 +186,7 @@ process.exit(0);
 				command: process.execPath,
 				command_args: [omittedModelCliPath, 'exec'],
 				cwd: declaredWorkspace,
-				artifacts_path: path.join(root, 'missing-declared-artifacts'),
+				artifacts_path: missingDeclaredArtifactRoot,
 			},
 		},
 		instructions: 'Run without selecting a model.',

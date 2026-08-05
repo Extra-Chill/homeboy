@@ -91,7 +91,7 @@ const { execute: executePiAgentTask, outcome, validationFailure } = createCliAge
 	providerLabel: 'Pi agent',
 	defaultSummary: 'Pi agent task executor did not produce a detailed outcome.',
 	requireConfig: false,
-	emitArtifacts: false,
+	emitArtifacts: true,
 	timeoutFallback: (config) => config.timeout_seconds || DEFAULT_TIMEOUT_SECONDS,
 	resolveCommandSpec,
 	buildArgs: (request, config, commandSpec) => commandSpec.args,

@@ -1,6 +1,6 @@
 {
   "name": "homeboy-agent-runtime-codex",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "main": "index.js",
   "exports": {
@@ -11,7 +11,8 @@
     "homeboy-codex-agent-task-executor": "./scripts/agent/homeboy-codex-agent-task-executor.cjs"
   },
   "scripts": {
-    "test:codex-agent-task-executor-boundary": "node tests/codex-agent-task-executor-boundary.test.js"
+    "test:declared-artifact-harvester": "node tests/declared-artifact-harvester.test.js",
+    "test:codex-agent-task-executor-boundary": "npm run test:declared-artifact-harvester && node tests/codex-agent-task-executor-boundary.test.js"
   },
   "engines": {
     "node": ">=18.12.0"

@@ -614,6 +614,68 @@ process.exit(${attempt.status});
 	assert.equal(agentResult.opencode_session.status, 'not_discovered');
 	assert.equal(artifactResult.metadata.missing_declared_artifacts, undefined);
 
+	const declaredArtifactCliPath = path.join(root, 'mock-opencode-declared-artifacts.cjs');
+	fs.writeFileSync(declaredArtifactCliPath, `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.mkdirSync('declared-screenshots', { recursive: true });
+fs.writeFileSync('declared-report.md', '# OpenCode report\\n');
+fs.writeFileSync('declared-screenshots/image.bin', Buffer.from([0, 255, 1, 254]));
+process.exit(0);
+`);
+	const noOpDeclaredArtifactCliPath = path.join(root, 'mock-opencode-no-op-declared-artifacts.cjs');
+	fs.writeFileSync(noOpDeclaredArtifactCliPath, '#!/usr/bin/env node\nprocess.exit(0);\n');
+	const declaredOpenCodeResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-declared-artifacts',
+		workspace_path: workspace,
+		artifacts_path: path.join(root, 'declared-opencode-artifacts'),
+		artifact_declarations: [
+			{ name: 'report', path: 'declared-report.md', kind: 'markdown', artifact_type: 'report', artifact_schema: 'example/report/v1', required: true, metadata: { source: 'opencode' } },
+			{ name: 'screenshots', path: 'declared-screenshots', kind: 'screenshot-directory', required: true },
+			{ name: 'optional-video', path: 'missing.webm', kind: 'video', required: false },
+		],
+		executor: {
+			...request.executor,
+			config: { ...request.executor.config, command_args: [declaredArtifactCliPath] },
+		},
+	}, { env: fixtureEnv });
+	assert.equal(declaredOpenCodeResult.status, 'succeeded', JSON.stringify(declaredOpenCodeResult.diagnostics));
+	const declaredReport = declaredOpenCodeResult.artifacts.find((artifact) => artifact.name === 'report');
+	const declaredScreenshots = declaredOpenCodeResult.artifacts.find((artifact) => artifact.name === 'screenshots');
+	assert.equal(declaredReport.artifact_schema, 'example/report/v1');
+	assert.equal(declaredReport.artifact_type, 'report');
+	assert.equal(declaredReport.metadata.source, 'opencode');
+	assert.equal(declaredReport.bytes, Buffer.byteLength('# OpenCode report\n'));
+	assert.match(declaredReport.sha256, /^[a-f0-9]{64}$/);
+	assert.deepEqual(fs.readFileSync(path.join(declaredScreenshots.path, 'image.bin')), Buffer.from([0, 255, 1, 254]));
+	assert.equal(declaredOpenCodeResult.diagnostics.some((diagnostic) => diagnostic.class === 'agent_task.optional_declared_artifact_missing'), true);
+	const unsafeOpenCodeResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-unsafe-declared-artifact',
+		workspace_path: workspace,
+		artifacts_path: path.join(root, 'unsafe-opencode-artifacts'),
+		artifact_declarations: [{ name: 'unsafe', path: '../outside.md', required: true }],
+		executor: {
+			...request.executor,
+			config: { ...request.executor.config, command_args: [noOpDeclaredArtifactCliPath] },
+		},
+	}, { env: fixtureEnv });
+	assert.equal(unsafeOpenCodeResult.status, 'failed');
+	assert.equal(unsafeOpenCodeResult.diagnostics.some((diagnostic) => diagnostic.class === 'agent_task.declared_artifact_unsafe_path'), true);
+	const missingPathOpenCodeResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-missing-path-declared-artifact',
+		workspace_path: workspace,
+		artifacts_path: path.join(root, 'missing-path-opencode-artifacts'),
+		artifact_declarations: [{ name: 'missing-path', required: true }],
+		executor: {
+			...request.executor,
+			config: { ...request.executor.config, command_args: [noOpDeclaredArtifactCliPath] },
+		},
+	}, { env: fixtureEnv });
+	assert.equal(missingPathOpenCodeResult.status, 'failed');
+	assert.equal(missingPathOpenCodeResult.diagnostics.some((diagnostic) => diagnostic.class === 'agent_task.declared_artifact_invalid_path'), true);
+
 	const largePatchCliPath = path.join(root, 'mock-opencode-large-patch.cjs');
 	fs.writeFileSync(largePatchCliPath, `#!/usr/bin/env node
 const fs = require('node:fs');
