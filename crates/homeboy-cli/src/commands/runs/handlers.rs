@@ -372,9 +372,14 @@ fn stale_run_summary(
         .filter(|run| {
             reconcile::stale_running_reason(run, &homeboy::core::process::pid_is_running).is_some()
                 // A direct daemon snapshot is authoritative for runner-backed
-                // rows. Never call one stale while that job is live or unknown.
+                // rows. Never call one stale while that job is live or unknown —
+                // but "unknown" cannot mean "forever". Past the reconciliation
+                // exemption ceiling, an absent snapshot stops being evidence of
+                // a live job and becomes evidence of a lost one (#11107).
                 && !active_durable_run_ids.contains(&run.id)
-                && (!reconcile::runner_backed_run(run) || active_runner_jobs_complete)
+                && (!reconcile::runner_backed_run(run)
+                    || active_runner_jobs_complete
+                    || reconcile::runner_backed_exemption_expired(run))
         })
         .map(|run| run.id.clone())
         .collect::<Vec<_>>();

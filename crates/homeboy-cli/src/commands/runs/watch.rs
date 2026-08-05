@@ -139,8 +139,13 @@ fn is_terminal_status(status: &str) -> bool {
 }
 
 /// Map a terminal run status to a process exit code: `pass`/`skipped` succeed,
-/// every other settled status (including `stale` ghosts and unknown statuses)
-/// fails.
+/// every other settled status (including `stale` ghosts, `handed_off`
+/// dispatches, and unknown statuses) fails.
+///
+/// `handed_off` deliberately fails. A handoff proves the dispatch succeeded, not
+/// that the dispatched command did, and reporting success for a command that
+/// completed nothing is the exact failure #11107 describes. A caller who wants
+/// the real outcome must watch the remote run the record names.
 fn exit_code_for_status(status: &str) -> i32 {
     match RunStatus::from_label(status) {
         Some(RunStatus::Pass) | Some(RunStatus::Skipped) => 0,
@@ -319,6 +324,21 @@ mod tests {
         let (output, exit_code) = build_output("run-1", result, None);
         assert_eq!(exit_code, 1);
         assert_eq!(output.status, "stale");
+    }
+
+    /// A detached Lab handoff settles to `handed_off`. The watch must exit
+    /// rather than hang — it used to hang, because the record was left
+    /// `running` forever (#11107) — and it must not report success: the
+    /// dispatch succeeded, the dispatched command proved nothing here.
+    #[test]
+    fn watch_surfaces_a_handed_off_dispatch_as_terminal_without_claiming_success() {
+        let poller = ScriptedPoller::new(&["running", "handed_off"]);
+        let result = run_loop(&poller, &config(None)).expect("loop");
+        assert_eq!(result.conclusion, WatchConclusion::Terminal);
+        let (output, exit_code) = build_output("run-1", result, None);
+        assert_eq!(exit_code, 1);
+        assert_eq!(output.status, "handed_off");
+        assert!(is_terminal_status("handed_off"));
     }
 
     #[test]
