@@ -294,23 +294,43 @@ fn detached_cook_admission_is_bounded_with_a_hundred_unavailable_recovery_record
     assert_eq!(handoff["detached"], true, "{stdout}");
     assert!(handoff["cook_id"].as_str().is_some_and(|id| !id.is_empty()));
 
-    let store = ObservationStore::open_initialized_at(&database).expect("reopen fixture store");
-    let owners = store
-        .list_runs(RunListFilter {
-            kind: Some("runner_exec_recovery".to_string()),
-            ..RunListFilter::default()
-        })
-        .expect("list recovery owners");
+    let observation_deadline = Instant::now() + Duration::from_secs(5);
+    let (owners, children) = loop {
+        let store = ObservationStore::open_initialized_at(&database).expect("reopen fixture store");
+        let owners = store
+            .list_runs(RunListFilter {
+                kind: Some("runner_exec_recovery".to_string()),
+                ..RunListFilter::default()
+            })
+            .expect("list recovery owners");
+        let children = store
+            .list_runs(RunListFilter {
+                kind: Some("runner_exec_recovery_child".to_string()),
+                ..RunListFilter::default()
+            })
+            .expect("list recovery children");
+        if owners.len() == 1
+            && owners[0].status != RunStatus::Running.as_str()
+            && children.len() == 100
+            && children
+                .iter()
+                .all(|child| child.status != RunStatus::Running.as_str())
+        {
+            break (owners, children);
+        }
+        assert!(
+            Instant::now() < observation_deadline,
+            "recovery state did not settle"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
     assert_eq!(owners.len(), 1, "recovery has its own durable owner");
     assert_eq!(owners[0].status, RunStatus::Pass.as_str());
     assert_eq!(owners[0].metadata_json["scheduled_count"], 100);
-    let children = store
-        .list_runs(RunListFilter {
-            kind: Some("runner_exec_recovery_child".to_string()),
-            ..RunListFilter::default()
-        })
-        .expect("list recovery children");
     assert_eq!(children.len(), 100, "each source has a durable child");
+    assert!(children
+        .iter()
+        .all(|child| child.status == RunStatus::Pass.as_str()));
 
     #[cfg(unix)]
     if let Some(pid) = handoff["pid"].as_u64() {

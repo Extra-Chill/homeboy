@@ -370,13 +370,33 @@ impl CliRuntime {
         if let Some(owner_id) = std::env::var_os(RUNNER_EXEC_RECOVERY_OWNER_ENV) {
             let owner_token =
                 std::env::var_os("HOMEBOY_RUNNER_EXEC_RECOVERY_OWNER_TOKEN").unwrap_or_default();
-            if let Ok(children) = crate::runner::run_scheduled_terminal_runner_exec_recovery(
+            if let Ok(Some(work)) = crate::runner::run_scheduled_terminal_runner_exec_recovery(
                 &owner_id.to_string_lossy(),
                 &owner_token.to_string_lossy(),
             ) {
-                for child in children {
-                    spawn_runner_exec_recovery_child(&child);
+                let mut scheduled_count = 0;
+                let mut spawn_failed_count = 0;
+                let executable = std::env::current_exe();
+                for child in &work.children {
+                    let spawned = match &executable {
+                        Ok(executable) => spawn_runner_exec_recovery_child(executable, child),
+                        Err(error) => Err(std::io::Error::new(error.kind(), error.to_string())),
+                    };
+                    match spawned {
+                        Ok(()) => scheduled_count += 1,
+                        Err(error) => {
+                            spawn_failed_count += 1;
+                            let _ = crate::runner::record_scheduled_terminal_runner_exec_recovery_child_spawn_failure(child, &error);
+                        }
+                    }
                 }
+                let _ = crate::runner::finish_scheduled_terminal_runner_exec_recovery(
+                    &owner_id.to_string_lossy(),
+                    &owner_token.to_string_lossy(),
+                    scheduled_count,
+                    spawn_failed_count,
+                    work.deferred_count,
+                );
             }
             return std::process::ExitCode::SUCCESS;
         }
@@ -743,10 +763,10 @@ fn schedule_runner_exec_recovery() {
     }
 }
 
-fn spawn_runner_exec_recovery_child(child: &crate::runner::RunnerExecRecoveryChildSchedule) {
-    let Ok(executable) = std::env::current_exe() else {
-        return;
-    };
+fn spawn_runner_exec_recovery_child(
+    executable: &std::path::Path,
+    child: &crate::runner::RunnerExecRecoveryChildSchedule,
+) -> std::io::Result<()> {
     let mut command = ProcessCommand::new(executable);
     command
         .env(RUNNER_EXEC_RECOVERY_CHILD_ENV, &child.child_id)
@@ -758,7 +778,7 @@ fn spawn_runner_exec_recovery_child(child: &crate::runner::RunnerExecRecoveryChi
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     crate::core::process::detach_from_caller_session(&mut command);
-    let _ = command.spawn();
+    command.spawn().map(|_| ())
 }
 
 /// A cook has no durable run record until controller admission. Re-exec before

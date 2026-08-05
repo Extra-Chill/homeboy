@@ -75,6 +75,24 @@ impl ObservationStore {
         Ok(store)
     }
 
+    /// Open the scheduler's scan connection. It is read-only and performs no
+    /// migrations, journal maintenance, or artifact-publication recovery.
+    pub fn open_scheduler_reader() -> Result<Self> {
+        Self::open_readonly()
+    }
+
+    /// Open the scheduler's bounded claim connection. It performs no startup
+    /// maintenance; callers use it only for short durable claim transitions.
+    pub fn open_scheduler_writer() -> Result<Self> {
+        let path = database_path()?;
+        let connection = schema::open_bounded_writer_connection(&path)?;
+        Ok(Self {
+            connection,
+            path,
+            readonly: false,
+        })
+    }
+
     /// Open an existing observation database without any initialization work.
     /// Metadata readers use this so they never contend for the global writer
     /// lock merely to inspect a persisted run.
@@ -227,6 +245,56 @@ impl ObservationStore {
                     run_id,
                     owner_token,
                 ],
+            )
+        })?;
+        Ok(rows == 1)
+    }
+
+    /// Claim a running runner-exec source for one child identity. The child
+    /// token fences later source terminalization after a retry or takeover.
+    pub fn claim_running_runner_exec_recovery_source(
+        &self,
+        run_id: &str,
+        child_id: &str,
+        child_token: &str,
+        runner_job_id: &str,
+    ) -> Result<bool> {
+        let claim = serde_json::to_string(&serde_json::json!({
+            "child_id": child_id,
+            "source_token": child_token,
+            "runner_job_id": runner_job_id,
+        }))
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize runner recovery source claim".to_string()),
+            )
+        })?;
+        let rows = execute_with_retry("claim runner recovery source", || {
+            self.connection.execute(
+                "UPDATE runs SET metadata_json = json_set(metadata_json, '$.runner_exec_recovery', json(?1)) WHERE id = ?2 AND status = 'running' AND json_extract(metadata_json, '$.runner_job_id') = ?3 AND (json_extract(metadata_json, '$.runner_exec_recovery.child_id') IS NULL OR json_extract(metadata_json, '$.runner_exec_recovery.child_id') = ?4)",
+                params![claim, run_id, runner_job_id, child_id],
+            )
+        })?;
+        Ok(rows == 1)
+    }
+
+    /// Terminalize evidence loss only for the child that still owns this exact
+    /// running source/job identity. A stale child cannot overwrite a retry or a
+    /// concurrently settled source record.
+    pub fn fail_running_runner_exec_recovery_source(
+        &self,
+        run_id: &str,
+        child_token: &str,
+        runner_job_id: &str,
+        metadata_json: serde_json::Value,
+    ) -> Result<bool> {
+        let metadata_json = serialize_metadata(&metadata_json)?;
+        let finished_at = chrono::Utc::now().to_rfc3339();
+        let rows = execute_with_retry("fail claimed runner recovery source", || {
+            self.connection.execute(
+                "UPDATE runs SET finished_at = ?1, status = 'fail', metadata_json = ?2 WHERE id = ?3 AND status = 'running' AND json_extract(metadata_json, '$.runner_job_id') = ?4 AND json_extract(metadata_json, '$.runner_exec_recovery.source_token') = ?5",
+                params![finished_at, metadata_json, run_id, runner_job_id, child_token],
             )
         })?;
         Ok(rows == 1)

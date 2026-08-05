@@ -124,7 +124,8 @@ pub(crate) use daemon_api::daemon_api_post_for_session;
 pub use failure::runner_exec_failure_error;
 pub use handoff::{runner_job_cancel, runner_job_cancel_projection};
 pub use recovery::{
-    reconcile_terminal_runner_exec_runs,
+    finish_scheduled_terminal_runner_exec_recovery,
+    record_scheduled_terminal_runner_exec_recovery_child_spawn_failure,
     record_scheduled_terminal_runner_exec_recovery_spawn_failure,
     run_scheduled_terminal_runner_exec_recovery, run_scheduled_terminal_runner_exec_recovery_child,
     schedule_terminal_runner_exec_recovery, RunnerExecRecoveryChildSchedule,
