@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::ops::Deref;
+use std::time::Instant;
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -766,6 +767,49 @@ pub fn runner_job_log_snapshot_for_session(
         crate::execution::daemon_api_get_for_session(session, &format!("/jobs/{job_id}"))?;
     let events_data =
         crate::execution::daemon_api_get_for_session(session, &format!("/jobs/{job_id}/events"))?;
+    let job_body = canonical_daemon_body(&job_data, "daemon job response")?;
+    let events_body = canonical_daemon_body(&events_data, "daemon job events response")?;
+    Ok(RunnerJobLogSnapshot {
+        job: serde_json::from_value(job_body["job"].clone()).map_err(|error| {
+            Error::internal_json(error.to_string(), Some("parse daemon job".to_string()))
+        })?,
+        events: serde_json::from_value(events_body["events"].clone()).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse daemon job events".to_string()),
+            )
+        })?,
+    })
+}
+
+/// Read both job resources under one absolute recovery-owner deadline.
+pub fn runner_job_log_snapshot_for_session_until(
+    session: &crate::RunnerSession,
+    job_id: &str,
+    deadline: Instant,
+) -> Result<RunnerJobLogSnapshot> {
+    let remaining = || {
+        deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "recovery_budget",
+                    "runner-exec recovery owner deadline expired",
+                    None,
+                    None,
+                )
+            })
+    };
+    let job_data = crate::execution::daemon_api_get_for_session_with_timeout(
+        session,
+        &format!("/jobs/{job_id}"),
+        remaining()?,
+    )?;
+    let events_data = crate::execution::daemon_api_get_for_session_with_timeout(
+        session,
+        &format!("/jobs/{job_id}/events"),
+        remaining()?,
+    )?;
     let job_body = canonical_daemon_body(&job_data, "daemon job response")?;
     let events_body = canonical_daemon_body(&events_data, "daemon job events response")?;
     Ok(RunnerJobLogSnapshot {

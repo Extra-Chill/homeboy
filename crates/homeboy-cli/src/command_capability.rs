@@ -20,9 +20,9 @@
 //!   `command_safety_manifest_audit` is `report_only: true`, and a path with no
 //!   registry declaration resolves to `read_only()` by default.
 //! - `CommandCapability` is a per-INVOCATION runtime gate that must fail closed,
-//!   because `Mutation` is what authorizes `reconcile_terminal_runner_exec_runs`
-//!   (recovering completed runner-exec evidence before a mutating command can
-//!   evict it) and the deferred-workload worker restart.
+//!   because `Mutation` is what authorizes scheduling runner-exec recovery
+//!   children (before a mutating command can evict their source evidence) and
+//!   the deferred-workload worker restart.
 //!
 //! A per-path lookup cannot express the argument-conditional rows here at all:
 //! `status` is read-only until `--refresh`, and `project`/`rig`/`server` are

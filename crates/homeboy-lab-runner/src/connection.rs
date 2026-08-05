@@ -1610,9 +1610,22 @@ pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
 /// Return the persisted controller-side session projection without reconnecting,
 /// probing a daemon, or reconciling generation state.
 pub fn persisted_status(runner_id: &str) -> Result<RunnerStatusReport> {
+    persisted_status_until(
+        runner_id,
+        std::time::Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+    )
+}
+
+/// Return the persisted session projection under one caller-owned deadline.
+/// This is intentionally observation-only: recovery may read a stale record,
+/// but every direct-session liveness probe receives only the time remaining.
+pub fn persisted_status_until(
+    runner_id: &str,
+    deadline: std::time::Instant,
+) -> Result<RunnerStatusReport> {
     let session_path = session_path(runner_id)?;
-    let session = read_session_for_status(runner_id)?;
-    let state = status_session_state(session.as_ref());
+    let session = read_session_for_status_until(runner_id, deadline)?;
+    let state = status_session_state_until(session.as_ref(), deadline);
     Ok(RunnerStatusReport {
         runner_id: runner_id.to_string(),
         connected: state == RunnerSessionState::Connected,
