@@ -163,7 +163,7 @@ pub(crate) enum IssuesCommand {
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum IssuesCommandOutput {
-    Reconcile(ReconcileOutput),
+    Reconcile(Box<ReconcileOutput>),
     ReconcileRun(ReconcileRunOutput),
     BuildFindings(ReconcileFindingsInput),
 }
@@ -278,7 +278,7 @@ pub fn run(args: IssuesArgs) -> CmdResult<IssuesCommandOutput> {
                 apply: mutation.is_apply(),
                 path,
             })?;
-            Ok((IssuesCommandOutput::Reconcile(output), exit))
+            Ok((IssuesCommandOutput::Reconcile(Box::new(output)), exit))
         }
         IssuesCommand::ReconcileRun {
             component_id,
