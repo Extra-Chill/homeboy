@@ -126,6 +126,129 @@ pub(crate) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
     run_cook_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
 }
 
+/// Compile every controller-owned Cook input required for durable detached
+/// admission. The caller may persist the returned options before spawning a
+/// child; the child then reconstructs this exact recipe rather than admitting a
+/// second argv-derived attempt.
+pub(crate) fn prepare_detached_cook_options(
+    args: AgentTaskCookArgs,
+) -> homeboy::core::Result<agent_task_service::AgentTaskCookServiceOptions> {
+    let args = resolve_cook_destination(args)?;
+    validate_cook_request(&args)?;
+    // An explicit provider command is the execution authority for this Cook;
+    // credential discovery would probe unrelated configured providers and turn
+    // detached admission into unbounded startup work.
+    if args.provider_command.is_none() && args.provider_argv.is_empty() {
+        preflight_cook_provider_credentials(&args)?;
+    }
+    let provision = provision_cook_destination(&args)?;
+    let mut dispatch_args = dispatch_args_for_cook(&args);
+    resolve_dispatch_prompt(&mut dispatch_args)?;
+    let requested_cook_id = dispatch_args.run_id.clone();
+    if let Some(cook_id) = requested_cook_id.as_deref() {
+        dispatch_args.run_id = Some(
+            args.attempt_run_id
+                .clone()
+                .unwrap_or_else(|| agent_task_lifecycle::cook_attempt_run_id(cook_id, 1)),
+        );
+    }
+    let run_id = dispatch_args
+        .run_id
+        .clone()
+        .unwrap_or_else(|| format!("agent-task-{}", uuid::Uuid::new_v4()));
+    dispatch_args.run_id = Some(run_id.clone());
+    let cook_id = requested_cook_id.unwrap_or_else(|| run_id.clone());
+    let (run_id, mut initial_plan) = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
+        (run_id, agent_task_service::read_plan(attempt_plan)?)
+    } else {
+        (run_id, compile_cook_plan(&args, provision.clone())?)
+    };
+    if args.attempt_plan.is_some() {
+        record_cook_provision(&mut initial_plan, provision);
+        record_cook_goal(&mut initial_plan, args.goal.as_deref());
+    }
+    if args.require_acceptance {
+        let authority = args
+            .acceptance_authority
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "acceptance-authority",
+                    "--require-acceptance requires a non-empty --acceptance-authority",
+                    None,
+                    None,
+                )
+            })?;
+        let policy = args
+            .acceptance_policy
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "acceptance-policy",
+                    "--require-acceptance requires a non-empty --acceptance-policy",
+                    None,
+                    None,
+                )
+            })?;
+        initial_plan.metadata["acceptance"] =
+            serde_json::json!({ "authority": authority, "policy": policy });
+    }
+    let source_worktree_path = initial_plan
+        .tasks
+        .first()
+        .and_then(|task| task.workspace.root.as_ref())
+        .map(PathBuf::from);
+    let task_base_sha = source_worktree_path.as_deref().and_then(git_head_sha);
+    let title = args
+        .title
+        .clone()
+        .unwrap_or_else(|| default_loop_title(&args));
+    let commit_message = args
+        .commit_message
+        .clone()
+        .unwrap_or_else(|| default_loop_commit_message(&args));
+    let selected_model = initial_plan
+        .tasks
+        .first()
+        .and_then(|task| task.executor.model())
+        .map(str::to_string);
+    Ok(agent_task_service::AgentTaskCookServiceOptions {
+        cook_id,
+        initial_run_id: run_id,
+        initial_plan,
+        to_worktree: args.to_worktree.expect("Cook destination is resolved"),
+        source_worktree_path,
+        provider_command: args.provider_command,
+        provider_invocation: (!args.provider_argv.is_empty()).then(|| CommandInvocation {
+            argv: args.provider_argv,
+            ..Default::default()
+        }),
+        gates: args.gates.into(),
+        max_attempts: args.max_attempts,
+        no_finalize: args.no_finalize,
+        base: args.base,
+        task_base_sha,
+        head: args.head,
+        title,
+        commit_message,
+        source_refs: args.dispatch.task_url.into_iter().collect(),
+        protected_branches: args.protected_branches,
+        ai_tool: super::fanout::resolve_ai_tool_disclosure(
+            &args.ai_tool,
+            args.dispatch.backend.as_deref(),
+            args.dispatch.selector.as_deref(),
+            args.dispatch.model.as_deref(),
+        ),
+        ai_model: selected_model,
+        ai_used_for: args.ai_used_for,
+        attempt_dispatcher: None,
+        harvest_context:
+            homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()?,
+    })
+}
+
 /// Resume a Cook from its immutable recipe rather than asking the operator to
 /// replay prompt, provider, gate, workspace, or disclosure arguments.
 pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {

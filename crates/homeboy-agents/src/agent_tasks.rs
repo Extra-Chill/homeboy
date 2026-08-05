@@ -453,7 +453,7 @@ pub mod service {
         hydrate_evidence_ref, hydrate_evidence_summary, load_recipe, load_recipe_for_attempt, logs,
         normalize_plan_workspaces, offloaded_status_remediation, persist_initial_recipe,
         persist_manual_finalization_intent, persist_provider_boundary_replay_evidence,
-        persisted_status, preflight_cook_continuation_admission,
+        persisted_status, preflight_cook_continuation_admission, prepare_detached_cook,
         prepare_manual_finalization_identity, promotion_is_resumable, promotion_source, read_plan,
         rearm_failed_terminal_continuation, reconcile_recipe_attempt_for_continuation,
         reconcile_terminal_artifact_projection, reconstruct_adoption_options_with_dispatcher,
@@ -472,6 +472,7 @@ pub mod service {
         AgentTaskDiscoveryRun, AgentTaskHydratedEvidence, AgentTaskPromotionJob,
         AgentTaskPromotionJobDriver, AgentTaskPromotionJobPhase, AgentTaskPromotionRequest,
         AgentTaskRetryServiceResult, AgentTaskRunResult, CookActivityProbe, CookProgressEvent,
-        CookProviderActivity, AGENT_TASK_PROMOTION_JOB_TYPE, AGENT_TASK_PROMOTION_JOB_VERSION,
+        CookProviderActivity, DetachedCookAdmission, AGENT_TASK_PROMOTION_JOB_TYPE,
+        AGENT_TASK_PROMOTION_JOB_VERSION,
     };
 }

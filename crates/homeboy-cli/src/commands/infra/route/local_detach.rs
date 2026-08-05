@@ -23,8 +23,9 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use clap::Parser;
 use homeboy::cli_surface::{Cli, Commands};
 use homeboy::core::Error;
 use serde_json::{json, Value};
@@ -56,6 +57,7 @@ pub(super) fn intercept_local_detached_cook(
     cli: &Cli,
     normalized_args: &[String],
     runner_side: bool,
+    output_file: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
     if !is_local_detached_cook(cli) {
         return Ok(None);
@@ -75,11 +77,6 @@ pub(super) fn intercept_local_detached_cook(
     let cook_id = requested_cook_id
         .clone()
         .unwrap_or_else(|| format!("cook-detached-{}", uuid::Uuid::new_v4()));
-    // Request validation is safe and required before acceptance. Runtime
-    // pinning, recovery, provider discovery, and workspace setup are owned by
-    // the detached controller after the handoff has become durable.
-    crate::commands::agent_task::run::validate_cook_request(cook)?;
-    let run_id = homeboy::agents::agent_tasks::lifecycle::cook_attempt_run_id(&cook_id, 1);
     let started = Instant::now();
     let mut child_args =
         detached_cook_child_args(normalized_args, &cook_id, requested_cook_id.is_some());
@@ -88,11 +85,32 @@ pub(super) fn intercept_local_detached_cook(
     // bytes live only in the launcher's pipe. Capture them here so the exact
     // prompt survives the handoff instead of the cook stalling on an empty read.
     materialize_stdin_prompt(&mut child_args, &session_root)?;
+    // Parse the rewritten argv so compilation consumes the captured prompt file,
+    // never the detached child's closed stdin.
+    let child_cli = Cli::try_parse_from(
+        std::iter::once("homeboy".to_string()).chain(child_args.iter().cloned()),
+    )
+    .map_err(|error| Error::validation_invalid_argument("cook", error.to_string(), None, None))?;
+    let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+        command: crate::commands::agent_task::AgentTaskCommand::Cook(child_cook),
+    }) = child_cli.command
+    else {
+        return Err(Error::internal_unexpected(
+            "detached Cook argv did not parse as Cook",
+        ));
+    };
+    let options = crate::commands::agent_task::run::prepare_detached_cook_options(child_cook)?;
+    let admission = homeboy::agents::agent_tasks::service::prepare_detached_cook(&options)?;
+    if admission.cook_id != cook_id {
+        return Err(Error::internal_unexpected(
+            "detached Cook admission changed its requested identity",
+        ));
+    }
     let log_path = session_root.join("cook.log");
     let handoff_path = session_root.join("handoff.json");
     let mut handoff = DetachedCookHandoff {
         state: DetachedHandoffState::Accepted,
-        run_id,
+        run_id: admission.run_id.clone(),
         waited_ms: 0,
         phase_timings_ms: json!({}),
     };
@@ -102,7 +120,18 @@ pub(super) fn intercept_local_detached_cook(
         &handoff_path,
         &handoff_envelope(&cook_id, None, &log_path, &handoff),
     )?;
-    let child = spawn_detached_cook(&child_args, &log_path)?;
+    let child = match spawn_detached_cook(&child_args, &log_path) {
+        Ok(child) => child,
+        Err(error) => {
+            homeboy::agents::agent_tasks::lifecycle::record_pre_execution_failure(
+                &admission.run_id,
+                &options.initial_plan,
+                "detached_cook_spawn",
+                &error,
+            )?;
+            return Err(error);
+        }
+    };
     handoff.waited_ms = started.elapsed().as_millis() as u64;
     handoff.phase_timings_ms = json!({
         "essential_validation_and_durable_handoff": handoff.waited_ms,
@@ -116,13 +145,7 @@ pub(super) fn intercept_local_detached_cook(
         Some(&cook_id),
         &handoff.run_id,
     );
-    let stdout = serde_json::to_string_pretty(&envelope).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("serialize detached local cook handoff".to_string()),
-        )
-    })?;
-    println!("{stdout}");
+    crate::commands::output_runtime::emit_json_result(Ok(envelope), output_file, 0);
     Ok(Some(0))
 }
 
@@ -171,7 +194,42 @@ fn materialize_stdin_prompt(
     args: &mut [String],
     session_root: &Path,
 ) -> homeboy::core::Result<Option<PathBuf>> {
-    materialize_prompt_from(args, session_root, &mut std::io::stdin().lock())
+    let Some(index) = stdin_prompt_index(args) else {
+        return Ok(None);
+    };
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut prompt = Vec::new();
+        let result = std::io::stdin().read_to_end(&mut prompt).map(|_| prompt);
+        let _ = sender.send(result);
+    });
+    let prompt = receiver
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| {
+            Error::validation_invalid_argument(
+                "prompt",
+                "timed out reading --prompt - before detached Cook admission",
+                None,
+                Some(vec![
+                    "Close stdin or provide a prompt file with --prompt @path.".to_string(),
+                ]),
+            )
+        })?
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read stdin prompt for a detached local cook".to_string()),
+            )
+        })?;
+    let path = session_root.join("prompt.txt");
+    std::fs::write(&path, prompt)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    args[index] = if args[index] == "-" {
+        format!("@{}", path.display())
+    } else {
+        format!("--prompt=@{}", path.display())
+    };
+    Ok(Some(path))
 }
 
 /// The reader is a parameter so the capture can be exercised without a test
@@ -362,7 +420,7 @@ mod tests {
     fn a_runner_owned_execution_still_refuses_to_detach() {
         let (cli, normalized) = cook_cli(&["--placement", "local", "--detach-after-handoff"]);
 
-        let error = intercept_local_detached_cook(&cli, &normalized, true)
+        let error = intercept_local_detached_cook(&cli, &normalized, true, None)
             .expect_err("a runner-owned execution cannot detach");
 
         assert!(
@@ -395,7 +453,8 @@ mod tests {
 
             assert!(!is_local_detached_cook(&cli), "{extra:?}");
             assert_eq!(
-                intercept_local_detached_cook(&cli, &normalized, false).expect("no interception"),
+                intercept_local_detached_cook(&cli, &normalized, false, None)
+                    .expect("no interception"),
                 None,
                 "{extra:?}"
             );

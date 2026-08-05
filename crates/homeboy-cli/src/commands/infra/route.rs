@@ -47,7 +47,7 @@ pub fn route_after_parse_with_provenance(
     // cannot honor (#10917).
     reject_contradictory_cook_arguments(cli)?;
 
-    if let Some(exit_code) = intercept_local_detached_cook(cli, normalized_args)? {
+    if let Some(exit_code) = intercept_local_detached_cook(cli, normalized_args, output_file)? {
         return Ok(Some(exit_code));
     }
 
@@ -501,6 +501,7 @@ pub fn route_after_parse_with_provenance(
 pub fn intercept_local_detached_cook(
     cli: &Cli,
     normalized_args: &[String],
+    output_file: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
     reject_contradictory_cook_arguments(cli)?;
     let managed_runner_placement =
@@ -508,7 +509,7 @@ pub fn intercept_local_detached_cook(
     let runner_side = lab_routing::is_lab_offload_subprocess()
         || managed_runner_placement
         || runner_resident_execution(cli);
-    local_detach::intercept_local_detached_cook(cli, normalized_args, runner_side)
+    local_detach::intercept_local_detached_cook(cli, normalized_args, runner_side, output_file)
 }
 
 fn placement_decision(

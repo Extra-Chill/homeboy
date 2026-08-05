@@ -356,14 +356,23 @@ impl CliRuntime {
             return std::process::ExitCode::from(2);
         }
 
-        // A local detached Cook's launcher owns only process handoff. Parse the
-        // static command surface first so it can return before extension and
-        // provider registration; the detached child retains the normal startup
-        // path and owns every Cook preparation step.
+        // Detached admission has its own bounded deadline. Validate the global
+        // output target before that admission can persist anything, then bypass
+        // provider/runtime startup so unrelated historical recovery cannot eat
+        // its five-second budget.
         if let Ok(cli) = Cli::try_parse_from(normalized.clone()) {
-            if let Ok(Some(exit_code)) =
-                crate::commands::route::intercept_local_detached_cook(&cli, &normalized)
-            {
+            let output_file = cli.output.as_ref().and_then(|path| path.to_str());
+            if let Some(path) = output_file {
+                if let Some(error) = output_runtime::validate_output_file_path(path) {
+                    output_runtime::emit_json_result(Err(error), None, 2);
+                    return std::process::ExitCode::from(2);
+                }
+            }
+            if let Ok(Some(exit_code)) = crate::commands::route::intercept_local_detached_cook(
+                &cli,
+                &normalized,
+                output_file,
+            ) {
                 return std::process::ExitCode::from(exit_code_to_u8(exit_code));
             }
         }
@@ -581,7 +590,11 @@ impl CliRuntime {
         // The detached child owns Cook preflight and execution. Return the
         // launcher's bounded handoff before hot-command preparation so stale
         // historical recovery cannot consume the caller's admission budget.
-        match crate::commands::route::intercept_local_detached_cook(&cli, &normalized) {
+        match crate::commands::route::intercept_local_detached_cook(
+            &cli,
+            &normalized,
+            output_file.as_deref(),
+        ) {
             Ok(Some(exit_code)) => return std::process::ExitCode::from(exit_code_to_u8(exit_code)),
             Ok(None) => {}
             Err(err) => {

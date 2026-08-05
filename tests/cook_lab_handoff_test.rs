@@ -273,10 +273,9 @@ fn cook_rejects_invalid_controller_transport_before_worktree_resolution() {
 
 /// `--placement local --detach-after-handoff` is served, not rejected (#11476).
 ///
-/// The launcher hands the Cook to a process in its own session and returns a
-/// bounded handoff naming the durable handle. It performs no worktree or
-/// provider resolution itself — that belongs to the detached cook — so this
-/// still asserts the fast, work-free return the old rejection guaranteed.
+/// Detached admission validates the destination before it can claim durable
+/// ownership. A missing repository is therefore a pre-acceptance rejection,
+/// not a synthetic handoff to a child that cannot resume it.
 #[test]
 fn cook_detaches_local_placement_instead_of_rejecting_it() {
     let context = HermeticTestContext::new();
@@ -301,46 +300,8 @@ fn cook_detaches_local_placement_instead_of_rejecting_it() {
     let output = bounded_output(command);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "{stdout}");
-    assert!(
-        !stdout.contains("cannot detach after handoff with --placement local"),
-        "{stdout}"
-    );
-    assert!(!stdout.contains("worktree provider"), "{stdout}");
-
-    // The envelope is the last thing the launcher writes, so parse from the
-    // first object brace rather than assuming stdout holds nothing else.
-    let envelope_start = stdout
-        .find('{')
-        .unwrap_or_else(|| panic!("handoff envelope is present\n{stdout}"));
-    let envelope: serde_json::Value = serde_json::from_str(stdout[envelope_start..].trim())
-        .unwrap_or_else(|error| panic!("handoff envelope is JSON: {error}\n{stdout}"));
-    assert_eq!(
-        envelope["schema"], "homeboy/agent-task-cook-local-detach-handoff/v1",
-        "{stdout}"
-    );
-    assert_eq!(envelope["placement"], "local", "{stdout}");
-    assert_eq!(envelope["detached"], true, "{stdout}");
-    let cook_id = envelope["cook_id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("handoff names a cook id\n{stdout}"));
-    assert!(!cook_id.is_empty(), "{stdout}");
-    assert_eq!(
-        envelope["status_command"],
-        format!("homeboy agent-task status {cook_id}"),
-        "{stdout}"
-    );
-    let pid = envelope["pid"]
-        .as_u64()
-        .unwrap_or_else(|| panic!("handoff names the detached pid\n{stdout}"));
-    assert!(pid > 0, "{stdout}");
-
-    // Never leave a detached process behind a test. An unresolvable destination
-    // normally kills it well before this, so this is belt-and-braces cleanup.
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGKILL);
-    }
+    assert!(!output.status.success(), "{stdout}");
+    assert!(stdout.contains("--repo <repo> is required"), "{stdout}");
 }
 
 /// Historical runner recovery is a distinct owner, never an admission gate for
@@ -507,8 +468,9 @@ fn detached_cook_admission_is_bounded_with_a_hundred_unavailable_recovery_record
     let handoff_start = stdout
         .find('{')
         .unwrap_or_else(|| panic!("Cook handoff is durable output\n{stdout}"));
-    let handoff: serde_json::Value = serde_json::from_str(stdout[handoff_start..].trim())
+    let response: serde_json::Value = serde_json::from_str(stdout[handoff_start..].trim())
         .unwrap_or_else(|error| panic!("Cook handoff is JSON: {error}\n{stdout}"));
+    let handoff = response["data"].clone();
     assert!(
         started.elapsed() <= Duration::from_secs(6),
         "Cook admission/handoff must settle within the five-second budget plus process-exit allowance: elapsed={:?}, handoff={handoff}",
