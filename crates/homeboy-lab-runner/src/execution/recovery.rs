@@ -1,24 +1,95 @@
 //! Recovery of generic runner-exec evidence after a controller interruption.
 
 use super::*;
+use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 const STARTUP_RUNNER_EXEC_RECOVERY_LIMIT: i64 = 100;
+pub const STARTUP_RUNNER_EXEC_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
+const RECOVERY_KIND: &str = "runner_exec_recovery";
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RunnerExecRecoverySchedule {
+    pub owner_id: String,
+    pub deferred_count: usize,
+    pub budget_ms: u64,
+    pub inspection_action: String,
+}
+
+/// Reserve a durable, independently inspectable owner before a background
+/// recovery worker is spawned. Scheduling only reads local evidence; remote
+/// reconciliation belongs to the owner, never to the mutating caller.
+pub fn schedule_terminal_runner_exec_recovery() -> Result<Option<RunnerExecRecoverySchedule>> {
+    let store = ObservationStore::open_initialized()?;
+    if let Some(existing) = store
+        .list_runs(RunListFilter {
+            kind: Some(RECOVERY_KIND.to_string()),
+            status: Some(RunStatus::Running.as_str().to_string()),
+            limit: Some(1),
+            ..RunListFilter::default()
+        })?
+        .into_iter()
+        .next()
+    {
+        let deferred_count = existing
+            .metadata_json
+            .get("deferred_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        return Ok(Some(recovery_schedule(&existing.id, deferred_count)));
+    }
+    let candidates = recovery_candidates(&store)?;
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let owner_id = format!("runner-exec-recovery-{}", Uuid::new_v4());
+    store.start_run_with_id(
+        NewRunRecord::builder(RECOVERY_KIND)
+            .metadata(json!({
+                "phase": "accepted",
+                "deferred_count": candidates.len(),
+                "budget_ms": STARTUP_RUNNER_EXEC_RECOVERY_BUDGET.as_millis() as u64,
+                "inspection_action": format!("homeboy runs show {owner_id}"),
+            }))
+            .build(),
+        owner_id.clone(),
+    )?;
+    Ok(Some(recovery_schedule(&owner_id, candidates.len())))
+}
+
+fn recovery_schedule(owner_id: &str, deferred_count: usize) -> RunnerExecRecoverySchedule {
+    RunnerExecRecoverySchedule {
+        owner_id: owner_id.to_string(),
+        deferred_count,
+        budget_ms: STARTUP_RUNNER_EXEC_RECOVERY_BUDGET.as_millis() as u64,
+        inspection_action: format!("homeboy runs show {owner_id}"),
+    }
+}
 
 /// Scan durable generic runner-exec runs, query their exact accepted runner-job
 /// binding, then retain declared evidence before terminal projection. This runs
 /// before command dispatch so a new daemon operation cannot evict a completed
 /// job while its controller checkpoint is still pending.
 pub fn reconcile_terminal_runner_exec_runs() -> Result<usize> {
+    reconcile_terminal_runner_exec_runs_with_budget(STARTUP_RUNNER_EXEC_RECOVERY_BUDGET)
+        .map(|(reconciled, _)| reconciled)
+}
+
+/// Reconcile under one owner-wide wall-clock budget. A failed endpoint is not
+/// retried for each historical job: all later records on that runner are
+/// deferred with their evidence intact for a later owner.
+pub fn reconcile_terminal_runner_exec_runs_with_budget(budget: Duration) -> Result<(usize, usize)> {
     let store = ObservationStore::open_initialized()?;
     let mut reconciled = 0;
-    for run in store.list_runs(RunListFilter {
-        kind: Some("runner_execution".to_string()),
-        status: Some(RunStatus::Running.as_str().to_string()),
-        limit: Some(STARTUP_RUNNER_EXEC_RECOVERY_LIMIT),
-        ..RunListFilter::default()
-    })? {
-        if run.metadata_json.get("kind").and_then(Value::as_str) != Some("runner_exec") {
-            continue;
+    let mut deferred = 0;
+    let mut unavailable_runners = BTreeSet::new();
+    let deadline = Instant::now() + budget;
+    let candidates = recovery_candidates(&store)?;
+    for (index, run) in candidates.iter().enumerate() {
+        if Instant::now() >= deadline {
+            deferred += candidates.len() - index;
+            break;
         }
         let (Some(runner_id), Some(job_id), Some(cwd)) = (
             run.metadata_json.get("runner_id").and_then(Value::as_str),
@@ -29,10 +100,30 @@ pub fn reconcile_terminal_runner_exec_runs() -> Result<usize> {
         ) else {
             continue;
         };
+        if unavailable_runners.contains(runner_id) {
+            deferred += 1;
+            continue;
+        }
         let snapshot = match crate::evidence::runner_job_log_snapshot(runner_id, job_id) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 record_evicted_evidence_loss(&store, &run, &error)?;
+                // A 404 is a durable per-job result. Other failures describe the
+                // endpoint, so avoid amplifying one unavailable daemon into N probes.
+                if error.details.get("http_status").and_then(Value::as_u64) != Some(404) {
+                    unavailable_runners.insert(runner_id.to_string());
+                    deferred += candidates
+                        .iter()
+                        .skip(index + 1)
+                        .filter(|candidate| {
+                            candidate
+                                .metadata_json
+                                .get("runner_id")
+                                .and_then(Value::as_str)
+                                == Some(runner_id)
+                        })
+                        .count();
+                }
                 continue;
             }
         };
@@ -137,7 +228,61 @@ pub fn reconcile_terminal_runner_exec_runs() -> Result<usize> {
         homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(&run.id, &snapshot)?;
         reconciled += 1;
     }
-    Ok(reconciled)
+    Ok((reconciled, deferred))
+}
+
+/// Complete one accepted recovery owner and leave deferred source records
+/// running, preserving their remote-evidence recovery opportunity.
+pub fn run_scheduled_terminal_runner_exec_recovery(owner_id: &str) -> Result<()> {
+    let store = ObservationStore::open_initialized()?;
+    let Some(owner) = store.get_run(owner_id)? else {
+        return Ok(());
+    };
+    if owner.kind != RECOVERY_KIND || owner.status != RunStatus::Running.as_str() {
+        return Ok(());
+    }
+    let (reconciled, deferred_count) =
+        reconcile_terminal_runner_exec_runs_with_budget(STARTUP_RUNNER_EXEC_RECOVERY_BUDGET)?;
+    let mut metadata = owner.metadata_json;
+    metadata["phase"] = json!(if deferred_count == 0 {
+        "completed"
+    } else {
+        "deferred"
+    });
+    metadata["reconciled_count"] = json!(reconciled);
+    metadata["deferred_count"] = json!(deferred_count);
+    metadata["budget_ms"] = json!(STARTUP_RUNNER_EXEC_RECOVERY_BUDGET.as_millis() as u64);
+    metadata["inspection_action"] = json!(format!("homeboy runs show {owner_id}"));
+    store.finish_running_run(owner_id, RunStatus::Pass, Some(metadata))?;
+    Ok(())
+}
+
+fn recovery_candidates(
+    store: &ObservationStore,
+) -> Result<Vec<homeboy_core::observation::RunRecord>> {
+    Ok(store
+        .list_runs(RunListFilter {
+            kind: Some("runner_execution".to_string()),
+            status: Some(RunStatus::Running.as_str().to_string()),
+            limit: Some(STARTUP_RUNNER_EXEC_RECOVERY_LIMIT),
+            ..RunListFilter::default()
+        })?
+        .into_iter()
+        .filter(|run| {
+            run.metadata_json.get("kind").and_then(Value::as_str) == Some("runner_exec")
+                && run
+                    .metadata_json
+                    .get("runner_id")
+                    .and_then(Value::as_str)
+                    .is_some()
+                && run
+                    .metadata_json
+                    .get("runner_job_id")
+                    .and_then(Value::as_str)
+                    .is_some()
+                && run.cwd.is_some()
+        })
+        .collect())
 }
 
 fn recovered_output(
@@ -285,7 +430,7 @@ mod tests {
             }
             connection
                 .execute(
-                    "INSERT INTO runs(id, kind, started_at, status, metadata_json) VALUES ('outside-budget', 'runner_execution', '2026-01-01T00:00:00Z', 'running', 'invalid-json')",
+                    "INSERT INTO runs(id, kind, started_at, status, metadata_json) VALUES ('outside-budget', 'runner_execution', '2026-01-01T00:00:00Z', 'running', '{\"kind\":\"runner_exec\"}')",
                     [],
                 )
                 .expect("insert outside-budget candidate");
@@ -295,6 +440,54 @@ mod tests {
                 reconcile_terminal_runner_exec_runs().expect("bounded recovery"),
                 0
             );
+        });
+    }
+
+    #[test]
+    fn recovery_owner_accepts_a_hundred_historical_jobs_without_remote_reconciliation() {
+        with_isolated_home(|_| {
+            for index in 0..STARTUP_RUNNER_EXEC_RECOVERY_LIMIT {
+                homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
+                    &format!("stale-{index}"),
+                    "unavailable-runner",
+                    &format!("job-{index}"),
+                    "/workspace",
+                    &["true".to_string()],
+                )
+                .expect("historical runner job");
+            }
+
+            let schedule = schedule_terminal_runner_exec_recovery()
+                .expect("schedule recovery")
+                .expect("historical jobs need an owner");
+            assert_eq!(
+                schedule.deferred_count,
+                STARTUP_RUNNER_EXEC_RECOVERY_LIMIT as usize
+            );
+            assert_eq!(
+                schedule.budget_ms,
+                STARTUP_RUNNER_EXEC_RECOVERY_BUDGET.as_millis() as u64
+            );
+            assert_eq!(
+                schedule.inspection_action,
+                format!("homeboy runs show {}", schedule.owner_id)
+            );
+
+            // A zero owner budget is a deterministic interruption boundary: no
+            // daemon endpoint is contacted and every source record remains
+            // recoverable for the next owner.
+            assert_eq!(
+                reconcile_terminal_runner_exec_runs_with_budget(Duration::ZERO)
+                    .expect("bounded recovery"),
+                (0, STARTUP_RUNNER_EXEC_RECOVERY_LIMIT as usize)
+            );
+            let store = ObservationStore::open_initialized().expect("store");
+            assert!(store
+                .get_run("stale-0")
+                .expect("read")
+                .expect("historical record")
+                .status
+                .eq("running"));
         });
     }
 

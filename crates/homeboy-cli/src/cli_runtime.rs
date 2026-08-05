@@ -24,6 +24,7 @@ use homeboy_core::extension_readiness::READY_CHECK_SKIPPED_REASON;
 use homeboy_upgrade::upgrade;
 
 const COOK_PINNED_RUNTIME_ENV: &str = "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME";
+const RUNNER_EXEC_RECOVERY_OWNER_ENV: &str = "HOMEBOY_RUNNER_EXEC_RECOVERY_OWNER";
 
 pub struct CliRuntime {
     extension_discovery: OnceLock<ExtensionCliDiscovery>,
@@ -356,18 +357,11 @@ impl CliRuntime {
         }
 
         register_startup_providers_before_reconcile();
-        // Recover completed generic runner-exec jobs before a mutating invocation
-        // can evict their evidence. Read-only commands must not mutate durable
-        // state during startup.
-        if requires_startup_reconciliation(&normalized)
-            && !normalized
-                .windows(2)
-                .any(|args| args == ["agent-task", "promotion-provider"])
-            && !normalized
-                .windows(3)
-                .any(|args| args == ["agent-task", "tool", "dispatch"])
-        {
-            let _ = crate::runner::reconcile_terminal_runner_exec_runs();
+        if let Some(owner_id) = std::env::var_os(RUNNER_EXEC_RECOVERY_OWNER_ENV) {
+            let _ = crate::runner::run_scheduled_terminal_runner_exec_recovery(
+                &owner_id.to_string_lossy(),
+            );
+            return std::process::ExitCode::SUCCESS;
         }
         let config = crate::core::defaults::load_config();
         if let Err(error) = register_startup_providers_after_reconcile(&config.agent_task) {
@@ -652,6 +646,12 @@ impl CliRuntime {
                 command_provenance,
             )
         });
+        // The command's initial outcome is now durable and returned. Historical
+        // runner evidence is a separately owned
+        // best-effort recovery concern and cannot delay that boundary.
+        if requires_startup_reconciliation(&normalized) {
+            schedule_runner_exec_recovery();
+        }
         std::process::ExitCode::from(exit_code_to_u8(exit_code))
     }
 
@@ -682,6 +682,25 @@ impl CliRuntime {
         self.extension_discovery
             .get_or_init(collect_extension_cli_info_metadata_only)
     }
+}
+
+fn schedule_runner_exec_recovery() {
+    let Ok(Some(schedule)) = crate::runner::schedule_terminal_runner_exec_recovery() else {
+        return;
+    };
+    eprintln!(
+        "runner-exec recovery accepted: owner_id={} deferred_count={} budget_ms={} inspect=`{}`",
+        schedule.owner_id, schedule.deferred_count, schedule.budget_ms, schedule.inspection_action
+    );
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let _ = ProcessCommand::new(executable)
+        .env(RUNNER_EXEC_RECOVERY_OWNER_ENV, &schedule.owner_id)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// A cook has no durable run record until controller admission. Re-exec before
