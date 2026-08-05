@@ -97,7 +97,7 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
         planning_metadata
             .get("sampling")
             .cloned()
-            .unwrap_or_else(|| serde_json::Value::Null),
+            .unwrap_or(serde_json::Value::Null),
     )
     .map_err(|err| {
         homeboy::core::Error::validation_invalid_argument(
@@ -268,7 +268,7 @@ pub(super) fn run_campaign(
             dispatch_records,
             run_ids,
             result_refs,
-            next_steps: campaign_next_steps(&status),
+            next_steps: campaign_next_steps(status),
         },
         exit_code,
     ))
@@ -443,7 +443,7 @@ pub(super) fn build_campaign_plan(
             .map(|path| path.to_string_lossy().to_string()),
         lab_runner,
         isolation: FuzzCampaignPlanIsolationOutput {
-            mode: effective_isolation_mode(&args).to_string(),
+            mode: effective_isolation_mode(args).to_string(),
             allow_destructive: args.run.effective_allow_destructive(),
             proof_required: args.run.effective_allow_destructive()
                 || args.run.effective_isolation().requests_isolation(),
@@ -1201,6 +1201,7 @@ fn operation_filters(args: &FuzzPlanArgs) -> homeboy::core::Result<BTreeSet<Stri
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn operation_skip_reason(
     operation: &FuzzOperation,
     family: Option<FuzzOperationFamily>,
