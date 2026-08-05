@@ -4,7 +4,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::super::{
-    ManagedSshSession, ManagedSshSessionOutput, Server, ServerAuthMode, ServerSessionConfig,
+    ManagedSshSession, ManagedSshSessionOutput, ManagedSshSessionPersistSource, Server,
+    ServerAuthMode, ServerSessionConfig,
 };
 use super::delegated::{DELEGATED_RUN_POLL_MS_ENV, DELEGATED_RUN_STATUS_FILE_ENV};
 use super::host::{get_local_ips, is_local_host};
@@ -753,6 +754,7 @@ fn managed_alias_reuses_its_controlpath_and_bounds_mux_control() {
         auth: Some(ManagedSshSession {
             control_path: "/tmp/homeboy-%h-%p-%r".to_string(),
             persist: "4h".to_string(),
+            persist_source: ManagedSshSessionPersistSource::Configured,
         }),
         is_local: false,
         env: HashMap::new(),

@@ -472,7 +472,7 @@ mod tests {
     use crate::test_support::with_isolated_home;
 
     use super::{parse_target, scp_args, transfer, TransferConfig, TransferTarget};
-    use crate::server::{ManagedSshSession, SshClient};
+    use crate::server::{ManagedSshSession, ManagedSshSessionPersistSource, SshClient};
 
     fn save_server(id: &str) {
         server::save(&Server {
@@ -568,6 +568,7 @@ mod tests {
             auth: Some(ManagedSshSession {
                 control_path: "/tmp/homeboy-control".to_string(),
                 persist: "4h".to_string(),
+                persist_source: ManagedSshSessionPersistSource::Configured,
             }),
             is_local: false,
             env: HashMap::new(),

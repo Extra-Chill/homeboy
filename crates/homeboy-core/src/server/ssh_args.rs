@@ -155,6 +155,7 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+    use crate::server::ManagedSshSessionPersistSource;
 
     #[test]
     fn shell_join_quotes_ssh_option_values_with_spaces() {
@@ -208,6 +209,7 @@ mod tests {
             auth: Some(ManagedSshSession {
                 control_path: control_path.to_string_lossy().to_string(),
                 persist: "4h".to_string(),
+                persist_source: ManagedSshSessionPersistSource::Configured,
             }),
             is_local: false,
             env: HashMap::new(),
