@@ -217,7 +217,7 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
             Ok(snapshot) => snapshot,
             Err(error) => {
                 worker.renew(&store)?;
-                record_evicted_evidence_loss(&store, &run, &error, &worker.token, job_id)?;
+                record_evicted_evidence_loss(&store, run, &error, &worker.token, job_id)?;
                 // A 404 is a durable per-job result. Other failures describe the
                 // endpoint, so avoid amplifying one unavailable daemon into N probes.
                 if error.details.get("http_status").and_then(Value::as_u64) != Some(404) {
@@ -696,6 +696,7 @@ fn try_acquire_child_lock(child_id: &str) -> Result<Option<std::fs::File>> {
     let path = root.join(format!("{child_id}.lock"));
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&path)

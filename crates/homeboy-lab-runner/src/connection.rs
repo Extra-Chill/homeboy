@@ -2269,7 +2269,7 @@ fn runner_jobs_with_client(
 ) -> Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> {
     let result: Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> = (|| {
         let (body, source) = if let Some(local_url) = session.local_url.as_deref() {
-            let data = daemon_get(&client, local_url, "/jobs")?;
+            let data = daemon_get(client, local_url, "/jobs")?;
             (
                 data.get("body").cloned().ok_or_else(|| {
                     Error::internal_unexpected("daemon jobs response missing data.body")
@@ -2284,7 +2284,7 @@ fn runner_jobs_with_client(
             })?;
             (
                 broker_http::get_json(
-                    &client,
+                    client,
                     broker_url,
                     "/jobs",
                     "list reverse runner broker jobs",

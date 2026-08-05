@@ -2023,7 +2023,7 @@ pub(crate) fn run_lab_offload_inner(
     lab_metadata["runtime_evidence"] =
         serde_json::to_value(&runtime_evidence).unwrap_or(serde_json::json!(null));
     let mut secret_env_handoff = build_lab_secret_env_handoff_plan(
-        &contract.secret_env_sources,
+        contract.secret_env_sources,
         &changed_since_preflight.args,
         env_delta,
     )?;
