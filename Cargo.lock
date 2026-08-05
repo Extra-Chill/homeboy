@@ -1165,6 +1165,7 @@ name = "homeboy-release"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fs4",
  "glob",
  "glob-match",
  "homeboy-core",

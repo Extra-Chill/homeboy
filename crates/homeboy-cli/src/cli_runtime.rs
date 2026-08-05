@@ -1477,7 +1477,7 @@ fn preflight_hot_command(
 
 fn review_test_runner_requirements(
     cli: &Cli,
-) -> Option<homeboy::core::deferred_workload::DeferredWorkloadRequirements> {
+) -> Option<homeboy::deferred_workload::DeferredWorkloadRequirements> {
     let Commands::Review(review) = &cli.command else {
         return None;
     };
@@ -1486,7 +1486,7 @@ fn review_test_runner_requirements(
     };
     let contract = test.lab_contract();
     contract.is_portable().then(
-        || homeboy::core::deferred_workload::DeferredWorkloadRequirements {
+        || homeboy::deferred_workload::DeferredWorkloadRequirements {
             required_runtimes: ["homeboy".to_string()].into(),
             required_capabilities: contract
                 .extra_required_capabilities
