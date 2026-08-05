@@ -107,6 +107,17 @@ fn client_connection_args(
         push_option(&mut args, "StrictHostKeyChecking=no");
     }
 
+    // Connection multiplexing is enabled only when a managed session exists,
+    // and `SshClient::from_server` populates one only for
+    // `ServerAuthMode::KeyPlusPasswordControlmaster`. So multiplexing is coupled
+    // to a password-recovery auth mode rather than to connection reuse: an
+    // ordinary key-authenticated server gets no `ControlPath` and every command
+    // pays a full connect plus key exchange. That is why 55 concurrent probe
+    // connections reached one Lab runner despite this block existing (#11080).
+    // Probe volume is bounded at the source in
+    // `homeboy_lab_runner::runner_probe_gate`; decoupling multiplexing from the
+    // auth mode is a separate change with its own blast radius (control-socket
+    // lifetime, forwarding, interactive sessions).
     if let Some(session) = auth {
         push_option(&mut args, "ControlMaster=auto");
         push_option(&mut args, format!("ControlPath={}", session.control_path));

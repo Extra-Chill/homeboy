@@ -135,6 +135,7 @@ mod resource_metrics;
 mod rig_materialization;
 mod rolling_generation;
 mod runner_cache;
+pub mod runner_probe_gate;
 mod runtime_materialization_status;
 pub mod runtime_materializer;
 mod runtime_overlay_freshness;
@@ -151,6 +152,10 @@ mod validation_dependencies;
 pub use runner_cache::{
     prune_homeboy_binary_cache, RunnerBinaryCachePruneEntry, RunnerBinaryCachePruneOptions,
     RunnerBinaryCachePruneOutput,
+};
+pub use runner_probe_gate::{
+    invalidate_runner_probes, reset_runner_probe_gate, runner_probe_metrics, RunnerProbeMetrics,
+    PROBE_CACHE_TTL_ENV, PROBE_CONCURRENCY_ENV, PROBE_WAIT_ENV,
 };
 pub use validation_dependencies::RunnerValidationDependencySyncOutput;
 pub mod runners;

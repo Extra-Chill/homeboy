@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
-use std::collections::{BTreeSet, HashMap};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
@@ -8,7 +9,11 @@ use homeboy_core::server::{
     self, execute_local_command_in_dir, execute_local_command_in_dir_with_timeout, SshClient,
 };
 
+use super::runner_probe_gate::deduplicated_probe;
 use super::{remote_runner_homeboy_path, Runner, RunnerKind, RunnerToolRegistry};
+
+/// Stable label for the remote capability probe in the probe-gate ledger.
+pub(crate) const RUNNER_CAPABILITY_PROBE: &str = "runner_capability_batch";
 
 // The lab-runner capability cluster (preflight, prepared/contract types, gate
 // mode/decision) now lives in the shared runner-contract crate as behavior-free
@@ -353,17 +358,31 @@ impl RunnerCapabilitySnapshot {
             &capability_probes,
             &preflight.required_toolchain_probes,
         );
-        let output = preflight
-            .timeout
-            .map(|timeout| client.execute_with_timeout(&script, timeout))
-            .unwrap_or_else(|| client.execute(&script));
-        Ok(parse_batch_probe_output(
-            &output.stdout,
-            &tool_commands,
-            &command_names,
-            &capability_probes,
-            &preflight.required_toolchain_probes,
-        ))
+        // Every controller surface that asks "is this runner ready" lands here,
+        // and each answer used to cost its own `ssh` connection — 55 of them at
+        // once during two cooks (#11080). The question is identical whenever the
+        // script and the environment it runs under are identical, so collapse
+        // concurrent askers onto one connection and cap how many can be open to
+        // this runner at all.
+        let fingerprint = batch_probe_fingerprint(&script, &client.env);
+        deduplicated_probe(
+            &runner.id,
+            RUNNER_CAPABILITY_PROBE,
+            &fingerprint,
+            move || {
+                let output = preflight
+                    .timeout
+                    .map(|timeout| client.execute_with_timeout(&script, timeout))
+                    .unwrap_or_else(|| client.execute(&script));
+                Ok(parse_batch_probe_output(
+                    &output.stdout,
+                    &tool_commands,
+                    &command_names,
+                    &capability_probes,
+                    &preflight.required_toolchain_probes,
+                ))
+            },
+        )
     }
 
     fn local_batch_probe(
@@ -432,7 +451,9 @@ impl RunnerCapabilitySnapshot {
     }
 }
 
-#[derive(Debug, Default)]
+// `Clone` so one probe's answer can be handed to every caller that coalesced
+// onto it instead of each opening its own connection (#11080).
+#[derive(Debug, Clone, Default)]
 struct RunnerCapabilityProbeResult {
     tools: BTreeSet<RunnerRequiredTool>,
     commands: BTreeSet<String>,
@@ -446,6 +467,22 @@ struct RunnerToolCapabilityProbe {
     command: String,
     env: Vec<String>,
     capability: String,
+}
+
+/// Identity of a remote capability probe: the exact script plus the exact
+/// environment it runs under. Two probes with the same fingerprint are asking
+/// the same question of the same runner and may share one connection; two with
+/// different fingerprints may not, and are only bounded by the concurrency cap.
+fn batch_probe_fingerprint(script: &str, env: &HashMap<String, String>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(script.as_bytes());
+    for (key, value) in env.iter().collect::<BTreeMap<_, _>>() {
+        hasher.update([0x1f]);
+        hasher.update(key.as_bytes());
+        hasher.update([b'=']);
+        hasher.update(value.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 fn batch_probe_script(
@@ -794,6 +831,46 @@ mod tests {
             resources: Default::default(),
             policy: RunnerPolicy::default(),
         }
+    }
+
+    /// The probe gate collapses concurrent callers that share a fingerprint, so
+    /// the fingerprint must be stable for one question and different for
+    /// another — otherwise two different probes would share one answer, or an
+    /// identical probe would still storm the runner (#11080).
+    #[test]
+    fn capability_probe_fingerprint_identifies_the_question_not_the_caller() {
+        let env: HashMap<String, String> = HashMap::from([
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("HOMEBOY_TOKEN".to_string(), "abc".to_string()),
+        ]);
+        // Same map, different insertion order: still the same question.
+        let reordered: HashMap<String, String> = HashMap::from([
+            ("HOMEBOY_TOKEN".to_string(), "abc".to_string()),
+            ("PATH".to_string(), "/usr/bin".to_string()),
+        ]);
+
+        let baseline = batch_probe_fingerprint("command -v git", &env);
+        assert_eq!(baseline, batch_probe_fingerprint("command -v git", &env));
+        assert_eq!(
+            baseline,
+            batch_probe_fingerprint("command -v git", &reordered)
+        );
+
+        assert_ne!(baseline, batch_probe_fingerprint("command -v cargo", &env));
+
+        let mut changed_env = env.clone();
+        changed_env.insert("HOMEBOY_TOKEN".to_string(), "def".to_string());
+        assert_ne!(
+            baseline,
+            batch_probe_fingerprint("command -v git", &changed_env)
+        );
+
+        let mut extra_env = env.clone();
+        extra_env.insert("EXTRA".to_string(), String::new());
+        assert_ne!(
+            baseline,
+            batch_probe_fingerprint("command -v git", &extra_env)
+        );
     }
 
     #[test]
