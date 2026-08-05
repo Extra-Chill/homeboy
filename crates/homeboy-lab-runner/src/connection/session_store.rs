@@ -1,5 +1,6 @@
 use super::*;
 use crate::session::RunnerConnectFailureEvidence;
+use std::time::Instant;
 
 pub(super) fn session_is_live(session: &RunnerSession) -> bool {
     session_is_live_with_timeout(session, Duration::from_secs(2))
@@ -181,16 +182,27 @@ pub(super) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
 /// tunnel without allowing historical session directories to turn status into
 /// an unbounded liveness scan.
 pub(super) fn read_session_for_status(runner_id: &str) -> Result<Option<RunnerSession>> {
+    read_session_for_status_until(
+        runner_id,
+        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+    )
+}
+
+/// Resolve the current or a peer session without allowing one runner's status
+/// observation to outlive the caller's absolute operation deadline.
+pub(super) fn read_session_for_status_until(
+    runner_id: &str,
+    deadline: Instant,
+) -> Result<Option<RunnerSession>> {
     let controller_id = controller_id();
     let session = read_session_for_controller(runner_id, &controller_id)?;
-    if session
-        .as_ref()
-        .is_some_and(|session| status_session_state(Some(session)) == RunnerSessionState::Connected)
-    {
+    if session.as_ref().is_some_and(|session| {
+        status_session_state_until(Some(session), deadline) == RunnerSessionState::Connected
+    }) {
         return Ok(session);
     }
     let directory = paths::runner_sessions_dir()?.join(runner_id);
-    match status_peer_session_in(&directory, &controller_id)? {
+    match status_peer_session_in_until(&directory, &controller_id, deadline)? {
         StatusPeerSession::One(peer) => Ok(Some(peer)),
         StatusPeerSession::None => Ok(session),
         StatusPeerSession::Ambiguous => {
@@ -223,8 +235,21 @@ const STATUS_PEER_SESSION_LIMIT: usize = 8;
 const STATUS_PEER_SESSION_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn status_peer_session_in(directory: &PathBuf, controller_id: &str) -> Result<StatusPeerSession> {
+    status_peer_session_in_until(
+        directory,
+        controller_id,
+        Instant::now() + STATUS_PEER_SESSION_TIMEOUT,
+    )
+}
+
+fn status_peer_session_in_until(
+    directory: &PathBuf,
+    controller_id: &str,
+    deadline: Instant,
+) -> Result<StatusPeerSession> {
     status_peer_session_in_with(directory, controller_id, |session| {
-        session_is_live_with_timeout(session, STATUS_PEER_SESSION_TIMEOUT)
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        !remaining.is_zero() && session_is_live_with_timeout(session, remaining)
     })
 }
 
@@ -285,6 +310,16 @@ fn status_peer_session_in_with(
 /// as remote identity and active-job probes. A failed check is disconnected,
 /// not a trigger to scan peers or reconcile a tunnel.
 pub(super) fn status_session_state(session: Option<&RunnerSession>) -> RunnerSessionState {
+    status_session_state_until(
+        session,
+        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+    )
+}
+
+pub(super) fn status_session_state_until(
+    session: Option<&RunnerSession>,
+    deadline: Instant,
+) -> RunnerSessionState {
     match session {
         Some(session)
             if session.mode == RunnerTunnelMode::Reverse
@@ -298,10 +333,10 @@ pub(super) fn status_session_state(session: Option<&RunnerSession>) -> RunnerSes
         }
         Some(session) if session.mode == RunnerTunnelMode::Reverse => RunnerSessionState::Recorded,
         Some(session)
-            if session_is_live_with_timeout(
-                session,
-                crate::readonly_probe::readonly_probe_timeout(),
-            ) =>
+            if {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                !remaining.is_zero() && session_is_live_with_timeout(session, remaining)
+            } =>
         {
             RunnerSessionState::Connected
         }

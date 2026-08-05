@@ -213,10 +213,10 @@ pub(crate) use connection::daemon_endpoint_identity;
 pub use connection::{
     close_reconnected_job_log_owner, connect, connect_reverse, connect_with_live_lease_adoption,
     connect_with_orphan_adoption, diagnostic_status, disconnect, disconnect_local_recovery,
-    persisted_status, persisted_statuses, reconcile_status, reconcile_terminal_jobs,
-    reconnect_job_log_owner, reverse_broker_artifact, reverse_broker_artifact_content,
-    reverse_broker_reconcile, runner_artifact_content, status, statuses, statuses_indexed,
-    submit_reverse_broker_job,
+    persisted_status, persisted_status_until, persisted_statuses, reconcile_status,
+    reconcile_terminal_jobs, reconnect_job_log_owner, reverse_broker_artifact,
+    reverse_broker_artifact_content, reverse_broker_reconcile, runner_artifact_content, status,
+    statuses, statuses_indexed, submit_reverse_broker_job,
 };
 pub(crate) use connection::{
     configured_runner_homeboy_build_identity, local_live_session, status_for_admission,
@@ -241,14 +241,16 @@ pub use evidence::{
 };
 pub(crate) use execution::exec_with_status_snapshot;
 pub use execution::{
-    daemon_api_get, daemon_api_post, exec, promote_runner_exec_artifact_dirs,
-    promote_runner_exec_artifacts, promote_runner_exec_summaries, promoted_output,
-    reconcile_runner_generation_after_evidence, reconcile_terminal_runner_exec_runs,
+    daemon_api_get, daemon_api_post, exec, finish_scheduled_terminal_runner_exec_recovery,
+    promote_runner_exec_artifact_dirs, promote_runner_exec_artifacts,
+    promote_runner_exec_summaries, promoted_output, reconcile_runner_generation_after_evidence,
+    record_scheduled_terminal_runner_exec_recovery_child_spawn_failure,
     record_scheduled_terminal_runner_exec_recovery_spawn_failure,
-    run_scheduled_terminal_runner_exec_recovery, runner_exec_failure_error,
-    runner_exec_structured_summary, runner_job_cancel, runner_job_cancel_for_session,
-    runner_job_cancel_projection, schedule_terminal_runner_exec_recovery, RunnerExecDiagnostics,
-    RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput,
+    run_scheduled_terminal_runner_exec_recovery, run_scheduled_terminal_runner_exec_recovery_child,
+    runner_exec_failure_error, runner_exec_structured_summary, runner_job_cancel,
+    runner_job_cancel_for_session, runner_job_cancel_projection,
+    schedule_terminal_runner_exec_recovery, RunnerExecDiagnostics, RunnerExecMode,
+    RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecRecoveryChildSchedule,
     RunnerExecStructuredSummary,
 };
 pub use execution::{RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV};
