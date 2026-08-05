@@ -453,16 +453,11 @@ pub struct WorktreeProviderListResultMapping {
     pub task_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeProviderKind {
+    #[default]
     Command,
-}
-
-impl Default for WorktreeProviderKind {
-    fn default() -> Self {
-        Self::Command
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
