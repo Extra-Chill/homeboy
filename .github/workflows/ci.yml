@@ -21,15 +21,26 @@ permissions:
   issues: write
 
 jobs:
-  required-gates-policy:
-    name: homeboy / Required Gates Policy
+  # Named for what a green tick here actually proves: the DECLARATION is intact.
+  # It used to be called "Required Gates Policy" and run `--local`, which reads
+  # as "GitHub requires these checks" while only proving "ci.yml emits these
+  # job names" — PR #11069 merged nine minutes ahead of a red `homeboy / Test`
+  # under a green tick from this job, because the live ruleset requires nothing
+  # (#11084). `--report` additionally probes the live ruleset and annotates the
+  # enforcement outcome loudly, but never fails on it: enforcement is repository
+  # state a PR cannot change, and this repository merges fast on purpose, so
+  # this stays reporting and no PR is newly blocked by it.
+  required-gates-declaration:
+    name: homeboy / Required Gates Declaration
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Validate required check contexts
-        run: bash .github/validate-required-gates.sh --local
+      - name: Validate required check contexts and report live enforcement
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/validate-required-gates.sh --report
 
   # Non-differential safety net for crate-topology changes. The `review test`
   # gate below is changed-file scoped, so a crate extraction that orphans a
