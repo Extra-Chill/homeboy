@@ -224,16 +224,27 @@ impl LabStagingRecipe {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
+        self.validate_with_source_requirement(true)
+    }
+
+    /// Validates the portable portion of a recipe after a sealed remote staging
+    /// operation has replaced the controller-local source path with its own
+    /// materialization authority.
+    pub(crate) fn validate_for_runner_staging(&self) -> Result<()> {
+        self.validate_with_source_requirement(false)
+    }
+
+    fn validate_with_source_requirement(&self, require_source_path: bool) -> Result<()> {
         if self.schema != LAB_STAGING_RECIPE_SCHEMA
             || self.run_id.trim().is_empty()
             || self.runner_id.trim().is_empty()
             || !self.command.portable
             || self.normalized_args.is_empty()
-            || self.source_path.is_none()
+            || (require_source_path && self.source_path.is_none())
         {
             return Err(Error::validation_invalid_argument(
                 "lab_staging_recipe",
-                "Lab staging requires its v1 schema, bound run and runner identities, portable argv, and a controller source path",
+                "Lab staging requires its v1 schema, bound run and runner identities, portable argv, and a controller source path when controller materialization is selected",
                 None,
                 None,
             ));

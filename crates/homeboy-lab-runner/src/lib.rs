@@ -74,6 +74,7 @@ mod generation_store;
     reason = "Staging compatibility states support optional Lab workflows."
 )]
 pub mod lab_staging_controller;
+pub mod runner_staging_operation;
 pub fn runner_generation_inventory(runner_id: &str) -> Result<Vec<RunnerDaemonGenerationStatus>> {
     let report = connection::status(runner_id)?;
     runner_generation_inventory_for_session(runner_id, report.session.as_ref())
