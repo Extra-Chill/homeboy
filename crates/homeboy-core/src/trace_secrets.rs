@@ -9,10 +9,9 @@ pub struct TraceSecretEnvStatus {
     pub source: String,
 }
 
-pub fn resolve_secret_env(
-    names: &[String],
-    project_id: Option<&str>,
-) -> Result<(Vec<(String, String)>, Vec<TraceSecretEnvStatus>)> {
+type ResolvedSecretEnv = (Vec<(String, String)>, Vec<TraceSecretEnvStatus>);
+
+pub fn resolve_secret_env(names: &[String], project_id: Option<&str>) -> Result<ResolvedSecretEnv> {
     let names = normalize_names(names);
     let mut resolved = Vec::new();
     let mut statuses = Vec::new();

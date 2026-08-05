@@ -87,12 +87,12 @@ pub fn read_source_revision_at(extension_dir: &Path) -> Option<String> {
     }
 
     // Try .git first (single-extension repos and linked extensions)
-    if let Some(rev) = git::head_sha(&extension_dir) {
+    if let Some(rev) = git::head_sha(extension_dir) {
         return Some(rev);
     }
 
     // Fall back to source metadata files (monorepo installs and staged linked installs).
-    read_source_metadata_value(&extension_dir, "revision")
+    read_source_metadata_value(extension_dir, "revision")
 }
 
 pub fn read_source_metadata_value(extension_dir: &Path, kind: &str) -> Option<String> {
