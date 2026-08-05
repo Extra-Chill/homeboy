@@ -11,6 +11,7 @@ const {
 	cliAgentTaskSpawnEnv,
 	createCliAgentTaskExecutor,
 } = require('../../lib/cli-agent-task-executor');
+const { adapterRuntimeToolRequest } = require('../../lib/runtime-tool-adapter');
 
 const PI_PROVIDER_ID = 'pi.agent-task-executor';
 const PI_PROVIDER_LABEL = 'Pi agent task executor';
@@ -96,7 +97,7 @@ const { execute: executePiAgentTask, outcome, validationFailure } = createCliAge
 	resolveCommandSpec,
 	buildArgs: (request, config, commandSpec) => commandSpec.args,
 	buildSpawn: (request, config, options) => {
-		const requestJson = JSON.stringify(request);
+		const requestJson = JSON.stringify(adapterRuntimeToolRequest(request));
 		return {
 			env: cliAgentTaskSpawnEnv(request, {
 				...options,

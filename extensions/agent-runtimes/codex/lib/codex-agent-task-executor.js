@@ -13,6 +13,7 @@ const {
 	cliAgentTaskSpawnEnv,
 	createCliAgentTaskExecutor,
 } = require('../../lib/cli-agent-task-executor');
+const { codexRuntimeToolConfigArgs } = require('../../lib/runtime-tool-adapter');
 
 const CODEX_RUNTIME_ID = 'codex';
 const CODEX_PROVIDER_ID = 'codex.agent-task-executor';
@@ -114,10 +115,11 @@ const { execute: executeCodexAgentTask, outcome, validationFailure } = createCli
 	artifactProvider: 'codex',
 	collectArtifacts: true,
 	resolveCommandSpec,
-	buildArgs: (request, config, commandSpec) => {
+	buildArgs: (request, config, commandSpec, options) => {
 		const model = config.model || request.executor?.model || request.model;
 		return [
 			...commandSpec.args,
+			...codexRuntimeToolConfigArgs(request, options.env || process.env),
 			...(model ? ['--model', model] : []),
 			request.instructions,
 		];

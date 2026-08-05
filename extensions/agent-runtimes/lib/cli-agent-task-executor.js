@@ -17,6 +17,7 @@ const {
 	normalizeAgentTaskOutcome,
 } = require('../../runtime-agent-ci/lib/agent-task-outcome-normalizer');
 const { harvestDeclaredArtifacts } = require('./declared-artifact-harvester');
+const { runtimeToolSecretEnvNames } = require('./runtime-tool-adapter');
 
 const DEFAULT_MAX_BUFFER = 10 * 1024 * 1024;
 const DEFAULT_PROCESS_ENV_ALLOWLIST = [
@@ -176,7 +177,7 @@ function createCliAgentTaskExecutor(spec) {
 		return null;
 	}
 
-	function processArtifacts(request, config, spawnResult) {
+	function processArtifacts(request, config, spawnResult, redactedEnv = secretEnv) {
 		const artifactDir = config.artifacts_path || config.artifactsPath || request.artifacts_path || process.env.HOMEBOY_AGENT_TASK_ARTIFACTS_DIR || process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACTS_DIR || '';
 		if (!artifactDir) {
 			return {};
@@ -184,7 +185,7 @@ function createCliAgentTaskExecutor(spec) {
 		const artifacts = [];
 		const evidence_refs = [];
 		for (const stream of ['stdout', 'stderr']) {
-			const content = redactSecrets(String(spawnResult[stream] || ''), secretEnv);
+			const content = redactSecrets(String(spawnResult[stream] || ''), redactedEnv);
 			if (!content) {
 				continue;
 			}
@@ -222,7 +223,7 @@ function createCliAgentTaskExecutor(spec) {
 			return outcome(request, onEmptyCommand({ request, config, commandSpec, cwd }));
 		}
 
-		const args = buildArgs(request, config, commandSpec);
+		const args = buildArgs(request, config, commandSpec, options);
 		const timeoutSeconds = timeoutSecondsFromLimits(request.limits, timeoutFallback(config));
 		const spawnExtra = buildSpawn(request, config, options);
 		const spawnResult = spawnSync(commandSpec.command, args, {
@@ -233,7 +234,7 @@ function createCliAgentTaskExecutor(spec) {
 			...(timeoutSeconds > 0 ? { timeout: timeoutSeconds * 1000 } : {}),
 		});
 
-		const processEvidence = collectArtifacts ? processArtifacts(request, config, spawnResult) : {};
+		const processEvidence = collectArtifacts ? processArtifacts(request, config, spawnResult, [...secretEnv, ...runtimeToolSecretEnvNames(request, spawnExtra.env)]) : {};
 		const declaredEvidence = harvestDeclaredArtifacts({ request, config, cwd, artifactDir: artifactDirectory(request, config) });
 		const evidence = mergeEvidence(processEvidence, declaredEvidence);
 		const context = { request, config, commandSpec, cwd, spawnResult, spawnExtra };
@@ -328,6 +329,7 @@ function cliAgentTaskSpawnEnv(request = {}, options = {}, envOptions = {}) {
 		...arrayValue(envOptions.secretEnv),
 		...arrayValue(config.secret_env),
 		...arrayValue(request.executor?.secret_env),
+		...runtimeToolSecretEnvNames(request, ambient),
 	]);
 	const env = {};
 	for (const name of names) {

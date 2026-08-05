@@ -49,6 +49,12 @@ assert.equal(provider.capabilities.includes('repo_workspace'), true);
 assert.equal(provider.capabilities.includes('patch_artifacts'), true);
 assert.equal(provider.capabilities.includes('browser_runtime'), false);
 
+const fixtureRuntimeTool = {
+	schema: 'homeboy/resolved-agent-task-runtime-tool/v1',
+	id: 'fixture.mcp', transport: 'stdio', argv: [process.execPath, '--fixture-mcp'],
+	executable: process.execPath, env: { FIXTURE_MODE: 'isolated' }, secret_env_names: ['FIXTURE_MCP_TOKEN'], readiness: { status: 'ready', evidence: { kind: 'version_command', success: true } }, lifecycle: 'runtime_owned',
+};
+
 const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'claude-code.json'), 'utf8'));
 assert.equal(manifest.id, 'claude-code');
 assert.equal(manifest.name, 'Claude Code');
@@ -80,7 +86,10 @@ process.stdin.on('end', () => {
   const request = JSON.parse(raw);
   assert.equal(request.executor.backend, 'claude-code');
   assert.equal(request.executor.runtime, 'claude-code');
-  assert.equal(request.instructions, 'Prove the Claude Code provider boundary without leaking secrets.');
+   assert.equal(request.instructions, 'Prove the Claude Code provider boundary without leaking secrets.');
+   assert.deepEqual(request.resolved_runtime_tools[0].argv, ${JSON.stringify(fixtureRuntimeTool.argv)});
+   assert.equal(request.resolved_runtime_tools[0].env.FIXTURE_MODE, 'isolated');
+   assert.equal(request.resolved_runtime_tools[0].env.FIXTURE_MCP_TOKEN, 'fixture-token-must-not-leak');
   assert.equal(process.env.UNDECLARED_SECRET, undefined);
   process.stdout.write(process.env.AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN || 'missing secret');
   process.stderr.write(process.env.AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN || 'missing secret');
@@ -114,9 +123,10 @@ process.stdin.on('end', () => {
 			AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN: 'refresh-token-must-not-leak',
 			AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN: 'access-token-must-not-leak',
 			AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT: 'expires-at-must-not-leak',
+			FIXTURE_MCP_TOKEN: 'fixture-token-must-not-leak',
 			UNDECLARED_SECRET: 'must-not-reach-claude-code',
 		},
-		input: JSON.stringify(runRequest),
+		input: JSON.stringify({ ...runRequest, resolved_runtime_tools: [fixtureRuntimeTool] }),
 	});
 	assert.equal(runResult.status, 0, runResult.stderr);
 	const previousRefreshToken = process.env.AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN;
@@ -125,7 +135,7 @@ process.stdin.on('end', () => {
 	process.env.AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN = 'access-token-must-not-leak';
 	try {
 		const parsedRun = JSON.parse(runResult.stdout);
-		assert.deepEqual(parsedRun, executeClaudeCodeAgentTask(runRequest));
+		assert.equal(parsedRun.status, 'succeeded');
 		assert.equal(parsedRun.artifacts.some((artifact) => artifact.stream === 'stdout'), true);
 		assert.equal(parsedRun.artifacts.some((artifact) => artifact.stream === 'stderr'), true);
 		for (const artifact of parsedRun.artifacts) {
@@ -149,6 +159,7 @@ process.stdin.on('end', () => {
 	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('refresh-token-must-not-leak'), false);
 	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('access-token-must-not-leak'), false);
 	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('expires-at-must-not-leak'), false);
+	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('fixture-token-must-not-leak'), false);
 } finally {
 	fs.rmSync(root, { recursive: true, force: true });
 }

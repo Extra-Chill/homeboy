@@ -21,6 +21,7 @@ const { harvestDeclaredArtifacts } = require('../../lib/declared-artifact-harves
 const {
 	createOpenCodeProgressAdapter,
 } = require('./opencode-progress-events');
+const { applyOpenCodeRuntimeTools } = require('../../lib/runtime-tool-adapter');
 
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -264,11 +265,11 @@ function opencodeSpawnEnv(request = {}, options = {}) {
 		allowlist: OPENCODE_PROCESS_ENV_ALLOWLIST,
 		secretEnv: OPENCODE_SECRET_ENV,
 	});
-	const configContent = opencodeConfigContentForRequest(request, env.OPENCODE_CONFIG_CONTENT);
+	const configContent = opencodeConfigContentForRequest(request, env.OPENCODE_CONFIG_CONTENT, env);
 	return configContent ? { ...env, OPENCODE_CONFIG_CONTENT: configContent } : env;
 }
 
-function opencodeConfigContentForRequest(request = {}, existingContent = '') {
+function opencodeConfigContentForRequest(request = {}, existingContent = '', env = process.env) {
 	const config = request.executor?.config || {};
 	const model = config.model || request.executor?.model || request.model;
 	const smallModel = config.small_model || config.smallModel;
@@ -321,7 +322,7 @@ function opencodeConfigContentForRequest(request = {}, existingContent = '') {
 		};
 	}
 
-	return JSON.stringify(content);
+	return JSON.stringify(applyOpenCodeRuntimeTools(content, request, env));
 }
 
 function opencodeExternalDirectoryPatterns(request = {}, config = {}) {

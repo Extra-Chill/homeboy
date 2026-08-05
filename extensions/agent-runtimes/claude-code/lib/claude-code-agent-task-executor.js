@@ -13,6 +13,7 @@ const {
 	cliAgentTaskSpawnEnv,
 	createCliAgentTaskExecutor,
 } = require('../../lib/cli-agent-task-executor');
+const { adapterRuntimeToolRequest } = require('../../lib/runtime-tool-adapter');
 
 const CLAUDE_CODE_PROVIDER_ID = 'claude-code.agent-task-executor';
 const CLAUDE_CODE_PROVIDER_LABEL = 'Claude Code agent task executor';
@@ -147,7 +148,7 @@ const { execute: executeClaudeCodeAgentTask, outcome, validationFailure } = crea
 			allowlist: ['HOMEBOY_CLAUDE_CODE_AGENT_TASK_COMMAND', 'HOMEBOY_CLAUDE_CODE_AGENT_TASK_COMMAND_ARGS'],
 			secretEnv: CLAUDE_CODE_SECRET_ENV,
 		}),
-		input: JSON.stringify(request),
+		input: JSON.stringify(adapterRuntimeToolRequest(request)),
 	}),
 	messages: {
 		invalidRequest: { code: 'agent_task.invalid_claude_code_request', summary: 'Claude Code request validation failed.' },

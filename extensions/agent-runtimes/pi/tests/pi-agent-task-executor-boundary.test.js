@@ -20,6 +20,11 @@ const {
 } = require('..');
 
 const runtimeRoot = path.join(__dirname, '..');
+const fixtureRuntimeTool = {
+	schema: 'homeboy/resolved-agent-task-runtime-tool/v1',
+	id: 'fixture.mcp', transport: 'stdio', argv: [process.execPath, '--fixture-mcp'],
+	executable: process.execPath, env: { FIXTURE_MODE: 'isolated' }, readiness: { status: 'ready', evidence: { kind: 'version_command', success: true } }, lifecycle: 'runtime_owned',
+};
 
 const provider = providerContract();
 assert.equal(provider.id, 'pi.agent-task-executor');
@@ -89,7 +94,9 @@ process.stdin.on('end', () => {
   const stdinRequest = JSON.parse(raw);
   const envRequest = JSON.parse(process.env.HOMEBOY_AGENT_TASK_REQUEST);
   assert.equal(stdinRequest.task_id, 'pi-real-executor');
-  assert.equal(envRequest.instructions, 'Validate the Pi provider boundary through a configured command.');
+   assert.equal(envRequest.instructions, 'Validate the Pi provider boundary through a configured command.');
+   assert.deepEqual(stdinRequest.resolved_runtime_tools[0].argv, ${JSON.stringify(fixtureRuntimeTool.argv)});
+   assert.equal(envRequest.resolved_runtime_tools[0].env.FIXTURE_MODE, 'isolated');
   assert.equal(process.env.UNDECLARED_SECRET, undefined);
   process.exit(0);
 });
@@ -132,10 +139,10 @@ process.stdin.on('end', () => process.exit(0));
 	const runResult = spawnSync(process.execPath, [scriptPath], {
 		encoding: 'utf8',
 		env: { ...process.env, UNDECLARED_SECRET: 'must-not-reach-pi' },
-		input: JSON.stringify(configuredRequest),
+		input: JSON.stringify({ ...configuredRequest, resolved_runtime_tools: [fixtureRuntimeTool] }),
 	});
 	assert.equal(runResult.status, 0, runResult.stderr);
-	assert.deepEqual(JSON.parse(runResult.stdout), executePiAgentTask(configuredRequest));
+	assert.deepEqual(JSON.parse(runResult.stdout), executePiAgentTask({ ...configuredRequest, resolved_runtime_tools: [fixtureRuntimeTool] }));
 	assert.equal(JSON.parse(runResult.stdout).status, 'no_op');
 	assert.equal(JSON.parse(runResult.stdout).metadata.exit_code, 0);
 

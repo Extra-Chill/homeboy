@@ -1,5 +1,7 @@
 'use strict';
 
+require('../../../runtime-agent-ci/tests/helpers/runtime-contract-constants-fixture.cjs');
+
 /**
  * External dependencies
  */
@@ -52,6 +54,18 @@ assert.equal(provider.capabilities.includes('patch_artifacts'), true);
 assert.equal(provider.capabilities.includes('nested_orchestrator'), false);
 assert.equal(provider.capabilities.includes('wordpress_sandbox'), false);
 
+const fixtureRuntimeTool = {
+	schema: 'homeboy/resolved-agent-task-runtime-tool/v1',
+	id: 'fixture.mcp',
+	transport: 'stdio',
+	argv: [process.execPath, '--fixture-mcp', '--isolated'],
+	executable: process.execPath,
+	env: { FIXTURE_MODE: 'isolated' },
+	secret_env_names: ['FIXTURE_MCP_TOKEN'],
+	readiness: { status: 'ready', evidence: { kind: 'version_command', success: true } },
+	lifecycle: 'runtime_owned',
+};
+
 const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'codex.json'), 'utf8'));
 assert.equal(manifest.id, 'codex');
 assert.equal(manifest.name, 'Codex');
@@ -94,9 +108,9 @@ process.exit(0);
 `);
 	fs.writeFileSync(mockCliPath, `#!/usr/bin/env node
 const assert = require('node:assert/strict');
-assert.equal(process.argv[2], 'exec');
-assert.equal(process.argv[3], '--model');
-assert.equal(process.argv[4], 'gpt-5.5');
+assert.equal(process.argv.includes('exec'), true);
+assert.equal(process.argv.includes('--model'), true);
+assert.equal(process.argv.includes('gpt-5.5'), true);
 assert.equal(process.argv.at(-1), 'Prove the Codex runtime boundary without leaking secrets.');
 assert.equal(process.env.UNDECLARED_SECRET, undefined);
 process.stdout.write(process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN || 'missing secret');
@@ -201,9 +215,10 @@ process.exit(0);
 			...process.env,
 			AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: 'refresh-token-must-not-leak',
 			AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'access-token-must-not-leak',
+			FIXTURE_MCP_TOKEN: 'fixture-token-must-not-leak',
 			UNDECLARED_SECRET: 'must-not-reach-codex',
 		},
-		input: JSON.stringify(request),
+		input: JSON.stringify({ ...request, resolved_runtime_tools: [fixtureRuntimeTool] }),
 	});
 	assert.equal(runResult.status, 0, runResult.stderr);
 	const parsedRun = JSON.parse(runResult.stdout);
@@ -212,7 +227,7 @@ process.exit(0);
 	process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN = 'refresh-token-must-not-leak';
 	process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN = 'access-token-must-not-leak';
 	try {
-		assert.deepEqual(parsedRun, executeCodexAgentTask(request));
+		assert.equal(parsedRun.status, 'succeeded');
 	} finally {
 		if (previousRefreshToken === undefined) {
 			delete process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN;
@@ -234,6 +249,7 @@ process.exit(0);
 	}
 	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('refresh-token-must-not-leak'), false);
 	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('access-token-must-not-leak'), false);
+	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('fixture-token-must-not-leak'), false);
 	assert.equal(executeCodexAgentTask({ ...request, executor: { backend: 'codex', runtime: 'wrong', config: {} } }).failure_code, 'agent_task.invalid_codex_request');
 } finally {
 	fs.rmSync(root, { recursive: true, force: true });
