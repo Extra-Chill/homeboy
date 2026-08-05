@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.7] - 2026-08-05
+
+### Fixed
+- stream shard aggregation payloads
+
 ## [2.11.6] - 2026-08-05
 
 ### Fixed
