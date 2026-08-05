@@ -362,6 +362,10 @@ impl SshClient {
         let control_path = args
             .windows(2)
             .find_map(|pair| (pair[0] == "-S").then(|| pair[1].clone()))
+            .or_else(|| {
+                args.iter()
+                    .find_map(|arg| arg.strip_prefix("ControlPath=").map(str::to_string))
+            })
             .unwrap_or_default();
         let mut command = Command::new(program);
         command

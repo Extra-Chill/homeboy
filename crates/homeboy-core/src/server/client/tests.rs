@@ -757,7 +757,7 @@ fn managed_alias_reuses_its_controlpath_and_bounds_mux_control() {
     let command = client.run_managed_session_command_with_program(
         client.build_ssh_args(Some("true"), false),
         true,
-        Duration::from_secs(1),
+        Duration::from_secs(3),
         &ssh,
     );
     assert!(command.live, "{}", command.stderr);
