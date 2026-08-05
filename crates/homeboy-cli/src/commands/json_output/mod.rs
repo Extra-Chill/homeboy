@@ -298,7 +298,7 @@ fn dispatch(command: Commands, spec: &CommandSpec) -> (homeboy::core::Result<Val
         crate::command_contract::CommandOutputFileMode::None,
     ) {
         Ok(adapter) => return adapter.run(),
-        Err(command) => command,
+        Err(command) => *command,
     };
 
     match spec.json_family {
