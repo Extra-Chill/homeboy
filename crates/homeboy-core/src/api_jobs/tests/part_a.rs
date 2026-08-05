@@ -404,12 +404,7 @@ fn capacity_queued_agent_task_spawns_once_after_claiming_an_idle_slot() {
     let (release_first_tx, release_first_rx) = mpsc::channel();
     let first_starts = Arc::clone(&starts);
     let first = store.run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
-        "runner.exec",
-        None,
-        None,
-        None,
-        local_runner(),
-        None,
+        super::store::LocalRunnerJobRequest { operation: "runner.exec".to_string(), source_snapshot: None, metadata: None, path_materialization_plan: None, local_runner: Some(local_runner()), admission_idempotency_key: None },
         1,
         move |job| {
             job.start_with_reserved_child_identity(
@@ -432,12 +427,7 @@ fn capacity_queued_agent_task_spawns_once_after_claiming_an_idle_slot() {
     let (second_started_tx, second_started_rx) = mpsc::channel();
     let second_starts = Arc::clone(&starts);
     let second = store.run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
-        "runner.exec",
-        None,
-        None,
-        None,
-        local_runner(),
-        None,
+        super::store::LocalRunnerJobRequest { operation: "runner.exec".to_string(), source_snapshot: None, metadata: None, path_materialization_plan: None, local_runner: Some(local_runner()), admission_idempotency_key: None },
         1,
         move |job| {
             job.start_with_reserved_child_identity(
@@ -477,19 +467,14 @@ fn capacity_queued_agent_task_spawns_once_after_claiming_an_idle_slot() {
 fn capacity_queued_agent_task_persists_typed_failure_before_child_identity() {
     let store = JobStore::default();
     let runner = store.run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
-        "runner.exec",
-        None,
-        None,
-        None,
-        super::store::LocalRunnerJob {
+        super::store::LocalRunnerJobRequest { operation: "runner.exec".to_string(), source_snapshot: None, metadata: None, path_materialization_plan: None, local_runner: Some(super::store::LocalRunnerJob {
             runner_id: "homeboy-lab".to_string(),
             command: vec!["homeboy".to_string(), "agent-task".to_string()],
             cwd: Some("/runner/worktree".to_string()),
             lifecycle: None,
             workspace_claim_binding: None,
             workspace_owner_lease: None,
-        },
-        None,
+        }), admission_idempotency_key: None },
         1,
         move |_job| {
             Err::<serde_json::Value, _>(Error::internal_io(
@@ -809,12 +794,7 @@ fn capacity_queued_local_runner_enqueue_dedupes_on_durable_run_id() {
 
     let first = store
         .run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
-            "runner.exec",
-            None,
-            None,
-            None,
-            local_runner("dup-run"),
-            None,
+            super::store::LocalRunnerJobRequest { operation: "runner.exec".to_string(), source_snapshot: None, metadata: None, path_materialization_plan: None, local_runner: Some(local_runner("dup-run")), admission_idempotency_key: None },
             usize::MAX,
             {
                 let wait = wait;
@@ -828,12 +808,7 @@ fn capacity_queued_local_runner_enqueue_dedupes_on_durable_run_id() {
     // Resubmit the same durable run id while the first job is still active.
     let second = store
         .run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
-            "runner.exec",
-            None,
-            None,
-            None,
-            local_runner("dup-run"),
-            None,
+            super::store::LocalRunnerJobRequest { operation: "runner.exec".to_string(), source_snapshot: None, metadata: None, path_materialization_plan: None, local_runner: Some(local_runner("dup-run")), admission_idempotency_key: None },
             usize::MAX,
             move |_job| Ok(serde_json::json!({})),
         );
@@ -856,12 +831,7 @@ fn capacity_queued_local_runner_enqueue_dedupes_on_durable_run_id() {
     // A different durable run id enqueues a distinct job.
     let other = store
         .run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
-            "runner.exec",
-            None,
-            None,
-            None,
-            local_runner("other-run"),
-            None,
+            super::store::LocalRunnerJobRequest { operation: "runner.exec".to_string(), source_snapshot: None, metadata: None, path_materialization_plan: None, local_runner: Some(local_runner("other-run")), admission_idempotency_key: None },
             usize::MAX,
             move |_job| Ok(serde_json::json!({})),
         );
