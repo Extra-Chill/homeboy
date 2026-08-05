@@ -1467,8 +1467,8 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     // must be reported as disconnected rather than triggering tunnel recovery.
     // Recovery can wait on shared control-plane state and may open a tunnel, so
     // it belongs to explicit connect/admission operations instead.
-    let session = read_session_or_live_peer(runner_id)?;
-    let state = session_state(session.as_ref());
+    let session = read_session_for_status(runner_id)?;
+    let state = status_session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
     let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected)?;
     let local_daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?;
@@ -1611,8 +1611,8 @@ pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
 /// probing a daemon, or reconciling generation state.
 pub fn persisted_status(runner_id: &str) -> Result<RunnerStatusReport> {
     let session_path = session_path(runner_id)?;
-    let session = read_session_or_live_peer(runner_id)?;
-    let state = session_state(session.as_ref());
+    let session = read_session_for_status(runner_id)?;
+    let state = status_session_state(session.as_ref());
     Ok(RunnerStatusReport {
         runner_id: runner_id.to_string(),
         connected: state == RunnerSessionState::Connected,
@@ -2211,7 +2211,7 @@ fn runner_jobs(
     session: &RunnerSession,
 ) -> Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> {
     let client = Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(crate::readonly_probe::readonly_probe_timeout())
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build active job client: {err}")))?;
     let (body, source) = if let Some(local_url) = session.local_url.as_deref() {
@@ -3163,8 +3163,8 @@ pub fn statuses_indexed() -> Result<Vec<RunnerActiveJobsSnapshot>> {
     for runner in super::list()? {
         // Indexed inspection is read-only: reconnecting here can start SSH work
         // and makes controller discovery depend on the unhealthy runner.
-        let session = read_session_or_live_peer(&runner.id)?;
-        let connected = session_state(session.as_ref()) == RunnerSessionState::Connected;
+        let session = read_session_for_status(&runner.id)?;
+        let connected = status_session_state(session.as_ref()) == RunnerSessionState::Connected;
         let (active_jobs, active_job_state, active_job_error) = if connected {
             match session.as_ref() {
                 Some(session) => match runner_jobs(&runner.id, session) {
@@ -3220,6 +3220,7 @@ mod status_read_purity_tests {
             "generation_store::reconcile_admission_session",
             "write_session(",
             "adopt",
+            "read_session_or_live_peer",
         ] {
             assert!(
                 !status.contains(mutation),

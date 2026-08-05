@@ -176,6 +176,42 @@ pub(super) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
     read_session_for_controller(runner_id, &controller_id())
 }
 
+/// Status is a projection of this controller's durable session. Peer discovery
+/// performs one liveness probe per historical controller record, so it belongs
+/// to handoff/admission paths rather than a read-only status command.
+pub(super) fn read_session_for_status(runner_id: &str) -> Result<Option<RunnerSession>> {
+    read_session(runner_id)
+}
+
+/// Keep the local tunnel observation inside the same explicit read-only budget
+/// as remote identity and active-job probes. A failed check is disconnected,
+/// not a trigger to scan peers or reconcile a tunnel.
+pub(super) fn status_session_state(session: Option<&RunnerSession>) -> RunnerSessionState {
+    match session {
+        Some(session)
+            if session.mode == RunnerTunnelMode::Reverse
+                && session.role == RunnerSessionRole::Controller =>
+        {
+            if reverse_controller_session_is_live(session) {
+                RunnerSessionState::Connected
+            } else {
+                RunnerSessionState::Recorded
+            }
+        }
+        Some(session) if session.mode == RunnerTunnelMode::Reverse => RunnerSessionState::Recorded,
+        Some(session)
+            if session_is_live_with_timeout(
+                session,
+                crate::readonly_probe::readonly_probe_timeout(),
+            ) =>
+        {
+            RunnerSessionState::Connected
+        }
+        Some(_) => RunnerSessionState::Disconnected,
+        None => RunnerSessionState::Disconnected,
+    }
+}
+
 /// Resolve this controller's session, or borrow a peer's live direct-SSH
 /// tunnel for an in-process handoff. Borrowing never writes a controller
 /// record, so only the original controller may later tear down that tunnel.

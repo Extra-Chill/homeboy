@@ -1269,7 +1269,14 @@ pub(super) fn probe_remote_daemon_endpoint(client: &SshClient, status: &mut Remo
         "curl --fail --silent --show-error --max-time 2 {}/version",
         shell::quote_arg(&format!("http://{}", daemon.address))
     );
-    let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
+    let timeout = crate::readonly_probe::readonly_probe_timeout();
+    let output = client.execute_with_timeout(&command, timeout);
+    crate::readonly_probe::record_probe_outcome(
+        "runner_remote_endpoint_identity",
+        None,
+        timeout,
+        &output,
+    );
     if !output.success {
         status.endpoint_probe_error = Some(command_failure_message(
             "remote daemon endpoint identity probe failed",
