@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.32.7] - 2026-08-05
+
+### Fixed
+- inventory test-profile artifacts
+
 ## [1.32.6] - 2026-08-05
 
 ### Fixed
