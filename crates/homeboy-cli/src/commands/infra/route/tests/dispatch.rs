@@ -1014,7 +1014,7 @@ fn lab_job_overrides_reject_invalid_env_shapes() {
 #[test]
 fn deferred_plan_persists_public_env_and_runner_secret_identity_without_plaintext() {
     crate::test_support::with_isolated_home(|_| {
-        let input = homeboy::core::deferred_workload::DeferredWorkloadInput {
+        let input = homeboy::deferred_workload::DeferredWorkloadInput {
             command_label: "review test".to_string(),
             args: vec![
                 "homeboy".to_string(),
@@ -1028,7 +1028,7 @@ fn deferred_plan_persists_public_env_and_runner_secret_identity_without_plaintex
             ci_alternative: "CI".to_string(),
             resolved_contract: serde_json::json!({}),
             resolved_resources: serde_json::json!({}),
-            test_requirements: homeboy::core::deferred_workload::DeferredWorkloadRequirements {
+            test_requirements: homeboy::deferred_workload::DeferredWorkloadRequirements {
                 required_runtimes: ["homeboy".to_string()].into(),
                 required_capabilities: Default::default(),
             },
@@ -1042,7 +1042,7 @@ fn deferred_plan_persists_public_env_and_runner_secret_identity_without_plaintex
                 workspace_root: None,
             },
         };
-        let deferred = homeboy::core::deferred_workload::defer(input).expect("defer fixture");
+        let deferred = homeboy::deferred_workload::defer(input).expect("defer fixture");
         assert_eq!(deferred.job_overrides.env["DB_SERVICE_HOST"], "db.fixture");
         assert_eq!(deferred.job_overrides.env["DB_SERVICE_PORT"], "3306");
         assert!(!deferred
@@ -1068,7 +1068,7 @@ fn deferred_plan_persists_public_env_and_runner_secret_identity_without_plaintex
 
 #[test]
 fn deferred_status_redacts_all_settings_arguments() {
-    let mut record = homeboy::core::deferred_workload::DeferredWorkload {
+    let mut record = homeboy::deferred_workload::DeferredWorkload {
         id: "deferred-settings".to_string(),
         fingerprint: "fixture".to_string(),
         command_label: "review test".to_string(),
@@ -1087,12 +1087,12 @@ fn deferred_status_redacts_all_settings_arguments() {
         ci_alternative: "CI".to_string(),
         resolved_contract: serde_json::json!({}),
         resolved_resources: serde_json::json!({}),
-        test_requirements: homeboy::core::deferred_workload::DeferredWorkloadRequirements {
+        test_requirements: homeboy::deferred_workload::DeferredWorkloadRequirements {
             required_runtimes: ["homeboy".to_string()].into(),
             required_capabilities: Default::default(),
         },
         job_overrides: Default::default(),
-        state: homeboy::core::deferred_workload::DeferredWorkloadState::Deferred,
+        state: homeboy::deferred_workload::DeferredWorkloadState::Deferred,
         created_at_ms: 0,
         updated_at_ms: 0,
         runner_id: None,
@@ -1151,7 +1151,7 @@ fn manifest_resolved_portable_db_service_warm_defers_and_dispatches_secret_ident
         assert_eq!(overrides.env["DB_SERVICE_HOST"], "db.fixture");
         assert_eq!(overrides.env["DB_SERVICE_PORT"], "3306");
         assert_eq!(overrides.secret_env_names, ["DB_SERVICE_PASSWORD"]);
-        let deferred = homeboy::core::deferred_workload::defer(
+        let deferred = homeboy::deferred_workload::defer(
             deferred_workload_input(
                 &cli,
                 &[
@@ -1197,8 +1197,8 @@ fn manifest_resolved_portable_db_service_warm_defers_and_dispatches_secret_ident
         )
         .expect("compatible runner dispatch");
         assert_eq!(
-            homeboy::core::deferred_workload::records().expect("records")[0].state,
-            homeboy::core::deferred_workload::DeferredWorkloadState::Dispatched
+            homeboy::deferred_workload::records().expect("records")[0].state,
+            homeboy::deferred_workload::DeferredWorkloadState::Dispatched
         );
     });
 }

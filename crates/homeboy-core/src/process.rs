@@ -431,7 +431,7 @@ pub fn pid_has_environment_value(pid: u32, key: &str, value: &str) -> Result<boo
 /// Prove that a process owns a persisted startup token before it is signaled.
 /// Linux reads the authoritative environment; other Unix platforms inspect the
 /// explicit `--startup-token` daemon argument with `ps`.
-pub(crate) fn pid_has_ownership_token(pid: u32, key: &str, value: &str) -> Result<bool> {
+pub fn pid_has_ownership_token(pid: u32, key: &str, value: &str) -> Result<bool> {
     #[cfg(target_os = "linux")]
     {
         return pid_has_environment_value(pid, key, value);

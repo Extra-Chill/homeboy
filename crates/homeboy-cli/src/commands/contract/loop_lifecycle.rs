@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::artifact_contract::ArtifactContract;
+use homeboy_core::artifact_contract::ArtifactContract;
 
 pub const LOOP_RUN_SCHEMA: &str = "homeboy/loop-run/v1";
 pub const LOOP_ITERATION_SCHEMA: &str = "homeboy/loop-iteration/v1";

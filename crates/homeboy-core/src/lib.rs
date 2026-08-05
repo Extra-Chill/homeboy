@@ -91,7 +91,6 @@ pub use homeboy_lifecycle_contract::cook_status;
     reason = "Daemon recovery helpers are invoked by lifecycle paths."
 )]
 pub mod daemon;
-pub mod deferred_workload;
 pub mod deps;
 pub mod engine;
 pub use homeboy_lab_contract::env_materialization_plan;
@@ -135,9 +134,7 @@ pub mod keychain;
 pub mod lab_offload;
 pub mod lab_routing;
 pub mod lab_workspace_provenance;
-pub mod operation_record;
 pub use homeboy_lifecycle_contract::lifecycle;
-pub mod loop_lifecycle;
 pub mod markdown;
 pub use homeboy_lab_contract::materialization_currency;
 pub mod matrix_artifact_summary;

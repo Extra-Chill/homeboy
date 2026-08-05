@@ -1,7 +1,7 @@
 //! Controller-owned durable deferral for portable workloads that have no runner yet.
 
-use crate::error::{Error, Result};
 use fs4::fs_std::FileExt;
+use homeboy_core::error::{Error, Result};
 use homeboy_engine_primitives::content_hash::sha256_hex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -27,7 +27,7 @@ pub struct DeferredWorkload {
     pub resolved_resources: serde_json::Value,
     #[serde(default)]
     pub test_requirements: DeferredWorkloadRequirements,
-    pub job_overrides: crate::lab_offload::LabJobOverrides,
+    pub job_overrides: homeboy_core::lab_offload::LabJobOverrides,
     pub state: DeferredWorkloadState,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
@@ -57,7 +57,7 @@ pub struct DeferredWorkloadInput {
     pub resolved_contract: serde_json::Value,
     pub resolved_resources: serde_json::Value,
     pub test_requirements: DeferredWorkloadRequirements,
-    pub job_overrides: crate::lab_offload::LabJobOverrides,
+    pub job_overrides: homeboy_core::lab_offload::LabJobOverrides,
 }
 
 /// Exact runner admission requirements persisted with a deferred workload.
@@ -303,7 +303,7 @@ pub fn records() -> Result<Vec<DeferredWorkload>> {
 }
 
 pub fn try_acquire_worker_lock() -> Result<Option<DeferredWorkloadWorkerLock>> {
-    let root = crate::paths::homeboy()?;
+    let root = homeboy_core::paths::homeboy()?;
     fs::create_dir_all(&root).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -339,7 +339,7 @@ pub fn try_acquire_worker_lock() -> Result<Option<DeferredWorkloadWorkerLock>> {
 }
 
 pub fn acquire_worker_start_lock() -> Result<DeferredWorkloadWorkerStartLock> {
-    let root = crate::paths::homeboy()?;
+    let root = homeboy_core::paths::homeboy()?;
     fs::create_dir_all(&root).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -396,24 +396,28 @@ pub fn worker_is_live(status: &DeferredWorkloadWorkerStatus) -> bool {
     }
     worker_identity_is_live(
         status,
-        crate::process::process_identity_state,
+        homeboy_core::process::process_identity_state,
         |pid, token| {
-            crate::process::pid_has_ownership_token(pid, "HOMEBOY_DEFERRED_WORKLOAD_OWNER", token)
-                .unwrap_or(false)
+            homeboy_core::process::pid_has_ownership_token(
+                pid,
+                "HOMEBOY_DEFERRED_WORKLOAD_OWNER",
+                token,
+            )
+            .unwrap_or(false)
         },
     )
 }
 
 fn worker_identity_is_live(
     status: &DeferredWorkloadWorkerStatus,
-    inspect_process: impl FnOnce(u32, Option<u64>) -> crate::process::ProcessIdentityState,
+    inspect_process: impl FnOnce(u32, Option<u64>) -> homeboy_core::process::ProcessIdentityState,
     owns_token: impl FnOnce(u32, &str) -> bool,
 ) -> bool {
     if cfg!(target_os = "linux") && status.linux_starttime_ticks.is_none() {
         return false;
     }
     inspect_process(status.pid, status.linux_starttime_ticks)
-        == crate::process::ProcessIdentityState::Live
+        == homeboy_core::process::ProcessIdentityState::Live
         && owns_token(status.pid, &status.owner_token)
 }
 
@@ -427,9 +431,11 @@ pub fn write_worker_status(
         schema: "homeboy/deferred-workload-worker-status/v1".to_string(),
         pid: std::process::id(),
         owner_token: owner_token.to_string(),
-        linux_starttime_ticks: crate::process::linux_process_starttime_ticks(std::process::id())
-            .ok()
-            .flatten(),
+        linux_starttime_ticks: homeboy_core::process::linux_process_starttime_ticks(
+            std::process::id(),
+        )
+        .ok()
+        .flatten(),
         state: state.to_string(),
         updated_at_ms: now_ms(),
         detail: detail.into(),
@@ -478,7 +484,7 @@ fn fingerprint(input: &DeferredWorkloadInput) -> Result<String> {
 }
 
 fn store_path() -> Result<PathBuf> {
-    Ok(crate::paths::homeboy()?.join("deferred-workloads.json"))
+    Ok(homeboy_core::paths::homeboy()?.join("deferred-workloads.json"))
 }
 
 fn update<T>(mutate: impl FnOnce(&mut Vec<DeferredWorkload>) -> Result<T>) -> Result<T> {
@@ -625,13 +631,13 @@ mod tests {
                 required_runtimes: ["homeboy".to_string()].into(),
                 required_capabilities: ["review test".to_string()].into(),
             },
-            job_overrides: crate::lab_offload::LabJobOverrides::default(),
+            job_overrides: homeboy_core::lab_offload::LabJobOverrides::default(),
         }
     }
 
     #[test]
     fn deferred_workload_is_idempotent_and_survives_restart_before_claim() {
-        crate::test_support::with_isolated_home(|_| {
+        homeboy_core::test_support::with_isolated_home(|_| {
             let first = defer(input()).expect("defer workload");
             let replay = defer(input()).expect("replay deferred workload");
             assert_eq!(first.id, replay.id);
@@ -650,7 +656,7 @@ mod tests {
 
     #[test]
     fn reading_an_absent_store_does_not_create_runtime_state() {
-        crate::test_support::with_isolated_home(|_| {
+        homeboy_core::test_support::with_isolated_home(|_| {
             let path = store_path().expect("store path");
 
             assert!(records().expect("read absent store").is_empty());
@@ -664,7 +670,7 @@ mod tests {
 
     #[test]
     fn terminalized_workload_does_not_reappear_as_a_ghost() {
-        crate::test_support::with_isolated_home(|_| {
+        homeboy_core::test_support::with_isolated_home(|_| {
             let deferred = defer(input()).expect("defer workload");
             let claimed = claim(&input(), "warm-lab", "owner")
                 .expect("claim workload")
@@ -684,7 +690,7 @@ mod tests {
 
     #[test]
     fn expired_claim_is_reclaimed_after_a_post_claim_crash() {
-        crate::test_support::with_isolated_home(|_| {
+        homeboy_core::test_support::with_isolated_home(|_| {
             defer(input()).expect("defer workload");
             let claimed = claim(&input(), "first-lab", "crashed-owner")
                 .expect("claim workload")
@@ -709,7 +715,7 @@ mod tests {
 
     #[test]
     fn next_claim_heartbeats_and_publishes_durable_worker_status() {
-        crate::test_support::with_isolated_home(|_| {
+        homeboy_core::test_support::with_isolated_home(|_| {
             let deferred = defer(input()).expect("defer workload");
             let claimed = claim_next("ready-runner", "worker-a")
                 .expect("claim next")
@@ -732,7 +738,7 @@ mod tests {
 
     #[test]
     fn matching_claim_skips_a_live_claimed_head_for_a_later_deferred_record() {
-        crate::test_support::with_isolated_home(|_| {
+        homeboy_core::test_support::with_isolated_home(|_| {
             let first = defer(input()).expect("first workload");
             let mut later_input = input();
             later_input.args.push("later".to_string());
@@ -765,14 +771,14 @@ mod tests {
 
         assert!(!worker_identity_is_live(
             &status,
-            |_, _| crate::process::ProcessIdentityState::IdentityMismatch,
+            |_, _| homeboy_core::process::ProcessIdentityState::IdentityMismatch,
             |_, _| true,
         ));
     }
 
     #[test]
     fn worker_lock_survives_replacement_of_the_legacy_adjacent_lock_file() {
-        crate::test_support::with_isolated_home(|_| {
+        homeboy_core::test_support::with_isolated_home(|_| {
             let owner = try_acquire_worker_lock()
                 .expect("acquire worker lock")
                 .expect("first worker owns lock");
@@ -874,7 +880,7 @@ mod tests {
 
     #[test]
     fn corrupt_store_fails_closed_without_resetting_records() {
-        crate::test_support::with_isolated_home(|_| {
+        homeboy_core::test_support::with_isolated_home(|_| {
             let path = store_path().expect("store path");
             std::fs::create_dir_all(path.parent().expect("store parent")).expect("create parent");
             std::fs::write(&path, b"not-json").expect("write corrupt store");
@@ -888,7 +894,7 @@ mod tests {
 
     #[test]
     fn refuses_inline_values_for_runner_secret_identities() {
-        crate::test_support::with_isolated_home(|_| {
+        homeboy_core::test_support::with_isolated_home(|_| {
             let mut input = input();
             input.job_overrides.env.insert(
                 "DB_SERVICE_PASSWORD".to_string(),
