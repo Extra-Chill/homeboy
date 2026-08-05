@@ -26,7 +26,8 @@ pub struct ProjectShowReport {
     pub project: Project,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
-    pub deploy_ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deploy_ready: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub deploy_blockers: Vec<String>,
 }
@@ -109,19 +110,20 @@ pub fn list_report() -> Result<ProjectListReport> {
 pub fn show_report(project_id: &str) -> Result<ProjectShowReport> {
     let project = load(project_id)?;
 
-    let hint = if project.server_id.is_none() {
+    let hint = if project.components.is_empty() {
+        None
+    } else if project.server_id.is_none() {
         Some("Local project: Server-deployed components require a server.".to_string())
-    } else if project.components.is_empty() {
-        Some(format!(
-            "No components linked. Use: homeboy project components add {} <component-id> or homeboy project components attach-path {} <component-id> <path>",
-            project.id,
-            project.id
-        ))
     } else {
         None
     };
 
-    let (deploy_ready, deploy_blockers) = calculate_deploy_readiness(&project);
+    let (deploy_ready, deploy_blockers) = if project.components.is_empty() {
+        (None, Vec::new())
+    } else {
+        let (ready, blockers) = calculate_deploy_readiness(&project);
+        (Some(ready), blockers)
+    };
 
     Ok(ProjectShowReport {
         project,
@@ -171,7 +173,7 @@ pub fn build_show_output(report: ProjectShowReport) -> ProjectReportOutput {
         entity: Some(report.project),
         hint: report.hint,
         extra: ProjectReportExtra {
-            deploy_ready: Some(report.deploy_ready),
+            deploy_ready: report.deploy_ready,
             deploy_blockers: if report.deploy_blockers.is_empty() {
                 None
             } else {
@@ -365,7 +367,7 @@ mod tests {
 
             let report = show_report("site").expect("show report");
 
-            assert!(!report.deploy_ready);
+            assert_eq!(report.deploy_ready, Some(false));
             assert!(report.deploy_blockers.iter().any(|blocker| {
                 blocker.contains(
                     "Component 'plugin' local_path '/tmp/homeboy-missing-component-path' does not exist",
@@ -406,11 +408,80 @@ mod tests {
             let report = show_report("site").expect("show report");
 
             assert!(
-                report.deploy_ready,
+                report.deploy_ready == Some(true),
                 "unexpected blockers: {:?}",
                 report.deploy_blockers
             );
             assert!(report.deploy_blockers.is_empty());
+        });
+    }
+
+    #[test]
+    fn show_report_does_not_treat_server_backed_projects_without_components_as_deploys() {
+        with_isolated_home(|_| {
+            crate::server::save(&crate::server::Server {
+                id: "sandbox".to_string(),
+                host: "localhost".to_string(),
+                user: "tester".to_string(),
+                port: 22,
+                identity_file: None,
+                aliases: Vec::new(),
+                kind: None,
+                auth: None,
+                env: Default::default(),
+                runner: None,
+            })
+            .expect("save server");
+            crate::project::save(&Project {
+                id: "sandbox-project".to_string(),
+                server_id: Some("sandbox".to_string()),
+                ..Project::default()
+            })
+            .expect("save project");
+
+            let report = show_report("sandbox-project").expect("show report");
+
+            assert!(report.hint.is_none());
+            assert!(report.deploy_ready.is_none());
+            assert!(report.deploy_blockers.is_empty());
+        });
+    }
+
+    #[test]
+    fn status_report_marks_an_unprobed_server_backed_zero_component_project_not_checked() {
+        with_isolated_home(|_| {
+            crate::server::save(&crate::server::Server {
+                id: "sandbox".to_string(),
+                host: "sandbox.example.test".to_string(),
+                user: "tester".to_string(),
+                port: 22,
+                identity_file: Some("/missing/homeboy-test-key".to_string()),
+                aliases: Vec::new(),
+                kind: None,
+                auth: None,
+                env: Default::default(),
+                runner: None,
+            })
+            .expect("save server");
+            crate::project::save(&Project {
+                id: "sandbox-project".to_string(),
+                server_id: Some("sandbox".to_string()),
+                ..Project::default()
+            })
+            .expect("save project");
+
+            let report = status_report("sandbox-project", true).expect("status report");
+            let health = report.health.expect("configured server health");
+
+            assert_eq!(
+                health.state,
+                crate::server::health::ServerHealthState::NotChecked
+            );
+            assert_eq!(
+                health.next_action.as_deref(),
+                Some("homeboy server status sandbox")
+            );
+            assert!(report.component_versions.is_none());
         });
     }
 }

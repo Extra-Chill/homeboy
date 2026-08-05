@@ -6,7 +6,7 @@
 use super::SshClient;
 use crate::engine::shell::quote_arg;
 use crate::project::Project;
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use std::time::Duration;
 
 const PROJECT_HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -15,8 +15,48 @@ const PROJECT_HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 // Types
 // ============================================================================
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerHealthState {
+    Healthy,
+    Unhealthy,
+    NotChecked,
+}
+
+impl ServerHealthState {
+    pub fn is_healthy(self) -> bool {
+        self == Self::Healthy
+    }
+}
+
+impl Default for ServerHealthState {
+    fn default() -> Self {
+        Self::NotChecked
+    }
+}
+
+impl Serialize for ServerHealthState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::Healthy => "healthy",
+            Self::Unhealthy => "unhealthy",
+            Self::NotChecked => "not_checked",
+        })
+    }
+}
+
 #[derive(Debug, Default, Serialize, Clone)]
 pub struct ServerHealth {
+    /// Whether the configured server transport was proven by this probe.
+    pub state: ServerHealthState,
+    /// Why the probe could not establish healthy transport.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Exact diagnostic command for an unresolved or failed server session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<String>,
     /// Server uptime as a human-readable string (e.g. "10 days")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uptime: Option<String>,
@@ -82,16 +122,31 @@ pub struct ServiceStatus {
 /// Returns None if the server can't be reached or isn't configured.
 pub fn collect_project_health(proj: &Project) -> Option<ServerHealth> {
     let server_id = proj.server_id.as_deref()?;
-    let srv = super::load(server_id).ok()?;
-    let client = SshClient::from_server(&srv, server_id).ok()?;
-    Some(collect_server_health(&client, &proj.services))
+    let srv = match super::load(server_id) {
+        Ok(server) => server,
+        Err(error) => return Some(not_checked(server_id, error.to_string())),
+    };
+    let client = match SshClient::from_server(&srv, server_id) {
+        Ok(client) => client,
+        Err(error) => return Some(not_checked(server_id, error.to_string())),
+    };
+    Some(collect_server_health(&client, server_id, &proj.services))
+}
+
+fn not_checked(server_id: &str, reason: String) -> ServerHealth {
+    ServerHealth {
+        state: ServerHealthState::NotChecked,
+        reason: Some(reason),
+        next_action: Some(format!("homeboy server status {server_id}")),
+        ..Default::default()
+    }
 }
 
 /// Collect server health metrics via a single SSH command.
 ///
 /// Runs a compound shell command that outputs structured, delimited sections
 /// for uptime, load, disk, memory, and optionally service statuses.
-fn collect_server_health(client: &SshClient, services: &[String]) -> ServerHealth {
+fn collect_server_health(client: &SshClient, server_id: &str, services: &[String]) -> ServerHealth {
     // Build a single compound command to minimize SSH round-trips.
     // Each section is delimited by a marker line for reliable parsing.
     let mut cmd_parts = vec![
@@ -126,13 +181,35 @@ fn collect_server_health(client: &SshClient, services: &[String]) -> ServerHealt
         PROJECT_HEALTH_PROBE_TIMEOUT.as_secs()
     );
     let output = client.execute_with_timeout(&compound_cmd, PROJECT_HEALTH_PROBE_TIMEOUT);
+    health_from_probe(&output, server_id, services)
+}
 
-    if !output.success && output.stdout.is_empty() {
-        // Total SSH failure — return empty health
-        return ServerHealth::default();
+fn health_from_probe(
+    output: &crate::server::CommandOutput,
+    server_id: &str,
+    services: &[String],
+) -> ServerHealth {
+    let mut health = parse_health_output(&output.stdout, services);
+    let complete = health.uptime.is_some()
+        && health.load.is_some()
+        && health.disk.is_some()
+        && health.memory.is_some();
+
+    if output.success && complete {
+        health.state = ServerHealthState::Healthy;
+        return health;
     }
 
-    parse_health_output(&output.stdout, services)
+    health.state = ServerHealthState::Unhealthy;
+    health.reason = Some(if output.timed_out {
+        "Server health probe timed out.".to_string()
+    } else if output.stderr.trim().is_empty() {
+        "Server health probe returned incomplete evidence.".to_string()
+    } else {
+        format!("Server health probe failed: {}", output.stderr.trim())
+    });
+    health.next_action = Some(format!("homeboy server status {server_id}"));
+    health
 }
 
 // ============================================================================
@@ -542,6 +619,60 @@ Mem:          3.8Gi       1.5Gi       1.0Gi       0.0Ki       1.3Gi       2.0Gi
         assert_eq!(health.uptime.as_deref(), Some("2 hours, 15 minutes"));
         assert!(health.services.is_empty());
         assert!(health.warnings.is_empty());
+    }
+
+    fn successful_probe(stdout: &str) -> crate::server::CommandOutput {
+        crate::server::CommandOutput {
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+            success: true,
+            exit_code: 0,
+            timed_out: false,
+            child_resource: None,
+        }
+    }
+
+    #[test]
+    fn health_probe_marks_a_server_backed_zero_component_project_healthy_with_complete_evidence() {
+        let output = successful_probe(
+            "---UPTIME---\nup 2 hours\n---LOAD---\n0.50 0.30 0.20 1/100 5678\n---CPUS---\n2\n---DISK---\n/dev/vda1 75G 30G 42G 42% /\n---MEMORY---\nMem: 3.8Gi 1.5Gi 1.0Gi 0.0Ki 1.3Gi 2.0Gi\n",
+        );
+
+        let health = health_from_probe(&output, "sandbox", &[]);
+
+        assert_eq!(health.state, ServerHealthState::Healthy);
+        assert!(health.reason.is_none());
+    }
+
+    #[test]
+    fn health_probe_marks_a_server_backed_zero_component_project_unhealthy_on_transport_failure() {
+        let output = crate::server::CommandOutput {
+            stdout: String::new(),
+            stderr: "Connection timed out".to_string(),
+            success: false,
+            exit_code: 255,
+            timed_out: true,
+            child_resource: None,
+        };
+
+        let health = health_from_probe(&output, "sandbox", &[]);
+
+        assert_eq!(health.state, ServerHealthState::Unhealthy);
+        assert_eq!(
+            health.next_action.as_deref(),
+            Some("homeboy server status sandbox")
+        );
+    }
+
+    #[test]
+    fn unresolved_server_is_not_checked_with_an_actionable_session_command() {
+        let health = not_checked("sandbox", "identity file is missing".to_string());
+
+        assert_eq!(health.state, ServerHealthState::NotChecked);
+        assert_eq!(
+            health.next_action.as_deref(),
+            Some("homeboy server status sandbox")
+        );
     }
 
     #[test]

@@ -174,6 +174,7 @@ pub fn collect_status(
 
         // Classify project health
         match &health {
+            Some(h) if !h.state.is_healthy() => summary.projects.unreachable += 1,
             Some(h) if h.warnings.is_empty() => summary.projects.healthy += 1,
             Some(h) => {
                 summary.projects.warning += 1;
@@ -408,6 +409,7 @@ fn compute_server_summary(
 
     for health_opt in health_cache.values() {
         match health_opt {
+            Some(h) if !h.state.is_healthy() => summary.servers.unreachable += 1,
             Some(h) => {
                 if h.warnings.is_empty() {
                     summary.servers.healthy += 1;
