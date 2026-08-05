@@ -1754,6 +1754,7 @@ mod tests {
             refresh: false,
             catalog: false,
             full: false,
+            machine_catalog: false,
         });
 
         assert_eq!(
