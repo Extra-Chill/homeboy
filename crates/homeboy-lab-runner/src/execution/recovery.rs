@@ -216,7 +216,7 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                     None,
                 ))
             } else {
-                crate::persisted_status(runner_id).and_then(|status| {
+                crate::persisted_status_until(runner_id, deadline).and_then(|status| {
                     status.session.ok_or_else(|| {
                         Error::validation_invalid_argument(
                             "runner",
@@ -381,7 +381,7 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
 
 fn endpoint_identity(session: &crate::RunnerSession) -> String {
     session
-        .local_url
+        .remote_daemon_address
         .clone()
         .or_else(|| session.broker_url.clone())
         .unwrap_or_else(|| {
