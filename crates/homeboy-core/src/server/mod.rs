@@ -26,7 +26,9 @@ pub use keys::{
     generate_key, get_public_key, import_key, unset_key, use_key, KeyGenerateResult,
     KeyImportResult,
 };
-pub use session::{ManagedSshSession, ManagedSshSessionOutput};
+pub use session::{
+    ManagedSshSession, ManagedSshSessionOutput, ManagedSshSessionPersistSource, PERSIST_SCOPE,
+};
 
 use std::collections::HashMap;
 
@@ -214,6 +216,8 @@ pub struct ServerSessionConfig {
     pub control_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persist: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persist_source: Option<ManagedSshSessionPersistSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -324,12 +328,55 @@ impl ConfigEntity for Server {
     }
 
     fn validate(&self) -> Result<()> {
+        if let Some(auth) = self.auth.as_ref() {
+            if auth.mode == ServerAuthMode::KeyPlusPasswordControlmaster {
+                match auth.session.persist.as_deref() {
+                    Some(persist) => {
+                        if auth.session.persist_source
+                            == Some(ManagedSshSessionPersistSource::LegacyDefault)
+                        {
+                            return Err(Error::validation_invalid_argument(
+                                "auth.persist_source",
+                                "legacy_default is only valid for an existing managed session without persist",
+                                None,
+                                None,
+                            ));
+                        }
+                        session::validate_persist(persist)?;
+                    }
+                    None if auth.session.persist_source
+                        == Some(ManagedSshSessionPersistSource::LegacyDefault) => {}
+                    None => {
+                        return Err(Error::validation_invalid_argument(
+                            "auth.persist",
+                            "Managed SSH sessions require an explicit OpenSSH ControlPersist lifetime",
+                            None,
+                            Some(vec![
+                                "Choose the local control-socket idle lifetime, for example: \"persist\": \"4h\"."
+                                    .to_string(),
+                            ]),
+                        ));
+                    }
+                }
+            }
+        }
+
         if let Some(runner) = self.runner.as_ref() {
             validate_runner_settings(&runner.settings, "runner.concurrency_limit", None)?;
             validate_runner_env(&runner.env, "runner.env")?;
         }
 
         Ok(())
+    }
+
+    fn post_load(&mut self, _stored_json: &str) {
+        if let Some(auth) = self.auth.as_mut() {
+            if auth.mode == ServerAuthMode::KeyPlusPasswordControlmaster
+                && auth.session.persist.is_none()
+            {
+                auth.session.persist_source = Some(ManagedSshSessionPersistSource::LegacyDefault);
+            }
+        }
     }
 }
 
@@ -352,4 +399,66 @@ pub fn set_identity_file(id: &str, identity_file: Option<String>) -> Result<Serv
     server.identity_file = identity_file;
     save(&server)?;
     Ok(server)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn managed_server(persist: Option<&str>) -> Server {
+        Server {
+            id: "sandbox".to_string(),
+            aliases: Vec::new(),
+            host: "example.test".to_string(),
+            user: "deploy".to_string(),
+            port: 22,
+            identity_file: None,
+            kind: None,
+            auth: Some(ServerAuth {
+                mode: ServerAuthMode::KeyPlusPasswordControlmaster,
+                session: ServerSessionConfig {
+                    control_path: None,
+                    persist: persist.map(str::to_string),
+                    persist_source: None,
+                },
+            }),
+            env: HashMap::new(),
+            runner: None,
+        }
+    }
+
+    #[test]
+    fn managed_session_requires_explicit_persist_for_new_configurations() {
+        assert!(managed_server(None).validate().is_err());
+        assert!(managed_server(Some("30m")).validate().is_ok());
+    }
+
+    #[test]
+    fn legacy_managed_session_retains_default_with_provenance() {
+        let mut server = managed_server(None);
+        server.post_load("{}");
+
+        server
+            .validate()
+            .expect("legacy configuration remains valid");
+        let session = ManagedSshSession::from_auth(server.auth.as_ref().expect("auth"));
+        assert_eq!(session.persist, session::LEGACY_DEFAULT_PERSIST);
+        assert_eq!(
+            session.persist_source,
+            ManagedSshSessionPersistSource::LegacyDefault
+        );
+    }
+
+    #[test]
+    fn migrated_persist_source_is_reported() {
+        let mut server = managed_server(Some("4h"));
+        server.auth.as_mut().expect("auth").session.persist_source =
+            Some(ManagedSshSessionPersistSource::Migrated);
+
+        let session = ManagedSshSession::from_auth(server.auth.as_ref().expect("auth"));
+        assert_eq!(
+            session.persist_source,
+            ManagedSshSessionPersistSource::Migrated
+        );
+    }
 }

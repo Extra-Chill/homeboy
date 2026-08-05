@@ -12,9 +12,7 @@ use crate::error::{Error, Result};
 
 use super::super::session::ensure_control_path_parent;
 use super::super::ssh_args::{client_ssh_args, SshArgOptions, SshPortFlag};
-use super::super::{
-    ManagedSshSession, ManagedSshSessionOutput, Server, ServerAuthMode, ServerSessionConfig,
-};
+use super::super::{ManagedSshSession, ManagedSshSessionOutput, Server, ServerAuthMode};
 use super::host::{is_local_host, is_transient_ssh_error};
 use super::local_exec::{
     execute_local_command, execute_local_command_in_dir_with_timeout,
@@ -363,11 +361,10 @@ impl SshClient {
         }
     }
 
-    pub(crate) fn output_session_config(&self) -> ServerSessionConfig {
-        ServerSessionConfig {
-            control_path: self.auth.as_ref().map(|auth| auth.control_path.clone()),
-            persist: self.auth.as_ref().map(|auth| auth.persist.clone()),
-        }
+    pub(crate) fn output_session_config(&self) -> ManagedSshSession {
+        self.auth
+            .clone()
+            .expect("managed session output requires managed session authentication")
     }
 
     pub fn execute(&self, command: &str) -> CommandOutput {

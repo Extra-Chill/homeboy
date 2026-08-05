@@ -652,6 +652,7 @@ fn managed_session_config_adds_controlmaster_args() {
             session: ServerSessionConfig {
                 control_path: Some("/tmp/homeboy-test-%h-%p-%r".to_string()),
                 persist: Some("4h".to_string()),
+                persist_source: None,
             },
         }),
         env: HashMap::new(),
@@ -679,6 +680,7 @@ fn managed_session_connect_builds_master_command() {
         auth: Some(ManagedSshSession {
             control_path: "/tmp/homeboy-test-control".to_string(),
             persist: "10m".to_string(),
+            persist_source: super::super::ManagedSshSessionPersistSource::Configured,
         }),
         is_local: false,
         env: HashMap::new(),
@@ -713,6 +715,7 @@ fn test_from_server() {
             session: ServerSessionConfig {
                 control_path: Some("/tmp/homeboy-local-%h-%p-%r".to_string()),
                 persist: Some("5m".to_string()),
+                persist_source: None,
             },
         }),
         env: HashMap::new(),
@@ -737,7 +740,7 @@ fn test_connect_managed_session() {
     let output = client.connect_managed_session().expect("connect");
 
     assert!(output.live);
-    assert_eq!(output.session.persist.as_deref(), Some("10m"));
+    assert_eq!(output.session.persist, "10m");
     assert_eq!(output.exit_code, 0);
 }
 
@@ -748,10 +751,7 @@ fn test_check_managed_session() {
     let output = client.check_managed_session().expect("check");
 
     assert!(output.live);
-    assert_eq!(
-        output.session.control_path.as_deref(),
-        Some("/tmp/homeboy-local-control")
-    );
+    assert_eq!(output.session.control_path, "/tmp/homeboy-local-control");
     assert_eq!(output.exit_code, 0);
 }
 
@@ -829,6 +829,7 @@ fn local_managed_session_client() -> SshClient {
         auth: Some(ManagedSshSession {
             control_path: "/tmp/homeboy-local-control".to_string(),
             persist: "10m".to_string(),
+            persist_source: super::super::ManagedSshSessionPersistSource::Configured,
         }),
         is_local: true,
         env: HashMap::new(),

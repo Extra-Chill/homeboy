@@ -162,6 +162,7 @@ mod tests {
             auth: Some(ManagedSshSession {
                 control_path: "/tmp/control path".to_string(),
                 persist: "4h".to_string(),
+                persist_source: crate::server::ManagedSshSessionPersistSource::Configured,
             }),
             is_local: false,
             env: HashMap::new(),
