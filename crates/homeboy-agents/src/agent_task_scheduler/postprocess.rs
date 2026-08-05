@@ -187,7 +187,7 @@ fn start_or_reconcile_worker_with_retry(
     write_json_atomically(&request_path, &request).map_err(|error| error.message)?;
     #[cfg(test)]
     {
-        return run_postprocess_worker(&request_path)
+        run_postprocess_worker(&request_path)
             .map_err(|error| error.message)
             .and_then(|_| {
                 read_checkpoint(
@@ -197,7 +197,7 @@ fn start_or_reconcile_worker_with_retry(
                     fingerprint,
                 )
                 .ok_or_else(|| "artifact postprocess worker did not write checkpoint".to_string())
-            });
+            })
     }
     #[cfg(not(test))]
     let worker = std::env::var_os("HOMEBOY_POSTPROCESS_WORKER")
@@ -1766,13 +1766,17 @@ mod tests {
                 ..AgentTaskPlan::new("recover", Vec::new())
             };
             let checkpoint = postprocess_checkpoint_path(Some("recover-run"), &step.id);
-            let identity =
-                checkpoint_identity(&plan, Some("recover-run"), &step, &[producer.clone()]);
+            let identity = checkpoint_identity(
+                &plan,
+                Some("recover-run"),
+                &step,
+                std::slice::from_ref(&producer),
+            );
             write_checkpoint(
                 &checkpoint,
                 Some("recover-run"),
                 &identity,
-                &[producer.clone()],
+                std::slice::from_ref(&producer),
                 &step,
                 &postprocess_outcome(&step, AgentTaskOutcomeStatus::Succeeded, "done", None),
             )
@@ -1886,8 +1890,12 @@ mod tests {
                 ..Default::default()
             };
             let checkpoint = postprocess_checkpoint_path(Some("restart-run"), &step.id);
-            let identity =
-                checkpoint_identity(&plan, Some("restart-run"), &step, &[producer.clone()]);
+            let identity = checkpoint_identity(
+                &plan,
+                Some("restart-run"),
+                &step,
+                std::slice::from_ref(&producer),
+            );
             write_checkpoint(
                 &checkpoint,
                 Some("restart-run"),

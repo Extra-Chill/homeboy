@@ -79,6 +79,10 @@ pub(super) fn select_candidate_adoption(
     })
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "scheduler returns the complete outcome for durable lifecycle recording"
+)]
 pub(super) fn validate_and_apply_candidate_adoption(
     request: &AgentTaskRequest,
     adoption: &AgentTaskCandidateAdoption,

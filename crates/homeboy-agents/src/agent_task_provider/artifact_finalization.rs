@@ -106,10 +106,11 @@ impl ExecutorArtifactRootIdentity {
             ));
         }
         #[cfg(unix)]
-        if {
+        let res = {
             use std::os::unix::fs::MetadataExt;
             current.dev() != self.device || current.ino() != self.inode
-        } {
+        };
+        if res {
             return Err(Error::validation_invalid_argument(
                 "artifacts_path",
                 "Homeboy executor artifact root changed during provider execution",

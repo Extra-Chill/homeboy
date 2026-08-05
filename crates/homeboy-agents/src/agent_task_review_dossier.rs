@@ -1922,10 +1922,8 @@ mod tests {
         value
             .validate(&default_profile())
             .expect("complete evidence");
-        assert!(
-            render_review_dossier(&value, &default_profile()).contains("unavailable_manual_review")
-                == false
-        );
+        assert!(!render_review_dossier(&value, &default_profile())
+            .contains("unavailable_manual_review"));
     }
 
     #[test]

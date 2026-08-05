@@ -1109,10 +1109,7 @@ where
 {
     std::thread::spawn(move || {
         let mut chunk = [0; 4096];
-        loop {
-            let Ok(read) = reader.read(&mut chunk) else {
-                break;
-            };
+        while let Ok(read) = reader.read(&mut chunk) {
             if read == 0 {
                 break;
             }

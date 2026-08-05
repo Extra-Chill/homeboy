@@ -98,31 +98,6 @@ pub fn load_materialize_spec_source(source: &str) -> Result<MaterializeSpecSourc
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn invalid_manifest_shape_preserves_primary_and_fallback_serde_causes() {
-        let error = match load_materialize_spec_source("{}") {
-            Ok(_) => panic!("expected schema mismatch error"),
-            Err(error) => error,
-        };
-
-        assert_eq!(error.code.as_str(), "validation.invalid_argument");
-        assert!(error.message.contains("agent task repo loop spec"));
-        assert!(error.message.contains("fallback cause"));
-        assert!(error.details["cause"]
-            .as_str()
-            .expect("primary cause")
-            .contains("missing field"));
-        assert!(error.details["fallback_cause"]
-            .as_str()
-            .expect("fallback cause")
-            .contains("missing field"));
-    }
-}
-
 fn load_generated_materialize_spec(
     source: &str,
     manifest: ControllerSpecGeneratorManifest,
@@ -455,4 +430,29 @@ fn attach_generator_failure_diagnostics(
             "max_stderr_bytes": bounds.max_stderr_bytes,
         }
     }]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_manifest_shape_preserves_primary_and_fallback_serde_causes() {
+        let error = match load_materialize_spec_source("{}") {
+            Ok(_) => panic!("expected schema mismatch error"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("agent task repo loop spec"));
+        assert!(error.message.contains("fallback cause"));
+        assert!(error.details["cause"]
+            .as_str()
+            .expect("primary cause")
+            .contains("missing field"));
+        assert!(error.details["fallback_cause"]
+            .as_str()
+            .expect("fallback cause")
+            .contains("missing field"));
+    }
 }

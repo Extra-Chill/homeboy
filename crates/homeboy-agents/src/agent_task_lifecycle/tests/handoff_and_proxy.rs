@@ -19,7 +19,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 enum TestRunnerReconciliation {
-    Snapshot(homeboy_core::api_jobs::RunnerJobLogSnapshot),
+    Snapshot(Box<homeboy_core::api_jobs::RunnerJobLogSnapshot>),
     ConfirmedAbsent(usize),
     Unconfirmed,
 }
@@ -927,7 +927,7 @@ fn accepted_handoff_adopts_a_job_found_on_another_known_generation() {
         let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
             // This represents a 404 on the current generation followed by a
             // matching snapshot on another generation in the durable ledger.
-            result: Mutex::new(Some(TestRunnerReconciliation::Snapshot(snapshot))),
+            result: Mutex::new(Some(TestRunnerReconciliation::Snapshot(Box::new(snapshot)))),
         }));
 
         let reconciled = status(run_id).expect("adopted generation snapshot");

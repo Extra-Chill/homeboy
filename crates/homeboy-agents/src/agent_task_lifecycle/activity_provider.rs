@@ -157,7 +157,7 @@ fn item_from_agent_task(record: AgentTaskRunRecord) -> ActivityItem {
             is_failure(state)
                 && load_controller_plan(&record.run_id)
                     .as_ref()
-                    .is_ok_and(|plan| plan_has_retry_materialization_identity(plan)),
+                    .is_ok_and(plan_has_retry_materialization_identity),
         ),
     }
 }
