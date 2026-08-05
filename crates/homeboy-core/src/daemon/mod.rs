@@ -2848,6 +2848,12 @@ fn enqueue_exec_job(
                 }))?;
                 plan.env
                     .insert("HOMEBOY_RUNNER_CHILD_RESERVATION".to_string(), reservation_id);
+                // Runner-local supervisors need the durable job identity to
+                // attach their child-service ledger to this daemon owner.
+                plan.env.insert(
+                    "HOMEBOY_RUNNER_JOB_ID".to_string(),
+                    job.job_id().to_string(),
+                );
                 let liveness = Arc::new(Mutex::new(ExecLiveness::new(Instant::now())));
                 let cancellation_requested = Arc::new(AtomicBool::new(false));
                 let _workspace_owner_renewer = workspace_owner_lease.clone().map(|lease| {

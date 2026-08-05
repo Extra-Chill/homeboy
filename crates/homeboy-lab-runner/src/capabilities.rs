@@ -2,6 +2,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use homeboy_agents::agent_tasks::provider::{
+    AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor,
+};
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
@@ -78,6 +81,27 @@ pub fn evaluate_lab_runner_capabilities_for_runner(
         &capabilities,
         mode,
     ))
+}
+
+/// Evaluate a previously observed raw runner inventory. Placement transport
+/// tests and read-only consumers can exercise the production gate without
+/// inventing a terminal gate decision.
+pub fn evaluate_lab_runner_capabilities_for_inventory(
+    runner_id: &str,
+    plan: &PreparedLabRunnerCapability,
+    inventory: &RunnerCapabilityInventory,
+    mode: LabRunnerGateMode,
+) -> LabRunnerGateDecision {
+    let capabilities = RunnerCapabilitySnapshot {
+        tools: inventory
+            .capabilities
+            .iter()
+            .map(RunnerRequiredTool::new)
+            .collect(),
+        components: inventory.capabilities.clone(),
+        ..Default::default()
+    };
+    evaluate_lab_runner_capabilities(runner_id, plan, &capabilities, mode)
 }
 
 pub(crate) fn runner_capability_snapshot_for_preflight(
@@ -282,6 +306,53 @@ pub fn runner_capability_inventory(runner_id: &str) -> Result<RunnerCapabilityIn
     Ok(RunnerCapabilityInventory {
         runtime_ids,
         capabilities,
+    })
+}
+
+/// Read the runner-owned provider catalog over the capability transport. This
+/// direct probe never creates a runner job, workspace, or daemon reservation.
+pub fn runner_agent_task_provider_catalog(
+    runner_id: &str,
+) -> Result<Vec<AgentTaskExecutorProvider>> {
+    let runner = super::load(runner_id)?;
+    if runner.kind == RunnerKind::Local {
+        return Ok(ExtensionProviderAgentTaskExecutor::discover()
+            .providers()
+            .to_vec());
+    }
+    let client = RunnerCapabilitySnapshot::ssh_client_for_runner(&runner)?;
+    let homeboy = remote_runner_homeboy_path(&runner, "runner provider catalog")?;
+    let output = client.execute(&format!(
+        "{} agent-task providers --machine-catalog",
+        shell::quote_arg(homeboy)
+    ));
+    let value: Value = serde_json::from_str(&output.stdout).map_err(|error| {
+        Error::validation_invalid_argument(
+            "provider_catalog",
+            format!("runner provider catalog returned invalid JSON: {error}"),
+            None,
+            None,
+        )
+    })?;
+    let providers = value
+        .get("providers")
+        .or_else(|| value.get("data").and_then(|data| data.get("providers")))
+        .cloned()
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "provider_catalog",
+                "runner provider catalog did not include providers",
+                None,
+                None,
+            )
+        })?;
+    serde_json::from_value(providers).map_err(|error| {
+        Error::validation_invalid_argument(
+            "provider_catalog",
+            format!("runner provider catalog is invalid: {error}"),
+            None,
+            None,
+        )
     })
 }
 

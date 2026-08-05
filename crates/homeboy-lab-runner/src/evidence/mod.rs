@@ -21,7 +21,6 @@ pub use download::{
 };
 
 pub use homeboy_core::api_jobs::RunnerJobLogSnapshot;
-pub use mirror::runner_job_log_snapshot_for_session;
 pub use mirror::{
     controller_artifact_metadata, mirror_connected_runner_run, mirror_daemon_job_progress,
     mirror_reverse_broker_job_progress, mirrored_runner_job_identity,
@@ -31,4 +30,5 @@ pub(crate) use mirror::{
     mirror_daemon_evidence, mirror_reverse_broker_evidence, MirrorEvidenceRequest,
     ReverseBrokerEvidenceContext,
 };
+pub use mirror::{runner_job_log_snapshot_for_session, runner_job_log_snapshot_for_session_until};
 pub(crate) use util::{local_job_run_id, runner_exec_run_label};

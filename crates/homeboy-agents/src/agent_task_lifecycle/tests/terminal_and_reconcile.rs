@@ -25,6 +25,10 @@ struct TerminalSnapshotProvider {
     snapshot: Mutex<Option<homeboy_core::api_jobs::RunnerJobLogSnapshot>>,
 }
 
+struct ServiceRunnerFixture {
+    commands: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
 struct FixtureAcceptanceVerifier;
 
 struct PromotionDriftVerifier {
@@ -180,6 +184,115 @@ impl RunnerContinuationProvider for TerminalSnapshotProvider {
             "not used by terminal reconciliation",
         ))
     }
+}
+
+impl RunnerContinuationProvider for ServiceRunnerFixture {
+    fn runner_job_log_snapshot(
+        &self,
+        _runner_id: &str,
+        _job_id: &str,
+    ) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot> {
+        Err(Error::internal_unexpected("not used by service fixture"))
+    }
+
+    fn is_runner_connected(&self, _runner_id: &str) -> bool {
+        true
+    }
+
+    fn runner_exists(&self, _runner_id: &str) -> bool {
+        true
+    }
+
+    fn run_continuation_exec(
+        &self,
+        runner_id: &str,
+        _cwd: &str,
+        command: &[String],
+        run_id: &str,
+    ) -> Result<i32> {
+        assert_eq!(runner_id, "fixture-lab");
+        assert_eq!(run_id, "service-runner-cancel");
+        self.commands
+            .lock()
+            .expect("service commands")
+            .push(command.to_vec());
+        Ok(0)
+    }
+
+    fn submit_reverse_broker_job(
+        &self,
+        _runner_id: &str,
+        _request: RemoteRunnerJobRequest,
+    ) -> Result<Job> {
+        Err(Error::internal_unexpected("not used by service fixture"))
+    }
+}
+
+#[test]
+fn cancellation_routes_managed_service_cleanup_to_its_lab_owner() {
+    with_isolated_home(|_| {
+        ensure_runner_continuation_provider_reset_hook();
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let _provider = RunnerContinuationTestGuard::install(Box::new(ServiceRunnerFixture {
+            commands: Arc::clone(&commands),
+        }));
+        let mut plan = test_plan();
+        plan.services.push(
+            serde_json::from_value(json!({
+                "id": "fixture-service", "command": ["fixture-service"],
+                "secret_env": ["FIXTURE_SERVICE_SECRET"]
+            }))
+            .expect("managed service contract"),
+        );
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "service-runner-cancel",
+            runner_id: "fixture-lab",
+            remote_workspace: "/fixture/workspace",
+            remote_command: &["agent-task".to_string(), "run-plan".to_string()],
+            durable_plan: Some(&plan),
+        })
+        .expect("persist Lab service owner");
+
+        let cancelled = cancel_run("service-runner-cancel", Some("fixture cancellation"))
+            .expect("cancel routed service");
+        assert_eq!(
+            cancelled.metadata["managed_service_cleanup"]["transport"],
+            "runner_command"
+        );
+        assert_eq!(
+            cancelled.metadata["managed_service_cleanup"]["state_ref"],
+            "homeboy://runner/fixture-lab/agent-task-runs/service-runner-cancel/service-supervisor/state"
+        );
+        assert_eq!(
+            *commands.lock().expect("service commands"),
+            vec![
+                vec![
+                    "self",
+                    "service-supervisor-worker",
+                    "--run-id",
+                    "service-runner-cancel",
+                    "--operation",
+                    "status"
+                ],
+                vec![
+                    "self",
+                    "service-supervisor-worker",
+                    "--run-id",
+                    "service-runner-cancel",
+                    "--operation",
+                    "stop"
+                ],
+                vec![
+                    "self",
+                    "service-supervisor-worker",
+                    "--run-id",
+                    "service-runner-cancel",
+                    "--operation",
+                    "reconcile"
+                ],
+            ]
+        );
+    });
 }
 
 #[cfg(unix)]

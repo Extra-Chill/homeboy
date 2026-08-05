@@ -3,7 +3,9 @@
 use std::path::Path;
 use std::time::Duration;
 
-use homeboy_agents::agent_task_provider::{resolve_provider_for_backend, ProviderResolution};
+use homeboy_agents::agent_task_provider::{
+    AgentTaskProviderAdmissionPlan, AgentTaskProviderAdmissionRequest,
+};
 use homeboy_agents::agent_tasks::provider::{
     default_backend_for_component, AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor,
 };
@@ -90,11 +92,7 @@ pub(super) fn preflight_agent_task_provider_on_runner(
     let local_providers = ExtensionProviderAgentTaskExecutor::discover()
         .providers()
         .to_vec();
-    let local_available = provider_available(
-        &local_providers,
-        &selection.backend,
-        selection.selector.as_deref(),
-    );
+    let local_available = provider_admission_plan(&selection, &local_providers).is_ready();
 
     if probe.exit_code != 0 {
         return Err(agent_task_provider_selection_preflight_error(
@@ -131,15 +129,7 @@ pub(super) fn preflight_agent_task_provider_on_runner(
     // (`resolve_provider_for_backend`) that execution-time selection uses. This
     // guarantees discovery and preflight can never disagree about whether a
     // listed provider is selectable for the requested backend/selector.
-    let mut runner_unavailable_reason = selection
-        .runtime_identity
-        .as_ref()
-        .and_then(|identity| {
-            (!resolved_materialized_runtime(identity))
-                .then(|| exact_runtime_requirement_reason(&runner_providers, identity))
-                .flatten()
-        })
-        .or_else(|| runner_provider_unavailable_reason(&runner_providers, &selection));
+    let mut runner_unavailable_reason = provider_admission_reason(&selection, &runner_providers);
     let mut refresh_result = None;
 
     if local_available
@@ -169,15 +159,7 @@ pub(super) fn preflight_agent_task_provider_on_runner(
             })?;
             if probe.exit_code == 0 {
                 if let Ok(providers) = parse_agent_task_providers_output(&probe.stdout) {
-                    runner_unavailable_reason = selection
-                        .runtime_identity
-                        .as_ref()
-                        .and_then(|identity| {
-                            (!resolved_materialized_runtime(identity))
-                                .then(|| exact_runtime_requirement_reason(&providers, identity))
-                                .flatten()
-                        })
-                        .or_else(|| runner_provider_unavailable_reason(&providers, &selection));
+                    runner_unavailable_reason = provider_admission_reason(&selection, &providers);
                 }
             }
         }
@@ -198,6 +180,40 @@ pub(super) fn preflight_agent_task_provider_on_runner(
     }
 
     Ok(())
+}
+
+/// Compile and revalidate the provider-owned admission plan against the catalog
+/// observed on this runner. The plan is data-only; session refresh and runtime
+/// materialization remain execution decisions outside this compiler.
+fn provider_admission_plan(
+    selection: &AgentTaskProviderSelection,
+    providers: &[AgentTaskExecutorProvider],
+) -> AgentTaskProviderAdmissionPlan {
+    let runtime_identity = selection
+        .runtime_identity
+        .as_ref()
+        .filter(|identity| !resolved_materialized_runtime(identity))
+        .cloned();
+    // The probe is the execution-only catalog observation. Compile the same
+    // request first, then immediately revalidate it against that observation.
+    AgentTaskProviderAdmissionPlan::compile_unobserved(AgentTaskProviderAdmissionRequest {
+        backend: selection.backend.clone(),
+        selector: selection.selector.clone(),
+        model: None,
+        runtime_identity,
+    })
+    .revalidate(providers)
+}
+
+fn provider_admission_reason(
+    selection: &AgentTaskProviderSelection,
+    providers: &[AgentTaskExecutorProvider],
+) -> Option<String> {
+    let plan = provider_admission_plan(selection, providers);
+    plan.predicates
+        .iter()
+        .find(|predicate| !predicate.satisfied)
+        .and_then(|predicate| predicate.detail.clone())
 }
 
 /// A v2 plan that Lab has rewritten to its immutable generation is already
@@ -267,36 +283,7 @@ fn runner_provider_unavailable_reason(
     providers: &[AgentTaskExecutorProvider],
     selection: &AgentTaskProviderSelection,
 ) -> Option<String> {
-    match resolve_provider_for_backend(
-        providers,
-        &selection.backend,
-        selection.selector.as_deref(),
-    ) {
-        ProviderResolution::Resolved(_) => None,
-        ProviderResolution::NotFound => Some(format!(
-            "runner provider discovery returned {} provider(s) ({}), but none declare backend `{}`{}",
-            providers.len(),
-            provider_inventory_summary(providers),
-            selection.backend,
-            selection
-                .selector
-                .as_deref()
-                .map(|selector| format!(" with selector/id `{selector}`"))
-                .unwrap_or_default()
-        )),
-        ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => Some(format!(
-            "backend `{}` matches extension alias for {} runner providers ({}); re-run with `--selector <id>` to pick one",
-            selection.backend,
-            candidate_ids.len(),
-            candidate_ids.join(", ")
-        )),
-        ProviderResolution::SelectorMismatch { available_ids, .. } => Some(format!(
-            "backend `{}` matches runner providers ({}), but selector/id `{}` does not match any of them",
-            selection.backend,
-            available_ids.join(", "),
-            selection.selector.as_deref().unwrap_or("<default>")
-        )),
-    }
+    provider_admission_reason(selection, providers)
 }
 
 /// Compact `id (backend)` inventory of discovered providers for diagnostics.
@@ -641,10 +628,16 @@ fn provider_available(
     backend: &str,
     selector: Option<&str>,
 ) -> bool {
-    matches!(
-        resolve_provider_for_backend(providers, backend, selector),
-        ProviderResolution::Resolved(_)
+    AgentTaskProviderAdmissionPlan::compile(
+        AgentTaskProviderAdmissionRequest {
+            backend: backend.to_string(),
+            selector: selector.map(str::to_string),
+            model: None,
+            runtime_identity: None,
+        },
+        providers,
     )
+    .is_ready()
 }
 
 #[allow(clippy::too_many_arguments)]

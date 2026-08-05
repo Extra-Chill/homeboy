@@ -4,6 +4,52 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.331.0] - 2026-08-05
+
+### Added
+- make untagged runner-download caches reapable via --include-untagged
+- make leaked test homes visible and reapable
+
+### Changed
+- stop the helper fixture swallowing the failure it hit
+- derive readiness from inventory [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- move three single-consumer modules out of homeboy-core (113 -> 110 pub mod)
+- adopt PresentationArgs for the output-format --json
+
+### Fixed
+- rebase postprocess path aliases
+- configure provider operation deadlines
+- preserve bounded status diagnostics
+- bound startup recovery ownership
+- clear the runner-evidence provider between hermetic tests
+- stop a test-only import blinding the verdict scan
+- stop counting zombies as a live process group
+- preserve durable readiness compatibility [AI: OpenAI GPT-5.6 Terra via OpenCode]
+- share routed Lab admission builder [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- unify placement admission compilation [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- export full provider catalog [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- observe provider catalog in preflight [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- share provider admission plan [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- unbreak main — restore compilation and fix the gate artifact-root guard
+- Fix bounded detached runner-exec recovery
+- bound shared status projections
+- skip duplicate recovery in internal startup
+- report server health probe state
+- stop the controller death guard from holding the child's stdin
+- require explicit managed session lifetime
+- bound managed session operations
+- report unverifiable daemons as unverified, not healthy
+- gate the fixture test-double backend behind test-support
+- route production temp_dir scratch through the artifact root
+- report live ruleset enforcement instead of implying it
+- settle detached handoffs instead of leaking phantom running runs
+- stop a dirty controller marking every Lab runner stale
+- bound and share runner readiness probing
+- validate declared sidecar payloads after a run
+- make truncated run pages detectable and paginable
+- make postprocess recovery transactional
+- complete runtime tool capability evidence
+
 ## [0.330.0] - 2026-08-04
 
 ### Added

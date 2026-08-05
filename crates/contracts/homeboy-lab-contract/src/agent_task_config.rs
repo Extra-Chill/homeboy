@@ -56,16 +56,36 @@ pub struct AgentTaskManagedService {
     /// command has an externally fixed endpoint and no port lease is required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_env: Option<String>,
+    /// The selected execution host binds the socket before exec and hands the
+    /// listener to a socket-activation-aware service on fd 3. This is the only
+    /// race-free dynamic-port mode; a service that binds its own port must use
+    /// an explicitly reserved fixed port.
+    #[serde(default)]
+    pub socket_handoff: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readiness: Option<AgentTaskManagedServiceReadiness>,
     /// An externally provisioned reviewer URL. Homeboy treats this as a
     /// reference and never assumes a particular tunnel or preview provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
+    /// Optional generic probe-provider request. The supervisor records the
+    /// observed final URL and origin; a declared public URL is never evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_origin_probe: Option<AgentTaskManagedServiceBrowserOriginProbe>,
     #[serde(default)]
     pub lifecycle: AgentTaskManagedServiceLifecycle,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+}
+
+/// A provider-neutral browser-origin observation request. Providers may use
+/// their own browser implementation, but must return redirect/origin evidence
+/// through this durable contract rather than treating a configured URL as fact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskManagedServiceBrowserOriginProbe {
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 impl AgentTaskManagedService {
@@ -109,20 +129,30 @@ mod managed_service_contract_tests {
     fn managed_service_is_a_portable_lab_handoff_contract() {
         let service: AgentTaskManagedService = serde_json::from_value(serde_json::json!({
             "id": "neutral-http", "command": ["fixture", "--serve"],
-            "port": 8080, "readiness": { "kind": "http", "path": "/ready" },
-            "secret_env": ["FIXTURE_TOKEN"], "public_url": "https://preview.example.test/run"
+            "port": 0, "socket_handoff": true, "readiness": { "kind": "http", "path": "/ready" },
+            "secret_env": ["FIXTURE_TOKEN"], "public_url": "https://preview.example.test/run",
+            "browser_origin_probe": { "provider": "fixture-browser" },
+            "target": "lab", "lifecycle": "target"
         }))
         .expect("service contract");
         assert_eq!(service.version, AgentTaskManagedService::VERSION);
         assert_eq!(service.host, "127.0.0.1");
+        assert!(service.socket_handoff);
+        assert_eq!(
+            service.browser_origin_probe.as_ref().unwrap().provider,
+            "fixture-browser"
+        );
+        assert_eq!(service.target.as_deref(), Some("lab"));
         assert_eq!(
             service.readiness.as_ref().unwrap().kind,
             AgentTaskManagedServiceReadinessKind::Http
         );
-        assert!(serde_json::to_value(&service)
-            .expect("serialize")
-            .get("secret_env")
-            .is_some());
+        let serialized = serde_json::to_value(&service).expect("serialize");
+        assert!(serialized.get("secret_env").is_some());
+        assert_eq!(
+            serialized["browser_origin_probe"]["provider"],
+            "fixture-browser"
+        );
     }
 }
 

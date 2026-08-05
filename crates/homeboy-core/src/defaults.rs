@@ -372,12 +372,19 @@ pub struct WorktreeProviderConfig {
 const DEFAULT_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS: u64 = 10_000;
 const MIN_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS: u64 = 1;
 const MAX_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS: u64 = 300_000;
+const DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS: u64 = 30_000;
+const MIN_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS: u64 = 1;
+const MAX_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS: u64 = 300_000;
 const DEFAULT_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
 const MIN_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES: usize = 1;
 const MAX_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
 fn default_worktree_provider_lookup_timeout_ms() -> u64 {
     DEFAULT_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS
+}
+
+fn default_worktree_provider_cleanup_timeout_ms() -> u64 {
+    DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS
 }
 
 fn default_worktree_provider_lookup_output_limit_bytes() -> usize {
@@ -405,6 +412,31 @@ pub fn validate_worktree_provider_lookup_timeout_ms(
     } else {
         Err(format!(
             "lookup_timeout_ms must be between {MIN_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS} and {MAX_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS} milliseconds"
+        ))
+    }
+}
+
+fn deserialize_worktree_provider_cleanup_timeout_ms<'de, D>(
+    deserializer: D,
+) -> std::result::Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let timeout_ms = u64::deserialize(deserializer)?;
+    validate_worktree_provider_cleanup_timeout_ms(timeout_ms).map_err(serde::de::Error::custom)?;
+    Ok(timeout_ms)
+}
+
+pub fn validate_worktree_provider_cleanup_timeout_ms(
+    timeout_ms: u64,
+) -> std::result::Result<(), String> {
+    if (MIN_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS..=MAX_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS)
+        .contains(&timeout_ms)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "cleanup timeout must be between {MIN_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS} and {MAX_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS} milliseconds"
         ))
     }
 }
@@ -460,7 +492,13 @@ pub enum WorktreeProviderKind {
     Command,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+impl Default for WorktreeProviderKind {
+    fn default() -> Self {
+        Self::Command
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorktreeProviderCommands {
     /// Targeted handle lookup. Each `{handle}` argument is replaced with the
     /// requested handle. The result uses `list_result_mapping` and may contain one item.
@@ -488,12 +526,42 @@ pub struct WorktreeProviderCommands {
     pub ensure: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup_preview: Option<Vec<String>>,
+    /// Maximum time allowed for the cleanup preview command.
+    #[serde(
+        default = "default_worktree_provider_cleanup_timeout_ms",
+        deserialize_with = "deserialize_worktree_provider_cleanup_timeout_ms"
+    )]
+    pub cleanup_preview_timeout_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup_apply: Option<Vec<String>>,
+    /// Maximum time allowed for the cleanup apply command.
+    #[serde(
+        default = "default_worktree_provider_cleanup_timeout_ms",
+        deserialize_with = "deserialize_worktree_provider_cleanup_timeout_ms"
+    )]
+    pub cleanup_apply_timeout_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts_preview: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts_apply: Option<Vec<String>>,
+}
+
+impl Default for WorktreeProviderCommands {
+    fn default() -> Self {
+        Self {
+            resolve: None,
+            resolve_path: None,
+            resolve_not_found_exit_codes: Vec::new(),
+            list: None,
+            ensure: None,
+            cleanup_preview: None,
+            cleanup_preview_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
+            cleanup_apply: None,
+            cleanup_apply_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
+            artifacts_preview: None,
+            artifacts_apply: None,
+        }
+    }
 }
 
 pub fn default_true() -> bool {
@@ -788,6 +856,18 @@ mod tests {
             DEFAULT_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS
         );
         assert_eq!(
+            config.worktree_providers["fixture"]
+                .commands
+                .cleanup_preview_timeout_ms,
+            DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS
+        );
+        assert_eq!(
+            config.worktree_providers["fixture"]
+                .commands
+                .cleanup_apply_timeout_ms,
+            DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS
+        );
+        assert_eq!(
             config.worktree_providers["fixture"].lookup_output_limit_bytes,
             DEFAULT_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES
         );
@@ -807,6 +887,22 @@ mod tests {
                 DEFAULT_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES
             ))
         );
+        assert_eq!(
+            serde_json::to_value(&config)
+                .expect("config serializes")
+                .pointer("/worktree_providers/fixture/commands/cleanup_preview_timeout_ms"),
+            Some(&serde_json::json!(
+                DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS
+            ))
+        );
+        assert_eq!(
+            serde_json::to_value(&config)
+                .expect("config serializes")
+                .pointer("/worktree_providers/fixture/commands/cleanup_apply_timeout_ms"),
+            Some(&serde_json::json!(
+                DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS
+            ))
+        );
 
         for timeout_ms in [0, MAX_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS + 1] {
             let error = serde_json::from_value::<HomeboyConfig>(serde_json::json!({
@@ -816,6 +912,18 @@ mod tests {
             assert!(error
                 .to_string()
                 .contains("lookup_timeout_ms must be between"));
+        }
+
+        for field in ["cleanup_preview_timeout_ms", "cleanup_apply_timeout_ms"] {
+            for timeout_ms in [0, MAX_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS + 1] {
+                let error = serde_json::from_value::<HomeboyConfig>(serde_json::json!({
+                    "worktree_providers": {"fixture": {"commands": {field: timeout_ms}}}
+                }))
+                .expect_err("out-of-range cleanup timeout is invalid");
+                assert!(error
+                    .to_string()
+                    .contains("cleanup timeout must be between"));
+            }
         }
 
         for output_limit_bytes in [0, MAX_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES + 1] {
@@ -838,7 +946,9 @@ mod tests {
             list: Some(vec!["provider".to_string(), "list".to_string()]),
             ensure: Some(vec!["provider".to_string(), "ensure".to_string()]),
             cleanup_preview: None,
+            cleanup_preview_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
             cleanup_apply: None,
+            cleanup_apply_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
             artifacts_preview: None,
             artifacts_apply: None,
         };

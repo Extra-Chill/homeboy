@@ -41,6 +41,9 @@ pub(crate) const SIGNAL_KILL: libc::c_int = 9;
 /// descendants changing sessions or outliving their direct parent.
 pub struct ProcessContainment {
     leader_pid: Option<u32>,
+    /// The isolated Unix process group is durable containment identity. Keep it
+    /// even when the leader exits so a supervisor can reap daemonized children.
+    process_group_id: Option<u32>,
     #[cfg(target_os = "linux")]
     scope: String,
 }
@@ -60,16 +63,27 @@ impl ProcessContainment {
             command.env(PROCESS_SCOPE_ENV, &scope);
             return Ok(Self {
                 leader_pid: None,
+                process_group_id: None,
                 scope,
             });
         }
         #[cfg(not(target_os = "linux"))]
-        Ok(Self { leader_pid: None })
+        Ok(Self {
+            leader_pid: None,
+            process_group_id: None,
+        })
     }
 
     pub fn attach(&mut self, child: &std::process::Child) -> Result<()> {
         self.leader_pid = Some(child.id());
+        self.process_group_id =
+            isolated_process_group_id(child.id()).map_err(Error::internal_unexpected)?;
         Ok(())
+    }
+
+    /// Stable containment identity suitable for a durable supervisor ledger.
+    pub fn process_group_id(&self) -> Option<u32> {
+        self.process_group_id
     }
 
     /// Terminate a failed child and its owned scope within `timeout`. The
@@ -106,8 +120,19 @@ impl ProcessContainment {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = timeout;
-            Ok(())
+            let group = self.process_group_id.ok_or_else(|| {
+                Error::internal_unexpected("process containment was not attached to a child")
+            })?;
+            terminate_isolated_process_group(group)?;
+            if wait_for_isolated_process_group_exit(group, timeout)
+                .map_err(Error::internal_unexpected)?
+            {
+                Ok(())
+            } else {
+                Err(Error::internal_unexpected(format!(
+                    "isolated process group {group} remains alive after cleanup"
+                )))
+            }
         }
     }
 }

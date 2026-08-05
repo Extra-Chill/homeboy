@@ -1021,6 +1021,7 @@ pub fn register_test_cache_reset_hook(hook: fn()) {
 
 fn reset_cached_test_state() {
     crate::defaults::reset_config_cache_for_test();
+    crate::observation::runs_service::runner_evidence::reset_runner_evidence_provider_for_test();
     let hooks = TEST_CACHE_RESET_HOOKS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
