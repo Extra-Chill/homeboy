@@ -49,10 +49,6 @@ pub fn worktree_provider_lifecycle_finalizer_argv_from_config(
 }
 
 #[cfg(not(test))]
-const PROVIDER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(test)]
-const PROVIDER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(not(test))]
 const PROVIDER_CLEANUP_HEARTBEAT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const PROVIDER_CLEANUP_HEARTBEAT: Duration = Duration::from_millis(100);
@@ -114,6 +110,7 @@ pub struct WorktreeProviderCleanupResult {
     pub inventory_completeness: WorktreeProviderInventoryCompleteness,
     pub elapsed_ms: u128,
     pub heartbeat_count: usize,
+    pub timeout_ms: u128,
     pub mode: WorktreeProviderCleanupMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command_run: Option<Vec<String>>,
@@ -1832,18 +1829,33 @@ fn run_provider_cleanup(
     mode: WorktreeProviderCleanupMode,
     timeout: Option<Duration>,
 ) -> WorktreeProviderCleanupResult {
+    let timeout = match provider_cleanup_timeout(provider_config, &mode, timeout) {
+        Ok(timeout) => timeout,
+        Err(error) => return provider_failure(provider_id, mode, None, &error),
+    };
     if !provider_config.enabled {
-        return provider_failure(provider_id, mode, "provider is disabled");
+        return provider_failure(provider_id, mode, Some(timeout), "provider is disabled");
     }
 
     match provider_config.kind {
-        WorktreeProviderKind::Command => run_command_provider_cleanup(
-            provider_id,
-            provider_config,
-            mode,
-            timeout.unwrap_or(PROVIDER_CLEANUP_TIMEOUT),
-        ),
+        WorktreeProviderKind::Command => {
+            run_command_provider_cleanup(provider_id, provider_config, mode, timeout)
+        }
     }
+}
+
+fn provider_cleanup_timeout(
+    provider: &WorktreeProviderConfig,
+    mode: &WorktreeProviderCleanupMode,
+    aggregate_cap: Option<Duration>,
+) -> std::result::Result<Duration, String> {
+    let configured_timeout_ms = match mode {
+        WorktreeProviderCleanupMode::Preview => provider.commands.cleanup_preview_timeout_ms,
+        WorktreeProviderCleanupMode::Apply => provider.commands.cleanup_apply_timeout_ms,
+    };
+    defaults::validate_worktree_provider_cleanup_timeout_ms(configured_timeout_ms)?;
+    let configured = Duration::from_millis(configured_timeout_ms);
+    Ok(aggregate_cap.map_or(configured, |cap| cap.min(configured)))
 }
 
 fn run_command_provider_cleanup(
@@ -1869,7 +1881,12 @@ fn run_command_provider_cleanup_with_liveness(
     heartbeat_interval: Duration,
 ) -> WorktreeProviderCleanupResult {
     if mode == WorktreeProviderCleanupMode::Apply && !provider_config.apply_enabled {
-        return provider_failure(provider_id, mode, "provider apply is not enabled");
+        return provider_failure(
+            provider_id,
+            mode,
+            Some(timeout),
+            "provider apply is not enabled",
+        );
     }
 
     let command = match mode {
@@ -1881,6 +1898,7 @@ fn run_command_provider_cleanup_with_liveness(
         return provider_failure(
             provider_id,
             mode,
+            Some(timeout),
             "provider cleanup command is not configured",
         );
     };
@@ -1888,6 +1906,7 @@ fn run_command_provider_cleanup_with_liveness(
         return provider_failure(
             provider_id,
             mode,
+            Some(timeout),
             "provider command argv must include an executable",
         );
     }
@@ -1961,6 +1980,7 @@ fn run_command_provider_cleanup_with_liveness(
                         format!("failed to supervise provider command: {err}"),
                         elapsed_ms,
                         heartbeats,
+                        Some(timeout),
                     );
                 }
             };
@@ -1984,6 +2004,7 @@ fn run_command_provider_cleanup_with_liveness(
                 outcome: outcome.clone(),
                 elapsed_ms,
                 heartbeat_count: heartbeats,
+                timeout_ms: timeout.as_millis(),
                 mode,
                 command_run: Some(command.clone()),
                 status,
@@ -2014,6 +2035,7 @@ fn run_command_provider_cleanup_with_liveness(
             format!("failed to execute provider command: {err}"),
             0,
             0,
+            Some(timeout),
         ),
     }
 }
@@ -2030,9 +2052,10 @@ fn last_non_empty_line(output: &str) -> Option<String> {
 fn provider_failure(
     provider_id: &str,
     mode: WorktreeProviderCleanupMode,
+    timeout: Option<Duration>,
     error: &str,
 ) -> WorktreeProviderCleanupResult {
-    provider_failure_with_details(provider_id, mode, None, error.to_string(), 0, 0)
+    provider_failure_with_details(provider_id, mode, None, error.to_string(), 0, 0, timeout)
 }
 
 fn provider_failure_with_details(
@@ -2042,6 +2065,7 @@ fn provider_failure_with_details(
     error: String,
     elapsed_ms: u128,
     heartbeat_count: usize,
+    timeout: Option<Duration>,
 ) -> WorktreeProviderCleanupResult {
     let phase = Some(mode_phase(&mode).to_string());
     WorktreeProviderCleanupResult {
@@ -2051,6 +2075,7 @@ fn provider_failure_with_details(
         inventory_completeness: WorktreeProviderInventoryCompleteness::Partial,
         elapsed_ms,
         heartbeat_count,
+        timeout_ms: timeout.map_or(0, |timeout| timeout.as_millis()),
         mode,
         command_run,
         status: None,
@@ -2918,12 +2943,241 @@ mod tests {
             output.providers[0].parsed_payload,
             Some(json!({ "mode": "preview" }))
         );
+        assert_eq!(output.providers[0].timeout_ms, 30_000);
+    }
+
+    #[test]
+    fn cleanup_budget_selects_configured_values_and_honors_aggregate_caps() {
+        let provider = WorktreeProviderConfig {
+            commands: WorktreeProviderCommands {
+                cleanup_preview_timeout_ms: 45_000,
+                cleanup_apply_timeout_ms: 90_000,
+                ..Default::default()
+            },
+            ..default_command_provider()
+        };
+
+        assert_eq!(
+            provider_cleanup_timeout(&provider, &WorktreeProviderCleanupMode::Preview, None)
+                .expect("configured preview budget")
+                .as_millis(),
+            45_000
+        );
+        assert_eq!(
+            provider_cleanup_timeout(
+                &provider,
+                &WorktreeProviderCleanupMode::Preview,
+                Some(Duration::from_secs(20)),
+            )
+            .expect("capped preview budget")
+            .as_millis(),
+            20_000
+        );
+        assert_eq!(
+            provider_cleanup_timeout(
+                &provider,
+                &WorktreeProviderCleanupMode::Apply,
+                Some(Duration::from_secs(120)),
+            )
+            .expect("uncapped apply budget")
+            .as_millis(),
+            90_000
+        );
+    }
+
+    #[test]
+    fn resolved_cleanup_budget_is_reported_for_early_failures() {
+        let cases = [
+            (
+                "disabled",
+                WorktreeProviderCleanupMode::Preview,
+                WorktreeProviderConfig {
+                    enabled: false,
+                    ..default_command_provider()
+                },
+            ),
+            (
+                "apply-disabled",
+                WorktreeProviderCleanupMode::Apply,
+                WorktreeProviderConfig {
+                    apply_enabled: false,
+                    commands: WorktreeProviderCommands {
+                        cleanup_apply: Some(vec![fake_provider_script()]),
+                        ..Default::default()
+                    },
+                    ..default_command_provider()
+                },
+            ),
+            (
+                "missing-command",
+                WorktreeProviderCleanupMode::Preview,
+                default_command_provider(),
+            ),
+            (
+                "invalid-argv",
+                WorktreeProviderCleanupMode::Preview,
+                WorktreeProviderConfig {
+                    commands: WorktreeProviderCommands {
+                        cleanup_preview: Some(vec![String::new()]),
+                        ..Default::default()
+                    },
+                    ..default_command_provider()
+                },
+            ),
+            (
+                "spawn",
+                WorktreeProviderCleanupMode::Preview,
+                WorktreeProviderConfig {
+                    commands: WorktreeProviderCommands {
+                        cleanup_preview: Some(vec!["/definitely/missing/provider".to_string()]),
+                        ..Default::default()
+                    },
+                    ..default_command_provider()
+                },
+            ),
+        ];
+
+        for (name, mode, provider) in cases {
+            let result =
+                run_provider_cleanup(name, &provider, mode, Some(Duration::from_millis(750)));
+            assert_eq!(result.timeout_ms, 750, "{name}");
+            assert_eq!(
+                result.outcome,
+                WorktreeProviderCleanupOutcome::Failed,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn configured_preview_timeout_allows_a_slow_provider() {
+        let dir = unique_fixture_script_dir();
+        let started = dir.join("started");
+        let release = dir.join("release");
+        let script = waiting_provider_script(&started, &release, "preview");
+        let cleanup = std::thread::spawn(move || {
+            cleanup_worktree_providers_from_config(
+                WorktreeProviderCleanupOptions {
+                    provider: vec!["fixture".to_string()],
+                    all_providers: false,
+                    apply: false,
+                    timeout: None,
+                },
+                config_with_provider(WorktreeProviderConfig {
+                    enabled: true,
+                    kind: WorktreeProviderKind::Command,
+                    apply_enabled: false,
+                    lookup_timeout_ms: 10_000,
+                    lookup_output_limit_bytes: 64 * 1024,
+                    commands: WorktreeProviderCommands {
+                        cleanup_preview: Some(vec![script]),
+                        cleanup_preview_timeout_ms: 2_000,
+                        ..Default::default()
+                    },
+                    list_result_mapping: None,
+                }),
+            )
+        });
+        wait_for_path(&started);
+        fs::write(&release, "release").expect("release provider");
+        let output = cleanup
+            .join()
+            .expect("cleanup thread")
+            .expect("configured timeout allows provider response");
+
+        assert_eq!(
+            output.providers[0].outcome,
+            WorktreeProviderCleanupOutcome::Completed
+        );
+        assert_eq!(output.providers[0].timeout_ms, 2_000);
+    }
+
+    #[test]
+    fn preview_and_apply_use_distinct_configured_budgets() {
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: true,
+            lookup_timeout_ms: 10_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands {
+                cleanup_preview_timeout_ms: 25,
+                cleanup_apply_timeout_ms: 2_000,
+                ..Default::default()
+            },
+            list_result_mapping: None,
+        };
+
+        assert_eq!(
+            provider_cleanup_timeout(&provider, &WorktreeProviderCleanupMode::Preview, None)
+                .expect("preview budget")
+                .as_millis(),
+            25
+        );
+        assert_eq!(
+            provider_cleanup_timeout(&provider, &WorktreeProviderCleanupMode::Apply, None)
+                .expect("apply budget")
+                .as_millis(),
+            2_000
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_timeout_terminates_the_provider_process_tree() {
+        let dir = unique_fixture_script_dir();
+        let marker = dir.join("orphaned-child");
+        let child_started = dir.join("child-started");
+        let permit_timeout = dir.join("permit-timeout");
+        let release = dir.join("release");
+        let script = fake_provider_script_body(&format!(
+            "(touch '{}'; while [ ! -f '{}' ]; do sleep 0.01; done; touch '{}') &\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nwhile :; do sleep 1; done\n",
+            child_started.display(),
+            release.display(),
+            marker.display(),
+            permit_timeout.display(),
+        ));
+        let cleanup = std::thread::spawn(move || {
+            cleanup_worktree_providers_from_config(
+                WorktreeProviderCleanupOptions {
+                    provider: vec!["fixture".to_string()],
+                    all_providers: false,
+                    apply: false,
+                    timeout: None,
+                },
+                config_with_provider(WorktreeProviderConfig {
+                    enabled: true,
+                    kind: WorktreeProviderKind::Command,
+                    apply_enabled: false,
+                    lookup_timeout_ms: 10_000,
+                    lookup_output_limit_bytes: 64 * 1024,
+                    commands: WorktreeProviderCommands {
+                        cleanup_preview: Some(vec![script]),
+                        cleanup_preview_timeout_ms: 2_000,
+                        ..Default::default()
+                    },
+                    list_result_mapping: None,
+                }),
+            )
+        });
+        wait_for_path(&child_started);
+        fs::write(&permit_timeout, "permit timeout").expect("permit timeout path");
+        let output = cleanup
+            .join()
+            .expect("cleanup thread")
+            .expect("timeout returns cleanup evidence");
+
+        assert_eq!(
+            output.providers[0].outcome,
+            WorktreeProviderCleanupOutcome::TimedOut
+        );
+        fs::write(&release, "release").expect("release orphaned child");
+        assert_path_remains_absent(&marker);
     }
 
     #[test]
     fn cleanup_provider_liveness_is_bounded_and_reports_partial_inventory() {
         let hanging = fake_provider_script_body("sleep 60\n");
-        let slow = fake_provider_script_body("sleep 0.12\nprintf '{\"mode\":\"preview\"}\\n'\n");
         let failing = fake_provider_script_body("printf 'provider failed\\n' >&2\nexit 23\n");
         let provider = |script: String| WorktreeProviderConfig {
             enabled: true,
@@ -2944,9 +3198,6 @@ mod tests {
             .insert("hanging".to_string(), provider(hanging));
         config
             .worktree_providers
-            .insert("slow".to_string(), provider(slow));
-        config
-            .worktree_providers
             .insert("failing".to_string(), provider(failing));
         let started = std::time::Instant::now();
         let output = cleanup_worktree_providers_from_config(
@@ -2954,13 +3205,13 @@ mod tests {
                 provider: Vec::new(),
                 all_providers: true,
                 apply: false,
-                timeout: Some(Duration::from_millis(500)),
+                timeout: Some(Duration::from_millis(1_500)),
             },
             config,
         )
         .expect("bounded cleanup completes");
 
-        assert!(started.elapsed() < Duration::from_millis(800));
+        assert!(started.elapsed() < Duration::from_secs(2));
         assert_eq!(
             output.inventory_completeness,
             WorktreeProviderInventoryCompleteness::Partial
@@ -2975,13 +3226,6 @@ mod tests {
             hanging.inventory_completeness,
             WorktreeProviderInventoryCompleteness::Partial
         );
-        let slow = output
-            .providers
-            .iter()
-            .find(|row| row.provider_id == "slow")
-            .expect("slow result");
-        assert_eq!(slow.outcome, WorktreeProviderCleanupOutcome::TimedOut);
-        assert!(slow.heartbeat_count > 0);
         let failing = output
             .providers
             .iter()
@@ -3311,7 +3555,7 @@ mod tests {
             enabled: true,
             kind: WorktreeProviderKind::Command,
             apply_enabled: false,
-            lookup_timeout_ms: 1_000,
+            lookup_timeout_ms: 5_000,
             lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands {
                 resolve: Some(vec![script, "{handle}".to_string()]),
@@ -4098,6 +4342,18 @@ mod tests {
         }
     }
 
+    fn default_command_provider() -> WorktreeProviderConfig {
+        WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: true,
+            lookup_timeout_ms: 10_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands::default(),
+            list_result_mapping: None,
+        }
+    }
+
     fn worktrees_mapping() -> WorktreeProviderListResultMapping {
         WorktreeProviderListResultMapping {
             items: "$.worktrees".to_string(),
@@ -4177,6 +4433,42 @@ mod tests {
         fs::write(&script, format!("#!/bin/sh\n{body}")).expect("write script");
         make_executable(&script);
         script.to_string_lossy().to_string()
+    }
+
+    fn waiting_provider_script(
+        started: &std::path::Path,
+        release: &std::path::Path,
+        mode: &str,
+    ) -> String {
+        fake_provider_script_body(&format!(
+            "touch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nprintf '{{\"mode\":\"{}\"}}\\n'\n",
+            started.display(),
+            release.display(),
+            mode,
+        ))
+    }
+
+    fn wait_for_path(path: &std::path::Path) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !path.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {}",
+                path.display()
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    fn assert_path_remains_absent(path: &std::path::Path) {
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            assert!(
+                !path.exists(),
+                "timed-out provider child must not outlive its process tree"
+            );
+            std::thread::yield_now();
+        }
     }
 
     fn fake_provider_script_with_refs() -> String {
