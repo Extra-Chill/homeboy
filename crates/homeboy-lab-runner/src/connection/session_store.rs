@@ -193,27 +193,46 @@ pub(super) fn read_session_for_status(runner_id: &str) -> Result<Option<RunnerSe
     match status_peer_session_in(&directory, &controller_id)? {
         StatusPeerSession::One(peer) => Ok(Some(peer)),
         StatusPeerSession::None => Ok(session),
+        StatusPeerSession::Truncated => {
+            record_partial_peer_projection(
+                runner_id,
+                crate::readonly_probe::REASON_PROBE_TRUNCATED,
+                format!(
+                    "runner `{runner_id}` has more than {STATUS_PEER_SESSION_LIMIT} persisted peer sessions; status did not select a potentially incomplete peer view"
+                ),
+            );
+            Ok(session)
+        }
         StatusPeerSession::Ambiguous => {
-            crate::readonly_probe::record_degradation(
-                crate::readonly_probe::ReadOnlyProbeDegradation {
-                    probe: "runner_peer_session".to_string(),
-                    runner_id: Some(runner_id.to_string()),
-                    reason_code: crate::readonly_probe::REASON_PROBE_AMBIGUOUS,
-                    timeout_seconds: 0,
-                    detail: format!(
-                        "multiple live direct-SSH peer sessions for runner `{runner_id}` disagree on daemon identity; status is partial. Run `homeboy runner reconcile {runner_id}` to select or repair the authoritative session."
-                    ),
-                },
+            record_partial_peer_projection(
+                runner_id,
+                crate::readonly_probe::REASON_PROBE_AMBIGUOUS,
+                format!(
+                    "multiple live direct-SSH peer sessions for runner `{runner_id}` disagree on daemon identity"
+                ),
             );
             Ok(session)
         }
     }
 }
 
+fn record_partial_peer_projection(runner_id: &str, reason_code: &'static str, detail: String) {
+    crate::readonly_probe::record_degradation(crate::readonly_probe::ReadOnlyProbeDegradation {
+        probe: "runner_peer_session".to_string(),
+        runner_id: Some(runner_id.to_string()),
+        reason_code,
+        timeout_seconds: 0,
+        detail: format!(
+            "{detail}; status is partial. Run `homeboy runner reconcile {runner_id}` to select or repair the authoritative session."
+        ),
+    });
+}
+
 enum StatusPeerSession {
     None,
     One(RunnerSession),
     Ambiguous,
+    Truncated,
 }
 
 /// Status observes at most this many persisted peers. The current controller
@@ -255,12 +274,15 @@ fn status_peer_session_in_with(
             )
         })?;
     paths.sort();
-    let mut peer: Option<RunnerSession> = None;
-    for path in paths
+    let paths = paths
         .into_iter()
         .filter(|path| is_controller_session_file(path))
-        .take(STATUS_PEER_SESSION_LIMIT)
-    {
+        .collect::<Vec<_>>();
+    if paths.len() > STATUS_PEER_SESSION_LIMIT {
+        return Ok(StatusPeerSession::Truncated);
+    }
+    let mut peer: Option<RunnerSession> = None;
+    for path in paths {
         let Some(candidate) = read_session_at(&path)? else {
             continue;
         };
@@ -1169,6 +1191,45 @@ mod tests {
             read_session_at(&root.path().join("peer-b.json")).expect("read second"),
             Some(second)
         );
+    }
+
+    #[test]
+    fn status_peer_projection_is_truncated_before_a_conflicting_ninth_peer() {
+        let root = TempDir::new().expect("session directory");
+        for index in 0..9 {
+            let lease = if index == 8 {
+                "lease-conflict"
+            } else {
+                "lease-live"
+            };
+            let peer = session(&format!("peer-{index}"), lease);
+            write_session_at(&root.path().join(format!("peer-{index}.json")), &peer)
+                .expect("write peer session");
+        }
+
+        assert!(matches!(
+            status_peer_session_in_with(&root.path().to_path_buf(), "current", |_| true)
+                .expect("project bounded peers"),
+            StatusPeerSession::Truncated
+        ));
+    }
+
+    #[test]
+    fn status_peer_projection_is_truncated_when_only_the_ninth_peer_is_live() {
+        let root = TempDir::new().expect("session directory");
+        for index in 0..9 {
+            let peer = session(&format!("peer-{index}"), "lease-live");
+            write_session_at(&root.path().join(format!("peer-{index}.json")), &peer)
+                .expect("write peer session");
+        }
+
+        assert!(matches!(
+            status_peer_session_in_with(&root.path().to_path_buf(), "current", |peer| {
+                peer.controller_id.as_deref() == Some("peer-8")
+            })
+            .expect("project bounded peers"),
+            StatusPeerSession::Truncated
+        ));
     }
 
     #[test]
