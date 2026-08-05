@@ -102,10 +102,17 @@ impl ExactRefCheckout {
         };
         ensure_resolved_commit_is_available(&source_root, component, &identity)?;
         let component_prefix = git::get_component_path_prefix(&component.local_path);
-        let parent = std::env::temp_dir().join("homeboy-deploy-ref");
+        // The exact-ref worktree is a full source checkout. It used to land in
+        // `std::env::temp_dir()`, which put it outside every cleanup surface --
+        // no owner record, no pin, no run binding, invisible to
+        // `cleanup --include runtime-tmp` and to the retained-storage report --
+        // and broke outright on a `noexec` `/tmp` (#11128). The artifact root
+        // is the volume the operator already sized for run bytes, so it is
+        // where a checkout this large belongs.
+        let parent = homeboy_core::artifacts::root()?.join("deploy-ref");
         std::fs::create_dir_all(&parent).map_err(|err| {
             Error::internal_io(
-                format!("Failed to create exact-ref deploy temp directory: {err}"),
+                format!("Failed to create exact-ref deploy checkout directory: {err}"),
                 Some("deploy.ref.temp".to_string()),
             )
         })?;
