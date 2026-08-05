@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.5] - 2026-08-04
+
+### Fixed
+- preserve failed shard aggregation
+
 ## [2.11.4] - 2026-08-04
 
 ### Fixed
