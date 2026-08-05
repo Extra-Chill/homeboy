@@ -73,6 +73,10 @@ pub enum PlacementReadinessInvocation {
     AgentTaskCook {
         provider: String,
         source_path: String,
+        /// Optional serialized durable plan. v2 callers omit this; v3 callers
+        /// let mutation-free preflight compile the same runner requirements as execution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        durable_plan: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         selector: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -213,11 +217,41 @@ pub(crate) fn compile_execution_lab_admission_plan(
     )
 }
 
+/// Add controller-owned durable task requirements to an already routed plan.
+/// This is shared by public preflight and execution, so a ready snapshot cannot
+/// omit a runner capability that execution will later reject.
+pub fn project_durable_agent_task_capabilities(
+    plan: &mut LabAdmissionPlan,
+    durable_plan: Option<&homeboy_agents::agent_task_scheduler::AgentTaskPlan>,
+) -> Result<()> {
+    let Some(durable_plan) = durable_plan else {
+        return Ok(());
+    };
+    for task in &durable_plan.tasks {
+        let requirements = task.capability_requirements().map_err(|message| {
+            Error::validation_invalid_argument(
+                "capability_requirements",
+                message,
+                Some(task.task_id.clone()),
+                Some(vec!["Use homeboy/agent-task-capability-requirements/v1 with explicit provider, runner, and attached-tool declarations.".to_string()]),
+            )
+        })?;
+        plan.capability
+            .required_capabilities
+            .extend(requirements.runner);
+    }
+    plan.capability.required_capabilities.sort();
+    plan.capability.required_capabilities.dedup();
+    Ok(())
+}
+
 fn validate_placement_readiness_request(request: &PlacementReadinessRequest) -> Result<()> {
-    if request.schema != "homeboy/placement-readiness/v2" {
+    if request.schema != "homeboy/placement-readiness/v2"
+        && request.schema != "homeboy/placement-readiness/v3"
+    {
         return Err(Error::validation_invalid_argument(
             "schema",
-            "placement readiness accepts homeboy/placement-readiness/v2 requests",
+            "placement readiness accepts homeboy/placement-readiness/v2 or v3 requests",
             Some(request.schema.clone()),
             None,
         ));
@@ -348,6 +382,22 @@ fn placement_readiness_with_transport(
         &routed.source_path,
         &observation.command_prefix_required_tools,
     )?;
+    let durable_plan = match &request.invocation {
+        PlacementReadinessInvocation::AgentTaskCook { durable_plan, .. } => durable_plan
+            .as_ref()
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "durable_plan",
+                    format!("invalid durable agent-task plan: {error}"),
+                    None,
+                    None,
+                )
+            })?,
+        PlacementReadinessInvocation::CapabilityAudit { .. } => None,
+    };
+    project_durable_agent_task_capabilities(&mut plan, durable_plan.as_ref())?;
     // Public preflight is mutation-free. Execution evaluates the same probes
     // after its workspace and runtime materialization have completed.
     plan.executable_probe_required = plan.toolchain.is_some();
@@ -1862,6 +1912,7 @@ mod placement_readiness_tests {
             invocation: PlacementReadinessInvocation::AgentTaskCook {
                 provider: "sol".to_string(),
                 source_path: "/workspace/source".to_string(),
+                durable_plan: None,
                 selector: selector.map(str::to_string),
                 model: Some("model".to_string()),
                 runtime_identity: None,
@@ -2099,6 +2150,7 @@ mod placement_readiness_tests {
         request.invocation = PlacementReadinessInvocation::AgentTaskCook {
             provider: " ".to_string(),
             source_path: " ".to_string(),
+            durable_plan: None,
             selector: None,
             model: None,
             runtime_identity: None,
