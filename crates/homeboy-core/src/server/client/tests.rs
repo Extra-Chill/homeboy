@@ -661,9 +661,10 @@ fn managed_session_config_adds_controlmaster_args() {
     let client = SshClient::from_server(&server, "bastion").expect("client");
     let args = client.build_ssh_args(Some("uptime"), false);
 
-    assert!(args.contains(&"ControlMaster=auto".to_string()));
-    assert!(args.contains(&"ControlPath=/tmp/homeboy-test-%h-%p-%r".to_string()));
-    assert!(args.contains(&"ControlPersist=4h".to_string()));
+    assert!(args
+        .windows(2)
+        .any(|pair| { pair == ["-S".to_string(), "/tmp/homeboy-test-%h-%p-%r".to_string()] }));
+    assert!(args.contains(&"ControlMaster=no".to_string()));
     assert!(args.contains(&"BatchMode=yes".to_string()));
     assert!(args.contains(&"2222".to_string()));
     assert_eq!(args.last().map(String::as_str), Some("uptime"));
@@ -696,6 +697,25 @@ fn managed_session_connect_builds_master_command() {
         args.last().map(String::as_str),
         Some("deploy@bastion.example.test")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn timed_command_does_not_wait_for_a_pipe_holding_descendant() {
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", "sleep 5 & exit 0"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::server::process_cleanup::configure_process_group_cleanup(&mut command);
+    let started = Instant::now();
+
+    let output = execute_command_with_stdin_timeout(command, None, Duration::from_millis(50));
+
+    assert!(output.timed_out);
+    assert_eq!(output.exit_code, 124);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(output.stderr.contains("stream drain exceeded"));
 }
 
 #[test]

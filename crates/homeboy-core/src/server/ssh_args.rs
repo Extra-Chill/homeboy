@@ -119,9 +119,11 @@ fn client_connection_args(
     // auth mode is a separate change with its own blast radius (control-socket
     // lifetime, forwarding, interactive sessions).
     if let Some(session) = auth {
-        push_option(&mut args, "ControlMaster=auto");
-        push_option(&mut args, format!("ControlPath={}", session.control_path));
-        push_option(&mut args, format!("ControlPersist={}", session.persist));
+        // A managed session is established explicitly by `server connect`. Command
+        // clients attach to that socket rather than starting a competing master.
+        args.push("-S".to_string());
+        args.push(session.control_path.clone());
+        push_option(&mut args, "ControlMaster=no");
     }
 
     if options.batch_mode && !options.interactive {
@@ -177,7 +179,8 @@ mod tests {
         ));
 
         assert!(rendered.contains("-i '/tmp/key with spaces'"));
-        assert!(rendered.contains("-o 'ControlPath=/tmp/control path'"));
+        assert!(rendered.contains("-S '/tmp/control path'"));
+        assert!(rendered.contains("-o ControlMaster=no"));
         assert!(rendered.contains("-p 2222"));
     }
 }

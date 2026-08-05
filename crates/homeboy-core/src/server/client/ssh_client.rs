@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -27,6 +28,7 @@ use super::{CommandOutput, SshClient};
 /// Sentinel terminating the secret-env block streamed over the SSH channel's
 /// stdin. Chosen to never collide with an env var name or a `NAME=VALUE` line.
 pub(crate) const SECRET_ENV_STDIN_SENTINEL: &str = "__HOMEBOY_SECRET_ENV_END__";
+const MANAGED_SESSION_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Where a command's stdin bytes come from when it is dispatched over SSH (or
 /// the localhost fast path).
@@ -333,15 +335,31 @@ impl SshClient {
         args: Vec<String>,
         expect_live_on_success: bool,
     ) -> ManagedSshSessionOutput {
-        let output = Command::new("ssh").args(&args).output();
-        let (stdout, stderr, exit_code) = match output {
-            Ok(out) => (
-                String::from_utf8_lossy(&out.stdout).to_string(),
-                String::from_utf8_lossy(&out.stderr).to_string(),
-                out.status.code().unwrap_or(-1),
-            ),
-            Err(err) => (String::new(), format!("SSH error: {}", err), -1),
-        };
+        let target = args.last().cloned().unwrap_or_default();
+        let control_path = args
+            .windows(2)
+            .find_map(|pair| (pair[0] == "-S").then(|| pair[1].clone()))
+            .unwrap_or_default();
+        let mut command = Command::new("ssh");
+        command
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        crate::server::process_cleanup::configure_process_group_cleanup(&mut command);
+        let output =
+            execute_command_with_stdin_timeout(command, None, MANAGED_SESSION_OPERATION_TIMEOUT);
+        let mut stderr = output.stderr;
+        if output.timed_out {
+            if !stderr.is_empty() && !stderr.ends_with('\n') {
+                stderr.push('\n');
+            }
+            stderr.push_str(&format!(
+                "Managed SSH control operation timed out during mux control; target={target}; configured_host={}; control_path={control_path}.",
+                self.host,
+            ));
+        }
+        let stdout = output.stdout;
+        let exit_code = output.exit_code;
         let success = exit_code == 0;
 
         ManagedSshSessionOutput {
@@ -547,12 +565,8 @@ pub(super) fn run_command_with_stdin_source(
     let stdin_failed = writer
         .and_then(|writer| writer.finish_after_child())
         .is_some_and(|result: std::io::Result<()>| result.is_err());
-    let stdout = stdout
-        .and_then(|reader| reader.join().ok())
-        .unwrap_or_default();
-    let mut stderr = stderr
-        .and_then(|reader| reader.join().ok())
-        .unwrap_or_default();
+    let stdout = collect_stream(stdout);
+    let mut stderr = collect_stream(stderr);
     if stdin_failed {
         if !stderr.is_empty() && !stderr.ends_with('\n') {
             stderr.push('\n');
@@ -586,12 +600,31 @@ pub(super) fn run_command_with_stdin_source(
     }
 }
 
-fn read_stream(mut pipe: impl Read + Send + 'static) -> thread::JoinHandle<String> {
+fn read_stream(mut pipe: impl Read + Send + 'static) -> Receiver<String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
     thread::spawn(move || {
         let mut bytes = Vec::new();
         let _ = pipe.read_to_end(&mut bytes);
-        String::from_utf8_lossy(&bytes).to_string()
-    })
+        let _ = sender.send(String::from_utf8_lossy(&bytes).to_string());
+    });
+    receiver
+}
+
+fn collect_stream(receiver: Option<Receiver<String>>) -> String {
+    receiver
+        .and_then(|receiver| receiver.recv().ok())
+        .unwrap_or_default()
+}
+
+fn collect_stream_before(receiver: Option<Receiver<String>>, deadline: Duration) -> (String, bool) {
+    match receiver {
+        Some(receiver) => match receiver.recv_timeout(deadline) {
+            Ok(output) => (output, false),
+            Err(RecvTimeoutError::Timeout) => (String::new(), true),
+            Err(RecvTimeoutError::Disconnected) => (String::new(), false),
+        },
+        None => (String::new(), false),
+    }
 }
 
 fn ssh_process_error(error: std::io::Error) -> CommandOutput {
@@ -736,12 +769,16 @@ pub(super) fn execute_command_with_stdin_source_timeout(
     let stdin_failed = writer
         .and_then(|writer| writer.finish_after_child())
         .is_some_and(|result| result.is_err());
-    let stdout = stdout
-        .and_then(|reader| reader.join().ok())
-        .unwrap_or_default();
-    let stderr = stderr
-        .and_then(|reader| reader.join().ok())
-        .unwrap_or_default();
+    let (stdout, stdout_stalled) = collect_stream_before(stdout, PROCESS_REAP_DEADLINE);
+    let (mut stderr, stderr_stalled) = collect_stream_before(stderr, PROCESS_REAP_DEADLINE);
+    if stdout_stalled || stderr_stalled {
+        timed_out = true;
+        terminate_process_group_with_deadline(&mut child, pid);
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str("Homeboy SSH stream drain exceeded its cleanup deadline; terminated child process group.");
+    }
     bounded_probe_output(
         stdout,
         stderr,
@@ -870,20 +907,8 @@ where
     };
     let pid = child.id();
     let (writer_rx, writer) = writer_factory(child.stdin.take(), stdin);
-    let stdout = child.stdout.take().map(|mut pipe| {
-        thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = pipe.read_to_end(&mut bytes);
-            String::from_utf8_lossy(&bytes).to_string()
-        })
-    });
-    let stderr = child.stderr.take().map(|mut pipe| {
-        thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = pipe.read_to_end(&mut bytes);
-            String::from_utf8_lossy(&bytes).to_string()
-        })
-    });
+    let stdout = child.stdout.take().map(read_stream);
+    let stderr = child.stderr.take().map(read_stream);
     let mut timed_out = false;
     let mut stdin_failed = false;
     let mut interrupted_signal = None;
@@ -922,12 +947,16 @@ where
     if let Some(writer) = writer {
         let _ = writer.join();
     }
-    let stdout = stdout
-        .and_then(|handle| handle.join().ok())
-        .unwrap_or_default();
-    let stderr = stderr
-        .and_then(|handle| handle.join().ok())
-        .unwrap_or_default();
+    let (stdout, stdout_stalled) = collect_stream_before(stdout, PROCESS_REAP_DEADLINE);
+    let (mut stderr, stderr_stalled) = collect_stream_before(stderr, PROCESS_REAP_DEADLINE);
+    if stdout_stalled || stderr_stalled {
+        timed_out = true;
+        terminate_process_group_with_deadline(&mut child, pid);
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str("Homeboy SSH stream drain exceeded its cleanup deadline; terminated child process group.");
+    }
     bounded_probe_output(
         stdout,
         stderr,
