@@ -334,9 +334,9 @@ pub struct RunnerOperatorCommand {
 #[derive(Debug, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RunnerConnectionOutput {
-    Connect(RunnerConnectReport),
-    Status(RunnerStatusReport),
-    Disconnect(RunnerDisconnectReport),
+    Connect(Box<RunnerConnectReport>),
+    Status(Box<RunnerStatusReport>),
+    Disconnect(Box<RunnerDisconnectReport>),
 }
 
 pub type RunnerOutput = EntityCrudOutput<Runner, RunnerExtra>;
@@ -346,21 +346,21 @@ pub(super) const REDACTED_ENV_VALUE: &str = "[redacted]";
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum RunnerCommandOutput {
-    Registry(RunnerOutput),
-    Doctor(doctor::RunnerDoctorOutput),
-    Preflight(homeboy::runner::runners::PlacementReadiness),
-    Execution(RunnerExecutionCommandOutput),
-    Env(RunnerEnvOutput),
-    Lifecycle(lifecycle::RunnerLifecycleOutput),
-    Job(RunnerJobOutput),
-    BrokerJob(RunnerBrokerJobOutput),
-    RefreshHomeboy(RunnerRefreshHomeboyCommandOutput),
-    DevSync(homeboy::runner::runners::RunnerDevSyncOutput),
-    CachePrune(homeboy::runner::runners::RunnerBinaryCachePruneOutput),
-    Worker(ReverseRunnerWorkerOutput),
-    Workspace(workspace::RunnerWorkspaceOutput),
-    RefreshPlan(refresh_plan::LabRefreshPlanOutput),
-    Broker(RunnerBrokerOutput),
+    Registry(Box<RunnerOutput>),
+    Doctor(Box<doctor::RunnerDoctorOutput>),
+    Preflight(Box<homeboy::runner::runners::PlacementReadiness>),
+    Execution(Box<RunnerExecutionCommandOutput>),
+    Env(Box<RunnerEnvOutput>),
+    Lifecycle(Box<lifecycle::RunnerLifecycleOutput>),
+    Job(Box<RunnerJobOutput>),
+    BrokerJob(Box<RunnerBrokerJobOutput>),
+    RefreshHomeboy(Box<RunnerRefreshHomeboyCommandOutput>),
+    DevSync(Box<homeboy::runner::runners::RunnerDevSyncOutput>),
+    CachePrune(Box<homeboy::runner::runners::RunnerBinaryCachePruneOutput>),
+    Worker(Box<ReverseRunnerWorkerOutput>),
+    Workspace(Box<workspace::RunnerWorkspaceOutput>),
+    RefreshPlan(Box<refresh_plan::LabRefreshPlanOutput>),
+    Broker(Box<RunnerBrokerOutput>),
 }
 
 #[derive(Debug, Serialize)]
