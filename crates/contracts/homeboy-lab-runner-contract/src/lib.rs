@@ -17,10 +17,15 @@
 //!   managed source checkout homeboy keeps synced on the runner, read by core's
 //!   agent-runtime manifest and by `homeboy-agents`.
 
+mod composite_phase_placement;
 mod execution_placement;
 mod placement;
 mod provider_source_types;
 
+pub use composite_phase_placement::{
+    CompositePhasePlacement, CompositePhasePlacementError, CompositePhasePlacementPlan,
+    CompositeWorkflowPhase, CompositeWorkflowPhaseKind,
+};
 pub use execution_placement::{
     EffectiveExecutionPlacement, ExecutionPlacementDecision, ExecutionPlacementFallback,
     ExecutionPlacementIdentity, ExecutionPlacementOutcome, ExecutionPlacementOverrideAuthorization,
