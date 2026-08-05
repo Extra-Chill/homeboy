@@ -712,9 +712,12 @@ pub(super) fn run_test_stage(
     })
 }
 
+type StringSettings = Vec<(String, String)>;
+type JsonSettings = Vec<(String, serde_json::Value)>;
+
 fn split_refactor_settings(
     settings: &[(String, serde_json::Value)],
-) -> (Vec<(String, String)>, Vec<(String, serde_json::Value)>) {
+) -> (StringSettings, JsonSettings) {
     settings
         .iter()
         .cloned()
