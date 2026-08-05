@@ -97,6 +97,12 @@ pub struct ControllerFallbackProjectionStore {
 }
 
 impl ControllerFallbackProjectionStore {
+    /// Shared controller ledger survives daemon restarts independently of the
+    /// runner-owned staging store.
+    pub fn open_default() -> Result<Self> {
+        Self::open(homeboy_core::paths::homeboy_data()?.join("controller-fallback-projection.json"))
+    }
+
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let store = Self { path: path.into() };
         if store.load()?.schema != STORE_SCHEMA {

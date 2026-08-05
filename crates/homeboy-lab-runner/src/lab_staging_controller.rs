@@ -24,6 +24,10 @@ use homeboy_core::lab_contract::{
 use homeboy_core::runner_execution_envelope::PathMaterializationPlan;
 use homeboy_core::{Error, Result};
 
+use crate::direct_lab_handoff::DirectLabHandoffEnvelope;
+use crate::runner_staging_operation::{
+    RemoteRunnerStagingEnvelope, RunnerMaterializationAuthority, SealedSourceAuthority,
+};
 use crate::{LabOffloadCommand, LabOffloadRequest};
 
 pub const LAB_STAGING_DISPATCH_JOB_TYPE: &str = "lab.staging-dispatch";
@@ -37,6 +41,7 @@ const DURABLE_LAB_RUNTIME_STAGE_ATTACHMENT_KIND: &str = "durable-lab-runtime-sta
 const DURABLE_LAB_HYDRATION_STAGE_ATTACHMENT_KIND: &str = "durable-lab-hydration-stage";
 const DURABLE_LAB_DISPATCH_RECEIPT_ATTACHMENT_KIND: &str = "durable-lab-dispatch-receipt";
 const DURABLE_LAB_TERMINAL_RECEIPT_ATTACHMENT_KIND: &str = "durable-lab-terminal-receipt";
+const DEFERRED_RUNNER_STAGING_RECEIPT_ATTACHMENT_KIND: &str = "deferred-runner-staging-receipt";
 const CONTROLLER_SUBMISSION_ATTEMPTS: usize = 3;
 
 /// Serializable, owned counterpart to the static Lab command contract.
@@ -973,7 +978,19 @@ pub(crate) fn submit_detached_staging(
             None,
         ));
     }
-    let daemon = ensure_current_controller_daemon()?;
+    let daemon = match ensure_current_controller_daemon() {
+        Ok(daemon) => daemon,
+        Err(daemon_error) => {
+            return submit_deferred_runner_staging(
+                run_id,
+                runner_id,
+                tunnel_mode,
+                request,
+                daemon_error,
+            )
+            .map(|receipt| receipt.handoff.runner_job_id);
+        }
+    };
     let recipe = persist_lab_staging_recipe_for_transport(
         run_id,
         runner_id,
@@ -1040,6 +1057,104 @@ pub(crate) fn submit_detached_staging(
         )));
     }
     Ok(job_id)
+}
+
+/// Explicit detached fallback after local controller admission has failed. The
+/// resolver performs connectivity/capability observation before the runner's
+/// durable staging mutation; no provider execution is available at this layer.
+fn submit_deferred_runner_staging(
+    run_id: &str,
+    runner_id: &str,
+    tunnel_mode: crate::RunnerTunnelMode,
+    request: &LabOffloadRequest<'_>,
+    daemon_error: Error,
+) -> Result<crate::runner_staging_operation::RemoteRunnerStagingReceipt> {
+    let plan = request.durable_agent_task_plan.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "durable_agent_task_plan",
+            "controller fallback requires an explicit detached durable plan",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let mut recipe = LabStagingRecipe::from_request_with_transport(
+        run_id,
+        runner_id,
+        tunnel_mode,
+        request,
+        request.local_output_file.is_some(),
+    )?;
+    let _source_path = recipe.source_path.take().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "source_path",
+            "controller fallback requires a source path to seal before detached staging",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    // The portable recipe is the sealed staging authority. It deliberately
+    // excludes the controller-local source path before crossing the runner API.
+    let sealed_payload = canonical_json_bytes(&serde_json::to_value(&recipe).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize deferred staging recipe".to_string()),
+        )
+    })?)
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("canonicalize deferred staging recipe".to_string()),
+        )
+    })?;
+    let digest = format!("sha256:{}", content_hash::sha256_hex(&sealed_payload));
+    let handoff = DirectLabHandoffEnvelope::new(
+        homeboy_product_identity::build_identity().display,
+        recipe,
+        plan.clone(),
+    );
+    let envelope = RemoteRunnerStagingEnvelope::from_direct_handoff(
+        &handoff,
+        RunnerMaterializationAuthority {
+            authority_id: format!("staging-{run_id}"),
+            workspace_key: run_id.to_string(),
+            source: SealedSourceAuthority::new(
+                digest,
+                String::from_utf8(sealed_payload).map_err(|error| {
+                    Error::internal_unexpected(format!(
+                        "deferred staging payload is not UTF-8: {error}"
+                    ))
+                })?,
+            ),
+        },
+    )?;
+    let mut transport =
+        crate::resolve_runner_staging_transport(runner_id).map_err(|mut error| {
+            error.details["controller_daemon_fallback"] = json!({
+                "daemon_error": daemon_error.message,
+                "phase": "pre_provider",
+                "provider_budget_consumed": false,
+            });
+            error
+        })?;
+    let receipt =
+        crate::controller_fallback_projection::ControllerFallbackProjectionStore::open_default()?
+            .submit_detached(&mut transport, &envelope)?
+            .runner_receipt;
+    homeboy_agents::agent_task_lifecycle::persist_private_run_attachment(
+        run_id,
+        DEFERRED_RUNNER_STAGING_RECEIPT_ATTACHMENT_KIND,
+        &receipt,
+    )?;
+    homeboy_agents::agent_task_lifecycle::record_detached_lab_run(
+        homeboy_agents::agent_task_lifecycle::DetachedLabRunRecord {
+            run_id,
+            runner_id,
+            runner_job_id: &receipt.handoff.runner_job_id,
+            remote_workspace: "runner-staging",
+            remote_command: &[],
+        },
+    )?;
+    Ok(receipt)
 }
 
 /// A response can be lost after the daemon accepted the request. Create uses
