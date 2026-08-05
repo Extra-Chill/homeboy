@@ -1,6 +1,6 @@
 {
   "name": "Rust",
-  "version": "1.32.1",
+  "version": "1.32.4",
   "icon": "gearshape.2.fill",
   "description": "Cargo CLI integration for Rust components",
   "author": "Extra Chill",
@@ -95,7 +95,8 @@
       "keys": [
         "HOMEBOY_TEST_INVENTORY_ONLY",
         "HOMEBOY_TEST_INVENTORY_FILE",
-        "HOMEBOY_TEST_SHARD_MANIFEST"
+        "HOMEBOY_TEST_SHARD_MANIFEST",
+        "HOMEBOY_RUST_NEXTEST_FILTER_MAX_BYTES"
       ]
     },
     "passthrough_filter": {
@@ -128,6 +129,13 @@
       "type": "boolean",
       "default": true,
       "description": "When cargo-nextest is selected but unavailable, fall back to cargo test. Set false or HOMEBOY_RUST_NEXTEST_FALLBACK=0 to fail with an install diagnostic instead."
+    },
+    {
+      "id": "rust_nextest_filter_max_bytes",
+      "label": "Rust nextest filter maximum bytes",
+      "type": "integer",
+      "default": 65536,
+      "description": "Maximum UTF-8 byte length for each serialized nextest -E filter during shard replay. Selected identities are deterministically batched under this bound."
     },
     {
       "id": "bench_criterion",

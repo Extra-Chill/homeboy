@@ -5,18 +5,45 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
-SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
-RUNNER_PRELUDE_HELPER="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/runner-prelude.sh}"
-RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/runner-steps.sh}"
-COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/command-capture.sh}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${TMP_DIR}/sidecar-writer.sh}"
+RUNNER_PRELUDE_HELPER="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${TMP_DIR}/runner-prelude.sh}"
+RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${TMP_DIR}/runner-steps.sh}"
+COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-${TMP_DIR}/command-capture.sh}"
 
-if [ ! -f "$SIDECAR_WRITER_HELPER" ]; then
-    echo "Missing sidecar writer helper: $SIDECAR_WRITER_HELPER" >&2
-    exit 1
-fi
+cat > "${TMP_DIR}/sidecar-writer.sh" <<'EOF'
+homeboy_sidecar_merge() { :; }
+homeboy_sidecar_emit() {
+    local kind="$1" result="$2"
+    [ "$kind" = "fix.result" ] || return 0
+    python3 - "$HOMEBOY_FIX_RESULTS_FILE" "$result" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+items = json.loads(path.read_text()) if path.exists() else []
+items.append(json.loads(sys.argv[2]))
+path.write_text(json.dumps(items))
+PY
+}
+EOF
+cat > "${TMP_DIR}/runner-prelude.sh" <<'EOF'
+homeboy_runner_init() {
+    PROJECT_PATH="$HOMEBOY_COMPONENT_PATH"
+    EXTENSION_PATH="$HOMEBOY_EXTENSION_PATH"
+    source "$HOMEBOY_RUNTIME_SIDECAR_WRITER"
+}
+should_run_step() { return 0; }
+EOF
+cat > "${TMP_DIR}/runner-steps.sh" <<'EOF'
+should_run_step() { return 0; }
+EOF
+cat > "${TMP_DIR}/command-capture.sh" <<'EOF'
+homeboy_run_step_capture() { local output_var="$1" exit_var="$2"; shift 3; [ "$1" = -- ] && shift; local output status=0; output="$(mktemp)"; "$@" >"$output" 2>&1 || status=$?; printf -v "$output_var" '%s' "$output"; printf -v "$exit_var" '%s' "$status"; return "$status"; }
+homeboy_cleanup_step_capture() { rm -f "$1"; }
+EOF
 
 PROJECT_DIR="${TMP_DIR}/project"
 FAKE_BIN="${TMP_DIR}/bin"

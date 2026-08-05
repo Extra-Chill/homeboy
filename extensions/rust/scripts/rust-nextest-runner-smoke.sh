@@ -3,25 +3,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
-RUNNER_PRELUDE_HELPER="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/runner-prelude.sh}"
-COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/command-capture.sh}"
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
-
-if [ ! -f "$RUNNER_PRELUDE_HELPER" ]; then
-    echo "Missing runner prelude helper: $RUNNER_PRELUDE_HELPER" >&2
-    exit 1
-fi
-if [ ! -f "$COMMAND_CAPTURE_HELPER" ]; then
-    echo "Missing command capture helper: $COMMAND_CAPTURE_HELPER" >&2
-    exit 1
-fi
 
 PROJECT_DIR="$WORKDIR/project"
 HELPER_DIR="$WORKDIR/helpers"
 BIN_DIR="$WORKDIR/bin"
 SIDECAR_DIR="$WORKDIR/sidecars"
+RUNNER_PRELUDE_HELPER="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-$HELPER_DIR/runner-prelude.sh}"
+COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-$HELPER_DIR/command-capture.sh}"
 mkdir -p "$PROJECT_DIR/tests" "$HELPER_DIR" "$BIN_DIR" "$SIDECAR_DIR"
 
 cat > "$PROJECT_DIR/Cargo.toml" <<'EOF'
@@ -43,6 +33,20 @@ homeboy_resolve_context() {
     PROJECT_PATH="${HOMEBOY_COMPONENT_PATH}"
     EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH}"
 }
+EOF
+
+cat > "$HELPER_DIR/runner-prelude.sh" <<'EOF'
+homeboy_runner_init() {
+    PROJECT_PATH="$HOMEBOY_COMPONENT_PATH"
+    EXTENSION_PATH="$HOMEBOY_EXTENSION_PATH"
+    [ -z "${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}" ] || source "$HOMEBOY_RUNTIME_SIDECAR_WRITER"
+}
+should_run_step() { return 0; }
+EOF
+
+cat > "$HELPER_DIR/command-capture.sh" <<'EOF'
+homeboy_run_step_capture() { local output_var="$1" exit_var="$2"; shift 3; [ "$1" = -- ] && shift; local output status=0; output="$(mktemp)"; "$@" >"$output" 2>&1 || status=$?; printf -v "$output_var" '%s' "$output"; printf -v "$exit_var" '%s' "$status"; return "$status"; }
+homeboy_cleanup_step_capture() { rm -f "$1"; }
 EOF
 
 cat > "$HELPER_DIR/runner-steps.sh" <<'EOF'
@@ -106,7 +110,7 @@ if [[ "$OUTPUT" != *"Running cargo nextest"* ]]; then
     exit 1
 fi
 
-EXPECTED_ARGS=$'nextest\nrun\n--manifest-path\n'"$PROJECT_DIR"$'/Cargo.toml\n--test\nintegration_scope'
+EXPECTED_ARGS=$'nextest\nrun\n--manifest-path\n'"$PROJECT_DIR"$'/Cargo.toml\n--workspace\n--test\nintegration_scope'
 ACTUAL_ARGS="$(cat "$WORKDIR/cargo-args.txt")"
 if [ "$ACTUAL_ARGS" != "$EXPECTED_ARGS" ]; then
     printf 'Expected nextest command shape:\n%s\nActual:\n%s\n' "$EXPECTED_ARGS" "$ACTUAL_ARGS" >&2

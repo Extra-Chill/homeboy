@@ -21,6 +21,18 @@ EXTENSION_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORK_DIR="$(mktemp -d -t homeboy-rust-ws-scope.XXXXXX)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
+cat > "${WORK_DIR}/runner-prelude.sh" <<'EOF'
+homeboy_runner_init() {
+    PROJECT_PATH="$HOMEBOY_COMPONENT_PATH"
+    EXTENSION_PATH="$HOMEBOY_EXTENSION_PATH"
+}
+should_run_step() { return 0; }
+EOF
+cat > "${WORK_DIR}/command-capture.sh" <<'EOF'
+homeboy_run_step_capture() { local output_var="$1" exit_var="$2"; shift 3; [ "$1" = -- ] && shift; local output status=0; output="$(mktemp)"; "$@" 2>&1 | tee "$output"; status=${PIPESTATUS[0]}; printf -v "$output_var" '%s' "$output"; printf -v "$exit_var" '%s' "$status"; return "$status"; }
+homeboy_cleanup_step_capture() { rm -f "$1"; }
+EOF
+
 if ! command -v cargo >/dev/null 2>&1; then
     printf 'SKIP: cargo is not installed\n'
     exit 0
@@ -85,6 +97,8 @@ run_runner() {
         HOMEBOY_SKIP_LINT=1 \
         HOMEBOY_TEST_SCOPE_KIND="${scope_kind}" \
         HOMEBOY_TEST_RUNNER_ARGS="${runner_args}" \
+        HOMEBOY_RUNTIME_RUNNER_PRELUDE="${WORK_DIR}/runner-prelude.sh" \
+        HOMEBOY_RUNTIME_COMMAND_CAPTURE="${WORK_DIR}/command-capture.sh" \
         bash "${EXTENSION_DIR}/scripts/test-runner.sh" >"${WORK_DIR}/out.log" 2>&1
     RUNNER_EXIT=$?
     set -e

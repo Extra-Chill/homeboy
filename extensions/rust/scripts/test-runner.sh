@@ -193,6 +193,129 @@ rust_nextest_filter() {
     jq -r '[.selected[] | "package(=\(.package)) and kind(=\(.target_kind)) and binary(=\(.target)) and test(=\(.name))"] | join(" + ")' "$1"
 }
 
+rust_nextest_filter_max_bytes() {
+    local configured value
+    configured="${HOMEBOY_RUST_NEXTEST_FILTER_MAX_BYTES:-$(homeboy_setting rust_nextest_filter_max_bytes '.rust_nextest_filter_max_bytes' 65536)}"
+    case "$configured" in
+        ''|0|*[!0-9]*)
+            echo "Error: HOMEBOY_RUST_NEXTEST_FILTER_MAX_BYTES must be a positive integer." >&2
+            return 1
+            ;;
+    esac
+    value="$(python3 - "$configured" <<'PY'
+import os
+import subprocess
+import sys
+
+configured = int(sys.argv[1])
+try:
+    arg_max = int(subprocess.check_output(["getconf", "ARG_MAX"], text=True).strip())
+except (OSError, subprocess.CalledProcessError, ValueError):
+    # This fallback remains below common POSIX ARG_MAX values when getconf is
+    # unavailable, so a runner never relies on an optimistic platform guess.
+    arg_max = 131072
+
+environment_bytes = sum(len(key.encode()) + len(value.encode()) + 2 for key, value in os.environ.items())
+pointer_bytes = (len(os.environ) + 32) * 8
+fixed_argv_bytes = 16384
+safety_bytes = 65536
+per_argument_ceiling = 65536
+safe_max = min(per_argument_ceiling, arg_max - environment_bytes - pointer_bytes - fixed_argv_bytes - safety_bytes)
+if safe_max <= 0:
+    raise SystemExit(
+        f"Rust test shard error: no safe nextest filter payload remains "
+        f"(ARG_MAX={arg_max}, environment_bytes={environment_bytes})"
+    )
+if configured > safe_max:
+    print(f"{safe_max}|{configured}|{arg_max}|{environment_bytes}")
+else:
+    print(f"{configured}||{arg_max}|{environment_bytes}")
+PY
+)" || return 1
+    IFS='|' read -r value clamped_from arg_max environment_bytes <<< "$value"
+    if [ -n "$clamped_from" ]; then
+        echo "Rust nextest filter limit clamped from ${clamped_from} to ${value} bytes (ARG_MAX=${arg_max}, environment_bytes=${environment_bytes})." >&2
+    fi
+    case "$value" in
+        ''|0|*[!0-9]*)
+            echo "Error: no safe nextest filter payload remains." >&2
+            return 1
+            ;;
+        *) printf '%s' "$value" ;;
+    esac
+}
+
+rust_nextest_batches() {
+    local shard_file="$1" max_bytes="$2" batch_dir="$3"
+    python3 - "$shard_file" "$max_bytes" "$batch_dir" <<'PY'
+import json
+import pathlib
+import sys
+
+shard_path, max_bytes_raw, batch_dir = sys.argv[1:]
+max_bytes = int(max_bytes_raw)
+shard = json.load(open(shard_path, encoding="utf-8"))
+batches = []
+current = []
+current_size = 0
+
+def term(item):
+    return f'package(={item["package"]}) and kind(={item["target_kind"]}) and binary(={item["target"]}) and test(={item["name"]})'
+
+for item in shard["selected"]:
+    item_term = term(item)
+    item_size = len(item_term.encode("utf-8"))
+    if item_size > max_bytes:
+        raise SystemExit(f"Rust test shard error: nextest identity exceeds filter byte limit ({item['id']!r}: {item_size} > {max_bytes})")
+    added_size = item_size if not current else item_size + 3
+    if current and current_size + added_size > max_bytes:
+        batches.append(current)
+        current = []
+        current_size = 0
+    current.append(item)
+    current_size += item_size if current_size == 0 else added_size
+if current:
+    batches.append(current)
+if not batches or any(not batch for batch in batches):
+    raise SystemExit("Rust test shard error: nextest batching produced an empty batch")
+
+target_dir = pathlib.Path(batch_dir)
+for index, batch in enumerate(batches):
+    target = dict(shard, selected=batch)
+    filter_bytes = len(" + ".join(term(item) for item in batch).encode("utf-8"))
+    if filter_bytes > max_bytes:
+        raise SystemExit("Rust test shard error: nextest batch exceeds filter byte limit")
+    path = target_dir / f"{index:06d}.json"
+    path.write_text(json.dumps(target, separators=(",", ":")), encoding="utf-8")
+    print(path)
+PY
+}
+
+rust_validate_nextest_batches() {
+    local shard_file="$1" batch_dir="$2"
+    python3 - "$shard_file" "$batch_dir" <<'PY'
+import json
+import pathlib
+import sys
+
+expected = [item["id"] for item in json.load(open(sys.argv[1], encoding="utf-8"))["selected"]]
+actual = []
+for path in sorted(pathlib.Path(sys.argv[2]).glob("*.json")):
+    batch = json.load(open(path, encoding="utf-8"))["selected"]
+    if not batch:
+        raise SystemExit(f"Rust test shard error: nextest batch is empty: {path.name}")
+    actual.extend(item["id"] for item in batch)
+if len(actual) != len(set(actual)):
+    raise SystemExit("Rust test shard error: nextest batches contain duplicate identities")
+if set(actual) != set(expected) or len(actual) != len(expected):
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    raise SystemExit(f"Rust test shard error: nextest batch membership mismatch (missing={missing[:1]}, extra={extra[:1]})")
+if actual != expected:
+    raise SystemExit("Rust test shard error: nextest batches do not preserve manifest ordering")
+PY
+}
+
 rust_validate_nextest_membership() {
     local list_file="$1" shard_file="$2"
     python3 - "$list_file" "$shard_file" <<'PY'
@@ -470,26 +593,55 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_TEST_INVENTORY_FILE:-}${HOMEB
     SHARD_FAILED=0
     SHARD_SKIPPED=0
     if [ "$SELECTED_RUNNER" = "nextest" ]; then
-        NEXTEST_FILTER="$(rust_nextest_filter "$SHARD_DATA")"
-        NEXTEST_LIST="$(mktemp)"
-        homeboy_run_step_capture NEXTEST_LIST_OUTPUT NEXTEST_LIST_EXIT "cargo nextest list" -- cargo nextest list --workspace --message-format json -E "$NEXTEST_FILTER" || true
-        if [ "$NEXTEST_LIST_EXIT" -ne 0 ] || ! rust_validate_nextest_membership "$NEXTEST_LIST_OUTPUT" "$SHARD_DATA"; then
+        if ! NEXTEST_MAX_BYTES="$(rust_nextest_filter_max_bytes)"; then
             SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
             rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
-            rm -f "$NEXTEST_LIST_OUTPUT" "$NEXTEST_LIST"
+            rm -f "$SHARD_DATA"
             exit 1
         fi
-        rm -f "$NEXTEST_LIST_OUTPUT" "$NEXTEST_LIST"
-        echo "Replaying Rust nextest shard: ${SHARD_TOTAL} exact identities"
-        homeboy_run_step_capture SHARD_OUTPUT SHARD_EXIT "cargo nextest run" -- env NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run --manifest-path "${PROJECT_PATH}/Cargo.toml" --test-threads 1 --no-fail-fast --no-tests fail --message-format libtest-json-plus --message-format-version 0.1 -E "$NEXTEST_FILTER" || true
-        if ! NEXTEST_COUNTS="$(rust_nextest_counts "$SHARD_OUTPUT" "$SHARD_DATA")"; then
+        NEXTEST_BATCH_DIR="$(mktemp -d)"
+        if ! rust_nextest_batches "$SHARD_DATA" "$NEXTEST_MAX_BYTES" "$NEXTEST_BATCH_DIR" || ! rust_validate_nextest_batches "$SHARD_DATA" "$NEXTEST_BATCH_DIR"; then
             SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
             rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
-            rm -f "$SHARD_OUTPUT" "$SHARD_DATA"
+            rm -rf "$NEXTEST_BATCH_DIR"
+            rm -f "$SHARD_DATA"
             exit 1
         fi
-        IFS=$'\t' read -r SHARD_PASSED SHARD_FAILED SHARD_SKIPPED <<< "$NEXTEST_COUNTS"
-        rm -f "$SHARD_OUTPUT"
+        # Validate every planned filter before any test batch can execute.
+        for NEXTEST_BATCH in "$NEXTEST_BATCH_DIR"/*.json; do
+            NEXTEST_FILTER="$(rust_nextest_filter "$NEXTEST_BATCH")"
+            homeboy_run_step_capture NEXTEST_LIST_OUTPUT NEXTEST_LIST_EXIT "cargo nextest list" -- cargo nextest list --workspace --message-format json -E "$NEXTEST_FILTER" || true
+            if [ "$NEXTEST_LIST_EXIT" -ne 0 ] || ! rust_validate_nextest_membership "$NEXTEST_LIST_OUTPUT" "$NEXTEST_BATCH"; then
+                SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
+                rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
+                rm -f "$NEXTEST_LIST_OUTPUT"
+                rm -rf "$NEXTEST_BATCH_DIR"
+                rm -f "$SHARD_DATA"
+                exit 1
+            fi
+            rm -f "$NEXTEST_LIST_OUTPUT"
+        done
+        echo "Replaying Rust nextest shard: ${SHARD_TOTAL} exact identities in $(printf '%s\n' "$NEXTEST_BATCH_DIR"/*.json | wc -l | tr -d ' ') batches"
+        SHARD_EXIT=0
+        for NEXTEST_BATCH in "$NEXTEST_BATCH_DIR"/*.json; do
+            NEXTEST_FILTER="$(rust_nextest_filter "$NEXTEST_BATCH")"
+            homeboy_run_step_capture SHARD_OUTPUT NEXTEST_BATCH_EXIT "cargo nextest run" -- env NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run --manifest-path "${PROJECT_PATH}/Cargo.toml" --workspace --test-threads 1 --no-fail-fast --no-tests fail --message-format libtest-json-plus --message-format-version 0.1 -E "$NEXTEST_FILTER" || true
+            if ! NEXTEST_COUNTS="$(rust_nextest_counts "$SHARD_OUTPUT" "$NEXTEST_BATCH")"; then
+                SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
+                rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
+                rm -f "$SHARD_OUTPUT"
+                rm -rf "$NEXTEST_BATCH_DIR"
+                rm -f "$SHARD_DATA"
+                exit 1
+            fi
+            IFS=$'\t' read -r PASSED FAILED SKIPPED <<< "$NEXTEST_COUNTS"
+            SHARD_PASSED=$((SHARD_PASSED + PASSED))
+            SHARD_FAILED=$((SHARD_FAILED + FAILED))
+            SHARD_SKIPPED=$((SHARD_SKIPPED + SKIPPED))
+            [ "$NEXTEST_BATCH_EXIT" -eq 0 ] || SHARD_EXIT="$NEXTEST_BATCH_EXIT"
+            rm -f "$SHARD_OUTPUT"
+        done
+        rm -rf "$NEXTEST_BATCH_DIR"
     else
         while IFS=$'\t' read -r package target target_kind name; do
             case "$target_kind" in

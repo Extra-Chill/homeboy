@@ -2,20 +2,22 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
-RUNNER_PRELUDE_HELPER="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/runner-prelude.sh}"
-COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/command-capture.sh}"
 PROJECT_DIR="$(mktemp -d)"
 trap 'rm -rf "$PROJECT_DIR"' EXIT
+RUNNER_PRELUDE_HELPER="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-$PROJECT_DIR/runner-prelude.sh}"
+COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-$PROJECT_DIR/command-capture.sh}"
 
-if [ ! -f "$RUNNER_PRELUDE_HELPER" ]; then
-    echo "Missing runner prelude helper: $RUNNER_PRELUDE_HELPER" >&2
-    exit 1
-fi
-if [ ! -f "$COMMAND_CAPTURE_HELPER" ]; then
-    echo "Missing command capture helper: $COMMAND_CAPTURE_HELPER" >&2
-    exit 1
-fi
+cat > "$PROJECT_DIR/runner-prelude.sh" <<'EOF'
+homeboy_runner_init() {
+    PROJECT_PATH="$HOMEBOY_COMPONENT_PATH"
+    EXTENSION_PATH="$HOMEBOY_EXTENSION_PATH"
+}
+should_run_step() { [ "${HOMEBOY_STEP:-}" != "none" ]; }
+EOF
+cat > "$PROJECT_DIR/command-capture.sh" <<'EOF'
+homeboy_run_step_capture() { local output_var="$1" exit_var="$2"; shift 3; [ "$1" = -- ] && shift; local output status=0; output="$(mktemp)"; "$@" >"$output" 2>&1 || status=$?; printf -v "$output_var" '%s' "$output"; printf -v "$exit_var" '%s' "$status"; return "$status"; }
+homeboy_cleanup_step_capture() { rm -f "$1"; }
+EOF
 
 cat > "$PROJECT_DIR/Cargo.toml" <<'EOF'
 [package]
