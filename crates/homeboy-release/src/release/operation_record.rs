@@ -255,6 +255,8 @@ fn lock() -> Result<std::fs::File> {
         .create(true)
         .read(true)
         .write(true)
+        // The lock is never written; retain any existing bytes while reopening it.
+        .truncate(false)
         .open(dir.join(".lock"))
         .map_err(|error| {
             Error::internal_io(
