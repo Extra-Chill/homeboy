@@ -26,8 +26,7 @@ pub struct ProjectShowReport {
     pub project: Project,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deploy_ready: Option<bool>,
+    pub deploy_ready: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub deploy_blockers: Vec<String>,
 }
@@ -110,20 +109,16 @@ pub fn list_report() -> Result<ProjectListReport> {
 pub fn show_report(project_id: &str) -> Result<ProjectShowReport> {
     let project = load(project_id)?;
 
-    let hint = if project.components.is_empty() {
-        None
-    } else if project.server_id.is_none() {
+    let hint = if project.server_id.is_none() {
         Some("Local project: Server-deployed components require a server.".to_string())
     } else {
         None
     };
 
-    let (deploy_ready, deploy_blockers) = if project.components.is_empty() {
-        (None, Vec::new())
-    } else {
-        let (ready, blockers) = calculate_deploy_readiness(&project);
-        (Some(ready), blockers)
-    };
+    let (deploy_ready, mut deploy_blockers) = calculate_deploy_readiness(&project);
+    if project.server_id.is_some() && project.components.is_empty() {
+        deploy_blockers.clear();
+    }
 
     Ok(ProjectShowReport {
         project,
@@ -173,7 +168,7 @@ pub fn build_show_output(report: ProjectShowReport) -> ProjectReportOutput {
         entity: Some(report.project),
         hint: report.hint,
         extra: ProjectReportExtra {
-            deploy_ready: report.deploy_ready,
+            deploy_ready: Some(report.deploy_ready),
             deploy_blockers: if report.deploy_blockers.is_empty() {
                 None
             } else {
@@ -367,7 +362,7 @@ mod tests {
 
             let report = show_report("site").expect("show report");
 
-            assert_eq!(report.deploy_ready, Some(false));
+            assert!(!report.deploy_ready);
             assert!(report.deploy_blockers.iter().any(|blocker| {
                 blocker.contains(
                     "Component 'plugin' local_path '/tmp/homeboy-missing-component-path' does not exist",
@@ -408,7 +403,7 @@ mod tests {
             let report = show_report("site").expect("show report");
 
             assert!(
-                report.deploy_ready == Some(true),
+                report.deploy_ready,
                 "unexpected blockers: {:?}",
                 report.deploy_blockers
             );
@@ -442,8 +437,13 @@ mod tests {
             let report = show_report("sandbox-project").expect("show report");
 
             assert!(report.hint.is_none());
-            assert!(report.deploy_ready.is_none());
+            assert!(!report.deploy_ready);
             assert!(report.deploy_blockers.is_empty());
+
+            let output = build_show_output(report);
+            let json = serde_json::to_value(output).expect("serialize show output");
+            assert_eq!(json["deploy_ready"], false);
+            assert!(json.get("deploy_blockers").is_none());
         });
     }
 

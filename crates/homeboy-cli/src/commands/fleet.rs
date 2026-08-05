@@ -453,11 +453,7 @@ fn log_fleet_dashboard(result: &FleetStatusResult) {
         let server_label = proj_status.server_id.as_deref().unwrap_or("unknown");
 
         // Health indicator
-        let health_icon = match &proj_status.health {
-            Some(h) if h.warnings.is_empty() => "✅",
-            Some(_) => "⚠️ ",
-            None => "❌",
-        };
+        let health_icon = health_indicator(proj_status.health.as_ref());
 
         eprintln!(
             "\n{} {} ({})",
@@ -511,6 +507,15 @@ fn log_fleet_dashboard(result: &FleetStatusResult) {
                 warning.server_id, warning.project_id, warning.message,
             );
         }
+    }
+}
+
+fn health_indicator(health: Option<&homeboy::core::server::health::ServerHealth>) -> &'static str {
+    match health {
+        Some(health) if !health.state.is_healthy() => "❌",
+        Some(health) if health.warnings.is_empty() => "✅",
+        Some(_) => "⚠️ ",
+        None => "❌",
     }
 }
 

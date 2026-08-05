@@ -57,6 +57,9 @@ pub struct ServerHealth {
     /// Exact diagnostic command for an unresolved or failed server session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_action: Option<String>,
+    /// Telemetry dimensions that the reachable server did not provide.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub telemetry_unavailable: Vec<String>,
     /// Server uptime as a human-readable string (e.g. "10 days")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uptime: Option<String>,
@@ -145,21 +148,21 @@ fn not_checked(server_id: &str, reason: String) -> ServerHealth {
 /// Collect server health metrics via a single SSH command.
 ///
 /// Runs a compound shell command that outputs structured, delimited sections
-/// for uptime, load, disk, memory, and optionally service statuses.
+/// for opportunistic uptime, load, disk, memory, and service telemetry.
 fn collect_server_health(client: &SshClient, server_id: &str, services: &[String]) -> ServerHealth {
     // Build a single compound command to minimize SSH round-trips.
     // Each section is delimited by a marker line for reliable parsing.
     let mut cmd_parts = vec![
         "echo '---UPTIME---'".to_string(),
-        "uptime -p 2>/dev/null || uptime".to_string(),
+        "uptime -p 2>/dev/null || uptime 2>/dev/null || true".to_string(),
         "echo '---LOAD---'".to_string(),
-        "cat /proc/loadavg 2>/dev/null".to_string(),
+        "cat /proc/loadavg 2>/dev/null || true".to_string(),
         "echo '---CPUS---'".to_string(),
-        "nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1".to_string(),
+        "nproc 2>/dev/null || getconf NPROCESSORS_ONLN 2>/dev/null || true".to_string(),
         "echo '---DISK---'".to_string(),
-        "df -h / 2>/dev/null | tail -1".to_string(),
+        "df -h / 2>/dev/null | tail -1 || true".to_string(),
         "echo '---MEMORY---'".to_string(),
-        "free -h 2>/dev/null | grep '^Mem:'".to_string(),
+        "free -h 2>/dev/null | grep '^Mem:' || true".to_string(),
     ];
 
     if !services.is_empty() {
@@ -174,7 +177,8 @@ fn collect_server_health(client: &SshClient, server_id: &str, services: &[String
         }
     }
 
-    let compound_cmd = cmd_parts.join(" && ");
+    cmd_parts.push("echo '---PROBE_COMPLETE---'".to_string());
+    let compound_cmd = cmd_parts.join("; ");
     log_status!(
         "project",
         "phase=health_probe timeout={}s",
@@ -190,12 +194,9 @@ fn health_from_probe(
     services: &[String],
 ) -> ServerHealth {
     let mut health = parse_health_output(&output.stdout, services);
-    let complete = health.uptime.is_some()
-        && health.load.is_some()
-        && health.disk.is_some()
-        && health.memory.is_some();
+    health.telemetry_unavailable = unavailable_telemetry(&health);
 
-    if output.success && complete {
+    if output.stdout.contains("---PROBE_COMPLETE---") {
         health.state = ServerHealthState::Healthy;
         return health;
     }
@@ -210,6 +211,23 @@ fn health_from_probe(
     });
     health.next_action = Some(format!("homeboy server status {server_id}"));
     health
+}
+
+fn unavailable_telemetry(health: &ServerHealth) -> Vec<String> {
+    let mut unavailable = Vec::new();
+    if health.uptime.is_none() {
+        unavailable.push("uptime".to_string());
+    }
+    if health.load.is_none() {
+        unavailable.push("load".to_string());
+    }
+    if health.disk.is_none() {
+        unavailable.push("disk".to_string());
+    }
+    if health.memory.is_none() {
+        unavailable.push("memory".to_string());
+    }
+    unavailable
 }
 
 // ============================================================================
@@ -252,6 +270,7 @@ fn parse_health_output(output: &str, services: &[String]) -> ServerHealth {
                 current_section = "services";
                 continue;
             }
+            "---PROBE_COMPLETE---" => continue,
             _ => {}
         }
 
@@ -635,13 +654,26 @@ Mem:          3.8Gi       1.5Gi       1.0Gi       0.0Ki       1.3Gi       2.0Gi
     #[test]
     fn health_probe_marks_a_server_backed_zero_component_project_healthy_with_complete_evidence() {
         let output = successful_probe(
-            "---UPTIME---\nup 2 hours\n---LOAD---\n0.50 0.30 0.20 1/100 5678\n---CPUS---\n2\n---DISK---\n/dev/vda1 75G 30G 42G 42% /\n---MEMORY---\nMem: 3.8Gi 1.5Gi 1.0Gi 0.0Ki 1.3Gi 2.0Gi\n",
+            "---UPTIME---\nup 2 hours\n---LOAD---\n0.50 0.30 0.20 1/100 5678\n---CPUS---\n2\n---DISK---\n/dev/vda1 75G 30G 42G 42% /\n---MEMORY---\nMem: 3.8Gi 1.5Gi 1.0Gi 0.0Ki 1.3Gi 2.0Gi\n---PROBE_COMPLETE---\n",
         );
 
         let health = health_from_probe(&output, "sandbox", &[]);
 
         assert_eq!(health.state, ServerHealthState::Healthy);
         assert!(health.reason.is_none());
+        assert!(health.telemetry_unavailable.is_empty());
+    }
+
+    #[test]
+    fn health_probe_keeps_transport_healthy_when_bsd_or_minimal_telemetry_is_unavailable() {
+        let output = successful_probe(
+            "---UPTIME---\nup 2 hours\n---DISK---\n/dev/disk1 100G 30G 70G 30% /\n---PROBE_COMPLETE---\n",
+        );
+
+        let health = health_from_probe(&output, "sandbox", &[]);
+
+        assert_eq!(health.state, ServerHealthState::Healthy);
+        assert_eq!(health.telemetry_unavailable, vec!["load", "memory"]);
     }
 
     #[test]
