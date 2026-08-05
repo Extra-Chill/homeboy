@@ -2,6 +2,9 @@
 
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc,
@@ -16,6 +19,14 @@ const RECOVERY_KIND: &str = "runner_exec_recovery";
 const RECOVERY_OWNER_ID: &str = "runner-exec-recovery";
 const RECOVERY_OWNER_LEASE: Duration = Duration::from_secs(30);
 const RECOVERY_LEASE_HEARTBEAT: Duration = Duration::from_secs(1);
+const RECOVERY_CHILD_REQUEST_ENV: &str = "HOMEBOY_RUNNER_EXEC_RECOVERY_RECORD_REQUEST";
+const RECOVERY_CLEANUP_BUDGET: Duration = Duration::from_millis(250);
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RecoveryRecordRequest {
+    run_id: String,
+    snapshot: homeboy_core::api_jobs::RunnerJobLogSnapshot,
+}
 #[derive(Clone)]
 struct RecoveryOwner {
     id: String,
@@ -267,136 +278,239 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 deferred += candidates.len() - index;
                 break;
             }
-        }
-        homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint(
-            &run.id, &snapshot,
-        )?;
-        let declarations = run
-            .metadata_json
-            .get("runner_exec_artifact_declarations")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
-        let strings = |key: &str| -> Vec<String> {
-            declarations
-                .get(key)
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        };
-        let output = recovered_output(&run, &snapshot, cwd);
-        let mut artifacts = Vec::new();
-        for declaration in strings("artifacts") {
-            if homeboy_agents::agent_task_lifecycle::runner_exec_declaration_is_promoted(
-                &run,
-                "artifact",
-                &declaration,
-            ) {
-                continue;
-            }
-            if let Some(owner) = owner {
-                if !owner.before_side_effect(&store)? {
-                    deferred += candidates.len() - index;
-                    break 'candidates;
-                }
-            }
-            let promoted = promote_runner_exec_artifacts(
-                &run.id,
-                &output,
-                std::slice::from_ref(&declaration),
-            )?;
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
-                &run.id,
-                "artifact",
-                &declaration,
-                &promoted,
-            )?;
-            artifacts.extend(promoted);
-        }
-        let mut directories = Vec::new();
-        for declaration in strings("artifact_dirs") {
-            if homeboy_agents::agent_task_lifecycle::runner_exec_declaration_is_promoted(
-                &run,
-                "artifact_dir",
-                &declaration,
-            ) {
-                continue;
-            }
-            if let Some(owner) = owner {
-                if !owner.before_side_effect(&store)? {
-                    deferred += candidates.len() - index;
-                    break 'candidates;
-                }
-            }
-            let promoted = promote_runner_exec_artifact_dirs(
-                &run.id,
-                &output,
-                std::slice::from_ref(&declaration),
-            )?;
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
-                &run.id,
-                "artifact_dir",
-                &declaration,
-                &promoted,
-            )?;
-            directories.extend(promoted);
-        }
-        let mut summaries = Vec::new();
-        for declaration in strings("summaries") {
-            if homeboy_agents::agent_task_lifecycle::runner_exec_declaration_is_promoted(
-                &run,
-                "summary",
-                &declaration,
-            ) {
-                continue;
-            }
-            if let Some(owner) = owner {
-                if !owner.before_side_effect(&store)? {
-                    deferred += candidates.len() - index;
-                    break 'candidates;
-                }
-            }
-            let promoted = promote_runner_exec_summaries(
-                &run.id,
-                &output,
-                std::slice::from_ref(&declaration),
-            )?;
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
-                &run.id,
-                "summary",
-                &declaration,
-                &promoted,
-            )?;
-            summaries.extend(promoted);
-        }
-        let retained = artifacts
-            .iter()
-            .chain(directories.iter())
-            .chain(summaries.iter())
-            .cloned()
-            .collect::<Vec<_>>();
-        if let Some(owner) = owner {
-            if !owner.before_side_effect(&store)? {
+            if !run_recovery_record_child(&store, run, &snapshot, owner.deadline)? {
                 deferred += candidates.len() - index;
                 break;
             }
+        } else {
+            reconcile_terminal_snapshot(run, &snapshot, cwd)?;
         }
-        homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_refs(&run.id, &retained)?;
-        if let Some(owner) = owner {
-            if !owner.before_side_effect(&store)? {
-                deferred += candidates.len() - index;
-                break;
-            }
-        }
-        homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(&run.id, &snapshot)?;
         reconciled += 1;
     }
     Ok((reconciled, deferred))
+}
+
+/// Execute the non-cancellable durable sequence from an atomic request. This is
+/// entered only by the contained recovery child, never by the owner process.
+pub fn run_terminal_runner_exec_recovery_record(request_path: &Path) -> Result<()> {
+    let request: RecoveryRecordRequest =
+        serde_json::from_slice(&fs::read(request_path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("read recovery request {}", request_path.display())),
+            )
+        })?)
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse recovery record request".to_string()),
+            )
+        })?;
+    let store = ObservationStore::open_initialized()?;
+    let run = store.get_run(&request.run_id)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "run_id",
+            "recovery source record disappeared",
+            Some(request.run_id.clone()),
+            None,
+        )
+    })?;
+    let cwd = run.cwd.clone().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "run_id",
+            "recovery source record has no cwd",
+            Some(run.id.clone()),
+            None,
+        )
+    })?;
+    reconcile_terminal_snapshot(&run, &request.snapshot, &cwd)?;
+    let _ = fs::remove_file(request_path);
+    Ok(())
+}
+
+fn run_recovery_record_child(
+    store: &ObservationStore,
+    run: &homeboy_core::observation::RunRecord,
+    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
+    deadline: Instant,
+) -> Result<bool> {
+    let request_path = write_recovery_record_request(run, snapshot)?;
+    let before_artifacts = store.list_artifacts(&run.id)?;
+    let executable = std::env::current_exe().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("resolve recovery child executable".to_string()),
+        )
+    })?;
+    let mut command = Command::new(executable);
+    command
+        .env(RECOVERY_CHILD_REQUEST_ENV, &request_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut containment = homeboy_core::process::ProcessContainment::prepare(&mut command)?;
+    let mut child = command.spawn().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("spawn recovery record child".to_string()),
+        )
+    })?;
+    containment.attach(&child)?;
+    loop {
+        if let Some(status) = child.try_wait().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("poll recovery record child".to_string()),
+            )
+        })? {
+            let _ = containment.cleanup_after_leader_exit_bounded(RECOVERY_CLEANUP_BUDGET);
+            let _ = fs::remove_file(&request_path);
+            if status.success() {
+                return Ok(true);
+            }
+            rollback_recovery_record(run, &before_artifacts, deadline + RECOVERY_CLEANUP_BUDGET)?;
+            return Ok(false);
+        }
+        if Instant::now() >= deadline {
+            let _ = containment.terminate_on_failure_bounded(RECOVERY_CLEANUP_BUDGET, false);
+            let _ = child.wait();
+            let _ = fs::remove_file(&request_path);
+            rollback_recovery_record(run, &before_artifacts, deadline + RECOVERY_CLEANUP_BUDGET)?;
+            return Ok(false);
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn write_recovery_record_request(
+    run: &homeboy_core::observation::RunRecord,
+    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
+) -> Result<PathBuf> {
+    let root = std::env::temp_dir().join("homeboy-runner-exec-recovery");
+    fs::create_dir_all(&root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", root.display())),
+        )
+    })?;
+    let path = root.join(format!("{}.json", Uuid::new_v4()));
+    let staging = path.with_extension("json.staging");
+    let body = serde_json::to_vec(&RecoveryRecordRequest {
+        run_id: run.id.clone(),
+        snapshot: snapshot.clone(),
+    })
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize recovery record request".to_string()),
+        )
+    })?;
+    fs::write(&staging, body).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("write {}", staging.display())),
+        )
+    })?;
+    fs::rename(&staging, &path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("publish {}", path.display())),
+        )
+    })?;
+    Ok(path)
+}
+
+fn rollback_recovery_record(
+    original: &homeboy_core::observation::RunRecord,
+    before_artifacts: &[homeboy_core::observation::ArtifactRecord],
+    cleanup_deadline: Instant,
+) -> Result<()> {
+    let store = ObservationStore::open_initialized_until(cleanup_deadline)?;
+    let before_ids = before_artifacts
+        .iter()
+        .map(|artifact| &artifact.id)
+        .collect::<BTreeSet<_>>();
+    for artifact in store.list_artifacts(&original.id)? {
+        if !before_ids.contains(&artifact.id) {
+            store.delete_artifact_record(&artifact.id)?;
+        }
+    }
+    // The child may have terminalized the source immediately before the owner
+    // killed it. Recovery owns this record exclusively, so restoring the exact
+    // pre-child row is safe and prevents a partial terminal projection.
+    store.upsert_imported_run(original)
+}
+
+fn reconcile_terminal_snapshot(
+    run: &homeboy_core::observation::RunRecord,
+    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
+    cwd: &str,
+) -> Result<()> {
+    homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint(
+        &run.id, snapshot,
+    )?;
+    let declarations = run
+        .metadata_json
+        .get("runner_exec_artifact_declarations")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let strings = |key: &str| {
+        declarations
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    let output = recovered_output(run, snapshot, cwd);
+    let mut retained = Vec::new();
+    for (role, declarations) in [
+        ("artifact", strings("artifacts")),
+        ("artifact_dir", strings("artifact_dirs")),
+        ("summary", strings("summaries")),
+    ] {
+        for declaration in declarations {
+            if homeboy_agents::agent_task_lifecycle::runner_exec_declaration_is_promoted(
+                run,
+                role,
+                &declaration,
+            ) {
+                continue;
+            }
+            let promoted = match role {
+                "artifact" => promote_runner_exec_artifacts(
+                    &run.id,
+                    &output,
+                    std::slice::from_ref(&declaration),
+                )?,
+                "artifact_dir" => promote_runner_exec_artifact_dirs(
+                    &run.id,
+                    &output,
+                    std::slice::from_ref(&declaration),
+                )?,
+                _ => promote_runner_exec_summaries(
+                    &run.id,
+                    &output,
+                    std::slice::from_ref(&declaration),
+                )?,
+            };
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+                &run.id,
+                role,
+                &declaration,
+                &promoted,
+            )?;
+            retained.extend(promoted);
+        }
+    }
+    homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_refs(&run.id, &retained)?;
+    homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(&run.id, snapshot)?;
+    Ok(())
 }
 
 fn endpoint_identity(session: &crate::RunnerSession) -> String {
@@ -819,6 +933,46 @@ mod tests {
                 RunStatus::Running.as_str(),
                 "deferred source evidence remains recoverable"
             );
+        });
+    }
+
+    #[test]
+    fn rollback_restores_source_evidence_and_removes_partial_artifact_records() {
+        with_isolated_home(|_| {
+            let run_id = "rollback-source";
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
+                run_id,
+                "runner",
+                "job",
+                "/workspace",
+                &[],
+            )
+            .expect("source record");
+            let store = ObservationStore::open_initialized().expect("store");
+            let original = store.get_run(run_id).expect("read").expect("source");
+            let file = tempfile::NamedTempFile::new().expect("artifact file");
+            fs::write(file.path(), "partial").expect("write artifact");
+            store
+                .record_artifact_with_id(
+                    run_id,
+                    "artifact",
+                    file.path(),
+                    "partial-artifact",
+                    json!({}),
+                )
+                .expect("record partial artifact");
+            let mut partial = store.get_run(run_id).expect("read").expect("source");
+            partial.metadata_json["runner_terminal_projection"] = json!({ "state": "projected" });
+            store
+                .upsert_imported_run(&partial)
+                .expect("write partial projection");
+
+            rollback_recovery_record(&original, &[], Instant::now() + Duration::from_secs(1))
+                .expect("rollback");
+
+            let restored = store.get_run(run_id).expect("read").expect("source");
+            assert_eq!(restored.metadata_json, original.metadata_json);
+            assert!(store.list_artifacts(run_id).expect("artifacts").is_empty());
         });
     }
 

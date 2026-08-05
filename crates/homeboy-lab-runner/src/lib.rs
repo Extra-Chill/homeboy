@@ -245,11 +245,11 @@ pub use execution::{
     promote_runner_exec_artifacts, promote_runner_exec_summaries, promoted_output,
     reconcile_runner_generation_after_evidence, reconcile_terminal_runner_exec_runs,
     record_scheduled_terminal_runner_exec_recovery_spawn_failure,
-    run_scheduled_terminal_runner_exec_recovery, runner_exec_failure_error,
-    runner_exec_structured_summary, runner_job_cancel, runner_job_cancel_for_session,
-    runner_job_cancel_projection, schedule_terminal_runner_exec_recovery, RunnerExecDiagnostics,
-    RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput,
-    RunnerExecStructuredSummary,
+    run_scheduled_terminal_runner_exec_recovery, run_terminal_runner_exec_recovery_record,
+    runner_exec_failure_error, runner_exec_structured_summary, runner_job_cancel,
+    runner_job_cancel_for_session, runner_job_cancel_projection,
+    schedule_terminal_runner_exec_recovery, RunnerExecDiagnostics, RunnerExecMode,
+    RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary,
 };
 pub use execution::{RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV};
 pub(crate) use extension_materialization::extension_source_content_hash;

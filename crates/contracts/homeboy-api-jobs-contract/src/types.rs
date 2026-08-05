@@ -247,7 +247,7 @@ pub struct JobEvent {
 /// reconstructing a run's outcome from a runner's job log. It carries only
 /// core job types (`Job` + `JobEvent`), so it lives in `api_jobs` rather than
 /// the optional runner subsystem.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunnerJobLogSnapshot {
     pub job: Job,
     pub events: Vec<JobEvent>,

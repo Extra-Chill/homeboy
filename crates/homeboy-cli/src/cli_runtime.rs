@@ -357,6 +357,18 @@ impl CliRuntime {
         }
 
         register_startup_providers_before_reconcile();
+        if let Some(request_path) = std::env::var_os("HOMEBOY_RUNNER_EXEC_RECOVERY_RECORD_REQUEST")
+        {
+            return match crate::runner::run_terminal_runner_exec_recovery_record(
+                std::path::Path::new(&request_path),
+            ) {
+                Ok(()) => std::process::ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("runner-exec recovery record failed: {error}");
+                    std::process::ExitCode::FAILURE
+                }
+            };
+        }
         if let Some(owner_id) = std::env::var_os(RUNNER_EXEC_RECOVERY_OWNER_ENV) {
             let owner_token =
                 std::env::var_os("HOMEBOY_RUNNER_EXEC_RECOVERY_OWNER_TOKEN").unwrap_or_default();
