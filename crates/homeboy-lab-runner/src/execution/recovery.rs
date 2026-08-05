@@ -1,17 +1,19 @@
 //! Recovery of generic runner-exec evidence after a controller interruption.
 
 use super::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const STARTUP_RUNNER_EXEC_RECOVERY_LIMIT: i64 = 100;
 pub const STARTUP_RUNNER_EXEC_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
 const RECOVERY_KIND: &str = "runner_exec_recovery";
+const RECOVERY_OWNER_LEASE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RunnerExecRecoverySchedule {
     pub owner_id: String,
+    pub owner_token: String,
     pub deferred_count: usize,
     pub budget_ms: u64,
     pub inspection_action: String,
@@ -23,29 +25,15 @@ pub struct RunnerExecRecoverySchedule {
 /// reconciliation belongs to the owner, never to the mutating caller.
 pub fn schedule_terminal_runner_exec_recovery() -> Result<Option<RunnerExecRecoverySchedule>> {
     let store = ObservationStore::open_initialized()?;
-    if let Some(existing) = store
-        .list_runs(RunListFilter {
-            kind: Some(RECOVERY_KIND.to_string()),
-            status: Some(RunStatus::Running.as_str().to_string()),
-            limit: Some(1),
-            ..RunListFilter::default()
-        })?
-        .into_iter()
-        .next()
-    {
-        let deferred_count = existing
-            .metadata_json
-            .get("deferred_count")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as usize;
-        return Ok(Some(recovery_schedule(&existing.id, deferred_count, false)));
-    }
     let candidates = recovery_candidates(&store)?;
     if candidates.is_empty() {
         return Ok(None);
     }
     let owner_id = format!("runner-exec-recovery-{}", Uuid::new_v4());
-    let new_owner = store.start_run_with_id(
+    let owner_token = Uuid::new_v4().to_string();
+    let lease_expires_at_ms =
+        chrono::Utc::now().timestamp_millis() + RECOVERY_OWNER_LEASE.as_millis() as i64;
+    let owner = store.claim_expiring_singleton_run(
         NewRunRecord::builder(RECOVERY_KIND)
             .metadata(json!({
                 "phase": "accepted",
@@ -54,9 +42,11 @@ pub fn schedule_terminal_runner_exec_recovery() -> Result<Option<RunnerExecRecov
                 "inspection_action": format!("homeboy runs show {owner_id}"),
             }))
             .build(),
-        owner_id.clone(),
+        owner_id,
+        &owner_token,
+        lease_expires_at_ms,
     );
-    if new_owner.is_err() {
+    let Some(owner) = owner? else {
         let existing = store
             .list_runs(RunListFilter {
                 kind: Some(RECOVERY_KIND.to_string()),
@@ -72,20 +62,32 @@ pub fn schedule_terminal_runner_exec_recovery() -> Result<Option<RunnerExecRecov
                 .get("deferred_count")
                 .and_then(Value::as_u64)
                 .unwrap_or(0) as usize;
-            return Ok(Some(recovery_schedule(&existing.id, deferred_count, false)));
+            return Ok(Some(recovery_schedule(
+                &existing.id,
+                deferred_count,
+                String::new(),
+                false,
+            )));
         }
-        new_owner?;
-    }
-    Ok(Some(recovery_schedule(&owner_id, candidates.len(), true)))
+        return Ok(None);
+    };
+    Ok(Some(recovery_schedule(
+        &owner.id,
+        candidates.len(),
+        owner_token,
+        true,
+    )))
 }
 
 fn recovery_schedule(
     owner_id: &str,
     deferred_count: usize,
+    owner_token: String,
     is_new_owner: bool,
 ) -> RunnerExecRecoverySchedule {
     RunnerExecRecoverySchedule {
         owner_id: owner_id.to_string(),
+        owner_token,
         deferred_count,
         budget_ms: STARTUP_RUNNER_EXEC_RECOVERY_BUDGET.as_millis() as u64,
         inspection_action: format!("homeboy runs show {owner_id}"),
@@ -111,6 +113,7 @@ pub fn reconcile_terminal_runner_exec_runs_with_budget(budget: Duration) -> Resu
     let mut deferred = 0;
     let mut unavailable_runners = BTreeSet::new();
     let deadline = Instant::now() + budget;
+    let mut sessions = BTreeMap::new();
     let candidates = recovery_candidates(&store)?;
     for (index, run) in candidates.iter().enumerate() {
         if Instant::now() >= deadline {
@@ -130,7 +133,31 @@ pub fn reconcile_terminal_runner_exec_runs_with_budget(budget: Duration) -> Resu
             deferred += 1;
             continue;
         }
-        let snapshot = match crate::evidence::runner_job_log_snapshot(runner_id, job_id) {
+        // Cache both healthy sessions and their failures. A stale history must
+        // not turn one unavailable endpoint into 100 status/tunnel attempts.
+        let session = sessions.entry(runner_id.to_string()).or_insert_with(|| {
+            if Instant::now() >= deadline {
+                return Err(Error::validation_invalid_argument(
+                    "recovery_budget",
+                    "runner-exec recovery owner deadline expired before session resolution",
+                    None,
+                    None,
+                ));
+            }
+            crate::persisted_status(runner_id).and_then(|status| {
+                status.session.ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "runner",
+                        "runner has no persisted daemon session for recovery",
+                        Some(runner_id.to_string()),
+                        None,
+                    )
+                })
+            })
+        });
+        let snapshot = match session.as_ref().map_err(Clone::clone).and_then(|session| {
+            crate::evidence::runner_job_log_snapshot_for_session_until(session, job_id, deadline)
+        }) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 record_evicted_evidence_loss(&store, &run, &error)?;
@@ -259,12 +286,25 @@ pub fn reconcile_terminal_runner_exec_runs_with_budget(budget: Duration) -> Resu
 
 /// Complete one accepted recovery owner and leave deferred source records
 /// running, preserving their remote-evidence recovery opportunity.
-pub fn run_scheduled_terminal_runner_exec_recovery(owner_id: &str) -> Result<()> {
+pub fn run_scheduled_terminal_runner_exec_recovery(
+    owner_id: &str,
+    owner_token: &str,
+) -> Result<()> {
     let store = ObservationStore::open_initialized()?;
     let Some(owner) = store.get_run(owner_id)? else {
         return Ok(());
     };
     if owner.kind != RECOVERY_KIND || owner.status != RunStatus::Running.as_str() {
+        return Ok(());
+    }
+    if owner.metadata_json["owner_token"].as_str() != Some(owner_token) {
+        return Ok(());
+    }
+    if !store.renew_running_run_lease(
+        owner_id,
+        owner_token,
+        chrono::Utc::now().timestamp_millis() + RECOVERY_OWNER_LEASE.as_millis() as i64,
+    )? {
         return Ok(());
     }
     let (reconciled, deferred_count) =
@@ -279,12 +319,13 @@ pub fn run_scheduled_terminal_runner_exec_recovery(owner_id: &str) -> Result<()>
     metadata["deferred_count"] = json!(deferred_count);
     metadata["budget_ms"] = json!(STARTUP_RUNNER_EXEC_RECOVERY_BUDGET.as_millis() as u64);
     metadata["inspection_action"] = json!(format!("homeboy runs show {owner_id}"));
-    store.finish_running_run(owner_id, RunStatus::Pass, Some(metadata))?;
+    store.finish_running_run_with_owner_token(owner_id, owner_token, RunStatus::Pass, metadata)?;
     Ok(())
 }
 
 pub fn record_scheduled_terminal_runner_exec_recovery_spawn_failure(
     owner_id: &str,
+    owner_token: &str,
     error: &std::io::Error,
 ) -> Result<()> {
     let store = ObservationStore::open_initialized()?;
@@ -295,7 +336,7 @@ pub fn record_scheduled_terminal_runner_exec_recovery_spawn_failure(
     metadata["phase"] = json!("spawn_failed");
     metadata["spawn_error"] = json!(error.to_string());
     metadata["inspection_action"] = json!(format!("homeboy runs show {owner_id}"));
-    store.finish_running_run(owner_id, RunStatus::Error, Some(metadata))?;
+    store.finish_running_run_with_owner_token(owner_id, owner_token, RunStatus::Error, metadata)?;
     Ok(())
 }
 
@@ -419,6 +460,7 @@ mod tests {
     use super::*;
     use homeboy_core::test_support::with_isolated_home;
     use homeboy_core::{Error, ErrorCode};
+    use std::sync::{Arc, Barrier};
 
     #[test]
     fn startup_recovery_does_not_materialize_unrelated_active_payloads() {
@@ -530,6 +572,81 @@ mod tests {
                 .expect("historical record")
                 .status
                 .eq("running"));
+        });
+    }
+
+    #[test]
+    fn concurrent_schedulers_grant_one_owner_and_one_spawn_entitlement() {
+        with_isolated_home(|_| {
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
+                "stale",
+                "unavailable-runner",
+                "job",
+                "/workspace",
+                &[],
+            )
+            .expect("historical runner job");
+            let barrier = Arc::new(Barrier::new(3));
+            let mut workers = Vec::new();
+            for _ in 0..2 {
+                let barrier = Arc::clone(&barrier);
+                workers.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    schedule_terminal_runner_exec_recovery().expect("schedule")
+                }));
+            }
+            barrier.wait();
+            let schedules = workers
+                .into_iter()
+                .map(|worker| worker.join().expect("scheduler thread").expect("owner"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                schedules
+                    .iter()
+                    .filter(|schedule| schedule.is_new_owner)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                schedules
+                    .iter()
+                    .map(|schedule| &schedule.owner_id)
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+                1
+            );
+        });
+    }
+
+    #[test]
+    fn expired_owner_is_taken_over_with_a_new_token() {
+        with_isolated_home(|_| {
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
+                "stale",
+                "unavailable-runner",
+                "job",
+                "/workspace",
+                &[],
+            )
+            .expect("historical runner job");
+            let first = schedule_terminal_runner_exec_recovery()
+                .expect("schedule")
+                .expect("owner");
+            let store = ObservationStore::open_initialized().expect("store");
+            let mut owner = store
+                .get_run(&first.owner_id)
+                .expect("read")
+                .expect("owner");
+            owner.metadata_json["lease_expires_at_ms"] = json!(0);
+            store
+                .update_run_metadata(&owner.id, owner.metadata_json)
+                .expect("expire lease");
+            let second = schedule_terminal_runner_exec_recovery()
+                .expect("schedule")
+                .expect("replacement owner");
+            assert!(second.is_new_owner);
+            assert_eq!(second.owner_id, first.owner_id);
+            assert_ne!(second.owner_token, first.owner_token);
         });
     }
 

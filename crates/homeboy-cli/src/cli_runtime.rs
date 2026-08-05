@@ -358,8 +358,11 @@ impl CliRuntime {
 
         register_startup_providers_before_reconcile();
         if let Some(owner_id) = std::env::var_os(RUNNER_EXEC_RECOVERY_OWNER_ENV) {
+            let owner_token =
+                std::env::var_os("HOMEBOY_RUNNER_EXEC_RECOVERY_OWNER_TOKEN").unwrap_or_default();
             let _ = crate::runner::run_scheduled_terminal_runner_exec_recovery(
                 &owner_id.to_string_lossy(),
+                &owner_token.to_string_lossy(),
             );
             return std::process::ExitCode::SUCCESS;
         }
@@ -695,12 +698,24 @@ fn schedule_runner_exec_recovery() {
     if !schedule.is_new_owner {
         return;
     }
-    let Ok(executable) = std::env::current_exe() else {
-        return;
+    let executable = match std::env::current_exe() {
+        Ok(executable) => executable,
+        Err(error) => {
+            let _ = crate::runner::record_scheduled_terminal_runner_exec_recovery_spawn_failure(
+                &schedule.owner_id,
+                &schedule.owner_token,
+                &error,
+            );
+            return;
+        }
     };
     let mut command = ProcessCommand::new(executable);
     command
         .env(RUNNER_EXEC_RECOVERY_OWNER_ENV, &schedule.owner_id)
+        .env(
+            "HOMEBOY_RUNNER_EXEC_RECOVERY_OWNER_TOKEN",
+            &schedule.owner_token,
+        )
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -708,6 +723,7 @@ fn schedule_runner_exec_recovery() {
     if let Err(error) = command.spawn() {
         let _ = crate::runner::record_scheduled_terminal_runner_exec_recovery_spawn_failure(
             &schedule.owner_id,
+            &schedule.owner_token,
             &error,
         );
     }
