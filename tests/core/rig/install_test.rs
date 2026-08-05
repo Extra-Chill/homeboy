@@ -11,10 +11,7 @@ use homeboy_core::ErrorCode;
 use std::fs;
 use std::path::Path;
 
-#[path = "support.rs"]
-mod support;
-
-use support::{minimal_rig, minimal_stack, write_rig, write_stack, GitFixture};
+use crate::rig_test_support::{minimal_rig, minimal_stack, write_rig, write_stack, GitFixture};
 
 fn write_single_rig(dir: &Path, id: &str, body: &str) -> std::path::PathBuf {
     fs::create_dir_all(dir).expect("single rig dir");
