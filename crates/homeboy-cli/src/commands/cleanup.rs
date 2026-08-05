@@ -1303,6 +1303,9 @@ pub struct CleanupInventoryOutput {
     pub candidate_count: usize,
     pub applied_count: usize,
     pub skipped_count: usize,
+    /// Records that require a separate reconciliation authority before cleanup
+    /// can act on them. They are excluded from `candidate_count`.
+    pub reconciliation_blocker_count: usize,
     /// Categories that executed and removed at least one resource. Counted in
     /// categories, never in resources.
     pub applied_category_count: usize,
@@ -1334,6 +1337,7 @@ pub struct CleanupInventoryCategory {
     pub candidate_count: usize,
     pub applied_count: usize,
     pub skipped_count: usize,
+    pub reconciliation_blocker_count: usize,
     pub estimated_bytes: u64,
     pub reclaimed_bytes: u64,
     pub output: Value,
@@ -2125,6 +2129,10 @@ fn cleanup_inventory_with_deadline(
         .iter()
         .map(|category| category.skipped_count)
         .sum();
+    let reconciliation_blocker_count = categories
+        .iter()
+        .map(|category| category.reconciliation_blocker_count)
+        .sum();
     let estimated_bytes = categories
         .iter()
         .map(|category| category.estimated_bytes)
@@ -2152,6 +2160,7 @@ fn cleanup_inventory_with_deadline(
         candidate_count,
         applied_count,
         skipped_count,
+        reconciliation_blocker_count,
         applied_category_count,
         estimated_bytes,
         reclaimed_bytes,
@@ -2310,6 +2319,7 @@ fn store_unavailable_category(
         candidate_count: 0,
         applied_count: 0,
         skipped_count: 1,
+        reconciliation_blocker_count: 0,
         estimated_bytes: 0,
         reclaimed_bytes: 0,
         output: serde_json::to_value(store).unwrap_or(Value::Null),
@@ -2350,6 +2360,7 @@ fn cleanup_category_failure(
         candidate_count: 0,
         applied_count: 0,
         skipped_count: 1,
+        reconciliation_blocker_count: 0,
         estimated_bytes: 0,
         reclaimed_bytes: 0,
         output: error.details,
@@ -2454,6 +2465,7 @@ fn repo_artifacts_category(apply: bool) -> homeboy::core::Result<CleanupInventor
         candidate_count: output.candidate_count,
         applied_count: output.applied_count,
         skipped_count: output.skipped_count + failure_count,
+        reconciliation_blocker_count: 0,
         estimated_bytes: output.estimated_bytes,
         reclaimed_bytes: output.reclaimed_bytes,
         output: serde_json::to_value(output.diagnostics).map_err(|error| {
@@ -2635,6 +2647,7 @@ fn category_from_command<T: Serialize>(
         candidate_count,
         applied_count,
         skipped_count,
+        reconciliation_blocker_count: 0,
         estimated_bytes,
         reclaimed_bytes,
         output: serde_json::to_value(output).map_err(|err| {
@@ -2647,7 +2660,8 @@ fn task_worktrees_category(
     output: WorktreeCleanupOutput,
     apply: bool,
 ) -> homeboy::core::Result<CleanupInventoryCategory> {
-    category_from_output(
+    let reconciliation_blocker_count = output.counts.reconciliation_blockers;
+    let mut category = category_from_output(
         TASK_WORKTREES_METADATA,
         apply,
         output.counts.candidates,
@@ -2656,7 +2670,9 @@ fn task_worktrees_category(
         0,
         0,
         output,
-    )
+    )?;
+    category.reconciliation_blocker_count = reconciliation_blocker_count;
+    Ok(category)
 }
 
 fn persisted_artifacts_category(
@@ -2687,6 +2703,7 @@ fn persisted_artifacts_category(
         candidate_count: persisted.planned_record_count + resource_cleanup_candidates,
         applied_count: persisted.removed_record_count,
         skipped_count: persisted.skipped_count,
+        reconciliation_blocker_count: 0,
         estimated_bytes: persisted.totals.planned_size_bytes,
         reclaimed_bytes: persisted.totals.removed_size_bytes,
         output,
@@ -2715,6 +2732,7 @@ fn remote_lab_workspace_categories(
                 candidate_count: 0,
                 applied_count: 0,
                 skipped_count: 1,
+                reconciliation_blocker_count: 0,
                 estimated_bytes: 0,
                 reclaimed_bytes: 0,
                 output: serde_json::json!({ "runner_id": status.runner_id, "connected": status.connected }),
@@ -2862,6 +2880,15 @@ fn cleanup_actionable(
                 .with_kind(CommandNextActionKind::Repair),
             );
             continue;
+        }
+        if category.reconciliation_blocker_count > 0 {
+            actionable.next_actions.push(
+                CommandNextAction::new(
+                    format!("reconcile {}", category.category.replace('_', " ")),
+                    "homeboy worktree inventory --apply",
+                )
+                .with_kind(CommandNextActionKind::Repair),
+            );
         }
         if category.skipped || category.candidate_count == 0 {
             continue;
@@ -4481,6 +4508,7 @@ mod tests {
                 candidate_count: 1,
                 applied_count: 0,
                 skipped_count: 0,
+                reconciliation_blocker_count: 0,
                 estimated_bytes: 0,
                 reclaimed_bytes: 0,
                 output: Value::Null,
@@ -4489,6 +4517,63 @@ mod tests {
             let actionable = cleanup_actionable(&[category], apply);
             assert_eq!(actionable.next_actions[0].command, command);
         }
+    }
+
+    #[test]
+    fn task_worktree_cleanup_separates_mixed_and_blocked_only_actions() {
+        let mixed = task_worktrees_category(
+            WorktreeCleanupOutput {
+                dry_run: true,
+                counts: worktree::WorktreeCleanupCounts {
+                    candidates: 1,
+                    skipped: 1,
+                    reconciliation_blockers: 1,
+                    ..Default::default()
+                },
+                candidates: Vec::new(),
+                removed: Vec::new(),
+                skipped: Vec::new(),
+            },
+            false,
+        )
+        .expect("mixed category");
+        assert_eq!(mixed.candidate_count, 1);
+        assert_eq!(mixed.reconciliation_blocker_count, 1);
+        assert_eq!(mixed.skipped_count, 1);
+        let mixed_actions = cleanup_actionable(&[mixed], false);
+        assert_eq!(
+            mixed_actions.next_actions[0].command,
+            "homeboy worktree inventory --apply"
+        );
+        assert_eq!(
+            mixed_actions.next_actions[1].command,
+            "homeboy worktree cleanup --cleanup-branches --apply"
+        );
+
+        let blocked = task_worktrees_category(
+            WorktreeCleanupOutput {
+                dry_run: true,
+                counts: worktree::WorktreeCleanupCounts {
+                    skipped: 4,
+                    reconciliation_blockers: 4,
+                    ..Default::default()
+                },
+                candidates: Vec::new(),
+                removed: Vec::new(),
+                skipped: Vec::new(),
+            },
+            false,
+        )
+        .expect("blocked category");
+        assert_eq!(blocked.candidate_count, 0);
+        assert_eq!(blocked.reconciliation_blocker_count, 4);
+        assert_eq!(blocked.skipped_count, 4);
+        let blocked_actions = cleanup_actionable(&[blocked], false);
+        assert_eq!(blocked_actions.next_actions.len(), 1);
+        assert_eq!(
+            blocked_actions.next_actions[0].command,
+            "homeboy worktree inventory --apply"
+        );
     }
 
     #[test]

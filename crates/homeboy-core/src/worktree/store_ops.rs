@@ -116,18 +116,20 @@ pub(super) fn cleanup_with_store(
         .iter()
         .filter(|output| output.branch_cleanup.deleted)
         .count();
-    let preflight_skipped = skipped
+    let reconciliation_blockers = skipped
         .iter()
         .filter(|skipped| {
-            !candidates
-                .iter()
-                .any(|candidate| candidate.record.id == skipped.record.id)
+            skipped
+                .safety
+                .as_ref()
+                .is_some_and(|safety| safety.worktree_missing)
         })
         .count();
     let counts = WorktreeCleanupCounts {
-        candidates: candidates.len() + preflight_skipped,
+        candidates: candidates.len(),
         removed: removed.len(),
         skipped: skipped.len(),
+        reconciliation_blockers,
         branch_delete_candidates,
         branches_deleted,
         unmerged_branches,

@@ -511,9 +511,13 @@ pub struct WorktreeCleanupOutput {
 
 #[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
 pub struct WorktreeCleanupCounts {
+    /// Records represented by `candidates`, which cleanup can act on directly.
     pub candidates: usize,
     pub removed: usize,
     pub skipped: usize,
+    /// Missing active worktrees that require inventory reconciliation authority
+    /// before cleanup can make progress.
+    pub reconciliation_blockers: usize,
     pub branch_delete_candidates: usize,
     pub branches_deleted: usize,
     pub unmerged_branches: usize,
