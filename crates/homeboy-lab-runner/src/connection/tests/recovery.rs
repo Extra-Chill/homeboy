@@ -2093,19 +2093,19 @@ fn idle_stale_replacement_uses_actual_endpoint_envelopes_and_reprobes_the_new_ow
         "lease-new",
         "homeboy 0.289.0+configured",
         |client, homeboy, configured_identity, argv_path| {
-            let daemon = ensure_remote_daemon(
+            let daemon = ensure_remote_daemon(RemoteDaemonEnsureRequest {
                 client,
                 homeboy,
-                "homeboy-lab",
-                None,
+                runner_id: "homeboy-lab",
+                previous_session: None,
                 configured_identity,
-                None,
-                &[],
-                None,
-                None,
-                None,
-                false,
-            )
+                orphan_lease_id: None,
+                confirmed_no_pid_job_ids: &[],
+                live_lease_expectation: None,
+                replacement_operation_id: None,
+                admission_fence: None,
+                registry_lock_held: false,
+            })
             .expect("replacement succeeds");
             assert_eq!(daemon.lease_id.as_deref(), Some("lease-new"));
             assert_eq!(daemon.pid, Some(222));
@@ -2125,19 +2125,19 @@ fn idle_stale_replacement_refuses_a_post_stop_owner_or_identity_change() {
         "lease-raced",
         "homeboy 0.288.13+stale",
         |client, homeboy, configured_identity, _| {
-            let error = ensure_remote_daemon(
+            let error = ensure_remote_daemon(RemoteDaemonEnsureRequest {
                 client,
                 homeboy,
-                "homeboy-lab",
-                None,
+                runner_id: "homeboy-lab",
+                previous_session: None,
                 configured_identity,
-                None,
-                &[],
-                None,
-                None,
-                None,
-                false,
-            )
+                orphan_lease_id: None,
+                confirmed_no_pid_job_ids: &[],
+                live_lease_expectation: None,
+                replacement_operation_id: None,
+                admission_fence: None,
+                registry_lock_held: false,
+            })
             .expect_err("concurrent stale daemon is refused");
             assert!(error.contains("ownership changed"));
         },
@@ -2151,19 +2151,19 @@ fn idle_stale_replacement_refuses_a_post_stop_identity_change() {
         "lease-new",
         "homeboy 0.288.13+stale",
         |client, homeboy, configured_identity, _| {
-            let error = ensure_remote_daemon(
+            let error = ensure_remote_daemon(RemoteDaemonEnsureRequest {
                 client,
                 homeboy,
-                "homeboy-lab",
-                None,
+                runner_id: "homeboy-lab",
+                previous_session: None,
                 configured_identity,
-                None,
-                &[],
-                None,
-                None,
-                None,
-                false,
-            )
+                orphan_lease_id: None,
+                confirmed_no_pid_job_ids: &[],
+                live_lease_expectation: None,
+                replacement_operation_id: None,
+                admission_fence: None,
+                registry_lock_held: false,
+            })
             .expect_err("stale replacement identity is refused");
             assert!(error.contains("does not match configured runner binary"));
         },

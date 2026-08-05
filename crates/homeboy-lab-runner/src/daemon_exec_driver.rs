@@ -171,10 +171,9 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
             )
         })?;
 
-        let mut is_cancelled = is_cancelled;
         let output = execute_runner_process_until_cancelled_with_progress(
             &plan,
-            || is_cancelled(),
+            is_cancelled,
             progress_sink,
             require_child_identity_acknowledgement,
             child_started,

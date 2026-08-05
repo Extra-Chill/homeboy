@@ -1,5 +1,6 @@
 use super::*;
 use crate::session::RunnerConnectFailureEvidence;
+use std::path::Path;
 
 pub(super) fn session_is_live(session: &RunnerSession) -> bool {
     session_is_live_with_timeout(session, Duration::from_secs(2))
@@ -191,7 +192,7 @@ pub(super) fn read_session_for_status(runner_id: &str) -> Result<Option<RunnerSe
     }
     let directory = paths::runner_sessions_dir()?.join(runner_id);
     match status_peer_session_in(&directory, &controller_id)? {
-        StatusPeerSession::One(peer) => Ok(Some(peer)),
+        StatusPeerSession::One(peer) => Ok(Some(*peer)),
         StatusPeerSession::None => Ok(session),
         StatusPeerSession::Ambiguous => {
             crate::readonly_probe::record_degradation(
@@ -212,7 +213,7 @@ pub(super) fn read_session_for_status(runner_id: &str) -> Result<Option<RunnerSe
 
 enum StatusPeerSession {
     None,
-    One(RunnerSession),
+    One(Box<RunnerSession>),
     Ambiguous,
 }
 
@@ -222,14 +223,14 @@ enum StatusPeerSession {
 const STATUS_PEER_SESSION_LIMIT: usize = 8;
 const STATUS_PEER_SESSION_TIMEOUT: Duration = Duration::from_secs(1);
 
-fn status_peer_session_in(directory: &PathBuf, controller_id: &str) -> Result<StatusPeerSession> {
+fn status_peer_session_in(directory: &Path, controller_id: &str) -> Result<StatusPeerSession> {
     status_peer_session_in_with(directory, controller_id, |session| {
         session_is_live_with_timeout(session, STATUS_PEER_SESSION_TIMEOUT)
     })
 }
 
 fn status_peer_session_in_with(
-    directory: &PathBuf,
+    directory: &Path,
     controller_id: &str,
     is_live: impl Fn(&RunnerSession) -> bool,
 ) -> Result<StatusPeerSession> {
@@ -278,7 +279,9 @@ fn status_peer_session_in_with(
         }
         peer = Some(candidate);
     }
-    Ok(peer.map_or(StatusPeerSession::None, StatusPeerSession::One))
+    Ok(peer.map_or(StatusPeerSession::None, |peer| {
+        StatusPeerSession::One(Box::new(peer))
+    }))
 }
 
 /// Keep the local tunnel observation inside the same explicit read-only budget
@@ -331,12 +334,12 @@ fn read_session_or_live_peer_for_controller(
 }
 
 fn resolve_session_or_live_peer_in(
-    directory: &PathBuf,
+    directory: &Path,
     controller_id: &str,
     session: Option<RunnerSession>,
     is_live: impl Fn(&RunnerSession) -> bool,
 ) -> Result<Option<RunnerSession>> {
-    if session.as_ref().is_some_and(|session| is_live(session)) {
+    if session.as_ref().is_some_and(&is_live) {
         return Ok(session);
     }
 
@@ -379,11 +382,11 @@ pub(super) fn read_ownership(runner_id: &str) -> Result<Option<RunnerSession>> {
     read_session_at(&ownership_path(runner_id)?)
 }
 
-fn read_session_at(path: &PathBuf) -> Result<Option<RunnerSession>> {
+fn read_session_at(path: &Path) -> Result<Option<RunnerSession>> {
     if !path.exists() {
         return Ok(None);
     }
-    let raw = std::fs::read_to_string(&path).map_err(|err| {
+    let raw = std::fs::read_to_string(path).map_err(|err| {
         Error::internal_io(err.to_string(), Some(format!("read {}", path.display())))
     })?;
     serde_json::from_str(&raw)
@@ -413,7 +416,7 @@ pub(super) fn claim_ownership_if_owner_not_live(session: &RunnerSession) -> Resu
         .is_some_and(session_is_live))
 }
 
-fn write_session_at(path: &PathBuf, session: &RunnerSession) -> Result<()> {
+fn write_session_at(path: &Path, session: &RunnerSession) -> Result<()> {
     homeboy_core::engine::local_files::write_json_file(path, session)
 }
 
@@ -506,7 +509,7 @@ fn has_live_peer_session_in(
 }
 
 fn live_peer_session_in(
-    directory: &PathBuf,
+    directory: &Path,
     controller_id: Option<&str>,
     is_live: impl Fn(&RunnerSession) -> bool,
 ) -> Result<Option<RunnerSession>> {
@@ -1145,7 +1148,7 @@ mod tests {
             status_peer_session_in_with(&root.path().to_path_buf(), "current-controller", |_| true)
                 .expect("project peer session");
 
-        assert!(matches!(projected, StatusPeerSession::One(session) if session == peer));
+        assert!(matches!(projected, StatusPeerSession::One(session) if *session == peer));
         assert!(root.path().join("peer-controller.json").exists());
         assert!(!root.path().join("current-controller.json").exists());
     }
