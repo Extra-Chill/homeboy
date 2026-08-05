@@ -2848,11 +2848,13 @@ fn stale_daemon_warning(
         &stale_runtime_paths,
         &changed_runtime_paths,
     );
-    let controller_matches_configured =
-        versions_match(&current_version, &controller_identity.version)
-            && controller_commit_comparison == IdentityComparison::Match
-            && controller_identity.git_dirty != Some(true);
+    let controller_reference = ControllerReference::for_identity(&controller_identity);
     let controller_version_matches = versions_match(&current_version, &controller_identity.version);
+    let controller_matches_configured = controller_runtime_is_current(
+        controller_reference,
+        controller_version_matches,
+        controller_commit_comparison,
+    );
     if daemon_matches_configured && controller_matches_configured {
         return Ok(None);
     }
@@ -2875,7 +2877,7 @@ fn stale_daemon_warning(
             controller_identity.display,
             controller_version_matches,
             daemon_matches_configured,
-            controller_identity.git_dirty == Some(true),
+            controller_reference == ControllerReference::Unverifiable,
         )
         .with_runtime_paths(&runner.id, stale_runtime_paths, changed_runtime_paths)
         .with_persisted_session_version(&runner.id, session.homeboy_version.clone()),
@@ -2961,6 +2963,60 @@ fn daemon_runtime_is_current(
         && identity_comparison == IdentityComparison::Match
         && stale_runtime_paths.is_empty()
         && changed_runtime_paths.is_empty()
+}
+
+/// Whether the controller's own build identity can serve as the reference a
+/// runner is compared against.
+///
+/// A controller built from a dirty working tree embeds the *last commit*, not
+/// the tree it was actually built from, so its commit names no reproducible
+/// build. Comparing any runner's commit against it can never match — not
+/// because the runner is behind, but because there is nothing well-defined to
+/// compare with. Rendering that as staleness marked every Lab runner
+/// permanently stale on any development controller (#11101).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControllerReference {
+    /// The controller names a reproducible build. Commit comparison against it
+    /// is authoritative.
+    Comparable,
+    /// The controller cannot name the build it is running, so commit
+    /// comparison is *impossible* rather than *failed*.
+    Unverifiable,
+}
+
+impl ControllerReference {
+    fn for_identity(identity: &homeboy_product_identity::BuildIdentity) -> Self {
+        if identity.git_dirty == Some(true) {
+            Self::Unverifiable
+        } else {
+            Self::Comparable
+        }
+    }
+}
+
+/// Controller↔runner convergence, the mirror of [`daemon_runtime_is_current`]
+/// for the other half of the comparison.
+///
+/// Version equality is enforced in **both** states: the crate version is
+/// compiled in and a dirty working tree does not make the controller misreport
+/// it. So a genuinely stale runner — one whose configured job command binary is
+/// a different Homeboy version — is still caught with a dirty controller, and
+/// the runner-internal daemon↔configured-binary check is untouched. Only the
+/// commit comparison is skipped when the controller cannot name its own build,
+/// because that comparison has no defined answer, not a negative one. Skipping
+/// it never widens the gate past version equality.
+fn controller_runtime_is_current(
+    controller_reference: ControllerReference,
+    controller_version_matches: bool,
+    controller_commit_comparison: IdentityComparison,
+) -> bool {
+    controller_version_matches
+        && match controller_reference {
+            ControllerReference::Comparable => {
+                controller_commit_comparison == IdentityComparison::Match
+            }
+            ControllerReference::Unverifiable => true,
+        }
 }
 
 fn unverifiable_configured_identity_message(homeboy: &str) -> String {
