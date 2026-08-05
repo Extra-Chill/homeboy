@@ -121,8 +121,9 @@ fn client_connection_args(
     if let Some(session) = auth {
         // A managed session is established explicitly by `server connect`. Command
         // clients attach to that socket rather than starting a competing master.
-        args.push("-S".to_string());
-        args.push(session.control_path.clone());
+        // `-o ControlPath` is understood by both ssh and scp; scp's `-S` means
+        // the SSH executable path rather than the control socket.
+        push_option(&mut args, format!("ControlPath={}", session.control_path));
         push_option(&mut args, "ControlMaster=no");
     }
 
@@ -179,7 +180,7 @@ mod tests {
         ));
 
         assert!(rendered.contains("-i '/tmp/key with spaces'"));
-        assert!(rendered.contains("-S '/tmp/control path'"));
+        assert!(rendered.contains("-o 'ControlPath=/tmp/control path'"));
         assert!(rendered.contains("-o ControlMaster=no"));
         assert!(rendered.contains("-p 2222"));
     }

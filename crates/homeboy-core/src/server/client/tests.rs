@@ -661,9 +661,12 @@ fn managed_session_config_adds_controlmaster_args() {
     let client = SshClient::from_server(&server, "bastion").expect("client");
     let args = client.build_ssh_args(Some("uptime"), false);
 
-    assert!(args
-        .windows(2)
-        .any(|pair| { pair == ["-S".to_string(), "/tmp/homeboy-test-%h-%p-%r".to_string()] }));
+    assert!(args.windows(2).any(|pair| {
+        pair == [
+            "-o".to_string(),
+            "ControlPath=/tmp/homeboy-test-%h-%p-%r".to_string(),
+        ]
+    }));
     assert!(args.contains(&"ControlMaster=no".to_string()));
     assert!(args.contains(&"BatchMode=yes".to_string()));
     assert!(args.contains(&"2222".to_string()));
@@ -714,8 +717,69 @@ fn timed_command_does_not_wait_for_a_pipe_holding_descendant() {
 
     assert!(output.timed_out);
     assert_eq!(output.exit_code, 124);
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(
+        started.elapsed() < Duration::from_millis(750),
+        "timeout plus its single cleanup allowance must remain bounded"
+    );
     assert!(output.stderr.contains("stream drain exceeded"));
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_alias_reuses_its_controlpath_and_bounds_mux_control() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = tempfile::tempdir().expect("fixture directory");
+    let ssh = fixture.path().join("ssh");
+    let args_file = fixture.path().join("args");
+    std::fs::write(
+        &ssh,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\ncase \"$*\" in *'-O check'*) sleep 5 ;; *) printf reused ;; esac\n",
+            crate::engine::shell::quote_path(&args_file.to_string_lossy())
+        ),
+    )
+    .expect("fake ssh");
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755))
+        .expect("make fake ssh executable");
+    let client = SshClient {
+        host: "sandbox-alias".to_string(),
+        user: "deploy".to_string(),
+        port: 22,
+        identity_file: None,
+        auth: Some(ManagedSshSession {
+            control_path: "/tmp/homeboy-%h-%p-%r".to_string(),
+            persist: "4h".to_string(),
+        }),
+        is_local: false,
+        env: HashMap::new(),
+    };
+    let command = client.run_managed_session_command_with_program(
+        client.build_ssh_args(Some("true"), false),
+        true,
+        Duration::from_secs(1),
+        &ssh,
+    );
+    assert!(command.live, "{}", command.stderr);
+    assert_eq!(command.stdout, "reused");
+    let args = std::fs::read_to_string(&args_file).expect("fake SSH arguments");
+    assert!(args.contains("ControlPath=/tmp/homeboy-%h-%p-%r"));
+    assert!(args.contains("ControlMaster=no"));
+    assert!(args.contains("deploy@sandbox-alias"));
+
+    let started = Instant::now();
+    let status = client.run_managed_session_command_with_program(
+        client
+            .build_session_control_args("check")
+            .expect("control arguments"),
+        true,
+        Duration::from_millis(50),
+        &ssh,
+    );
+    assert!(!status.live);
+    assert_eq!(status.exit_code, 124);
+    assert!(started.elapsed() < Duration::from_millis(750));
+    assert!(status.stderr.contains("mux control"));
 }
 
 #[test]

@@ -203,7 +203,7 @@ impl SshClient {
         )
     }
 
-    fn build_session_control_args(&self, operation: &str) -> Result<Vec<String>> {
+    pub(super) fn build_session_control_args(&self, operation: &str) -> Result<Vec<String>> {
         let session = self.auth.as_ref().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "auth.mode",
@@ -335,19 +335,41 @@ impl SshClient {
         args: Vec<String>,
         expect_live_on_success: bool,
     ) -> ManagedSshSessionOutput {
+        self.run_managed_session_command_with_timeout(
+            args,
+            expect_live_on_success,
+            MANAGED_SESSION_OPERATION_TIMEOUT,
+        )
+    }
+
+    pub(super) fn run_managed_session_command_with_timeout(
+        &self,
+        args: Vec<String>,
+        expect_live_on_success: bool,
+        timeout: Duration,
+    ) -> ManagedSshSessionOutput {
+        self.run_managed_session_command_with_program(args, expect_live_on_success, timeout, "ssh")
+    }
+
+    pub(super) fn run_managed_session_command_with_program(
+        &self,
+        args: Vec<String>,
+        expect_live_on_success: bool,
+        timeout: Duration,
+        program: impl AsRef<std::ffi::OsStr>,
+    ) -> ManagedSshSessionOutput {
         let target = args.last().cloned().unwrap_or_default();
         let control_path = args
             .windows(2)
             .find_map(|pair| (pair[0] == "-S").then(|| pair[1].clone()))
             .unwrap_or_default();
-        let mut command = Command::new("ssh");
+        let mut command = Command::new(program);
         command
             .args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         crate::server::process_cleanup::configure_process_group_cleanup(&mut command);
-        let output =
-            execute_command_with_stdin_timeout(command, None, MANAGED_SESSION_OPERATION_TIMEOUT);
+        let output = execute_command_with_stdin_timeout(command, None, timeout);
         let mut stderr = output.stderr;
         if output.timed_out {
             if !stderr.is_empty() && !stderr.ends_with('\n') {
@@ -616,15 +638,27 @@ fn collect_stream(receiver: Option<Receiver<String>>) -> String {
         .unwrap_or_default()
 }
 
-fn collect_stream_before(receiver: Option<Receiver<String>>, deadline: Duration) -> (String, bool) {
+fn collect_stream_before(receiver: Option<Receiver<String>>, deadline: Instant) -> (String, bool) {
     match receiver {
-        Some(receiver) => match receiver.recv_timeout(deadline) {
-            Ok(output) => (output, false),
-            Err(RecvTimeoutError::Timeout) => (String::new(), true),
-            Err(RecvTimeoutError::Disconnected) => (String::new(), false),
-        },
+        Some(receiver) => {
+            match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(output) => (output, false),
+                Err(RecvTimeoutError::Timeout) => (String::new(), true),
+                Err(RecvTimeoutError::Disconnected) => (String::new(), false),
+            }
+        }
         None => (String::new(), false),
     }
+}
+
+fn collect_streams_before(
+    stdout: Option<Receiver<String>>,
+    stderr: Option<Receiver<String>>,
+    deadline: Instant,
+) -> (String, String, bool) {
+    let (stdout, stdout_stalled) = collect_stream_before(stdout, deadline);
+    let (stderr, stderr_stalled) = collect_stream_before(stderr, deadline);
+    (stdout, stderr, stdout_stalled || stderr_stalled)
 }
 
 fn ssh_process_error(error: std::io::Error) -> CommandOutput {
@@ -751,17 +785,22 @@ pub(super) fn execute_command_with_stdin_source_timeout(
     let stderr = child.stderr.take().map(read_stream);
     let mut timed_out = false;
     let mut interrupted_signal = None;
+    let mut cleanup_deadline = None;
     let status = loop {
         if let Some(signal) = crate::server::process_cleanup::active_cleanup_signal() {
             interrupted_signal = Some(signal);
-            break terminate_process_group_with_deadline(&mut child, pid);
+            let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
+            cleanup_deadline = Some(deadline);
+            break terminate_process_group_with_deadline(&mut child, pid, deadline);
         }
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) if started.elapsed() < timeout => thread::sleep(Duration::from_millis(25)),
             Ok(None) => {
                 timed_out = true;
-                break terminate_process_group_with_deadline(&mut child, pid);
+                let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
+                cleanup_deadline = Some(deadline);
+                break terminate_process_group_with_deadline(&mut child, pid, deadline);
             }
             Err(_) => break None,
         }
@@ -769,11 +808,14 @@ pub(super) fn execute_command_with_stdin_source_timeout(
     let stdin_failed = writer
         .and_then(|writer| writer.finish_after_child())
         .is_some_and(|result| result.is_err());
-    let (stdout, stdout_stalled) = collect_stream_before(stdout, PROCESS_REAP_DEADLINE);
-    let (mut stderr, stderr_stalled) = collect_stream_before(stderr, PROCESS_REAP_DEADLINE);
-    if stdout_stalled || stderr_stalled {
+    let (stdout, mut stderr, streams_stalled) = collect_streams_before(
+        stdout,
+        stderr,
+        cleanup_deadline.unwrap_or_else(|| Instant::now() + PROCESS_CLEANUP_ALLOWANCE),
+    );
+    if streams_stalled {
         timed_out = true;
-        terminate_process_group_with_deadline(&mut child, pid);
+        terminate_unreaped_process_group(pid);
         if !stderr.is_empty() && !stderr.ends_with('\n') {
             stderr.push('\n');
         }
@@ -913,6 +955,7 @@ where
     let mut stdin_failed = false;
     let mut interrupted_signal = None;
     let mut status = None;
+    let mut cleanup_deadline = None;
     loop {
         // `configure_process_group_cleanup` replaced the default SIGINT/SIGTERM
         // disposition with a recording handler, so a cancelled caller no longer
@@ -922,12 +965,16 @@ where
         // the operator's cancellation.
         if let Some(signal) = crate::server::process_cleanup::active_cleanup_signal() {
             interrupted_signal = Some(signal);
-            status = terminate_process_group_with_deadline(&mut child, pid);
+            let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
+            cleanup_deadline = Some(deadline);
+            status = terminate_process_group_with_deadline(&mut child, pid, deadline);
             break;
         }
         if matches!(writer_rx.try_recv(), Ok(Err(_))) {
             stdin_failed = true;
-            status = terminate_process_group_with_deadline(&mut child, pid);
+            let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
+            cleanup_deadline = Some(deadline);
+            status = terminate_process_group_with_deadline(&mut child, pid, deadline);
             break;
         }
         match child.try_wait() {
@@ -938,7 +985,9 @@ where
             Ok(None) if started.elapsed() < timeout => thread::sleep(Duration::from_millis(25)),
             Ok(None) => {
                 timed_out = true;
-                status = terminate_process_group_with_deadline(&mut child, pid);
+                let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
+                cleanup_deadline = Some(deadline);
+                status = terminate_process_group_with_deadline(&mut child, pid, deadline);
                 break;
             }
             Err(_) => break,
@@ -947,11 +996,14 @@ where
     if let Some(writer) = writer {
         let _ = writer.join();
     }
-    let (stdout, stdout_stalled) = collect_stream_before(stdout, PROCESS_REAP_DEADLINE);
-    let (mut stderr, stderr_stalled) = collect_stream_before(stderr, PROCESS_REAP_DEADLINE);
-    if stdout_stalled || stderr_stalled {
+    let (stdout, mut stderr, streams_stalled) = collect_streams_before(
+        stdout,
+        stderr,
+        cleanup_deadline.unwrap_or_else(|| Instant::now() + PROCESS_CLEANUP_ALLOWANCE),
+    );
+    if streams_stalled {
         timed_out = true;
-        terminate_process_group_with_deadline(&mut child, pid);
+        terminate_unreaped_process_group(pid);
         if !stderr.is_empty() && !stderr.ends_with('\n') {
             stderr.push('\n');
         }
@@ -1097,8 +1149,11 @@ mod bounded_probe_output_tests {
     }
 }
 
+/// One shared allowance covers process termination and both output streams after
+/// a timed SSH command's deadline. It is deliberately smaller than the polling
+/// interval callers commonly use for their own process deadlines.
+const PROCESS_CLEANUP_ALLOWANCE: Duration = Duration::from_millis(250);
 const PROCESS_TERMINATION_GRACE: Duration = Duration::from_millis(100);
-const PROCESS_REAP_DEADLINE: Duration = Duration::from_millis(250);
 
 /// Run a timed SSH command in a remote session that Homeboy explicitly owns.
 /// The remote shell, rather than the controller's local `ssh` process group,
@@ -1113,6 +1168,7 @@ pub(super) fn wrap_timed_remote_command(command: &str) -> String {
 fn terminate_process_group_with_deadline(
     child: &mut std::process::Child,
     pid: u32,
+    deadline: Instant,
 ) -> Option<std::process::ExitStatus> {
     #[cfg(unix)]
     unsafe {
@@ -1122,7 +1178,8 @@ fn terminate_process_group_with_deadline(
     {
         let _ = child.kill();
     }
-    if let Some(status) = poll_child_until(child, PROCESS_TERMINATION_GRACE) {
+    let graceful_deadline = std::cmp::min(deadline, Instant::now() + PROCESS_TERMINATION_GRACE);
+    if let Some(status) = poll_child_until(child, graceful_deadline) {
         return Some(status);
     }
     #[cfg(unix)]
@@ -1133,18 +1190,24 @@ fn terminate_process_group_with_deadline(
     {
         let _ = child.kill();
     }
-    poll_child_until(child, PROCESS_REAP_DEADLINE)
+    poll_child_until(child, deadline)
+}
+
+fn terminate_unreaped_process_group(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
 }
 
 fn poll_child_until(
     child: &mut std::process::Child,
-    deadline: Duration,
+    deadline: Instant,
 ) -> Option<std::process::ExitStatus> {
-    let started = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Some(status),
-            Ok(None) if started.elapsed() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
             Ok(None) | Err(_) => return None,
         }
     }
