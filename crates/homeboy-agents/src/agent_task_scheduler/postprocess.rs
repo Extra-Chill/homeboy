@@ -716,29 +716,64 @@ fn completion_exit_codes(outcome: &AgentTaskOutcome) -> Vec<Option<i32>> {
         .unwrap_or_default()
 }
 
-fn rebase_outcome_paths(mut outcome: AgentTaskOutcome, from: &Path, to: &Path) -> AgentTaskOutcome {
-    let from = from.to_string_lossy().to_string();
-    let to = to.to_string_lossy().to_string();
-    for artifact in &mut outcome.artifacts {
-        if let Some(path) = &artifact.path {
-            artifact.path = Some(path.replacen(&from, &to, 1));
+fn rebase_outcome_paths(outcome: AgentTaskOutcome, from: &Path, to: &Path) -> AgentTaskOutcome {
+    let mut source_roots = vec![from.to_path_buf()];
+    if let Ok(canonical) = from.canonicalize() {
+        if canonical != from {
+            source_roots.push(canonical);
         }
     }
-    rebase_json_paths(&mut outcome.outputs, &from, &to);
-    outcome
+    let Ok(mut value) = serde_json::to_value(&outcome) else {
+        return outcome;
+    };
+    rebase_json_paths(&mut value, &source_roots, to);
+    serde_json::from_value(value).unwrap_or(outcome)
 }
 
-fn rebase_json_paths(value: &mut serde_json::Value, from: &str, to: &str) {
+fn rebase_path(path: &str, source_roots: &[PathBuf], to: &Path) -> Option<String> {
+    let path = Path::new(path);
+    path.is_absolute()
+        .then_some(())
+        .and_then(|_| {
+            source_roots.iter().find_map(|source| {
+                path.strip_prefix(source)
+                    .ok()
+                    .filter(|relative| is_safe_rebase_relative(relative))
+            })
+        })
+        .map(|relative| {
+            if relative.as_os_str().is_empty() {
+                to.to_path_buf()
+            } else {
+                to.join(relative)
+            }
+            .display()
+            .to_string()
+        })
+}
+
+fn is_safe_rebase_relative(relative: &Path) -> bool {
+    !relative.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    })
+}
+
+fn rebase_json_paths(value: &mut serde_json::Value, source_roots: &[PathBuf], to: &Path) {
     match value {
-        serde_json::Value::String(path) if path.starts_with(from) => {
-            *path = path.replacen(from, to, 1)
+        serde_json::Value::String(path) => {
+            if let Some(rebased) = rebase_path(path, source_roots, to) {
+                *path = rebased;
+            }
         }
         serde_json::Value::Array(values) => values
             .iter_mut()
-            .for_each(|value| rebase_json_paths(value, from, to)),
+            .for_each(|value| rebase_json_paths(value, source_roots, to)),
         serde_json::Value::Object(values) => values
             .values_mut()
-            .for_each(|value| rebase_json_paths(value, from, to)),
+            .for_each(|value| rebase_json_paths(value, source_roots, to)),
         _ => {}
     }
 }
@@ -1387,6 +1422,14 @@ mod tests {
                 result.artifacts[0].sha256.as_deref().map(str::len),
                 Some(64)
             );
+            let reported_output = result.outputs["artifact_postprocess"]["outputs"][0]["output"]
+                .as_str()
+                .expect("reported output path");
+            assert_eq!(reported_output, output_path);
+            assert!(
+                !reported_output.contains("/staging/"),
+                "promoted output path retained staging location: {reported_output}"
+            );
         });
     }
 
@@ -1536,6 +1579,76 @@ mod tests {
                 Some(output.as_str())
             );
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebase_outcome_paths_handles_canonical_source_aliases_without_prefix_collisions() {
+        let root = tempfile::tempdir().expect("root");
+        let target = root.path().join("target");
+        let alias = root.path().join("alias");
+        let source = alias.join("output");
+        std::fs::create_dir_all(target.join("output")).expect("source root");
+        std::os::unix::fs::symlink(&target, &alias).expect("source alias");
+        let canonical = source.canonicalize().expect("canonical source root");
+        let version = root.path().join("versions/attempt");
+        let lexical = source.join("lexical.txt").display().to_string();
+        let canonical_path = canonical.join("canonical.txt").display().to_string();
+        let prefix_collision = format!("{}-old/keep.txt", canonical.display());
+        let traversal = canonical.join("../sibling/keep.txt").display().to_string();
+        let outcome = AgentTaskOutcome {
+            artifacts: vec![AgentTaskArtifact {
+                path: Some(canonical_path.clone()),
+                metadata: serde_json::json!({ "manifest_path": canonical_path }),
+                ..Default::default()
+            }],
+            diagnostics: vec![AgentTaskDiagnostic {
+                class: "postprocess".to_string(),
+                message: "diagnostic".to_string(),
+                data: serde_json::json!({ "path": canonical.join("diagnostic.json") }),
+            }],
+            outputs: serde_json::json!({
+                "lexical": lexical,
+                "nested": [canonical_path, prefix_collision, traversal, "relative/output.txt"],
+                "url": format!("file://{}", canonical.display()),
+            }),
+            metadata: serde_json::json!({ "root": canonical }),
+            ..Default::default()
+        };
+
+        let rebased = rebase_outcome_paths(outcome, &source, &version);
+
+        assert_eq!(
+            rebased.artifacts[0].path.as_deref(),
+            Some(version.join("canonical.txt").to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            rebased.outputs["lexical"],
+            serde_json::json!(version.join("lexical.txt").display().to_string())
+        );
+        assert_eq!(
+            rebased.outputs["nested"][0],
+            serde_json::json!(version.join("canonical.txt").display().to_string())
+        );
+        assert_eq!(rebased.outputs["nested"][1], prefix_collision);
+        assert_eq!(rebased.outputs["nested"][2], traversal);
+        assert_eq!(rebased.outputs["nested"][3], "relative/output.txt");
+        assert_eq!(
+            rebased.outputs["url"],
+            format!("file://{}", canonical.display())
+        );
+        assert_eq!(
+            rebased.metadata["root"],
+            serde_json::json!(version.display().to_string())
+        );
+        assert_eq!(
+            rebased.artifacts[0].metadata["manifest_path"],
+            serde_json::json!(version.join("canonical.txt").display().to_string())
+        );
+        assert_eq!(
+            rebased.diagnostics[0].data["path"],
+            serde_json::json!(version.join("diagnostic.json").display().to_string())
+        );
     }
 
     #[test]
