@@ -79,6 +79,10 @@ pub struct SourceUpgradeHomeboyPathRealignment {
     pub detail: String,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Source realignment compares independent configured, candidate, version, and identity observations."
+)]
 pub fn source_upgrade_homeboy_path_realignment(
     runner: &Runner,
     original_homeboy_path: &str,

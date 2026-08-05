@@ -53,7 +53,14 @@ pub fn runner_upgrade_failure_entry(
 /// continue (either no realignment was needed, or the retry succeeded). Returns
 /// `Err(entry)` with a fully-populated failure entry (minus `previous_version`,
 /// which the caller assigns) when recovery or the retry definitively fails.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The retry boundary preserves the complete failed-upgrade diagnostic contract."
+)]
+#[expect(
+    clippy::result_large_err,
+    reason = "RunnerUpgradeEntry is a stable result payload consumed by existing upgrade reporting."
+)]
 pub fn recover_and_retry_failed_upgrade(
     runner: &Runner,
     force: bool,

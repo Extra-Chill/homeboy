@@ -133,7 +133,7 @@ pub fn reconcile_terminal_runner_exec_runs_with_budget(budget: Duration) -> Resu
         let snapshot = match crate::evidence::runner_job_log_snapshot(runner_id, job_id) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                record_evicted_evidence_loss(&store, &run, &error)?;
+                record_evicted_evidence_loss(&store, run, &error)?;
                 // A 404 is a durable per-job result. Other failures describe the
                 // endpoint, so avoid amplifying one unavailable daemon into N probes.
                 if error.details.get("http_status").and_then(Value::as_u64) != Some(404) {
@@ -177,11 +177,11 @@ pub fn reconcile_terminal_runner_exec_runs_with_budget(budget: Duration) -> Resu
                 })
                 .unwrap_or_default()
         };
-        let output = recovered_output(&run, &snapshot, cwd);
+        let output = recovered_output(run, &snapshot, cwd);
         let mut artifacts = Vec::new();
         for declaration in strings("artifacts") {
             if homeboy_agents::agent_task_lifecycle::runner_exec_declaration_is_promoted(
-                &run,
+                run,
                 "artifact",
                 &declaration,
             ) {
@@ -203,7 +203,7 @@ pub fn reconcile_terminal_runner_exec_runs_with_budget(budget: Duration) -> Resu
         let mut directories = Vec::new();
         for declaration in strings("artifact_dirs") {
             if homeboy_agents::agent_task_lifecycle::runner_exec_declaration_is_promoted(
-                &run,
+                run,
                 "artifact_dir",
                 &declaration,
             ) {
@@ -225,7 +225,7 @@ pub fn reconcile_terminal_runner_exec_runs_with_budget(budget: Duration) -> Resu
         let mut summaries = Vec::new();
         for declaration in strings("summaries") {
             if homeboy_agents::agent_task_lifecycle::runner_exec_declaration_is_promoted(
-                &run,
+                run,
                 "summary",
                 &declaration,
             ) {

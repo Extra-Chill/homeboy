@@ -63,6 +63,10 @@ pub fn reconnect_runner_daemon(runner_id: &str) -> Result<(String, Option<String
     )))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Recovery diagnostics retain independent source, binary, version, and identity observations for compatible remediation output."
+)]
 pub fn runner_recovery_commands(
     runner_id: &str,
     homeboy_path: &str,
