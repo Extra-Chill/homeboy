@@ -985,6 +985,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn deferred_staging_follow_up_commands_are_registered_cli_commands() {
+        for args in [
+            ["homeboy", "agent-task", "status", "run-1"].as_slice(),
+            ["homeboy", "agent-task", "logs", "run-1"].as_slice(),
+            ["homeboy", "agent-task", "cancel", "run-1"].as_slice(),
+            ["homeboy", "agent-task", "evidence", "run-1", "--full"].as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(args).is_ok(),
+                "deferred staging emitted an invalid command: {args:?}"
+            );
+        }
+    }
+
     /// Dry run is the default. Recovery mutates the daemon that owns the
     /// caller's durable jobs, so it may not happen because someone ran the
     /// obvious command to find out what it would do.

@@ -369,6 +369,14 @@ impl CliRuntime {
             eprintln!("error: {error}");
             return std::process::ExitCode::from(2);
         }
+        // Runner-owned fallback staging may outlive the controller process. Its
+        // receipt ledger is replay-safe and finalizes staging exactly once.
+        if let Err(error) =
+            crate::runner::controller_fallback_projection::reconcile_on_controller_startup()
+        {
+            eprintln!("error: {error}");
+            return std::process::ExitCode::from(2);
+        }
         // Deferred records outlive their worker. Startup restarts the singleton
         // so expired claims recover without another deferral request.
         if command_capability == CommandCapability::Mutation

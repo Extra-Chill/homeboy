@@ -66,7 +66,7 @@ pub struct RunnerTerminalEvidence {
 pub struct ControllerMissionProjection {
     pub mission_id: String,
     pub runner_id: String,
-    pub runner_job_id: String,
+    pub runner_staging_id: String,
     pub terminal_outcome: String,
     pub artifacts: RunnerStagingArtifacts,
     pub finalization_owner: String,
@@ -147,9 +147,30 @@ impl ControllerFallbackProjectionStore {
         Ok(receipt)
     }
 
-    /// Repeated controller startup projects exactly one mission and fails closed
-    /// if later runner evidence differs from the first terminal evidence.
-    pub fn reconcile_after_controller_restart(
+    /// Repeated controller startup projects each accepted runner staging receipt
+    /// exactly once. The receipt is terminal evidence for staging only; it does
+    /// not claim that the eventual provider workload has completed.
+    pub fn reconcile_after_controller_restart(&self) -> Result<Vec<ControllerMissionProjection>> {
+        let state = self.load()?;
+        state
+            .receipts
+            .iter()
+            .filter(|(mission_id, _)| !state.projections.contains_key(*mission_id))
+            .map(|(mission_id, receipt)| {
+                self.project_terminal_evidence(
+                    mission_id,
+                    RunnerTerminalEvidence {
+                        outcome: "staged".to_string(),
+                        artifacts: receipt.runner_receipt.artifacts.clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Projects explicit runner terminal evidence and fails closed if later
+    /// evidence differs from the first finalized projection.
+    pub fn project_terminal_evidence(
         &self,
         mission_id: &str,
         evidence: RunnerTerminalEvidence,
@@ -178,7 +199,7 @@ impl ControllerFallbackProjectionStore {
         let projection = ControllerMissionProjection {
             mission_id: mission_id.to_string(),
             runner_id: receipt.runner_receipt.handoff.runner_id.clone(),
-            runner_job_id: receipt.runner_receipt.handoff.runner_job_id.clone(),
+            runner_staging_id: receipt.runner_receipt.handoff.runner_job_id.clone(),
             terminal_outcome: evidence.outcome,
             artifacts: evidence.artifacts,
             finalization_owner: "controller".to_string(),
@@ -250,6 +271,14 @@ impl ControllerFallbackProjectionStore {
     }
 }
 
+/// Production startup reconciliation for deferred runner staging. An empty
+/// ledger is a no-op, preserving healthy controller startup behavior.
+pub fn reconcile_on_controller_startup() -> Result<usize> {
+    Ok(ControllerFallbackProjectionStore::open_default()?
+        .reconcile_after_controller_restart()?
+        .len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,27 +319,48 @@ mod tests {
     }
 
     #[test]
-    fn restart_projects_one_controller_mission_and_preserves_runner_artifacts() {
+    fn controller_restart_projects_each_staged_mission_once() {
         let store = store();
         let envelope = envelope();
         let mut runner = Transport::compatible();
         let receipt = store
             .submit_detached(&mut runner, &envelope)
             .expect("admit");
-        let evidence = RunnerTerminalEvidence {
-            outcome: "succeeded".to_string(),
-            artifacts: receipt.runner_receipt.artifacts.clone(),
-        };
-        let projected = store
-            .reconcile_after_controller_restart(&receipt.mission_id, evidence.clone())
-            .expect("project");
-        assert_eq!(projected.artifacts, evidence.artifacts);
+        let projected = store.reconcile_after_controller_restart().expect("project");
+        assert_eq!(projected.len(), 1);
+        let projected = &projected[0];
+        assert_eq!(projected.artifacts, receipt.runner_receipt.artifacts);
+        assert_eq!(projected.terminal_outcome, "staged");
         assert_eq!(projected.finalization_owner, "controller");
         assert_eq!(
             store
-                .reconcile_after_controller_restart(&receipt.mission_id, evidence)
-                .expect("idempotent projection"),
-            projected
+                .reconcile_after_controller_restart()
+                .expect("idempotent projection")
+                .len(),
+            0
         );
+    }
+
+    #[test]
+    fn explicit_terminal_evidence_cannot_replace_startup_projection() {
+        let store = store();
+        let envelope = envelope();
+        let mut runner = Transport::compatible();
+        let receipt = store
+            .submit_detached(&mut runner, &envelope)
+            .expect("admit");
+        store
+            .reconcile_after_controller_restart()
+            .expect("startup projection");
+
+        assert!(store
+            .project_terminal_evidence(
+                &receipt.mission_id,
+                RunnerTerminalEvidence {
+                    outcome: "succeeded".to_string(),
+                    artifacts: receipt.runner_receipt.artifacts,
+                },
+            )
+            .is_err());
     }
 }

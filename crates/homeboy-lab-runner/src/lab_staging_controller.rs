@@ -969,7 +969,7 @@ pub(crate) fn submit_detached_staging(
     runner_id: &str,
     tunnel_mode: crate::RunnerTunnelMode,
     request: &LabOffloadRequest<'_>,
-) -> Result<String> {
+) -> Result<DetachedStagingSubmission> {
     if !routing_ready() {
         return Err(Error::validation_invalid_argument(
             "lab_staging_adapter",
@@ -988,7 +988,7 @@ pub(crate) fn submit_detached_staging(
                 request,
                 daemon_error,
             )
-            .map(|receipt| receipt.handoff.runner_job_id);
+            .map(DetachedStagingSubmission::Deferred);
         }
     };
     let recipe = persist_lab_staging_recipe_for_transport(
@@ -1056,7 +1056,14 @@ pub(crate) fn submit_detached_staging(
             started.id, job.id
         )));
     }
-    Ok(job_id)
+    Ok(DetachedStagingSubmission::Controller { job_id })
+}
+
+/// The initiating client must distinguish a controller job from runner-owned
+/// staging. They have separate status and reconciliation authorities.
+pub(crate) enum DetachedStagingSubmission {
+    Controller { job_id: String },
+    Deferred(crate::controller_fallback_projection::DeferredControllerReceipt),
 }
 
 /// Explicit detached fallback after local controller admission has failed. The
@@ -1068,7 +1075,7 @@ fn submit_deferred_runner_staging(
     tunnel_mode: crate::RunnerTunnelMode,
     request: &LabOffloadRequest<'_>,
     daemon_error: Error,
-) -> Result<crate::runner_staging_operation::RemoteRunnerStagingReceipt> {
+) -> Result<crate::controller_fallback_projection::DeferredControllerReceipt> {
     let plan = request.durable_agent_task_plan.ok_or_else(|| {
         Error::validation_invalid_argument(
             "durable_agent_task_plan",
@@ -1136,25 +1143,24 @@ fn submit_deferred_runner_staging(
             });
             error
         })?;
-    let receipt =
+    let deferred_receipt =
         crate::controller_fallback_projection::ControllerFallbackProjectionStore::open_default()?
-            .submit_detached(&mut transport, &envelope)?
-            .runner_receipt;
+            .submit_detached(&mut transport, &envelope)?;
     homeboy_agents::agent_task_lifecycle::persist_private_run_attachment(
         run_id,
         DEFERRED_RUNNER_STAGING_RECEIPT_ATTACHMENT_KIND,
-        &receipt,
+        &deferred_receipt.runner_receipt,
     )?;
     homeboy_agents::agent_task_lifecycle::record_detached_lab_run(
         homeboy_agents::agent_task_lifecycle::DetachedLabRunRecord {
             run_id,
             runner_id,
-            runner_job_id: &receipt.handoff.runner_job_id,
+            runner_job_id: &deferred_receipt.runner_receipt.handoff.runner_job_id,
             remote_workspace: "runner-staging",
             remote_command: &[],
         },
     )?;
-    Ok(receipt)
+    Ok(deferred_receipt)
 }
 
 /// A response can be lost after the daemon accepted the request. Create uses
