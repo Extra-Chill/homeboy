@@ -1,5 +1,8 @@
+use std::path::Path;
 use std::process::Output;
+use std::time::{Duration, Instant};
 
+use homeboy_core::observation::{NewRunRecord, ObservationStore, RunListFilter, RunStatus};
 use homeboy_core::test_support::{bounded_output, HermeticTestContext, TestBinary};
 
 /// Run the fixture binary through the shared hermetic harness.
@@ -231,6 +234,82 @@ fn cook_detaches_local_placement_instead_of_rejecting_it() {
     #[cfg(unix)]
     unsafe {
         libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    }
+}
+
+/// Historical runner recovery is a distinct owner, never an admission gate for
+/// an accepted Cook. This invokes the actual detached Cook command path rather
+/// than a scheduler helper so its output and durable handoff remain observable.
+#[test]
+fn detached_cook_admission_is_bounded_with_a_hundred_unavailable_recovery_records() {
+    let context = HermeticTestContext::new();
+    let database = context.data_dir().join("homeboy.sqlite");
+    let store = ObservationStore::open_initialized_at(&database).expect("open fixture store");
+    for index in 0..100 {
+        store
+            .start_run_with_id(
+                NewRunRecord::builder("runner_execution")
+                    .cwd_path(Path::new("/workspace"))
+                    .metadata(serde_json::json!({
+                        "kind": "runner_exec",
+                        "runner_id": "unavailable-runner",
+                        "runner_job_id": format!("stale-job-{index}"),
+                    }))
+                    .build(),
+                format!("stale-runner-exec-{index}"),
+            )
+            .expect("seed stale runner execution");
+    }
+    drop(store);
+
+    let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    command
+        .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "5000")
+        .args([
+            "--placement",
+            "local",
+            "--detach-after-handoff",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "admit despite stale runner records",
+            "--to-worktree",
+            "missing@worktree",
+            "--verify",
+            "true",
+        ]);
+    let started = Instant::now();
+    let output = bounded_output(command);
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "Cook admission must not wait for stale daemon recovery"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    let handoff_start = stdout
+        .find('{')
+        .unwrap_or_else(|| panic!("Cook handoff is durable output\n{stdout}"));
+    let handoff: serde_json::Value = serde_json::from_str(stdout[handoff_start..].trim())
+        .unwrap_or_else(|error| panic!("Cook handoff is JSON: {error}\n{stdout}"));
+    assert_eq!(handoff["detached"], true, "{stdout}");
+    assert!(handoff["cook_id"].as_str().is_some_and(|id| !id.is_empty()));
+
+    let store = ObservationStore::open_initialized_at(&database).expect("reopen fixture store");
+    let owners = store
+        .list_runs(RunListFilter {
+            kind: Some("runner_exec_recovery".to_string()),
+            ..RunListFilter::default()
+        })
+        .expect("list recovery owners");
+    assert_eq!(owners.len(), 1, "recovery has its own durable owner");
+    assert_eq!(owners[0].status, RunStatus::Pass.as_str());
+    assert_eq!(owners[0].metadata_json["deferred_count"], 100);
+
+    #[cfg(unix)]
+    if let Some(pid) = handoff["pid"].as_u64() {
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
     }
 }
 

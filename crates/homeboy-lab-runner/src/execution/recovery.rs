@@ -4,8 +4,7 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc,
-    Arc,
+    mpsc, Arc,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -14,6 +13,7 @@ use uuid::Uuid;
 const STARTUP_RUNNER_EXEC_RECOVERY_LIMIT: i64 = 100;
 pub const STARTUP_RUNNER_EXEC_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
 const RECOVERY_KIND: &str = "runner_exec_recovery";
+const RECOVERY_OWNER_ID: &str = "runner-exec-recovery";
 const RECOVERY_OWNER_LEASE: Duration = Duration::from_secs(30);
 const RECOVERY_LEASE_HEARTBEAT: Duration = Duration::from_secs(1);
 /// Artifact publication and terminal projection are durable, synchronous store
@@ -89,7 +89,10 @@ pub fn schedule_terminal_runner_exec_recovery() -> Result<Option<RunnerExecRecov
     if candidates.is_empty() {
         return Ok(None);
     }
-    let owner_id = format!("runner-exec-recovery-{}", Uuid::new_v4());
+    // The store's expiring claim is keyed by run ID. A stable ID is therefore
+    // the singleton identity; a fresh UUID here would only make each scheduler
+    // claim itself and permit overlapping recovery workers.
+    let owner_id = RECOVERY_OWNER_ID.to_string();
     let owner_token = Uuid::new_v4().to_string();
     let lease_expires_at_ms =
         chrono::Utc::now().timestamp_millis() + RECOVERY_OWNER_LEASE.as_millis() as i64;
@@ -249,18 +252,8 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 // endpoint, so avoid amplifying one unavailable daemon into N probes.
                 if error.details.get("http_status").and_then(Value::as_u64) != Some(404) {
                     unavailable_endpoints.insert(endpoint);
-                    deferred += candidates
-                        .iter()
-                        .skip(index + 1)
-                        .filter(|candidate| {
-                            candidate
-                                .metadata_json
-                                .get("runner_id")
-                                .and_then(Value::as_str)
-                                == Some(runner_id)
-                        })
-                        .count();
                 }
+                deferred += 1;
                 continue;
             }
         };
