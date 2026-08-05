@@ -510,15 +510,23 @@ fn detached_cook_admission_is_bounded_with_a_hundred_unavailable_recovery_record
     let handoff: serde_json::Value = serde_json::from_str(stdout[handoff_start..].trim())
         .unwrap_or_else(|error| panic!("Cook handoff is JSON: {error}\n{stdout}"));
     assert!(
-        handoff["handoff"]["waited_ms"]
-            .as_u64()
-            .is_some_and(|millis| millis <= 5_000),
-        "Cook admission/handoff must settle within five seconds: elapsed={:?}, handoff={handoff}",
+        started.elapsed() <= Duration::from_secs(6),
+        "Cook admission/handoff must settle within the five-second budget plus process-exit allowance: elapsed={:?}, handoff={handoff}",
         started.elapsed()
     );
     assert_eq!(handoff["detached"], true, "{stdout}");
     assert_eq!(handoff["cook_id"], "cook-admission-11156", "{stdout}");
     assert_eq!(handoff["handoff"]["state"], "accepted", "{stdout}");
+    assert!(
+        handoff["handoff"]["phase_timings_ms"]["essential_validation_and_durable_handoff"]
+            .as_u64()
+            .is_some(),
+        "{stdout}"
+    );
+    assert_eq!(
+        handoff["handoff"]["phase_timings_ms"]["global_recovery"], "deferred_to_detached_owner",
+        "{stdout}"
+    );
     assert!(
         handoff["run_id"]
             .as_str()
@@ -529,6 +537,16 @@ fn detached_cook_admission_is_bounded_with_a_hundred_unavailable_recovery_record
         handoff["status_command"], "homeboy agent-task status cook-admission-11156",
         "{stdout}"
     );
+    let handoff_path = handoff["launcher_log"]
+        .as_str()
+        .map(Path::new)
+        .and_then(Path::parent)
+        .expect("launcher session path")
+        .join("handoff.json");
+    let persisted_handoff: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&handoff_path).expect("read durable Cook handoff"))
+            .expect("durable Cook handoff JSON");
+    assert_eq!(persisted_handoff, handoff, "{stdout}");
     assert!(
         task_worktree.join(".git").exists(),
         "Cook destination remains owned"
@@ -538,6 +556,17 @@ fn detached_cook_admission_is_bounded_with_a_hundred_unavailable_recovery_record
         .expect("read observable recovery owner")
         .expect("recovery owner remains observable");
     assert_eq!(owner.status, RunStatus::Running.as_str());
+
+    #[cfg(unix)]
+    if let Some(pid) = handoff["pid"].as_u64() {
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+        // The detached Cook can retain at most two seconds for signal delivery
+        // and process reaping; this is separate from the five-second admission
+        // bound above.
+        wait_for_detached_process_cleanup(pid);
+    }
 
     // Interrupt the still-observable owner after the Cook handoff, then let its
     // replacement finish. The former token must not terminalize either owner.
@@ -582,17 +611,8 @@ fn detached_cook_admission_is_bounded_with_a_hundred_unavailable_recovery_record
     }
     assert!(
         daemon.requests.load(Ordering::SeqCst) <= 50,
-        "shared unavailable runner must not receive serial per-record probes (requests={})",
-        daemon.requests.load(Ordering::SeqCst)
+        "shared unavailable runner must not receive serial per-record probes"
     );
-
-    #[cfg(unix)]
-    if let Some(pid) = handoff["pid"].as_u64() {
-        unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGKILL);
-        }
-        wait_for_detached_process_cleanup(pid);
-    }
 }
 
 #[test]

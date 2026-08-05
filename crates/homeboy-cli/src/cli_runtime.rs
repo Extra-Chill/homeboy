@@ -1,4 +1,4 @@
-use clap::{ArgMatches, Command};
+use clap::{ArgMatches, Command, Parser};
 use std::io::IsTerminal;
 use std::process::Command as ProcessCommand;
 use std::sync::OnceLock;
@@ -356,6 +356,18 @@ impl CliRuntime {
             return std::process::ExitCode::from(2);
         }
 
+        // A local detached Cook's launcher owns only process handoff. Parse the
+        // static command surface first so it can return before extension and
+        // provider registration; the detached child retains the normal startup
+        // path and owns every Cook preparation step.
+        if let Ok(cli) = Cli::try_parse_from(normalized.clone()) {
+            if let Ok(Some(exit_code)) =
+                crate::commands::route::intercept_local_detached_cook(&cli, &normalized)
+            {
+                return std::process::ExitCode::from(exit_code_to_u8(exit_code));
+            }
+        }
+
         register_startup_providers_before_reconcile();
         if let Some(owner_id) = std::env::var_os(RUNNER_EXEC_RECOVERY_OWNER_ENV) {
             let owner_token =
@@ -566,6 +578,23 @@ impl CliRuntime {
             }
         }
 
+        // The detached child owns Cook preflight and execution. Return the
+        // launcher's bounded handoff before hot-command preparation so stale
+        // historical recovery cannot consume the caller's admission budget.
+        match crate::commands::route::intercept_local_detached_cook(&cli, &normalized) {
+            Ok(Some(exit_code)) => return std::process::ExitCode::from(exit_code_to_u8(exit_code)),
+            Ok(None) => {}
+            Err(err) => {
+                output_runtime::emit_json_result_for_identity(
+                    Err(err),
+                    output_file.as_deref(),
+                    2,
+                    &command_identity,
+                );
+                return std::process::ExitCode::from(2);
+            }
+        }
+
         match guard_fanout_resume_runtime(&cli) {
             Ok(()) => {}
             Err(err) => {
@@ -652,7 +681,13 @@ impl CliRuntime {
         // The command's initial outcome is now durable and returned. Historical
         // runner evidence is a separately owned
         // best-effort recovery concern and cannot delay that boundary.
-        if requires_startup_reconciliation(&normalized) {
+        // A detached Cook has already handed the historical recovery concern to
+        // its independently scheduled owner. Starting another owner after its
+        // own command would serially reprobe the same unavailable endpoints.
+        if requires_startup_reconciliation(&normalized)
+            && std::env::var_os(crate::commands::route::local_detach::DETACHED_COOK_CHILD_ENV)
+                .is_none()
+        {
             schedule_runner_exec_recovery();
         }
         std::process::ExitCode::from(exit_code_to_u8(exit_code))

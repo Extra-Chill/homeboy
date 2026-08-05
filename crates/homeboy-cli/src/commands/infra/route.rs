@@ -47,6 +47,10 @@ pub fn route_after_parse_with_provenance(
     // cannot honor (#10917).
     reject_contradictory_cook_arguments(cli)?;
 
+    if let Some(exit_code) = intercept_local_detached_cook(cli, normalized_args)? {
+        return Ok(Some(exit_code));
+    }
+
     // A managed runner executes the controller-selected command once. Its argv
     // retains the controller's explicit placement for provenance, but must not
     // recursively route back through a runner-side controller daemon.
@@ -55,17 +59,6 @@ pub fn route_after_parse_with_provenance(
     let runner_side = lab_routing::is_lab_offload_subprocess()
         || managed_runner_placement
         || runner_resident_execution(cli);
-
-    // A locally-placed Cook asking to detach is served by re-executing it in
-    // its own session, so the durable run id means what Cook's help says it
-    // means on every placement (#11476). This is evaluated before the
-    // runner-side bail-out because the request needs a verdict — detach here,
-    // or an explicit rejection there — in both contexts.
-    if let Some(exit_code) =
-        local_detach::intercept_local_detached_cook(cli, normalized_args, runner_side)?
-    {
-        return Ok(Some(exit_code));
-    }
 
     if runner_side {
         return Ok(None);
@@ -500,6 +493,22 @@ pub fn route_after_parse_with_provenance(
             Ok(Some(output.exit_code))
         }
     }
+}
+
+/// A detached local Cook needs no launcher-side preflight: its detached child
+/// owns all Cook preparation. Keep this callable before hot-command preflight
+/// so the launcher returns on the bounded handoff path promptly.
+pub fn intercept_local_detached_cook(
+    cli: &Cli,
+    normalized_args: &[String],
+) -> homeboy::core::Result<Option<i32>> {
+    reject_contradictory_cook_arguments(cli)?;
+    let managed_runner_placement =
+        crate::commands::utils::resource_policy::is_managed_runner_placement_context();
+    let runner_side = lab_routing::is_lab_offload_subprocess()
+        || managed_runner_placement
+        || runner_resident_execution(cli);
+    local_detach::intercept_local_detached_cook(cli, normalized_args, runner_side)
 }
 
 fn placement_decision(
@@ -3037,7 +3046,7 @@ fn agent_task_fanout_cook_batch_dispatch_id(
     })
 }
 
-mod local_detach;
+pub(crate) mod local_detach;
 mod rig_source;
 use rig_source::*;
 fn is_runs_list_runner_option(args: &[String]) -> bool {

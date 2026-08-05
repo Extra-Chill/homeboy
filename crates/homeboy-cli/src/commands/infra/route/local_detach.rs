@@ -23,24 +23,14 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::cli_surface::{Cli, Commands};
 use homeboy::core::Error;
 use serde_json::{json, Value};
 
 const HANDOFF_SCHEMA: &str = "homeboy/agent-task-cook-local-detach-handoff/v1";
-
-/// Bound on how long the launcher waits for the detached cook to publish its
-/// durable identity before reporting the handoff as still pending. The wait
-/// exists so a returned run id is addressable, not so the launcher becomes a
-/// second `--wait`.
-const DEFAULT_HANDOFF_TIMEOUT_MS: u64 = 30_000;
-const HANDOFF_POLL: Duration = Duration::from_millis(100);
-
-/// Test and operator override for the bounded handoff wait.
-const HANDOFF_TIMEOUT_ENV: &str = "HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS";
+pub(crate) const DETACHED_COOK_CHILD_ENV: &str = "HOMEBOY_DETACHED_COOK_HANDOFF_CHILD";
 
 /// Whether this invocation is a locally-placed Cook asking to be detached.
 fn is_local_detached_cook(cli: &Cli) -> bool {
@@ -85,6 +75,12 @@ pub(super) fn intercept_local_detached_cook(
     let cook_id = requested_cook_id
         .clone()
         .unwrap_or_else(|| format!("cook-detached-{}", uuid::Uuid::new_v4()));
+    // Request validation is safe and required before acceptance. Runtime
+    // pinning, recovery, provider discovery, and workspace setup are owned by
+    // the detached controller after the handoff has become durable.
+    crate::commands::agent_task::run::validate_cook_request(cook)?;
+    let run_id = homeboy::agents::agent_tasks::lifecycle::cook_attempt_run_id(&cook_id, 1);
+    let started = Instant::now();
     let mut child_args =
         detached_cook_child_args(normalized_args, &cook_id, requested_cook_id.is_some());
     let session_root = detached_session_root(&cook_id)?;
@@ -93,15 +89,33 @@ pub(super) fn intercept_local_detached_cook(
     // prompt survives the handoff instead of the cook stalling on an empty read.
     materialize_stdin_prompt(&mut child_args, &session_root)?;
     let log_path = session_root.join("cook.log");
-
-    let mut child = spawn_detached_cook(&child_args, &log_path)?;
-    let pid = child.id();
-    let handoff = await_durable_handoff(&cook_id, &mut child, handoff_timeout());
-
-    if let Some(run_id) = handoff.run_id.as_deref() {
-        crate::commands::agent_task::run::announce_durable_cook_identity(Some(&cook_id), run_id);
-    }
-    let envelope = handoff_envelope(&cook_id, pid, &log_path, &handoff);
+    let handoff_path = session_root.join("handoff.json");
+    let mut handoff = DetachedCookHandoff {
+        state: DetachedHandoffState::Accepted,
+        run_id,
+        waited_ms: 0,
+        phase_timings_ms: json!({}),
+    };
+    // The acceptance record precedes child startup so interruption cannot lose
+    // the caller's requested identity or the recovery handoff.
+    persist_handoff(
+        &handoff_path,
+        &handoff_envelope(&cook_id, None, &log_path, &handoff),
+    )?;
+    let child = spawn_detached_cook(&child_args, &log_path)?;
+    handoff.waited_ms = started.elapsed().as_millis() as u64;
+    handoff.phase_timings_ms = json!({
+        "essential_validation_and_durable_handoff": handoff.waited_ms,
+        "global_recovery": "deferred_to_detached_owner",
+        "controller_runtime": "deferred_to_detached_owner",
+        "provider_startup": "deferred_to_detached_owner",
+    });
+    let envelope = handoff_envelope(&cook_id, Some(child.id()), &log_path, &handoff);
+    persist_handoff(&handoff_path, &envelope)?;
+    crate::commands::agent_task::run::announce_durable_cook_identity(
+        Some(&cook_id),
+        &handoff.run_id,
+    );
     let stdout = serde_json::to_string_pretty(&envelope).map_err(|error| {
         Error::internal_json(
             error.to_string(),
@@ -234,6 +248,7 @@ fn spawn_detached_cook(
     let mut command = Command::new(exe);
     command
         .args(args)
+        .env(DETACHED_COOK_CHILD_ENV, "1")
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
@@ -250,91 +265,46 @@ fn spawn_detached_cook(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DetachedCookHandoff {
     state: DetachedHandoffState,
-    run_id: Option<String>,
+    run_id: String,
     waited_ms: u64,
+    phase_timings_ms: Value,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DetachedHandoffState {
-    /// The detached cook published its durable cook index; the returned ids are
-    /// addressable now.
+    /// The launcher persisted the requested Cook identity and handoff before
+    /// starting the detached controller.
     Accepted,
-    /// The process is alive but has not reached durable submission yet. The
-    /// cook id is still the correct handle — it is pinned on the child's argv.
-    Pending,
-    /// The detached process exited before publishing durable identity. The log
-    /// is the only evidence, and this is reported rather than dressed up as a
-    /// successful handoff.
-    ExitedBeforeHandoff,
 }
 
 impl DetachedHandoffState {
     fn as_str(self) -> &'static str {
         match self {
             Self::Accepted => "accepted",
-            Self::Pending => "pending",
-            Self::ExitedBeforeHandoff => "exited_before_handoff",
         }
     }
 }
 
-fn handoff_timeout() -> Duration {
-    let millis = std::env::var(HANDOFF_TIMEOUT_ENV)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(DEFAULT_HANDOFF_TIMEOUT_MS);
-    Duration::from_millis(millis)
-}
-
-/// Poll durable state until the detached cook is addressable, it dies, or the
-/// bound elapses. A launcher that returned before the record existed would hand
-/// back an id that `agent-task status` cannot yet resolve.
-///
-/// Liveness is read from the child handle rather than from the pid. The
-/// detached cook is still this process's direct child until this process exits,
-/// so an early exit leaves a zombie that a pid probe reports as running on
-/// platforms without a `/proc` state check — which would turn a cook that died
-/// on startup into an indefinite "pending" handoff.
-fn await_durable_handoff(
-    cook_id: &str,
-    child: &mut std::process::Child,
-    timeout: Duration,
-) -> DetachedCookHandoff {
-    let started = Instant::now();
-    loop {
-        if agent_task_lifecycle::cook_index_exists(cook_id).unwrap_or(false) {
-            let run_id = agent_task_lifecycle::cook_index(cook_id)
-                .ok()
-                .map(|index| index.latest_run_id);
-            return DetachedCookHandoff {
-                state: DetachedHandoffState::Accepted,
-                run_id,
-                waited_ms: started.elapsed().as_millis() as u64,
-            };
-        }
-        if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
-            return DetachedCookHandoff {
-                state: DetachedHandoffState::ExitedBeforeHandoff,
-                run_id: None,
-                waited_ms: started.elapsed().as_millis() as u64,
-            };
-        }
-        if started.elapsed() >= timeout {
-            return DetachedCookHandoff {
-                state: DetachedHandoffState::Pending,
-                run_id: None,
-                waited_ms: started.elapsed().as_millis() as u64,
-            };
-        }
-        std::thread::sleep(HANDOFF_POLL);
-    }
+fn persist_handoff(path: &Path, handoff: &Value) -> homeboy::core::Result<()> {
+    let bytes = serde_json::to_vec_pretty(handoff).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize detached Cook handoff".to_string()),
+        )
+    })?;
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, bytes).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
+    })?;
+    std::fs::rename(&temporary, path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
 }
 
 /// The launcher's only output: a bounded, machine-readable handoff naming the
 /// durable handle and the evidence needed to follow or stop the cook.
 fn handoff_envelope(
     cook_id: &str,
-    pid: u32,
+    pid: Option<u32>,
     log_path: &Path,
     handoff: &DetachedCookHandoff,
 ) -> Value {
@@ -349,6 +319,7 @@ fn handoff_envelope(
         "handoff": {
             "state": handoff.state.as_str(),
             "waited_ms": handoff.waited_ms,
+            "phase_timings_ms": handoff.phase_timings_ms,
         },
         "status_command": format!("homeboy agent-task status {cook_id}"),
         "logs_command": format!("homeboy agent-task logs {cook_id}"),
@@ -607,13 +578,14 @@ mod tests {
     fn an_accepted_handoff_reports_the_addressable_ids_and_follow_up_commands() {
         let handoff = DetachedCookHandoff {
             state: DetachedHandoffState::Accepted,
-            run_id: Some("cook-11476-attempt-1-ab12cd34".to_string()),
+            run_id: "cook-11476-attempt-1-ab12cd34".to_string(),
             waited_ms: 240,
+            phase_timings_ms: json!({ "essential_validation_and_durable_handoff": 240 }),
         };
 
         let envelope = handoff_envelope(
             "cook-11476",
-            4242,
+            Some(4242),
             Path::new("/data/agent-task-detached/cook-11476/cook.log"),
             &handoff,
         );
@@ -626,6 +598,10 @@ mod tests {
         assert_eq!(envelope["pid"], 4242);
         assert_eq!(envelope["handoff"]["state"], "accepted");
         assert_eq!(
+            envelope["handoff"]["phase_timings_ms"]["essential_validation_and_durable_handoff"],
+            240
+        );
+        assert_eq!(
             envelope["status_command"],
             "homeboy agent-task status cook-11476"
         );
@@ -635,48 +611,18 @@ mod tests {
         );
     }
 
-    /// A launcher that dressed an unproven handoff as an accepted one would
-    /// reproduce the exact dishonesty this change exists to remove.
     #[test]
-    fn an_unproven_handoff_is_reported_as_such() {
-        for (state, expected) in [
-            (DetachedHandoffState::Pending, "pending"),
-            (
-                DetachedHandoffState::ExitedBeforeHandoff,
-                "exited_before_handoff",
-            ),
-        ] {
-            let handoff = DetachedCookHandoff {
-                state,
-                run_id: None,
-                waited_ms: 30_000,
-            };
+    fn accepted_handoff_is_durable_before_the_child_starts() {
+        let directory = tempfile::tempdir().expect("handoff directory");
+        let path = directory.path().join("handoff.json");
+        let handoff = json!({ "state": "accepted", "cook_id": "cook-11476" });
 
-            let envelope =
-                handoff_envelope("cook-11476", 4242, Path::new("/tmp/cook.log"), &handoff);
+        persist_handoff(&path, &handoff).expect("persist handoff");
 
-            assert_eq!(envelope["handoff"]["state"], expected);
-            assert_eq!(envelope["run_id"], Value::Null);
-            assert_eq!(envelope["launcher_log"], "/tmp/cook.log");
-        }
-    }
-
-    #[test]
-    fn a_dead_detached_process_is_never_reported_as_an_accepted_handoff() {
-        crate::test_support::with_isolated_home(|_| {
-            let mut child = Command::new("sh")
-                .args(["-c", "exit 0"])
-                .spawn()
-                .expect("spawn a child that exits immediately");
-
-            let handoff = await_durable_handoff(
-                "cook-never-submitted",
-                &mut child,
-                std::time::Duration::from_millis(5_000),
-            );
-
-            assert_eq!(handoff.state, DetachedHandoffState::ExitedBeforeHandoff);
-            assert_eq!(handoff.run_id, None);
-        });
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(path).expect("read handoff"))
+                .expect("handoff json"),
+            handoff
+        );
     }
 }
