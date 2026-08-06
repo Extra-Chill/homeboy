@@ -6,14 +6,12 @@ use std::path::{Path, PathBuf};
 use homeboy::core::engine::run_dir;
 use homeboy::core::observation::{
     run_has_active_remote_job, run_owner_pid, runs_service, ObservationStore, RunListFilter,
-    RunRecord, RunStatus,
+    RunRecord, RunStatus, OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES,
 };
 use homeboy::core::process::pid_is_running;
 
 use crate::commands::runs::RunsOutput;
 use crate::commands::CmdResult;
-
-const OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES: i64 = 30;
 
 /// Upper bound on how long a runner-backed running record stays exempt from
 /// reconciliation.

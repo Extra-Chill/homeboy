@@ -1,5 +1,45 @@
 use serde::Serialize;
 
+/// Minutes a `Running` record may go without a heartbeat (`updated_at`) before
+/// readers stop counting it as active work.
+///
+/// This is the *heartbeat liveness* threshold: it measures the age of the last
+/// update a record reported, so it answers "has this run checked in recently?".
+/// Old observation rows — runner executions and Cooks from hours or days
+/// earlier — whose processes are gone must not inflate the `active`/`running`
+/// totals operators rely on for cleanup and workload decisions (#9743). It also
+/// catches Lab/offloaded runs whose runner process died silently, which would
+/// otherwise leave a frozen `running` record trusted indefinitely (#5682).
+///
+/// A record with **no** `updated_at` at all is deliberately not stale by this
+/// rule: absence of a timestamp is not evidence of death, and every reader here
+/// leaves such a record for a liveness signal (owner pid, runner job) to judge.
+///
+/// Deliberately **separate** from [`OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES`]
+/// despite sharing a value today. That one measures `started_at`, not
+/// `updated_at`, and answers a different question. See its docs.
+pub const RUNNING_HEARTBEAT_STALE_MINUTES: i64 = 30;
+
+/// Minutes an *ownerless* `Running` run record stays credible, measured from
+/// its `started_at`, before reconciliation may settle it to
+/// [`RunStatus::Stale`].
+///
+/// This is a *grace period for missing provenance*, not a heartbeat measure.
+/// It is only ever consulted after a record has been shown to carry no owner
+/// pid at all, so a long-lived run with a live owner never reaches it. The
+/// conjunction is the point: "ownerless" alone would strike down a run that has
+/// only just started and not yet recorded its owner, and "old" alone would
+/// strike down healthy long jobs.
+///
+/// Deliberately **separate** from [`RUNNING_HEARTBEAT_STALE_MINUTES`] despite
+/// sharing a value today: a record can be freshly heartbeating and still
+/// ownerless, or owned and silent. Tuning one must not move the other.
+///
+/// Runner-backed ownerless records get a far longer window instead of this one,
+/// because a live remote job is authoritative; that exemption and its 24h
+/// ceiling are documented at the reconcile call site (#11107).
+pub const OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES: i64 = 30;
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 pub enum RunStatus {
     Running,
@@ -71,9 +111,27 @@ impl RunStatus {
     }
 }
 
+/// Pins that each running-staleness threshold is defined exactly once, so the
+/// four-way drift that produced these constants cannot re-form.
+#[cfg(test)]
+#[path = "run_staleness_guard_test.rs"]
+mod run_staleness_guard_test;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two thresholds are asserted **separately and never against each
+    /// other**. They share a value today and are still two concepts: one
+    /// measures `updated_at`, the other `started_at`. Asserting them equal
+    /// would re-couple exactly what splitting them was meant to free, so this
+    /// pins each value on its own — enough to catch an accidental change during
+    /// a refactor, without making a deliberate tune of one a failure.
+    #[test]
+    fn the_shared_thresholds_hold_their_reconciled_values() {
+        assert_eq!(RUNNING_HEARTBEAT_STALE_MINUTES, 30);
+        assert_eq!(OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES, 30);
+    }
 
     #[test]
     fn test_as_str() {
