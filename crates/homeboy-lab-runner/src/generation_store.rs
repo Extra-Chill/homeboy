@@ -2211,6 +2211,37 @@ mod tests {
     }
 
     #[test]
+    fn reconciled_zero_for_admission_owner_releases_fence_but_retains_job_identities() {
+        test_support::with_isolated_home(|_| {
+            let current = session("lease-current", "daemon-current", Some(202));
+            record_job("runner-a", &current, "job-a").expect("record first job");
+            record_job("runner-a", &current, "job-b").expect("record second job");
+            let operations = FakeEndpointOperations::default();
+            operations
+                .active_jobs
+                .borrow_mut()
+                .insert("lease-current".to_string(), 0);
+
+            reconcile_with("runner-a", Some(&current), &operations)
+                .expect("reconcile authoritative remote zero");
+
+            let projection = status_projection("runner-a", Some(&current)).expect("projection");
+            assert_eq!(projection[0].active_job_count, 0);
+            assert_eq!(projection[0].observed_active_job_count, Some(0));
+            assert_eq!(
+                status_job_owners("runner-a", Some(&current)).expect("owners")[0].job_ids,
+                ["job-a", "job-b"],
+                "zero live work settles the active count without discarding durable ownership"
+            );
+            with_admission_fence("runner-a", Some(&current), "connect", |fence| {
+                assert!(fence.is_none(), "authoritative zero must permit reconnect");
+                Ok(())
+            })
+            .expect("released fence");
+        });
+    }
+
+    #[test]
     fn ssh_fallback_authenticates_the_exact_generation_lease_and_pid() {
         let expected = session("lease-a", "127.0.0.1", Some(101));
         assert!(SshGenerationEndpointOperations::health_matches_session(

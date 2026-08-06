@@ -29,10 +29,11 @@ pub fn report(
                     runner,
                     server,
                     status.daemon_freshness.clone(),
+                    admission_summary(status),
                 );
             }
             None => {
-                return disconnected_report(runner_id, runner, server, None);
+                return disconnected_report(runner_id, runner, server, None, None);
             }
             Some(_) => {}
         }
@@ -326,7 +327,10 @@ pub fn report(
         checks,
         secret_env_migration: None,
         diagnostics,
-        daemon_recovery: persisted_status.and_then(|status| status.daemon_freshness),
+        daemon_recovery: persisted_status
+            .as_ref()
+            .and_then(|status| status.daemon_freshness.clone()),
+        admission_summary: persisted_status.as_ref().and_then(admission_summary),
         repairs: Vec::new(),
     }
 }
@@ -336,6 +340,7 @@ pub(super) fn disconnected_report(
     runner: &Runner,
     server: &Server,
     daemon_recovery: Option<homeboy::core::daemon::DaemonFreshnessReport>,
+    admission_summary: Option<homeboy::runner::runners::RunnerAdmissionSummary>,
 ) -> RunnerDoctorOutput {
     let mut details = BTreeMap::new();
     let (message, remediation) = match daemon_recovery.as_ref() {
@@ -390,8 +395,23 @@ pub(super) fn disconnected_report(
         secret_env_migration: None,
         diagnostics: None,
         daemon_recovery,
+        admission_summary,
         repairs: Vec::new(),
     }
+}
+
+fn admission_summary(
+    status: &homeboy::runner::runners::RunnerStatusReport,
+) -> Option<homeboy::runner::runners::RunnerAdmissionSummary> {
+    let generations =
+        runner::runner_generation_inventory_for_session(&status.runner_id, status.session.as_ref())
+            .ok()?;
+    let owners = runner::runner_generation_job_owners_for_session(
+        &status.runner_id,
+        status.session.as_ref(),
+    )
+    .ok()?;
+    Some(status.admission_summary_with_generations(&generations, &owners, generations.len()))
 }
 
 fn default_artifact_root(client: &SshClient) -> String {

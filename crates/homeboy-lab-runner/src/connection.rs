@@ -1781,11 +1781,9 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
 pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
     let runner = load(runner_id)?;
     let mut report = status(runner_id)?;
-    if !report.connected {
-        return Ok(report);
+    if report.connected {
+        reconcile_session_metadata_with_observed_daemon(&runner, &mut report.session, true)?;
     }
-
-    reconcile_session_metadata_with_observed_daemon(&runner, &mut report.session, true)?;
     // Terminal-job settlement was formerly coupled to status. Keep it under
     // this explicit lifecycle owner so status remains safe to parallelize.
     reconcile_terminal_jobs(runner_id)?;
@@ -1794,8 +1792,12 @@ pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
     } else {
         super::generation_store::reconcile(runner_id, report.session.as_ref())?;
     }
-    if let (Some(session), Some(_)) = (report.session.as_ref(), report.daemon_freshness.as_ref()) {
-        super::generation_store::reconcile_admission_session(runner_id, session)?;
+    if report.connected {
+        if let (Some(session), Some(_)) =
+            (report.session.as_ref(), report.daemon_freshness.as_ref())
+        {
+            super::generation_store::reconcile_admission_session(runner_id, session)?;
+        }
     }
     status(runner_id)
 }
