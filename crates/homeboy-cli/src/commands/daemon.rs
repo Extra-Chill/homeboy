@@ -168,6 +168,9 @@ enum DaemonCommand {
         /// Exact startup admission identity, forwarded by the supervisor.
         #[arg(long, hide = true)]
         startup_token: Option<String>,
+        /// Durable store identity forwarded by the supervisor for process discovery.
+        #[arg(long, hide = true)]
+        state_dir: Option<PathBuf>,
     },
     /// Supervise one daemon child and persist its termination evidence.
     #[command(hide = true)]
@@ -395,10 +398,14 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
         DaemonCommand::Serve {
             addr,
             startup_token,
+            state_dir,
         } => {
             // Supervision supplies the token through the environment; the
-            // hidden argument is retained as the portable ownership proof.
+            // hidden arguments retain portable process ownership evidence.
             let _ = startup_token;
+            if let Some(state_dir) = state_dir {
+                std::env::set_var(homeboy::core::paths::DAEMON_STATE_DIR_ENV, state_dir);
+            }
             serve(&addr)
         }
         DaemonCommand::Supervise {

@@ -762,6 +762,17 @@ next actions for the current session, including job log following, cancellation,
 broker claim reconciliation for reverse runners, and artifact lookup/fetch
 commands when the status payload has enough context.
 
+### `reconcile`
+
+```sh
+homeboy runner reconcile <runner-id>
+```
+
+Reconciles persisted direct-runner generation state and retires daemon
+generations that have been verified as drained. Use the remediation command
+reported by `homeboy runner status` after it has established that no active work
+still belongs to the generation.
+
 ### `disconnect`
 
 ```sh
@@ -949,6 +960,17 @@ workspace directories inspected, sized, retained in memory, and removed in each
 pass; it is a page size, not a delete budget, which is why the aggregate
 `--limit` record budget is deliberately not wired to it. `--passes` bounds apply
 passes. Output now includes `scanned_workspace_count` and `scan_complete`: when `scan_complete` is false, `has_more` is true, `continuation_cursor` is an opaque token that resumes strictly after the last inspected workspace, and `total_candidate_*` plus `remaining_candidate_*` describe only the inspected window. Use the emitted `next_command` or `drain_command` unchanged; both carry the cursor when needed.
+
+### `cache-prune`
+
+```sh
+homeboy runner cache-prune <runner-id>
+homeboy runner cache-prune <runner-id> --apply --min-age-hours 24
+```
+
+Inventories stale managed Homeboy binary slots on a runner. `--apply` removes
+only unselected slots that meet the shared minimum-age floor; omit it to inspect
+the eligible slots without changing the runner.
 
 ### `workspace apply`
 
