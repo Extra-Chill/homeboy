@@ -76,7 +76,7 @@ def cargo_inventory(workspace_root, packages):
 
 
 def nextest_inventory(workspace_root):
-    result = run(["cargo", "nextest", "list", "--workspace", "--message-format", "json"], workspace_root)
+    result = run(["cargo", "nextest", "list", "--workspace", "--run-ignored", "all", "--message-format", "json"], workspace_root)
     if result.returncode:
         fail(f"could not enumerate nextest tests: {result.stderr.strip()}")
     try:
@@ -95,7 +95,16 @@ def nextest_inventory(workspace_root):
                 fail("nextest emitted an invalid testcase identity")
             if testcase.get("filter-match", {}).get("status") != "matches":
                 continue
-            tests.append({"id": f"{package}::{target_kind}::{target}::{name}", "package": package, "target": target, "target_kind": target_kind, "name": name})
+            tests.append({
+                "id": f"{package}::{target_kind}::{target}::{name}",
+                "package": package,
+                "target": target,
+                "target_kind": target_kind,
+                "name": name,
+                # nextest list is the canonical source for tests that its
+                # default run policy intentionally skips without a terminal.
+                "expected_outcome": "skipped" if testcase.get("ignored") else "executed",
+            })
     return tests
 
 
@@ -147,6 +156,23 @@ def inventory(project, runner):
     return record
 
 
+def legacy_inventory_fingerprint(current):
+    """Fingerprint the v1 nextest inventory emitted before ignored tests were listed."""
+    legacy_tests = []
+    for test in current["tests"]:
+        if test.get("expected_outcome") == "skipped":
+            continue
+        legacy_tests.append({key: test[key] for key in ("id", "package", "target", "target_kind", "name")})
+    legacy = {
+        "schema": SCHEMA,
+        "runner": current["runner"],
+        "runner_fingerprint": current["runner_fingerprint"],
+        "workspace_fingerprint": current["workspace_fingerprint"],
+        "tests": legacy_tests,
+    }
+    return digest(json.dumps(legacy, sort_keys=True, separators=(",", ":"))), {test["id"] for test in legacy_tests}
+
+
 def validate(manifest_path, current):
     try:
         manifest = json.loads(Path(manifest_path).read_text())
@@ -156,7 +182,7 @@ def validate(manifest_path, current):
         fail("unsupported shard manifest schema")
     if manifest.get("runner") != current.get("runner"):
         fail("shard manifest runner does not match the selected runner")
-    for key in ("inventory_fingerprint", "runner_fingerprint", "workspace_fingerprint"):
+    for key in ("runner_fingerprint", "workspace_fingerprint"):
         if manifest.get(key) != current.get(key):
             fail(f"stale shard manifest: {key} does not match the current inventory")
     selected = manifest.get("tests")
@@ -170,6 +196,13 @@ def validate(manifest_path, current):
     missing = [identity for identity in selected if identity not in known]
     if missing:
         fail(f"shard manifest contains unresolvable test identity: {missing[0]}")
+    if manifest.get("inventory_fingerprint") != current.get("inventory_fingerprint"):
+        legacy_fingerprint, legacy_ids = legacy_inventory_fingerprint(current)
+        if manifest.get("inventory_fingerprint") != legacy_fingerprint:
+            fail("stale shard manifest: inventory_fingerprint does not match the current or compatible legacy inventory")
+        legacy_missing = [identity for identity in selected if identity not in legacy_ids]
+        if legacy_missing:
+            fail(f"legacy shard manifest selects tests outside the legacy inventory: {legacy_missing[0]}")
     return [known[identity] for identity in selected]
 
 

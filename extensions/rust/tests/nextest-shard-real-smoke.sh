@@ -70,13 +70,62 @@ HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
 HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
 bash "$EXTENSION_DIR/scripts/test-runner.sh" >/dev/null
 
-python3 - "$INVENTORY" "$WORK_DIR/manifest.json" <<'PY'
+if [ -n "${HOMEBOY_PARENT_EXTENSION_DIR:-}" ]; then
+    PARENT_INVENTORY="$WORK_DIR/parent-inventory.json"
+    PARENT_MANIFEST="$WORK_DIR/parent-manifest.json"
+    python3 "$HOMEBOY_PARENT_EXTENSION_DIR/scripts/test-shard-inventory.py" \
+        --project "$FIXTURE_DIR" --runner nextest --output "$PARENT_INVENTORY"
+    python3 - "$PARENT_INVENTORY" "$PARENT_MANIFEST" <<'PY'
 import json
 import sys
 
 inventory = json.load(open(sys.argv[1], encoding="utf-8"))
 selected = [test["id"] for test in inventory["tests"] if test["name"] == "tests::selected_parent"]
 assert len(selected) == 1, inventory["tests"]
+manifest = {key: inventory[key] for key in ("runner", "inventory_fingerprint", "runner_fingerprint", "workspace_fingerprint")}
+manifest["schema"] = "homeboy/test-shard-manifest/v1"
+manifest["tests"] = selected
+json.dump(manifest, open(sys.argv[2], "w"), indent=2)
+PY
+    HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+    HOMEBOY_COMPONENT_PATH="$FIXTURE_DIR" \
+    HOMEBOY_SKIP_LINT=1 \
+    HOMEBOY_RUST_TEST_RUNNER=nextest \
+    HOMEBOY_TEST_SHARD_MANIFEST="$PARENT_MANIFEST" \
+    HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/parent-results.json" \
+    HOMEBOY_REAL_NEXTEST_EVENT_STREAM="$WORK_DIR/parent-events.jsonl" \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+    HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+    HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
+    bash "$EXTENSION_DIR/scripts/test-runner.sh" >"$WORK_DIR/parent-runner.out"
+    python3 - "$WORK_DIR/parent-results.json" "$PARENT_MANIFEST" "$WORK_DIR/tampered-parent-manifest.json" "$WORK_DIR/stale-parent-manifest.json" <<'PY'
+import json
+import sys
+
+results = json.load(open(sys.argv[1], encoding="utf-8"))
+assert results == {"total": 1, "passed": 1, "failed": 0, "skipped": 0, "partial": "rust-shard"}, results
+manifest = json.load(open(sys.argv[2], encoding="utf-8"))
+tampered = dict(manifest, tests=manifest["tests"] + ["nextest-shard-alpha::lib::nextest_shard_alpha::tests::planned_ignored"])
+json.dump(tampered, open(sys.argv[3], "w"))
+stale = dict(manifest, workspace_fingerprint="stale")
+json.dump(stale, open(sys.argv[4], "w"))
+PY
+    for invalid in "$WORK_DIR/tampered-parent-manifest.json" "$WORK_DIR/stale-parent-manifest.json"; do
+        if python3 "$EXTENSION_DIR/scripts/test-shard-inventory.py" --project "$FIXTURE_DIR" --runner nextest --output "$WORK_DIR/invalid.json" --manifest "$invalid" >/dev/null 2>&1; then
+            printf 'Expected incompatible parent manifest rejection: %s\n' "$invalid" >&2
+            exit 1
+        fi
+    done
+fi
+
+python3 - "$INVENTORY" "$WORK_DIR/manifest.json" <<'PY'
+import json
+import sys
+
+inventory = json.load(open(sys.argv[1], encoding="utf-8"))
+selected = [test["id"] for test in inventory["tests"] if test["name"] in {"tests::selected_parent", "tests::planned_ignored"}]
+assert len(selected) == 2, inventory["tests"]
+assert sum(test["expected_outcome"] == "skipped" for test in inventory["tests"] if test["id"] in selected) == 1, inventory["tests"]
 manifest = {key: inventory[key] for key in ("runner", "inventory_fingerprint", "runner_fingerprint", "workspace_fingerprint")}
 manifest["schema"] = "homeboy/test-shard-manifest/v1"
 manifest["tests"] = selected
@@ -120,7 +169,7 @@ assert any(event.get("event") in {"started", "queued", "running"} and event.get(
 assert any(event.get("event") == "ignored" and event.get("name", "").endswith("$tests::ignored_child_helper") for event in events), events
 assert any(event.get("event") in {"ok", "passed"} and event.get("name", "").endswith("$tests::selected_parent") for event in events), events
 results = json.load(open(sys.argv[2], encoding="utf-8"))
-assert results == {"total": 1, "passed": 1, "failed": 0, "skipped": 0, "partial": "rust-shard"}, results
+assert results == {"total": 2, "passed": 1, "failed": 0, "skipped": 1, "partial": "rust-shard"}, results
 PY
 
 printf 'real nextest shard smoke ok\n'

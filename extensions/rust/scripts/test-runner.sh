@@ -396,6 +396,12 @@ def planned_identity(item):
         raise SystemExit("Rust test shard error: shard manifest contains a malformed planned nextest identity")
     return values
 
+def planned_outcome(item):
+    outcome = item.get("expected_outcome", "executed")
+    if outcome not in {"executed", "skipped"}:
+        raise SystemExit("Rust test shard error: shard manifest contains an invalid planned nextest outcome")
+    return outcome
+
 def emitted_identity(value):
     # libtest-json-plus omits Cargo's target kind and encodes its remaining
     # identity as package::target$test. Reconcile that structured projection,
@@ -410,12 +416,15 @@ def emitted_identity(value):
 
 planned_by_emitted = {}
 expected_identities = set()
+expected_skipped = set()
 for item in expected:
     planned = planned_identity(item)
     package, target_kind, target, test = planned
     if planned in expected_identities:
         raise SystemExit(f"Rust test shard error: shard manifest contains a duplicate planned nextest identity: {package}::{target_kind}::{target}::{test}")
     expected_identities.add(planned)
+    if planned_outcome(item) == "skipped":
+        expected_skipped.add(planned)
     emitted = package, target, test
     if emitted in planned_by_emitted:
         raise SystemExit(f"Rust test shard error: nextest output identity is ambiguous: {package}::{target}${test}")
@@ -446,8 +455,13 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     if status in {"ok", "passed"}: passed += 1
     elif status in {"failed", "fail"}: failed += 1
     else: skipped += 1
-if actual != expected_identities:
-    raise SystemExit(f"Rust test shard error: nextest executed membership does not match the shard manifest (missing={sorted(expected_identities - actual)[:1]})")
+missing = expected_identities - actual
+unexpected_missing = missing - expected_skipped
+if unexpected_missing:
+    raise SystemExit(f"Rust test shard error: nextest executed membership does not match the shard manifest (missing={sorted(unexpected_missing)[:1]})")
+# Nextest intentionally omits ignored tests from its default event stream.
+# Their listed disposition is canonical execution policy, not a relaxed match.
+skipped += len(missing)
 print(f"{passed}\t{failed}\t{skipped}")
 PY
 }
@@ -690,7 +704,7 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_TEST_INVENTORY_FILE:-}${HOMEB
         for NEXTEST_BATCH in "$NEXTEST_BATCH_DIR"/*.json; do
             NEXTEST_FILTER="$(rust_nextest_filter "$NEXTEST_BATCH")"
             NEXTEST_LIST_JSON="$(mktemp)"
-            homeboy_run_step_capture NEXTEST_LIST_OUTPUT NEXTEST_LIST_EXIT "cargo nextest list" -- rust_capture_stdout "$NEXTEST_LIST_JSON" cargo nextest list --workspace --message-format json -E "$NEXTEST_FILTER" || true
+            homeboy_run_step_capture NEXTEST_LIST_OUTPUT NEXTEST_LIST_EXIT "cargo nextest list" -- rust_capture_stdout "$NEXTEST_LIST_JSON" cargo nextest list --workspace --run-ignored all --message-format json -E "$NEXTEST_FILTER" || true
             if [ "$NEXTEST_LIST_EXIT" -ne 0 ] || ! rust_validate_nextest_membership "$NEXTEST_LIST_JSON" "$NEXTEST_BATCH"; then
                 SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
                 rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"

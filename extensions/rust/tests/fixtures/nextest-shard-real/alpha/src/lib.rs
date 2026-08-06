@@ -13,6 +13,12 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn planned_ignored() {
+        assert!(true);
+    }
+
+    #[test]
+    #[ignore]
     fn ignored_child_helper() {
         assert!(true);
     }
