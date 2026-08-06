@@ -133,6 +133,15 @@ fn print_hint(latest: &str, checked_at: Option<u64>) {
     }
 }
 
+/// Refresh the daily cache and emit the update hint.
+///
+/// The cached `latest_version` is whatever [`upgrade::check_for_updates`]
+/// resolved, which for asset-installed methods is the newest release that
+/// actually ships an artifact for the running target (#11750). That matters
+/// here because this cache is the only thing every other surface reads: the
+/// startup hint, [`latest_allowed_stable`]'s durable admission, and controller
+/// staleness. Caching the newest *tag* instead would advertise — on every
+/// command, for a day — an upgrade that 404s when taken.
 pub fn run_startup_check() {
     if is_disabled() {
         return;
