@@ -60,6 +60,9 @@ pub struct LabRoutingPolicy {
     /// commands (bench/audit/test/agent-task) leave it `false` and offload as
     /// soon as the machine leaves `ok`.
     pub offload_only_when_hot: bool,
+    /// Whether a remote command's structured result payload is the caller-facing
+    /// result and must survive terminal-output compaction.
+    pub preserve_result_payload: bool,
 }
 
 impl LabRoutingPolicy {
@@ -235,6 +238,7 @@ impl LabCommandContract {
                 requires_extension_parity,
                 read_only_polling: false,
                 offload_only_when_hot: false,
+                preserve_result_payload: false,
             },
         }
     }
@@ -310,6 +314,12 @@ impl LabCommandContract {
         }
     }
 
+    /// Keep the remote command-result `data` payload as the caller result.
+    pub fn preserve_result_payload(mut self) -> Self {
+        self.routing_policy.preserve_result_payload = true;
+        self
+    }
+
     pub fn local_only(hot_label: &'static str, reason: &'static str) -> Self {
         Self {
             hot_label,
@@ -327,6 +337,7 @@ impl LabCommandContract {
                 requires_extension_parity: false,
                 read_only_polling: false,
                 offload_only_when_hot: false,
+                preserve_result_payload: false,
             },
         }
     }
