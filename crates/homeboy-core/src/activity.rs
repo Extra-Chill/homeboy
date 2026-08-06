@@ -12,6 +12,9 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
+// `crate::observation` is the crate-root module, not this module's own
+// `observation` submodule declared below.
+use crate::observation::RUNNING_HEARTBEAT_STALE_MINUTES;
 use crate::{Error, Result};
 
 pub mod agent_task_provider;
@@ -31,13 +34,6 @@ pub(crate) use action_helpers::{action, metadata_string, ms_to_rfc3339, parse_ts
 pub(crate) use collector::ActivityCollector;
 
 pub const ACTIVITY_REPORT_SCHEMA: &str = "homeboy/activity-report/v1";
-
-/// A `Running` activity row whose last heartbeat/update is older than this many
-/// minutes is treated as an unverified stale projection rather than active
-/// running work. Old observation rows (runner executions and Cooks from hours or
-/// days earlier) whose processes are gone must not inflate the `active`/`running`
-/// totals that operators rely on for cleanup and workload decisions (#9743).
-const RUNNING_HEARTBEAT_STALE_MINUTES: i64 = 30;
 
 pub fn activity_report(scope: ActivityScope, limit: usize) -> Result<ActivityReport> {
     let mut collector = ActivityCollector::default();

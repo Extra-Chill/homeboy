@@ -686,6 +686,13 @@ impl AgentTaskRunRecord {
         RunExecutionState::from(self.state) == self.lifecycle.execution.state
     }
 
+    /// Whether this record reported an `updated_at` heartbeat recently enough
+    /// to count as live.
+    ///
+    /// The exact inverse of the staleness rule discovery applies, against the
+    /// same shared threshold — this predicate carried its own bare `30` until
+    /// the threshold was unified, which is precisely the drift the shared
+    /// constant exists to prevent.
     pub(crate) fn has_fresh_update(&self) -> bool {
         self.updated_at
             .as_deref()
@@ -694,7 +701,7 @@ impl AgentTaskRunRecord {
                 chrono::Utc::now()
                     .signed_duration_since(updated_at.with_timezone(&chrono::Utc))
                     .num_minutes()
-                    < 30
+                    < homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES
             })
     }
 
