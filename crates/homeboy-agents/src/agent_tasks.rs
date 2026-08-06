@@ -289,8 +289,8 @@ pub mod gate {
 pub mod lifecycle {
     pub use super::super::agent_task_lifecycle::{
         aggregate_source, artifacts, cancel, cancel_run, claim_next_queued_run,
-        cook_attempt_run_id, cook_index, cook_index_exists, durable_local_read,
-        exact_durable_local_read, has_accepted_runner_handoff,
+        cook_attempt_run_id, cook_index, cook_index_exists, cook_terminal_notification_outcome,
+        durable_local_read, exact_durable_local_read, has_accepted_runner_handoff,
         invalidate_cook_finalization_for_dependency, list_records, load_controller_plan, load_plan,
         logs, mark_resuming, mark_running, materialize_recovered_patch_artifact,
         pin_current_controller_runtime, pinned_runtime_for_mutation, prune_controller_runtime_pins,

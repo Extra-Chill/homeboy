@@ -145,6 +145,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     }
     let mut value = serde_json::to_value(&record).unwrap_or(Value::Null);
     attach_status_identity(&mut value, &args.run_id, &target);
+    attach_cook_notification_delivery(&mut value, &record, &target);
     attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
     let acceptance_is_actionable = record.state
         == agent_task_lifecycle::AgentTaskRunState::Succeeded
@@ -221,6 +222,42 @@ fn attach_status_identity(value: &mut Value, requested_run_id: &str, target: &Co
             identity["cook_alias"] = cook_alias.clone();
         }
         fields.insert("identity".to_string(), identity);
+    }
+}
+
+/// The outcome is stored beside the Cook index rather than copied to every
+/// attempt record. Project it onto the resolved read so compact and full status
+/// answer whether terminal silence means delivered, unconfigured, or failed.
+fn attach_cook_notification_delivery(
+    value: &mut Value,
+    record: &AgentTaskRunRecord,
+    target: &CookReaderTarget,
+) {
+    let cook_id = target
+        .cook_alias
+        .as_ref()
+        .and_then(|alias| alias.get("cook_id"))
+        .and_then(Value::as_str)
+        .or_else(|| record.metadata.get("cook_id").and_then(Value::as_str));
+    let Some(cook_id) = cook_id else { return };
+    let Ok(Some(mut outcome)) = agent_task_lifecycle::cook_terminal_notification_outcome(cook_id)
+    else {
+        return;
+    };
+    if outcome.get("status").and_then(Value::as_str) != Some("delivered") {
+        outcome["retry_command"] = Value::String(format!(
+            "homeboy agent-task cook --continue {}",
+            quote_arg(cook_id)
+        ));
+    }
+    if outcome.get("status").and_then(Value::as_str) == Some("not_configured") {
+        outcome["configuration_command"] = Value::String(
+            "homeboy config set /notifications/default_transport '<installed-transport-id>'"
+                .to_string(),
+        );
+    }
+    if let Value::Object(fields) = value {
+        fields.insert("notification_delivery".to_string(), outcome);
     }
 }
 
@@ -738,6 +775,28 @@ fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
     if let Some(command) = transport_proxy_recovery_command(value) {
         metadata.next_actions.push(
             CommandNextAction::new("recover runner transport", command)
+                .with_kind(CommandNextActionKind::Repair),
+        );
+    }
+
+    if let Some(command) = value
+        .get("notification_delivery")
+        .and_then(|delivery| delivery.get("retry_command"))
+        .and_then(Value::as_str)
+    {
+        metadata.next_actions.push(
+            CommandNextAction::new("retry terminal notification", command)
+                .with_kind(CommandNextActionKind::Repair),
+        );
+    }
+
+    if let Some(command) = value
+        .get("notification_delivery")
+        .and_then(|delivery| delivery.get("configuration_command"))
+        .and_then(Value::as_str)
+    {
+        metadata.next_actions.push(
+            CommandNextAction::new("configure terminal notifications", command)
                 .with_kind(CommandNextActionKind::Repair),
         );
     }
@@ -2814,6 +2873,24 @@ fn compact_status_summary_with_aggregate(
             );
         }
     }
+    if let Some(delivery) = record.get("notification_delivery") {
+        summary["notification_delivery"] = compact_fields(
+            delivery,
+            &[
+                "schema",
+                "cook_id",
+                "event_id",
+                "event_kind",
+                "transport",
+                "route_classification",
+                "status",
+                "error_class",
+                "transport_result",
+                "retry_command",
+                "configuration_command",
+            ],
+        );
+    }
     summary
 }
 
@@ -4068,6 +4145,39 @@ mod tests {
             accepted_handoff["liveness"]["provider_boundary"]["runner_job_id"],
             "accepted-daemon-job"
         );
+    }
+
+    #[test]
+    fn compact_status_surfaces_actionable_notification_delivery_without_destination() {
+        let summary = compact_status_summary(
+            &json!({
+                "run_id": "cook-attempt-1",
+                "state": "failed",
+                "tasks": [],
+                "notification_delivery": {
+                    "schema": "homeboy/cook-notification-delivery/v1",
+                    "cook_id": "cook-1",
+                    "event_id": "terminal",
+                    "event_kind": "needs_attention",
+                    "transport": "generic.transport",
+                    "route_classification": "explicit",
+                    "status": "failed",
+                    "error_class": "transport_spawn_failed",
+                    "retry_command": "homeboy agent-task cook --continue cook-1",
+                    "raw_destination": "must-not-appear"
+                }
+            }),
+            "cook-attempt-1",
+        );
+
+        assert_eq!(summary["notification_delivery"]["status"], "failed");
+        assert_eq!(
+            summary["notification_delivery"]["retry_command"],
+            "homeboy agent-task cook --continue cook-1"
+        );
+        assert!(summary["notification_delivery"]
+            .get("raw_destination")
+            .is_none());
     }
 
     #[test]

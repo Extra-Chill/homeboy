@@ -1132,6 +1132,36 @@ pub fn claim_cook_terminal_notification(cook_id: &str, delivered_by: &str) -> Re
     )
 }
 
+/// Persist a confirmed terminal delivery, which is the point at which its
+/// exactly-once eligibility is consumed.
+pub fn confirm_cook_terminal_notification(cook_id: &str, delivered_by: &str) -> Result<()> {
+    store::confirm_cook_notification(
+        cook_id,
+        &json!({
+            "at": now_timestamp(),
+            "by": delivered_by,
+            "state": "delivered",
+        }),
+    )
+}
+
+/// Allow a later terminal observer to retry a notification that did not reach
+/// its transport. Notification delivery remains non-fatal to Cook execution.
+pub fn release_cook_terminal_notification_claim(cook_id: &str) -> Result<()> {
+    store::release_cook_notification_claim(cook_id)
+}
+
+/// Store the latest compact notification delivery outcome for Cook/status
+/// readers. The caller supplies an already redacted, bounded projection.
+pub fn record_cook_terminal_notification_outcome(cook_id: &str, outcome: Value) -> Result<()> {
+    store::write_cook_notification_outcome(cook_id, &outcome)
+}
+
+/// Read the latest terminal notification outcome without loading Cook attempts.
+pub fn cook_terminal_notification_outcome(cook_id: &str) -> Result<Option<Value>> {
+    store::read_cook_notification_outcome(cook_id)
+}
+
 pub fn record_completed_run(
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
