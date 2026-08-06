@@ -101,6 +101,11 @@ pub struct HomeboyBinaryRefreshOutput {
     pub selected_binary_path: String,
     pub reconnect_required: bool,
     pub followup_commands: Vec<String>,
+    /// The observed admission postcondition after a reconnect. A rotated daemon
+    /// may be healthy while older generations still own work, so daemon startup
+    /// alone is not convergence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<HomeboyRefreshReadiness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reconnect_deferred: Option<HomeboyReconnectDeferred>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,6 +114,28 @@ pub struct HomeboyBinaryRefreshOutput {
     pub bootstrap_provenance: Option<HomeboyBootstrapProvenance>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rollback: Option<HomeboyBinaryRefreshRollback>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HomeboyRefreshReadinessState {
+    Ready,
+    Draining,
+    Blocked,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HomeboyRefreshReadiness {
+    pub state: HomeboyRefreshReadinessState,
+    pub accepting_jobs: bool,
+    pub daemon_fresh: bool,
+    /// Exact generation or lease owners that still fence convergence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owners: Vec<String>,
+    /// One command that resumes the blocked lifecycle from its current state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -379,6 +406,7 @@ pub fn refresh_homeboy_binary(
                 selected_binary_path: plan.binary_path.clone(),
                 reconnect_required: !plan.reconnect,
                 followup_commands: plan.followup_commands.clone(),
+                readiness: None,
                 reconnect_deferred: None,
                 failure: None,
                 bootstrap_provenance: None,
@@ -422,6 +450,7 @@ pub fn refresh_homeboy_binary(
                 selected_binary_path: plan.binary_path.clone(),
                 reconnect_required: !plan.reconnect,
                 followup_commands: plan.followup_commands.clone(),
+                readiness: Some(failed_refresh_readiness(&plan)),
                 reconnect_deferred: None,
                 failure: Some(refresh_failure(&plan, exec_output, exit_code)),
                 bootstrap_provenance: None,
@@ -461,6 +490,13 @@ pub fn refresh_homeboy_binary(
                 selected_binary_path: plan.binary_path.clone(),
                 reconnect_required: true,
                 followup_commands: followup_commands.clone(),
+                readiness: Some(HomeboyRefreshReadiness {
+                    state: HomeboyRefreshReadinessState::Draining,
+                    accepting_jobs: false,
+                    daemon_fresh: false,
+                    owners: active_job_ids.clone(),
+                    continuation: followup_commands.last().cloned(),
+                }),
                 reconnect_deferred: Some(HomeboyReconnectDeferred {
                     reason: "active_daemon_jobs",
                     active_job_ids,
@@ -624,6 +660,7 @@ pub fn refresh_homeboy_binary(
                     selected_binary_path: plan.binary_path.clone(),
                     reconnect_required: !plan.reconnect,
                     followup_commands: plan.followup_commands.clone(),
+                    readiness: Some(failed_refresh_readiness(&plan)),
                     reconnect_deferred: None,
                     failure: Some(failure),
                     bootstrap_provenance: None,
@@ -696,6 +733,14 @@ pub fn refresh_homeboy_binary(
                 return Err(refresh_error_with_phase_summary(error, &phases));
             }
             phase_summary.push(refresh_phase("generation_rotation", true, 0));
+            let readiness = refresh_readiness_postcondition(&plan.runner_id)?;
+            let converged = readiness.state == HomeboyRefreshReadinessState::Ready;
+            phase_summary.push(refresh_phase(
+                "admission_readiness",
+                true,
+                if converged { 0 } else { 1 },
+            ));
+            let followup_commands = readiness.continuation.clone().into_iter().collect();
             return Ok((
                 HomeboyBinaryRefreshOutput {
                     variant: "refresh_homeboy",
@@ -706,17 +751,21 @@ pub fn refresh_homeboy_binary(
                     identity: Some(identity.clone()),
                     updated_fields: updated_fields.clone(),
                     phase_summary,
+                    // Rotation completed even when older generations still
+                    // fence admission. `readiness` and the exit code report
+                    // convergence without rewriting this operation fact.
                     daemon_refreshed: true,
                     interrupted_job_ids: Vec::new(),
                     selected_binary_path: selected_binary_path.clone(),
-                    reconnect_required: false,
-                    followup_commands: Vec::new(),
+                    reconnect_required: reconnect_required_after_refresh(true),
+                    followup_commands,
+                    readiness: Some(readiness),
                     reconnect_deferred: None,
                     failure: None,
                     bootstrap_provenance: None,
                     rollback: rollback.clone(),
                 },
-                0,
+                if converged { 0 } else { 1 },
             ));
         }
         interrupted_job_ids = match protect_active_jobs_before_reconnect(
@@ -747,6 +796,13 @@ pub fn refresh_homeboy_binary(
                         selected_binary_path: selected_binary_path.clone(),
                         reconnect_required: true,
                         followup_commands: deferred.followup_commands.clone(),
+                        readiness: Some(HomeboyRefreshReadiness {
+                            state: HomeboyRefreshReadinessState::Draining,
+                            accepting_jobs: false,
+                            daemon_fresh: false,
+                            owners: deferred.active_job_ids.clone(),
+                            continuation: deferred.followup_commands.last().cloned(),
+                        }),
                         reconnect_deferred: Some(deferred),
                         failure: None,
                         bootstrap_provenance: None,
@@ -881,6 +937,7 @@ pub fn refresh_homeboy_binary(
                     selected_binary_path: selected_binary_path.clone(),
                     reconnect_required: true,
                     followup_commands: plan.followup_commands.clone(),
+                    readiness: Some(failed_refresh_readiness(&plan)),
                     reconnect_deferred: None,
                     failure: Some(refresh_reconnect_failure(
                         &plan,
@@ -940,6 +997,7 @@ pub fn refresh_homeboy_binary(
                         selected_binary_path: selected_binary_path.clone(),
                         reconnect_required: true,
                         followup_commands: plan.followup_commands.clone(),
+                        readiness: Some(failed_refresh_readiness(&plan)),
                         reconnect_deferred: None,
                         failure: Some(refresh_reconnect_failure(
                             &plan,
@@ -961,9 +1019,21 @@ pub fn refresh_homeboy_binary(
         interrupted_job_ids = Vec::new();
     }
 
+    let readiness = options
+        .reconnect
+        .then(|| refresh_readiness_postcondition(&plan.runner_id))
+        .transpose()?;
+    let converged = readiness
+        .as_ref()
+        .is_none_or(|readiness| readiness.state == HomeboyRefreshReadinessState::Ready);
     if daemon_refreshed {
         clear_refresh_partial_state(&plan.runner_id)?;
     }
+    let followup_commands = readiness
+        .as_ref()
+        .and_then(|readiness| readiness.continuation.clone())
+        .map(|continuation| vec![continuation])
+        .unwrap_or_else(|| plan.followup_commands.clone());
     Ok((
         HomeboyBinaryRefreshOutput {
             variant: "refresh_homeboy",
@@ -977,8 +1047,9 @@ pub fn refresh_homeboy_binary(
             daemon_refreshed,
             interrupted_job_ids,
             selected_binary_path: selected_binary_path.clone(),
-            reconnect_required: !daemon_refreshed,
-            followup_commands: plan.followup_commands,
+            reconnect_required: reconnect_required_after_refresh(daemon_refreshed),
+            followup_commands,
+            readiness,
             reconnect_deferred: None,
             failure: None,
             bootstrap_provenance: Some(HomeboyBootstrapProvenance {
@@ -1002,7 +1073,7 @@ pub fn refresh_homeboy_binary(
             }),
             rollback,
         },
-        0,
+        if converged { 0 } else { 1 },
     ))
 }
 
@@ -1037,6 +1108,110 @@ fn should_rotate_daemon_generation(
     force: bool,
 ) -> bool {
     !force && (has_active_jobs || preserve_generations)
+}
+
+fn failed_refresh_readiness(plan: &HomeboyBinaryRefreshPlan) -> HomeboyRefreshReadiness {
+    HomeboyRefreshReadiness {
+        state: HomeboyRefreshReadinessState::Failed,
+        accepting_jobs: false,
+        daemon_fresh: false,
+        owners: Vec::new(),
+        continuation: Some(format!(
+            "homeboy runner refresh-homeboy {} --reconnect",
+            shell_arg(&plan.runner_id)
+        )),
+    }
+}
+
+/// `daemon_refreshed` records a completed daemon operation. A later readiness
+/// failure can require reconciliation without requiring another reconnect.
+fn reconnect_required_after_refresh(daemon_refreshed: bool) -> bool {
+    !daemon_refreshed
+}
+
+/// Evaluate refresh completion from the admission authority, not from daemon
+/// process startup. This is intentionally shared with `runner status`'s status
+/// and generation projections so refresh cannot certify a state status rejects.
+fn refresh_readiness_postcondition(runner_id: &str) -> Result<HomeboyRefreshReadiness> {
+    let report = super::status(runner_id)?;
+    let generations =
+        super::runner_generation_inventory_for_session(runner_id, report.session.as_ref())?;
+    Ok(refresh_readiness_from_status(
+        runner_id,
+        &report,
+        &generations,
+    ))
+}
+
+fn refresh_readiness_from_status(
+    runner_id: &str,
+    report: &super::RunnerStatusReport,
+    generations: &[super::RunnerDaemonGenerationStatus],
+) -> HomeboyRefreshReadiness {
+    let draining_count = generations
+        .iter()
+        .filter(|generation| !generation.admission_owner)
+        .count();
+    let summary = report.admission_summary_with_generations(generations, draining_count);
+    if summary.accepting_jobs {
+        return HomeboyRefreshReadiness {
+            state: HomeboyRefreshReadinessState::Ready,
+            accepting_jobs: true,
+            daemon_fresh: true,
+            owners: Vec::new(),
+            continuation: None,
+        };
+    }
+    let owners = generations
+        .iter()
+        .filter(|generation| !generation.admission_owner && generation.active_job_count > 0)
+        .map(|generation| {
+            generation
+                .remote_daemon_lease_id
+                .clone()
+                .unwrap_or_else(|| generation.generation.clone())
+        })
+        .collect::<Vec<_>>();
+    if !owners.is_empty() {
+        return HomeboyRefreshReadiness {
+            state: HomeboyRefreshReadinessState::Draining,
+            accepting_jobs: false,
+            daemon_fresh: summary.daemon_fresh,
+            owners,
+            continuation: Some(format!("homeboy runner reconcile {}", shell_arg(runner_id))),
+        };
+    }
+    HomeboyRefreshReadiness {
+        state: HomeboyRefreshReadinessState::Blocked,
+        accepting_jobs: false,
+        daemon_fresh: summary.daemon_fresh,
+        owners: generations
+            .iter()
+            .filter(|generation| generation.admission_owner)
+            .map(|generation| {
+                generation
+                    .remote_daemon_lease_id
+                    .clone()
+                    .unwrap_or_else(|| generation.generation.clone())
+            })
+            .chain(
+                generations
+                    .is_empty()
+                    .then(|| {
+                        report
+                            .daemon_freshness
+                            .as_ref()
+                            .and_then(|freshness| freshness.lease_id.clone())
+                    })
+                    .flatten(),
+            )
+            .collect(),
+        continuation: Some(
+            summary.next_action.unwrap_or_else(|| {
+                format!("homeboy runner status {} --full", shell_arg(runner_id))
+            }),
+        ),
+    }
 }
 
 fn refresh_owned_lease(session: super::RunnerSession) -> Option<String> {

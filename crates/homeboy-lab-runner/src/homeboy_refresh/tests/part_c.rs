@@ -4,7 +4,162 @@ use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::{
+    RollingDrainState, RunnerActiveJobState, RunnerDaemonGenerationStatus, RunnerSessionState,
+    RunnerStatusReport,
+};
+use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
 use homeboy_core::error::Error;
+
+fn readiness_report(freshness: DaemonFreshnessReport) -> RunnerStatusReport {
+    RunnerStatusReport {
+        runner_id: "homeboy-lab".to_string(),
+        connected: true,
+        state: RunnerSessionState::Connected,
+        session: None,
+        stale_daemon: None,
+        daemon_freshness: Some(freshness),
+        active_jobs: Vec::new(),
+        active_runner_jobs: Vec::new(),
+        stale_runner_jobs: Vec::new(),
+        active_job_count: 0,
+        stale_runner_job_count: 0,
+        active_job_state: RunnerActiveJobState::Available,
+        active_job_source: None,
+        active_job_error: None,
+        active_job_recovery_evidence: None,
+        session_path: "test".to_string(),
+    }
+}
+
+fn freshness(
+    fresh: bool,
+    stale_reason_code: Option<DaemonStaleReasonCode>,
+) -> DaemonFreshnessReport {
+    DaemonFreshnessReport {
+        fresh,
+        stale_reason_code,
+        restartable: true,
+        lease_id: Some("lease-new".to_string()),
+        pid: Some(1234),
+        recovery_evidence: None,
+        ownership_evidence: None,
+        adoption_command: None,
+        binary_hash: None,
+        daemon_version: None,
+        daemon_build_identity: None,
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    }
+}
+
+fn generation(
+    name: &str,
+    admission_owner: bool,
+    active_job_count: usize,
+) -> RunnerDaemonGenerationStatus {
+    RunnerDaemonGenerationStatus {
+        generation: name.to_string(),
+        admission_owner,
+        drain_state: if admission_owner {
+            RollingDrainState::Admitting
+        } else {
+            RollingDrainState::Draining
+        },
+        active_job_count,
+        observed_active_job_count: Some(active_job_count),
+        active_job_count_authoritative: true,
+        job_owner_count: active_job_count,
+        run_owner_count: 0,
+        artifact_owner_count: 0,
+        homeboy_build_identity: None,
+        remote_daemon_lease_id: Some(name.to_string()),
+        remote_daemon_address: None,
+        local_url: None,
+    }
+}
+
+#[test]
+fn refresh_readiness_reports_active_draining_generation_with_its_exact_owner() {
+    let mut report = readiness_report(freshness(true, None));
+    report.active_job_count = 1;
+    let readiness = refresh_readiness_from_status(
+        "homeboy-lab",
+        &report,
+        &[
+            generation("lease-old", false, 1),
+            generation("lease-new", true, 0),
+        ],
+    );
+
+    assert_eq!(readiness.state, HomeboyRefreshReadinessState::Draining);
+    assert_eq!(readiness.owners, ["lease-old"]);
+    assert_eq!(
+        readiness.continuation.as_deref(),
+        Some("homeboy runner reconcile homeboy-lab")
+    );
+}
+
+#[test]
+fn refresh_readiness_blocks_a_post_refresh_binary_hash_mismatch() {
+    let readiness = refresh_readiness_from_status(
+        "homeboy-lab",
+        &readiness_report(freshness(
+            false,
+            Some(DaemonStaleReasonCode::BinaryHashMismatch),
+        )),
+        &[generation("lease-new", true, 0)],
+    );
+
+    assert_eq!(readiness.state, HomeboyRefreshReadinessState::Blocked);
+    assert!(!readiness.daemon_fresh);
+    assert!(!readiness.accepting_jobs);
+    assert_eq!(readiness.owners, ["lease-new"]);
+    assert_eq!(
+        readiness.continuation.as_deref(),
+        Some("homeboy runner doctor homeboy-lab --scope lab-offload")
+    );
+}
+
+#[test]
+fn refresh_readiness_certifies_immediate_admission_only_when_ready() {
+    let readiness = refresh_readiness_from_status(
+        "homeboy-lab",
+        &readiness_report(freshness(true, None)),
+        &[generation("lease-new", true, 0)],
+    );
+
+    assert_eq!(readiness.state, HomeboyRefreshReadinessState::Ready);
+    assert!(readiness.daemon_fresh);
+    assert!(readiness.accepting_jobs);
+    assert!(readiness.continuation.is_none());
+}
+
+#[test]
+fn incomplete_readiness_does_not_rewrite_daemon_refresh_compatibility_facts() {
+    let mut report = readiness_report(freshness(true, None));
+    report.active_job_count = 1;
+    let readiness = refresh_readiness_from_status(
+        "homeboy-lab",
+        &report,
+        &[
+            generation("lease-old", false, 1),
+            generation("lease-new", true, 0),
+        ],
+    );
+
+    assert_eq!(readiness.state, HomeboyRefreshReadinessState::Draining);
+    // A completed rotation remains a completed daemon operation. The non-ready
+    // readiness state and nonzero refresh result express incomplete convergence.
+    assert!(!reconnect_required_after_refresh(true));
+    assert!(reconnect_required_after_refresh(false));
+    assert_eq!(
+        readiness.continuation.as_deref(),
+        Some("homeboy runner reconcile homeboy-lab")
+    );
+}
 
 fn not_fresh_error() -> Error {
     // Shape mirrors `reserve_daemon_admission` when the daemon refuses the
