@@ -46,6 +46,10 @@ pub struct StatusArgs {
     #[arg(long, short = 'a')]
     pub all: bool,
 
+    /// Show a bounded local control-plane snapshot from any directory
+    #[arg(long)]
+    pub global: bool,
+
     /// Show only outdated components (local != remote)
     #[arg(long)]
     pub outdated: bool,
@@ -192,6 +196,62 @@ pub struct UnregisteredContextStatusOutput {
     pub git_root: Option<String>,
     pub suggestion: String,
     pub action: &'static str,
+}
+
+/// Bounded, local-only control-plane status. This intentionally contains counts
+/// rather than component, runner, or activity inventories so it remains safe to
+/// request from an arbitrary directory on a long-lived controller.
+#[derive(Debug, Serialize)]
+pub struct GlobalStatusOutput {
+    pub command: &'static str,
+    pub status: &'static str,
+    pub controller: ControllerStaleness,
+    pub daemon: GlobalDaemonStatus,
+    pub runners: GlobalRunnerStatus,
+    pub activity: GlobalActivityStatus,
+    pub inventory: GlobalInventoryStatus,
+    pub drill_down: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GlobalDaemonStatus {
+    pub admitting_work: bool,
+    pub fresh: bool,
+    pub reachable: bool,
+    pub active_jobs: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<String>,
+    pub drill_down: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GlobalRunnerStatus {
+    pub registered: usize,
+    pub inspected: usize,
+    pub omitted: usize,
+    pub disconnected: usize,
+    pub status_unavailable: usize,
+    /// Persisted runner snapshots deliberately do not contact remote daemons,
+    /// so daemon freshness is always established by the drill-down command.
+    pub freshness_unverified: usize,
+    pub drill_down: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GlobalActivityStatus {
+    pub active: usize,
+    pub active_truncated: bool,
+    pub recent: usize,
+    pub recent_truncated: bool,
+    pub drill_down: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GlobalInventoryStatus {
+    pub projects: usize,
+    pub components: usize,
 }
 
 /// A single row in the project status dashboard.
@@ -377,6 +437,7 @@ fn is_zero(value: &usize) -> bool {
 pub enum StatusResult {
     Summary(StatusOutput),
     UnregisteredContext(UnregisteredContextStatusOutput),
+    Global(GlobalStatusOutput),
     Full(Box<homeboy::core::context::report::ContextReport>),
     Dashboard(ProjectDashboardOutput),
 }
@@ -389,6 +450,7 @@ impl serde::Serialize for StatusResult {
         match self {
             StatusResult::Summary(output) => output.serialize(serializer),
             StatusResult::UnregisteredContext(output) => output.serialize(serializer),
+            StatusResult::Global(output) => output.serialize(serializer),
             StatusResult::Full(output) => output.serialize(serializer),
             StatusResult::Dashboard(output) => output.serialize(serializer),
         }

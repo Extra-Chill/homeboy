@@ -38,6 +38,7 @@ Actionable component status overview
 | `--ready` | flag | Show only components ready to deploy |
 | `--docs-only` | flag | Show only components with docs-only changes |
 | `-a`, `--all` | flag | Show all components regardless of current directory context |
+| `--global` | flag | Show a bounded local control-plane snapshot from any directory |
 | `--outdated` | flag | Show only outdated components (local != remote) |
 | `--timings` | flag | Emit status phase progress to stderr and include phase timings in JSON |
 | `--refresh` | flag | Refresh remote Git refs before calculating drift and release state |
