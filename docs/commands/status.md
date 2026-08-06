@@ -6,9 +6,10 @@ Show an actionable component status overview.
 
 ```sh
 homeboy status [PROJECT]
+homeboy status --global
 ```
 
-## Two modes
+## Three modes
 
 `homeboy status` behaves differently depending on whether you pass a project:
 
@@ -17,6 +18,18 @@ homeboy status [PROJECT]
 - **`homeboy status <project>`** — a **target-accurate** dashboard that
   compares each component's installed-on-target version against its latest
   release tag and reports `current` / `outdated` / `pinned_current`.
+- **`homeboy status --global`** — a bounded, local control-plane snapshot from
+  any CWD. It reads the controller update cache, local daemon state, persisted
+  runner sessions, bounded observation pages, and registered inventory counts.
+  It does not fetch component remotes, inspect releases, or contact runners.
+
+`--global` is the fast answer to "is this controller able to operate?" Its
+payload is count-only for runners, activities, projects, and components, with
+explicit drill-down commands. Runner freshness is intentionally reported as
+unverified in this snapshot because proving it requires a runner-specific
+inspection; use `homeboy runner status --full` for that bounded remote work.
+When the local daemon is not admitting work, the snapshot returns
+`homeboy daemon recover` as the repair command (dry-run by default).
 
 ## `ready_to_deploy` is git-state only (read this)
 
@@ -127,6 +140,7 @@ themselves.
 - `--docs-only` — show only components with docs-only changes
 - `--unreleased` — show only components carrying merged-but-unreleased work (commits on `origin/<default-branch>` past the latest release tag)
 - `--all` — show all components regardless of current directory context
+- `--global` — show the local, count-only control-plane snapshot from any CWD; no component remote fetches or runner probes
 - `--outdated` — (project mode) show only components whose installed-on-target version is behind the latest release
 - `--timings` — emit phase progress to stderr and include phase timings in JSON, useful when diagnosing slow status runs
 
