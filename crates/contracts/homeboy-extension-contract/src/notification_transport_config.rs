@@ -10,6 +10,14 @@ use serde::{Deserialize, Serialize};
 
 pub const NOTIFICATION_TRANSPORT_SCHEMA: &str = "homeboy/notification-transport/v1";
 
+/// Safe, read-only transport metadata exposed by extension discovery surfaces.
+/// Invocation argv stays confined to the installed manifest and dispatch path.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct NotificationTransportDescriptor {
+    pub schema: String,
+    pub id: String,
+}
+
 /// An installed extension-owned notification command. `command` is a literal
 /// argv prefix, never a shell command or template. Homeboy appends the typed
 /// completion event arguments defined by the schema.
@@ -27,6 +35,13 @@ fn default_notification_transport_schema() -> String {
 }
 
 impl NotificationTransportConfig {
+    pub fn descriptor(&self) -> NotificationTransportDescriptor {
+        NotificationTransportDescriptor {
+            schema: self.schema.clone(),
+            id: self.id.clone(),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.schema != NOTIFICATION_TRANSPORT_SCHEMA {
             return Err(Error::validation_invalid_argument(
@@ -64,5 +79,45 @@ impl NotificationTransportConfig {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn transport(id: &str) -> NotificationTransportConfig {
+        NotificationTransportConfig {
+            schema: NOTIFICATION_TRANSPORT_SCHEMA.to_string(),
+            id: id.to_string(),
+            command: vec!["notify".to_string()],
+        }
+    }
+
+    #[test]
+    fn descriptor_exposes_only_safe_discovery_metadata() {
+        let descriptor = transport("example.completed").descriptor();
+
+        assert_eq!(descriptor.id, "example.completed");
+        assert_eq!(descriptor.schema, NOTIFICATION_TRANSPORT_SCHEMA);
+        assert_eq!(
+            serde_json::to_value(descriptor).expect("serialize descriptor"),
+            serde_json::json!({
+                "schema": NOTIFICATION_TRANSPORT_SCHEMA,
+                "id": "example.completed"
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_transport_declaration_reports_the_invalid_field() {
+        let error = NotificationTransportConfig {
+            schema: "homeboy/notification-transport/v2".to_string(),
+            ..transport("example.completed")
+        }
+        .validate()
+        .expect_err("invalid schema must fail");
+
+        assert!(error.to_string().contains("notification_transports.schema"));
     }
 }

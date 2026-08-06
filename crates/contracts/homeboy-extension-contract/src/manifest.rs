@@ -573,6 +573,56 @@ impl ExtensionManifest {
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest(transports: Vec<NotificationTransportConfig>) -> ExtensionManifest {
+        ExtensionManifest {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            version: "1.0.0".to_string(),
+            notification_transports: transports,
+            ..serde_json::from_value(serde_json::json!({
+                "name": "Test",
+                "version": "1.0.0"
+            }))
+            .expect("minimal manifest")
+        }
+    }
+
+    fn transport(id: &str) -> NotificationTransportConfig {
+        NotificationTransportConfig {
+            schema: NOTIFICATION_TRANSPORT_SCHEMA.to_string(),
+            id: id.to_string(),
+            command: vec!["notify".to_string()],
+        }
+    }
+
+    #[test]
+    fn notification_transport_validation_allows_zero_and_one_declarations() {
+        manifest(Vec::new())
+            .validate_notification_transports()
+            .expect("zero declarations are valid");
+        manifest(vec![transport("example.completed")])
+            .validate_notification_transports()
+            .expect("one declaration is valid");
+    }
+
+    #[test]
+    fn notification_transport_validation_rejects_duplicate_ids() {
+        let error = manifest(vec![
+            transport("example.completed"),
+            transport("example.completed"),
+        ])
+        .validate_notification_transports()
+        .expect_err("duplicate declarations must fail");
+
+        assert!(error.to_string().contains("notification_transports.id"));
+        assert!(error.to_string().contains("unique"));
+    }
+}
+
+#[cfg(test)]
 mod composition_tests {
     use super::*;
 

@@ -99,6 +99,9 @@ pub mod manifest_deploy_config;
 pub mod manifest_test_config;
 pub mod manifest_toolchain_config;
 pub mod notification_transport_config;
+pub use notification_transport_config::{
+    NotificationTransportConfig, NotificationTransportDescriptor, NOTIFICATION_TRANSPORT_SCHEMA,
+};
 pub mod runner_contract;
 pub mod runtime_helper;
 pub mod sidecar_config;

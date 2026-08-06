@@ -58,7 +58,7 @@ pub use homeboy_extension_contract::test_drift::TestDriftConfig;
 
 pub use homeboy_extension_contract::manifest_capability_config::ExtensionDiagnosticsConfig;
 pub use homeboy_extension_contract::notification_transport_config::{
-    NotificationTransportConfig, NOTIFICATION_TRANSPORT_SCHEMA,
+    NotificationTransportConfig, NotificationTransportDescriptor, NOTIFICATION_TRANSPORT_SCHEMA,
 };
 
 pub use homeboy_extension_contract::ExtensionManifest;
