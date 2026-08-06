@@ -44,6 +44,7 @@ pub(crate) fn serve_listener(
     let auth = Arc::new(PreviewIngressAuth {
         token_sha256_env: spec.token_sha256_env.clone(),
         token_sha256: preview_token_sha256(&spec.token_sha256_env),
+        public_host_pattern: spec.public_host_pattern.trim().to_ascii_lowercase(),
     });
     eprintln!(
         "homeboy preview ingress listening on {} for {} ({})",
@@ -316,6 +317,29 @@ fn handle_client_api(
             let body: PreviewRegisterRequest = parse_json_body(&request.body, "register")?;
             let public_host = normalize_public_host(&body.public_host);
             validate_client_public_host(&public_host)?;
+            if let Err(error) = validate_public_host_authority(&public_host, auth) {
+                let failure = PreviewIngressFailure {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    host: request.host.clone().unwrap_or_default(),
+                    path: request.target.clone(),
+                    status: 403,
+                    classification: "host_claim_rejected".to_string(),
+                    message: error.message.clone(),
+                };
+                record_failure(recent_failures, failure);
+                return write_json_response(
+                    stream,
+                    403,
+                    json!({
+                        "error": "forbidden",
+                        "classification": "host_claim_rejected",
+                        "message": error.message,
+                        "public_host": public_host,
+                        "public_host_pattern": auth.public_host_pattern,
+                        "hint": "A preview client may only register a public host matching the pattern this ingress was started with."
+                    }),
+                );
+            }
             validate_client_local_origin(&body.local_origin)?;
             let _session_id = body.session_id.unwrap_or_else(|| public_host.clone());
             let mut sessions_guard = sessions
@@ -643,9 +667,11 @@ fn preview_token_sha256(env_name: &str) -> Option<String> {
 }
 
 fn authorized_preview_client(request: &IngressHttpRequest, auth: &PreviewIngressAuth) -> bool {
+    // Fail CLOSED: with no configured digest there is nothing to authenticate
+    // against, so every client request is denied rather than admitted.
     let Some(expected) = auth.token_sha256.as_deref() else {
         eprintln!(
-            "homeboy preview ingress client auth disabled: {} is not set",
+            "homeboy preview ingress denying all client requests: {} is not set, so no client token can be verified",
             auth.token_sha256_env
         );
         return false;
@@ -682,7 +708,58 @@ fn validate_client_public_host(public_host: &str) -> Result<()> {
             None,
         ));
     }
+    // A registered host becomes a routing key matched against inbound Host
+    // headers, so restrict it to the DNS hostname charset. Without this, a
+    // claim like `attacker.example#x-tunnel.operator.example` still satisfies a
+    // `*-tunnel.operator.example` pattern while never being a host real traffic
+    // can arrive on.
+    if !public_host
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
+        return Err(Error::validation_invalid_argument(
+            "public_host",
+            "preview client public host must contain only DNS hostname characters",
+            Some(public_host.to_string()),
+            None,
+        ));
+    }
     Ok(())
+}
+
+/// Bind a claimed public host to the host authority this ingress was started with.
+///
+/// The shared bearer token is a single secret held by every client of an
+/// ingress, so on its own it cannot distinguish one client from another. Session
+/// state is keyed by public host, and registration overwrites unconditionally,
+/// so an unbound `public_host` lets any token holder claim any host -- including
+/// one already owned by another client -- and intercept its traffic.
+///
+/// `public_host_pattern` is the same value the operator puts in the reverse
+/// proxy `server_name`, so a host outside it can never legitimately reach this
+/// ingress anyway. Enforcing it here closes the takeover path without
+/// constraining any host that real traffic can arrive on.
+fn validate_public_host_authority(public_host: &str, auth: &PreviewIngressAuth) -> Result<()> {
+    let pattern = auth.public_host_pattern.trim();
+    if pattern.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "public_host",
+            "preview ingress has no public host pattern configured, so no host claim can be authorized",
+            Some(public_host.to_string()),
+            Some(vec![
+                "restart the ingress with --public-host-pattern '*-tunnel.<domain>'".to_string(),
+            ]),
+        ));
+    }
+    if pattern == public_host || glob_match::glob_match(pattern, public_host) {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "public_host",
+        "preview client is not authorized to claim a public host outside this ingress's host pattern",
+        Some(public_host.to_string()),
+        Some(vec![pattern.to_string()]),
+    ))
 }
 
 fn query_value(target: &str, key: &str) -> Option<String> {

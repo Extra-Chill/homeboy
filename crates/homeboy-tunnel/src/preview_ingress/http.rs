@@ -273,7 +273,10 @@ pub(crate) fn reason_for_status(status: u16) -> &'static str {
     match status {
         204 => "No Content",
         302 => "Found",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
+        405 => "Method Not Allowed",
         410 => "Gone",
         502 => "Bad Gateway",
         504 => "Gateway Timeout",

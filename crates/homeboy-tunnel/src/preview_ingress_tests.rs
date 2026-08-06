@@ -205,6 +205,174 @@ fn reverse_channel_client_serves_public_request() {
     });
 }
 
+/// Boot an ingress on an ephemeral port and return that port.
+///
+/// Each caller passes its own env var name so tests never share auth state.
+fn spawn_ingress(token_sha256_env: &str, public_host_pattern: &str) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve port");
+    let port = listener.local_addr().expect("local addr").port();
+    let token_sha256_env = token_sha256_env.to_string();
+    let public_host_pattern = public_host_pattern.to_string();
+    thread::spawn(move || {
+        serve_listener(
+            PreviewIngressServeSpec {
+                bind: format!("127.0.0.1:{port}"),
+                domain: "example.com".to_string(),
+                public_host_pattern,
+                token_sha256_env,
+            },
+            listener,
+        )
+        .expect("serve ingress");
+    });
+    thread::sleep(Duration::from_millis(100));
+    port
+}
+
+fn register_body(public_host: &str) -> String {
+    json!({
+        "public_host": public_host,
+        "local_origin": "http://127.0.0.1:49999",
+        "session_id": "run-1"
+    })
+    .to_string()
+}
+
+#[test]
+fn client_auth_denies_every_request_when_token_env_is_unset() {
+    test_support::with_isolated_home(|_| {
+        // Deliberately never set this env var: an ingress with no configured
+        // digest must reject clients, not admit them.
+        std::env::remove_var("HOMEBOY_TEST_UNSET_TOKEN_SHA256");
+        let port = spawn_ingress("HOMEBOY_TEST_UNSET_TOKEN_SHA256", "*-tunnel.example.com");
+
+        let with_token = http_request(
+            port,
+            "POST",
+            "/preview/client/register",
+            "homeboy-health-tunnel.example.com",
+            Some("any-token-at-all"),
+            register_body("run-1-tunnel.example.com"),
+        );
+        assert!(
+            with_token.contains("401 Unauthorized"),
+            "unset token env must fail closed, got: {with_token}"
+        );
+
+        let without_token = http_request(
+            port,
+            "POST",
+            "/preview/client/register",
+            "homeboy-health-tunnel.example.com",
+            None,
+            register_body("run-1-tunnel.example.com"),
+        );
+        assert!(
+            without_token.contains("401 Unauthorized"),
+            "unset token env must fail closed, got: {without_token}"
+        );
+    });
+}
+
+#[test]
+fn client_auth_denies_wrong_bearer_token() {
+    test_support::with_isolated_home(|_| {
+        std::env::set_var(
+            "HOMEBOY_TEST_WRONG_TOKEN_SHA256",
+            native_preview_token_sha256("correct-token"),
+        );
+        let port = spawn_ingress("HOMEBOY_TEST_WRONG_TOKEN_SHA256", "*-tunnel.example.com");
+
+        let response = http_request(
+            port,
+            "POST",
+            "/preview/client/register",
+            "homeboy-health-tunnel.example.com",
+            Some("wrong-token"),
+            register_body("run-1-tunnel.example.com"),
+        );
+        assert!(response.contains("401 Unauthorized"), "{response}");
+    });
+}
+
+#[test]
+fn client_with_valid_token_cannot_claim_host_outside_ingress_pattern() {
+    test_support::with_isolated_home(|_| {
+        let token = "host-claim-token";
+        std::env::set_var(
+            "HOMEBOY_TEST_HOST_CLAIM_TOKEN_SHA256",
+            native_preview_token_sha256(token),
+        );
+        let port = spawn_ingress(
+            "HOMEBOY_TEST_HOST_CLAIM_TOKEN_SHA256",
+            "*-tunnel.example.com",
+        );
+
+        // A valid token holder attempting to claim a host this ingress has no
+        // authority over: the takeover primitive the bearer check alone allowed.
+        for hijack in [
+            "victim.other-tenant.com",
+            "run-1-tunnel.evil.com",
+            "example.com",
+        ] {
+            let response = http_request(
+                port,
+                "POST",
+                "/preview/client/register",
+                "homeboy-health-tunnel.example.com",
+                Some(token),
+                register_body(hijack),
+            );
+            assert!(
+                response.contains("403 Forbidden"),
+                "claiming {hijack} must be rejected, got: {response}"
+            );
+            assert!(
+                response.contains("host_claim_rejected"),
+                "claiming {hijack} must be classified, got: {response}"
+            );
+        }
+
+        // The in-pattern host still registers: only added terms, nothing weakened.
+        let allowed = http_request(
+            port,
+            "POST",
+            "/preview/client/register",
+            "homeboy-health-tunnel.example.com",
+            Some(token),
+            register_body("run-1-tunnel.example.com"),
+        );
+        assert!(allowed.contains("200 OK"), "{allowed}");
+    });
+}
+
+#[test]
+fn host_claim_is_authorized_case_insensitively_and_ignores_port() {
+    test_support::with_isolated_home(|_| {
+        let token = "host-normalize-token";
+        std::env::set_var(
+            "HOMEBOY_TEST_HOST_NORMALIZE_TOKEN_SHA256",
+            native_preview_token_sha256(token),
+        );
+        let port = spawn_ingress(
+            "HOMEBOY_TEST_HOST_NORMALIZE_TOKEN_SHA256",
+            "*-tunnel.example.com",
+        );
+
+        // normalize_public_host lowercases and strips the port before the
+        // authority check, so this must be treated as the in-pattern host.
+        let response = http_request(
+            port,
+            "POST",
+            "/preview/client/register",
+            "homeboy-health-tunnel.example.com",
+            Some(token),
+            register_body("RUN-1-TUNNEL.EXAMPLE.COM:443"),
+        );
+        assert!(response.contains("200 OK"), "{response}");
+    });
+}
+
 #[test]
 fn durable_reverse_client_reregisters_after_session_disconnect() {
     test_support::with_isolated_home(|_| {
