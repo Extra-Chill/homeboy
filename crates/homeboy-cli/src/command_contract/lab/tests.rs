@@ -17,6 +17,11 @@ use super::{lab_cli_arguments_are_visible_for_path, LAB_VISIBLE_COMMAND_PATHS};
 use crate::cli_surface::{current_command_surface, Cli, CommandSurfaceEntry};
 use clap::{CommandFactory, FromArgMatches};
 
+#[test]
+fn scoped_command_tree_has_valid_argument_relationships() {
+    Cli::command_with_scoped_lab_args().debug_assert();
+}
+
 /// A parseable invocation at each Lab-visible path.
 ///
 /// Help visibility is per-PATH; a Lab contract is resolved per-INVOCATION.
