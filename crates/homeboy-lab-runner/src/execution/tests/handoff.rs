@@ -1,6 +1,7 @@
 use super::*;
 use base64::Engine;
 use homeboy_core::api_jobs::JobEventKind;
+use homeboy_core::observation::{NewRunRecord, ObservationStore};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -835,6 +836,41 @@ fn direct_daemon_detached_handoff_returns_while_the_workload_remains_running() {
             1,
             "the terminal daemon child must retain one durable typed job projection"
         );
+    });
+}
+
+#[test]
+fn runner_exec_source_claim_diagnostic_distinguishes_missing_and_owned_sources() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let missing = runner_exec_source_claim_error(&store, "missing-source", "daemon-job")
+            .expect("missing source diagnostic");
+        assert!(missing
+            .message
+            .contains("source observation identity is missing"));
+
+        store
+            .start_run_with_id(
+                NewRunRecord::builder("runner_execution")
+                    .metadata(json!({ "runner_job_id": "daemon-job" }))
+                    .build(),
+                "owned-source".to_string(),
+            )
+            .expect("owned source");
+        assert!(store
+            .claim_running_runner_exec_recovery_source(
+                "owned-source",
+                "existing-owner",
+                "existing-token",
+                "daemon-job",
+            )
+            .expect("claim source"));
+
+        let owned = runner_exec_source_claim_error(&store, "owned-source", "daemon-job")
+            .expect("owned source diagnostic");
+        assert!(owned
+            .message
+            .contains("already owned by an active lifecycle"));
     });
 }
 
