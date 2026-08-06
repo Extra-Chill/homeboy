@@ -5,7 +5,9 @@
 //! instruction to resolve controller state; it durably owns materialization,
 //! staging artifacts, and the replayable receipt.
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use homeboy_core::{Error, Result};
 
@@ -14,7 +16,112 @@ use crate::direct_lab_handoff::{DirectLabHandoffEnvelope, DirectLabHandoffReceip
 pub const REMOTE_RUNNER_STAGING_SCHEMA: &str = "homeboy/remote-runner-staging/v1";
 pub const REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA: &str = "homeboy/remote-runner-staging-receipt/v1";
 pub const REMOTE_RUNNER_STAGING_CAPABILITY: &str = "remote-runner-staging/v1";
+pub const REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY: &str = "remote-runner-source-artifact/v1";
 pub const SEALED_SOURCE_AUTHORITY_SCHEMA: &str = "homeboy/sealed-source-authority/v1";
+pub const SOURCE_ARTIFACT_TRANSFER_SCHEMA: &str = "homeboy/runner-source-artifact-transfer/v1";
+pub const RUNNER_SOURCE_ARTIFACT_SCHEMA: &str = "homeboy/runner-source-artifact/v1";
+pub const MAX_SOURCE_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Bounded package bytes transferred exactly once during staging. The receipt
+/// carries only [`RunnerSourceArtifact`], never these potentially large bytes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceArtifactTransfer {
+    pub schema: String,
+    pub artifact_id: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub content_base64: String,
+}
+
+impl SourceArtifactTransfer {
+    pub fn from_bytes(artifact_id: impl Into<String>, bytes: &[u8]) -> Self {
+        Self {
+            schema: SOURCE_ARTIFACT_TRANSFER_SCHEMA.to_string(),
+            artifact_id: artifact_id.into(),
+            sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+            size_bytes: bytes.len() as u64,
+            content_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }
+
+    pub fn decode_verified(&self) -> Result<Vec<u8>> {
+        if self.schema != SOURCE_ARTIFACT_TRANSFER_SCHEMA
+            || self.artifact_id.trim().is_empty()
+            || self.artifact_id.contains('/')
+            || self.artifact_id.contains('\\')
+            || !self.sha256.starts_with("sha256:")
+            || self.size_bytes > MAX_SOURCE_ARTIFACT_BYTES
+        {
+            return Err(Error::validation_invalid_argument(
+                "source_artifact",
+                "remote staging requires a bounded v1 source artifact transfer",
+                Some(self.artifact_id.clone()),
+                None,
+            ));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&self.content_base64)
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "source_artifact.content_base64",
+                    error.to_string(),
+                    Some(self.artifact_id.clone()),
+                    None,
+                )
+            })?;
+        if bytes.len() as u64 != self.size_bytes
+            || format!("sha256:{:x}", Sha256::digest(&bytes)) != self.sha256
+        {
+            return Err(Error::validation_invalid_argument(
+                "source_artifact",
+                "source artifact bytes do not match their declared size and SHA-256 digest",
+                Some(self.artifact_id.clone()),
+                None,
+            ));
+        }
+        Ok(bytes)
+    }
+
+    pub fn descriptor(&self) -> RunnerSourceArtifact {
+        RunnerSourceArtifact {
+            schema: RUNNER_SOURCE_ARTIFACT_SCHEMA.to_string(),
+            artifact_id: self.artifact_id.clone(),
+            sha256: self.sha256.clone(),
+            size_bytes: self.size_bytes,
+        }
+    }
+}
+
+/// Immutable, retrievable source-package identity returned by staging.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerSourceArtifact {
+    pub schema: String,
+    pub artifact_id: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+}
+
+impl RunnerSourceArtifact {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema != RUNNER_SOURCE_ARTIFACT_SCHEMA
+            || self.artifact_id.trim().is_empty()
+            || self.artifact_id.contains('/')
+            || self.artifact_id.contains('\\')
+            || !self.sha256.starts_with("sha256:")
+            || self.size_bytes > MAX_SOURCE_ARTIFACT_BYTES
+        {
+            return Err(Error::validation_invalid_argument(
+                "source_artifact",
+                "invalid runner source artifact descriptor",
+                Some(self.artifact_id.clone()),
+                None,
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Opaque, self-contained source authority. The producer seals the source
 /// payload before transport; its private filesystem location is never part of
@@ -61,6 +168,8 @@ pub struct RunnerMaterializationAuthority {
     pub authority_id: String,
     pub workspace_key: String,
     pub source: SealedSourceAuthority,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_artifact: Option<SourceArtifactTransfer>,
 }
 
 impl RunnerMaterializationAuthority {
@@ -77,7 +186,19 @@ impl RunnerMaterializationAuthority {
                 None,
             ));
         }
-        self.source.validate()
+        self.source.validate()?;
+        self.source_artifact
+            .as_ref()
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "source_artifact",
+                    "remote staging requires a transferable source artifact before admission",
+                    Some(self.authority_id.clone()),
+                    None,
+                )
+            })?
+            .decode_verified()
+            .map(|_| ())
     }
 }
 
@@ -139,6 +260,8 @@ pub struct RunnerStagingArtifacts {
     pub lifecycle_id: String,
     pub source_artifact_id: String,
     pub workspace_artifact_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_artifact: Option<RunnerSourceArtifact>,
 }
 
 /// Durable runner receipt. Replays return this exact value for the same
@@ -165,6 +288,18 @@ impl RemoteRunnerStagingReceipt {
                 None,
             ));
         }
+        self.artifacts
+            .source_artifact
+            .as_ref()
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "remote_runner_staging_receipt.source_artifact",
+                    "remote staging receipt is missing its immutable source artifact",
+                    Some(envelope.handoff.run_id.clone()),
+                    None,
+                )
+            })?
+            .validate()?;
         self.handoff.validate_for(&envelope.handoff)
     }
 }
@@ -206,6 +341,14 @@ pub fn submit_remote_runner_staging(
             Vec::new(),
         ));
     }
+    if !transport.supports_capability(REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY) {
+        return Err(Error::runner_capability_missing(
+            &envelope.handoff.runner_id,
+            "sealed runner source artifact transfer",
+            vec![REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY.to_string()],
+            Vec::new(),
+        ));
+    }
     let receipt = transport.stage_durable(envelope)?;
     receipt.validate_for(envelope)?;
     Ok(receipt)
@@ -223,6 +366,7 @@ pub(crate) mod tests_support {
     struct Transport {
         connected: bool,
         compatible: bool,
+        source_artifact_compatible: bool,
         calls: usize,
         provider_budget: usize,
         receipts: HashMap<String, RemoteRunnerStagingReceipt>,
@@ -233,7 +377,9 @@ pub(crate) mod tests_support {
             self.connected
         }
         fn supports_capability(&self, capability: &str) -> bool {
-            self.compatible && capability == REMOTE_RUNNER_STAGING_CAPABILITY
+            (self.compatible && capability == REMOTE_RUNNER_STAGING_CAPABILITY)
+                || (self.source_artifact_compatible
+                    && capability == REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY)
         }
         fn stage_durable(
             &mut self,
@@ -251,6 +397,11 @@ pub(crate) mod tests_support {
                     lifecycle_id: "runner-lifecycle-1".to_string(),
                     source_artifact_id: "runner-source-1".to_string(),
                     workspace_artifact_id: "runner-workspace-1".to_string(),
+                    source_artifact: envelope
+                        .materialization
+                        .source_artifact
+                        .as_ref()
+                        .map(SourceArtifactTransfer::descriptor),
                 },
             };
             self.receipts
@@ -300,6 +451,10 @@ pub(crate) mod tests_support {
                 authority_id: "authority-1".to_string(),
                 workspace_key: "run-1".to_string(),
                 source: SealedSourceAuthority::new("sha256:source-1", "sealed-source-payload"),
+                source_artifact: Some(SourceArtifactTransfer::from_bytes(
+                    "source-package-1",
+                    b"source package",
+                )),
             },
         )
         .expect("sealed envelope")
@@ -309,6 +464,7 @@ pub(crate) mod tests_support {
         Transport {
             connected: true,
             compatible: true,
+            source_artifact_compatible: true,
             calls: 0,
             provider_budget: 0,
             receipts: HashMap::new(),
@@ -349,5 +505,18 @@ pub(crate) mod tests_support {
         assert!(submit_remote_runner_staging(&mut disconnected, &envelope).is_err());
         assert_eq!(disconnected.calls, 0);
         assert_eq!(disconnected.provider_budget, 0);
+    }
+
+    #[test]
+    fn source_artifact_capability_is_negotiated_before_admission() {
+        let envelope = envelope();
+        let mut incompatible = Transport {
+            source_artifact_compatible: false,
+            ..transport()
+        };
+        let error = submit_remote_runner_staging(&mut incompatible, &envelope).expect_err("refuse");
+        assert_eq!(error.code, homeboy_core::ErrorCode::RunnerCapabilityMissing);
+        assert_eq!(incompatible.calls, 0);
+        assert_eq!(incompatible.provider_budget, 0);
     }
 }

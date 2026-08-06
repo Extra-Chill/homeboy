@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use homeboy_core::{Error, Result};
@@ -19,11 +20,52 @@ use homeboy_core::{Error, Result};
 use crate::direct_lab_handoff::DirectLabHandoffReceipt;
 use crate::runner_staging_operation::{
     RemoteRunnerStagingEnvelope, RemoteRunnerStagingReceipt, RemoteRunnerStagingTransport,
-    RunnerStagingArtifacts, REMOTE_RUNNER_STAGING_CAPABILITY, REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA,
+    RunnerSourceArtifact, RunnerStagingArtifacts, SourceArtifactTransfer,
+    REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY, REMOTE_RUNNER_STAGING_CAPABILITY,
+    REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA,
 };
 use crate::{broker_submit_token_for_runner, RunnerSession, RunnerTunnelMode};
 
 const STORE_SCHEMA: &str = "homeboy/remote-runner-staging-store/v1";
+
+/// Read the verified source package named by a staging receipt. Execution code
+/// uses this before extracting its own workspace; it never receives controller
+/// paths or the transfer's inline content.
+pub fn read_staged_source_artifact(
+    store_path: impl AsRef<Path>,
+    artifact: &RunnerSourceArtifact,
+) -> Result<Vec<u8>> {
+    artifact.validate()?;
+    let path = store_path
+        .as_ref()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("source-artifacts")
+        .join(&artifact.artifact_id);
+    let bytes = fs::read(&path).map_err(|error| {
+        Error::validation_invalid_argument(
+            "source_artifact",
+            "staged source artifact is unavailable",
+            Some(artifact.artifact_id.clone()),
+            Some(vec![format!(
+                "restore or retransmit source artifact at {}",
+                path.display()
+            )]),
+        )
+        .with_source(error)
+    })?;
+    if bytes.len() as u64 != artifact.size_bytes
+        || format!("sha256:{:x}", Sha256::digest(&bytes)) != artifact.sha256
+    {
+        return Err(Error::validation_invalid_argument(
+            "source_artifact",
+            "staged source artifact no longer matches its immutable descriptor",
+            Some(artifact.artifact_id.clone()),
+            None,
+        ));
+    }
+    Ok(bytes)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,6 +144,13 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
                 None,
             ));
         }
+        let transfer = envelope
+            .materialization
+            .source_artifact
+            .as_ref()
+            .expect("envelope validation requires source artifact");
+        let bytes = transfer.decode_verified()?;
+        let source_artifact = transfer.descriptor();
         let _lock = self.admission_lock()?;
         let mut state = self.load()?;
         let key = &envelope.handoff.idempotency_key;
@@ -114,11 +163,13 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
                     None,
                 ));
             }
+            self.verify_source_artifact(&source_artifact)?;
             return Ok(existing.receipt.clone());
         }
 
         // The lock covers materialization and receipt publication. Concurrent
         // requests therefore observe one durable admission, not two writes.
+        self.persist_source_artifact(&source_artifact, &bytes)?;
         let artifacts = self.materializer.materialize(envelope)?;
         let receipt = RemoteRunnerStagingReceipt {
             schema: REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA.to_string(),
@@ -126,7 +177,10 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
                 &envelope.handoff,
                 format!("staging-{}", envelope.handoff.run_id),
             ),
-            artifacts,
+            artifacts: RunnerStagingArtifacts {
+                source_artifact: Some(source_artifact),
+                ..artifacts
+            },
         };
         receipt.validate_for(envelope)?;
         state.stages.insert(
@@ -200,6 +254,72 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
             Error::internal_io(
                 error.error.to_string(),
                 Some(format!("publish {}", self.path.display())),
+            )
+        })?;
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("sync {}", parent.display())),
+                )
+            })
+    }
+
+    /// Return verified, runner-owned package bytes for the later execution
+    /// layer. The receipt descriptor remains the only authority it needs.
+    pub fn read_source_artifact(&self, artifact: &RunnerSourceArtifact) -> Result<Vec<u8>> {
+        read_staged_source_artifact(&self.path, artifact)
+    }
+
+    fn source_artifact_path(&self, artifact: &RunnerSourceArtifact) -> Result<PathBuf> {
+        artifact.validate()?;
+        Ok(self
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("source-artifacts")
+            .join(&artifact.artifact_id))
+    }
+
+    fn verify_source_artifact(&self, artifact: &RunnerSourceArtifact) -> Result<()> {
+        read_staged_source_artifact(&self.path, artifact).map(|_| ())
+    }
+
+    fn persist_source_artifact(&self, artifact: &RunnerSourceArtifact, bytes: &[u8]) -> Result<()> {
+        let path = self.source_artifact_path(artifact)?;
+        if path.exists() {
+            return self.verify_source_artifact(artifact);
+        }
+        let parent = path.parent().expect("source artifact has parent");
+        fs::create_dir_all(parent).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("create {}", parent.display())),
+            )
+        })?;
+        let mut temporary = NamedTempFile::new_in(parent).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("create source artifact in {}", parent.display())),
+            )
+        })?;
+        temporary.write_all(bytes).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("write source artifact {}", artifact.artifact_id)),
+            )
+        })?;
+        temporary.as_file().sync_all().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("sync source artifact {}", artifact.artifact_id)),
+            )
+        })?;
+        temporary.persist_noclobber(&path).map_err(|error| {
+            Error::internal_io(
+                error.error.to_string(),
+                Some(format!("publish source artifact {}", artifact.artifact_id)),
             )
         })?;
         File::open(parent)
@@ -303,7 +423,11 @@ impl<M: RunnerStagingMaterializer> RemoteRunnerStagingTransport for RunnerStagin
         self.connected
     }
     fn supports_capability(&self, capability: &str) -> bool {
-        self.compatible && capability == REMOTE_RUNNER_STAGING_CAPABILITY
+        self.compatible
+            && matches!(
+                capability,
+                REMOTE_RUNNER_STAGING_CAPABILITY | REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY
+            )
     }
     fn stage_durable(
         &mut self,
@@ -523,6 +647,7 @@ impl RunnerStagingMaterializer for SealedPayloadMaterializer {
                 envelope.materialization.source.content_digest
             ),
             workspace_artifact_id: format!("workspace:{}", envelope.materialization.workspace_key),
+            source_artifact: None,
         })
     }
 }
@@ -531,7 +656,10 @@ struct ProductionStagingProvider;
 
 impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionStagingProvider {
     fn capabilities(&self, _runner_id: &str) -> Result<Vec<String>> {
-        Ok(vec![REMOTE_RUNNER_STAGING_CAPABILITY.to_string()])
+        Ok(vec![
+            REMOTE_RUNNER_STAGING_CAPABILITY.to_string(),
+            REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY.to_string(),
+        ])
     }
 
     fn stage(&self, request: serde_json::Value) -> Result<serde_json::Value> {
@@ -609,6 +737,7 @@ mod tests {
                     "workspace-{}",
                     envelope.materialization.workspace_key
                 ),
+                source_artifact: None,
             })
         }
     }
@@ -677,6 +806,7 @@ mod tests {
                 lifecycle_id: format!("lifecycle-{}", envelope.handoff.run_id),
                 source_artifact_id: "source-1".to_string(),
                 workspace_artifact_id: "workspace-1".to_string(),
+                source_artifact: None,
             })
         }
     }
@@ -706,6 +836,66 @@ mod tests {
         let second = workers.remove(0).join().expect("second worker");
         assert_eq!(first, second);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn staged_source_artifact_is_retrievable_and_tampering_is_refused() {
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("staging.json");
+        let request = envelope();
+        let mut initial = transport(&path);
+        let receipt = initial.stage_durable(&request).expect("stage");
+        let source = receipt.artifacts.source_artifact.expect("source artifact");
+        assert_eq!(
+            initial.store.read_source_artifact(&source).expect("source"),
+            b"source package"
+        );
+        fs::write(
+            initial.store.source_artifact_path(&source).expect("path"),
+            b"tampered",
+        )
+        .expect("tamper");
+        let mut restarted = transport(&path);
+        let error = restarted
+            .stage_durable(&request)
+            .expect_err("tampered source refusal");
+        assert_eq!(
+            error.code,
+            homeboy_core::ErrorCode::ValidationInvalidArgument
+        );
+        assert_eq!(restarted.store.materializer.calls, 0);
+    }
+
+    #[test]
+    fn missing_staged_source_is_refused_on_receipt_replay() {
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("staging.json");
+        let request = envelope();
+        let mut initial = transport(&path);
+        let receipt = initial.stage_durable(&request).expect("stage");
+        let source = receipt.artifacts.source_artifact.expect("source artifact");
+        fs::remove_file(initial.store.source_artifact_path(&source).expect("path"))
+            .expect("remove");
+        let mut restarted = transport(&path);
+        let error = restarted
+            .stage_durable(&request)
+            .expect_err("missing source refusal");
+        assert_eq!(
+            error.code,
+            homeboy_core::ErrorCode::ValidationInvalidArgument
+        );
+        assert_eq!(restarted.store.materializer.calls, 0);
+    }
+
+    #[test]
+    fn source_transfer_rejects_declared_size_above_bound() {
+        let mut source = SourceArtifactTransfer::from_bytes("source-package-1", b"source package");
+        source.size_bytes = crate::runner_staging_operation::MAX_SOURCE_ARTIFACT_BYTES + 1;
+        let error = source.decode_verified().expect_err("size bound");
+        assert_eq!(
+            error.code,
+            homeboy_core::ErrorCode::ValidationInvalidArgument
+        );
     }
 
     #[test]
@@ -739,6 +929,11 @@ mod tests {
                 lifecycle_id: "lifecycle-1".to_string(),
                 source_artifact_id: "source-1".to_string(),
                 workspace_artifact_id: "workspace-1".to_string(),
+                source_artifact: request
+                    .materialization
+                    .source_artifact
+                    .as_ref()
+                    .map(SourceArtifactTransfer::descriptor),
             },
         };
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -747,7 +942,10 @@ mod tests {
         let mut direct = ProductionRunnerStagingTransport {
             runner_id: "runner-1".to_string(),
             session: direct_session,
-            capabilities: vec![REMOTE_RUNNER_STAGING_CAPABILITY.to_string()],
+            capabilities: vec![
+                REMOTE_RUNNER_STAGING_CAPABILITY.to_string(),
+                REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY.to_string(),
+            ],
         };
         assert_eq!(
             submit_remote_runner_staging(&mut direct, &request).expect("direct"),
@@ -758,7 +956,10 @@ mod tests {
         let mut reverse = ProductionRunnerStagingTransport {
             runner_id: "runner-1".to_string(),
             session: reverse_session,
-            capabilities: vec![REMOTE_RUNNER_STAGING_CAPABILITY.to_string()],
+            capabilities: vec![
+                REMOTE_RUNNER_STAGING_CAPABILITY.to_string(),
+                REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY.to_string(),
+            ],
         };
         assert_eq!(
             submit_remote_runner_staging(&mut reverse, &request).expect("reverse"),
