@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.39] - 2026-08-06
+
+### Fixed
+- resolve the WP Codebox CLI through one validated seam
+- repair stale managed Codebox paths
+
 ## [3.34.38] - 2026-08-06
 
 ### Fixed
