@@ -98,7 +98,6 @@ fn provider_config_file_path_syncs_containing_checkout() {
     std::fs::create_dir_all(&source).expect("source dir");
     std::fs::create_dir_all(cli.parent().unwrap()).expect("cli dist dir");
     std::fs::write(&cli, "#!/usr/bin/env node\n").expect("cli file");
-    std::fs::write(provider.join("package-lock.json"), "{}\n").expect("package lock");
     git(&provider, &["init", "-b", "main"]);
     git(&provider, &["config", "user.email", "test@example.com"]);
     git(&provider, &["config", "user.name", "Homeboy Test"]);
@@ -120,7 +119,6 @@ fn provider_config_file_path_syncs_containing_checkout() {
     assert!(workspaces[0]
         .snapshot_includes
         .contains(&"packages/cli/dist/**".to_string()));
-    assert!(workspaces[0].bootstrap_node_dependencies);
 }
 
 #[test]
@@ -211,7 +209,6 @@ fn provider_config_file_path_merges_snapshot_includes_for_duplicate_checkout() {
     std::fs::create_dir_all(&source).expect("source dir");
     std::fs::create_dir_all(cli.parent().unwrap()).expect("cli dist dir");
     std::fs::write(&cli, "#!/usr/bin/env node\n").expect("cli file");
-    std::fs::write(provider.join("package-lock.json"), "{}\n").expect("package lock");
     git(&provider, &["init", "-b", "main"]);
     git(&provider, &["config", "user.email", "test@example.com"]);
     git(&provider, &["config", "user.name", "Homeboy Test"]);
@@ -236,7 +233,6 @@ fn provider_config_file_path_merges_snapshot_includes_for_duplicate_checkout() {
     assert!(workspaces[0]
         .snapshot_includes
         .contains(&"packages/cli/dist/**".to_string()));
-    assert!(workspaces[0].bootstrap_node_dependencies);
 }
 
 #[test]
@@ -290,7 +286,6 @@ fn agent_task_run_plan_file_path_syncs_containing_checkout() {
     std::fs::create_dir_all(plan.parent().unwrap()).expect("plan dir");
     std::fs::create_dir_all(tool_bin.parent().unwrap()).expect("tool cli dir");
     std::fs::write(&tool_bin, "#!/usr/bin/env node\n").expect("tool bin");
-    std::fs::write(tool.join("package-lock.json"), "{}\n").expect("package lock");
     std::fs::write(
         &plan,
         serde_json::json!({
@@ -336,13 +331,11 @@ fn agent_task_run_plan_file_path_syncs_containing_checkout() {
     assert_eq!(workspaces[0].role, "agent_task_plan");
     assert_eq!(workspaces[0].path, planner.canonicalize().unwrap());
     assert!(workspaces[0].snapshot_includes.is_empty());
-    assert!(!workspaces[0].bootstrap_node_dependencies);
     assert_eq!(workspaces[1].role, "agent_task_plan_config");
     assert_eq!(workspaces[1].path, tool.canonicalize().unwrap());
     assert!(workspaces[1]
         .snapshot_includes
         .contains(&"packages/cli/dist/**".to_string()));
-    assert!(workspaces[1].bootstrap_node_dependencies);
 }
 
 #[test]
@@ -460,7 +453,6 @@ fn agent_task_run_plan_relative_file_reads_from_primary_workspace() {
     std::fs::create_dir_all(plan.parent().unwrap()).expect("plan dir");
     std::fs::create_dir_all(tool_bin.parent().unwrap()).expect("tool cli dir");
     std::fs::write(&tool_bin, "#!/usr/bin/env node\n").expect("tool bin");
-    std::fs::write(tool.join("package-lock.json"), "{}\n").expect("package lock");
     std::fs::write(
         &plan,
         serde_json::json!({
@@ -507,7 +499,6 @@ fn path_setting_local_file_syncs_containing_checkout() {
     std::fs::create_dir_all(&source).expect("source dir");
     std::fs::create_dir_all(tool_bin.parent().unwrap()).expect("tool cli dir");
     std::fs::write(&tool_bin, "#!/usr/bin/env node\n").expect("tool bin");
-    std::fs::write(tool.join("package-lock.json"), "{}\n").expect("package lock");
     git(&tool, &["init", "-b", "main"]);
     git(&tool, &["config", "user.email", "test@example.com"]);
     git(&tool, &["config", "user.name", "Homeboy Test"]);
@@ -531,7 +522,6 @@ fn path_setting_local_file_syncs_containing_checkout() {
     assert!(workspaces[0]
         .snapshot_includes
         .contains(&"packages/cli/dist/**".to_string()));
-    assert!(workspaces[0].bootstrap_node_dependencies);
 }
 
 #[test]
@@ -874,8 +864,6 @@ fn workspace_ref_provenance_is_recorded_on_mapping_entry() {
         role: "path_setting_workspace_ref".to_string(),
         path: PathBuf::from("/local/repo@cook"),
         snapshot_includes: Vec::new(),
-        bootstrap_node_dependencies: false,
-        bootstrap_command: None,
         allow_dirty_lab_workspace: false,
         source_provenance: Some(serde_json::json!({
             "source_provenance": "workspace_ref",
@@ -946,7 +934,6 @@ fn agent_task_run_plan_syncs_symlinked_dependency_target_inside_primary_workspac
     std::fs::create_dir_all(symlink.parent().unwrap()).expect("ci dir");
     std::fs::create_dir_all(tool_bin.parent().unwrap()).expect("tool cli dir");
     std::fs::write(&tool_bin, "#!/usr/bin/env node\n").expect("tool bin");
-    std::fs::write(tool.join("package-lock.json"), "{}\n").expect("package lock");
     std::os::unix::fs::symlink(&tool, &symlink).expect("tool symlink");
     std::fs::write(
         &plan,
@@ -989,7 +976,6 @@ fn agent_task_run_plan_syncs_symlinked_dependency_target_inside_primary_workspac
     assert!(workspaces[0]
         .snapshot_includes
         .contains(&"packages/cli/dist/**".to_string()));
-    assert!(workspaces[0].bootstrap_node_dependencies);
 }
 
 #[test]
