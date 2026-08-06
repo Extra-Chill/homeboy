@@ -176,7 +176,7 @@ jobs:
       scope: auto
       differential-gating: 'false'
       baseline-commands: none
-      test-shards: '8'
+      test-shards: '16'
       execution-timeout-seconds: '1800'
       test-timeout-seconds: '1500'
       comment-section-key: test
