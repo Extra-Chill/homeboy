@@ -15,7 +15,14 @@ Display the current configuration (merged built-in defaults + file overrides).
 ```bash
 homeboy config show              # Show merged config
 homeboy config show --builtin    # Show only built-in defaults
+homeboy config show /notifications/default_transport
+homeboy config show --builtin /defaults/deploy/scp_flags
 ```
+
+Passing a JSON pointer returns only that effective value, its canonical pointer,
+and its owning source. File-backed values include the `homeboy.json` path;
+values supplied by defaults report `"builtin"`. Pointer reads apply the same
+secret redaction as a full config read.
 
 ### `homeboy config set`
 
@@ -42,8 +49,8 @@ homeboy config set /defaults/permissions/local/file_mode '"g+r"'
 # Store copied run artifacts in a repo- or agent-readable directory
 homeboy config set /artifact_root '"~/Developer/.homeboy-artifacts"'
 
-# Select the installed transport for route-less operations
-homeboy config set /notifications/default_transport '"discord.run-completion"'
+# Select a transport discovered with `homeboy extension list` for route-less operations
+homeboy config set /notifications/default_transport '"<transport-id>"'
 
 # Apply environment to every gh subprocess for a GitHub Enterprise host
 homeboy config set /github_hosts/github.example.com/env/HTTPS_PROXY '"socks5://127.0.0.1:8080"'
@@ -89,7 +96,7 @@ homeboy config path
 {
   "artifact_root": null,
   "notifications": {
-    "default_transport": "discord.run-completion"
+    "default_transport": "<transport-id>"
   },
   "github_hosts": {
     "github.example.com": {

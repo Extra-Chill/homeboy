@@ -19,6 +19,8 @@ enum ConfigCommand {
         /// Show only built-in defaults (ignore homeboy.json)
         #[arg(long)]
         builtin: bool,
+        /// JSON pointer path to read (e.g., /notifications/default_transport)
+        pointer: Option<String>,
     },
     /// Set a configuration value at a JSON pointer path
     Set {
@@ -57,12 +59,14 @@ pub struct ConfigOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     value: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     deleted: Option<bool>,
 }
 
 pub fn run(args: ConfigArgs) -> CmdResult<ConfigOutput> {
     match args.command {
-        ConfigCommand::Show { builtin } => show(builtin),
+        ConfigCommand::Show { builtin, pointer } => show(builtin, pointer.as_deref()),
         ConfigCommand::Set {
             pointer,
             value,
@@ -74,7 +78,11 @@ pub fn run(args: ConfigArgs) -> CmdResult<ConfigOutput> {
     }
 }
 
-fn show(builtin: bool) -> CmdResult<ConfigOutput> {
+fn show(builtin: bool, pointer: Option<&str>) -> CmdResult<ConfigOutput> {
+    if let Some(pointer) = pointer {
+        return show_pointer(builtin, pointer);
+    }
+
     if builtin {
         Ok((
             ConfigOutput {
@@ -85,6 +93,7 @@ fn show(builtin: bool) -> CmdResult<ConfigOutput> {
                 exists: None,
                 pointer: None,
                 value: None,
+                source: None,
                 deleted: None,
             },
             0,
@@ -101,11 +110,105 @@ fn show(builtin: bool) -> CmdResult<ConfigOutput> {
                 exists: None,
                 pointer: None,
                 value: None,
+                source: None,
                 deleted: None,
             },
             0,
         ))
     }
+}
+
+fn show_pointer(builtin: bool, pointer: &str) -> CmdResult<ConfigOutput> {
+    if !pointer.starts_with('/') {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "pointer",
+            "JSON pointer must start with '/'",
+            None,
+            None,
+        ));
+    }
+
+    let config = if builtin {
+        serde_json::to_value(defaults::HomeboyConfig::default()).map_err(|error| {
+            homeboy::core::Error::internal_unexpected(format!(
+                "Failed to serialize built-in config: {error}"
+            ))
+        })?
+    } else {
+        redacted_config_value(&defaults::load_config())?
+    };
+    let value = homeboy::core::config::get_json_pointer(&config, pointer)?
+        .cloned()
+        .ok_or_else(|| missing_pointer_error(&config, pointer))?;
+    let source = if !builtin && defaults::config_file_value(pointer).is_some() {
+        "file"
+    } else {
+        "builtin"
+    };
+    let path = (source == "file").then(defaults::config_path).transpose()?;
+
+    Ok((
+        ConfigOutput {
+            command: "config.show".to_string(),
+            config: None,
+            defaults: None,
+            path,
+            exists: None,
+            pointer: Some(pointer.to_string()),
+            value: Some(value),
+            source: Some(source.to_string()),
+            deleted: None,
+        },
+        0,
+    ))
+}
+
+fn missing_pointer_error(config: &Value, pointer: &str) -> homeboy::core::Error {
+    let suggestions = nearby_pointer_paths(config, pointer);
+    let mut error = homeboy::core::Error::config_missing_key(pointer, None);
+    if !suggestions.is_empty() {
+        error = error.with_hint(format!("Nearby valid paths: {}", suggestions.join(", ")));
+    }
+    error
+}
+
+fn nearby_pointer_paths(config: &Value, pointer: &str) -> Vec<String> {
+    let parent = pointer
+        .rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or("");
+    let Ok(Some(parent)) = homeboy::core::config::get_json_pointer(config, parent) else {
+        return Vec::new();
+    };
+
+    match parent {
+        Value::Object(values) => values
+            .keys()
+            .take(5)
+            .map(|key| {
+                format!(
+                    "{}/{}",
+                    pointer_parent_display(pointer),
+                    escape_pointer_token(key)
+                )
+            })
+            .collect(),
+        Value::Array(values) => (0..values.len().min(5))
+            .map(|index| format!("{}/{}", pointer_parent_display(pointer), index))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn pointer_parent_display(pointer: &str) -> &str {
+    pointer
+        .rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or("")
+}
+
+fn escape_pointer_token(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
 }
 
 fn set(pointer: &str, value_str: &str, string: bool) -> CmdResult<ConfigOutput> {
@@ -154,6 +257,7 @@ fn set(pointer: &str, value_str: &str, string: bool) -> CmdResult<ConfigOutput> 
             exists: None,
             pointer: Some(pointer.to_string()),
             value: Some(value),
+            source: None,
             deleted: None,
         },
         0,
@@ -250,6 +354,7 @@ fn remove(pointer: &str) -> CmdResult<ConfigOutput> {
             exists: None,
             pointer: Some(pointer.to_string()),
             value: None,
+            source: None,
             deleted: None,
         },
         0,
@@ -289,6 +394,7 @@ fn reset() -> CmdResult<ConfigOutput> {
             exists: None,
             pointer: None,
             value: None,
+            source: None,
             deleted: Some(deleted),
         },
         0,
@@ -308,6 +414,7 @@ fn path() -> CmdResult<ConfigOutput> {
             exists: Some(exists),
             pointer: None,
             value: None,
+            source: None,
             deleted: None,
         },
         0,
@@ -351,5 +458,100 @@ mod tests {
             .expect("json array value");
 
         assert_eq!(value, Value::Array(Vec::new()));
+    }
+
+    #[test]
+    fn pointer_read_supports_nested_objects_and_arrays() {
+        let config = serde_json::json!({
+            "notifications": { "default_transport": "discord" },
+            "defaults": { "version_candidates": [{ "file": "Cargo.toml" }] },
+        });
+
+        assert_eq!(
+            homeboy::core::config::get_json_pointer(&config, "/notifications")
+                .expect("valid pointer"),
+            Some(&serde_json::json!({ "default_transport": "discord" }))
+        );
+        assert_eq!(
+            homeboy::core::config::get_json_pointer(&config, "/defaults/version_candidates/0/file")
+                .expect("valid pointer"),
+            Some(&serde_json::json!("Cargo.toml"))
+        );
+    }
+
+    #[test]
+    fn missing_pointer_is_typed_and_lists_nearby_paths() {
+        let config = serde_json::json!({
+            "notifications": { "default_transport": "discord" },
+        });
+
+        let error = missing_pointer_error(&config, "/notifications/default_transprot");
+
+        assert_eq!(
+            error.code,
+            homeboy::core::error::ErrorCode::ConfigMissingKey
+        );
+        assert_eq!(error.details["key"], "/notifications/default_transprot");
+        assert!(
+            error
+                .hints
+                .iter()
+                .any(|hint| hint.message.contains("/notifications/default_transport")),
+            "missing-pointer guidance must name a nearby valid path: {error:?}"
+        );
+    }
+
+    #[test]
+    fn pointer_read_redacts_secret_values() {
+        let config: defaults::HomeboyConfig = serde_json::from_value(serde_json::json!({
+            "agent_task": {
+                "secrets": {
+                    "api_token": { "source": "literal", "value": "secret" }
+                }
+            }
+        }))
+        .expect("config with secret");
+        let redacted = redacted_config_value(&config).expect("redact config");
+
+        assert_eq!(
+            homeboy::core::config::get_json_pointer(
+                &redacted,
+                "/agent_task/secrets/api_token/value"
+            )
+            .expect("valid pointer"),
+            Some(&serde_json::json!("[redacted]"))
+        );
+    }
+
+    #[test]
+    fn pointer_read_reports_file_and_builtin_ownership() {
+        homeboy::core::test_support::with_isolated_home(|home| {
+            let path = home.path().join(".config/homeboy/homeboy.json");
+            std::fs::create_dir_all(path.parent().expect("config parent")).expect("config dir");
+            std::fs::write(
+                path,
+                r#"{"notifications":{"default_transport":"discord.run-completion"}}"#,
+            )
+            .expect("config file");
+
+            let (file, _) = show_pointer(false, "/notifications/default_transport")
+                .expect("file-backed pointer read");
+            assert_eq!(file.source.as_deref(), Some("file"));
+            assert!(file.path.is_some());
+            assert_eq!(
+                file.value,
+                Some(serde_json::json!("discord.run-completion"))
+            );
+
+            let (builtin, _) = show_pointer(false, "/defaults/deploy/scp_flags")
+                .expect("builtin-backed pointer read");
+            assert_eq!(builtin.source.as_deref(), Some("builtin"));
+            assert_eq!(builtin.path, None);
+
+            let (builtin_only, _) =
+                show_pointer(true, "/defaults/deploy/scp_flags").expect("builtin pointer read");
+            assert_eq!(builtin_only.source.as_deref(), Some("builtin"));
+            assert_eq!(builtin_only.path, None);
+        });
     }
 }

@@ -4,6 +4,91 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.333.0] - 2026-08-06
+
+### Added
+- expose managed service contract
+- supervise provider sessions with a resource policy
+- type the agent-task dispatch-handoff seam over Lab offload
+- support bounded cleanup deadlines
+- route daemon fallback to live staging [AI: OpenAI openai/gpt-5.6-terra via OpenCode wired production transport fallback and receipt persistence]
+- add deferred controller projection [AI: OpenAI openai/gpt-5.6-terra via OpenCode implemented fallback receipt ledger and tests]
+- admit packaged staging jobs
+- bind staged source artifacts
+- model composite phase placement
+- route sealed staging to live runners
+- persist sealed staging handoffs
+- add sealed runner staging operation
+- support explicit local apply
+- define direct detached handoff contract
+
+### Changed
+- route runs findings/hotspots through the runs_service facade
+- AI assistance: OpenCode with OpenAI gpt-5.6-sol implemented and verified this change with Chris Huber.
+- prove staged workspace source use [AI: OpenAI gpt-5.6-terra via OpenCode strengthened the reverse staging E2E fixture]
+- add authenticated staging fallback E2E [AI: OpenAI gpt-5.6-terra via OpenCode implemented production-route fixture and acceptance coverage]
+- complete managed SSH session fixtures
+- verify selector exclusivity
+- cover cold sharded test builds [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- allow sharded tests to report complete counts [AI: OpenAI GPT-5.6 Sol via OpenCode]
+
+### Fixed
+- produce declared local artifact [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- retain command capture evidence [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- preserve valid scoped Lab conflicts [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- reap the remaining process group before joining capture readers
+- align runtime tool readiness
+- preserve provider inventory [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- route controller-owned reads locally [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- bound fixer lifecycle [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- honor explicit local wait [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- normalize successful failures summaries [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- unbreak main -- scope terminator returned Result<()> as Result<bool>
+- report declared-but-unparsable actionable metadata instead of dropping it
+- preserve compact fix summaries [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- fund the attempts the wrong-schema cook fixture declares
+- expire stale notification claims
+- claim lifecycle source observations
+- persist notification delivery outcomes
+- isolate daemon lifecycle namespaces
+- install automatic retention by default
+- cover command surface drift
+- generate command index
+- route lab typo hints to runners
+- accept null workspace owner requests
+- compose refresh readiness with owner counts [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- verify refresh admission readiness [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- admit past unresolved generation history [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- bind refresh generations to binary bytes [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- converge versioned runner source pins [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- reconcile status job count semantics [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- an empty gate set is not a pass
+- resolve config from target checkout
+- keep a controller-local run controller-owned for its whole lifecycle
+- attribute cook activity to the provider, not homeboy
+- retain reverse unverified admission [AI: OpenAI gpt-5.6-terra via OpenCode aligned typed reverse availability gate]
+- scale test shards beyond timeout capacity
+- execute staged source jobs
+- scale test shards for the full inventory
+- bound deferred projection reconciliation
+- durably serialize fallback projections [AI: OpenAI gpt-5.6-terra via OpenCode added locked fsynced receipt ledger publication]
+- package fallback source trees [AI: OpenAI gpt-5.6-terra via OpenCode replaced recipe staging with source packages and terminal runner reconciliation]
+- report staged runner job IDs [AI: OpenAI gpt-5.6-terra via OpenCode aligned projection receipts with packaged runner jobs]
+- carry staged source descriptors [AI: OpenAI gpt-5.6-terra via OpenCode adapted deferred projection receipts to the runner source artifact contract]
+- reconcile deferred staging receipts [AI: OpenAI gpt-5.6-terra via OpenCode repaired startup projection and CLI contracts]
+- recover staged queue admission
+- scope artifact identity check to Unix
+- serialize sealed staging admission
+- record actual terminal signal
+- correct generic Lab profile fixture
+- do not supervise a plan that declares no services
+- preserve unclassified controller placement [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- clarify malformed capacity ledger errors [AI: OpenAI GPT-5.6 Sol via OpenCode]
+- remove control-plane orchestration footguns
+- report actionable worktree candidates
+- resolve self artifacts from binary identity
+- migrate lock-only Cargo targets
+
 ## [0.332.0] - 2026-08-06
 
 ### Added

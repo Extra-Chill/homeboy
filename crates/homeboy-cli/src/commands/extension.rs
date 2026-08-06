@@ -481,6 +481,9 @@ pub struct ExtensionDetail {
     pub cli: Option<CliDetail>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<ActionDetail>,
+    /// Installed transport IDs and schemas, without executable argv.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notification_transports: Vec<homeboy_extension::NotificationTransportDescriptor>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<homeboy_extension::InputConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -955,6 +958,11 @@ fn show_extension(
         source_revision,
         cli,
         actions,
+        notification_transports: extension
+            .notification_transports
+            .iter()
+            .map(|transport| transport.descriptor())
+            .collect(),
         inputs: extension.inputs().to_vec(),
         settings: extension.settings.clone(),
         structured_sidecars: homeboy_extension::structured_sidecars(&extension),
@@ -1602,6 +1610,62 @@ mod tests {
     }
 
     #[test]
+    fn extension_inspection_discovers_transport_metadata_without_argv() {
+        with_isolated_home(|home| {
+            let extension_id = "notification-provider";
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions")
+                .join(extension_id);
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join(format!("{extension_id}.json")),
+                r#"{
+  "name": "Notification provider",
+  "version": "1.0.0",
+  "notification_transports": [{
+    "schema": "homeboy/notification-transport/v1",
+    "id": "example.completed",
+    "command": ["private-notify", "--token", "secret"]
+  }]
+}"#,
+            )
+            .expect("extension manifest");
+
+            let (output, exit_code) =
+                show_extension(extension_id, ExtensionReadinessMode::Skip).expect("show extension");
+            assert_eq!(exit_code, 0);
+            let ExtensionOutput::Show { extension } = output else {
+                panic!("expected extension show output");
+            };
+            assert_eq!(extension.notification_transports.len(), 1);
+            assert_eq!(extension.notification_transports[0].id, "example.completed");
+            assert_eq!(
+                extension.notification_transports[0].schema,
+                homeboy_extension::NOTIFICATION_TRANSPORT_SCHEMA
+            );
+            assert!(
+                serde_json::to_value(&extension)
+                    .expect("serialize extension detail")
+                    .pointer("/notification_transports/0/command")
+                    .is_none(),
+                "extension inspection must not expose transport argv"
+            );
+
+            let (output, exit_code) =
+                list(None, ExtensionReadinessMode::Skip).expect("list extensions");
+            assert_eq!(exit_code, 0);
+            let ExtensionOutput::List { extensions, .. } = output else {
+                panic!("expected extension list output");
+            };
+            assert_eq!(
+                extensions[0].notification_transports[0].id,
+                "example.completed"
+            );
+        });
+    }
+
+    #[test]
     fn extension_show_emits_contract_producers() {
         with_isolated_home(|home| {
             let extension_id = "contract-producer";
@@ -1730,6 +1794,7 @@ mod tests {
             cli_tool: None,
             cli_display_name: None,
             actions: Vec::new(),
+            notification_transports: Vec::new(),
             has_setup: None,
             has_ready_check: None,
         };
@@ -1787,6 +1852,7 @@ mod tests {
                 cli_tool: None,
                 cli_display_name: None,
                 actions: Vec::new(),
+                notification_transports: Vec::new(),
                 has_setup: Some(true),
                 has_ready_check: Some(true),
             };
@@ -1830,6 +1896,7 @@ mod tests {
                 cli_tool: None,
                 cli_display_name: None,
                 actions: Vec::new(),
+                notification_transports: Vec::new(),
                 has_setup: Some(true),
                 has_ready_check: Some(true),
             };

@@ -11,7 +11,11 @@
 
 use homeboy::core::component;
 use homeboy::core::context;
+use homeboy::core::daemon;
+use homeboy::core::observation::{ObservationStore, RunListFilter};
+use homeboy::core::project;
 use homeboy::core::scope::{self, Scope};
+use homeboy::runner::runners as runner;
 use homeboy_deploy::ReleaseStateStatus;
 use homeboy_release::release::version;
 use homeboy_upgrade::controller_staleness::{self, ControllerStaleness};
@@ -29,9 +33,10 @@ use dashboard_table::log_dashboard_table;
 use git_cache::{fetch_project_remote_versions, log_unreleased_merges, StatusGitCache};
 
 pub use types::{
-    ProjectComponentDashboardStatus, ProjectDashboardOutput, ProjectDashboardSummary,
-    ProjectStatusRow, StatusArgs, StatusOutput, StatusResult, StatusTiming,
-    UnregisteredContextStatusOutput, UnreleasedMerge, UpstreamDrift,
+    GlobalActivityStatus, GlobalDaemonStatus, GlobalInventoryStatus, GlobalRunnerStatus,
+    GlobalStatusOutput, ProjectComponentDashboardStatus, ProjectDashboardOutput,
+    ProjectDashboardSummary, ProjectStatusRow, StatusArgs, StatusOutput, StatusResult,
+    StatusTiming, UnregisteredContextStatusOutput, UnreleasedMerge, UpstreamDrift,
 };
 use types::{StatusProgress, StatusTimer, READY_TO_DEPLOY_NOTE, UNRELEASED_MERGES_NOTE};
 
@@ -49,6 +54,10 @@ pub fn run(args: StatusArgs) -> CmdResult<StatusResult> {
     // re-resolution (#11483).
     let controller = controller_staleness::current();
     log_controller_staleness(&controller);
+
+    if args.global {
+        return global_status(controller);
+    }
 
     // Explicit scope selection. `--path` and `--project` keep their historical
     // routes (checkout inspection and the project dashboard); the remaining
@@ -130,6 +139,112 @@ pub fn run(args: StatusArgs) -> CmdResult<StatusResult> {
     };
 
     summarize_components(components, &args, timer, controller)
+}
+
+const GLOBAL_RUNNER_LIMIT: usize = 64;
+const GLOBAL_ACTIVITY_LIMIT: i64 = 100;
+
+/// Read the controller's own local stores without resolving the caller's CWD,
+/// fetching component remotes, or probing runner daemons. Counts are capped at
+/// their query boundary and runner inspection is capped independently of the
+/// registered inventory size.
+fn global_status(controller: ControllerStaleness) -> CmdResult<StatusResult> {
+    let daemon_status = daemon::read_status()?;
+    let admitting_work = daemon_status.running && daemon_status.fresh && daemon_status.reachable;
+    let blocker = (!admitting_work).then(|| {
+        daemon_status
+            .stale_reason
+            .clone()
+            .unwrap_or_else(|| "daemon is not running, fresh, and reachable".to_string())
+    });
+
+    let registered_runners = runner::list()?;
+    let inspected_runners = registered_runners.len().min(GLOBAL_RUNNER_LIMIT);
+    let mut status_unavailable = 0;
+    let runner_reports = registered_runners
+        .iter()
+        .take(GLOBAL_RUNNER_LIMIT)
+        .filter_map(
+            |runner_config| match runner::persisted_status(&runner_config.id) {
+                Ok(report) => Some(report),
+                Err(_) => {
+                    status_unavailable += 1;
+                    None
+                }
+            },
+        )
+        .collect::<Vec<_>>();
+    let disconnected = runner_reports
+        .iter()
+        .filter(|report| !report.connected)
+        .count();
+
+    let activity = ObservationStore::open_readonly()
+        .ok()
+        .map(|store| {
+            let active = store
+                .list_active_runs_bounded(GLOBAL_ACTIVITY_LIMIT + 1)
+                .unwrap_or_default();
+            let recent = store
+                .list_runs_page(RunListFilter {
+                    limit: Some(GLOBAL_ACTIVITY_LIMIT),
+                    ..Default::default()
+                })
+                .ok();
+            GlobalActivityStatus {
+                active_truncated: active.len() > GLOBAL_ACTIVITY_LIMIT as usize,
+                active: active.len().min(GLOBAL_ACTIVITY_LIMIT as usize),
+                recent: recent.as_ref().map_or(0, |page| page.runs.len()),
+                recent_truncated: recent.is_some_and(|page| page.truncated),
+                drill_down: "homeboy activity",
+            }
+        })
+        .unwrap_or(GlobalActivityStatus {
+            active: 0,
+            active_truncated: false,
+            recent: 0,
+            recent_truncated: false,
+            drill_down: "homeboy activity",
+        });
+
+    Ok((
+        StatusResult::Global(GlobalStatusOutput {
+            command: "status",
+            status: "global",
+            controller,
+            daemon: GlobalDaemonStatus {
+                admitting_work,
+                fresh: daemon_status.fresh,
+                reachable: daemon_status.reachable,
+                active_jobs: daemon_status.freshness.active_jobs,
+                blocker,
+                drill_down: "homeboy daemon status",
+                repair: (!admitting_work).then_some("homeboy daemon recover"),
+            },
+            runners: GlobalRunnerStatus {
+                registered: registered_runners.len(),
+                inspected: inspected_runners,
+                omitted: registered_runners.len().saturating_sub(inspected_runners),
+                disconnected,
+                status_unavailable,
+                freshness_unverified: inspected_runners,
+                drill_down: "homeboy runner status --full",
+            },
+            activity,
+            inventory: GlobalInventoryStatus {
+                projects: project::list().unwrap_or_default().len(),
+                components: component::registered().unwrap_or_default().len(),
+            },
+            drill_down: vec![
+                "homeboy daemon status",
+                "homeboy runner status --full",
+                "homeboy activity",
+                "homeboy runs list --limit 100",
+                "homeboy component list",
+            ],
+        }),
+        0,
+    ))
 }
 
 /// Emit the controller-staleness warning to the status channel.
@@ -584,6 +699,7 @@ mod tests {
             ready: false,
             docs_only: false,
             all: false,
+            global: false,
             outdated: false,
             unreleased: false,
             timings: false,
@@ -601,6 +717,7 @@ mod tests {
             ready: false,
             docs_only: false,
             all: false,
+            global: false,
             outdated: false,
             unreleased: false,
             timings: false,
@@ -697,6 +814,74 @@ mod tests {
             Commands::Status(args) => assert!(args.timings),
             _ => panic!("expected status command"),
         }
+    }
+
+    #[test]
+    fn global_status_from_an_unregistered_cwd_is_local_and_bounded() {
+        let _guard = CWD_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        crate::test_support::with_isolated_home(|_| {
+            let original_cwd = env::current_dir().expect("current dir");
+            let dir = TempDir::new().expect("tempdir");
+            env::set_current_dir(dir.path()).expect("set unregistered cwd");
+
+            let started = Instant::now();
+            let result = run(parse_status(&["homeboy", "status", "--global"]));
+            let elapsed = started.elapsed();
+            env::set_current_dir(original_cwd).expect("restore cwd");
+
+            let (result, code) = result.expect("global status succeeds");
+            assert_eq!(code, 0);
+            assert!(
+                elapsed.as_secs() < 2,
+                "global status exceeded local budget: {elapsed:?}"
+            );
+            let StatusResult::Global(output) = result else {
+                panic!("expected global status output");
+            };
+            assert_eq!(output.status, "global");
+            assert_eq!(output.inventory.projects, 0);
+            assert_eq!(output.inventory.components, 0);
+            assert_eq!(output.runners.inspected, output.runners.registered);
+            assert_eq!(output.activity.active, 0);
+            assert!(output.drill_down.contains(&"homeboy daemon status"));
+        });
+    }
+
+    #[test]
+    fn global_status_keeps_large_registered_inventories_count_only() {
+        crate::test_support::with_isolated_home(|home| {
+            let registrations = home.path().join(".config/homeboy/components");
+            fs::create_dir_all(&registrations).expect("component registry");
+            for index in 0..200 {
+                fs::write(
+                    registrations.join(format!("component-{index}.json")),
+                    serde_json::json!({ "local_path": home.path() }).to_string(),
+                )
+                .expect("component registration");
+            }
+
+            let started = Instant::now();
+            let (result, code) = run(parse_status(&["homeboy", "status", "--global"]))
+                .expect("global status succeeds");
+            assert!(
+                started.elapsed().as_secs() < 2,
+                "global status must stay within its local inventory budget"
+            );
+            assert_eq!(code, 0);
+            let StatusResult::Global(output) = result else {
+                panic!("expected global status output");
+            };
+            assert_eq!(output.inventory.components, 200);
+            let json = serde_json::to_value(output).expect("serialize global status");
+            assert!(
+                json.get("components").is_none(),
+                "inventory must remain count-only"
+            );
+            assert!(
+                serde_json::to_string(&json).expect("global JSON").len() < 8_000,
+                "global response must not grow with inventory contents"
+            );
+        });
     }
 
     #[test]
@@ -885,6 +1070,7 @@ mod tests {
             "--full",
         ]);
         assert!(filters.all);
+        assert!(!filters.global);
         assert!(filters.uncommitted);
         assert!(filters.needs_release);
         assert!(filters.ready);
@@ -897,6 +1083,9 @@ mod tests {
 
         let short_all = parse_status(&["homeboy", "status", "-a"]);
         assert!(short_all.all);
+
+        let global = parse_status(&["homeboy", "status", "--global"]);
+        assert!(global.global);
     }
 
     #[test]
@@ -968,34 +1157,36 @@ mod tests {
     #[test]
     fn default_status_from_unregistered_cwd_returns_actionable_context_without_global_scan() {
         let _guard = CWD_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let original_cwd = env::current_dir().expect("current dir");
-        let dir = TempDir::new().expect("tempdir");
-        env::set_current_dir(dir.path()).expect("set unregistered cwd");
+        crate::test_support::with_isolated_home(|_| {
+            let original_cwd = env::current_dir().expect("current dir");
+            let dir = TempDir::new().expect("tempdir");
+            env::set_current_dir(dir.path()).expect("set unregistered cwd");
 
-        let started = Instant::now();
-        let result = run(default_status_args());
-        let elapsed = started.elapsed();
+            let started = Instant::now();
+            let result = run(default_status_args());
+            let elapsed = started.elapsed();
 
-        env::set_current_dir(original_cwd).expect("restore cwd");
-        let (result, code) = result.expect("status succeeds from unregistered cwd");
+            env::set_current_dir(original_cwd).expect("restore cwd");
+            let (result, code) = result.expect("status succeeds from unregistered cwd");
 
-        assert_eq!(code, 0);
-        assert!(
-            elapsed.as_secs() < 2,
-            "unregistered status should fast-return, elapsed={elapsed:?}"
-        );
-        match result {
-            StatusResult::UnregisteredContext(output) => {
-                assert_eq!(output.status, "unregistered_context");
-                assert_eq!(
-                    PathBuf::from(&output.cwd).canonicalize().ok(),
-                    dir.path().canonicalize().ok()
-                );
-                assert!(output.suggestion.contains("attach"));
-                assert!(output.action.contains("homeboy status --all"));
+            assert_eq!(code, 0);
+            assert!(
+                elapsed.as_secs() < 2,
+                "unregistered status should fast-return, elapsed={elapsed:?}"
+            );
+            match result {
+                StatusResult::UnregisteredContext(output) => {
+                    assert_eq!(output.status, "unregistered_context");
+                    assert_eq!(
+                        PathBuf::from(&output.cwd).canonicalize().ok(),
+                        dir.path().canonicalize().ok()
+                    );
+                    assert!(output.suggestion.contains("attach"));
+                    assert!(output.action.contains("homeboy status --all"));
+                }
+                _ => panic!("expected unregistered context output"),
             }
-            _ => panic!("expected unregistered context output"),
-        }
+        });
     }
 
     #[test]
@@ -1050,6 +1241,7 @@ mod tests {
                 ),
                 StatusResult::Full(_) => panic!("expected summary status"),
                 StatusResult::Dashboard(_) => panic!("expected summary status"),
+                StatusResult::Global(_) => panic!("expected summary status"),
             }
             assert_eq!(
                 fs::read_to_string(&registration).expect("registration after status"),

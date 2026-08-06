@@ -1267,9 +1267,11 @@ fn ensure_sigkill_reaped(scope: &str, owner_pid: u32, survivors: &[u32]) -> Resu
     if survivors.is_empty() {
         return Ok(());
     }
-    let owner = (owner_pid != 0)
-        .then(|| format!(" {owner_pid}"))
-        .unwrap_or_default();
+    let owner = if owner_pid != 0 {
+        format!(" {owner_pid}")
+    } else {
+        String::new()
+    };
     Err(Error::internal_unexpected(format!(
         "{scope}{owner} survived SIGKILL escalation; surviving pids: {}",
         join_pids(survivors)
@@ -1562,6 +1564,7 @@ mod process_tree_tests {
         let error = ensure_sigkill_reaped("owned process tree", 42, &[7, 9])
             .expect_err("survivors must fail cleanup");
         assert!(error.message.contains("SIGKILL escalation"));
+        assert!(error.message.contains("owned process tree 42"));
         assert!(error.message.contains("7 9"));
     }
 

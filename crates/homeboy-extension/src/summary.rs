@@ -8,6 +8,7 @@ use super::{evaluate_core_compatibility, CoreCompatibilityReport};
 use homeboy_core::extension_store::{
     discover_extensions, is_extension_linked, DiscoveredExtension, ExtensionManifestFailure,
 };
+use homeboy_extension_contract::NotificationTransportDescriptor;
 
 /// Summary of an extension for list views.
 #[derive(Debug, Clone, Serialize)]
@@ -42,6 +43,8 @@ pub struct ExtensionSummary {
     pub cli_display_name: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<ActionSummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notification_transports: Vec<NotificationTransportDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_setup: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -100,6 +103,11 @@ pub fn list_summaries_with(
                         action_type: a.action_type.clone(),
                     })
                     .collect();
+                let notification_transports = ext
+                    .notification_transports
+                    .iter()
+                    .map(|transport| transport.descriptor())
+                    .collect();
 
                 let has_setup = ext
                     .runtime()
@@ -150,6 +158,7 @@ pub fn list_summaries_with(
                     cli_tool,
                     cli_display_name,
                     actions,
+                    notification_transports,
                     has_setup,
                     has_ready_check,
                 }
@@ -188,6 +197,7 @@ fn invalid_summary(failure: ExtensionManifestFailure) -> ExtensionSummary {
         cli_tool: None,
         cli_display_name: None,
         actions: Vec::new(),
+        notification_transports: Vec::new(),
         has_setup: None,
         has_ready_check: None,
     }
