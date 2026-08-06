@@ -53,7 +53,10 @@ fn deferred_staging_emits_only_durable_run_commands() {
         output["runner_job_id"],
         "00000000-0000-0000-0000-000000000001"
     );
-    assert!(output.get("runner_staging_id").is_none());
+    assert_eq!(
+        output["runner_staging_id"],
+        "00000000-0000-0000-0000-000000000001"
+    );
     assert!(output.get("controller_job_id").is_none());
     assert!(output["retrieval_commands"].get("controller_job").is_none());
     assert_eq!(

@@ -2298,6 +2298,10 @@ pub(crate) fn detached_staging_submission_output(
             output["status"] = serde_json::json!("staged");
             output["runner_job_id"] =
                 serde_json::json!(receipt.runner_receipt.handoff.runner_job_id);
+            // Older clients consumed this name before staging admitted a real
+            // runner daemon job. Keep it additive while they migrate.
+            output["runner_staging_id"] =
+                serde_json::json!(receipt.runner_receipt.handoff.runner_job_id);
             output["controller_projection"] = serde_json::json!(receipt.controller_projection);
         }
     }

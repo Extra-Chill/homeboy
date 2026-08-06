@@ -9,6 +9,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::Path;
 
 use homeboy_core::{Error, Result};
 
@@ -56,6 +58,125 @@ pub struct SourceArtifactTransfer {
 }
 
 impl SourceArtifactTransfer {
+    /// Packages a controller-owned source tree into the versioned runner
+    /// manifest. Traversal is lexical and deterministic; links and non-files
+    /// are refused rather than crossing a controller filesystem boundary.
+    pub fn from_directory(artifact_id: impl Into<String>, root: &Path) -> Result<Self> {
+        fn collect(
+            root: &Path,
+            directory: &Path,
+            files: &mut BTreeMap<String, Vec<u8>>,
+        ) -> Result<()> {
+            let mut entries = fs::read_dir(directory)
+                .map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(directory.display().to_string()))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(directory.display().to_string()))
+                })?;
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let path = entry.path();
+                let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                })?;
+                if metadata.file_type().is_symlink() || !(metadata.is_file() || metadata.is_dir()) {
+                    return Err(Error::validation_invalid_argument(
+                        "source_path",
+                        "source package accepts only regular files and directories",
+                        Some(path.display().to_string()),
+                        None,
+                    ));
+                }
+                if metadata.is_dir() {
+                    collect(root, &path, files)?;
+                    continue;
+                }
+                if metadata.len() > MAX_SOURCE_PACKAGE_FILE_BYTES {
+                    return Err(Error::validation_invalid_argument(
+                        "source_path",
+                        "source package file exceeds the configured size bound",
+                        Some(path.display().to_string()),
+                        None,
+                    ));
+                }
+                let relative = path.strip_prefix(root).expect("walk remains under root");
+                let relative = relative.to_string_lossy().replace('\\', "/");
+                let bytes = fs::read(&path).map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                })?;
+                files.insert(relative, bytes);
+                if files.len() > MAX_SOURCE_PACKAGE_ENTRIES
+                    || files.values().map(|bytes| bytes.len() as u64).sum::<u64>()
+                        > MAX_SOURCE_ARTIFACT_BYTES
+                {
+                    return Err(Error::validation_invalid_argument(
+                        "source_path",
+                        "source package exceeds configured entry or total size bounds",
+                        Some(root.display().to_string()),
+                        None,
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        if !root.is_dir() {
+            return Err(Error::validation_invalid_argument(
+                "source_path",
+                "source package root must be a readable directory",
+                Some(root.display().to_string()),
+                None,
+            ));
+        }
+        let mut files = BTreeMap::new();
+        collect(root, root, &mut files)?;
+        if files.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "source_path",
+                "source package root must contain at least one regular file",
+                Some(root.display().to_string()),
+                None,
+            ));
+        }
+        let entries = files
+            .iter()
+            .map(|(path, bytes)| SourcePackageEntry {
+                path: path.clone(),
+                sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+                size_bytes: bytes.len() as u64,
+            })
+            .collect::<Vec<_>>();
+        let package = serde_json::to_vec(
+            &files
+                .iter()
+                .map(|(path, bytes)| {
+                    (
+                        path,
+                        base64::engine::general_purpose::STANDARD.encode(bytes),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>(),
+        )
+        .expect("source package serializes");
+        let transfer = Self {
+            schema: SOURCE_ARTIFACT_TRANSFER_SCHEMA.to_string(),
+            artifact_id: artifact_id.into(),
+            sha256: format!("sha256:{:x}", Sha256::digest(&package)),
+            size_bytes: package.len() as u64,
+            content_base64: base64::engine::general_purpose::STANDARD.encode(package),
+            package: SourcePackageManifest {
+                schema: "homeboy/source-package-manifest/v1".into(),
+                format: "homeboy/source-package-json/v1".into(),
+                extraction_root: "workspace".into(),
+                entries,
+            },
+        };
+        transfer.decode_verified()?;
+        Ok(transfer)
+    }
+
     pub fn from_bytes(artifact_id: impl Into<String>, bytes: &[u8]) -> Self {
         let package = serde_json::to_vec(&BTreeMap::from([(
             "source.bin",
@@ -679,5 +800,30 @@ pub(crate) mod tests_support {
         assert_eq!(error.code, homeboy_core::ErrorCode::RunnerCapabilityMissing);
         assert_eq!(incompatible.calls, 0);
         assert_eq!(incompatible.provider_budget, 0);
+    }
+
+    #[test]
+    fn source_tree_package_is_deterministic_and_preserves_manifest_entries() {
+        let source = tempfile::tempdir().expect("source");
+        std::fs::create_dir(source.path().join("nested")).expect("nested");
+        std::fs::write(source.path().join("z.txt"), b"z").expect("z");
+        std::fs::write(source.path().join("nested/a.txt"), b"a").expect("a");
+
+        let first =
+            SourceArtifactTransfer::from_directory("source-1", source.path()).expect("pack");
+        let second =
+            SourceArtifactTransfer::from_directory("source-1", source.path()).expect("repack");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first
+                .package
+                .entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            ["nested/a.txt", "z.txt"]
+        );
+        first.decode_verified().expect("verified package");
     }
 }

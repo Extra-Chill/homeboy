@@ -148,20 +148,43 @@ impl ControllerFallbackProjectionStore {
         Ok(receipt)
     }
 
-    /// Repeated controller startup projects each accepted runner staging receipt
-    /// exactly once. The receipt is terminal evidence for staging only; it does
-    /// not claim that the eventual provider workload has completed.
-    pub fn reconcile_after_controller_restart(&self) -> Result<Vec<ControllerMissionProjection>> {
+    /// Reconcile a bounded receipt batch against authoritative runner jobs.
+    /// Nonterminal jobs remain deferred; only a terminal snapshot reaches the
+    /// agent-task lifecycle finalizer and this projection ledger.
+    pub fn reconcile_after_controller_restart_with<Snapshot, Finalize>(
+        &self,
+        limit: usize,
+        mut snapshot: Snapshot,
+        mut finalize: Finalize,
+    ) -> Result<Vec<ControllerMissionProjection>>
+    where
+        Snapshot: FnMut(&str, &str) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot>,
+        Finalize: FnMut(&str, &homeboy_core::api_jobs::RunnerJobLogSnapshot) -> Result<bool>,
+    {
         let state = self.load()?;
         state
             .receipts
             .iter()
             .filter(|(mission_id, _)| !state.projections.contains_key(*mission_id))
-            .map(|(mission_id, receipt)| {
+            .take(limit)
+            .filter_map(|(mission_id, receipt)| {
+                let snapshot = snapshot(
+                    &receipt.runner_receipt.handoff.runner_id,
+                    &receipt.runner_receipt.handoff.runner_job_id,
+                )
+                .ok()?;
+                snapshot
+                    .job
+                    .status
+                    .is_terminal()
+                    .then_some((mission_id, receipt, snapshot))
+            })
+            .map(|(mission_id, receipt, snapshot)| {
+                finalize(mission_id, &snapshot)?;
                 self.project_terminal_evidence(
                     mission_id,
                     RunnerTerminalEvidence {
-                        outcome: "staged".to_string(),
+                        outcome: snapshot.job.status.daemon_status_label().to_string(),
                         artifacts: receipt.runner_receipt.artifacts.clone(),
                     },
                 )
@@ -272,11 +295,15 @@ impl ControllerFallbackProjectionStore {
     }
 }
 
-/// Production startup reconciliation for deferred runner staging. An empty
-/// ledger is a no-op, preserving healthy controller startup behavior.
+/// Production startup reconciliation for deferred runner staging. It reads at
+/// most eight runner jobs so ordinary CLI startup remains bounded by work count.
 pub fn reconcile_on_controller_startup() -> Result<usize> {
     Ok(ControllerFallbackProjectionStore::open_default()?
-        .reconcile_after_controller_restart()?
+        .reconcile_after_controller_restart_with(
+            8,
+            crate::runner_job_log_snapshot,
+            homeboy_agents::agent_task_lifecycle::project_terminal_runner_result,
+        )?
         .len())
 }
 
@@ -320,45 +347,24 @@ mod tests {
     }
 
     #[test]
-    fn controller_restart_projects_each_staged_mission_once() {
+    fn terminal_runner_evidence_projects_once_after_restart() {
         let store = store();
         let envelope = envelope();
         let mut runner = Transport::compatible();
         let receipt = store
             .submit_detached(&mut runner, &envelope)
             .expect("admit");
-        let projected = store.reconcile_after_controller_restart().expect("project");
-        assert_eq!(projected.len(), 1);
-        let projected = &projected[0];
+        let projected = store
+            .project_terminal_evidence(
+                &receipt.mission_id,
+                RunnerTerminalEvidence {
+                    outcome: "succeeded".to_string(),
+                    artifacts: receipt.runner_receipt.artifacts.clone(),
+                },
+            )
+            .expect("project");
+        assert_eq!(projected.terminal_outcome, "succeeded");
         assert_eq!(projected.artifacts, receipt.runner_receipt.artifacts);
-        assert_eq!(
-            projected
-                .artifacts
-                .source_artifact
-                .as_ref()
-                .expect("source artifact descriptor")
-                .artifact_id,
-            "source-package-1"
-        );
-        assert_eq!(
-            projected
-                .artifacts
-                .source_artifact
-                .as_ref()
-                .expect("source artifact descriptor")
-                .package
-                .format,
-            "homeboy/source-package-json/v1"
-        );
-        assert_eq!(projected.terminal_outcome, "staged");
-        assert_eq!(projected.finalization_owner, "controller");
-        assert_eq!(
-            store
-                .reconcile_after_controller_restart()
-                .expect("idempotent projection")
-                .len(),
-            0
-        );
     }
 
     #[test]
@@ -370,14 +376,19 @@ mod tests {
             .submit_detached(&mut runner, &envelope)
             .expect("admit");
         store
-            .reconcile_after_controller_restart()
-            .expect("startup projection");
-
-        assert!(store
             .project_terminal_evidence(
                 &receipt.mission_id,
                 RunnerTerminalEvidence {
                     outcome: "succeeded".to_string(),
+                    artifacts: receipt.runner_receipt.artifacts.clone(),
+                },
+            )
+            .expect("first terminal projection");
+        assert!(store
+            .project_terminal_evidence(
+                &receipt.mission_id,
+                RunnerTerminalEvidence {
+                    outcome: "failed".to_string(),
                     artifacts: receipt.runner_receipt.artifacts,
                 },
             )

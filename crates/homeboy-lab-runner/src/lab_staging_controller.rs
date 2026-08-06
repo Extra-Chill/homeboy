@@ -1092,7 +1092,7 @@ fn submit_deferred_runner_staging(
         request,
         request.local_output_file.is_some(),
     )?;
-    let _source_path = recipe.source_path.take().ok_or_else(|| {
+    let source_path = recipe.source_path.take().ok_or_else(|| {
         Error::validation_invalid_argument(
             "source_path",
             "controller fallback requires a source path to seal before detached staging",
@@ -1116,7 +1116,7 @@ fn submit_deferred_runner_staging(
     })?;
     let digest = format!("sha256:{}", content_hash::sha256_hex(&sealed_payload));
     let source_artifact =
-        SourceArtifactTransfer::from_bytes(format!("source-{run_id}"), &sealed_payload);
+        SourceArtifactTransfer::from_directory(format!("source-{run_id}"), &source_path)?;
     let handoff = DirectLabHandoffEnvelope::new(
         homeboy_product_identity::build_identity().display,
         recipe,
