@@ -9,6 +9,7 @@
 use clap::{Arg, ArgAction, Args, Command, CommandFactory};
 
 use crate::cli_surface::Cli;
+use crate::command_capability::argv_separator_index;
 use homeboy::core::component::{self, Component};
 use homeboy::core::scope::{Scope, ScopeKind};
 
@@ -91,6 +92,16 @@ pub(crate) fn filter_passthrough_args(command: PassthroughCommand, args: &[Strin
 }
 
 /// Mark explicit passthrough arguments so Homeboy-owned flag filtering preserves them.
+///
+/// This is the other half of the same boundary `homeboy_owned_args` answers:
+/// that function names the prefix Homeboy may read, this one names where the
+/// forwarded suffix begins. Both resolve through [`argv_separator_index`] so
+/// there is one rule about the bare separator rather than a private rescan in
+/// each (#11755).
+///
+/// Only the FIRST separator is marked. A later one is the runner's own
+/// argument — `homeboy bench comp -- sh -c -- inner` — and marking it injected
+/// the sentinel into the argv Homeboy forwards verbatim.
 pub(crate) fn mark_explicit_passthrough(args: Vec<String>) -> Vec<String> {
     let explicit_passthrough = matches!(args.get(1).map(String::as_str), Some("bench"))
         || matches!(
@@ -104,15 +115,12 @@ pub(crate) fn mark_explicit_passthrough(args: Vec<String>) -> Vec<String> {
         return args;
     }
 
-    let mut result = Vec::new();
-    for arg in args.iter() {
-        if arg == "--" {
-            result.push(arg.clone());
-            result.push(EXPLICIT_PASSTHROUGH_SENTINEL.to_string());
-            continue;
-        }
-        result.push(arg.clone());
-    }
+    let Some(separator) = argv_separator_index(&args) else {
+        return args;
+    };
+
+    let mut result = args;
+    result.insert(separator + 1, EXPLICIT_PASSTHROUGH_SENTINEL.to_string());
     result
 }
 
@@ -656,6 +664,97 @@ mod normalize_tests {
         assert_eq!(
             super::filter_passthrough_args(super::PassthroughCommand::Test, &args),
             argv(&["--coverage", "--baseline", "runner-value"])
+        );
+    }
+
+    #[test]
+    fn only_the_first_separator_is_marked_so_a_nested_one_reaches_the_runner() {
+        // A second separator is the runner's own argument. Marking every one
+        // of them injected the sentinel into the argv Homeboy forwards
+        // verbatim, so `sh -c -- inner` reached the runner with a homeboy
+        // token wedged into it.
+        let input = argv(&[
+            "homeboy", "bench", "my-comp", "--", "sh", "-c", "--", "inner",
+        ]);
+        let normalized = normalize(input);
+
+        assert_eq!(
+            normalized,
+            argv(&[
+                "homeboy",
+                "bench",
+                "my-comp",
+                "--",
+                EXPLICIT_PASSTHROUGH_SENTINEL,
+                "sh",
+                "-c",
+                "--",
+                "inner",
+            ])
+        );
+
+        // What clap hands the `last = true` field, filtered: the runner's
+        // command, nested separator intact and sentinel-free.
+        let passthrough: Vec<String> = normalized
+            .iter()
+            .skip_while(|arg| arg.as_str() != "--")
+            .skip(1)
+            .cloned()
+            .collect();
+        assert_eq!(
+            super::filter_passthrough_args(super::PassthroughCommand::Bench, &passthrough),
+            argv(&["sh", "-c", "--", "inner"])
+        );
+    }
+
+    #[test]
+    fn review_test_forwards_a_runner_owned_format_flag_verbatim() {
+        // #11555 recorded that `test` could not adopt `--format` because the
+        // owned-flag filter would swallow libtest's own `--format <fmt>`.
+        // The explicit separator is what prevents that, and it covers
+        // `review test` exactly as it covers `bench`.
+        let normalized = normalize(argv(&[
+            "homeboy",
+            "review",
+            "test",
+            "my-comp",
+            "--json-summary",
+            "--",
+            "--format",
+            "json",
+            "--test-threads",
+            "1",
+        ]));
+
+        let passthrough: Vec<String> = normalized
+            .iter()
+            .skip_while(|arg| arg.as_str() != "--")
+            .skip(1)
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            super::filter_passthrough_args(super::PassthroughCommand::Test, &passthrough),
+            argv(&["--format", "json", "--test-threads", "1"])
+        );
+    }
+
+    #[test]
+    fn without_the_separator_the_filter_still_strips_a_command_owned_flag() {
+        // The other side of the same contract, on a flag the command really
+        // does own today: `bench` declares `--format` via `PresentationArgs`.
+        // Unmarked, the filter removes it and the value it consumes — which is
+        // exactly why the separator has to be marked, and exactly what would
+        // have happened to libtest's `--format` without it.
+        let unmarked = argv(&["--format", "json"]);
+        assert!(
+            super::filter_passthrough_args(super::PassthroughCommand::Bench, &unmarked).is_empty()
+        );
+
+        let marked = argv(&[EXPLICIT_PASSTHROUGH_SENTINEL, "--format", "json"]);
+        assert_eq!(
+            super::filter_passthrough_args(super::PassthroughCommand::Bench, &marked),
+            argv(&["--format", "json"])
         );
     }
 }
@@ -1298,12 +1397,20 @@ pub enum DetailLevel {
 /// Still on their own vocabulary, and why:
 ///
 /// * `--json-summary` / `--summary` (`audit`, `lint`, `test`, `trace`,
-///   `bench`'s run group) are the *detail* axis, not the format axis. `test`
-///   in particular cannot take a `--format` flag yet: `filter_passthrough_args`
-///   strips homeboy-owned flags from `homeboy test -- <runner args>`, and the
-///   test path has no explicit-passthrough sentinel, so declaring `--format`
-///   here would silently swallow libtest's own `--format <fmt>`. (`bench` is
-///   safe because `mark_explicit_passthrough` marks `homeboy bench -- ...`.)
+///   `bench`'s run group) are the *detail* axis, not the format axis.
+///
+///   `test` was recorded here as unable to take a `--format` flag at all, on
+///   the grounds that `filter_passthrough_args` strips homeboy-owned flags from
+///   `homeboy review test -- <runner args>` and the test path had no
+///   explicit-passthrough sentinel, so declaring `--format` would swallow
+///   libtest's own `--format <fmt>`. That is no longer true, and #11755 is
+///   where it was checked: `mark_explicit_passthrough` marks
+///   `("review", "test")` exactly as it marks `bench`, and
+///   `filter_passthrough_args` returns everything after that sentinel verbatim.
+///   `review_test_forwards_a_runner_owned_format_flag_verbatim` pins the whole
+///   path end to end. Adopting the group on `test` is now a presentation
+///   decision (which of `--json-summary`'s two senses `--detail` folds onto),
+///   not a passthrough hazard.
 /// * `lint` declares `--summary` *and* `--json-summary` as separate fields
 ///   that `review` couples with `|=`; collapsing them is a behavior decision.
 /// * `--full` (`status`, `agent-task`), `--compact` (`runner`), `--format`
