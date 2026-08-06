@@ -475,7 +475,7 @@ fn run_fix(
 
     let lint_options = LintSourceOptions {
         selected_files,
-        summary: args.summary,
+        summary: args.summary || args.json_summary,
         file: args.file.clone(),
         glob: args.glob.clone(),
         sniff_filters: args.sniff_filters.to_lint_sniff_filters(),

@@ -10,8 +10,8 @@ use homeboy_core::finding::HomeboyFinding;
 use std::path::Path;
 
 #[test]
-fn lint_summary_counts_categories_and_caps_top_findings() {
-    let findings = (0..25)
+fn lint_summary_counts_categories_and_omits_individual_findings() {
+    let findings = (0..1_000)
         .map(|index| {
             let category = if index % 2 == 0 {
                 "style"
@@ -36,12 +36,18 @@ fn lint_summary_counts_categories_and_caps_top_findings() {
     );
     let summary = build_lint_summary(&findings, &producers, 1);
 
-    assert_eq!(summary.total_findings, 25);
-    assert_eq!(summary.categories.get("style"), Some(&13));
-    assert_eq!(summary.categories.get("correctness"), Some(&12));
-    assert_eq!(summary.top_findings.len(), 20);
-    assert_eq!(summary.producer_summaries[0].finding_count, 25);
+    assert_eq!(summary.total_findings, 1_000);
+    assert_eq!(summary.categories.get("style"), Some(&500));
+    assert_eq!(summary.categories.get("correctness"), Some(&500));
+    assert!(summary.top_findings.is_empty());
+    assert_eq!(summary.producer_summaries[0].finding_count, 1_000);
     assert_eq!(summary.exit_code, 1);
+
+    let rendered = serde_json::to_value(&summary).expect("summary serializes");
+    assert!(
+        rendered.get("top_findings").is_none(),
+        "a compact summary must not serialize individual findings"
+    );
 }
 
 #[test]

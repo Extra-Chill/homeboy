@@ -189,7 +189,6 @@ pub fn run_main_lint_workflow(
                 "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
                 "1",
             )
-            .passthrough(!args.json_summary)
             .run()?;
         let stdout_artifact = write_command_artifact(run_dir, 0, "stdout", &output.stdout)?;
         let stderr_artifact = write_command_artifact(run_dir, 0, "stderr", &output.stderr)?;
@@ -503,7 +502,6 @@ fn run_scoped_lint_runs(
                 "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
                 "1",
             )
-            .passthrough(!args.json_summary)
             .run()?;
         let stdout_artifact = write_command_artifact(run_dir, index, "stdout", &output.stdout)?;
         let stderr_artifact = write_command_artifact(run_dir, index, "stderr", &output.stderr)?;
