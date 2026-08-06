@@ -139,6 +139,18 @@ struct CapacityReservationRecord {
     lease_expires_unix_seconds: u64,
 }
 
+struct CapacityReservationInput<'a> {
+    ledger: &'a Path,
+    root: &'a Path,
+    filesystem: &'a str,
+    subject: &'a str,
+    budget: DiskBudget,
+    demand: CapacityDemand,
+    reserve: CapacityReserve,
+    owner: (u32, String),
+    now: u64,
+}
+
 /// Reserve projected materialization demand before the first large write.
 ///
 /// Capacity is compared after subtracting already-reserved capacity and this
@@ -159,33 +171,25 @@ pub fn reserve_projected_capacity(
         subject,
         "capacity is not measurable on this platform",
     );
-    reserve_projected_capacity_in(
-        &ledger,
-        &root,
-        &filesystem,
+    reserve_projected_capacity_in(CapacityReservationInput {
+        ledger: &ledger,
+        root: &root,
+        filesystem: &filesystem,
         subject,
         budget,
         demand,
         reserve,
-        owner_evidence(std::process::id()),
-        now_seconds(),
-    )
+        owner: owner_evidence(std::process::id()),
+        now: now_seconds(),
+    })
 }
 
 fn reserve_projected_capacity_in(
-    ledger: &Path,
-    root: &Path,
-    filesystem: &str,
-    subject: &str,
-    budget: DiskBudget,
-    demand: CapacityDemand,
-    reserve: CapacityReserve,
-    owner: (u32, String),
-    now: u64,
+    input: CapacityReservationInput<'_>,
 ) -> Result<CapacityReservation> {
-    let lock = lock_capacity_ledger(ledger)?;
-    let mut records = read_capacity_reservations(ledger)?;
-    records.retain(|record| reservation_is_live(record, now));
+    let lock = lock_capacity_ledger(input.ledger)?;
+    let mut records = read_capacity_reservations(input.ledger)?;
+    records.retain(|record| reservation_is_live(record, input.now));
     let held = records
         .iter()
         .fold(CapacityDemand::default(), |total, record| {
@@ -194,40 +198,41 @@ fn reserve_projected_capacity_in(
                 inodes: record.inodes,
             })
         });
-    let projected_bytes = budget.available_bytes.map(|available| {
+    let projected_bytes = input.budget.available_bytes.map(|available| {
         available
             .saturating_sub(held.bytes)
-            .saturating_sub(demand.bytes)
+            .saturating_sub(input.demand.bytes)
     });
-    let projected_inodes = budget.available_inodes.map(|available| {
+    let projected_inodes = input.budget.available_inodes.map(|available| {
         available
             .saturating_sub(held.inodes)
-            .saturating_sub(demand.inodes)
+            .saturating_sub(input.demand.inodes)
     });
-    let bytes_ok = projected_bytes.is_some_and(|available| available >= reserve.bytes);
-    let inodes_ok = projected_inodes.is_some_and(|available| available >= reserve.inodes);
+    let bytes_ok = projected_bytes.is_some_and(|available| available >= input.reserve.bytes);
+    let inodes_ok = projected_inodes.is_some_and(|available| available >= input.reserve.inodes);
     if !bytes_ok || !inodes_ok {
         let mut error = Error::storage_exhausted_detailed(StorageExhaustedDetails {
             error: format!(
-                "{subject} projected materialization would breach configured capacity floors"
+                "{} projected materialization would breach configured capacity floors",
+                input.subject
             ),
-            context: Some(format!("admission before {subject}")),
-            path: Some(root.display().to_string()),
-            available_bytes: budget.available_bytes,
-            available_inodes: budget.available_inodes,
-            reserve_bytes: Some(reserve.bytes),
-            reserve_inodes: Some(reserve.inodes),
+            context: Some(format!("admission before {}", input.subject)),
+            path: Some(input.root.display().to_string()),
+            available_bytes: input.budget.available_bytes,
+            available_inodes: input.budget.available_inodes,
+            reserve_bytes: Some(input.reserve.bytes),
+            reserve_inodes: Some(input.reserve.inodes),
         });
         error.details["projected_bytes"] = serde_json::json!(projected_bytes);
         error.details["projected_inodes"] = serde_json::json!(projected_inodes);
-        error.details["demand_bytes"] = serde_json::json!(demand.bytes);
-        error.details["demand_inodes"] = serde_json::json!(demand.inodes);
+        error.details["demand_bytes"] = serde_json::json!(input.demand.bytes);
+        error.details["demand_inodes"] = serde_json::json!(input.demand.inodes);
         error.details["reserved_bytes"] = serde_json::json!(held.bytes);
         error.details["reserved_inodes"] = serde_json::json!(held.inodes);
         error.details["dominant_reclaimable_categories"] = serde_json::json!(["build_output"]);
         let command = format!(
             "homeboy cleanup artifacts --path {} --sort size --limit 100 --apply",
-            crate::engine::shell::quote_arg(&root.display().to_string())
+            crate::engine::shell::quote_arg(&input.root.display().to_string())
         );
         error.details["cleanup_commands"] = serde_json::json!([command.clone()]);
         error = error.with_hint(format!(
@@ -238,19 +243,19 @@ fn reserve_projected_capacity_in(
     let id = uuid::Uuid::new_v4().to_string();
     records.push(CapacityReservationRecord {
         id: id.clone(),
-        filesystem: filesystem.to_string(),
-        root: root.display().to_string(),
-        bytes: demand.bytes,
-        inodes: demand.inodes,
-        owner_pid: owner.0,
-        owner_process: owner.1,
-        created_unix_seconds: now,
-        lease_expires_unix_seconds: now.saturating_add(RESERVATION_TTL.as_secs()),
+        filesystem: input.filesystem.to_string(),
+        root: input.root.display().to_string(),
+        bytes: input.demand.bytes,
+        inodes: input.demand.inodes,
+        owner_pid: input.owner.0,
+        owner_process: input.owner.1,
+        created_unix_seconds: input.now,
+        lease_expires_unix_seconds: input.now.saturating_add(RESERVATION_TTL.as_secs()),
     });
-    write_capacity_reservations(ledger, &records)?;
+    write_capacity_reservations(input.ledger, &records)?;
     drop(lock);
     Ok(CapacityReservation {
-        ledger: ledger.to_path_buf(),
+        ledger: input.ledger.to_path_buf(),
         id,
     })
 }
@@ -287,6 +292,9 @@ fn lock_capacity_ledger(ledger: &Path) -> Result<File> {
         .create(true)
         .read(true)
         .write(true)
+        // Each client reopens this lock before reading and publishing the ledger.
+        // Retaining its contents preserves that shared synchronization point.
+        .truncate(false)
         .open(&lock_path)
         .map_err(|error| {
             Error::internal_io(
@@ -593,17 +601,18 @@ mod tests {
         demand: CapacityDemand,
         reserve: CapacityReserve,
     ) -> Result<CapacityReservation> {
-        reserve_projected_capacity_in(
-            &path.join("capacity-reservations.json"),
-            path,
-            "fixture-filesystem",
+        let ledger = path.join("capacity-reservations.json");
+        reserve_projected_capacity_in(CapacityReservationInput {
+            ledger: &ledger,
+            root: path,
+            filesystem: "fixture-filesystem",
             subject,
             budget,
             demand,
             reserve,
-            owner_evidence(std::process::id()),
-            now_seconds(),
-        )
+            owner: owner_evidence(std::process::id()),
+            now: now_seconds(),
+        })
     }
 
     fn budget(available_bytes: Option<u64>, available_inodes: Option<u64>) -> DiskBudget {
