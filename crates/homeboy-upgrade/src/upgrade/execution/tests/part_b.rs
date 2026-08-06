@@ -821,6 +821,7 @@ fn binary_404_upgrade_error_suggests_source_fallback() {
     let err = upgrade_failure_error(
         InstallMethod::Binary,
         "curl: (22) The requested URL returned error: 404",
+        None,
     );
 
     assert!(err
@@ -833,6 +834,63 @@ fn binary_404_upgrade_error_suggests_source_fallback() {
         .any(|hint| hint.message.contains("--source-path")));
 }
 
+/// The reported 404 named neither the URL it fetched nor the triple it looked
+/// for, so diagnosing it required listing release assets by hand (#11750).
+#[test]
+fn binary_404_upgrade_error_names_the_asset_url_and_target_triple() {
+    let release = SelectedRelease {
+        tag: "v0.333.0".to_string(),
+        version: "0.333.0".to_string(),
+        target: Some("x86_64-unknown-linux-gnu".to_string()),
+    };
+
+    let err = upgrade_failure_error(
+        InstallMethod::Binary,
+        "curl: (22) The requested URL returned error: 404",
+        Some(&release),
+    );
+
+    let hints: Vec<&str> = err.hints.iter().map(|hint| hint.message.as_str()).collect();
+    assert!(
+        hints
+            .iter()
+            .any(|hint| hint.contains("x86_64-unknown-linux-gnu")),
+        "404 must name the target triple it looked for: {hints:?}"
+    );
+    assert!(
+        hints.iter().any(|hint| hint.contains(
+            "https://github.com/Extra-Chill/homeboy/releases/download/v0.333.0/homeboy-x86_64-unknown-linux-gnu.tar.xz"
+        )),
+        "404 must name the resolved asset URL: {hints:?}"
+    );
+    assert!(
+        hints.iter().any(|hint| hint.contains("--version <TAG>")),
+        "404 must offer the pin as a way out: {hints:?}"
+    );
+}
+
+/// An unresolvable target must be reported as unresolved rather than papered
+/// over with a guessed triple in the diagnostic.
+#[test]
+fn binary_404_upgrade_error_admits_an_undetermined_target() {
+    let release = SelectedRelease {
+        tag: "v0.333.0".to_string(),
+        version: "0.333.0".to_string(),
+        target: None,
+    };
+
+    let err = upgrade_failure_error(
+        InstallMethod::Binary,
+        "curl: (22) The requested URL returned error: 404",
+        Some(&release),
+    );
+
+    assert!(err
+        .hints
+        .iter()
+        .any(|hint| hint.message.contains("could not be determined")));
+}
+
 #[test]
 fn missing_tool_upgrade_error_suggests_source_fallback() {
     let err = upgrade_failure_error(
@@ -841,6 +899,7 @@ fn missing_tool_upgrade_error_suggests_source_fallback() {
             "sh: 1: {}: not found",
             defaults::secondary_install_method_key()
         ),
+        None,
     );
 
     assert!(err

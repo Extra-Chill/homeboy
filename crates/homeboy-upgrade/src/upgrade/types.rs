@@ -64,9 +64,32 @@ pub enum RunnerConvergenceDisposition {
 pub struct VersionCheck {
     pub command: String,
     pub current_version: String,
+    /// The release an upgrade would actually install. For asset-installed
+    /// methods this is the newest release carrying an artifact for
+    /// [`Self::target`] — not merely the newest tag, which may be
+    /// uninstallable here (#11750). `None` when the check could not reach
+    /// GitHub, or when no published release ships this target's artifact.
     pub latest_version: Option<String>,
     pub update_available: bool,
     pub install_method: InstallMethod,
+    /// Running target triple, or `None` when the OS/architecture pair is not
+    /// one Homeboy publishes assets for. `None` means asset availability was
+    /// *not* verified, which is a different claim from "no asset exists".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Newest published release, whatever its asset inventory. Equal to
+    /// `latest_version` on a healthy release train; they diverge exactly when
+    /// the newest release cannot be installed on this target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newest_version: Option<String>,
+    /// Releases newer than `latest_version` that were passed over because they
+    /// ship no artifact for `target`, newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uninstallable_versions: Vec<String>,
+    /// Plain-language explanation when `latest_version` is not the newest
+    /// release, or when nothing installable was found at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
