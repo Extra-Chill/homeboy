@@ -26,7 +26,7 @@ pub use json_ops::collect_array_fields;
 pub use json_ops::merge_config;
 pub(crate) use json_ops::remove_config;
 pub use json_pointer::value_type_name;
-pub use json_pointer::{remove_json_pointer, set_json_pointer};
+pub use json_pointer::{get_json_pointer, remove_json_pointer, set_json_pointer};
 
 /// Bound on how long a thread will wait for the config lock before failing with
 /// an attributable error. `0` restores the historical unbounded wait.
