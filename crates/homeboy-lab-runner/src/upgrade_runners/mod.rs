@@ -63,6 +63,7 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
         expected_controller_identity: Option<&str>,
         runner_targets: &[String],
         extension_updates: &[ExtensionUpgradeEntry],
+        promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
     ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)> {
         upgrade_configured_runners_with_explicit_source_path(
             force,
@@ -72,6 +73,7 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
             expected_controller_identity,
             runner_targets,
             extension_updates,
+            promotion_lease,
         )
     }
 
