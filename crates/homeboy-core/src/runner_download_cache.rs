@@ -68,6 +68,24 @@
 //! And a marker write that fails *removes* the marker rather than leaving a
 //! stale one, so the failure mode is "untagged" (retain), never "internal"
 //! (reclaimable).
+//!
+//! ## The untagged backlog, and the opt-in that drains it (#11128)
+//!
+//! Intent tagging was introduced part way through this cache's life, so the
+//! "absent" row above is not a rare failure mode: *every* directory written
+//! before tagging existed sits in it permanently. Retaining forever is the
+//! right default and the wrong terminal state — the backlog only grows.
+//!
+//! [`RunnerDownloadReclaimScope::IncludeUntagged`] is the explicit operator
+//! opt-in that makes that one row eligible, and nothing else moves with it:
+//!
+//! - the default scope is unchanged, so age alone still licenses nothing;
+//! - `operator_pull` is still never reclaimable — the flag is about *unrecorded*
+//!   intent, not about overriding a recorded operator claim;
+//! - `unreadable` still retains, because a marker that exists but will not parse
+//!   may be an `operator_pull` whose bytes on disk went bad;
+//! - the age floor and the liveness veto are untouched. The opt-in widens *what*
+//!   is eligible, never *how old* it must be or *who* may still claim it.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -158,6 +176,24 @@ fn default_marker_schema() -> String {
     RUNNER_DOWNLOAD_MARKER_SCHEMA.to_string()
 }
 
+/// How much of the untagged backlog a sweep is allowed to consider.
+///
+/// This is a *scope*, not an override: every value here still routes through
+/// the same age floor and the same liveness veto, and no value releases an
+/// `operator_pull` or an unreadable marker. Modelled as an enum rather than a
+/// bare `bool` so the widened case has to be named at every call site.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RunnerDownloadReclaimScope {
+    /// The #10585 default: only an explicit `internal_fetch` is reclaimable.
+    /// Untagged bytes fail closed and are treated as operator-owned.
+    #[default]
+    TaggedInternalOnly,
+    /// The `--include-untagged` opt-in (#11128): an *absent* marker also
+    /// becomes eligible, so caches written before intent tagging existed can
+    /// finally be reaped. Recorded operator claims are still honoured.
+    IncludeUntagged,
+}
+
 /// What the marker says about one cache directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunnerDownloadOwnership {
@@ -171,10 +207,24 @@ pub enum RunnerDownloadOwnership {
 }
 
 impl RunnerDownloadOwnership {
-    /// The single question the cleanup predicate asks. Only an explicit
-    /// `internal_fetch` releases anything.
+    /// The single question the cleanup predicate asks, under the default scope.
+    /// Only an explicit `internal_fetch` releases anything.
     pub fn is_reclaimable(self) -> bool {
-        matches!(self, Self::Tagged(RunnerDownloadIntent::InternalFetch))
+        self.is_reclaimable_in(RunnerDownloadReclaimScope::TaggedInternalOnly)
+    }
+
+    /// [`Self::is_reclaimable`] under an explicitly chosen scope.
+    ///
+    /// Exactly one state changes answer between the two scopes:
+    /// [`Self::Unrecorded`]. `operator_pull` and `unreadable` are not scoped —
+    /// widening what an *absent* marker means must not touch what a *present*
+    /// one means.
+    pub fn is_reclaimable_in(self, scope: RunnerDownloadReclaimScope) -> bool {
+        match self {
+            Self::Tagged(RunnerDownloadIntent::InternalFetch) => true,
+            Self::Unrecorded => scope == RunnerDownloadReclaimScope::IncludeUntagged,
+            Self::Unreadable | Self::Tagged(RunnerDownloadIntent::OperatorPull) => false,
+        }
     }
 
     pub fn as_str(self) -> &'static str {
@@ -185,13 +235,27 @@ impl RunnerDownloadOwnership {
         }
     }
 
-    /// Why a non-reclaimable cache directory is being kept. `None` for the
-    /// reclaimable case, which has no retain reason to report.
+    /// Why a non-reclaimable cache directory is being kept, under the default
+    /// scope. `None` for the reclaimable case, which has no retain reason to
+    /// report.
     pub fn retain_reason(self) -> Option<&'static str> {
+        self.retain_reason_in(RunnerDownloadReclaimScope::TaggedInternalOnly)
+    }
+
+    /// [`Self::retain_reason`] under an explicitly chosen scope.
+    ///
+    /// The untagged reason names the flag that would release it, so a plan an
+    /// operator reads tells them what to type rather than only that homeboy
+    /// declined.
+    pub fn retain_reason_in(self, scope: RunnerDownloadReclaimScope) -> Option<&'static str> {
         match self {
-            Self::Unrecorded => Some(
-                "download intent is unrecorded, so the cache is treated as operator-owned (fail closed)",
-            ),
+            Self::Unrecorded => match scope {
+                RunnerDownloadReclaimScope::TaggedInternalOnly => Some(
+                    "download intent is unrecorded, so the cache is treated as operator-owned (fail closed); \
+                     pass --include-untagged to make untagged caches eligible",
+                ),
+                RunnerDownloadReclaimScope::IncludeUntagged => None,
+            },
             Self::Unreadable => Some(
                 "download intent marker is unreadable, so the cache is treated as operator-owned (fail closed)",
             ),
@@ -199,6 +263,28 @@ impl RunnerDownloadOwnership {
                 Some("an operator pulled these bytes; only the operator releases them")
             }
             Self::Tagged(RunnerDownloadIntent::InternalFetch) => None,
+        }
+    }
+
+    /// Why a reclaimable cache directory is being released.
+    ///
+    /// Only the two states [`Self::retain_reason_in`] can clear are reachable
+    /// from a removal branch; the other two are spelled out anyway so this
+    /// stays exhaustive and cannot silently start reporting a release reason
+    /// for bytes that were never released.
+    pub fn release_reason(self) -> &'static str {
+        match self {
+            Self::Tagged(RunnerDownloadIntent::InternalFetch) => {
+                "internal fetch past the age floor with no non-terminal owning run; not operator-owned"
+            }
+            Self::Unrecorded => {
+                "untagged and past the age floor with no non-terminal owning run; \
+                 included only by the explicit --include-untagged opt-in"
+            }
+            Self::Unreadable => "unreadable intent marker; never released",
+            Self::Tagged(RunnerDownloadIntent::OperatorPull) => {
+                "an operator pulled these bytes; never released"
+            }
         }
     }
 }

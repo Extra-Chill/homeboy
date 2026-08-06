@@ -23,11 +23,17 @@ pub(super) fn daemon_get(client: &Client, local_url: &str, path: &str) -> Result
     let response = client
         .get(format!("{}{}", local_url.trim_end_matches('/'), path))
         .send()
-        .map_err(|err| Error::internal_unexpected(format!("query runner daemon: {err}")))?;
+        .map_err(|err| {
+            let mut error = Error::internal_unexpected(format!("query runner daemon: {err}"));
+            error.details["request_timeout"] = json!(err.is_timeout());
+            error
+        })?;
     let status_code = response.status().as_u16();
-    let body = response
-        .text()
-        .map_err(|err| Error::internal_unexpected(format!("read runner daemon response: {err}")))?;
+    let body = response.text().map_err(|err| {
+        let mut error = Error::internal_unexpected(format!("read runner daemon response: {err}"));
+        error.details["request_timeout"] = json!(err.is_timeout());
+        error
+    })?;
     let envelope: DaemonGetEnvelope =
         parse_daemon_response_json(&body, status_code, path, "parse daemon response")?;
     if !envelope.success {

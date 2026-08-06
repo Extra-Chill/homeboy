@@ -45,7 +45,7 @@ use super::command_json_value;
 
 pub(super) fn fanout(args: AgentTaskFanoutArgs) -> CmdResult<Value> {
     match args.command {
-        AgentTaskFanoutCommand::CookBatch(cook_batch_args) => cook_batch(cook_batch_args),
+        AgentTaskFanoutCommand::CookBatch(cook_batch_args) => cook_batch(*cook_batch_args),
         AgentTaskFanoutCommand::Plan(plan_args) => {
             let plan = load_batch_cook_fanout_plan(&plan_args.input)?;
             Ok((command_json_value(plan)?, 0))
@@ -2271,7 +2271,7 @@ impl IssueRef {
             ));
         };
         let number = number_part
-            .split(|c| matches!(c, '/' | '?' | '#'))
+            .split(['/', '?', '#'])
             .next()
             .unwrap_or_default();
         if number.is_empty() || !number.chars().all(|c| c.is_ascii_digit()) {

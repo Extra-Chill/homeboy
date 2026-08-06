@@ -72,22 +72,38 @@ pub struct PreparedDaemonExec {
     plan_token: Arc<dyn std::any::Any + Send + Sync>,
 }
 
+/// The daemon-visible process plan prepared by a runner-specific driver.
+pub struct PreparedDaemonExecRequest {
+    pub runner_id: String,
+    pub cwd: String,
+    pub command: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub secret_env_names: Vec<String>,
+    pub source_snapshot: SourceSnapshot,
+    pub require_paths: Vec<String>,
+    pub concurrency_limit: Option<usize>,
+    pub heartbeat_only_stall: HeartbeatOnlyStallPolicy,
+    pub extension_env_provenance: Value,
+    pub plan_token: Arc<dyn std::any::Any + Send + Sync>,
+}
+
 impl PreparedDaemonExec {
     /// Construct a prepared exec. `plan_token` is the driver's private full
     /// plan; the daemon-visible fields are the process descriptor.
-    pub fn new(
-        runner_id: String,
-        cwd: String,
-        command: Vec<String>,
-        env: HashMap<String, String>,
-        secret_env_names: Vec<String>,
-        source_snapshot: SourceSnapshot,
-        require_paths: Vec<String>,
-        concurrency_limit: Option<usize>,
-        heartbeat_only_stall: HeartbeatOnlyStallPolicy,
-        extension_env_provenance: Value,
-        plan_token: Arc<dyn std::any::Any + Send + Sync>,
-    ) -> Self {
+    pub fn new(request: PreparedDaemonExecRequest) -> Self {
+        let PreparedDaemonExecRequest {
+            runner_id,
+            cwd,
+            command,
+            env,
+            secret_env_names,
+            source_snapshot,
+            require_paths,
+            concurrency_limit,
+            heartbeat_only_stall,
+            extension_env_provenance,
+            plan_token,
+        } = request;
         Self {
             runner_id,
             cwd,

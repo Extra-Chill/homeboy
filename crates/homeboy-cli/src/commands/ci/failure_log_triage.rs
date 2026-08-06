@@ -406,11 +406,11 @@ mod engine {
             if is_relevant_log_line(line, failed_steps) {
                 let start = idx.saturating_sub(context_lines);
                 let end = (idx + context_lines + 1).min(lines.len());
-                for snippet_idx in start..end {
+                for (snippet_idx, line) in lines.iter().enumerate().take(end).skip(start) {
                     if hits.len() >= max_snippets {
                         return hits;
                     }
-                    let text = normalize_log_line(lines[snippet_idx]);
+                    let text = normalize_log_line(line);
                     if text.is_empty()
                         || hits
                             .iter()

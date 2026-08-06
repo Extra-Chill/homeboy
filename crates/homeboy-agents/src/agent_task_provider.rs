@@ -33,6 +33,7 @@ pub(crate) use homeboy_core::secret_env_plan::{SecretEnvPlan, SecretEnvStatus};
 use homeboy_core::{component, defaults, Error};
 use homeboy_extension as extension;
 
+mod admission;
 pub(crate) mod artifact_finalization;
 mod catalog;
 pub(crate) mod command_runner;
@@ -59,6 +60,11 @@ mod workspace_types;
 #[cfg(test)]
 mod tests;
 
+pub use admission::{
+    AgentTaskProviderAdmissionAction, AgentTaskProviderAdmissionPlan,
+    AgentTaskProviderAdmissionPredicate, AgentTaskProviderAdmissionRequest,
+    AGENT_TASK_PROVIDER_ADMISSION_PLAN_SCHEMA,
+};
 pub use catalog::*;
 pub use command_runner::{
     probe_provider_executor_resolves, provider_command_parts, run_provider_readiness_invocation,

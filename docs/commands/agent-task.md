@@ -430,7 +430,8 @@ it on both the heartbeat line and `agent-task status`, under
 |---|---|
 | `files_changed` | Uncommitted files in the destination worktree, untracked included. `0` after several minutes is the clearest sign a cook is not producing work. Homeboy's own `.homeboy/` run state is excluded, so this counts provider edits only. |
 | `commits_written` | Commits made in that worktree since the provider started. A provider that commits leaves a clean tree, so this is what distinguishes "finished" from "did nothing". |
-| `command` / `command_elapsed_seconds` | The longest-running command the provider has spawned, and its age — `cargo test -p homeboy-agents`, six minutes in. |
+| `command` / `command_elapsed_seconds` | The longest-running command the *provider* is running, and its age — `cargo test -p homeboy-agents`, six minutes in. Homeboy's own processes are never reported here: not the cook controller, not the nested controller a `--placement local` cook re-enters through, not a gate, and not a `homeboy …` call the agent made as a tool. |
+| `command_unavailable` | Present instead of `command` when the process tree was sampled and no provider process was found. Homeboy states the absence rather than naming its own command, which is what made this signal misleading in #11598. |
 | `elapsed_seconds` | Time since provider execution began. |
 | `observed_at` | When the sample was taken. A retained sample keeps its own observation time, so a stale reading is visible as stale. |
 

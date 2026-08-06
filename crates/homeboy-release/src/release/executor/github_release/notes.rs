@@ -242,10 +242,7 @@ fn github_generated_notes(
     if output.timed_out || output.exit_code != Some(0) {
         let diagnostic =
             gh_failure_diagnostic("gh api releases/generate-notes", &endpoint, &output);
-        return Err(Error::internal_unexpected(format!(
-            "{}",
-            diagnostic.summary
-        )));
+        return Err(Error::internal_unexpected(diagnostic.summary));
     }
 
     Ok(output.stdout.trim().to_string())

@@ -126,9 +126,11 @@ pub(super) fn execute_release_plan_step(
                 context.component,
                 context.component_id,
                 &context.component.local_path,
-                None,
-                context.component.build_artifact.as_deref(),
-                context.options.skip_build_validation,
+                executor::PackageRequest {
+                    component_source_path: None,
+                    declared_build_artifact: context.component.build_artifact.as_deref(),
+                    skip_build_validation: context.options.skip_build_validation,
+                },
             )
             .and_then(|result| {
                 // `--skip-build-validation` bypasses build-structure

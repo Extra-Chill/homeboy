@@ -449,7 +449,7 @@ pub fn move_items_with_options(
     // Remove moved items (descending order to not shift indices)
     let mut items_to_remove: Vec<&ParsedItem> = found_items.clone();
     items_to_remove.extend(related_tests.iter());
-    items_to_remove.sort_by(|a, b| b.start_line.cmp(&a.start_line));
+    items_to_remove.sort_by_key(|item| std::cmp::Reverse(item.start_line));
 
     for item in &items_to_remove {
         let mut start = item.start_line.saturating_sub(1); // 0-indexed

@@ -422,11 +422,43 @@ fn cleanup_marks_missing_worktree_record_removed() {
     .unwrap();
     let updated = read_record(&store, &record.id).unwrap();
 
-    assert_eq!(output.counts.candidates, 1);
+    assert_eq!(output.counts.candidates, 0);
     assert_eq!(output.counts.removed, 0);
     assert_eq!(output.counts.skipped, 1);
+    assert_eq!(output.counts.reconciliation_blockers, 1);
     assert!(output.skipped[0].reasons[0].contains("inventory --apply"));
     assert_eq!(updated.state, TaskWorktreeState::Active);
+}
+
+#[test]
+fn cleanup_reports_missing_active_records_as_reconciliation_blockers() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let store = dir.path().join("store");
+    for index in 0..4 {
+        let mut record = fixture_record(
+            source.path(),
+            &sibling_worktree_path(source.path(), &format!("missing-{index}")),
+        );
+        record.id = format!("fixture@missing-{index}");
+        write_record(&store, &record).unwrap();
+    }
+
+    let output = cleanup_with_store(
+        WorktreeCleanupOptions {
+            force: false,
+            dry_run: true,
+            cleanup_branches: false,
+            allow_unmerged_branches: false,
+        },
+        &store,
+    )
+    .unwrap();
+
+    assert_eq!(output.counts.candidates, 0);
+    assert_eq!(output.counts.reconciliation_blockers, 4);
+    assert_eq!(output.counts.skipped, 4);
+    assert!(output.candidates.is_empty());
 }
 
 #[test]
@@ -996,9 +1028,10 @@ fn cleanup_deletes_merged_task_branch_when_requested() {
         &store,
     )
     .unwrap();
-    assert_eq!(retry.counts.candidates, 1);
+    assert_eq!(retry.counts.candidates, 0);
     assert_eq!(retry.counts.removed, 0);
     assert_eq!(retry.counts.branches_deleted, 0);
+    assert_eq!(retry.counts.reconciliation_blockers, 1);
 }
 
 #[test]
@@ -1074,9 +1107,10 @@ fn cleanup_keeps_branch_when_worktree_removal_fails_and_continues() {
     )
     .unwrap();
 
-    assert_eq!(output.counts.candidates, 2);
+    assert_eq!(output.counts.candidates, 1);
     assert_eq!(output.counts.removed, 0);
     assert_eq!(output.counts.skipped, 2);
+    assert_eq!(output.counts.reconciliation_blockers, 1);
     assert!(locked_worktree.exists());
     run_git(
         source.path(),
@@ -1090,6 +1124,49 @@ fn cleanup_keeps_branch_when_worktree_removal_fails_and_continues() {
         read_record(&store, &removable_record.id).unwrap().state,
         TaskWorktreeState::Active
     );
+}
+
+#[test]
+fn cleanup_separates_actionable_candidates_from_reconciliation_blockers() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let store = dir.path().join("store");
+    let removable = sibling_worktree_path(source.path(), "mixed-removable");
+    run_git(
+        source.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "mixed-removable",
+            &removable.to_string_lossy(),
+        ],
+    );
+    let removable_record = fixture_record(source.path(), &removable);
+    let mut missing_record = fixture_record(
+        source.path(),
+        &sibling_worktree_path(source.path(), "mixed-missing"),
+    );
+    missing_record.id = "fixture@mixed-missing".to_string();
+    write_record(&store, &removable_record).unwrap();
+    write_record(&store, &missing_record).unwrap();
+
+    let output = cleanup_with_store(
+        WorktreeCleanupOptions {
+            force: false,
+            dry_run: true,
+            cleanup_branches: false,
+            allow_unmerged_branches: false,
+        },
+        &store,
+    )
+    .unwrap();
+
+    assert_eq!(output.counts.candidates, 1);
+    assert_eq!(output.counts.reconciliation_blockers, 1);
+    assert_eq!(output.counts.skipped, 1);
+    assert_eq!(output.candidates.len(), 1);
+    assert_eq!(output.skipped.len(), 1);
 }
 
 #[test]
@@ -1212,9 +1289,10 @@ fn cleanup_skips_unrepairable_missing_source_and_continues() {
         let skipped = read_record(&store, &unrepairable.id).unwrap();
         let removed = read_record(&store, &removable.id).unwrap();
 
-        assert_eq!(output.counts.candidates, 2);
+        assert_eq!(output.counts.candidates, 0);
         assert_eq!(output.counts.removed, 0);
         assert_eq!(output.counts.skipped, 2);
+        assert_eq!(output.counts.reconciliation_blockers, 1);
         assert_eq!(skipped.state, TaskWorktreeState::Active);
         assert_eq!(removed.state, TaskWorktreeState::Active);
     });
@@ -1259,9 +1337,10 @@ fn cleanup_skips_dirty_worktree_without_force() {
     .unwrap();
     let updated = read_record(&store, &dirty_record.id).unwrap();
 
-    assert_eq!(output.counts.candidates, 2);
+    assert_eq!(output.counts.candidates, 0);
     assert_eq!(output.counts.removed, 0);
     assert_eq!(output.counts.skipped, 2);
+    assert_eq!(output.counts.reconciliation_blockers, 1);
     assert_eq!(output.skipped[0].record.id, dirty_record.id);
     assert!(output.skipped[0]
         .reasons
@@ -1291,9 +1370,10 @@ fn cleanup_force_still_skips_primary_checkout_hard_gate() {
     .unwrap();
     let updated = read_record(&store, &record.id).unwrap();
 
-    assert_eq!(output.counts.candidates, 1);
+    assert_eq!(output.counts.candidates, 0);
     assert_eq!(output.counts.removed, 0);
     assert_eq!(output.counts.skipped, 1);
+    assert_eq!(output.counts.reconciliation_blockers, 0);
     assert!(output.skipped[0]
         .reasons
         .iter()

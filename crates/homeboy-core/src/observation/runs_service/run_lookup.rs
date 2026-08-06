@@ -325,11 +325,8 @@ pub(crate) fn refresh_selected_mirrored_daemon_evidence(
     store: &ObservationStore,
     run: &RunRecord,
 ) -> Option<Error> {
-    let Some((runner_id, job_id)) =
-        runner_evidence::with_runner_evidence(|p| p.mirrored_runner_job_identity(run))
-    else {
-        return None;
-    };
+    let (runner_id, job_id) =
+        runner_evidence::with_runner_evidence(|p| p.mirrored_runner_job_identity(run))?;
 
     match runner_evidence::with_runner_evidence(|p| p.refresh_mirrored_daemon_evidence(&run.id)) {
         Ok(_) => None,

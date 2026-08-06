@@ -26,17 +26,12 @@ pub enum CleanupPolicy {
     PreserveOnFailure,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BranchCleanupIntent {
+    #[default]
     DeleteWhenMerged,
     Preserve,
-}
-
-impl Default for BranchCleanupIntent {
-    fn default() -> Self {
-        Self::DeleteWhenMerged
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -250,6 +245,7 @@ pub struct AdoptedWorkspaceRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // Registry records are returned by value.
 pub enum WorkspaceRefRecord {
     Task(TaskWorktreeRecord),
     Adopted(AdoptedWorkspaceRecord),
@@ -511,9 +507,13 @@ pub struct WorktreeCleanupOutput {
 
 #[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
 pub struct WorktreeCleanupCounts {
+    /// Records represented by `candidates`, which cleanup can act on directly.
     pub candidates: usize,
     pub removed: usize,
     pub skipped: usize,
+    /// Missing active worktrees that require inventory reconciliation authority
+    /// before cleanup can make progress.
+    pub reconciliation_blockers: usize,
     pub branch_delete_candidates: usize,
     pub branches_deleted: usize,
     pub unmerged_branches: usize,

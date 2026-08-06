@@ -169,7 +169,7 @@ macro_rules! __provider_registry_declare {
                 $crate::provider_registry::DeclaredProviderRegistry {
                     module_path: ::std::module_path!(),
                     register_fn: ::std::stringify!($register),
-                    is_registered: is_registered,
+                    is_registered,
                 }
             }
         };

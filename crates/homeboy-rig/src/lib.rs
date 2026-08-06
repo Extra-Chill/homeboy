@@ -43,6 +43,10 @@ pub mod toolchain;
 pub mod trace_experiment;
 pub mod workloads;
 
+#[cfg(test)]
+#[path = "../../../tests/core/rig/support.rs"]
+mod rig_test_support;
+
 pub use app::{AppLauncherAction, AppLauncherOptions, AppLauncherReport};
 pub use artifact_index::{
     for_run as artifact_index_for_run,

@@ -813,44 +813,6 @@ fn project_execution_placement(finalization: &mut Value, metadata: &Value) {
     }
 }
 
-#[cfg(test)]
-mod projection_tests {
-    use super::*;
-
-    #[test]
-    fn finalization_projects_the_exact_durable_placement_decision_and_outcome_ids() {
-        let decision = serde_json::json!({
-            "decision_id": "epd-durable-decision",
-            "runner": { "runner_id": "fixture-lab", "source": "policy" }
-        });
-        let outcome = serde_json::json!({
-            "decision_id": "epd-durable-decision",
-            "effective": "lab",
-            "runner_id": "fixture-lab"
-        });
-        let metadata = serde_json::json!({
-            "execution_placement_decision": decision,
-            "execution_placement_outcome": outcome
-        });
-        let mut finalization = serde_json::json!({ "status": "review_ready" });
-
-        project_execution_placement(&mut finalization, &metadata);
-
-        assert_eq!(
-            finalization["execution_placement_decision"],
-            metadata["execution_placement_decision"]
-        );
-        assert_eq!(
-            finalization["execution_placement_outcome"],
-            metadata["execution_placement_outcome"]
-        );
-        assert_eq!(
-            finalization["execution_placement_decision"]["decision_id"],
-            finalization["execution_placement_outcome"]["decision_id"]
-        );
-    }
-}
-
 fn reusable_applied_adoption_promotion(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     candidate_sha: &str,
@@ -1256,5 +1218,43 @@ fn compact_text(value: &str) -> String {
         format!("{prefix}...")
     } else {
         prefix
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+
+    #[test]
+    fn finalization_projects_the_exact_durable_placement_decision_and_outcome_ids() {
+        let decision = serde_json::json!({
+            "decision_id": "epd-durable-decision",
+            "runner": { "runner_id": "fixture-lab", "source": "policy" }
+        });
+        let outcome = serde_json::json!({
+            "decision_id": "epd-durable-decision",
+            "effective": "lab",
+            "runner_id": "fixture-lab"
+        });
+        let metadata = serde_json::json!({
+            "execution_placement_decision": decision,
+            "execution_placement_outcome": outcome
+        });
+        let mut finalization = serde_json::json!({ "status": "review_ready" });
+
+        project_execution_placement(&mut finalization, &metadata);
+
+        assert_eq!(
+            finalization["execution_placement_decision"],
+            metadata["execution_placement_decision"]
+        );
+        assert_eq!(
+            finalization["execution_placement_outcome"],
+            metadata["execution_placement_outcome"]
+        );
+        assert_eq!(
+            finalization["execution_placement_decision"]["decision_id"],
+            finalization["execution_placement_outcome"]["decision_id"]
+        );
     }
 }

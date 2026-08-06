@@ -30,7 +30,7 @@ fn entry(project_id: &str, variable_name: &str) -> Result<Entry> {
 pub fn set(project_id: &str, variable_name: &str, value: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        return macos::set(project_id, variable_name, value);
+        macos::set(project_id, variable_name, value)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -52,7 +52,7 @@ pub fn get(project_id: &str, variable_name: &str) -> Result<Option<String>> {
 pub fn remove(project_id: &str, variable_name: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        return macos::remove(project_id, variable_name);
+        macos::remove(project_id, variable_name)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -281,7 +281,7 @@ mod macos {
         let descriptor = unsafe {
             CFStringCreateWithCString(
                 kCFAllocatorDefault,
-                b"homeboy\0".as_ptr().cast(),
+                c"homeboy".as_ptr(),
                 kCFStringEncodingUTF8,
             )
         };

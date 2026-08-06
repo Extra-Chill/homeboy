@@ -91,10 +91,10 @@ pub fn reconcile_record_health(dry_run: bool) -> Result<AgentTaskRecordReconcili
             continue;
         }
         report.considered += 1;
-        let reconstructable = !run
+        let reconstructable = run
             .metadata_json
             .pointer("/agent_task_run/lab_handoff")
-            .is_some()
+            .is_none()
             && matches!(
                 item.reason,
                 AgentTaskRecordHealthReason::MissingMetadata

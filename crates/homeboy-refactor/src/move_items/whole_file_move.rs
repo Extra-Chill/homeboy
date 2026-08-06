@@ -210,7 +210,7 @@ pub fn move_file(from: &str, to: &str, root: &Path, write: bool) -> Result<MoveF
                 let mut lines: Vec<&str> = content.split('\n').collect();
                 // Apply rewrites in reverse line order to preserve line numbers
                 let mut sorted_rewrites = rewrites.clone();
-                sorted_rewrites.sort_by(|a, b| b.line.cmp(&a.line));
+                sorted_rewrites.sort_by_key(|rewrite| std::cmp::Reverse(rewrite.line));
                 for rewrite in &sorted_rewrites {
                     let idx = rewrite.line.saturating_sub(1);
                     if idx < lines.len() {

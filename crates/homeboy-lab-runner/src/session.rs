@@ -1524,15 +1524,15 @@ impl RunnerStaleDaemonWarning {
         } else {
             "daemon_configured_identity == equal"
         };
-        let recovery_actions = (!version_matches || !identity_matches)
-            .then(|| {
-                recovery_action(
-                    runner_id,
-                    current_homeboy_build_identity.as_deref(),
-                    &homeboy_product_identity::build_identity(),
-                )
-            })
-            .unwrap_or_default();
+        let recovery_actions = if !version_matches || !identity_matches {
+            recovery_action(
+                runner_id,
+                current_homeboy_build_identity.as_deref(),
+                &homeboy_product_identity::build_identity(),
+            )
+        } else {
+            Vec::new()
+        };
         let recovery_commands = rendered_commands(&recovery_actions);
         let message = if !version_matches {
             format!(

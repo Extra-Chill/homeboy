@@ -142,7 +142,7 @@ pub fn ensure_worker() -> homeboy::core::Result<()> {
 }
 
 pub fn restart_worker_if_pending() -> homeboy::core::Result<()> {
-    restart_worker_if_pending_with(deferred_workload::worker_is_live, || ensure_worker())
+    restart_worker_if_pending_with(deferred_workload::worker_is_live, ensure_worker)
 }
 
 fn ensure_worker_with(
@@ -285,7 +285,7 @@ pub(crate) fn run_worker_with(
             format!("{} via {runner_id}", record.id),
         )?;
         deferred_workload::append_worker_log(format!("claimed {} via {runner_id}", record.id))?;
-        let success = match dispatch(&record, &runner_id, owner) {
+        let success = match dispatch(&record, runner_id, owner) {
             Ok(success) => success,
             Err(error) if error.message == CAPABILITY_MISMATCH_ERROR => {
                 deferred_workload::defer_claim(&record.id, owner)?;
@@ -378,6 +378,59 @@ fn child_args(record: &deferred_workload::DeferredWorkload, runner_id: &str) -> 
     }
     args.splice(1..1, overrides);
     args
+}
+
+pub(crate) fn redacted_record(record: &deferred_workload::DeferredWorkload) -> serde_json::Value {
+    let mut value = serde_json::to_value(record).expect("deferred workload serializes");
+    let secret_names = record
+        .job_overrides
+        .secret_env_names
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(env) = value
+        .pointer_mut("/job_overrides/env")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for name in secret_names {
+            if env.contains_key(name) {
+                env.insert(
+                    name.to_string(),
+                    serde_json::Value::String("[REDACTED]".to_string()),
+                );
+            }
+        }
+    }
+    if let Some(args) = value
+        .get_mut("args")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        redact_settings_args(args);
+    }
+    value
+}
+
+fn redact_settings_args(args: &mut [serde_json::Value]) {
+    let mut redact_next = false;
+    for arg in args {
+        let Some(value) = arg.as_str() else { continue };
+        if redact_next {
+            *arg = serde_json::Value::String("[REDACTED]".to_string());
+            redact_next = false;
+        } else if matches!(
+            value,
+            "--setting" | "--setting-json" | "--settings-json-file" | "--settings-profile"
+        ) {
+            redact_next = true;
+        } else if value.starts_with("--setting=")
+            || value.starts_with("--setting-json=")
+            || value.starts_with("--settings-json-file=")
+            || value.starts_with("--settings-profile=")
+        {
+            *arg = serde_json::Value::String(
+                value.split_once('=').expect("checked").0.to_string() + "=[REDACTED]",
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -662,58 +715,5 @@ mod tests {
             .expect("restart dead worker");
             assert_eq!(spawned.get(), 1);
         });
-    }
-}
-
-pub(crate) fn redacted_record(record: &deferred_workload::DeferredWorkload) -> serde_json::Value {
-    let mut value = serde_json::to_value(record).expect("deferred workload serializes");
-    let secret_names = record
-        .job_overrides
-        .secret_env_names
-        .iter()
-        .collect::<std::collections::BTreeSet<_>>();
-    if let Some(env) = value
-        .pointer_mut("/job_overrides/env")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        for name in secret_names {
-            if env.contains_key(name) {
-                env.insert(
-                    name.to_string(),
-                    serde_json::Value::String("[REDACTED]".to_string()),
-                );
-            }
-        }
-    }
-    if let Some(args) = value
-        .get_mut("args")
-        .and_then(serde_json::Value::as_array_mut)
-    {
-        redact_settings_args(args);
-    }
-    value
-}
-
-fn redact_settings_args(args: &mut [serde_json::Value]) {
-    let mut redact_next = false;
-    for arg in args {
-        let Some(value) = arg.as_str() else { continue };
-        if redact_next {
-            *arg = serde_json::Value::String("[REDACTED]".to_string());
-            redact_next = false;
-        } else if matches!(
-            value,
-            "--setting" | "--setting-json" | "--settings-json-file" | "--settings-profile"
-        ) {
-            redact_next = true;
-        } else if value.starts_with("--setting=")
-            || value.starts_with("--setting-json=")
-            || value.starts_with("--settings-json-file=")
-            || value.starts_with("--settings-profile=")
-        {
-            *arg = serde_json::Value::String(
-                value.split_once('=').expect("checked").0.to_string() + "=[REDACTED]",
-            );
-        }
     }
 }

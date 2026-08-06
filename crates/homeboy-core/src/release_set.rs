@@ -154,6 +154,7 @@ impl NormalizedReleaseSet {
 
     /// Runs all validation before invoking a mutation closure. A red comparison
     /// never calls `mutate`, which makes the boundary directly testable by callers.
+    #[allow(clippy::result_large_err)] // Public result layout is a caller contract.
     pub fn mutate_if_ready<T>(
         &self,
         observations: &[ReleaseSetObservation],

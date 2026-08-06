@@ -75,6 +75,24 @@ impl ObservationStore {
         Ok(store)
     }
 
+    /// Open the scheduler's scan connection. It is read-only and performs no
+    /// migrations, journal maintenance, or artifact-publication recovery.
+    pub fn open_scheduler_reader() -> Result<Self> {
+        Self::open_readonly()
+    }
+
+    /// Open the scheduler's bounded claim connection. It performs no startup
+    /// maintenance; callers use it only for short durable claim transitions.
+    pub fn open_scheduler_writer() -> Result<Self> {
+        let path = database_path()?;
+        let connection = schema::open_bounded_writer_connection(&path)?;
+        Ok(Self {
+            connection,
+            path,
+            readonly: false,
+        })
+    }
+
     /// Open an existing observation database without any initialization work.
     /// Metadata readers use this so they never contend for the global writer
     /// lock merely to inspect a persisted run.
@@ -128,6 +146,179 @@ impl ObservationStore {
             .clone()
             .with_missing_from(RunContext::subprocess_compatibility_from_env());
         self.start_run_with_context_and_id(run, context, Some(id))
+    }
+
+    /// Atomically claim a singleton running run. A live lease leaves the
+    /// existing owner untouched; an expired lease is taken over in the same
+    /// SQLite statement, so a crash between observation and replacement cannot
+    /// create two workers.
+    pub fn claim_expiring_singleton_run(
+        &self,
+        mut run: NewRunRecord,
+        id: String,
+        owner_token: &str,
+        lease_expires_at_ms: i64,
+    ) -> Result<Option<RunRecord>> {
+        validate_required("kind", &run.kind)?;
+        validate_required("id", &id)?;
+        validate_required("owner_token", owner_token)?;
+        run.metadata_json["owner_token"] = serde_json::Value::String(owner_token.to_string());
+        run.metadata_json["lease_expires_at_ms"] = serde_json::json!(lease_expires_at_ms);
+        let context = run
+            .run_context
+            .clone()
+            .with_missing_from(RunContext::subprocess_compatibility_from_env());
+        let metadata_json =
+            serialize_metadata(&with_run_context_metadata(run.metadata_json, &context))?;
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now().timestamp_millis();
+        let rows = execute_with_retry("claim expiring singleton run", || {
+            self.connection.execute(
+                r#"
+                INSERT INTO runs(id, kind, component_id, started_at, status, command, cwd, homeboy_version, git_sha, rig_id, metadata_json)
+                VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7, ?8, ?9, ?10)
+                ON CONFLICT DO UPDATE SET
+                    started_at = excluded.started_at,
+                    finished_at = NULL,
+                    status = 'running',
+                    metadata_json = excluded.metadata_json
+                WHERE runs.kind = excluded.kind AND (
+                    runs.status != 'running'
+                    OR COALESCE(CAST(json_extract(runs.metadata_json, '$.lease_expires_at_ms') AS INTEGER), 0) < ?11
+                )
+                "#,
+                params![id, run.kind, run.component_id, started_at, run.command, run.cwd,
+                    run.homeboy_version, run.git_sha, run.rig_id, metadata_json, now],
+            )
+        })?;
+        if rows == 0 {
+            return Ok(None);
+        }
+        let claimed = self.get_run(&id)?;
+        Ok(claimed
+            .filter(|record| record.metadata_json["owner_token"].as_str() == Some(owner_token)))
+    }
+
+    /// Renew a singleton lease only for its exact live owner token.
+    pub fn renew_running_run_lease(
+        &self,
+        run_id: &str,
+        owner_token: &str,
+        lease_expires_at_ms: i64,
+    ) -> Result<bool> {
+        let rows = execute_with_retry("renew running run lease", || {
+            self.connection.execute(
+                "UPDATE runs SET metadata_json = json_set(metadata_json, '$.lease_expires_at_ms', ?1) WHERE id = ?2 AND status = 'running' AND json_extract(metadata_json, '$.owner_token') = ?3",
+                params![lease_expires_at_ms, run_id, owner_token],
+            )
+        })?;
+        Ok(rows == 1)
+    }
+
+    /// Terminalize a leased singleton only when its ownership token still
+    /// matches. A worker revived after a stale-owner takeover cannot overwrite
+    /// the replacement owner's outcome.
+    pub fn finish_running_run_with_owner_token(
+        &self,
+        run_id: &str,
+        owner_token: &str,
+        status: RunStatus,
+        metadata_json: serde_json::Value,
+    ) -> Result<bool> {
+        let metadata_json = serialize_metadata(&metadata_json)?;
+        let finished_at = chrono::Utc::now().to_rfc3339();
+        let rows = execute_with_retry("finish leased running run", || {
+            self.connection.execute(
+                "UPDATE runs SET finished_at = ?1, status = ?2, metadata_json = ?3 WHERE id = ?4 AND status = 'running' AND json_extract(metadata_json, '$.owner_token') = ?5",
+                params![
+                    finished_at,
+                    status.as_str(),
+                    metadata_json,
+                    run_id,
+                    owner_token,
+                ],
+            )
+        })?;
+        Ok(rows == 1)
+    }
+
+    /// Claim a running runner-exec source for one child identity. The child
+    /// token fences later source terminalization after a retry or takeover.
+    pub fn claim_running_runner_exec_recovery_source(
+        &self,
+        run_id: &str,
+        child_id: &str,
+        child_token: &str,
+        runner_job_id: &str,
+    ) -> Result<bool> {
+        let claim = serde_json::to_string(&serde_json::json!({
+            "owner_id": child_id,
+            "source_token": child_token,
+            "runner_job_id": runner_job_id,
+            "expires_at_ms": chrono::Utc::now().timestamp_millis() + 30_000,
+        }))
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize runner recovery source claim".to_string()),
+            )
+        })?;
+        let rows = execute_with_retry("claim runner recovery source", || {
+            self.connection.execute(
+                "UPDATE runs SET metadata_json = json_set(metadata_json, '$.runner_exec_source_lease', json(?1)) WHERE id = ?2 AND status = 'running' AND json_extract(metadata_json, '$.runner_job_id') = ?3 AND (json_extract(metadata_json, '$.runner_exec_source_lease.expires_at_ms') IS NULL OR CAST(json_extract(metadata_json, '$.runner_exec_source_lease.expires_at_ms') AS INTEGER) < ?4)",
+                params![claim, run_id, runner_job_id, chrono::Utc::now().timestamp_millis()],
+            )
+        })?;
+        Ok(rows == 1)
+    }
+
+    /// Terminalize evidence loss only for the child that still owns this exact
+    /// running source/job identity. A stale child cannot overwrite a retry or a
+    /// concurrently settled source record.
+    pub fn fail_running_runner_exec_recovery_source(
+        &self,
+        run_id: &str,
+        child_token: &str,
+        runner_job_id: &str,
+        metadata_json: serde_json::Value,
+    ) -> Result<bool> {
+        let metadata_json = serialize_metadata(&metadata_json)?;
+        let finished_at = chrono::Utc::now().to_rfc3339();
+        let rows = execute_with_retry("fail claimed runner recovery source", || {
+            self.connection.execute(
+                "UPDATE runs SET finished_at = ?1, status = 'fail', metadata_json = ?2 WHERE id = ?3 AND status = 'running' AND json_extract(metadata_json, '$.runner_job_id') = ?4 AND json_extract(metadata_json, '$.runner_exec_source_lease.source_token') = ?5",
+                params![finished_at, metadata_json, run_id, runner_job_id, child_token],
+            )
+        })?;
+        Ok(rows == 1)
+    }
+
+    pub fn renew_running_runner_exec_source_lease(
+        &self,
+        run_id: &str,
+        token: &str,
+    ) -> Result<bool> {
+        let rows = execute_with_retry("renew runner exec source lease", || {
+            self.connection.execute(
+            "UPDATE runs SET metadata_json = json_set(metadata_json, '$.runner_exec_source_lease.expires_at_ms', ?1) WHERE id = ?2 AND status = 'running' AND json_extract(metadata_json, '$.runner_exec_source_lease.source_token') = ?3",
+            params![chrono::Utc::now().timestamp_millis() + 30_000, run_id, token],
+        )
+        })?;
+        Ok(rows == 1)
+    }
+
+    pub fn release_running_runner_exec_source_lease(
+        &self,
+        run_id: &str,
+        token: &str,
+    ) -> Result<bool> {
+        let rows = execute_with_retry("release runner exec source lease", || {
+            self.connection.execute(
+            "UPDATE runs SET metadata_json = json_remove(metadata_json, '$.runner_exec_source_lease') WHERE id = ?1 AND status = 'running' AND json_extract(metadata_json, '$.runner_exec_source_lease.source_token') = ?2",
+            params![run_id, token],
+        )
+        })?;
+        Ok(rows == 1)
     }
 
     pub fn start_run_with_context(
@@ -324,7 +515,7 @@ impl ObservationStore {
             return Ok(None);
         }
 
-        Ok(self.get_run(run_id)?)
+        self.get_run(run_id)
     }
 
     pub fn update_run_metadata(
@@ -418,21 +609,21 @@ impl ObservationStore {
         let probe = limit + 1;
         let mut predicates = Vec::new();
         let mut values: Vec<&dyn ToSql> = Vec::new();
-        if filter.kind.is_some() {
+        if let Some(kind) = filter.kind.as_ref() {
             predicates.push("kind = ?");
-            values.push(filter.kind.as_ref().expect("checked"));
+            values.push(kind);
         }
-        if filter.component_id.is_some() {
+        if let Some(component_id) = filter.component_id.as_ref() {
             predicates.push("component_id = ?");
-            values.push(filter.component_id.as_ref().expect("checked"));
+            values.push(component_id);
         }
-        if filter.status.is_some() {
+        if let Some(status) = filter.status.as_ref() {
             predicates.push("status = ?");
-            values.push(filter.status.as_ref().expect("checked"));
+            values.push(status);
         }
-        if filter.rig_id.is_some() {
+        if let Some(rig_id) = filter.rig_id.as_ref() {
             predicates.push("rig_id = ?");
-            values.push(filter.rig_id.as_ref().expect("checked"));
+            values.push(rig_id);
         }
         if let Some(cursor) = filter.after.as_ref() {
             // Keyset resume in the canonical `started_at DESC, id DESC` order.
@@ -1228,6 +1419,32 @@ mod tests {
                 complete.runs,
                 "the bounded accessor keeps returning the same rows"
             );
+        });
+    }
+
+    #[test]
+    fn singleton_claim_reads_back_its_exact_id_among_many_running_rows() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            for index in 0..100 {
+                store
+                    .start_run_with_id(
+                        NewRunRecord::builder("recovery-child").build(),
+                        format!("other-running-child-{index}"),
+                    )
+                    .expect("other running child");
+            }
+            let claimed = store
+                .claim_expiring_singleton_run(
+                    NewRunRecord::builder("recovery-child").build(),
+                    "target-child".to_string(),
+                    "target-token",
+                    chrono::Utc::now().timestamp_millis() + 60_000,
+                )
+                .expect("claim")
+                .expect("target claim");
+            assert_eq!(claimed.id, "target-child");
+            assert_eq!(claimed.metadata_json["owner_token"], "target-token");
         });
     }
 }

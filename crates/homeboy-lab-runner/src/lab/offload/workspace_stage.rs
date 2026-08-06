@@ -11,7 +11,6 @@ use homeboy_core::runner_execution_envelope::{
     PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
     PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG, PATH_MATERIALIZATION_STATUS_MATERIALIZED,
 };
-use homeboy_rig;
 
 /// Owned command facts consumed while materializing a workspace. This keeps the
 /// durable controller path bounded by the request lifetime rather than forcing
@@ -642,7 +641,7 @@ fn prepare_lab_offload_workspace_stage_inner(
     plan = with_step(
         plan,
         PlanStep::ready("lab.rewrite_args", "lab.rewrite_args")
-            .inputs(PlanValues::new().json("argv", &redact_argv(&command)))
+            .inputs(PlanValues::new().json("argv", redact_argv(&command)))
             .build(),
     );
     Ok(LabOffloadWorkspaceStage {

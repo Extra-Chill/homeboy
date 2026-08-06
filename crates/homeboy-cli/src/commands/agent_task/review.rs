@@ -232,14 +232,16 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
             aggregate
                 .map(|aggregate| {
                     promotion_candidates(
-                        &record.run_id,
-                        Some(&record.run_id),
-                        record.aggregate_path.as_deref(),
-                        args.to_worktree.as_deref(),
-                        cook_base.as_deref(),
-                        args.provider_command.as_deref(),
-                        &args.provider_argv,
-                        record.metadata.get("latest_promotion"),
+                        PromotionCandidateContext {
+                            source: &record.run_id,
+                            source_run_id: Some(&record.run_id),
+                            aggregate_path: record.aggregate_path.as_deref(),
+                            to_worktree: args.to_worktree.as_deref(),
+                            cook_base: cook_base.as_deref(),
+                            provider_command: args.provider_command.as_deref(),
+                            provider_argv: &args.provider_argv,
+                            latest_promotion: record.metadata.get("latest_promotion"),
+                        },
                         aggregate,
                         review,
                     )
@@ -975,6 +977,15 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     let catalog_version = catalog.version.clone();
     let executor = ExtensionProviderAgentTaskExecutor::from_catalog(catalog);
     let all_providers = executor.providers();
+    if args.machine_catalog {
+        return Ok((
+            serde_json::json!({
+                "schema": "homeboy/agent-task-provider-catalog/v1",
+                "providers": all_providers,
+            }),
+            0,
+        ));
+    }
     if args.validate_readiness {
         // Fall back to the configured default backend the same way Cook selection
         // does, so readiness validation does not demand a flag that policy already
@@ -1046,8 +1057,6 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
         diagnostics
             .iter()
             .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
             .map(|diagnostic| serde_json::to_value(diagnostic).unwrap_or(Value::Null))
             .collect::<Vec<_>>()
     } else {
@@ -1318,15 +1327,20 @@ pub(crate) fn default_protected_branches() -> Vec<String> {
     ]
 }
 
+#[derive(Clone, Copy)]
+struct PromotionCandidateContext<'a> {
+    source: &'a str,
+    source_run_id: Option<&'a str>,
+    aggregate_path: Option<&'a str>,
+    to_worktree: Option<&'a str>,
+    cook_base: Option<&'a str>,
+    provider_command: Option<&'a str>,
+    provider_argv: &'a [String],
+    latest_promotion: Option<&'a Value>,
+}
+
 fn promotion_candidates(
-    source: &str,
-    source_run_id: Option<&str>,
-    aggregate_path: Option<&str>,
-    to_worktree: Option<&str>,
-    cook_base: Option<&str>,
-    provider_command: Option<&str>,
-    provider_argv: &[String],
-    latest_promotion: Option<&Value>,
+    context: PromotionCandidateContext<'_>,
     aggregate: &AgentTaskAggregate,
     review: &AgentTaskAggregateReport,
 ) -> Vec<Value> {
@@ -1357,13 +1371,13 @@ fn promotion_candidates(
                         outcome,
                         &AgentTaskPromotionOptions {
                             source: "{}".to_string(),
-                            source_run_id: source_run_id.map(str::to_string),
-                            source_path: aggregate_path.map(std::path::PathBuf::from),
+                            source_run_id: context.source_run_id.map(str::to_string),
+                            source_path: context.aggregate_path.map(std::path::PathBuf::from),
                             source_worktree_path: None,
                             base_ref: None,
                             task_base_sha: None,
                             candidate_ref: None,
-                            to_worktree: to_worktree.unwrap_or("<managed-worktree>").to_string(),
+                            to_worktree: context.to_worktree.unwrap_or("<managed-worktree>").to_string(),
                             task_id: Some(candidate.task_id.clone()),
                             artifact_id: None,
                             dry_run: true,
@@ -1382,13 +1396,13 @@ fn promotion_candidates(
                     "homeboy".to_string(),
                     "agent-task".to_string(),
                     "promote".to_string(),
-                    source.to_string(),
+                    context.source.to_string(),
                     "--task-id".to_string(),
                     candidate.task_id.clone(),
                     "--artifact-id".to_string(),
                     artifact_id.clone(),
                 ];
-                let continuation = latest_promotion.filter(|promotion| {
+                let continuation = context.latest_promotion.filter(|promotion| {
                     promotion_is_resumable(promotion, false)
                         && promotion.pointer("/source/task_id").and_then(Value::as_str)
                             == Some(candidate.task_id.as_str())
@@ -1398,7 +1412,7 @@ fn promotion_candidates(
                 if let Some(to_worktree) = continuation
                     .and_then(|promotion| promotion.pointer("/target/worktree"))
                     .and_then(Value::as_str)
-                    .or(to_worktree)
+                    .or(context.to_worktree)
                 {
                     command.push("--to-worktree".to_string());
                     command.push(to_worktree.to_string());
@@ -1407,15 +1421,15 @@ fn promotion_candidates(
                     .and_then(|promotion| promotion.pointer("/provenance/resume_contract"))
                 {
                     append_resume_contract(&mut command, contract);
-                } else if let Some(base) = cook_base {
+                } else if let Some(base) = context.cook_base {
                     command.extend(["--base".to_string(), base.to_string()]);
                 }
-                if let Some(provider_command) = provider_command {
+                if let Some(provider_command) = context.provider_command {
                     command.push("--provider-command".to_string());
                     command.push(provider_command.to_string());
                 }
                 command.extend(
-                    provider_argv
+                    context.provider_argv
                         .iter()
                         .map(|argument| format!("--provider-argv={argument}")),
                 );
@@ -1425,7 +1439,7 @@ fn promotion_candidates(
                     "artifact_id": artifact_id,
                     "reason": candidate.reason,
                     "command": command,
-                    "ready": to_worktree.is_some(),
+                    "ready": context.to_worktree.is_some(),
                     "selection_required": selection_required,
                 })
             })
@@ -1716,8 +1730,7 @@ mod tests {
             "capabilities": vec!["capability-".to_string() + &"x".repeat(10_000); 100],
         }))
         .expect("provider fixture");
-        let providers = std::iter::repeat(provider)
-            .take(DEFAULT_PROVIDER_LIMIT + 100)
+        let providers = std::iter::repeat_n(provider, DEFAULT_PROVIDER_LIMIT + 100)
             .map(|provider| compact_provider(&provider))
             .take(DEFAULT_PROVIDER_LIMIT)
             .collect::<Vec<_>>();
@@ -1745,6 +1758,7 @@ mod tests {
             refresh: false,
             catalog: false,
             full: false,
+            machine_catalog: false,
         });
 
         assert_eq!(
@@ -1919,20 +1933,23 @@ mod tests {
         }))
         .expect("aggregate");
 
+        let provider_argv = [
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "promotion-provider".to_string(),
+            "--workspace=/tmp/target".to_string(),
+        ];
         let candidates = promotion_candidates(
-            "aggregate.json",
-            None,
-            None,
-            Some("fixture@target"),
-            None,
-            None,
-            &[
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "promotion-provider".to_string(),
-                "--workspace=/tmp/target".to_string(),
-            ],
-            None,
+            PromotionCandidateContext {
+                source: "aggregate.json",
+                source_run_id: None,
+                aggregate_path: None,
+                to_worktree: Some("fixture@target"),
+                cook_base: None,
+                provider_command: None,
+                provider_argv: &provider_argv,
+                latest_promotion: None,
+            },
             &aggregate,
             &review,
         );
@@ -1985,14 +2002,16 @@ mod tests {
         .expect("aggregate");
 
         let candidates = promotion_candidates(
-            "cook-attempt-9400",
-            Some("cook-attempt-9400"),
-            None,
-            Some("fixture@target"),
-            Some("trunk"),
-            None,
-            &[],
-            None,
+            PromotionCandidateContext {
+                source: "cook-attempt-9400",
+                source_run_id: Some("cook-attempt-9400"),
+                aggregate_path: None,
+                to_worktree: Some("fixture@target"),
+                cook_base: Some("trunk"),
+                provider_command: None,
+                provider_argv: &[],
+                latest_promotion: None,
+            },
             &aggregate,
             &review,
         );
@@ -2083,14 +2102,16 @@ mod tests {
         assert_eq!(equivalent_review.apply_candidates.len(), 0);
         assert_eq!(equivalent_review.review_candidates.len(), 1);
         let equivalent = promotion_candidates(
-            "review-run",
-            None,
-            None,
-            Some("fixture@target"),
-            None,
-            None,
-            &[],
-            None,
+            PromotionCandidateContext {
+                source: "review-run",
+                source_run_id: None,
+                aggregate_path: None,
+                to_worktree: Some("fixture@target"),
+                cook_base: None,
+                provider_command: None,
+                provider_argv: &[],
+                latest_promotion: None,
+            },
             &equivalent_aggregate,
             &equivalent_review,
         );
@@ -2102,14 +2123,16 @@ mod tests {
         let distinct_aggregate = recoverable_review_aggregate(&temp, &[1, 2]);
         let distinct_review = AgentTaskAggregateReport::from(distinct_aggregate.outcomes.clone());
         let distinct = promotion_candidates(
-            "review-run",
-            None,
-            None,
-            Some("fixture@target"),
-            None,
-            None,
-            &[],
-            None,
+            PromotionCandidateContext {
+                source: "review-run",
+                source_run_id: None,
+                aggregate_path: None,
+                to_worktree: Some("fixture@target"),
+                cook_base: None,
+                provider_command: None,
+                provider_argv: &[],
+                latest_promotion: None,
+            },
             &distinct_aggregate,
             &distinct_review,
         );

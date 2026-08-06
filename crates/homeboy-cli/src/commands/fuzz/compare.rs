@@ -887,6 +887,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn envelope(
         id: &str,
         declared_targets: u64,

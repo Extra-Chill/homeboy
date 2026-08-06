@@ -12,7 +12,7 @@ use super::cli::RunnerJobCommand;
 use super::types::{RunnerBrokerJobOutput, RunnerJobOutput};
 
 pub(super) enum RunnerJobCommandOutput {
-    Daemon(RunnerJobOutput),
+    Daemon(Box<RunnerJobOutput>),
     Broker(RunnerBrokerJobOutput),
 }
 
@@ -42,7 +42,7 @@ pub(super) fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobCommandOutput
 }
 
 fn map_daemon_job(result: CmdResult<RunnerJobOutput>) -> CmdResult<RunnerJobCommandOutput> {
-    result.map(|(output, exit_code)| (RunnerJobCommandOutput::Daemon(output), exit_code))
+    result.map(|(output, exit_code)| (RunnerJobCommandOutput::Daemon(Box::new(output)), exit_code))
 }
 
 fn job_reconcile(runner_id: &str) -> CmdResult<RunnerJobCommandOutput> {

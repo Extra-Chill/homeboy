@@ -393,8 +393,8 @@ fn find_matching_brace(lines: &[&str], start_line: usize, _grammar: &Grammar) ->
     let mut depth: i32 = 0;
     let mut found_open = false;
 
-    for i in start_line..lines.len() {
-        for ch in lines[i].chars() {
+    for (i, line) in lines.iter().enumerate().skip(start_line) {
+        for ch in line.chars() {
             if ch == '{' {
                 depth += 1;
                 found_open = true;
@@ -537,8 +537,8 @@ fn extract_fn_body(lines: &[&str], start_idx: usize, _grammar: &Grammar) -> Stri
     let mut found_open = false;
     let mut body_lines = Vec::new();
 
-    for i in start_idx..lines.len() {
-        let trimmed = lines[i].trim();
+    for line in lines.iter().skip(start_idx) {
+        let trimmed = line.trim();
 
         // Trait method declarations end with `;` and have no body.
         // If we hit a semicolon before finding any `{`, this is a bodyless declaration.
@@ -546,7 +546,7 @@ fn extract_fn_body(lines: &[&str], start_idx: usize, _grammar: &Grammar) -> Stri
             return String::new();
         }
 
-        for ch in lines[i].chars() {
+        for ch in line.chars() {
             if ch == '{' {
                 depth += 1;
                 found_open = true;
@@ -554,7 +554,7 @@ fn extract_fn_body(lines: &[&str], start_idx: usize, _grammar: &Grammar) -> Stri
                 depth -= 1;
             }
         }
-        body_lines.push(lines[i]);
+        body_lines.push(*line);
         if found_open && depth == 0 {
             break;
         }

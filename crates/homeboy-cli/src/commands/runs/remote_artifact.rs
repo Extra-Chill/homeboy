@@ -1025,6 +1025,7 @@ mod tests {
                     apply: false,
                     include: vec![crate::commands::cleanup::CleanupCategoryArg::RunnerDownloads],
                     exclude: Vec::new(),
+                    include_untagged: false,
                     older_than_days: None,
                     runtime_tmp_managed_older_than_days: None,
                     limit: None,

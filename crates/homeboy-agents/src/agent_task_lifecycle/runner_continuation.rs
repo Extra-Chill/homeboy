@@ -24,7 +24,7 @@ use homeboy_core::workspace_claim::{WorkspaceClaim, WorkspaceIdentity};
 /// confirms the job is absent. Transport failures remain deliberately
 /// unconfirmed so a transient daemon error cannot discard runner-owned work.
 pub enum RunnerJobReconciliation {
-    Snapshot(RunnerJobLogSnapshot),
+    Snapshot(Box<RunnerJobLogSnapshot>),
     ConfirmedAbsent { checked_generations: usize },
     UnconfirmedAbsence,
 }
@@ -110,7 +110,7 @@ pub trait RunnerContinuationProvider: Send + Sync {
     /// ownership support retain the conservative snapshot-only behavior.
     fn reconcile_runner_job(&self, runner_id: &str, job_id: &str) -> RunnerJobReconciliation {
         match self.runner_job_log_snapshot(runner_id, job_id) {
-            Ok(snapshot) => RunnerJobReconciliation::Snapshot(snapshot),
+            Ok(snapshot) => RunnerJobReconciliation::Snapshot(Box::new(snapshot)),
             Err(_) => RunnerJobReconciliation::UnconfirmedAbsence,
         }
     }

@@ -85,7 +85,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         if !output.status.success() {
             return Err(Error::validation_invalid_argument(
                 "base",
-                &format!(
+                format!(
                     "could not fetch requested base `refs/heads/{base}` from origin; verify remote access and that the branch exists, then retry: {}",
                     String::from_utf8_lossy(&output.stderr).trim()
                 ),
@@ -620,6 +620,102 @@ fn is_git_object_id(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+pub(super) fn validate_real_candidate_fingerprint(
+    options: &AgentTaskPrFinalizationOptions,
+) -> Result<()> {
+    let record = crate::agent_task_lifecycle::status(&options.run_id)?;
+    let promotion: AgentTaskPromotionReport = deserialize_persisted_value(
+        record.metadata.get("latest_promotion").cloned(),
+        "normal finalization requires persisted latest_promotion",
+        "persisted latest_promotion is invalid",
+    )?;
+    let expected: AgentTaskPromotionCandidate = deserialize_persisted_value(
+        promotion.provenance.get("candidate").cloned(),
+        "applied promotion is missing a candidate capability; rerun promotion before normal finalization or use --manual-finalization to record the explicit bypass",
+        "persisted candidate capability is invalid",
+    )?;
+    if !matches!(expected, AgentTaskPromotionCandidate::Git { .. }) {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "normal GitHub PR finalization requires an exact Git candidate fingerprint; the applied promotion target was not a Git worktree. Rerun promotion into a Git worktree or use --manual-finalization to record the explicit provenance bypass",
+            None,
+            None,
+        ));
+    }
+    if super::normalize_changed_files(&options.changed_files)
+        != super::normalize_changed_files(&promotion.changed_files)
+    {
+        return Err(super::changed_files_mismatch_error(
+            &options.run_id,
+            &options.changed_files,
+            &promotion.changed_files,
+        ));
+    }
+    validate_candidate_fingerprint(options, &expected)
+}
+
+pub(super) fn validate_candidate_fingerprint(
+    options: &AgentTaskPrFinalizationOptions,
+    expected: &AgentTaskPromotionCandidate,
+) -> Result<()> {
+    let AgentTaskPromotionCandidate::Git {
+        fingerprint: expected_fingerprint,
+    } = expected
+    else {
+        unreachable!("caller validates Git promotion candidate")
+    };
+    let actual = crate::agent_task_promotion::candidate_fingerprint(&options.path)?;
+    let AgentTaskPromotionCandidate::Git {
+        fingerprint: actual_fingerprint,
+    } = &actual
+    else {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "finalization path is not a Git worktree; normal GitHub PR finalization requires the promoted Git candidate",
+            Some(options.path.clone()),
+            None,
+        ));
+    };
+    if actual == *expected {
+        return Ok(());
+    }
+    if !actual_fingerprint.changed_files.is_empty()
+        || expected_fingerprint.tree.is_empty()
+        || !committed_candidate_matches(options, expected_fingerprint)?
+    {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "candidate changed after promotion; durable finalization accepts a recovery commit only when its parent and tree exactly match the recorded promoted candidate. Rerun promotion gates before finalization.",
+            None,
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn committed_candidate_matches(
+    options: &AgentTaskPrFinalizationOptions,
+    fingerprint: &crate::agent_task_promotion::AgentTaskCandidateFingerprint,
+) -> Result<bool> {
+    let parent = git_output(&options.path, &["rev-parse", "HEAD^"])?;
+    if parent.trim() != fingerprint.head {
+        return Ok(false);
+    }
+    let tree = git_output(&options.path, &["rev-parse", "HEAD^{tree}"])?;
+    Ok(tree.trim() == fingerprint.tree)
+}
+
+fn deserialize_persisted_value<T: DeserializeOwned>(
+    value: Option<serde_json::Value>,
+    missing_message: &str,
+    invalid_message: &str,
+) -> Result<T> {
+    let value = value
+        .ok_or_else(|| Error::validation_invalid_argument("run_id", missing_message, None, None))?;
+    serde_json::from_value(value)
+        .map_err(|_| Error::validation_invalid_argument("run_id", invalid_message, None, None))
+}
+
 #[cfg(test)]
 mod remote_base_tests {
     use super::*;
@@ -1124,100 +1220,4 @@ mod remote_base_tests {
             .expect("newer snapshot compares candidate");
         assert!(matches!(stale, AgentTaskPrCandidateState::Invalid { .. }));
     }
-}
-
-pub(super) fn validate_real_candidate_fingerprint(
-    options: &AgentTaskPrFinalizationOptions,
-) -> Result<()> {
-    let record = crate::agent_task_lifecycle::status(&options.run_id)?;
-    let promotion: AgentTaskPromotionReport = deserialize_persisted_value(
-        record.metadata.get("latest_promotion").cloned(),
-        "normal finalization requires persisted latest_promotion",
-        "persisted latest_promotion is invalid",
-    )?;
-    let expected: AgentTaskPromotionCandidate = deserialize_persisted_value(
-        promotion.provenance.get("candidate").cloned(),
-        "applied promotion is missing a candidate capability; rerun promotion before normal finalization or use --manual-finalization to record the explicit bypass",
-        "persisted candidate capability is invalid",
-    )?;
-    if !matches!(expected, AgentTaskPromotionCandidate::Git { .. }) {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            "normal GitHub PR finalization requires an exact Git candidate fingerprint; the applied promotion target was not a Git worktree. Rerun promotion into a Git worktree or use --manual-finalization to record the explicit provenance bypass",
-            None,
-            None,
-        ));
-    }
-    if super::normalize_changed_files(&options.changed_files)
-        != super::normalize_changed_files(&promotion.changed_files)
-    {
-        return Err(super::changed_files_mismatch_error(
-            &options.run_id,
-            &options.changed_files,
-            &promotion.changed_files,
-        ));
-    }
-    validate_candidate_fingerprint(options, &expected)
-}
-
-pub(super) fn validate_candidate_fingerprint(
-    options: &AgentTaskPrFinalizationOptions,
-    expected: &AgentTaskPromotionCandidate,
-) -> Result<()> {
-    let AgentTaskPromotionCandidate::Git {
-        fingerprint: expected_fingerprint,
-    } = expected
-    else {
-        unreachable!("caller validates Git promotion candidate")
-    };
-    let actual = crate::agent_task_promotion::candidate_fingerprint(&options.path)?;
-    let AgentTaskPromotionCandidate::Git {
-        fingerprint: actual_fingerprint,
-    } = &actual
-    else {
-        return Err(Error::validation_invalid_argument(
-            "path",
-            "finalization path is not a Git worktree; normal GitHub PR finalization requires the promoted Git candidate",
-            Some(options.path.clone()),
-            None,
-        ));
-    };
-    if actual == *expected {
-        return Ok(());
-    }
-    if !actual_fingerprint.changed_files.is_empty()
-        || expected_fingerprint.tree.is_empty()
-        || !committed_candidate_matches(options, expected_fingerprint)?
-    {
-        return Err(Error::validation_invalid_argument(
-            "path",
-            "candidate changed after promotion; durable finalization accepts a recovery commit only when its parent and tree exactly match the recorded promoted candidate. Rerun promotion gates before finalization.",
-            None,
-            None,
-        ));
-    }
-    Ok(())
-}
-
-fn committed_candidate_matches(
-    options: &AgentTaskPrFinalizationOptions,
-    fingerprint: &crate::agent_task_promotion::AgentTaskCandidateFingerprint,
-) -> Result<bool> {
-    let parent = git_output(&options.path, &["rev-parse", "HEAD^"])?;
-    if parent.trim() != fingerprint.head {
-        return Ok(false);
-    }
-    let tree = git_output(&options.path, &["rev-parse", "HEAD^{tree}"])?;
-    Ok(tree.trim() == fingerprint.tree)
-}
-
-fn deserialize_persisted_value<T: DeserializeOwned>(
-    value: Option<serde_json::Value>,
-    missing_message: &str,
-    invalid_message: &str,
-) -> Result<T> {
-    let value = value
-        .ok_or_else(|| Error::validation_invalid_argument("run_id", missing_message, None, None))?;
-    serde_json::from_value(value)
-        .map_err(|_| Error::validation_invalid_argument("run_id", invalid_message, None, None))
 }

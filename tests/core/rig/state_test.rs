@@ -222,7 +222,7 @@ fn set_effective_component_path_ignores_unknown_component() {
     let component = snapshot.components.get("studio").expect("component");
     assert_eq!(component.path, "/Users/user/Developer/studio");
     assert!(component.declared_path.is_none());
-    assert!(snapshot.components.get("missing").is_none());
+    assert!(!snapshot.components.contains_key("missing"));
 }
 
 #[test]

@@ -1,6 +1,4 @@
-use crate::component::{
-    discover_from_portable, inventory, load, try_discover_from_portable, Component,
-};
+use crate::component::{inventory, load, try_discover_from_portable, Component};
 use crate::error::{Error, Result};
 use crate::git::run_git;
 use homeboy_extension_contract::ExtensionCapability;
@@ -303,46 +301,127 @@ fn detect_from_cwd() -> Option<String> {
 /// current directory (or git root) has a matching `id`. This means the user is
 /// standing inside a clone of this component and intends to operate on it,
 /// even if the registered `local_path` points elsewhere (#694).
-fn prefer_cwd_for_component(component_id: &str) -> Option<Component> {
-    let cwd = std::env::current_dir().ok()?;
+fn prefer_cwd_for_component(component_id: &str) -> Result<Option<Component>> {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(_) => return Ok(None),
+    };
 
     // Check CWD directly
-    if let Some(discovered) = discover_from_portable(&cwd) {
+    if let Some(mut discovered) = try_discover_from_portable(&cwd)? {
         if discovered.id == component_id {
-            return Some(discovered);
+            crate::project::component::resolution::apply_standalone_component_fallbacks(
+                &mut discovered,
+                None,
+            );
+            return Ok(Some(discovered));
         }
     }
 
     // Check git root if different from CWD
     if let Some(git_root) = detect_git_root(&cwd) {
         if git_root != cwd {
-            if let Some(discovered) = discover_from_portable(&git_root) {
+            if let Some(mut discovered) = try_discover_from_portable(&git_root)? {
                 if discovered.id == component_id {
-                    return Some(discovered);
+                    crate::project::component::resolution::apply_standalone_component_fallbacks(
+                        &mut discovered,
+                        None,
+                    );
+                    return Ok(Some(discovered));
                 }
             }
         }
     }
 
-    let mut registered = load(component_id).ok()?;
+    let registered = match load(component_id) {
+        Ok(registered) => registered,
+        Err(_) => return Ok(None),
+    };
     let registered_path = PathBuf::from(shellexpand::tilde(&registered.local_path).into_owned());
-    let cwd_git_root = detect_git_root(&cwd)?;
+    let Some(cwd_git_root) = detect_git_root(&cwd) else {
+        return Ok(None);
+    };
 
     if same_git_common_dir(&registered_path, &cwd_git_root) {
-        registered.local_path = rebase_registered_path_to_checkout(&registered_path, &cwd_git_root)
-            .to_string_lossy()
-            .to_string();
-        crate::component::resolve_remote_path(&mut registered);
-        return Some(registered);
+        let checkout_path = rebase_registered_path_to_checkout(&registered_path, &cwd_git_root);
+        return portable_component_for_checkout(
+            component_id,
+            &checkout_path,
+            &registered,
+            &checkout_path,
+        )
+        .map(Some);
     }
 
     if is_named_component_worktree(component_id, &registered_path, &cwd_git_root) {
-        registered.local_path = cwd_git_root.to_string_lossy().to_string();
-        crate::component::resolve_remote_path(&mut registered);
-        return Some(registered);
+        return portable_component_for_checkout(
+            component_id,
+            &cwd_git_root,
+            &registered,
+            &cwd_git_root,
+        )
+        .map(Some);
     }
 
-    None
+    Ok(None)
+}
+
+/// A matched worktree is a distinct checkout, so all portable component fields
+/// must come from its manifest rather than the registered primary checkout.
+fn portable_component_for_checkout(
+    component_id: &str,
+    checkout_path: &Path,
+    registered: &Component,
+    fallback_path: &Path,
+) -> Result<Component> {
+    let manifest_path = checkout_path.join("homeboy.json");
+    let Some(mut component) = try_discover_from_portable(checkout_path)? else {
+        // A registration without a primary portable manifest is legacy
+        // machine-local metadata, not checkout-owned configuration. Keep that
+        // behavior for legacy consumers; otherwise a target manifest is required.
+        if try_discover_from_portable(Path::new(&registered.local_path))?.is_none() {
+            let mut component = registered.clone();
+            component.local_path = fallback_path.to_string_lossy().to_string();
+            crate::component::resolve_remote_path(&mut component);
+            return Ok(component);
+        }
+        return Err(Error::validation_invalid_argument(
+            "homeboy.json",
+            format!(
+                "Matched checkout for component '{}' has no portable manifest at {}",
+                component_id,
+                manifest_path.display()
+            ),
+            Some(checkout_path.to_string_lossy().to_string()),
+            Some(vec![
+                "Check out a revision containing homeboy.json or target a checkout with compatible component config".to_string(),
+            ]),
+        ));
+    };
+
+    if component.id != component_id {
+        return Err(Error::validation_invalid_argument(
+            "component_id",
+            format!(
+                "Matched checkout manifest at {} declares component id '{}' instead of '{}'",
+                manifest_path.display(),
+                component.id,
+                component_id
+            ),
+            Some(component_id.to_string()),
+            Some(vec![
+                "Target a checkout whose homeboy.json has the requested component id".to_string(),
+            ]),
+        ));
+    }
+
+    component.local_path = checkout_path.to_string_lossy().to_string();
+    crate::project::component::resolution::apply_standalone_component_fallbacks(
+        &mut component,
+        None,
+    );
+    crate::component::resolve_remote_path(&mut component);
+    Ok(component)
 }
 
 fn rebase_registered_path_to_checkout(registered_path: &Path, cwd_git_root: &Path) -> PathBuf {
@@ -439,6 +518,10 @@ fn resolve_path_override(path: &str) -> Result<Component> {
             Some(Path::new(path)),
         )?;
         discovered.local_path = path.to_string();
+        crate::project::component::resolution::apply_standalone_component_fallbacks(
+            &mut discovered,
+            None,
+        );
         crate::component::resolve_remote_path(&mut discovered);
         return Ok(discovered);
     }
@@ -449,6 +532,10 @@ fn resolve_path_override(path: &str) -> Result<Component> {
             if let Some(mut discovered) = try_discover_from_portable(&git_root)? {
                 validate_duplicate_portable_component_ids(&discovered.id, &git_root, None)?;
                 discovered.local_path = path.to_string();
+                crate::project::component::resolution::apply_standalone_component_fallbacks(
+                    &mut discovered,
+                    None,
+                );
                 crate::component::resolve_remote_path(&mut discovered);
                 return Ok(discovered);
             }
@@ -461,7 +548,7 @@ fn resolve_path_override(path: &str) -> Result<Component> {
     // bare-path resolution (e.g. top-level `homeboy status` from the worktree)
     // resolves the same component `git status` does instead of a synthetic one
     // (#9895).
-    if let Some(component) = registered_component_for_worktree_path(dir) {
+    if let Some(component) = registered_component_for_worktree_path(dir, None)? {
         return Ok(component);
     }
 
@@ -481,10 +568,18 @@ fn component_is_registered(component_id: &str) -> bool {
 /// registered checkout. Returns the registered component rebased onto the
 /// worktree path. `None` when the path is not a worktree of any registered
 /// component (#9895).
-fn registered_component_for_worktree_path(dir: &Path) -> Option<Component> {
-    let cwd_git_root = detect_git_root(dir)?;
-    let components = crate::component::inventory().ok()?;
-    for mut registered in components {
+fn registered_component_for_worktree_path(
+    dir: &Path,
+    expected_id: Option<&str>,
+) -> Result<Option<Component>> {
+    let Some(cwd_git_root) = detect_git_root(dir) else {
+        return Ok(None);
+    };
+    let components = crate::component::inventory()?;
+    for registered in components {
+        if expected_id.is_some_and(|id| id != registered.id) {
+            continue;
+        }
         let registered_path =
             PathBuf::from(shellexpand::tilde(&registered.local_path).into_owned());
         // A worktree is a *distinct* checkout of the registered component's repo:
@@ -497,12 +592,17 @@ fn registered_component_for_worktree_path(dir: &Path) -> Option<Component> {
             && (same_git_common_dir(&registered_path, &cwd_git_root)
                 || is_named_component_worktree(&registered.id, &registered_path, &cwd_git_root))
         {
-            registered.local_path = cwd_git_root.to_string_lossy().to_string();
-            crate::component::resolve_remote_path(&mut registered);
-            return Some(registered);
+            let checkout_path = rebase_registered_path_to_checkout(&registered_path, &cwd_git_root);
+            return portable_component_for_checkout(
+                &registered.id,
+                &checkout_path,
+                &registered,
+                dir,
+            )
+            .map(Some);
         }
     }
-    None
+    Ok(None)
 }
 
 fn path_has_portable_config(path: &Path) -> Result<bool> {
@@ -692,9 +792,13 @@ fn resolve_effective_inner(
     registry_lookup: RegistryLookupPolicy,
 ) -> Result<Component> {
     if let (Some(project), Some(id)) = (project, id) {
-        let mut component = crate::project::resolve_project_component(project, id)?;
+        let component = crate::project::resolve_project_component(project, id)?;
         if let Some(path) = path_override {
-            component.local_path = path.to_string();
+            let component =
+                portable_component_for_checkout(id, Path::new(path), &component, Path::new(path))?;
+            return crate::project::component::resolution::bind_materialized_component_at_path(
+                component, project,
+            );
         }
         return Ok(component);
     }
@@ -724,12 +828,21 @@ fn resolve_effective_inner(
                     Some(Path::new(path)),
                 )?;
                 discovered.local_path = path.to_string();
+                crate::project::component::resolution::apply_standalone_component_fallbacks(
+                    &mut discovered,
+                    None,
+                );
                 crate::component::resolve_remote_path(&mut discovered);
                 Ok(discovered)
             } else {
                 // Fallback: create a synthetic component when --path is
                 // explicitly provided but the directory has no homeboy.json.
                 // This supports ad-hoc operations on unregistered projects.
+                if let Some(component) =
+                    registered_component_for_worktree_path(Path::new(path), Some(id))?
+                {
+                    return Ok(component);
+                }
                 Ok(Component {
                     id: id.to_string(),
                     local_path: path.to_string(),
@@ -777,7 +890,7 @@ fn resolve_effective_inner(
             // if the CWD (or its git root) is a checkout of this component.
             // This ensures `homeboy test foo` from a different clone of `foo`
             // operates on the current checkout, not the registered local_path (#694).
-            if let Some(cwd_component) = prefer_cwd_for_component(id) {
+            if let Some(cwd_component) = prefer_cwd_for_component(id)? {
                 validate_duplicate_portable_component_ids(
                     id,
                     Path::new(&cwd_component.local_path),
@@ -926,6 +1039,7 @@ fn duplicate_portable_id_error(component_id: &str, paths: Vec<PathBuf>) -> Error
 mod tests {
     use super::*;
     use crate::component::ScopedExtensionConfig;
+    use crate::project::{Project, ProjectComponentAttachment, ProjectComponentOverrides};
     use std::collections::HashMap;
     use std::fs;
     use std::sync::{Mutex, OnceLock};
@@ -937,7 +1051,7 @@ mod tests {
     }
 
     fn with_cwd<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
-        let _guard = cwd_lock().lock().expect("cwd lock");
+        let _guard = cwd_lock().lock().unwrap_or_else(|error| error.into_inner());
         let previous = std::env::current_dir().expect("current dir");
         std::env::set_current_dir(dir).expect("set cwd");
         let result = f();
@@ -957,6 +1071,13 @@ mod tests {
             .to_string(),
         )
         .expect("standalone registration");
+    }
+
+    fn write_standalone_config(home: &Path, id: &str, config: serde_json::Value) {
+        let components = home.join(".config/homeboy/components");
+        fs::create_dir_all(&components).expect("components dir");
+        fs::write(components.join(format!("{id}.json")), config.to_string())
+            .expect("standalone config");
     }
 
     fn git(path: &Path, args: &[&str]) {
@@ -984,6 +1105,30 @@ mod tests {
             .to_string(),
         )
         .expect("portable config");
+    }
+
+    fn write_portable_with_env(dir: &Path, id: &str, env: Option<(&str, &str)>) {
+        let mut manifest = serde_json::json!({
+            "id": id,
+            "build_artifact": format!("build/{id}.zip")
+        });
+        if let Some((key, value)) = env {
+            manifest["env"] = serde_json::json!({ key: value });
+        }
+        fs::write(dir.join("homeboy.json"), manifest.to_string()).expect("portable config");
+    }
+
+    fn add_worktree(primary: &Path, worktree: &Path, branch: &str) {
+        git(
+            primary,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
     }
 
     #[test]
@@ -1441,6 +1586,312 @@ mod tests {
                 );
                 assert!(!target.synthetic);
             });
+        });
+    }
+
+    #[test]
+    fn worktree_resolution_uses_each_checkout_manifest_across_all_target_forms() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary = dir.path().join("fixture");
+            std::fs::create_dir_all(&primary).expect("primary dir");
+            git(&primary, &["init"]);
+            git(&primary, &["config", "user.email", "test@example.com"]);
+            git(&primary, &["config", "user.name", "Test User"]);
+            write_portable_with_env(&primary, "fixture", Some(("REPO_RELATIVE_CACHE", "cache")));
+            git(&primary, &["add", "homeboy.json"]);
+            git(&primary, &["commit", "-m", "stale manifest"]);
+            write_standalone_registration(home.path(), "fixture", &primary);
+
+            let primary_component = resolve_effective(Some("fixture"), None, None)
+                .expect("registered primary resolves");
+            assert_eq!(
+                primary_component
+                    .env
+                    .get("REPO_RELATIVE_CACHE")
+                    .map(String::as_str),
+                Some("cache"),
+                "the registered primary still represents its own revision"
+            );
+
+            let dmc_worktree = dir.path().join("fixture@dmc-worktree");
+            let task_worktree = dir.path().join("fixture@task-worktree");
+            for (worktree, branch) in [
+                (&dmc_worktree, "dmc-worktree"),
+                (&task_worktree, "task-worktree"),
+            ] {
+                add_worktree(&primary, worktree, branch);
+                write_portable_with_env(worktree, "fixture", None);
+                git(worktree, &["add", "homeboy.json"]);
+                git(worktree, &["commit", "-m", "fresh manifest"]);
+            }
+
+            with_cwd(&dmc_worktree, || {
+                let component = resolve_effective(Some("fixture"), None, None)
+                    .expect("DMC-style worktree resolves");
+                assert_eq!(
+                    Path::new(&component.local_path)
+                        .canonicalize()
+                        .expect("canonical resolved worktree"),
+                    dmc_worktree.canonicalize().expect("canonical DMC worktree")
+                );
+                assert!(
+                    !component.env.contains_key("REPO_RELATIVE_CACHE"),
+                    "DMC-style worktree must not inherit the primary manifest env"
+                );
+            });
+
+            let task_component = resolve_effective(
+                Some("fixture"),
+                Some(task_worktree.to_str().expect("task worktree path")),
+                None,
+            )
+            .expect("task worktree resolves through explicit target");
+            assert_eq!(task_component.local_path, task_worktree.to_string_lossy());
+            assert!(!task_component.env.contains_key("REPO_RELATIVE_CACHE"));
+
+            let path_component = resolve_effective(
+                None,
+                Some(dmc_worktree.to_str().expect("DMC worktree path")),
+                None,
+            )
+            .expect("path-only target resolves");
+            assert_eq!(path_component.local_path, dmc_worktree.to_string_lossy());
+            assert!(!path_component.env.contains_key("REPO_RELATIVE_CACHE"));
+        });
+    }
+
+    #[test]
+    fn worktree_resolution_preserves_target_manifest_across_reverse_revision_drift() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary = dir.path().join("fixture");
+            let worktree = dir.path().join("fixture@older-revision");
+            std::fs::create_dir_all(&primary).expect("primary dir");
+            git(&primary, &["init"]);
+            git(&primary, &["config", "user.email", "test@example.com"]);
+            git(&primary, &["config", "user.name", "Test User"]);
+            write_portable_with_env(&primary, "fixture", Some(("REPO_RELATIVE_CACHE", "cache")));
+            git(&primary, &["add", "homeboy.json"]);
+            git(&primary, &["commit", "-m", "old manifest"]);
+            add_worktree(&primary, &worktree, "older-revision");
+
+            write_portable_with_env(&primary, "fixture", None);
+            git(&primary, &["add", "homeboy.json"]);
+            git(&primary, &["commit", "-m", "new manifest"]);
+            write_standalone_registration(home.path(), "fixture", &primary);
+
+            let primary_component = resolve_effective(Some("fixture"), None, None)
+                .expect("fresh registered primary resolves");
+            assert!(!primary_component.env.contains_key("REPO_RELATIVE_CACHE"));
+
+            with_cwd(&worktree, || {
+                let component = resolve_effective(Some("fixture"), None, None)
+                    .expect("older worktree resolves");
+                assert_eq!(
+                    component.env.get("REPO_RELATIVE_CACHE").map(String::as_str),
+                    Some("cache"),
+                    "the older worktree keeps its own manifest value"
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn registered_worktree_without_compatible_manifest_fails_with_target_diagnostic() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary = dir.path().join("fixture");
+            let worktree = dir.path().join("fixture@missing-manifest");
+            std::fs::create_dir_all(&primary).expect("primary dir");
+            git(&primary, &["init"]);
+            git(&primary, &["config", "user.email", "test@example.com"]);
+            git(&primary, &["config", "user.name", "Test User"]);
+            write_portable_with_env(&primary, "fixture", Some(("REPO_RELATIVE_CACHE", "cache")));
+            git(&primary, &["add", "homeboy.json"]);
+            git(&primary, &["commit", "-m", "manifest"]);
+            add_worktree(&primary, &worktree, "missing-manifest");
+            fs::remove_file(worktree.join("homeboy.json")).expect("remove target manifest");
+            write_standalone_registration(home.path(), "fixture", &primary);
+
+            let error = resolve_effective(
+                Some("fixture"),
+                Some(worktree.to_str().expect("worktree path")),
+                None,
+            )
+            .expect_err("registered worktree must not borrow the primary manifest");
+            assert_eq!(error.code.as_str(), "validation.invalid_argument");
+            assert!(error.message.contains("Matched checkout"), "{error}");
+            assert!(error.message.contains("homeboy.json"), "{error}");
+            assert!(error
+                .details
+                .to_string()
+                .contains("revision containing homeboy.json"));
+
+            write_portable_with_env(&worktree, "other-component", None);
+            let error = resolve_effective(
+                Some("fixture"),
+                Some(worktree.to_str().expect("worktree path")),
+                None,
+            )
+            .expect_err("incompatible worktree manifest must fail");
+            assert_eq!(error.code.as_str(), "validation.invalid_argument");
+            assert!(error
+                .message
+                .contains("does not match homeboy.json id 'other-component'"));
+            assert!(error
+                .message
+                .contains(worktree.join("homeboy.json").to_string_lossy().as_ref()));
+        });
+    }
+
+    #[test]
+    fn target_manifest_reapplies_registration_and_project_owned_layers() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary = dir.path().join("fixture");
+            let worktree = dir.path().join("fixture@target");
+            fs::create_dir_all(&primary).expect("primary dir");
+            git(&primary, &["init"]);
+            git(&primary, &["config", "user.email", "test@example.com"]);
+            git(&primary, &["config", "user.name", "Test User"]);
+            fs::write(
+                primary.join("homeboy.json"),
+                r#"{"id":"fixture","remote_path":"primary/path","env":{"REPO_RELATIVE_CACHE":"primary"}}"#,
+            )
+            .expect("primary manifest");
+            git(&primary, &["add", "homeboy.json"]);
+            git(&primary, &["commit", "-m", "primary manifest"]);
+            add_worktree(&primary, &worktree, "target");
+            fs::write(
+                worktree.join("homeboy.json"),
+                r#"{"id":"fixture","env":{"REPO_RELATIVE_CACHE":"target"}}"#,
+            )
+            .expect("target manifest");
+            git(&worktree, &["add", "homeboy.json"]);
+            git(&worktree, &["commit", "-m", "target manifest"]);
+            write_standalone_config(
+                home.path(),
+                "fixture",
+                serde_json::json!({
+                    "local_path": primary,
+                    "remote_path": "registry/path",
+                    "remote_url": "https://github.com/example/fixture.git"
+                }),
+            );
+            let project = Project {
+                id: "site".to_string(),
+                components: vec![ProjectComponentAttachment {
+                    id: "fixture".to_string(),
+                    local_path: primary.to_string_lossy().to_string(),
+                    remote_path: Some("attachment/path".to_string()),
+                    ..Default::default()
+                }],
+                component_overrides: HashMap::from([(
+                    "fixture".to_string(),
+                    ProjectComponentOverrides {
+                        remote_path: Some("project/path".to_string()),
+                        build_artifact: Some("project.zip".to_string()),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            };
+
+            let component = resolve_effective(Some("fixture"), worktree.to_str(), Some(&project))
+                .expect("target component resolves");
+
+            assert_eq!(
+                component.env.get("REPO_RELATIVE_CACHE").map(String::as_str),
+                Some("target")
+            );
+            assert_eq!(component.remote_path, "project/path");
+            assert_eq!(component.build_artifact.as_deref(), Some("project.zip"));
+            assert_eq!(
+                component.remote_url.as_deref(),
+                Some("https://github.com/example/fixture.git")
+            );
+        });
+    }
+
+    #[test]
+    fn explicit_id_does_not_match_another_manifestless_worktree_registration() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary = dir.path().join("other");
+            let worktree = dir.path().join("other@legacy");
+            fs::create_dir_all(&primary).expect("primary dir");
+            git(&primary, &["init"]);
+            git(&primary, &["config", "user.email", "test@example.com"]);
+            git(&primary, &["config", "user.name", "Test User"]);
+            fs::write(primary.join("README.md"), "legacy\n").expect("readme");
+            git(&primary, &["add", "README.md"]);
+            git(&primary, &["commit", "-m", "legacy"]);
+            add_worktree(&primary, &worktree, "legacy");
+            write_standalone_registration(home.path(), "other", &primary);
+
+            let component = resolve_effective(Some("fixture"), worktree.to_str(), None)
+                .expect("unmatched explicit id remains synthetic");
+            assert_eq!(component.id, "fixture");
+            assert_eq!(component.local_path, worktree.to_string_lossy());
+            assert_ne!(component.remote_path, "wp-content/plugins/other");
+        });
+    }
+
+    #[test]
+    fn manifestless_registered_worktree_preserves_explicit_nested_target_path() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary = dir.path().join("repo");
+            let primary_component = primary.join("packages/fixture");
+            let worktree = dir.path().join("repo@legacy");
+            fs::create_dir_all(&primary_component).expect("component dir");
+            git(&primary, &["init"]);
+            git(&primary, &["config", "user.email", "test@example.com"]);
+            git(&primary, &["config", "user.name", "Test User"]);
+            fs::write(primary_component.join("README.md"), "legacy\n").expect("readme");
+            git(&primary, &["add", "."]);
+            git(&primary, &["commit", "-m", "legacy"]);
+            add_worktree(&primary, &worktree, "legacy");
+            write_standalone_registration(home.path(), "fixture", &primary_component);
+            let nested = worktree.join("packages/fixture");
+
+            let component = resolve_effective(Some("fixture"), nested.to_str(), None)
+                .expect("nested legacy target resolves");
+            assert_eq!(component.local_path, nested.to_string_lossy());
+        });
+    }
+
+    #[test]
+    fn malformed_target_manifest_fails_for_cwd_id_path_and_path_only_resolution() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary = dir.path().join("fixture");
+            let worktree = dir.path().join("fixture@malformed");
+            fs::create_dir_all(&primary).expect("primary dir");
+            git(&primary, &["init"]);
+            git(&primary, &["config", "user.email", "test@example.com"]);
+            git(&primary, &["config", "user.name", "Test User"]);
+            write_portable(&primary, "fixture");
+            git(&primary, &["add", "homeboy.json"]);
+            git(&primary, &["commit", "-m", "manifest"]);
+            add_worktree(&primary, &worktree, "malformed");
+            fs::write(worktree.join("homeboy.json"), "{").expect("malformed manifest");
+            write_standalone_registration(home.path(), "fixture", &primary);
+
+            let errors = [
+                with_cwd(&worktree, || resolve_effective(Some("fixture"), None, None)),
+                resolve_effective(Some("fixture"), worktree.to_str(), None),
+                resolve_effective(None, worktree.to_str(), None),
+            ];
+            for error in errors {
+                let error = error.expect_err("malformed target manifest must fail");
+                assert_eq!(error.code.as_str(), "validation.invalid_json");
+                assert!(
+                    error.details.to_string().contains("homeboy.json"),
+                    "{error}"
+                );
+            }
         });
     }
 

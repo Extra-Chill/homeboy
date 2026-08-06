@@ -320,7 +320,7 @@ fn dispatch(
         crate::command_contract::CommandOutputFileMode::None,
     ) {
         Ok(adapter) => return adapter.run(),
-        Err(command) => command,
+        Err(command) => *command,
     };
 
     match spec.json_family {
@@ -411,7 +411,7 @@ mod tests {
 
         let error =
             homeboy::core::Error::validation_invalid_argument("test", "invalid", None, None);
-        let expected_code = error.code.clone();
+        let expected_code = error.code;
         let run = command_run_with_summary((Err(error.clone()), 2), |_, _| {
             panic!("renderer must not run for errors")
         });

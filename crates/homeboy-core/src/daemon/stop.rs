@@ -114,9 +114,10 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
         active_jobs: 0,
         resource_evidence: "unavailable: forced stop does not collect OS resource snapshots"
             .to_string(),
-        os_evidence: termination,
+        os_evidence: termination.os_evidence(state.pid),
         exit_code: None,
-        signal: Some(SIGNAL_TERMINATE),
+        signal: termination.child_signal,
+        supervisor_signal: termination.supervisor_signal,
         stdout: None,
         stderr: None,
         stop_requested: true,
@@ -135,16 +136,44 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
 /// Stop the serving child first, allowing its supervisor to record the exit and
 /// leave normally. Every signal is preceded by fresh lease, zero-job, and token
 /// checks so a reused PID cannot be killed between the grace window and SIGKILL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SupervisedDaemonTermination {
+    child_signal: Option<i32>,
+    supervisor_signal: Option<i32>,
+}
+
+impl SupervisedDaemonTermination {
+    fn os_evidence(self, child_pid: u32) -> String {
+        let child_signal = signal_name(self.child_signal);
+        let supervisor_signal = self.supervisor_signal.map_or_else(
+            || "exited after child or was not observed".to_string(),
+            |signal| signal_name(Some(signal)).to_string(),
+        );
+        format!(
+            "exact startup-token ownership revalidated immediately before every signal; daemon pid {child_pid} stopped with {child_signal}; supervisor {supervisor_signal}"
+        )
+    }
+}
+
+fn signal_name(signal: Option<i32>) -> &'static str {
+    match signal {
+        Some(SIGNAL_TERMINATE) => "SIGTERM",
+        Some(SIGNAL_KILL) => "SIGKILL",
+        None => "no signal sent",
+        Some(_) => "unknown signal",
+    }
+}
+
 fn terminate_exact_supervised_daemon(
     path: &std::path::Path,
     identity: &DaemonLeaseIdentity,
     state: &DaemonState,
-) -> Result<String> {
+) -> Result<SupervisedDaemonTermination> {
     let supervisor = supervised_parent_pid(state.pid, &state.startup_token)?;
     revalidate_exact_termination_target(path, identity, state)?;
     signal_pid(state.pid, SIGNAL_TERMINATE)?;
     let child_signal = if wait_for_pid_exit(state.pid, TERM_GRACE) {
-        "SIGTERM"
+        Some(SIGNAL_TERMINATE)
     } else {
         revalidate_exact_termination_target(path, identity, state)?;
         signal_pid(state.pid, SIGNAL_KILL)?;
@@ -154,19 +183,19 @@ fn terminate_exact_supervised_daemon(
                 state.pid
             )));
         }
-        "SIGKILL"
+        Some(SIGNAL_KILL)
     };
 
     // The supervisor observes its child exit and normally leaves on its own.
     // If it remains, prove its matching token before applying the same bounded
     // escalation; an unrelated reparented process is never signaled.
     let supervisor_signal = match supervisor {
-        Some(pid) if wait_for_pid_exit(pid, TERM_GRACE) => "exited after child",
+        Some(pid) if wait_for_pid_exit(pid, TERM_GRACE) => None,
         Some(pid) => {
             revalidate_exact_supervisor_termination_target(path, identity, state, pid)?;
             signal_pid(pid, SIGNAL_TERMINATE)?;
             if wait_for_pid_exit(pid, TERM_GRACE) {
-                "SIGTERM"
+                Some(SIGNAL_TERMINATE)
             } else {
                 revalidate_exact_supervisor_termination_target(path, identity, state, pid)?;
                 signal_pid(pid, SIGNAL_KILL)?;
@@ -175,15 +204,15 @@ fn terminate_exact_supervised_daemon(
                         "daemon supervisor pid {pid} survived bounded SIGTERM-to-SIGKILL escalation"
                     )));
                 }
-                "SIGKILL"
+                Some(SIGNAL_KILL)
             }
         }
-        None => "not observed",
+        None => None,
     };
-    Ok(format!(
-        "exact startup-token ownership revalidated immediately before every signal; daemon pid {} stopped with {child_signal}; supervisor {supervisor_signal}",
-        state.pid
-    ))
+    Ok(SupervisedDaemonTermination {
+        child_signal,
+        supervisor_signal,
+    })
 }
 
 fn revalidate_exact_termination_target(
@@ -465,9 +494,10 @@ pub(super) fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> 
                 active_jobs: 0,
                 resource_evidence:
                     "unavailable: ordinary stop does not collect OS resource snapshots".to_string(),
-                os_evidence: termination,
+                os_evidence: termination.os_evidence(pid),
                 exit_code: None,
-                signal: Some(SIGNAL_TERMINATE),
+                signal: termination.child_signal,
+                supervisor_signal: termination.supervisor_signal,
                 stdout: None,
                 stderr: None,
                 stop_requested: true,
@@ -496,6 +526,7 @@ pub(super) fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> 
                     .to_string(),
             exit_code: None,
             signal: None,
+            supervisor_signal: None,
             stdout: None,
             stderr: None,
             stop_requested: true,

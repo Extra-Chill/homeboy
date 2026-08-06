@@ -315,7 +315,7 @@ fn handoff_envelope_from_typed_handoff(handoff: &AgentTaskLabHandoff) -> Value {
     }
     if let Some(aggregate) = handoff.aggregate.as_ref() {
         if let Ok(value) = serde_json::to_value(
-            &homeboy_agents::agent_task_artifacts::reviewer_facing_aggregate(aggregate),
+            homeboy_agents::agent_task_artifacts::reviewer_facing_aggregate(aggregate),
         ) {
             envelope.insert("aggregate".to_string(), value);
         }

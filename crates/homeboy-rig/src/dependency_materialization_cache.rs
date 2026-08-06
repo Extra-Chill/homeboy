@@ -98,7 +98,7 @@ impl DependencyMaterializationCache {
             .iter()
             .map(|input| {
                 let path =
-                    contained_path(&workspace, &expand_vars_with_settings(rig, input, settings))?;
+                    contained_path(&workspace, expand_vars_with_settings(rig, input, settings))?;
                 let relative = path.strip_prefix(&workspace).unwrap().display().to_string();
                 Ok(Input {
                     path: relative,
@@ -344,6 +344,7 @@ impl DependencyMaterializationCache {
             .map_err(|error| io_error("create dependency cache root", error))?;
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(self.root.join(format!(".{}.lock", self.key)))
@@ -584,8 +585,7 @@ fn clear_path(path: &Path) -> Result<()> {
 
 fn contained_path(root: &Path, path: impl AsRef<Path>) -> Result<PathBuf> {
     let path =
-        homeboy_paths::resolve_contained_local_path(root, path, "dependency_materialization")
-            .map_err(Error::from)?;
+        homeboy_paths::resolve_contained_local_path(root, path, "dependency_materialization")?;
     let root =
         fs::canonicalize(root).map_err(|error| io_error("resolve dependency workspace", error))?;
     let mut ancestor = path.as_path();
@@ -655,7 +655,7 @@ fn hash_path(path: &Path) -> Result<String> {
 }
 fn hash_directory(root: &Path) -> Result<String> {
     let mut files = Vec::new();
-    collect_files(root, root, &mut files)?;
+    collect_files(root, &mut files)?;
     files.sort();
     let mut hasher = Sha256::new();
     for file in files {
@@ -669,7 +669,7 @@ fn hash_directory(root: &Path) -> Result<String> {
     }
     Ok(format!("{:x}", hasher.finalize()))
 }
-fn collect_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+fn collect_files(directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(directory)
         .map_err(|error| io_error("read dependency cache directory", error))?
     {
@@ -687,7 +687,7 @@ fn collect_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Res
             ));
         }
         if metadata.is_dir() {
-            collect_files(root, &path, files)?;
+            collect_files(&path, files)?;
         } else if metadata.is_file() {
             files.push(path);
         }
@@ -701,7 +701,7 @@ fn path_bytes(path: &Path) -> Result<u64> {
             .len());
     }
     let mut files = Vec::new();
-    collect_files(path, path, &mut files)?;
+    collect_files(path, &mut files)?;
     files.into_iter().try_fold(0, |total, file| {
         Ok(total
             + fs::metadata(file)

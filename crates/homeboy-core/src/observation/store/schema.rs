@@ -469,6 +469,24 @@ pub(crate) fn open_readonly_connection(path: &Path) -> Result<Connection> {
     Ok(connection)
 }
 
+/// Open an existing store for a bounded scheduler write. This deliberately
+/// avoids migrations, pragma maintenance, and artifact reconciliation: a
+/// scheduler may only claim or terminalize its own durable work.
+pub(crate) fn open_bounded_writer_connection(path: &Path) -> Result<Connection> {
+    const WRITE_TIMEOUT: Duration = Duration::from_millis(750);
+    let connection = Connection::open(path).map_err(sqlite_error(format!(
+        "open bounded observation scheduler store {}",
+        path.display()
+    )))?;
+    connection
+        .busy_timeout(WRITE_TIMEOUT)
+        .map_err(sqlite_error(
+            "configure bounded observation scheduler store",
+        ))?;
+    enforce_foreign_keys(&connection)?;
+    Ok(connection)
+}
+
 fn read_store_error(path: &Path, operation: &str, error: rusqlite::Error) -> crate::Error {
     if super::is_transient_lock_error(&error) {
         return crate::Error::observation_store_busy(path.to_string_lossy(), operation, 750);

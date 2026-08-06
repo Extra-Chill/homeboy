@@ -85,16 +85,16 @@ fn evaluate_temporal_assertion(
             p95_ms,
             p99_ms,
             message,
-        } => evaluate_latency_bound(
+        } => evaluate_latency_bound(LatencyBoundAssertionRequest {
             id,
             from,
             to,
-            *p50_ms,
-            *p95_ms,
-            *p99_ms,
-            message.as_deref(),
+            p50_ms: *p50_ms,
+            p95_ms: *p95_ms,
+            p99_ms: *p99_ms,
+            message: message.as_deref(),
             timeline,
-        ),
+        }),
         TraceTemporalAssertionDefinition::RequiredSequence {
             id,
             sequence,
@@ -361,17 +361,19 @@ fn evaluate_ordering(
     }
 }
 
-fn evaluate_latency_bound(
-    id: &str,
-    from: &str,
-    to: &str,
+struct LatencyBoundAssertionRequest<'a> {
+    id: &'a str,
+    from: &'a str,
+    to: &'a str,
     p50_ms: Option<u64>,
     p95_ms: Option<u64>,
     p99_ms: Option<u64>,
-    message: Option<&str>,
-    timeline: &[super::parsing::TraceEvent],
-) -> TraceAssertion {
-    let durations = paired_durations(timeline, from, to);
+    message: Option<&'a str>,
+    timeline: &'a [super::parsing::TraceEvent],
+}
+
+fn evaluate_latency_bound(request: LatencyBoundAssertionRequest<'_>) -> TraceAssertion {
+    let durations = paired_durations(request.timeline, request.from, request.to);
     let samples = durations
         .iter()
         .map(|duration| *duration as f64)
@@ -380,29 +382,33 @@ fn evaluate_latency_bound(
     let actual_p95 = (!samples.is_empty()).then(|| percentile(&samples, 95.0));
     let actual_p99 = (!samples.is_empty()).then(|| percentile(&samples, 99.0));
     let passed = !samples.is_empty()
-        && p50_ms.is_none_or(|limit| actual_p50.is_some_and(|actual| actual <= limit as f64))
-        && p95_ms.is_none_or(|limit| actual_p95.is_some_and(|actual| actual <= limit as f64))
-        && p99_ms.is_none_or(|limit| actual_p99.is_some_and(|actual| actual <= limit as f64));
+        && request
+            .p50_ms
+            .is_none_or(|limit| actual_p50.is_some_and(|actual| actual <= limit as f64))
+        && request
+            .p95_ms
+            .is_none_or(|limit| actual_p95.is_some_and(|actual| actual <= limit as f64))
+        && request
+            .p99_ms
+            .is_none_or(|limit| actual_p99.is_some_and(|actual| actual <= limit as f64));
 
     TraceAssertion {
-        id: id.to_string(),
+        id: request.id.to_string(),
         status: if passed {
             TraceAssertionStatus::Pass
         } else {
             TraceAssertionStatus::Fail
         },
-        message: Some(
-            message
-                .map(str::to_string)
-                .unwrap_or_else(|| latency_bound_message(from, to, durations.len(), passed)),
-        ),
+        message: Some(request.message.map(str::to_string).unwrap_or_else(|| {
+            latency_bound_message(request.from, request.to, durations.len(), passed)
+        })),
         details: Some(json!({
             "kind": "latency-bound",
-            "from": from,
-            "to": to,
-            "p50_ms": p50_ms,
-            "p95_ms": p95_ms,
-            "p99_ms": p99_ms,
+            "from": request.from,
+            "to": request.to,
+            "p50_ms": request.p50_ms,
+            "p95_ms": request.p95_ms,
+            "p99_ms": request.p99_ms,
             "actual_p50_ms": actual_p50,
             "actual_p95_ms": actual_p95,
             "actual_p99_ms": actual_p99,

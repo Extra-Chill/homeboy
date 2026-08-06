@@ -211,7 +211,7 @@ pub enum AuditCommandOutput {
         #[serde(skip_serializing_if = "Option::is_none")]
         changed_since: Option<AuditChangedSinceSummary>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        summary: Option<AuditSummaryOutput>,
+        summary: Box<Option<AuditSummaryOutput>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         fixability: Option<AuditFixability>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -392,8 +392,7 @@ pub fn build_changed_since_summary(
 ///
 /// This must match the `#[serde(rename_all = "snake_case")]` on the enum so that
 /// `fixability.by_kind` keys align with the finding group keys in JSON output.
-/// Using `format!("{:?}", ...)` would produce Debug PascalCase (e.g. `compilerwarning`)
-
+/// Using `format!("{:?}", ...)` would produce Debug PascalCase (e.g. `compilerwarning`).
 /// Compute fixability metadata from an audit result without applying fixes.
 ///
 /// Runs the fix generator in dry-run mode and counts how many findings

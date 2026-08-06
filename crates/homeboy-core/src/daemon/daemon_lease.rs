@@ -71,7 +71,7 @@ pub(crate) fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> 
         });
     }
 
-    let content = fs::read_to_string(&path)
+    let content = fs::read_to_string(path)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("read {}", path.display()))))?;
     let state: DaemonState = match serde_json::from_str(&content) {
         Ok(state) => state,

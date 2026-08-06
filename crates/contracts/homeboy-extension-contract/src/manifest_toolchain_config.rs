@@ -620,7 +620,8 @@ mod tests {
             names_path: vec!["service".to_string(), "secret_env".to_string()],
             optional: false,
         };
-        validate_test_secret_env_projections(&[projection.clone()]).expect("bounded projection");
+        validate_test_secret_env_projections(std::slice::from_ref(&projection))
+            .expect("bounded projection");
 
         for malformed in [
             TestSecretEnvProjection {

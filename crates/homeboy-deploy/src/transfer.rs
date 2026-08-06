@@ -64,7 +64,7 @@ fn rsync_directory(
 
     let mut ssh_cmd_parts = vec!["ssh".to_string()];
     ssh_cmd_parts.extend(homeboy_core::server::ssh_args::client_option_args(
-        &ssh_client,
+        ssh_client,
         homeboy_core::server::ssh_args::SshArgOptions {
             batch_mode: true,
             connect_timeout: true,

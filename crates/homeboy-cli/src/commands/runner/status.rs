@@ -99,7 +99,7 @@ pub(super) fn status(
                 id: Some(id.to_string()),
                 extra: RunnerExtra {
                     admission_summary,
-                    connection: Some(RunnerConnectionOutput::Status(report)),
+                    connection: Some(RunnerConnectionOutput::Status(Box::new(report))),
                     generation_inventory,
                     preferred_lab_runner,
                     selected_lab_runner,
@@ -200,7 +200,7 @@ pub(super) fn reconcile(id: &str) -> CmdResult<RunnerOutput> {
                     &generation_inventory,
                     generation_inventory.len(),
                 )),
-                connection: Some(RunnerConnectionOutput::Status(report.clone())),
+                connection: Some(RunnerConnectionOutput::Status(Box::new(report.clone()))),
                 generation_inventory,
                 operator_hints: runner_status_operator_hints(&report),
                 operator_commands: runner_status_operator_commands(&report),
@@ -552,13 +552,15 @@ pub(crate) fn declared_runtime_diagnostics(
     );
     let packages = declared_runtime_packages(
         declaration,
-        runner_id,
-        env,
-        &install_dir,
-        &install_dir_source,
-        &managed_cache_source,
-        &default_install_dir,
-        &default_managed_cache_source,
+        RuntimePackageContext {
+            runner_id,
+            env,
+            install_dir: &install_dir,
+            install_dir_source: &install_dir_source,
+            managed_cache_source: &managed_cache_source,
+            default_install_dir: &default_install_dir,
+            default_managed_cache_source: &default_managed_cache_source,
+        },
     );
     let mut diagnostics = declared_runtime_source_diagnostics(
         &declaration.source_consistency,
@@ -738,15 +740,19 @@ fn render_path_message(template: &str, path: &str, root: &str) -> String {
     template.replace("${path}", path).replace("${root}", root)
 }
 
+struct RuntimePackageContext<'a> {
+    runner_id: Option<&'a str>,
+    env: &'a BTreeMap<String, String>,
+    install_dir: &'a str,
+    install_dir_source: &'a str,
+    managed_cache_source: &'a str,
+    default_install_dir: &'a str,
+    default_managed_cache_source: &'a str,
+}
+
 fn declared_runtime_packages(
     declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
-    runner_id: Option<&str>,
-    env: &BTreeMap<String, String>,
-    install_dir: &str,
-    install_dir_source: &str,
-    managed_cache_source: &str,
-    default_install_dir: &str,
-    default_managed_cache_source: &str,
+    context: RuntimePackageContext<'_>,
 ) -> Vec<RunnerRuntimePackageDiagnostics> {
     declaration
         .packages
@@ -754,22 +760,26 @@ fn declared_runtime_packages(
         .map(|package| {
             let effective_path = render_diagnostic_template(
                 &package.expected_path,
-                install_dir,
-                managed_cache_source,
+                context.install_dir,
+                context.managed_cache_source,
             );
             let default_path = render_diagnostic_template(
                 &package.expected_path,
-                default_install_dir,
-                default_managed_cache_source,
+                context.default_install_dir,
+                context.default_managed_cache_source,
             );
             let override_value = package
                 .env_override
                 .as_deref()
-                .and_then(|key| env.get(key).map(|value| (key, value.clone())));
+                .and_then(|key| context.env.get(key).map(|value| (key, value.clone())));
             let (expected_path, selection_source, env_override, remediation_command) =
                 if let Some((key, value)) = override_value {
                     let remediation_command = if value != default_path {
-                        Some(runner_env_update_command(runner_id, key, &default_path))
+                        Some(runner_env_update_command(
+                            context.runner_id,
+                            key,
+                            &default_path,
+                        ))
                     } else {
                         None
                     };
@@ -780,7 +790,12 @@ fn declared_runtime_packages(
                         remediation_command,
                     )
                 } else {
-                    (effective_path, install_dir_source.to_string(), None, None)
+                    (
+                        effective_path,
+                        context.install_dir_source.to_string(),
+                        None,
+                        None,
+                    )
                 };
             RunnerRuntimePackageDiagnostics {
                 field: package.field.clone(),
@@ -1422,34 +1437,31 @@ pub(super) fn runner_status_operator_commands(
         }
     }
 
-    if session.mode == RunnerTunnelMode::Reverse {
-        if session.broker_url.is_some() {
+    if session.mode == RunnerTunnelMode::Reverse && session.broker_url.is_some() {
+        commands.push(RunnerOperatorCommand {
+            scope: "broker_reconcile",
+            runner_id: report.runner_id.clone(),
+            job_id: None,
+            command: format!(
+                "homeboy runner job reconcile {}",
+                shell_arg(&report.runner_id)
+            ),
+            description:
+                "Fail expired reverse-runner claims through the broker-owned lifecycle path."
+                    .to_string(),
+        });
+        for job in &report.active_runner_jobs {
             commands.push(RunnerOperatorCommand {
-                scope: "broker_reconcile",
+                scope: "broker_artifact_lookup",
                 runner_id: report.runner_id.clone(),
-                job_id: None,
+                job_id: Some(job.job_id.clone()),
                 command: format!(
-                    "homeboy runner job reconcile {}",
-                    shell_arg(&report.runner_id)
+                    "homeboy runner job artifacts {} {} <artifact-id>",
+                    shell_arg(&report.runner_id),
+                    shell_arg(&job.job_id)
                 ),
-                description:
-                    "Fail expired reverse-runner claims through the broker-owned lifecycle path."
-                        .to_string(),
+                description: "Inspect broker-held reverse-runner artifact metadata.".to_string(),
             });
-            for job in &report.active_runner_jobs {
-                commands.push(RunnerOperatorCommand {
-                    scope: "broker_artifact_lookup",
-                    runner_id: report.runner_id.clone(),
-                    job_id: Some(job.job_id.clone()),
-                    command: format!(
-                        "homeboy runner job artifacts {} {} <artifact-id>",
-                        shell_arg(&report.runner_id),
-                        shell_arg(&job.job_id)
-                    ),
-                    description: "Inspect broker-held reverse-runner artifact metadata."
-                        .to_string(),
-                });
-            }
         }
     }
 

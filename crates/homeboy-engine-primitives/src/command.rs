@@ -65,10 +65,10 @@ impl ControllerChildGuard {
                 }
             }
             isolate_process_tree(command);
-            return Ok(Self {
+            Ok(Self {
                 controller_liveness_read_fd: fds[0],
                 controller_liveness_fd: fds[1],
-            });
+            })
         }
 
         #[cfg(not(unix))]
@@ -625,7 +625,7 @@ pub fn wait_with_bounded_output_supervised_with_progress(
 /// tree with the same semantics instead of reimplementing them.
 #[cfg(unix)]
 pub fn terminate_remaining_process_group(root_pid: u32) -> io::Result<()> {
-    if !process_group_is_running(root_pid) {
+    if !process_group_has_live_member(root_pid) {
         return Ok(());
     }
     signal_process_group(root_pid, libc::SIGTERM)?;
@@ -831,6 +831,81 @@ fn process_group_is_running(root_pid: u32) -> bool {
     unsafe { libc::kill(-(root_pid as libc::pid_t), 0) == 0 }
 }
 
+/// Whether `root_pid`'s process group still holds a process that can run.
+///
+/// `process_group_is_running` asks `kill(-pgid, 0)`, which succeeds for a
+/// **zombie**. `reap_exited_process_group_children` clears the zombies we are
+/// the parent of, but not every zombie in the group is ours: a shell background
+/// job whose parent exits first is reparented to PID 1, and where PID 1 does not
+/// reap — the usual case inside a container — it stays a zombie until the
+/// container ends. `waitpid` cannot touch a process we did not spawn, so the
+/// group reads as alive forever.
+///
+/// The visible cost is not just a wrong error. Termination burns both the
+/// SIGTERM and SIGKILL grace windows (4s combined) waiting for processes that
+/// already exited, then reports "remained alive after SIGKILL" for a tree that
+/// is dead in every sense that matters.
+///
+/// A zombie holds no descriptors, runs no code, and cannot be killed again. For
+/// the question these wait loops ask — may this tree still act? — it is gone.
+#[cfg(unix)]
+fn process_group_has_live_member(root_pid: u32) -> bool {
+    if !process_group_is_running(root_pid) {
+        return false;
+    }
+    // Absent a way to inspect process state, keep the historical answer: the
+    // group exists, so treat it as alive.
+    process_group_live_member_count(root_pid).is_none_or(|live| live > 0)
+}
+
+/// Count non-zombie members of `root_pid`'s process group, or `None` where
+/// process state cannot be read.
+#[cfg(all(unix, target_os = "linux"))]
+fn process_group_live_member_count(root_pid: u32) -> Option<usize> {
+    let mut live = 0usize;
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if name.parse::<u32>().is_err() {
+            continue;
+        }
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            // A process that exits mid-scan is not a live member.
+            continue;
+        };
+        // `comm` (field 2) is parenthesised and may itself contain spaces and
+        // ')', so the fields after the final ')' are the only stable ones:
+        // state, ppid, pgrp.
+        let Some((_, rest)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let Some(state) = fields.next() else {
+            continue;
+        };
+        let Some(_ppid) = fields.next() else {
+            continue;
+        };
+        let Some(pgrp) = fields.next().and_then(|field| field.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pgrp != root_pid {
+            continue;
+        }
+        if state != "Z" {
+            live += 1;
+        }
+    }
+    Some(live)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_group_live_member_count(_root_pid: u32) -> Option<usize> {
+    None
+}
+
 /// Reap any of our own already-exited children that belong to `root_pid`'s
 /// process group.
 ///
@@ -870,12 +945,12 @@ fn wait_for_process_group_exit(
     status: &mut Option<ExitStatus>,
 ) -> io::Result<bool> {
     let deadline = std::time::Instant::now() + grace;
-    while process_group_is_running(root_pid) {
+    while process_group_has_live_member(root_pid) {
         if status.is_none() {
             *status = child.try_wait()?;
         }
         reap_exited_process_group_children(root_pid);
-        if !process_group_is_running(root_pid) {
+        if !process_group_has_live_member(root_pid) {
             break;
         }
         if std::time::Instant::now() >= deadline {
@@ -889,9 +964,9 @@ fn wait_for_process_group_exit(
 #[cfg(unix)]
 fn wait_for_process_group_exit_without_child(root_pid: u32, grace: Duration) -> bool {
     let deadline = std::time::Instant::now() + grace;
-    while process_group_is_running(root_pid) {
+    while process_group_has_live_member(root_pid) {
         reap_exited_process_group_children(root_pid);
-        if !process_group_is_running(root_pid) {
+        if !process_group_has_live_member(root_pid) {
             return true;
         }
         if std::time::Instant::now() >= deadline {
@@ -900,6 +975,74 @@ fn wait_for_process_group_exit_without_child(root_pid: u32, grace: Duration) -> 
         thread::sleep(PROCESS_TREE_POLL_INTERVAL);
     }
     true
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod process_group_liveness_tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    /// A process group whose only remaining member is a zombie is not alive.
+    ///
+    /// `kill(-pgid, 0)` succeeds for a zombie, so the group reads as running
+    /// long after it can do anything. Where the zombie is not our own child we
+    /// cannot reap it away, so the wait loops have to recognise the state
+    /// rather than wait it out.
+    #[test]
+    fn a_process_group_of_only_zombies_is_not_live() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 0"]);
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+        isolate_process_tree(&mut command);
+        let child = command.spawn().expect("spawn child");
+        let pid = child.id();
+        // Deliberately leak the handle: dropping `Child` without waiting is what
+        // leaves the exited process as an unreaped zombie.
+        std::mem::forget(child);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let live = process_group_live_member_count(pid).expect("read process state");
+            if live == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child never exited; group still reports {live} live member(s)"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            process_group_is_running(pid),
+            "precondition: kill(-pgid, 0) still succeeds for the zombie, which is \
+             exactly why the naive probe is wrong"
+        );
+        assert!(
+            !process_group_has_live_member(pid),
+            "a group holding only a zombie must not be reported as alive"
+        );
+
+        reap_exited_process_group_children(pid);
+    }
+
+    /// The zombie allowance must not blind the probe to a group that is running.
+    #[test]
+    fn a_process_group_with_a_running_member_is_live() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5"]);
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+        isolate_process_tree(&mut command);
+        let mut child = command.spawn().expect("spawn child");
+        let pid = child.id();
+
+        assert!(
+            process_group_has_live_member(pid),
+            "a group running `sleep 5` must be reported as alive"
+        );
+
+        let _ = terminate_process_tree_and_reap(&mut child);
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -1012,7 +1155,7 @@ pub fn terminate_process_tree_and_reap(child: &mut Child) -> io::Result<ExitStat
                 ));
             }
         }
-        return status.map(Ok).unwrap_or_else(|| child.wait());
+        status.map(Ok).unwrap_or_else(|| child.wait())
     }
 
     #[cfg(not(unix))]

@@ -232,6 +232,23 @@ homeboy_engine_primitives::provider_registry! {
     with: pub fn with_runner_evidence,
 }
 
+/// Clear any registered runner-evidence provider.
+///
+/// Registration is process-global and permanent, which is correct in a binary
+/// (the runner layer registers once at startup) but wrong in a test binary,
+/// where every test shares one process. A test that registers a fake provider
+/// otherwise keeps serving every later test in the run, so a fake's
+/// expectations leak into unrelated tests and the failure surfaces in whichever
+/// test happens to sort after it. Hermetic test setup calls this so each test
+/// starts from the unregistered no-op state.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn reset_runner_evidence_provider_for_test() {
+    let mut slot = provider_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *slot = None;
+}
+
 /// Refresh runner-owned evidence and return its authenticated runner/job
 /// identities without exposing runner-specific metadata to consumers.
 pub fn mirrored_runner_job_identities(run_id: &str) -> Result<Vec<(String, String)>> {

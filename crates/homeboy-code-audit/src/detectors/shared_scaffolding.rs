@@ -26,6 +26,8 @@ use super::fingerprint::FileFingerprint;
 
 /// Minimum number of classes with identical shape to consider a group.
 const MIN_GROUP_SIZE: usize = 3;
+type SharedScaffoldingGroups<'a> =
+    HashMap<(String, Vec<(String, String)>), Vec<&'a ClassShape<'a>>>;
 
 /// Minimum mean per-method body similarity (0.0 – 1.0).
 const MIN_MEAN_SIMILARITY: f64 = 0.60;
@@ -70,7 +72,7 @@ fn detect_shared_scaffolding(fingerprints: &[&FileFingerprint]) -> Vec<Finding> 
     }
 
     // Group by (subtree, shape).
-    let mut groups: HashMap<(String, Vec<(String, String)>), Vec<&ClassShape>> = HashMap::new();
+    let mut groups: SharedScaffoldingGroups = HashMap::new();
     for cs in &shapes {
         groups
             .entry((cs.subtree.clone(), cs.shape.clone()))

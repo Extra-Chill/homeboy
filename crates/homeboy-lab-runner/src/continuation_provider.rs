@@ -131,7 +131,7 @@ impl RunnerContinuationProvider for RunnerContinuation {
 
     fn reconcile_runner_job(&self, runner_id: &str, job_id: &str) -> RunnerJobReconciliation {
         match self.runner_job_log_snapshot(runner_id, job_id) {
-            Ok(snapshot) => return RunnerJobReconciliation::Snapshot(snapshot),
+            Ok(snapshot) => return RunnerJobReconciliation::Snapshot(Box::new(snapshot)),
             Err(error) if !job_not_found(&error, job_id) => {
                 return RunnerJobReconciliation::UnconfirmedAbsence;
             }
@@ -164,7 +164,7 @@ impl RunnerContinuationProvider for RunnerContinuation {
                     {
                         return RunnerJobReconciliation::UnconfirmedAbsence;
                     }
-                    return RunnerJobReconciliation::Snapshot(snapshot);
+                    return RunnerJobReconciliation::Snapshot(Box::new(snapshot));
                 }
                 Err(error) if job_not_found(&error, job_id) => continue,
                 Err(_) => return RunnerJobReconciliation::UnconfirmedAbsence,

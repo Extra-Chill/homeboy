@@ -293,7 +293,7 @@ mod tests {
     fn captures_environment_and_allows_non_parser_resolution_sources() {
         let previous = std::env::var_os("HOMEBOY_PROVENANCE_TEST_ENV");
         std::env::set_var("HOMEBOY_PROVENANCE_TEST_ENV", "configured");
-        let result = (|| {
+        {
             let matches = TestCli::command()
                 .try_get_matches_from(["homeboy", "cook"])
                 .expect("parse environment default");
@@ -315,13 +315,12 @@ mod tests {
                     &[ArgumentSource::Configuration, ArgumentSource::Policy],
                 )
                 .expect("allowed source group");
-        })();
+        }
         if let Some(previous) = previous {
             std::env::set_var("HOMEBOY_PROVENANCE_TEST_ENV", previous);
         } else {
             std::env::remove_var("HOMEBOY_PROVENANCE_TEST_ENV");
         }
-        result
     }
 
     #[test]

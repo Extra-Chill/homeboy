@@ -298,6 +298,10 @@ pub(crate) fn automatic_capability_fallback(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The fallback boundary accepts independently-derived routing, capability, and lifecycle evidence; grouping it would weaken their ownership contract."
+)]
 pub(crate) fn automatic_capability_fallback_or_error(
     request: &LabOffloadRequest<'_>,
     plan: HomeboyPlan,

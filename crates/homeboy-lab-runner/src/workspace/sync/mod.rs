@@ -26,7 +26,8 @@ use super::super::{
 };
 use super::git::{
     git_snapshot, materialize_git, materialize_git_from_controller_bundle,
-    materialize_git_snapshot_from_controller_bundle,
+    materialize_git_snapshot_from_controller_bundle, ControllerGitBundleMaterializationRequest,
+    GitMaterializationRequest,
 };
 use super::snapshot::{
     effective_snapshot_excludes, ensure_no_runner_workspace_metadata_collision,
@@ -226,8 +227,8 @@ pub fn sync_workspace(
                         }
                         super::types::SnapshotTransferStats {
                             reused: ByteFileCounts::default(),
-                            transferred: stats.clone(),
-                            final_size: stats.clone(),
+                            transferred: stats,
+                            final_size: stats,
                         }
                     }
                 });
@@ -243,19 +244,21 @@ pub fn sync_workspace(
                     Some(RunnerWorkspaceSyncMode::SnapshotGit.label().to_string());
             }
             materialization_plan.fallback_reason = fallback_reason;
-            let metadata = workspace_metadata(
-                &runner.id,
-                &local_path,
-                &remote_path,
-                options.mode,
-                materialization_plan.actual_materialization_mode.as_deref(),
-                materialization_plan.fallback_reason.as_deref(),
-                &snapshot,
-                &excludes,
-                Some(content_manifest),
-                options.run_isolation_token.as_deref(),
-                ResourceCleanupPolicy::DeleteOnSuccess,
-            );
+            let metadata = workspace_metadata(WorkspaceMetadataRequest {
+                runner_id: &runner.id,
+                local_path: &local_path,
+                remote_path: &remote_path,
+                sync_mode: options.mode,
+                actual_materialization_mode: materialization_plan
+                    .actual_materialization_mode
+                    .as_deref(),
+                fallback_reason: materialization_plan.fallback_reason.as_deref(),
+                snapshot_identity: &snapshot,
+                snapshot_excludes: &excludes,
+                content_manifest: Some(content_manifest),
+                run_id: options.run_isolation_token.as_deref(),
+                cleanup_policy: ResourceCleanupPolicy::DeleteOnSuccess,
+            });
             let resource_lifecycle = metadata.resource_lifecycle.clone().unwrap_or_else(|| {
                 workspace_resource_lifecycle(
                     &runner.id,
@@ -373,14 +376,16 @@ pub fn sync_workspace(
             {
                 materialize_git_from_controller_bundle(
                     &runner,
-                    &local_path,
-                    &remote_path,
-                    &git.head,
-                    git.branch.as_deref(),
-                    &git.remote_url,
-                    git.changed_since_base.as_deref(),
-                    &git.git_fetch_refs,
-                    options.allow_dirty_lab_workspace,
+                    ControllerGitBundleMaterializationRequest {
+                        local_path: &local_path,
+                        remote_path: &remote_path,
+                        head: &git.head,
+                        branch: git.branch.as_deref(),
+                        remote_url: &git.remote_url,
+                        changed_since_base: git.changed_since_base.as_deref(),
+                        git_fetch_refs: &git.git_fetch_refs,
+                        allow_dirty_lab_workspace: options.allow_dirty_lab_workspace,
+                    },
                 )
                 .map(Some)
             } else {
@@ -392,13 +397,15 @@ pub fn sync_workspace(
                 }
                 match materialize_git(
                     &runner,
-                    &remote_path,
-                    &git.remote_url,
-                    &git.head,
-                    git.branch.as_deref(),
-                    git.changed_since_base.as_deref(),
-                    &git.git_fetch_refs,
-                    options.allow_dirty_lab_workspace,
+                    GitMaterializationRequest {
+                        remote_path: &remote_path,
+                        remote_url: &git.remote_url,
+                        head: &git.head,
+                        branch: git.branch.as_deref(),
+                        changed_since_base: git.changed_since_base.as_deref(),
+                        git_fetch_refs: &git.git_fetch_refs,
+                        allow_dirty_lab_workspace: options.allow_dirty_lab_workspace,
+                    },
                 ) {
                     Ok(()) => Ok(None),
                     Err(error) => {
@@ -407,14 +414,16 @@ pub fn sync_workspace(
                         } else {
                             materialize_git_from_controller_bundle(
                                 &runner,
-                                &local_path,
-                                &remote_path,
-                                &git.head,
-                                git.branch.as_deref(),
-                                &git.remote_url,
-                                git.changed_since_base.as_deref(),
-                                &git.git_fetch_refs,
-                                options.allow_dirty_lab_workspace,
+                                ControllerGitBundleMaterializationRequest {
+                                    local_path: &local_path,
+                                    remote_path: &remote_path,
+                                    head: &git.head,
+                                    branch: git.branch.as_deref(),
+                                    remote_url: &git.remote_url,
+                                    changed_since_base: git.changed_since_base.as_deref(),
+                                    git_fetch_refs: &git.git_fetch_refs,
+                                    allow_dirty_lab_workspace: options.allow_dirty_lab_workspace,
+                                },
                             )
                             .map(Some)
                         }
@@ -436,19 +445,21 @@ pub fn sync_workspace(
                 }
                 Err(error) => return Err(error),
             }
-            let metadata = workspace_metadata(
-                &runner.id,
-                &local_path,
-                &remote_path,
-                RunnerWorkspaceSyncMode::Git,
-                materialization_plan.actual_materialization_mode.as_deref(),
-                materialization_plan.fallback_reason.as_deref(),
-                &git.head,
-                &excludes,
-                None,
-                options.run_isolation_token.as_deref(),
-                ResourceCleanupPolicy::DeleteOnSuccess,
-            );
+            let metadata = workspace_metadata(WorkspaceMetadataRequest {
+                runner_id: &runner.id,
+                local_path: &local_path,
+                remote_path: &remote_path,
+                sync_mode: RunnerWorkspaceSyncMode::Git,
+                actual_materialization_mode: materialization_plan
+                    .actual_materialization_mode
+                    .as_deref(),
+                fallback_reason: materialization_plan.fallback_reason.as_deref(),
+                snapshot_identity: &git.head,
+                snapshot_excludes: &excludes,
+                content_manifest: None,
+                run_id: options.run_isolation_token.as_deref(),
+                cleanup_policy: ResourceCleanupPolicy::DeleteOnSuccess,
+            });
             let resource_lifecycle = metadata.resource_lifecycle.clone().unwrap_or_else(|| {
                 workspace_resource_lifecycle(
                     &runner.id,
@@ -647,22 +658,22 @@ fn materialize_git_fallback_filesystem_snapshot(
         Some("controller_git_object_closure_unavailable".to_string());
     materialization_plan.snapshot_transfer = Some(super::types::SnapshotTransferStats {
         reused: ByteFileCounts::default(),
-        transferred: stats.clone(),
-        final_size: stats.clone(),
+        transferred: stats,
+        final_size: stats,
     });
-    let metadata = workspace_metadata(
-        &runner.id,
+    let metadata = workspace_metadata(WorkspaceMetadataRequest {
+        runner_id: &runner.id,
         local_path,
-        &remote_path,
-        options.mode,
-        materialization_plan.actual_materialization_mode.as_deref(),
-        materialization_plan.fallback_reason.as_deref(),
-        &snapshot,
-        excludes,
-        Some(content_manifest),
-        options.run_isolation_token.as_deref(),
-        ResourceCleanupPolicy::DeleteOnSuccess,
-    );
+        remote_path: &remote_path,
+        sync_mode: options.mode,
+        actual_materialization_mode: materialization_plan.actual_materialization_mode.as_deref(),
+        fallback_reason: materialization_plan.fallback_reason.as_deref(),
+        snapshot_identity: &snapshot,
+        snapshot_excludes: excludes,
+        content_manifest: Some(content_manifest),
+        run_id: options.run_isolation_token.as_deref(),
+        cleanup_policy: ResourceCleanupPolicy::DeleteOnSuccess,
+    });
     let resource_lifecycle = metadata.resource_lifecycle.clone().unwrap_or_else(|| {
         workspace_resource_lifecycle(
             &runner.id,
@@ -808,19 +819,19 @@ pub fn update_workspace(
         .unwrap_or_else(|| snapshot.snapshot_identity.clone());
     let mut update_lineage = snapshot.update_lineage.clone();
     update_lineage.push(resulting_snapshot_identity.clone());
-    let metadata = workspace_metadata(
-        &runner.id,
-        &local_path,
-        &snapshot.remote_path,
-        RunnerWorkspaceSyncMode::Snapshot,
-        Some("prepared_workspace_delta"),
-        None,
-        &resulting_snapshot_identity,
-        &excludes,
-        Some(manifest),
-        snapshot.run_id.as_deref(),
-        ResourceCleanupPolicy::DeleteOnSuccess,
-    );
+    let metadata = workspace_metadata(WorkspaceMetadataRequest {
+        runner_id: &runner.id,
+        local_path: &local_path,
+        remote_path: &snapshot.remote_path,
+        sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+        actual_materialization_mode: Some("prepared_workspace_delta"),
+        fallback_reason: None,
+        snapshot_identity: &resulting_snapshot_identity,
+        snapshot_excludes: &excludes,
+        content_manifest: Some(manifest),
+        run_id: snapshot.run_id.as_deref(),
+        cleanup_policy: ResourceCleanupPolicy::DeleteOnSuccess,
+    });
     let mut metadata = metadata;
     metadata.workspace_lease = Some(new_workspace_lease());
     metadata.workspace_generation = snapshot.workspace_generation.saturating_add(1);
@@ -1195,8 +1206,8 @@ fn write_prune_convergence_receipt(
     })
 }
 
-fn record_prune_convergence_page(
-    convergence: Option<&mut RunnerWorkspacePruneConvergence>,
+struct PruneConvergencePage<'a> {
+    convergence: Option<&'a mut RunnerWorkspacePruneConvergence>,
     pass: usize,
     cursor_before: Option<String>,
     cursor_after: Option<String>,
@@ -1206,30 +1217,32 @@ fn record_prune_convergence_page(
     skipped_count: usize,
     reclaimed_bytes: u64,
     scan_complete: bool,
-) {
-    let Some(convergence) = convergence else {
+}
+
+fn record_prune_convergence_page(page: PruneConvergencePage<'_>) {
+    let Some(convergence) = page.convergence else {
         return;
     };
     convergence.pass_count += 1;
-    convergence.cursor_history.push(cursor_before.clone());
-    convergence.cursor_history.push(cursor_after.clone());
-    convergence.inspected_count += scanned_workspace_count;
-    convergence.candidate_count += candidate_count;
-    convergence.applied_count += applied_count;
-    convergence.skipped_count += skipped_count;
-    convergence.verified_reclaimed_bytes += reclaimed_bytes;
+    convergence.cursor_history.push(page.cursor_before.clone());
+    convergence.cursor_history.push(page.cursor_after.clone());
+    convergence.inspected_count += page.scanned_workspace_count;
+    convergence.candidate_count += page.candidate_count;
+    convergence.applied_count += page.applied_count;
+    convergence.skipped_count += page.skipped_count;
+    convergence.verified_reclaimed_bytes += page.reclaimed_bytes;
     convergence
         .page_receipts
         .push(RunnerWorkspacePrunePageReceipt {
-            pass,
-            cursor_before,
-            cursor_after,
-            scanned_workspace_count,
-            candidate_count,
-            applied_count,
-            skipped_count,
-            reclaimed_bytes,
-            scan_complete,
+            pass: page.pass,
+            cursor_before: page.cursor_before,
+            cursor_after: page.cursor_after,
+            scanned_workspace_count: page.scanned_workspace_count,
+            candidate_count: page.candidate_count,
+            applied_count: page.applied_count,
+            skipped_count: page.skipped_count,
+            reclaimed_bytes: page.reclaimed_bytes,
+            scan_complete: page.scan_complete,
         });
 }
 
@@ -1409,18 +1422,18 @@ pub fn prune_workspaces(
             total_candidate_bytes = candidates.iter().map(|entry| entry.bytes).sum();
         }
         if candidates.is_empty() {
-            record_prune_convergence_page(
-                convergence.as_mut(),
-                pass + 1,
+            record_prune_convergence_page(PruneConvergencePage {
+                convergence: convergence.as_mut(),
+                pass: pass + 1,
                 cursor_before,
-                continuation_cursor.clone(),
-                page_scanned,
-                0,
-                0,
-                skipped.len() - skipped_before,
-                0,
+                cursor_after: continuation_cursor.clone(),
+                scanned_workspace_count: page_scanned,
+                candidate_count: 0,
+                applied_count: 0,
+                skipped_count: skipped.len() - skipped_before,
+                reclaimed_bytes: 0,
                 scan_complete,
-            );
+            });
             if options.apply {
                 persist_prune_convergence(
                     receipt_path.as_deref(),
@@ -1505,38 +1518,38 @@ pub fn prune_workspaces(
             }
         }
         if !options.apply || scan_complete {
-            record_prune_convergence_page(
-                convergence.as_mut(),
-                pass + 1,
+            record_prune_convergence_page(PruneConvergencePage {
+                convergence: convergence.as_mut(),
+                pass: pass + 1,
                 cursor_before,
-                continuation_cursor.clone(),
-                page_scanned,
+                cursor_after: continuation_cursor.clone(),
+                scanned_workspace_count: page_scanned,
                 candidate_count,
-                removed.len() - removed_before,
-                skipped.len() - skipped_before,
-                removed[removed_before..]
+                applied_count: removed.len() - removed_before,
+                skipped_count: skipped.len() - skipped_before,
+                reclaimed_bytes: removed[removed_before..]
                     .iter()
                     .map(|entry| entry.bytes)
                     .sum(),
                 scan_complete,
-            );
+            });
             break;
         }
-        record_prune_convergence_page(
-            convergence.as_mut(),
-            pass + 1,
+        record_prune_convergence_page(PruneConvergencePage {
+            convergence: convergence.as_mut(),
+            pass: pass + 1,
             cursor_before,
-            continuation_cursor.clone(),
-            page_scanned,
+            cursor_after: continuation_cursor.clone(),
+            scanned_workspace_count: page_scanned,
             candidate_count,
-            removed.len() - removed_before,
-            skipped.len() - skipped_before,
-            removed[removed_before..]
+            applied_count: removed.len() - removed_before,
+            skipped_count: skipped.len() - skipped_before,
+            reclaimed_bytes: removed[removed_before..]
                 .iter()
                 .map(|entry| entry.bytes)
                 .sum(),
             scan_complete,
-        );
+        });
         if options.apply {
             persist_prune_convergence(
                 receipt_path.as_deref(),
@@ -1555,7 +1568,7 @@ pub fn prune_workspaces(
     let has_more = !scan_complete || remaining_candidate_count > 0 || !skipped.is_empty();
     let runner_arg = shell_arg(&runner.id);
     let cursor_arg = (!scan_complete)
-        .then(|| continuation_cursor.as_deref())
+        .then_some(continuation_cursor.as_deref())
         .flatten()
         .map(|cursor| format!(" --cursor {}", shell_arg(cursor)))
         .unwrap_or_default();
@@ -1763,11 +1776,9 @@ pub fn reap_run_workspace(
             remote_path,
         )?;
     }
-    if let Err(error) = remove_workspace(&runner, &lab_workspaces_root, remote_path) {
-        // The remote side may have completed deletion before transport failed.
-        // Retain pending authority so either outcome remains safe and resumable.
-        return Err(error);
-    }
+    // The remote side may have completed deletion before transport failed.
+    // Retain pending authority so either outcome remains safe and resumable.
+    remove_workspace(&runner, &lab_workspaces_root, remote_path)?;
     // The sibling Homeboy artifact directory (`<checkout>-homeboy-artifacts`)
     // also lives under `_lab_workspaces`, so it passes the same containment
     // guard. It only exists when the run requested `--output`, so a
@@ -1817,44 +1828,52 @@ fn workspace_metadata_run_id(
         .map(str::to_string))
 }
 
-fn workspace_metadata(
-    runner_id: &str,
-    local_path: &Path,
-    remote_path: &str,
+struct WorkspaceMetadataRequest<'a> {
+    runner_id: &'a str,
+    local_path: &'a Path,
+    remote_path: &'a str,
     sync_mode: RunnerWorkspaceSyncMode,
-    actual_materialization_mode: Option<&str>,
-    fallback_reason: Option<&str>,
-    snapshot_identity: &str,
-    snapshot_excludes: &[String],
+    actual_materialization_mode: Option<&'a str>,
+    fallback_reason: Option<&'a str>,
+    snapshot_identity: &'a str,
+    snapshot_excludes: &'a [String],
     content_manifest: Option<super::snapshot::WorkspaceContentManifest>,
-    run_id: Option<&str>,
+    run_id: Option<&'a str>,
     cleanup_policy: ResourceCleanupPolicy,
-) -> RunnerWorkspaceMetadata {
-    let git_state = local_git_state(local_path);
-    let resource_lifecycle =
-        workspace_resource_lifecycle(runner_id, remote_path, run_id, cleanup_policy);
+}
+
+fn workspace_metadata(request: WorkspaceMetadataRequest<'_>) -> RunnerWorkspaceMetadata {
+    let git_state = local_git_state(request.local_path);
+    let resource_lifecycle = workspace_resource_lifecycle(
+        request.runner_id,
+        request.remote_path,
+        request.run_id,
+        request.cleanup_policy,
+    );
     RunnerWorkspaceMetadata {
         schema: "homeboy/runner-workspace/v1".to_string(),
-        runner_id: runner_id.to_string(),
-        repo: Some(workspace_repo_from_path(&local_path.display().to_string())),
-        local_path: local_path.display().to_string(),
-        remote_path: remote_path.to_string(),
-        sync_mode: sync_mode.label().to_string(),
-        actual_materialization_mode: actual_materialization_mode.map(str::to_string),
-        fallback_reason: fallback_reason.map(str::to_string),
-        snapshot_identity: snapshot_identity.to_string(),
+        runner_id: request.runner_id.to_string(),
+        repo: Some(workspace_repo_from_path(
+            &request.local_path.display().to_string(),
+        )),
+        local_path: request.local_path.display().to_string(),
+        remote_path: request.remote_path.to_string(),
+        sync_mode: request.sync_mode.label().to_string(),
+        actual_materialization_mode: request.actual_materialization_mode.map(str::to_string),
+        fallback_reason: request.fallback_reason.map(str::to_string),
+        snapshot_identity: request.snapshot_identity.to_string(),
         workspace_lease: Some(new_workspace_lease()),
         workspace_generation: 0,
-        original_prepared_snapshot_identity: Some(snapshot_identity.to_string()),
+        original_prepared_snapshot_identity: Some(request.snapshot_identity.to_string()),
         update_lineage: Vec::new(),
-        snapshot_excludes: snapshot_excludes.to_vec(),
-        content_manifest,
+        snapshot_excludes: request.snapshot_excludes.to_vec(),
+        content_manifest: request.content_manifest,
         synced_at: chrono::Utc::now().to_rfc3339(),
         source_ref: git_state.ref_name,
         source_commit: git_state.commit,
         source_remote_url: git_state.remote_url,
         source_dirty: git_state.dirty,
-        run_id: run_id.map(str::to_string),
+        run_id: request.run_id.map(str::to_string),
         job_id: None,
         resource_lifecycle: Some(resource_lifecycle),
         terminal_evidence: None,
@@ -2685,6 +2704,7 @@ fn snapshot_reservation_lock(path: &Path) -> Result<std::fs::File> {
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(lock)
         .map_err(|error| {
             Error::internal_io(
@@ -2960,7 +2980,7 @@ fn prune_candidates_local(
         }
     }
     let continuation_cursor = (!scan_complete)
-        .then(|| last_inspected.as_ref())
+        .then_some(last_inspected.as_ref())
         .flatten()
         .map(|path| encode_prune_cursor(path));
     candidates.sort_by(|a, b| {
@@ -4385,14 +4405,14 @@ mod tests {
             let filesystem = probe("tmpfs-concurrent", 150, 150);
             let first = SnapshotFilesystemAdmission::acquire(
                 tempfile::tempdir().expect("scratch").keep(),
-                &[filesystem.clone()],
+                std::slice::from_ref(&filesystem),
                 requirement,
                 &runner,
             )
             .expect("first reservation");
             let error = SnapshotFilesystemAdmission::acquire(
                 tempfile::tempdir().expect("scratch").keep(),
-                &[filesystem.clone()],
+                std::slice::from_ref(&filesystem),
                 requirement,
                 &runner,
             )

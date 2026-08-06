@@ -674,6 +674,17 @@ fn first_diagnostics(value: &Value) -> Value {
     }
 }
 
+fn excerpt(text: &str) -> String {
+    const LIMIT: usize = 600;
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= LIMIT {
+        trimmed.to_string()
+    } else {
+        let prefix: String = trimmed.chars().take(LIMIT).collect();
+        format!("{prefix}...")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -840,16 +851,5 @@ mod tests {
             hydrated.content["diagnostic_class"],
             "agent_task.provider_executable_missing"
         );
-    }
-}
-
-fn excerpt(text: &str) -> String {
-    const LIMIT: usize = 600;
-    let trimmed = text.trim();
-    if trimmed.chars().count() <= LIMIT {
-        trimmed.to_string()
-    } else {
-        let prefix: String = trimmed.chars().take(LIMIT).collect();
-        format!("{prefix}...")
     }
 }

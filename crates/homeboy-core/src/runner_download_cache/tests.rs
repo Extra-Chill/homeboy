@@ -191,6 +191,62 @@ fn an_untagged_cache_directory_reads_as_operator_owned() {
 }
 
 #[test]
+fn the_reclaim_scope_moves_the_untagged_verdict_and_nothing_else() {
+    // #11128. `--include-untagged` is a scope, not an override: exactly one of
+    // the four ownership states changes answer between the two scopes.
+    use RunnerDownloadIntent::{InternalFetch, OperatorPull};
+    use RunnerDownloadOwnership::{Tagged, Unreadable, Unrecorded};
+    use RunnerDownloadReclaimScope::{IncludeUntagged, TaggedInternalOnly};
+
+    assert_eq!(
+        RunnerDownloadReclaimScope::default(),
+        TaggedInternalOnly,
+        "the default must stay the #10585 fail-closed contract"
+    );
+
+    for (ownership, default_scope, opted_in) in [
+        (Unrecorded, false, true),
+        (Unreadable, false, false),
+        (Tagged(OperatorPull), false, false),
+        (Tagged(InternalFetch), true, true),
+    ] {
+        assert_eq!(
+            ownership.is_reclaimable_in(TaggedInternalOnly),
+            default_scope,
+            "{ownership:?} under the default scope"
+        );
+        assert_eq!(
+            ownership.is_reclaimable_in(IncludeUntagged),
+            opted_in,
+            "{ownership:?} under --include-untagged"
+        );
+        // The unscoped helpers are the default scope, so every existing caller
+        // keeps the verdict it had.
+        assert_eq!(ownership.is_reclaimable(), default_scope);
+        assert_eq!(
+            ownership.retain_reason().is_none(),
+            ownership.is_reclaimable()
+        );
+        assert_eq!(
+            ownership.retain_reason_in(IncludeUntagged).is_none(),
+            opted_in
+        );
+    }
+
+    // The default retain reason for untagged names the flag that releases it;
+    // the release reason names the opt-in rather than claiming an internal
+    // fetch that was never recorded.
+    assert!(Unrecorded
+        .retain_reason()
+        .expect("untagged retains by default")
+        .contains("--include-untagged"));
+    assert!(Unrecorded.release_reason().contains("--include-untagged"));
+    assert!(Tagged(InternalFetch)
+        .release_reason()
+        .contains("internal fetch"));
+}
+
+#[test]
 fn an_unparseable_marker_reads_as_operator_owned() {
     let home = tempfile::tempdir().expect("home");
     let cache = home.path().join("runner").join("lab").join("run-1");

@@ -27,7 +27,7 @@ pub fn resolve_source_url_read_only(extension_id: &str) -> Result<String> {
             is_extension_linked(extension_id)
                 .then(|| git::remote_origin_url(&extension_dir))
                 .flatten()
-                .and_then(|url| normalize_source_url(url))
+                .and_then(normalize_source_url)
         })
         .ok_or_else(|| missing_source_url_error(extension_id, extension.extension_path.as_deref()))
 }

@@ -25,6 +25,14 @@ use super::{step_failed, step_success};
 /// succeeds, so we retry once before surfacing the error. Issue #3238.
 const PACKAGE_ACTION_MAX_ATTEMPTS: usize = 2;
 
+/// Step-specific inputs for package execution, kept together to make every
+/// caller name the release context it passes to a provider.
+pub(crate) struct PackageRequest<'a> {
+    pub component_source_path: Option<&'a str>,
+    pub declared_build_artifact: Option<&'a str>,
+    pub skip_build_validation: bool,
+}
+
 /// Invoke the `release.package` action on every extension that provides it,
 /// parse the emitted artifacts, and stash them in [`ReleaseState::artifacts`]
 /// for downstream publish targets and for the GitHub Release step.
@@ -34,10 +42,13 @@ pub(crate) fn run_package(
     component: &Component,
     component_id: &str,
     component_local_path: &str,
-    component_source_path: Option<&str>,
-    declared_build_artifact: Option<&str>,
-    skip_build_validation: bool,
+    request: PackageRequest<'_>,
 ) -> Result<ReleaseStepResult> {
+    let PackageRequest {
+        component_source_path,
+        declared_build_artifact,
+        skip_build_validation,
+    } = request;
     let cleanup_before = package_cleanup_snapshot(component)?;
     let result = (|| {
         let package_extensions: Vec<&ExtensionManifest> = extensions
