@@ -258,7 +258,7 @@ fn disconnected_lab_doctor_reuses_daemon_recovery_envelope() {
         runner: None,
     };
 
-    let report = remote::disconnected_report("lab", &runner, &server, Some(recovery));
+    let report = remote::disconnected_report("lab", &runner, &server, Some(recovery), None);
 
     assert_eq!(report.checks.len(), 1);
     assert_eq!(report.checks[0].id, "daemon.recovery");

@@ -534,10 +534,21 @@ pub struct RunnerDaemonGenerationStatus {
 
 /// Durable job-owner identities grouped by generation. This is an internal
 /// status input, kept separate from the serialized generation count view.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RunnerGenerationJobOwners {
     pub generation: String,
     pub job_ids: Vec<String>,
+}
+
+/// A durable job identity retained by a daemon generation. This is separate
+/// from a daemon's live process view so recovery never turns an unobserved
+/// retained counter into an anonymous active child.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RunnerUnresolvedJobOwner {
+    pub job_id: String,
+    pub generation: String,
+    pub ownership_source: &'static str,
+    pub observed_active_job_count: Option<usize>,
 }
 
 impl Serialize for RunnerStatusReport {
@@ -675,6 +686,10 @@ pub struct RunnerAdmissionSummary {
     /// admission until they drain or reconcile.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub admission_blocking_job_ids: Vec<String>,
+    /// Durable identities retained by a generation whose active count has not
+    /// yet converged with a live daemon observation.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_job_owners: Vec<RunnerUnresolvedJobOwner>,
     /// Generations with unresolved non-authoritative retained projections.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unresolved_generation_ids: Vec<String>,
@@ -805,9 +820,7 @@ impl RunnerStatusReport {
         let unresolved_generations = generations
             .iter()
             .filter(|generation| {
-                !generation.admission_owner
-                    && !generation.active_job_count_authoritative
-                    && generation.active_job_count > 0
+                !generation.active_job_count_authoritative && generation.active_job_count > 0
             })
             .collect::<Vec<_>>();
         let unresolved_retained_projection_count = unresolved_generations
@@ -828,13 +841,30 @@ impl RunnerStatusReport {
             .map(|generation| generation.generation.clone());
         let unresolved_generation = generations
             .iter()
-            .find(|generation| !generation.admission_owner && generation.active_job_count > 0)
+            .find(|generation| generation.active_job_count > 0)
             .map(|generation| generation.generation.clone());
         let admission_blocking_job_ids = blocking_generation
             .as_deref()
             .and_then(|generation| owners.iter().find(|owner| owner.generation == generation))
             .map(|owner| owner.job_ids.iter().take(20).cloned().collect())
             .unwrap_or_default();
+        let unresolved_job_owners = unresolved_generations
+            .iter()
+            .flat_map(|generation| {
+                owners
+                    .iter()
+                    .find(|owner| owner.generation == generation.generation)
+                    .into_iter()
+                    .flat_map(|owner| owner.job_ids.iter())
+                    .map(|job_id| RunnerUnresolvedJobOwner {
+                        job_id: job_id.clone(),
+                        generation: generation.generation.clone(),
+                        ownership_source: "generation_ledger",
+                        observed_active_job_count: generation.observed_active_job_count,
+                    })
+            })
+            .take(100)
+            .collect();
         // A persisted session proves neither current daemon liveness nor its
         // active-job count. Admission and rotation remain fail-closed until a
         // current job view is available.
@@ -851,13 +881,13 @@ impl RunnerStatusReport {
             .as_ref()
             .and_then(|session| session.homeboy_build_identity.clone());
 
-        let next_action = self
-            .admission_action()
-            .or_else(|| {
-                unresolved_generation
-                    .as_ref()
-                    .map(|_| reconcile_action(&self.runner_id))
-            })
+        // A retained active count has to receive a bounded authoritative
+        // observation before a reconnect can be considered. Otherwise status
+        // advertises connect while connect correctly returns to reconcile.
+        let next_action = unresolved_generation
+            .as_ref()
+            .map(|_| reconcile_action(&self.runner_id))
+            .or_else(|| self.admission_action())
             .map(|action| action.render_command());
 
         RunnerAdmissionSummary {
@@ -870,6 +900,7 @@ impl RunnerStatusReport {
             retained_durable_job_count,
             unresolved_retained_projection_count,
             admission_blocking_job_ids,
+            unresolved_job_owners,
             unresolved_generation_ids,
             stale_job_count: self.stale_runner_job_count,
             daemon_build_identity,
@@ -1476,6 +1507,47 @@ mod status_serialization_tests {
         assert_eq!(summary.unresolved_generation_ids, ["lease-old"]);
         assert!(summary.accepting_jobs);
         assert!(!summary.safe_to_rotate);
+        assert_eq!(
+            summary.next_action.as_deref(),
+            Some("homeboy runner reconcile homeboy-lab")
+        );
+    }
+
+    #[test]
+    fn retained_admission_count_projects_each_durable_owner_before_reconnect() {
+        let mut report = base_report();
+        report.connected = false;
+        report.state = RunnerSessionState::Disconnected;
+        let generations = vec![RunnerDaemonGenerationStatus {
+            generation: "lease-current".to_string(),
+            admission_owner: true,
+            drain_state: crate::RollingDrainState::Admitting,
+            active_job_count: 2,
+            observed_active_job_count: None,
+            active_job_count_authoritative: false,
+            job_owner_count: 2,
+            run_owner_count: 0,
+            artifact_owner_count: 0,
+            homeboy_build_identity: None,
+            remote_daemon_lease_id: Some("lease-current".to_string()),
+            remote_daemon_address: None,
+            local_url: None,
+        }];
+        let owners = vec![RunnerGenerationJobOwners {
+            generation: "lease-current".to_string(),
+            job_ids: vec!["job-a".to_string(), "job-b".to_string()],
+        }];
+
+        let summary = report.admission_summary_with_generations(&generations, &owners, 0);
+
+        assert_eq!(summary.unresolved_retained_projection_count, 2);
+        assert_eq!(summary.unresolved_job_owners.len(), 2);
+        assert_eq!(summary.unresolved_job_owners[0].job_id, "job-a");
+        assert_eq!(summary.unresolved_job_owners[0].generation, "lease-current");
+        assert_eq!(
+            summary.unresolved_job_owners[0].ownership_source,
+            "generation_ledger"
+        );
         assert_eq!(
             summary.next_action.as_deref(),
             Some("homeboy runner reconcile homeboy-lab")
