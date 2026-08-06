@@ -129,6 +129,32 @@ Lab offload support is intentionally command-specific:
 
 Local-only resource-pressure commands still get resource-policy warnings, but those warnings explain why Lab offload is unavailable instead of suggesting `--runner`.
 
+### Stale daemon diagnostics and local recovery
+
+When a connected SSH runner has a non-fresh daemon admission session, normal
+`runner exec` remains fenced: it does not rotate or submit work through the
+stale daemon. Use the diagnostic transport for bounded direct SSH inspection:
+
+```sh
+homeboy runner exec <runner-id> --ssh -- homeboy daemon status
+```
+
+Diagnostic SSH is available only when the runner is disconnected or its daemon
+admission is non-fresh. It bypasses daemon job admission, does not materialize
+extensions or rotate the tunnel, and preserves the runner id, command, and an
+optional `--run-id` in the normal runner execution evidence.
+
+If `runner disconnect` reports `endpoint_identity_mismatch`, it retains local
+state and never sends a lifecycle mutation to the foreign endpoint. After the
+read-only SSH status probe proves an authoritative zero active-job count, retire
+only the controller-local state with:
+
+```sh
+homeboy runner disconnect <runner-id> --local-recovery
+```
+
+This operation does not claim the remote daemon was stopped or torn down.
+
 Configure a preferred runner with:
 
 ```sh

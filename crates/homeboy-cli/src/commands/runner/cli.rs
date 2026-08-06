@@ -309,7 +309,7 @@ pub(super) enum RunnerCommand {
         /// Runner ID
         id: String,
 
-        /// Remove only this controller's matching local tunnel/session state without contacting the remote runner
+        /// Retire only this controller's matching local tunnel/session state after a read-only SSH probe proves zero active jobs; it never stops the remote daemon
         #[arg(long)]
         local_recovery: bool,
     },
@@ -413,7 +413,7 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         project: Option<String>,
 
-        /// Allow diagnostic-only SSH command execution when no daemon session is connected
+        /// Allow diagnostic-only SSH command execution when the daemon is disconnected or non-fresh; it never uses or rotates daemon admission
         #[arg(long)]
         ssh: bool,
 

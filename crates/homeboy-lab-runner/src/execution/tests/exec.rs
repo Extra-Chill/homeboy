@@ -1487,3 +1487,18 @@ fn explicit_diagnostic_ssh_wins_for_ssh_runners() {
     options.allow_diagnostic_ssh = false;
     assert!(!should_force_diagnostic_ssh(&ssh_runner(), &options));
 }
+
+#[test]
+fn diagnostic_ssh_is_available_for_stale_sessions_but_not_fresh_admission() {
+    let stale = stale_direct_daemon_status();
+    assert!(diagnostic_ssh_allowed(&stale));
+
+    let mut fresh = stale;
+    fresh.stale_daemon = None;
+    fresh.daemon_freshness = Some(homeboy_core::daemon::DaemonFreshnessReport {
+        fresh: true,
+        stale_reason_code: None,
+        ..authoritative_drained_freshness()
+    });
+    assert!(!diagnostic_ssh_allowed(&fresh));
+}
