@@ -73,6 +73,11 @@ pub struct AgentTaskFanoutCookBatchArgs {
     pub secret_env: Vec<String>,
     #[arg(long = "provider-config", value_name = "JSON")]
     pub provider_config: Option<String>,
+    /// AI tool disclosure recorded in every child PR's assistance attribution.
+    /// When omitted, each child derives its disclosure from its effective provider
+    /// and model selection.
+    #[arg(long = "ai-tool", value_name = "TEXT")]
+    pub ai_tool: Option<String>,
     #[command(flatten)]
     pub gates: VerifyGateArgs,
     #[arg(long = "dry-run")]
@@ -132,4 +137,8 @@ pub struct AgentTaskFanoutRunPlanArgs {
     pub input: AgentTaskFanoutInputArgs,
     #[arg(long = "record-run-id", value_name = "ID")]
     pub record_run_id: Option<String>,
+    /// AI tool disclosure recorded in every child PR's assistance attribution.
+    /// Overrides the persisted plan value for this execution.
+    #[arg(long = "ai-tool", value_name = "TEXT")]
+    pub ai_tool: Option<String>,
 }
