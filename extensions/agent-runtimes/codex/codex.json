@@ -100,7 +100,8 @@
         "structured_outcome",
         "provider_owned_auth",
         "provider_owned_session",
-        "provider_owned_cancellation"
+        "provider_owned_cancellation",
+        "runtime_tool_attachment"
       ],
       "workspace_materialization": {
         "cwd": "git_checkout"

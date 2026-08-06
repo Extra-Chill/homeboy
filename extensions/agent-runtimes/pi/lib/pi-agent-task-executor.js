@@ -36,6 +36,7 @@ function providerContract(options = {}) {
 			'cli_runtime',
 			'workspace_materialization',
 			'structured_outcome',
+			'runtime_tool_attachment',
 		],
 		workspace_materialization: {
 			cwd: 'request_workspace',

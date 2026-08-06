@@ -47,6 +47,7 @@ assert.deepEqual(provider.provider_preflight['claude-code'].optional_secret_env,
 assert.equal(provider.redacted_metadata_keys.includes('claude_code_auth'), true);
 assert.equal(provider.capabilities.includes('repo_workspace'), true);
 assert.equal(provider.capabilities.includes('patch_artifacts'), true);
+assert.equal(provider.capabilities.includes('runtime_tool_attachment'), true);
 assert.equal(provider.capabilities.includes('browser_runtime'), false);
 
 const fixtureRuntimeTool = {

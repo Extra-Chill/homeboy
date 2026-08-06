@@ -261,6 +261,14 @@ promotion ordering, retention, and cleanup preview/apply reporting. A runtime do
 delete, lease, or retain the root: that would duplicate controller lifecycle state and could
 remove an active attempt's scratch.
 
+### Runtime tool attachment
+
+Providers that advertise `runtime_tool_attachment` accept Homeboy-resolved runtime tools and
+project every validated tool into the backend's native tool configuration. Homeboy owns tool
+declaration resolution and readiness; providers reject unresolved declarations and preserve the
+resolved command, environment, secret-name, capability-evidence, and runtime-owned lifecycle
+boundary during attachment.
+
 Capabilities are selection and orchestration promises. Declare a capability only
 when the provider can satisfy it for every request accepted by that provider.
 

@@ -83,6 +83,7 @@ const OPENCODE_CAPABILITIES = [
 	'live_progress_events',
 	'nested_orchestrator',
 	'run_scoped_scratch',
+	'runtime_tool_attachment',
 ];
 
 const OPENCODE_COMMAND = 'node {{runtime_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs';

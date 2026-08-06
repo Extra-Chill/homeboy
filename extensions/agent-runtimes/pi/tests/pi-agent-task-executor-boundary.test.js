@@ -38,6 +38,7 @@ assert.deepEqual(provider.secret_env_requirements, []);
 assert.deepEqual(provider.provider_defaults, {});
 assert.equal(provider.capabilities.includes('cli_runtime'), true);
 assert.equal(provider.capabilities.includes('structured_outcome'), true);
+assert.equal(provider.capabilities.includes('runtime_tool_attachment'), true);
 assert.equal(provider.capabilities.includes('repo_workspace'), false);
 
 const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'pi.json'), 'utf8'));

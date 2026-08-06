@@ -97,7 +97,8 @@
         "provider_owned_auth",
         "provider_owned_session",
         "provider_owned_cancellation",
-        "nested_orchestrator"
+        "nested_orchestrator",
+        "runtime_tool_attachment"
       ],
       "workspace_materialization": {
         "cwd": "git_checkout"

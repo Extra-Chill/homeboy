@@ -74,7 +74,8 @@
       "capabilities": [
         "cli_runtime",
         "workspace_materialization",
-        "structured_outcome"
+        "structured_outcome",
+        "runtime_tool_attachment"
       ],
       "workspace_materialization": {
         "cwd": "request_workspace",

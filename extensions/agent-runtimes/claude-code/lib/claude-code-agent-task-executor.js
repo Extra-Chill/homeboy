@@ -40,6 +40,7 @@ const CLAUDE_CODE_CAPABILITIES = [
 	'provider_owned_session',
 	'provider_owned_cancellation',
 	'nested_orchestrator',
+	'runtime_tool_attachment',
 ];
 
 function providerContract(options = {}) {

@@ -34,6 +34,11 @@ const fixtureRuntimeTool = {
 	id: 'fixture.mcp', transport: 'stdio', argv: [process.execPath, '--fixture-mcp', '--isolated'],
 	executable: process.execPath, env: { FIXTURE_MODE: 'isolated' }, secret_env_names: ['FIXTURE_MCP_TOKEN'], readiness: { status: 'ready', evidence: { kind: 'version_command', success: true } }, lifecycle: 'runtime_owned',
 };
+const secondFixtureRuntimeTool = {
+	schema: 'homeboy/resolved-agent-task-runtime-tool/v1',
+	id: 'fixture.second', transport: 'stdio', argv: [process.execPath, '--second-fixture-mcp'],
+	executable: process.execPath, env: {}, secret_env_names: [], readiness: { status: 'ready', evidence: { kind: 'declared_probe', success: true } }, lifecycle: 'runtime_owned',
+};
 
 function secretEnvRequirementForProvider(contract, provider) {
 	return contract.secret_env_requirements.find((requirement) => (
@@ -124,6 +129,7 @@ assert.equal(provider.redacted_metadata_keys.includes('opencode_auth'), true);
 assert.equal(provider.capabilities.includes('repo_workspace'), true);
 assert.equal(provider.capabilities.includes('patch_artifacts'), true);
 assert.equal(provider.capabilities.includes('run_scoped_scratch'), true);
+assert.equal(provider.capabilities.includes('runtime_tool_attachment'), true);
 assert.equal(provider.capabilities.includes('live_progress_events'), true);
 assert.equal(provider.capabilities.includes('browser_runtime'), false);
 
@@ -160,12 +166,21 @@ try {
 const assert = require('node:assert/strict');
 assert.equal(process.argv[2], 'run');
 assert.equal(process.argv.includes('--model'), false);
-assert.equal(process.argv.at(-1), 'Prove the OpenCode provider boundary without leaking secrets.');
+const instruction = process.argv.at(-1);
+assert.equal([
+  'Prove the OpenCode provider boundary without leaking secrets.',
+  'Prove two attached runtime tools without leaking secrets.',
+].includes(instruction), true);
 assert.equal(process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN, 'refresh-token-must-not-leak');
 assert.equal(process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN, 'access-token-must-not-leak');
 assert.equal(process.env.UNDECLARED_SECRET, undefined);
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}');
 assert.equal(config.agent.title.disable, true);
+if (instruction === 'Prove two attached runtime tools without leaking secrets.') {
+  assert.equal(typeof config.mcp, 'object');
+  assert.deepEqual(config.mcp['fixture.mcp'].args, ['--fixture-mcp', '--isolated']);
+  assert.deepEqual(config.mcp['fixture.second'].args, ['--second-fixture-mcp']);
+}
 process.stdout.write(process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN || 'missing secret');
 process.stderr.write(process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN || 'missing secret');
 process.exit(0);
@@ -203,7 +218,11 @@ process.exit(0);
 			FIXTURE_MCP_TOKEN: 'fixture-token-must-not-leak',
 			UNDECLARED_SECRET: 'must-not-reach-opencode',
 		},
-		input: JSON.stringify({ ...request, resolved_runtime_tools: [fixtureRuntimeTool] }),
+		input: JSON.stringify({
+			...request,
+			instructions: 'Prove two attached runtime tools without leaking secrets.',
+			resolved_runtime_tools: [fixtureRuntimeTool, secondFixtureRuntimeTool],
+		}),
 	});
 	assert.equal(runResult.status, 0, runResult.stderr);
 	const fixtureEnv = {

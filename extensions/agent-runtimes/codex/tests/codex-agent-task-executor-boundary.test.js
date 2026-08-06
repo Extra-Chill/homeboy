@@ -51,6 +51,7 @@ assert.deepEqual(provider.provider_defaults.codex.command_args, CODEX_DEFAULT_CO
 assert.equal(provider.redacted_metadata_keys.includes('codex_auth'), true);
 assert.equal(provider.capabilities.includes('repo_workspace'), true);
 assert.equal(provider.capabilities.includes('patch_artifacts'), true);
+assert.equal(provider.capabilities.includes('runtime_tool_attachment'), true);
 assert.equal(provider.capabilities.includes('nested_orchestrator'), false);
 assert.equal(provider.capabilities.includes('wordpress_sandbox'), false);
 

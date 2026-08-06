@@ -38,6 +38,7 @@ const CODEX_CAPABILITIES = [
 	'provider_owned_auth',
 	'provider_owned_session',
 	'provider_owned_cancellation',
+	'runtime_tool_attachment',
 ];
 
 function providerContract(options = {}) {
