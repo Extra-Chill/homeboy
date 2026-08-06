@@ -41,6 +41,7 @@ mod command_path;
 )]
 mod connection;
 mod continuation_provider;
+pub mod controller_fallback_projection;
 mod daemon_exec_driver;
 mod daemon_health;
 mod daemon_http_get;
