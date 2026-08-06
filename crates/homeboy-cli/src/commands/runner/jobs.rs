@@ -422,6 +422,7 @@ mod tests {
             local_url: Some(url),
             tunnel_pid,
             tunnel_process_start_identity: None,
+            proxy_forward: None,
             remote_daemon_pid: Some(4242),
             remote_daemon_lease_id: Some("lease-authoritative".to_string()),
             homeboy_version: "test".to_string(),
