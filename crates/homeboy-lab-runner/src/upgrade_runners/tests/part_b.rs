@@ -72,7 +72,6 @@ fn materializes_forced_source_upgrade_path_before_forwarding_to_runner() {
         vec![
             "/home/user/.cargo/bin/homeboy",
             "upgrade",
-            "--no-restart",
             "--skip-extensions",
             "--skip-runners",
             "--force",

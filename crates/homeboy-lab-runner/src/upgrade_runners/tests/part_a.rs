@@ -54,7 +54,6 @@ fn upgrades_configured_runner_with_homeboy_path_and_skip_runner_guard() {
         vec![
             "/home/user/.local/bin/homeboy",
             "upgrade",
-            "--no-restart",
             "--skip-extensions",
             "--skip-runners"
         ]

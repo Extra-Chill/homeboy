@@ -15,10 +15,6 @@ pub struct UpgradeArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Skip automatic restart after upgrade
-    #[arg(long)]
-    pub no_restart: bool,
-
     /// Skip extension updates (only upgrade the binary)
     #[arg(long)]
     pub skip_extensions: bool,
@@ -31,6 +27,23 @@ pub struct UpgradeArgs {
     /// They will be reported as pending with their recovery commands instead.
     #[arg(long)]
     pub no_restart_services: bool,
+
+    /// Accepted and ignored. `--no-restart` was declared but never read: it was
+    /// born inert in `90adfed70` and `git log -S'args.no_restart,'` finds no
+    /// commit in which it was consulted. `--no-restart-services` is the flag
+    /// that actually skips restarts.
+    ///
+    /// It is retained hidden purely as a cross-version compatibility shim,
+    /// because Homeboy passed it to itself over SSH: a controller older than
+    /// this change still emits `<homeboy> upgrade --no-restart ...` when
+    /// upgrading a runner. `upgrade --runner-only` installs the new binary on
+    /// the runner and *then* invokes it with the old controller's argv, so
+    /// rejecting the argument would break the very upgrade that creates the
+    /// skew. Accepting it costs nothing; refusing it bricks that path.
+    ///
+    /// Remove once no supported controller emits it. Tracked in #11786.
+    #[arg(long, hide = true)]
+    pub no_restart: bool,
 
     /// Select the configured runner to converge with the controller. Repeat to target multiple runners.
     #[arg(

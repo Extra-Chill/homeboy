@@ -24,7 +24,6 @@ Upgrade Homeboy to the latest version
 | --- | --- | --- |
 | `--check` | flag | Check for updates without installing |
 | `--force` | flag | Force upgrade even if already at latest version |
-| `--no-restart` | flag | Skip automatic restart after upgrade |
 | `--skip-extensions` | flag | Skip extension updates (only upgrade the binary) |
 | `--skip-runners` | flag | Skip configured runner upgrades after the local upgrade |
 | `--no-restart-services` | flag | Skip restarting declared binary-resident services after the binary swap. They will be reported as pending with their recovery commands instead |
