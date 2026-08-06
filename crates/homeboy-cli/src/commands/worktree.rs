@@ -17,6 +17,7 @@ use homeboy::core::worktree::{
 use crate::command_contract::{LabCommandContract, WORKTREE_CLEANUP_LAB_LABEL};
 
 use super::utils::args::MutationArgs;
+use super::utils::response::{CommandActionableMetadata, CommandNextAction, CommandNextActionKind};
 use super::CmdResult;
 
 #[derive(Args)]
@@ -209,6 +210,8 @@ pub struct WorktreeCleanupCommandOutput {
     pub artifact_cleanup: Option<ArtifactCleanupOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deprecated_flag: Option<&'static str>,
+    #[serde(rename = "_homeboy_actionable")]
+    pub actionable: CommandActionableMetadata,
 }
 
 pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
@@ -466,10 +469,12 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             } else {
                 None
             };
+            let actionable = worktree_cleanup_actionable(&worktrees, cleanup_branches);
             WorktreeOutput::Cleanup(WorktreeCleanupCommandOutput {
                 worktrees,
                 artifact_cleanup,
                 deprecated_flag: deprecated_dry_run.then_some("--dry-run"),
+                actionable,
             })
         }
         WorktreeCommand::Quarantine { command } => match command {
@@ -492,6 +497,33 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
 
 fn cleanup_is_dry_run(apply: bool) -> bool {
     !apply
+}
+
+fn worktree_cleanup_actionable(
+    output: &WorktreeCleanupOutput,
+    cleanup_branches: bool,
+) -> CommandActionableMetadata {
+    let mut actionable = CommandActionableMetadata::default();
+    if output.counts.reconciliation_blockers > 0 {
+        actionable.next_actions.push(
+            CommandNextAction::new(
+                "reconcile task worktrees",
+                "homeboy worktree inventory --apply",
+            )
+            .with_kind(CommandNextActionKind::Repair),
+        );
+    }
+    if output.dry_run || output.counts.candidates > output.counts.removed {
+        let mut command = "homeboy worktree cleanup".to_string();
+        if cleanup_branches {
+            command.push_str(" --cleanup-branches");
+        }
+        command.push_str(" --apply");
+        actionable
+            .next_actions
+            .push(CommandNextAction::new("task worktree cleanup", command));
+    }
+    actionable
 }
 
 #[cfg(test)]
@@ -613,5 +645,75 @@ mod tests {
             };
 
         assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn worktree_cleanup_prioritizes_bounded_reconciliation_before_cleanup() {
+        let output = homeboy::core::worktree::WorktreeCleanupOutput {
+            dry_run: true,
+            counts: homeboy::core::worktree::WorktreeCleanupCounts {
+                candidates: 1,
+                skipped: 1,
+                reconciliation_blockers: 1,
+                ..Default::default()
+            },
+            candidates: Vec::new(),
+            removed: Vec::new(),
+            skipped: Vec::new(),
+        };
+
+        let actions = super::worktree_cleanup_actionable(&output, true);
+        assert_eq!(
+            actions.next_actions[0].command,
+            "homeboy worktree inventory --apply"
+        );
+        assert_eq!(
+            actions.next_actions[1].command,
+            "homeboy worktree cleanup --cleanup-branches --apply"
+        );
+    }
+
+    #[test]
+    fn worktree_cleanup_preview_preserves_branch_cleanup_request() {
+        let output = homeboy::core::worktree::WorktreeCleanupOutput {
+            dry_run: true,
+            counts: homeboy::core::worktree::WorktreeCleanupCounts {
+                candidates: 1,
+                ..Default::default()
+            },
+            candidates: Vec::new(),
+            removed: Vec::new(),
+            skipped: Vec::new(),
+        };
+
+        let without_branches = super::worktree_cleanup_actionable(&output, false);
+        assert_eq!(
+            without_branches.next_actions[0].command,
+            "homeboy worktree cleanup --apply"
+        );
+        let with_branches = super::worktree_cleanup_actionable(&output, true);
+        assert_eq!(
+            with_branches.next_actions[0].command,
+            "homeboy worktree cleanup --cleanup-branches --apply"
+        );
+    }
+
+    #[test]
+    fn worktree_cleanup_apply_omits_action_after_removing_all_candidates() {
+        let output = homeboy::core::worktree::WorktreeCleanupOutput {
+            dry_run: false,
+            counts: homeboy::core::worktree::WorktreeCleanupCounts {
+                candidates: 1,
+                removed: 1,
+                ..Default::default()
+            },
+            candidates: Vec::new(),
+            removed: Vec::new(),
+            skipped: Vec::new(),
+        };
+
+        assert!(super::worktree_cleanup_actionable(&output, true)
+            .next_actions
+            .is_empty());
     }
 }
