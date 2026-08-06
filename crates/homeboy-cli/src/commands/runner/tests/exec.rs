@@ -370,16 +370,60 @@ fn script_file_accepts_whitespace_only_and_preserves_non_empty_newlines() {
 }
 
 #[test]
-fn script_file_prepares_bash_stdin_command() {
-    let command = prepare_runner_exec_command(Some(&"echo '$GREETING'".to_string()), Vec::new())
-        .expect("script command");
+fn script_file_materializes_a_content_addressed_file_for_bash() {
+    let source = "printf '%s\\n%s\\n%s' \"$0\" \"$HOMEBOY_RUNNER_EXEC_SCRIPT\" \"$HOMEBOY_RUNNER_EXEC_SCRIPT_SHA256\"";
+    let command =
+        prepare_runner_exec_command(Some(&source.to_string()), Vec::new()).expect("script command");
 
     assert_eq!(command[0], "bash");
     assert_eq!(command[1], "-c");
-    assert!(command[2].contains("printf '%s'"));
-    assert!(command[2].contains("bash -s"));
-    assert!(!command[2].contains("HOMEBOY_RUNNER_EXEC_SCRIPT"));
-    assert!(command[2].contains("'echo '\\''$GREETING'\\'''"));
+    assert!(command[2].contains("script-"));
+    assert!(command[2].contains("HOMEBOY_RUNNER_JOB_ID"));
+    assert!(command[2].contains("HOMEBOY_RUNNER_EXEC_SCRIPT"));
+    assert!(command[2].contains("HOMEBOY_RUNNER_EXEC_SCRIPT_SHA256"));
+    assert!(command[2].contains("chmod 500"));
+    assert!(command[2].contains("trap cleanup EXIT"));
+    assert!(!command[2].contains("bash -s"));
+
+    let output = std::process::Command::new(&command[0])
+        .args(&command[1..])
+        .env("HOMEBOY_RUNNER_JOB_ID", "test-job")
+        .output()
+        .expect("run materialized script command");
+    assert!(output.status.success());
+    let lines = String::from_utf8(output.stdout)
+        .expect("script output")
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0], lines[1]);
+    assert!(lines[0].contains("homeboy-runner-exec/test-job/script-"));
+    assert_eq!(
+        lines[2],
+        format!(
+            "sha256:{}",
+            homeboy_engine_primitives::content_hash::sha256_hex(source.as_bytes())
+        )
+    );
+    assert!(!std::path::Path::new(&lines[0]).exists());
+}
+
+#[test]
+fn materialized_script_preserves_bash_exit_status() {
+    let source = "printf '%s' \"$HOMEBOY_RUNNER_EXEC_SCRIPT\"; exit 17";
+    let command =
+        prepare_runner_exec_command(Some(&source.to_string()), Vec::new()).expect("script command");
+
+    let output = std::process::Command::new(&command[0])
+        .args(&command[1..])
+        .env("HOMEBOY_RUNNER_JOB_ID", "test-failure")
+        .output()
+        .expect("run materialized script command");
+
+    assert_eq!(output.status.code(), Some(17));
+    let script_path = String::from_utf8(output.stdout).expect("script path");
+    assert!(!std::path::Path::new(&script_path).exists());
 }
 
 #[test]

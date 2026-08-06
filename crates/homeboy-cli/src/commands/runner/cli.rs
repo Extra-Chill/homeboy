@@ -425,8 +425,8 @@ pub(super) enum RunnerCommand {
         #[arg(long = "require-path")]
         require_paths: Vec<String>,
 
-        /// Read a shell script from this path and execute it on the runner with bash.
-        /// Use `-` to read the script from stdin; stdin must contain at least one byte.
+        /// Read a shell script from this path and execute its materialized runner copy with bash.
+        /// Use `-` to read stdin on the controller; it is captured with the same bounded semantics.
         /// Whitespace-only scripts are executed verbatim.
         #[arg(long = "script-file")]
         script_file: Option<String>,
