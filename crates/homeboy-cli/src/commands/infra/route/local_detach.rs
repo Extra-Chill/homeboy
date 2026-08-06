@@ -126,10 +126,12 @@ fn runner_side_detach_error() -> Error {
 
 /// The argv the detached cook executes.
 ///
-/// It is the caller's own argv with two edits: the detach request is consumed
-/// by the launcher, and the cook id is pinned so the launcher can name the run
-/// it just handed off. Everything else is preserved byte for byte — a detached
-/// cook that silently differs from the requested one is worse than no detach.
+/// It is the caller's own argv with three edits: the detach request is consumed
+/// by the launcher, `--wait` makes the child's terminal-report policy explicit,
+/// and the cook id is pinned so the launcher can name the run it just handed
+/// off. The parent is the only process authorized to detach; the child must not
+/// infer a handoff policy from its noninteractive stdio. Everything else is
+/// preserved byte for byte.
 fn detached_cook_child_args(
     normalized_args: &[String],
     cook_id: &str,
@@ -147,6 +149,7 @@ fn detached_cook_child_args(
         args.push("--run-id".to_string());
         args.push(cook_id.to_string());
     }
+    args.push("--wait".to_string());
     args
 }
 
@@ -440,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn child_args_drop_the_detach_request_and_pin_a_generated_cook_id() {
+    fn child_args_replace_detach_with_explicit_wait_and_pin_a_generated_cook_id() {
         let normalized = args(&[
             "homeboy",
             "--placement",
@@ -465,6 +468,7 @@ mod tests {
                 "fix it",
                 "--run-id",
                 "cook-generated",
+                "--wait",
             ])
         );
     }
@@ -495,7 +499,7 @@ mod tests {
             !child.iter().any(|arg| arg == "--detach-after-handoff"),
             "{child:?}"
         );
-        assert_eq!(child.last().map(String::as_str), Some("fix it"));
+        assert_eq!(child.last().map(String::as_str), Some("--wait"));
     }
 
     /// The re-executed cook must be the requested cook. Anything the launcher
