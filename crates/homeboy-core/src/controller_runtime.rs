@@ -19,6 +19,17 @@ pub const CONTROLLER_RUNTIME_METADATA_KEY: &str = "controller_runtime";
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) const TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV: &str =
     "HOMEBOY_TEST_CONTROLLER_RUNTIME_EXECUTABLE";
+/// Names the executable [`TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV`]'s fixture is
+/// copied from.
+///
+/// The fixture is materialized on first *read* rather than when the hermetic
+/// home is built, so the destination path can name a file that does not exist
+/// yet. This variable is what lets any process holding the destination —
+/// including a child test process that inherited it — produce those bytes
+/// itself. See `test_support::ensure_test_controller_fixture`.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) const TEST_CONTROLLER_RUNTIME_SOURCE_ENV: &str =
+    "HOMEBOY_TEST_CONTROLLER_RUNTIME_SOURCE";
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) const TEST_CONTROLLER_RUNTIME_STORE_ENV: &str = "HOMEBOY_TEST_CONTROLLER_RUNTIME_STORE";
 #[cfg(any(test, feature = "test-support"))]
@@ -647,7 +658,12 @@ pub fn pin_current_queued(
 fn current_executable() -> Result<PathBuf> {
     #[cfg(any(test, feature = "test-support"))]
     if let Some(executable) = std::env::var_os(TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV) {
-        return Ok(PathBuf::from(executable));
+        let executable = PathBuf::from(executable);
+        // The fixture is materialized here, on first read, instead of when the
+        // hermetic home was built: only the handful of readers of this contract
+        // need its bytes, and the copy is of a multi-hundred-megabyte binary.
+        crate::test_support::ensure_test_controller_fixture(&executable);
+        return Ok(executable);
     }
 
     std::env::current_exe().map_err(|error| {
@@ -2075,6 +2091,7 @@ fn executable_identity(path: &Path, verified_digest: Option<&str>) -> Result<Str
 fn test_controller_identity(path: &Path, verified_digest: Option<&str>) -> Option<Result<String>> {
     let source = std::env::var_os(TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV)?;
     let identity = std::env::var(TEST_CONTROLLER_RUNTIME_IDENTITY_ENV).ok()?;
+    crate::test_support::ensure_test_controller_fixture(Path::new(&source));
     let source_digest = test_controller_fixture_digest(Path::new(&source)).map_err(|error| {
         Error::validation_invalid_argument(
             "controller_runtime",
@@ -2184,6 +2201,7 @@ fn controller_executable_digest(path: &Path) -> Result<String> {
     if std::env::var_os(TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV)
         .is_some_and(|source| Path::new(&source) == path)
     {
+        crate::test_support::ensure_test_controller_fixture(path);
         return test_controller_fixture_digest(path);
     }
     executable_digest(path)
