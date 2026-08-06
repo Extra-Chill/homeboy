@@ -405,6 +405,14 @@ can use the daemon session instead of ad-hoc SSH command execution. The JSON
 payload uses `command: "runner.connect"` and reports connection state such as
 the runner ID, tunnel endpoint, daemon endpoint, and persisted session metadata.
 
+Set `HOMEBOY_CONTROLLER_PROXY` to an explicit `http`, `https`, `socks5`, or
+`socks5h` controller-local proxy URL to expose it to a direct SSH runner. Connect
+then owns a runner-loopback reverse forward and injects its credential-free
+loopback URL as `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` for daemon jobs that
+do not already set those values. Session status records the forward PID and URL;
+rotation preserves it and disconnect tears it down. With the variable unset,
+runner connections and job environments are unchanged.
+
 Reconnect distinguishes a healthy endpoint from a lost local tunnel, a live
 exact-owner PID whose recorded listener no longer answers, a dead PID with a
 retained lease, and an endpoint whose lease/PID identity differs from the

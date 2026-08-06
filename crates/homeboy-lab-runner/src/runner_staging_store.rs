@@ -1142,6 +1142,7 @@ mod tests {
             local_url: (mode == RunnerTunnelMode::DirectSsh).then(|| endpoint.to_string()),
             tunnel_pid: None,
             tunnel_process_start_identity: None,
+            proxy_forward: None,
             remote_daemon_pid: None,
             remote_daemon_lease_id: None,
             homeboy_version: "test".to_string(),

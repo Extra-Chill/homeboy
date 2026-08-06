@@ -403,21 +403,52 @@ pub(super) fn exec_via_reverse_broker(
         &redaction_env,
         &redaction_secret_env_names,
     );
+    let terminal_snapshot = homeboy_core::api_jobs::RunnerJobLogSnapshot {
+        job: job.clone(),
+        events: events.clone(),
+    };
+    if run_id_owns_generic_exec {
+        if let Some(run_id) = run_id.as_deref() {
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint(
+                run_id,
+                &terminal_snapshot,
+            )?;
+        }
+    }
     let mirror = if mirror_evidence {
+        let request = crate::evidence::MirrorEvidenceRequest::new(
+            runner,
+            &cwd,
+            &command,
+            &job,
+            &events,
+            &result,
+            run_id.as_deref(),
+            lab_runner_workload
+                .as_ref()
+                .and_then(|workload| workload.notification_route.as_ref()),
+        );
+        let request = if run_id_owns_generic_exec {
+            request.with_generic_runner_exec_run()
+        } else {
+            request
+        };
         mirror_reverse_broker_evidence(crate::evidence::ReverseBrokerEvidenceContext {
-            request: crate::evidence::MirrorEvidenceRequest::new(
-                runner,
-                &cwd,
-                &command,
-                &job,
-                &events,
-                &result,
-                run_id.as_deref(),
-                lab_runner_workload
-                    .as_ref()
-                    .and_then(|workload| workload.notification_route.as_ref()),
-            ),
+            request,
             broker_url,
+        })
+        .map_err(|error| {
+            if run_id_owns_generic_exec {
+                if let Some(run_id) = run_id.as_deref() {
+                    let _ =
+                        homeboy_agents::agent_task_lifecycle::record_runner_exec_projection_failure(
+                            run_id,
+                            &terminal_snapshot,
+                            &error,
+                        );
+                }
+            }
+            error
         })?
     } else {
         None

@@ -401,6 +401,7 @@ pub(crate) fn prepare_daemon_local_process(
     env.insert(RUNNER_HOSTED_EXEC_ENV.to_string(), "1".to_string());
     env.insert(RUNNER_PLACEMENT_RESOLVED_ENV.to_string(), "1".to_string());
     env.insert(RUNNER_ID_ENV.to_string(), runner.id.clone());
+    inject_controller_proxy_forward(&mut env, &runner.id)?;
     // Execution provenance is distinct from the dispatch markers above. It
     // survives CLI routing so runner-local agent-task plans do not open a
     // second controller-to-runner handoff.
@@ -434,6 +435,23 @@ pub(crate) fn prepare_daemon_local_process(
         source_snapshot,
         require_paths: request.require_paths,
     })
+}
+
+fn inject_controller_proxy_forward(
+    env: &mut HashMap<String, String>,
+    runner_id: &str,
+) -> Result<()> {
+    let Some(session) = crate::connection::recorded_session(runner_id)? else {
+        return Ok(());
+    };
+    let Some(proxy_forward) = session.proxy_forward else {
+        return Ok(());
+    };
+    for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+        env.entry(name.to_string())
+            .or_insert_with(|| proxy_forward.runner_url.clone());
+    }
+    Ok(())
 }
 
 pub(crate) fn execute_runner_process(plan: &PreparedRunnerProcess) -> Result<ProcessOutput> {

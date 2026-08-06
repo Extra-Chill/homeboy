@@ -466,6 +466,17 @@ pub enum RunnerTunnelProcessStartIdentity {
     },
 }
 
+/// A controller-owned reverse forward that exposes a controller-local proxy to
+/// a direct SSH runner. The URL is safe to pass to a runner process: it points
+/// at the runner loopback listener and never carries controller credentials.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerProxyForward {
+    pub runner_url: String,
+    pub tunnel_pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_process_start_identity: Option<RunnerTunnelProcessStartIdentity>,
+}
+
 /// A persisted runner session record. Pure serde data so the core daemon's
 /// `/runner/sessions` endpoints can build and persist sessions without a
 /// core -> runner edge. `leaseless_recovery_evidence` is carried as opaque JSON
@@ -492,6 +503,9 @@ pub struct RunnerSession {
     pub tunnel_pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tunnel_process_start_identity: Option<RunnerTunnelProcessStartIdentity>,
+    /// Optional controller proxy exposure owned with this direct SSH session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_forward: Option<RunnerProxyForward>,
     pub remote_daemon_pid: Option<u32>,
     #[serde(default)]
     pub remote_daemon_lease_id: Option<String>,

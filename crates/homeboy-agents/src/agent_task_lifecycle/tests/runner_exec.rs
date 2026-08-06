@@ -292,6 +292,45 @@ fn generic_runner_exec_rejects_stale_terminal_snapshot_binding() {
 }
 
 #[test]
+fn generic_runner_exec_projection_failure_retains_terminal_evidence() {
+    with_isolated_home(|_| {
+        let run_id = "runner-projection-failure-evidence";
+        record_runner_exec_job_identity(
+            run_id,
+            "homeboy-lab",
+            "00000000-0000-0000-0000-000000000123",
+            "/runner/workspace",
+            &["true".to_string()],
+        )
+        .expect("bound generic run");
+        let snapshot = runner_snapshot("failed");
+        let error = Error::internal_unexpected("artifact projection transport failed");
+
+        record_runner_exec_projection_failure(run_id, &snapshot, &error)
+            .expect("terminal snapshot and projection error persist");
+
+        let run = homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("store")
+            .get_run(run_id)
+            .expect("read")
+            .expect("run");
+        assert_eq!(run.status, "running");
+        assert_eq!(
+            run.metadata_json["runner_terminal_projection"]["state"],
+            "projection_failed"
+        );
+        assert_eq!(
+            run.metadata_json["runner_terminal_projection"]["job_id"],
+            snapshot.job.id.to_string()
+        );
+        assert_eq!(
+            run.metadata_json["runner_terminal_projection"]["event_count"],
+            snapshot.events.len()
+        );
+    });
+}
+
+#[test]
 fn synchronous_diagnostic_ssh_and_local_runs_finish_with_artifacts_and_replay_safely() {
     with_isolated_home(|_| {
         let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");

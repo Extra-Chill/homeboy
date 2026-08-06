@@ -52,6 +52,9 @@ pub(crate) struct MirrorEvidenceRequest<'a> {
     pub(crate) events: &'a [JobEvent],
     pub(crate) result: &'a Value,
     pub(crate) run_id: Option<&'a str>,
+    /// An explicit ad hoc runner-exec ID is created in the controller before
+    /// dispatch. It is not a runner `/runs/<id>` record to mirror.
+    pub(crate) generic_runner_exec_run: bool,
     pub(crate) notification_route: Option<&'a NotificationRoute>,
 }
 
@@ -78,8 +81,14 @@ impl<'a> MirrorEvidenceRequest<'a> {
             events,
             result,
             run_id,
+            generic_runner_exec_run: false,
             notification_route,
         }
+    }
+
+    pub(crate) fn with_generic_runner_exec_run(mut self) -> Self {
+        self.generic_runner_exec_run = true;
+        self
     }
 }
 
@@ -244,10 +253,12 @@ pub(crate) fn mirror_daemon_evidence(
             request.runner,
             request.job,
             request.result,
+            controller_owned_generic_run_id(request),
             request.notification_route,
         )?;
         if request.job.status.is_terminal()
             && (remote_runs.is_empty() || request.job.status == JobStatus::Failed)
+            && !request.job.artifacts.is_empty()
         {
             mirror_terminal_job_artifacts(&store, request.runner, request.job, &local_job_run)?;
         }
@@ -318,7 +329,10 @@ pub(crate) fn mirror_reverse_broker_evidence(
         let TerminalResultAvailability::Present(terminal_result) = terminal_result else {
             unreachable!("pending result returned above");
         };
-        let declared_run_ids = explicit_observation_run_ids(request.result, request.job);
+        let declared_run_ids = explicit_observation_run_ids(request.result, request.job)
+            .into_iter()
+            .filter(|run_id| Some(run_id.as_str()) != controller_owned_generic_run_id(request))
+            .collect::<Vec<_>>();
         let runs;
         let local_artifacts = if request.job.status == JobStatus::Failed {
             Some(mirror_reverse_terminal_artifacts(
@@ -733,7 +747,8 @@ where
             request.runner,
             request.job,
             request.result,
-            None,
+            controller_owned_generic_run_id(request),
+            request.notification_route,
         )?;
         let terminal = matches!(
             request.job.status,
@@ -965,7 +980,9 @@ fn mirror_job_run_request(
         events,
         result,
         run_id,
+        generic_runner_exec_run,
         notification_route,
+        ..
     } = request;
     let inferred_label = runner_exec_run_label(command);
     let synthetic_token = if run_id.is_none() {
@@ -1016,6 +1033,26 @@ fn mirror_job_run_request(
         lab["synthetic_publication_token"] = Value::String(synthetic_token.clone());
     }
     if let Some(run_id) = run_id {
+        if generic_runner_exec_run {
+            let mut metadata_json = store
+                .get_run(run_id)?
+                .ok_or_else(|| {
+                    Error::internal_unexpected(format!(
+                        "controller-owned generic runner-exec run {run_id} disappeared while mirroring Lab evidence"
+                    ))
+                })?
+                .metadata_json;
+            metadata_json["lab"] = lab;
+            if let Some(notification_route) = notification_route {
+                notification_route.insert_into_metadata(&mut metadata_json);
+            }
+            return store
+                .update_run_metadata(run_id, metadata_json)
+                .map(|run| MirroredJobRun {
+                    run,
+                    synthetic_ownership: None,
+                });
+        }
         if store
             .get_run(run_id)?
             .is_some_and(|existing| existing.metadata_json.get("agent_task_run").is_some())
@@ -1317,9 +1354,13 @@ fn mirror_remote_observation_runs(
     runner: &Runner,
     job: &Job,
     result: &Value,
+    controller_owned_run_id: Option<&str>,
     notification_route: Option<&NotificationRoute>,
 ) -> Result<Vec<RunRecord>> {
-    let explicit_run_ids = explicit_observation_run_ids(result, job);
+    let explicit_run_ids = explicit_observation_run_ids(result, job)
+        .into_iter()
+        .filter(|run_id| Some(run_id.as_str()) != controller_owned_run_id)
+        .collect::<Vec<_>>();
     if !explicit_run_ids.is_empty() {
         return mirror_remote_observation_runs_by_id(
             store,
@@ -1334,6 +1375,13 @@ fn mirror_remote_observation_runs(
     // a result, artifact, or submitted durable-run reference, the job mirror is
     // the only evidence whose ownership is proven.
     Ok(Vec::new())
+}
+
+fn controller_owned_generic_run_id(request: MirrorEvidenceRequest<'_>) -> Option<&str> {
+    let run_id = request.run_id?;
+    // This flag is set only by the explicit generic runner-exec admission path,
+    // which creates and ownership-checks the run before the daemon is called.
+    request.generic_runner_exec_run.then_some(run_id)
 }
 
 /// Legacy terminal producers may advertise artifacts without a durable

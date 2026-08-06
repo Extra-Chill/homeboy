@@ -252,6 +252,37 @@ pub fn record_runner_exec_terminal_checkpoint(
     store.upsert_imported_run_preserving_terminal(&run)
 }
 
+/// Preserve the authoritative terminal snapshot when controller-side evidence
+/// projection fails. The run stays active for replay, while its job reference
+/// and bounded daemon events remain available to an operator.
+pub fn record_runner_exec_projection_failure(
+    run_id: &str,
+    snapshot: &RunnerJobLogSnapshot,
+    error: &Error,
+) -> Result<()> {
+    record_runner_exec_terminal_checkpoint(run_id, snapshot)?;
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let Some(mut run) = store.get_run(&sanitize_run_id(run_id))? else {
+        return Ok(());
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND) {
+        return Ok(());
+    }
+    let metadata = run.metadata_json.as_object_mut().expect("metadata object");
+    metadata.insert(
+        "runner_terminal_projection".to_string(),
+        json!({
+            "state": "projection_failed",
+            "artifact_promotion": "pending",
+            "job_id": snapshot.job.id,
+            "status": snapshot.job.status,
+            "event_count": snapshot.events.len(),
+            "error": { "code": error.code.as_str(), "message": error.message },
+        }),
+    );
+    store.upsert_imported_run_preserving_terminal(&run)
+}
+
 /// Retain controller-owned artifact IDs alongside the original declarations.
 /// These IDs remain usable after the daemon evicts its job/event retention.
 pub fn record_runner_exec_artifact_refs(

@@ -1,6 +1,8 @@
 use super::*;
 use crate::daemon_repair;
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonRecoveryEvidence};
+use std::io::{BufRead, BufReader};
+use std::sync::mpsc;
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -294,6 +296,109 @@ pub(super) fn open_loopback_tunnel(
             stderr: format!("SSH tunnel error: {}", err),
             success: false,
         },
+    }
+}
+
+/// Open a controller-owned reverse forward. sshd allocates the runner-loopback
+/// port, so parallel runner sessions cannot collide on a fixed proxy port.
+pub(super) fn open_reverse_proxy_tunnel(
+    server: &Server,
+    proxy_host: &str,
+    proxy_port: u16,
+) -> SshTunnelOutput {
+    let mut args = homeboy_core::server::ssh_args::server_option_args(
+        server,
+        homeboy_core::server::ssh_args::SshArgOptions {
+            batch_mode: true,
+            connect_timeout: true,
+            exit_on_forward_failure: true,
+            port_flag: Some(homeboy_core::server::ssh_args::SshPortFlag::Lowercase),
+            ..homeboy_core::server::ssh_args::SshArgOptions::default()
+        },
+    );
+    args.extend([
+        "-v".to_string(),
+        "-N".to_string(),
+        "-R".to_string(),
+        format!("127.0.0.1:0:{proxy_host}:{proxy_port}"),
+        format!("{}@{}", server.user, server.host),
+    ]);
+    let mut command = std::process::Command::new("ssh");
+    command
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let Ok(mut child) = spawn_tunnel_process(&mut command) else {
+        return SshTunnelOutput {
+            pid: None,
+            stderr: "SSH proxy forward could not start".to_string(),
+            success: false,
+        };
+    };
+    let pid = child.id();
+    let Some(stderr) = child.stderr.take() else {
+        return SshTunnelOutput {
+            pid: Some(pid),
+            stderr: "SSH proxy forward did not expose stderr".to_string(),
+            success: false,
+        };
+    };
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut output = String::new();
+        for line in BufReader::new(stderr).lines().map_while(|line| line.ok()) {
+            output.push_str(&line);
+            output.push('\n');
+            if let Some(port) = allocated_remote_port(&line) {
+                let _ = sender.send(Ok(port));
+                return;
+            }
+        }
+        let _ = sender.send(Err(output));
+    });
+    match receiver.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(port)) => SshTunnelOutput {
+            pid: Some(pid),
+            stderr: port.to_string(),
+            success: true,
+        },
+        Ok(Err(stderr)) => SshTunnelOutput {
+            pid: Some(pid),
+            stderr,
+            success: false,
+        },
+        Err(_) => SshTunnelOutput {
+            pid: Some(pid),
+            stderr: "SSH proxy forward did not report an allocated remote port".to_string(),
+            success: false,
+        },
+    }
+}
+
+pub(super) fn allocated_remote_port(line: &str) -> Option<u16> {
+    let port = line
+        .split_once("Allocated port ")?
+        .1
+        .split_whitespace()
+        .next()?;
+    port.parse().ok()
+}
+
+#[cfg(test)]
+mod proxy_forward_tests {
+    use super::allocated_remote_port;
+
+    #[test]
+    fn reads_the_port_allocated_by_openssh() {
+        assert_eq!(
+            allocated_remote_port("Allocated port 42731 for remote forward to 127.0.0.1:8080"),
+            Some(42731)
+        );
+        assert_eq!(
+            allocated_remote_port("debug1: forwarding established"),
+            None
+        );
     }
 }
 
