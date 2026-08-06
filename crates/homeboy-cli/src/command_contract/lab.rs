@@ -24,7 +24,14 @@ pub fn scope_lab_cli_arguments(command: Command) -> Command {
         .cloned()
         .collect::<Vec<_>>();
     let command = LAB_CLI_ARGUMENT_IDS.iter().fold(command, |command, id| {
-        command.mut_arg(id, |arg| arg.hide(true))
+        command.mut_arg(id, |arg| {
+            let arg = arg.hide(true);
+            if matches!(*id, "placement" | "runner") {
+                arg.conflicts_with(clap::builder::Resettable::<clap::Id>::Reset)
+            } else {
+                arg
+            }
+        })
     });
     scope_lab_cli_arguments_at_path(command, &[], &lab_args)
 }
@@ -41,7 +48,14 @@ fn scope_lab_cli_arguments_at_path(
     let visible = lab_cli_arguments_are_visible_for_path(path);
     let command = if visible {
         lab_args.iter().fold(command, |command, arg| {
-            command.arg(arg.clone().global(false).hide(false))
+            let already_declared = command
+                .get_arguments()
+                .any(|existing| existing.get_id() == arg.get_id() && !existing.is_global_set());
+            if already_declared {
+                command
+            } else {
+                command.arg(arg.clone().global(false).hide(false))
+            }
         })
     } else if path.iter().map(String::as_str).eq(["cleanup"]) {
         // Cleanup is controller-owned, not Lab-portable. It still honors the
@@ -57,6 +71,19 @@ fn scope_lab_cli_arguments_at_path(
         )
     } else {
         command
+    };
+    let has_placement = command
+        .get_arguments()
+        .any(|arg| arg.get_id() == "placement");
+    let has_runner = command.get_arguments().any(|arg| arg.get_id() == "runner");
+    let command = match (has_placement, has_runner) {
+        (true, false) => command.mut_arg("placement", |arg| {
+            arg.conflicts_with(clap::builder::Resettable::<clap::Id>::Reset)
+        }),
+        (false, true) => command.mut_arg("runner", |arg| {
+            arg.conflicts_with(clap::builder::Resettable::<clap::Id>::Reset)
+        }),
+        _ => command,
     };
     // Cook coordinates durable promotion and finalization, so it cannot hand
     // its controller lifecycle to the generic queue. Keep parsing the inherited
