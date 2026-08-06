@@ -1673,7 +1673,8 @@ fn fuzz_report_persists_result_envelope_artifact_for_run_id() {
             .performance_hotspots
             .hottest_metric_families
             .is_empty());
-        assert_eq!(output.status, "passed");
+        // No gates were declared, so there is no pass to report (#11645).
+        assert_eq!(output.status, "not_gated");
         assert!(output.gates.is_empty());
         assert!(output.envelope.gates.is_empty());
         assert!(output.envelope.required_artifacts.is_empty());

@@ -1270,7 +1270,9 @@ fn fuzz_validate_accepts_case_log_artifact() {
     })
     .expect("validate fuzz campaign and case log");
 
-    assert_eq!(output.status, "passed");
+    // The measurement profile declares no gates, so the verdict is `not_gated`
+    // rather than a pass over an empty set (#11645).
+    assert_eq!(output.status, "not_gated");
     assert_eq!(output.case_log_entries, 1);
     assert_eq!(
         output.case_log_files,
@@ -1349,7 +1351,10 @@ fn fuzz_validate_measurement_profile_is_non_blocking_but_strict_profile_blocks()
     })
     .expect("validate strict campaign");
 
-    assert_eq!(measurement.status, "passed");
+    // The measurement profile is non-blocking, which is not the same as passing.
+    // This campaign has an open finding and evaluated no gates, so reporting
+    // `passed` would launder that finding into a green verdict (#11645).
+    assert_eq!(measurement.status, "not_gated");
     assert_eq!(measurement.open_findings, 1);
     assert!(measurement.gates.is_empty());
     assert_eq!(strict.status, "failed");
