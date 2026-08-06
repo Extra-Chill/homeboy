@@ -84,6 +84,16 @@ jobs:
         with:
           node-version: 24
 
+      - name: Cache Rust tools
+        if: matrix.component == 'rust'
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        if: matrix.component == 'rust'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
+
       - name: Install WordPress extension dependencies
         if: matrix.component == 'wordpress'
         working-directory: wordpress

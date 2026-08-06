@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EXTENSION_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+EXTENSION_DIR="${HOMEBOY_TESTED_EXTENSION_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 WORK_DIR="$(mktemp -d -t homeboy-rust-shards.XXXXXX)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
@@ -89,16 +89,26 @@ import sys
 
 count = int(os.environ.get("HOMEBOY_NEXTEST_TEST_COUNT", "5"))
 names = ["unit::alpha", "unit::beta", "unit::ignored", "api::works", "member::member_works"] if count == 5 else [f"unit::long_test_{index:04d}_{'x' * 100}" for index in range(count)]
+if os.environ.get("HOMEBOY_NEXTEST_LIST_MODE") == "filter-escape":
+    names.append("unit::closing)")
+if os.environ.get("HOMEBOY_NEXTEST_LIST_MODE") == "filter-control":
+    names.append("unit::line\nbreak")
 args = sys.argv[1:]
 filter_value = args[args.index("-E") + 1] if "-E" in args else ""
-selected = set(re.findall(r"test\(=([^)]+)\)", filter_value)) if filter_value else set(names)
+selected = {value.replace("\\)", ")").replace("\\,", ",").replace("\\\\", "\\") for value in re.findall(r"test\(=((?:\\.|[^)])*)\)", filter_value)} if filter_value else set(names)
 suites = {}
 for name in names:
     if name not in selected:
         continue
     package, binary, kind = ("shard-smoke", "api", "test") if name == "api::works" else ("member-smoke", "member_smoke", "lib") if name == "member::member_works" else ("shard-smoke", "shard_smoke", "lib")
-    suite = suites.setdefault(f"{package}::{binary}", {"package-name": package, "binary-name": binary, "kind": kind, "testcases": {}})
+    # These are the cargo-nextest --message-format json suite and testcase
+    # fields consumed by the inventory adapter.
+    suite = suites.setdefault(f"{package}::{binary}", {"package-name": package, "binary-name": binary, "kind": kind, "binary-path": f"/fixture/target/debug/deps/{binary}", "build-platform": "target", "cwd": "/fixture", "status": "listed", "testcases": {}})
     suite["testcases"][name] = {"ignored": name == "unit::ignored", "filter-match": {"status": "matches"}}
+    if os.environ.get("HOMEBOY_NEXTEST_LIST_MODE") == "ambiguous" and name == "unit::alpha":
+        # Distinct planned kind identities can project to the same runtime
+        # libtest-json-plus name; that projection must be rejected.
+        suites[f"{package}::{binary}::bin"] = {"package-name": package, "binary-name": binary, "kind": "bin", "binary-path": f"/fixture/target/debug/{binary}", "build-platform": "target", "cwd": "/fixture", "status": "listed", "testcases": {name: {"ignored": False, "filter-match": {"status": "matches"}}}}
 print(json.dumps({"rust-suites": suites}))
 PY
   exit 0
@@ -126,14 +136,23 @@ import re
 import sys
 
 args = sys.argv[1:]
-names = re.findall(r"test\(=([^)]+)\)", args[args.index("-E") + 1])
+names = [value.replace("\\)", ")").replace("\\,", ",").replace("\\\\", "\\") for value in re.findall(r"test\(=((?:\\.|[^)])*)\)", args[args.index("-E") + 1])]
 mode = os.environ.get("HOMEBOY_NEXTEST_MODE", "pass")
 if mode == "zero":
     raise SystemExit(0)
 for name in names:
+    if mode == "missing-terminal" and name == "unit::beta":
+        continue
     package, binary = ("shard-smoke", "api") if name == "api::works" else ("member-smoke", "member_smoke") if name == "member::member_works" else ("shard-smoke", "shard_smoke")
     event = "failed" if mode == "failure" and name == "unit::beta" else "ignored" if name == "unit::ignored" else "ok"
-    print(json.dumps({"type": "test", "name": f"{package}::{binary}${name}", "event": event}))
+    # This is the libtest-json-plus terminal event shape emitted by nextest.
+    runtime_name = "malformed" if mode == "malformed" else f"{package}::{binary}${name}"
+    print(json.dumps({"type": "test", "name": runtime_name, "event": event, "exec_time": 0.001}))
+    if mode == "duplicate-terminal" and name == "unit::alpha":
+        print(json.dumps({"type": "test", "name": runtime_name, "event": event, "exec_time": 0.001}))
+if mode in {"terminal-outside-ok", "terminal-outside-failed", "terminal-outside-ignored"}:
+    event = {"terminal-outside-ok": "ok", "terminal-outside-failed": "failed", "terminal-outside-ignored": "ignored"}[mode]
+    print(json.dumps({"type": "test", "name": "outside::suite$terminal", "event": event, "exec_time": 0.001}))
 raise SystemExit(1 if mode == "failure" and "unit::beta" in names else 0)
 PY
   exit $?
@@ -347,6 +366,13 @@ import sys
 
 assert json.load(open(sys.argv[1])) == {"total": 5, "passed": 4, "failed": 0, "skipped": 1, "partial": "rust-shard"}
 PY
+
+# A real libtest-json-plus identity omits `target_kind`; the released replay
+# path must reconcile it to the inventory's package/kind/target/test record.
+if ! grep -q 'Rust shard result: total=5 passed=4 failed=0 skipped=1' "$WORK_DIR/nextest-runner.out"; then
+  printf 'Expected non-empty nextest manifest to execute and report counts\n' >&2
+  exit 1
+fi
 
 python3 - "$WORK_DIR/nextest-selection.log" <<'PY'
 import sys
@@ -596,6 +622,175 @@ PASSTHROUGH_EXIT=$?
 set -e
 if [ "$ZERO_EXIT" -eq 0 ] || ! grep -q 'nextest executed membership does not match the shard manifest' "$WORK_DIR/nextest-zero.out"; then
   printf 'Expected nextest zero-selection shard replay to fail closed\n' >&2
+  exit 1
+fi
+
+set +e
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_NEXTEST_MODE=malformed \
+HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/nextest-manifest.json" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/nextest-malformed.out" 2>&1
+MALFORMED_EXIT=$?
+set -e
+if [ "$MALFORMED_EXIT" -eq 0 ] || ! grep -q 'nextest emitted a malformed test identity' "$WORK_DIR/nextest-malformed.out"; then
+  printf 'Expected malformed nextest event identity to fail closed\n' >&2
+  exit 1
+fi
+
+assert_nextest_event_rejected() {
+  local mode="$1" expected="$2" output
+  output="$WORK_DIR/nextest-${mode}.out"
+  set +e
+  HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+  HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+  HOMEBOY_SKIP_LINT=1 \
+  HOMEBOY_RUST_TEST_RUNNER=nextest \
+  HOMEBOY_NEXTEST_MODE="$mode" \
+  HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/nextest-manifest.json" \
+  HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+  HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+  PATH="$BIN_DIR:$PATH" \
+  bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$output" 2>&1
+  local status=$?
+  set -e
+  if [ "$status" -eq 0 ] || ! grep -q "$expected" "$output"; then
+    printf 'Expected %s nextest terminal event rejection\n' "$mode" >&2
+    exit 1
+  fi
+}
+
+assert_nextest_event_rejected terminal-outside-ok 'nextest emitted an unexpected test identity'
+assert_nextest_event_rejected terminal-outside-failed 'nextest emitted an unexpected test identity'
+assert_nextest_event_rejected duplicate-terminal 'nextest emitted an unexpected or duplicate test identity'
+assert_nextest_event_rejected missing-terminal 'nextest executed membership does not match the shard manifest'
+
+# An ignored helper outside the immutable manifest did not execute. It must not
+# be reconciled or counted, while the planned ignored test still counts once.
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_NEXTEST_MODE=terminal-outside-ignored \
+HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/nextest-manifest.json" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
+HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/ignored-outside-results.json" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/ignored-outside.out"
+python3 - "$WORK_DIR/ignored-outside-results.json" <<'PY'
+import json
+import sys
+
+assert json.load(open(sys.argv[1])) == {"total": 5, "passed": 4, "failed": 0, "skipped": 1, "partial": "rust-shard"}
+PY
+
+make_nextest_manifest() {
+  local list_mode="$1" inventory="$2" manifest="$3"
+  HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+  HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+  HOMEBOY_RUST_TEST_RUNNER=nextest \
+  HOMEBOY_NEXTEST_LIST_MODE="$list_mode" \
+  HOMEBOY_TEST_INVENTORY_ONLY=1 \
+  HOMEBOY_TEST_INVENTORY_FILE="$inventory" \
+  HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+  HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+  PATH="$BIN_DIR:$PATH" \
+  bash "$EXTENSION_DIR/scripts/test-runner.sh" >/dev/null
+  python3 - "$inventory" "$manifest" <<'PY'
+import json
+import sys
+
+inventory = json.load(open(sys.argv[1]))
+manifest = {key: inventory[key] for key in ("runner", "inventory_fingerprint", "runner_fingerprint", "workspace_fingerprint")}
+manifest["schema"] = "homeboy/test-shard-manifest/v1"
+manifest["tests"] = [test["id"] for test in inventory["tests"]]
+json.dump(manifest, open(sys.argv[2], "w"))
+PY
+}
+
+ESCAPED_INVENTORY="$WORK_DIR/escaped-inventory.json"
+ESCAPED_MANIFEST="$WORK_DIR/escaped-manifest.json"
+make_nextest_manifest filter-escape "$ESCAPED_INVENTORY" "$ESCAPED_MANIFEST"
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_NEXTEST_LIST_MODE=filter-escape \
+HOMEBOY_TEST_SHARD_MANIFEST="$ESCAPED_MANIFEST" \
+HOMEBOY_FAKE_NEXTEST_RUN_LOG="$WORK_DIR/escaped-filter.log" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" >/dev/null
+if ! grep -q 'test(=unit::closing\\))' "$WORK_DIR/escaped-filter.log"; then
+  printf 'Expected nextest filter to escape a closing parenthesis\n' >&2
+  exit 1
+fi
+
+CONTROL_INVENTORY="$WORK_DIR/control-inventory.json"
+CONTROL_MANIFEST="$WORK_DIR/control-manifest.json"
+make_nextest_manifest filter-control "$CONTROL_INVENTORY" "$CONTROL_MANIFEST"
+set +e
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_NEXTEST_LIST_MODE=filter-control \
+HOMEBOY_TEST_SHARD_MANIFEST="$CONTROL_MANIFEST" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/control-filter.out" 2>&1
+CONTROL_EXIT=$?
+set -e
+if [ "$CONTROL_EXIT" -eq 0 ] || ! grep -q 'nextest filter identity contains a control character' "$WORK_DIR/control-filter.out"; then
+  printf 'Expected nextest filter control-character rejection\n' >&2
+  exit 1
+fi
+
+AMBIGUOUS_INVENTORY="$WORK_DIR/ambiguous-nextest-inventory.json"
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_NEXTEST_LIST_MODE=ambiguous \
+HOMEBOY_TEST_INVENTORY_ONLY=1 \
+HOMEBOY_TEST_INVENTORY_FILE="$AMBIGUOUS_INVENTORY" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/ambiguous-inventory.out"
+python3 - "$AMBIGUOUS_INVENTORY" "$WORK_DIR/ambiguous-nextest-manifest.json" <<'PY'
+import json
+import sys
+
+inventory = json.load(open(sys.argv[1]))
+manifest = {key: inventory[key] for key in ("runner", "inventory_fingerprint", "runner_fingerprint", "workspace_fingerprint")}
+manifest["schema"] = "homeboy/test-shard-manifest/v1"
+manifest["tests"] = [test["id"] for test in inventory["tests"]]
+json.dump(manifest, open(sys.argv[2], "w"))
+PY
+set +e
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_NEXTEST_LIST_MODE=ambiguous \
+HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/ambiguous-nextest-manifest.json" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/nextest-ambiguous.out" 2>&1
+AMBIGUOUS_EXIT=$?
+set -e
+if [ "$AMBIGUOUS_EXIT" -eq 0 ] || ! grep -q 'nextest output identity is ambiguous' "$WORK_DIR/nextest-ambiguous.out"; then
+  printf 'Expected ambiguous nextest identity projection to fail closed\n' >&2
   exit 1
 fi
 if [ "$PASSTHROUGH_EXIT" -eq 0 ] || ! grep -q 'do not support passthrough arguments' "$WORK_DIR/passthrough.out"; then

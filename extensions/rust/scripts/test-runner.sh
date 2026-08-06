@@ -190,7 +190,35 @@ PY
 }
 
 rust_nextest_filter() {
-    jq -r '[.selected[] | "package(=\(.package)) and kind(=\(.target_kind)) and binary(=\(.target)) and test(=\(.name))"] | join(" + ")' "$1"
+    python3 - "$1" <<'PY'
+import json
+import sys
+
+def escape(value):
+    if not isinstance(value, str) or not value:
+        raise SystemExit("Rust test shard error: nextest filter identity contains an empty or non-string value")
+    escaped = []
+    for character in value:
+        if character == "\\": escaped.append("\\\\")
+        elif character == ")": escaped.append("\\)")
+        elif character == ",": escaped.append("\\,")
+        elif character == "\n": escaped.append("\\n")
+        elif character == "\r": escaped.append("\\r")
+        elif character == "\t": escaped.append("\\t")
+        elif ord(character) < 32 or ord(character) == 127:
+            raise SystemExit("Rust test shard error: nextest filter identity contains a control character")
+        else: escaped.append(character)
+    return "".join(escaped)
+
+selected = json.load(open(sys.argv[1], encoding="utf-8"))["selected"]
+terms = []
+for item in selected:
+    package, kind, target, name = (escape(item.get(key)) for key in ("package", "target_kind", "target", "name"))
+    terms.append(f"package(={package}) and kind(={kind}) and binary(={target}) and test(={name})")
+if not terms:
+    raise SystemExit("Rust test shard error: nextest filter cannot represent an empty selection")
+print(" + ".join(terms))
+PY
 }
 
 rust_nextest_filter_max_bytes() {
@@ -260,7 +288,20 @@ current = []
 current_size = 0
 
 def term(item):
-    return f'package(={item["package"]}) and kind(={item["target_kind"]}) and binary(={item["target"]}) and test(={item["name"]})'
+    def escape(value):
+        if not isinstance(value, str) or not value:
+            raise SystemExit("Rust test shard error: nextest filter identity contains an empty or non-string value")
+        escaped = []
+        for character in value:
+            if character == "\\": escaped.append("\\\\")
+            elif character == ")": escaped.append("\\)")
+            elif character == ",": escaped.append("\\,")
+            elif character in "\n\r\t" or ord(character) < 32 or ord(character) == 127:
+                raise SystemExit("Rust test shard error: nextest filter identity contains a control character")
+            else: escaped.append(character)
+        return "".join(escaped)
+    package, kind, target, name = (escape(item.get(key)) for key in ("package", "target_kind", "target", "name"))
+    return f"package(={package}) and kind(={kind}) and binary(={target}) and test(={name})"
 
 for item in shard["selected"]:
     item_term = term(item)
@@ -348,12 +389,37 @@ import json
 import sys
 
 expected = json.load(open(sys.argv[2], encoding="utf-8"))["selected"]
-names = {}
+
+def planned_identity(item):
+    values = (item.get("package"), item.get("target_kind"), item.get("target"), item.get("name"))
+    if not all(isinstance(value, str) and value for value in values):
+        raise SystemExit("Rust test shard error: shard manifest contains a malformed planned nextest identity")
+    return values
+
+def emitted_identity(value):
+    # libtest-json-plus omits Cargo's target kind and encodes its remaining
+    # identity as package::target$test. Reconcile that structured projection,
+    # rather than mutating either serialized identifier.
+    if not isinstance(value, str):
+        raise SystemExit("Rust test shard error: nextest emitted a malformed test identity")
+    package_target, separator, test = value.rpartition("$")
+    package, target_separator, target = package_target.partition("::")
+    if not separator or not target_separator or not all((package, target, test)):
+        raise SystemExit(f"Rust test shard error: nextest emitted a malformed test identity: {value!r}")
+    return package, target, test
+
+planned_by_emitted = {}
+expected_identities = set()
 for item in expected:
-    key = f'{item["package"]}::{item["target"]}${item["name"]}'
-    if key in names:
-        raise SystemExit(f"Rust test shard error: nextest output identity is ambiguous: {key}")
-    names[key] = item["id"]
+    planned = planned_identity(item)
+    package, target_kind, target, test = planned
+    if planned in expected_identities:
+        raise SystemExit(f"Rust test shard error: shard manifest contains a duplicate planned nextest identity: {package}::{target_kind}::{target}::{test}")
+    expected_identities.add(planned)
+    emitted = package, target, test
+    if emitted in planned_by_emitted:
+        raise SystemExit(f"Rust test shard error: nextest output identity is ambiguous: {package}::{target}${test}")
+    planned_by_emitted[emitted] = planned
 passed = failed = skipped = 0
 actual = set()
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
@@ -366,15 +432,22 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     status = event.get("event")
     if status not in {"ok", "passed", "failed", "fail", "ignored", "skipped"}:
         continue
-    name = event.get("name")
-    if name not in names or names[name] in actual:
-        raise SystemExit(f"Rust test shard error: nextest emitted an unexpected or duplicate test identity: {name}")
-    actual.add(names[name])
+    emitted = emitted_identity(event.get("name"))
+    if emitted not in planned_by_emitted:
+        # Nested libtest helpers can report an ignored/skipped terminal event
+        # even though the shard selected only their parent test. They did not
+        # execute, so they are neither membership evidence nor result counts.
+        if status in {"ignored", "skipped"}:
+            continue
+        raise SystemExit(f"Rust test shard error: nextest emitted an unexpected test identity: {event.get('name')}")
+    if planned_by_emitted[emitted] in actual:
+        raise SystemExit(f"Rust test shard error: nextest emitted an unexpected or duplicate test identity: {event.get('name')}")
+    actual.add(planned_by_emitted[emitted])
     if status in {"ok", "passed"}: passed += 1
     elif status in {"failed", "fail"}: failed += 1
     else: skipped += 1
-if actual != set(names.values()):
-    raise SystemExit(f"Rust test shard error: nextest executed membership does not match the shard manifest (missing={sorted(set(names.values()) - actual)[:1]})")
+if actual != expected_identities:
+    raise SystemExit(f"Rust test shard error: nextest executed membership does not match the shard manifest (missing={sorted(expected_identities - actual)[:1]})")
 print(f"{passed}\t{failed}\t{skipped}")
 PY
 }
