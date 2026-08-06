@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.32.10] - 2026-08-06
+
+### Fixed
+- bind shard authority to filtered nextest plan
+
 ## [1.32.9] - 2026-08-06
 
 ### Fixed
