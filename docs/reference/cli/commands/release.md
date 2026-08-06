@@ -56,6 +56,8 @@ Plan release workflows
 | `homeboy release changelog` | Show generated changelog content |
 | `homeboy release version` | Version inspection helpers |
 | `homeboy release artifact-source-authority` | Write a source-authority manifest for assembled release artifacts |
+| `homeboy release contains` | Report which release first contained a commit, and whether the installed build has it |
+| `homeboy release gap` | Report how far the installed build is behind the newest release |
 
 ## `homeboy release changes`
 
@@ -147,3 +149,36 @@ Write a source-authority manifest for assembled release artifacts
 | `--dir` | `<DIR>` | Directory containing the assembled publication files |
 | `--tag` | `<TAG>` | Prepared release tag |
 | `--commit` | `<COMMIT>` | Exact commit the prepared tag resolves to |
+
+## `homeboy release contains`
+
+```sh
+homeboy release contains [OPTIONS] [COMMIT]
+```
+
+Report which release first contained a commit, and whether the installed build has it
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `[COMMIT]` | no | Commit sha (or any commit-ish) to locate. Omit when using --issue |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--issue` | `<N>` | Resolve the commit through the merged pull request that closed this issue, so the operator does not have to find the sha first |
+| `--component` | `<COMPONENT_ID>` | Component whose release tag namespace to search (default: the component discovered from the working directory) |
+| `--path` | `<PATH>` | Checkout to inspect directly. Useful for unregistered clones, CI runners, and worktrees |
+| `--installed` | `<VERSION>` | Version to treat as installed instead of the running binary's version |
+
+## `homeboy release gap`
+
+```sh
+homeboy release gap [OPTIONS]
+```
+
+Report how far the installed build is behind the newest release
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--component` | `<COMPONENT_ID>` | Component whose release tag namespace to search (default: the component discovered from the working directory) |
+| `--path` | `<PATH>` | Checkout to inspect directly. Useful for unregistered clones, CI runners, and worktrees |
+| `--installed` | `<VERSION>` | Version to treat as installed instead of the running binary's version |
