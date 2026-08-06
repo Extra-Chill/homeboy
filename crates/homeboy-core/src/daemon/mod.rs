@@ -37,6 +37,7 @@ pub mod recovery_actions;
 mod remote_runner;
 pub mod runner_exec_driver;
 mod runner_files;
+pub mod runner_staging;
 mod stop;
 pub(crate) use stop::stop_unlocked;
 use stop::{active_daemon_job_ids, active_jobs_block_daemon_stop_error, stop_with_force_for_lease};
@@ -1657,6 +1658,9 @@ where
         | ("POST", "/runner/workspace-owners/validate")
         | ("POST", "/runner/workspace-owners/renew")
         | ("POST", "/runner/workspace-owners/release") => {
+            remote_runner::route(method, path, body, job_store, &broker_auth)
+        }
+        ("POST", "/runner/staging") | ("POST", "/runner/staging/capabilities") => {
             remote_runner::route(method, path, body, job_store, &broker_auth)
         }
         ("GET", "/runner/sessions")
@@ -5630,6 +5634,16 @@ where
         let _ = stop_with_force_for_lease(&request.lease_id, request.force);
     }
     Ok(())
+}
+
+/// Test-support network entry point for the production reverse-broker routes.
+/// Authentication and route handling remain identical to a daemon connection.
+#[cfg(any(test, feature = "test-support"))]
+pub fn handle_reverse_broker_test_connection(
+    stream: TcpStream,
+    job_store: &JobStore,
+) -> std::io::Result<()> {
+    handle_connection(stream, job_store, UnsupportedAnalysisJobRunner, false)
 }
 
 fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {

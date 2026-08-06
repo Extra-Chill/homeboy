@@ -1196,13 +1196,13 @@ pub(crate) fn run_lab_offload_inner(
             request.local_output_file,
             &mut messages,
         );
-        let controller_job_id = match crate::lab_staging_controller::submit_detached_staging(
+        let submission = match crate::lab_staging_controller::submit_detached_staging(
             run_id,
             runner_id,
             selection.mode.clone(),
             &request,
         ) {
-            Ok(controller_job_id) => controller_job_id,
+            Ok(submission) => submission,
             Err(error) => {
                 if error.retryable != Some(true) {
                     let _ = agent_task_lifecycle::record_pre_execution_failure(
@@ -1219,29 +1219,17 @@ pub(crate) fn run_lab_offload_inner(
                 ));
             }
         };
-        let controller_job_commands = controller_job_retrieval_commands(&controller_job_id);
+        let submission = detached_staging_submission_output(submission, run_id);
         let stdout = serde_json::to_string_pretty(&serde_json::json!({
             "success": true,
-            "data": {
-                "status": "materializing",
-                "durable_run_id": run_id,
-                "controller_job_id": controller_job_id,
-                "retrieval_commands": {
-                    "status": format!("homeboy agent-task status {run_id}"),
-                    "controller_job": controller_job_commands.show,
-                    "controller_job_watch": controller_job_commands.watch,
-                },
-            }
+            "data": submission,
         }))
-        .unwrap_or_else(|_| {
-            format!("Lab staging controller job {controller_job_id} accepted for {run_id}")
-        });
+        .unwrap_or_else(|_| format!("Lab staging accepted for {run_id}"));
         return Ok(LabOffloadOutcome::InFlight {
             plan,
             stdout: format!("{stdout}\n"),
             stderr: format!(
-                "Lab staging continues in controller job `{controller_job_id}`.\nNext: homeboy agent-task status {run_id}\nNext: {}\nNext: {}\n",
-                controller_job_commands.show, controller_job_commands.watch,
+                "Lab staging continues for durable run `{run_id}`.\nNext: homeboy agent-task status {run_id}\nNext: homeboy agent-task logs {run_id}\n",
             ),
             exit_code: 0,
             output_file_content: Some(format!("{stdout}\n")),
@@ -1426,7 +1414,10 @@ pub(crate) fn run_lab_offload_inner(
         .session
         .as_ref()
         .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
-        && runner_status.stale_daemon.is_none()
+        // An unverified reverse session is an availability warning rather than
+        // a freshness fence. Only a typed blocking verdict can suppress this
+        // direct-SSH identity comparison.
+        && runner_status.admission_blocking_stale_daemon().is_none()
     {
         let session = runner_status
             .session
@@ -1691,13 +1682,13 @@ pub(crate) fn run_lab_offload_inner(
             request.local_output_file,
             &mut messages,
         );
-        let controller_job_id = match crate::lab_staging_controller::submit_detached_staging(
+        let submission = match crate::lab_staging_controller::submit_detached_staging(
             run_id,
             runner_id,
             selection.mode.clone(),
             &request,
         ) {
-            Ok(controller_job_id) => controller_job_id,
+            Ok(submission) => submission,
             Err(error) => {
                 // A retryable transport failure can follow durable acceptance.
                 // Keep the parent nonterminal so replay can reconcile the same
@@ -1719,33 +1710,17 @@ pub(crate) fn run_lab_offload_inner(
                 ));
             }
         };
-        let controller_job_commands = controller_job_retrieval_commands(&controller_job_id);
+        let submission = detached_staging_submission_output(submission, run_id);
         let stdout = serde_json::to_string_pretty(&serde_json::json!({
             "success": true,
-            "data": {
-                "status": "materializing",
-                "durable_run_id": run_id,
-                "controller_job_id": controller_job_id,
-                "retrieval_commands": {
-                    "status": format!("homeboy agent-task status {run_id}"),
-                    "controller_job": controller_job_commands.show,
-                    "controller_job_watch": controller_job_commands.watch,
-                },
-                "next_actions": [
-                    format!("Show controller job: {}", controller_job_commands.show),
-                    format!("Watch controller job: {}", controller_job_commands.watch),
-                ],
-            }
+            "data": submission,
         }))
-        .unwrap_or_else(|_| {
-            format!("Lab staging controller job {controller_job_id} accepted for {run_id}")
-        });
+        .unwrap_or_else(|_| format!("Lab staging accepted for {run_id}"));
         return Ok(LabOffloadOutcome::InFlight {
             plan,
             stdout: format!("{stdout}\n"),
             stderr: format!(
-                "Lab staging continues in controller job `{controller_job_id}`.\nNext: homeboy agent-task status {run_id}\nNext: {}\nNext: {}\n",
-                controller_job_commands.show, controller_job_commands.watch,
+                "Lab staging continues for durable run `{run_id}`.\nNext: homeboy agent-task status {run_id}\nNext: homeboy agent-task logs {run_id}\n",
             ),
             exit_code: 0,
             output_file_content: Some(format!("{stdout}\n")),
@@ -2307,6 +2282,40 @@ pub(crate) fn controller_job_retrieval_commands(job_id: &str) -> ControllerJobRe
         show: format!("homeboy activity show {job_id}"),
         watch: format!("homeboy activity watch {job_id}"),
     }
+}
+
+pub(crate) fn detached_staging_submission_output(
+    submission: crate::lab_staging_controller::DetachedStagingSubmission,
+    run_id: &str,
+) -> serde_json::Value {
+    let mut output = serde_json::json!({
+        "durable_run_id": run_id,
+        "retrieval_commands": {
+            "status": format!("homeboy agent-task status {run_id}"),
+            "logs": format!("homeboy agent-task logs {run_id}"),
+        },
+    });
+    match submission {
+        crate::lab_staging_controller::DetachedStagingSubmission::Controller { job_id } => {
+            let commands = controller_job_retrieval_commands(&job_id);
+            output["status"] = serde_json::json!("materializing");
+            output["controller_job_id"] = serde_json::json!(job_id);
+            output["retrieval_commands"]["controller_job"] = serde_json::json!(commands.show);
+            output["retrieval_commands"]["controller_job_watch"] =
+                serde_json::json!(commands.watch);
+        }
+        crate::lab_staging_controller::DetachedStagingSubmission::Deferred(receipt) => {
+            output["status"] = serde_json::json!("staged");
+            output["runner_job_id"] =
+                serde_json::json!(receipt.runner_receipt.handoff.runner_job_id);
+            // Older clients consumed this name before staging admitted a real
+            // runner daemon job. Keep it additive while they migrate.
+            output["runner_staging_id"] =
+                serde_json::json!(receipt.runner_receipt.handoff.runner_job_id);
+            output["controller_projection"] = serde_json::json!(receipt.controller_projection);
+        }
+    }
+    output
 }
 
 /// Keep the generated direct command and the reverse-transport command in

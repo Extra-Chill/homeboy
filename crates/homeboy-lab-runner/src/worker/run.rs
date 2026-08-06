@@ -363,6 +363,11 @@ fn run_once_output(
     let _command_assets =
         materialize_command_assets(&claim.job.id.to_string(), &mut execution_envelope)?;
     let _private_at_files = verify_private_at_files(&mut execution_envelope)?;
+    materialize_staged_source_artifact(
+        &options.runner_id,
+        &claim.job.id.to_string(),
+        &mut execution_envelope,
+    )?;
     materialize_snapshot_git_baseline(&execution_envelope)?;
     // Shared finisher so the exec-error and exec-success paths submit their
     // terminal job result through identical broker plumbing (#5091).
@@ -992,6 +997,42 @@ fn reverse_worker_lab_offload(raw: &str) -> Result<serde_json::Value> {
             Some("parse reverse worker Lab offload metadata".to_string()),
         )
     })
+}
+
+/// A staged job's source is runner-owned durable storage, not a controller path.
+/// Verify and extract it before the normal queue executor consumes the command.
+fn materialize_staged_source_artifact(
+    runner_id: &str,
+    job_id: &str,
+    envelope: &mut RunnerExecutionEnvelope,
+) -> Result<()> {
+    let Some(source) = envelope.metadata.get("staged_source_artifact") else {
+        return Ok(());
+    };
+    let source = serde_json::from_value(source.clone()).map_err(|error| {
+        Error::validation_invalid_argument(
+            "staged_source_artifact",
+            format!("invalid staged source artifact: {error}"),
+            None,
+            None,
+        )
+    })?;
+    let session_path = homeboy_core::paths::runner_session_file(runner_id)?;
+    let store_path = session_path.with_file_name(format!("{runner_id}-staging/store.json"));
+    let workspace_root = session_path
+        .with_file_name(format!("{runner_id}-staging/workloads"))
+        .join(job_id);
+    let workspace = crate::runner_staging_store::extract_staged_source_artifact(
+        store_path,
+        &source,
+        &workspace_root,
+    )?;
+    let dispatch = envelope
+        .dispatch
+        .as_mut()
+        .ok_or_else(|| Error::internal_unexpected("staged runner job has no execution dispatch"))?;
+    dispatch.cwd = Some(workspace.display().to_string());
+    Ok(())
 }
 
 /// Materialize broker-owned command files in the worker's durable data root and
