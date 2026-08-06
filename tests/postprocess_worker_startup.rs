@@ -98,7 +98,9 @@ fn postprocess_plan() -> AgentTaskPlan {
 
 #[test]
 fn scheduler_recovers_a_worker_killed_before_claim_creation() {
-    let _lock = POSTPROCESS_TEST_LOCK.lock().expect("test lock");
+    let _lock = POSTPROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let home = tempfile::tempdir().expect("home");
     let artifact_root = home.path().join("artifacts");
     homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));
@@ -179,7 +181,9 @@ fn scheduler_recovers_a_worker_killed_before_claim_creation() {
 
 #[test]
 fn scheduler_restart_adopts_a_live_worker_without_reinvoking_helper() {
-    let _lock = POSTPROCESS_TEST_LOCK.lock().expect("test lock");
+    let _lock = POSTPROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let home = tempfile::tempdir().expect("home");
     let artifact_root = home.path().join("artifacts");
     homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));

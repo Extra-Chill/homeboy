@@ -392,6 +392,20 @@ impl ManagedServices {
 
     #[cfg(not(test))]
     pub(super) fn start(specs: &[AgentTaskManagedService], run_id: &str) -> Result<Self, String> {
+        // A plan that declares no services has nothing to supervise. Spawning a
+        // durable worker anyway costs a process and then blocks the scheduler
+        // for up to six seconds waiting for a readiness state that describes an
+        // empty set -- on every run, and most runs declare no services.
+        //
+        // It also fails outright in any host whose `current_exe()` is not the
+        // Homeboy CLI. An integration test binary spawned as
+        // `self service-supervisor-worker --request <path>` reads those as
+        // libtest filters, runs no tests, exits, and never writes a state file,
+        // so the poll runs to exhaustion and the plan fails before reaching its
+        // first step.
+        if specs.is_empty() {
+            return AgentTaskServiceSupervisor::start(specs, run_id).map(Self::Local);
+        }
         let request = AgentTaskServiceWorkerRequest {
             schema: AgentTaskServiceWorkerRequest::SCHEMA.to_string(),
             operation: "start".to_string(),
