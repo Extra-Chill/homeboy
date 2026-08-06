@@ -91,6 +91,14 @@ pub fn runner_generation_inventory_for_session(
 ) -> Result<Vec<RunnerDaemonGenerationStatus>> {
     generation_store::status_projection(runner_id, session)
 }
+
+/// Durable job identities for an already-observed generation view.
+pub fn runner_generation_job_owners_for_session(
+    runner_id: &str,
+    session: Option<&RunnerSession>,
+) -> Result<Vec<RunnerGenerationJobOwners>> {
+    generation_store::status_job_owners(runner_id, session)
+}
 mod git_dependency_materialization;
 #[allow(
     dead_code,
@@ -313,11 +321,11 @@ pub use session::{
     RunnerActiveJobState, RunnerActiveJobsSnapshot, RunnerAdmissionSummary, RunnerArtifactRef,
     RunnerAvailability, RunnerChangedRuntimePath, RunnerConnectReport,
     RunnerDaemonGenerationStatus, RunnerDaemonVerification, RunnerDisconnectReport,
-    RunnerFailureKind, RunnerJob, RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence,
-    RunnerLifecycleOwner, RunnerMutationArtifacts, RunnerNamedWorkspaceLease, RunnerRecoveryState,
-    RunnerResult, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
-    RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceLease,
-    RunnerWorkspaceLeaseSet,
+    RunnerFailureKind, RunnerGenerationJobOwners, RunnerJob, RunnerLeaselessRecoveryContract,
+    RunnerLeaselessRecoveryEvidence, RunnerLifecycleOwner, RunnerMutationArtifacts,
+    RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerResult, RunnerSession, RunnerSessionRole,
+    RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport,
+    RunnerTunnelMode, RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
 };
 pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
 pub(crate) use transport::{select_runner_transport, RunnerFileTransfer, RunnerTransport};

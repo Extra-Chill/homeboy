@@ -14,7 +14,9 @@ use homeboy_core::process::{
 use homeboy_core::server::SshClient;
 
 use crate::rolling_generation::RollingResultOwnerRetirement;
-use crate::{RollingGenerations, RunnerDaemonGenerationStatus, RunnerSession};
+use crate::{
+    RollingGenerations, RunnerDaemonGenerationStatus, RunnerGenerationJobOwners, RunnerSession,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct AdmissionFence {
@@ -923,6 +925,26 @@ pub(crate) fn status_projection(
                     remote_daemon_lease_id: entry.endpoint.remote_daemon_lease_id,
                     remote_daemon_address: entry.endpoint.remote_daemon_address,
                     local_url: entry.endpoint.local_url,
+                })
+                .collect()
+        }),
+    )
+}
+
+/// Return durable job identities grouped by generation. These identities can
+/// be deduplicated with live daemon jobs; persisted counters cannot.
+pub(crate) fn status_job_owners(
+    runner_id: &str,
+    legacy: Option<&RunnerSession>,
+) -> Result<Vec<RunnerGenerationJobOwners>> {
+    Ok(
+        read_projection(runner_id, legacy)?.map_or_else(Vec::new, |generations| {
+            generations
+                .generations
+                .iter()
+                .map(|(generation, entry)| RunnerGenerationJobOwners {
+                    generation: generation.clone(),
+                    job_ids: job_owner_ids_for(&generations, generation, &entry.endpoint),
                 })
                 .collect()
         }),
@@ -2993,6 +3015,24 @@ mod tests {
             assert!(projected.iter().any(|entry| entry.generation == "build-b"
                 && entry.active_job_count == 1
                 && entry.admission_owner));
+            // The durable owner ledger retains the original job alongside the
+            // current generation job. Consumers use these identities, rather
+            // than the overlapping per-generation counters, to deduplicate
+            // admission pressure after rotation.
+            let owners = status_job_owners("runner-a", Some(&b)).expect("owner projection");
+            assert_eq!(
+                owners,
+                vec![
+                    RunnerGenerationJobOwners {
+                        generation: "build-b".to_string(),
+                        job_ids: vec!["job-b".to_string()]
+                    },
+                    RunnerGenerationJobOwners {
+                        generation: "lease-a".to_string(),
+                        job_ids: vec!["job-a".to_string()]
+                    },
+                ]
+            );
             let report = RunnerStatusReport {
                 runner_id: "runner-a".to_string(),
                 connected: true,
@@ -3019,6 +3059,54 @@ mod tests {
                     "total": 2,
                 })
             );
+
+            let report = RunnerStatusReport {
+                runner_id: "runner-a".to_string(),
+                connected: true,
+                state: RunnerSessionState::Connected,
+                session: Some(b.clone()),
+                stale_daemon: None,
+                daemon_freshness: None,
+                active_jobs: vec![homeboy_core::api_jobs::ActiveRunnerJobSummary {
+                    runner_id: "runner-a".to_string(),
+                    job_id: "job-b".to_string(),
+                    operation: "runner.exec".to_string(),
+                    source: "daemon".to_string(),
+                    kind: "runner.exec".to_string(),
+                    status: homeboy_core::api_jobs::JobStatus::Running,
+                    command: "true".to_string(),
+                    cwd: None,
+                    started_at_ms: 0,
+                    updated_at_ms: 0,
+                    elapsed_ms: 0,
+                    heartbeat_age_ms: 0,
+                    claim: homeboy_core::api_jobs::JobClaimMetadata::default(),
+                    claim_expires_in_ms: None,
+                    lifecycle: None,
+                    durable_run_id: None,
+                    stale_reason: None,
+                    lifecycle_state: None,
+                    retryable: None,
+                    active_child_count: None,
+                    active_cell_count: None,
+                }],
+                active_runner_jobs: Vec::new(),
+                stale_runner_jobs: Vec::new(),
+                active_job_count: 1,
+                stale_runner_job_count: 0,
+                active_job_state: RunnerActiveJobState::Available,
+                active_job_source: None,
+                active_job_error: None,
+                active_job_recovery_evidence: None,
+                session_path: "test".to_string(),
+            };
+            let summary = report.admission_summary_with_generations(&projected, &owners, 1);
+            assert_eq!(summary.live_daemon_job_count, 1);
+            assert_eq!(summary.retained_durable_job_count, 2);
+            assert_eq!(summary.active_job_count, 1);
+            assert_eq!(summary.unresolved_retained_projection_count, 1);
+            assert!(summary.admission_blocking_job_ids.is_empty());
+            assert_eq!(summary.unresolved_generation_ids, ["lease-a"]);
 
             let operations = FakeEndpointOperations::default();
             operations

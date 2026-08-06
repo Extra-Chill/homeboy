@@ -38,17 +38,19 @@ pub(super) fn status(
         // a read-only command must not repeat remote runner inspection.
         let generation_inventory =
             runner::runner_generation_inventory_for_session(id, report.session.as_ref())?;
+        let generation_owners =
+            runner::runner_generation_job_owners_for_session(id, report.session.as_ref())?;
         // Lead with the compact authoritative admission answer, summarizing the
         // draining generations by count rather than expanding the full ledger
         // (#9478/#9522). The full inventory stays available as detail below.
         // Count the draining generations before optionally dropping the expanded
         // ledger, so the summary's count is accurate whether or not the caller
         // asked for the full list.
-        let admission_summary =
-            Some(report.admission_summary_with_generations(
-                &generation_inventory,
-                generation_inventory.len(),
-            ));
+        let admission_summary = Some(report.admission_summary_with_generations(
+            &generation_inventory,
+            &generation_owners,
+            generation_inventory.len(),
+        ));
         // By default the expanded per-generation ledger is omitted — the summary
         // already carries the count, and on a long-lived runner the full
         // inventory runs to thousands of lines that make old ownership look like
@@ -191,6 +193,8 @@ pub(super) fn reconcile(id: &str) -> CmdResult<RunnerOutput> {
     let report = runner::reconcile_status(id)?;
     let generation_inventory =
         runner::runner_generation_inventory_for_session(id, report.session.as_ref())?;
+    let generation_owners =
+        runner::runner_generation_job_owners_for_session(id, report.session.as_ref())?;
     Ok((
         RunnerOutput {
             command: "runner.reconcile".to_string(),
@@ -198,6 +202,7 @@ pub(super) fn reconcile(id: &str) -> CmdResult<RunnerOutput> {
             extra: RunnerExtra {
                 admission_summary: Some(report.admission_summary_with_generations(
                     &generation_inventory,
+                    &generation_owners,
                     generation_inventory.len(),
                 )),
                 connection: Some(RunnerConnectionOutput::Status(Box::new(report.clone()))),
