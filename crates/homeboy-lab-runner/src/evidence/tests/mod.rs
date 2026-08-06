@@ -587,6 +587,51 @@ fn direct_failure_mirror_projects_bounded_typed_diagnostics_without_artifacts() 
 }
 
 #[test]
+fn explicit_generic_runner_exec_run_skips_missing_remote_run_projection() {
+    // #11725: the controller creates this durable ad hoc run before dispatch.
+    // A completed daemon job can echo that ID even though no runner `/runs/<id>`
+    // exists; the terminal mirror must retain the controller record rather than
+    // fail on that expected 404 before declared artifacts can reconcile.
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let job = terminal_runner_job();
+        let run_id = "runner-exec-controller-owned-11725";
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
+            run_id,
+            "lab",
+            &job.id.to_string(),
+            "/runner/project",
+            &["true".to_string()],
+        )
+        .expect("controller generic run is persisted before dispatch");
+
+        let evidence = mirror_daemon_evidence(
+            MirrorEvidenceRequest::new(
+                &ssh_runner(),
+                "/runner/project",
+                &["true".to_string()],
+                &job,
+                &[],
+                &json!({ "exit_code": 0, "durable_run_id": run_id }),
+                Some(run_id),
+                None,
+            )
+            .with_generic_runner_exec_run(),
+        )
+        .expect("controller-owned run does not require a remote run lookup")
+        .expect("terminal evidence");
+
+        assert_eq!(evidence.run.id, run_id);
+        let run = ObservationStore::open_initialized()
+            .expect("store")
+            .get_run(run_id)
+            .expect("read run")
+            .expect("durable run remains available");
+        assert_eq!(run.status, "running");
+        assert_eq!(run.metadata_json["runner_job_id"], job.id.to_string());
+    });
+}
+
+#[test]
 fn failed_job_without_terminal_exit_code_projects_root_failure_fallback() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let store = ObservationStore::open_initialized().expect("store");

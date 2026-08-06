@@ -362,8 +362,20 @@ pub(super) fn exec_via_daemon(
         exit_code,
     } = runner_job_result_fields(&events, job.status, &env, &secret_env_names);
 
+    let terminal_snapshot = homeboy_core::api_jobs::RunnerJobLogSnapshot {
+        job: job.clone(),
+        events: events.clone(),
+    };
+    if run_id_owns_generic_exec {
+        if let Some(run_id) = run_id.as_deref() {
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint(
+                run_id,
+                &terminal_snapshot,
+            )?;
+        }
+    }
     let mirror = if mirror_evidence {
-        mirror_daemon_evidence(crate::evidence::MirrorEvidenceRequest::new(
+        let request = crate::evidence::MirrorEvidenceRequest::new(
             runner,
             &cwd,
             &command,
@@ -374,7 +386,25 @@ pub(super) fn exec_via_daemon(
             lab_runner_workload
                 .as_ref()
                 .and_then(|workload| workload.notification_route.as_ref()),
-        ))?
+        );
+        let request = if run_id_owns_generic_exec {
+            request.with_generic_runner_exec_run()
+        } else {
+            request
+        };
+        mirror_daemon_evidence(request).map_err(|error| {
+            if run_id_owns_generic_exec {
+                if let Some(run_id) = run_id.as_deref() {
+                    let _ =
+                        homeboy_agents::agent_task_lifecycle::record_runner_exec_projection_failure(
+                            run_id,
+                            &terminal_snapshot,
+                            &error,
+                        );
+                }
+            }
+            error
+        })?
     } else {
         None
     };
