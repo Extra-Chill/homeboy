@@ -21,6 +21,15 @@ static SHARED_COMMITTED_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
 static SHARED_CONTROLLER_RUNTIME_FIXTURE: OnceLock<TempDir> = OnceLock::new();
 static SHARED_HOMEBOY_CONTROLLER_RUNTIME_FIXTURE: OnceLock<TempDir> = OnceLock::new();
 static SHARED_CONTROLLER_RUNTIME_STORE: OnceLock<TempDir> = OnceLock::new();
+/// Destinations whose controller fixture bytes this process has already
+/// published. Keeps the copy to at most once per process per fixture path —
+/// including a path inherited from a parent test process — and serializes
+/// concurrent materialization so two threads never copy the same binary twice.
+static PUBLISHED_CONTROLLER_FIXTURES: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+/// File name every controller-runtime fixture is published under. Reading it
+/// back off the destination path is what lets `ensure_test_controller_fixture`
+/// tell *our* fixture apart from a binary a test chose for itself.
+const CONTROLLER_FIXTURE_FILE_NAME: &str = "homeboy-controller-fixture";
 static EXEC_CAPABLE_TEMP_BASE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 static SHORT_EXEC_CAPABLE_TEMP_BASE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 /// Runs the leaked-tempdir sweep exactly once per test process.
@@ -105,13 +114,7 @@ impl HermeticTestContext {
     }
 
     pub fn binary_path(&self, binary: TestBinary) -> PathBuf {
-        match binary {
-            TestBinary::CurrentTest => std::env::current_exe().expect("current test executable"),
-            TestBinary::HomeboyFixture => PathBuf::from(
-                std::env::var_os("CARGO_BIN_EXE_homeboy")
-                    .expect("CARGO_BIN_EXE_homeboy fixture binary"),
-            ),
-        }
+        test_binary_path(binary)
     }
 
     /// Build a command whose Homeboy state is wholly owned by this context.
@@ -151,9 +154,16 @@ impl HermeticTestContext {
                 crate::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV,
                 TEST_DAEMON_BINARY_SHA,
             )
+            // Destination and source travel together. The child materializes
+            // the fixture itself the first time it reads the contract, so this
+            // parent never copies a binary the child may not even need.
             .env(
                 crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV,
-                test_controller_fixture(binary),
+                test_controller_fixture_path(binary),
+            )
+            .env(
+                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_SOURCE_ENV,
+                test_binary_path(binary),
             )
             .env(
                 crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
@@ -422,6 +432,7 @@ pub struct HomeGuard {
     prior_no_update_check: Option<String>,
     prior_daemon_binary_sha: Option<String>,
     prior_controller_runtime_executable: Option<String>,
+    prior_controller_runtime_source: Option<String>,
     prior_controller_runtime_identity: Option<String>,
     context: HermeticTestContext,
     _guard: MutexGuard<'static, ()>,
@@ -512,6 +523,8 @@ impl HomeGuard {
             std::env::var(crate::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV).ok();
         let prior_controller_runtime_executable =
             std::env::var(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV).ok();
+        let prior_controller_runtime_source =
+            std::env::var(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_SOURCE_ENV).ok();
         let prior_controller_runtime_identity =
             std::env::var(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV).ok();
         // The isolated HOME hosts `~/.config/homeboy/extensions/**/*.sh`
@@ -553,9 +566,17 @@ impl HomeGuard {
             crate::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV,
             TEST_DAEMON_BINARY_SHA,
         );
+        // Name the fixture and its source, but do not copy anything: the copy
+        // is a multi-hundred-megabyte binary and almost no test on this path
+        // ever reads the contract. `ensure_test_controller_fixture` produces
+        // the bytes at the few call sites that do.
         std::env::set_var(
             crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV,
-            test_controller_fixture(TestBinary::CurrentTest),
+            test_controller_fixture_path(TestBinary::CurrentTest),
+        );
+        std::env::set_var(
+            crate::controller_runtime::TEST_CONTROLLER_RUNTIME_SOURCE_ENV,
+            test_binary_path(TestBinary::CurrentTest),
         );
         std::env::set_var(
             crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
@@ -573,6 +594,7 @@ impl HomeGuard {
             prior_no_update_check,
             prior_daemon_binary_sha,
             prior_controller_runtime_executable,
+            prior_controller_runtime_source,
             prior_controller_runtime_identity,
             context,
             _guard: guard,
@@ -949,6 +971,15 @@ impl Drop for HomeGuard {
                 crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV,
             ),
         }
+        match &self.prior_controller_runtime_source {
+            Some(value) => std::env::set_var(
+                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_SOURCE_ENV,
+                value,
+            ),
+            None => {
+                std::env::remove_var(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_SOURCE_ENV)
+            }
+        }
         match &self.prior_controller_runtime_identity {
             Some(value) => std::env::set_var(
                 crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
@@ -962,33 +993,126 @@ impl Drop for HomeGuard {
     }
 }
 
-fn test_controller_fixture(binary: TestBinary) -> PathBuf {
+/// The executable a hermetic test command runs, and the source a controller
+/// fixture for that selection is copied from.
+fn test_binary_path(binary: TestBinary) -> PathBuf {
+    match binary {
+        TestBinary::CurrentTest => std::env::current_exe().expect("current test executable"),
+        TestBinary::HomeboyFixture => PathBuf::from(
+            std::env::var_os("CARGO_BIN_EXE_homeboy")
+                .expect("CARGO_BIN_EXE_homeboy fixture binary"),
+        ),
+    }
+}
+
+/// Where this process publishes its controller-runtime fixture for `binary`.
+///
+/// Allocating the path is cheap — one tempdir per process, shared by every
+/// isolated home. The expensive part, copying the source executable, is
+/// deferred to [`ensure_test_controller_fixture`].
+fn test_controller_fixture_path(binary: TestBinary) -> PathBuf {
     let fixture = match binary {
         TestBinary::CurrentTest => &SHARED_CONTROLLER_RUNTIME_FIXTURE,
         TestBinary::HomeboyFixture => &SHARED_HOMEBOY_CONTROLLER_RUNTIME_FIXTURE,
     };
     fixture
-        .get_or_init(|| {
-            let directory = exec_capable_tempdir();
-            let path = directory.path().join("homeboy-controller-fixture");
-            fs::copy(
-                match binary {
-                    TestBinary::CurrentTest => {
-                        std::env::current_exe().expect("current test executable")
-                    }
-                    TestBinary::HomeboyFixture => PathBuf::from(
-                        std::env::var_os("CARGO_BIN_EXE_homeboy")
-                            .expect("CARGO_BIN_EXE_homeboy fixture binary"),
-                    ),
-                },
-                &path,
-            )
-            .expect("copy controller fixture");
-            make_test_controller_fixture_read_only(&path);
-            directory
-        })
+        .get_or_init(exec_capable_tempdir)
         .path()
-        .join("homeboy-controller-fixture")
+        .join(CONTROLLER_FIXTURE_FILE_NAME)
+}
+
+/// Materialize the controller-runtime fixture named by `path`, once.
+///
+/// The fixture is a byte-identical copy of the running test binary, which is
+/// ~700 MB unoptimized (see the `profile.dev.package.sha2` note in the
+/// workspace `Cargo.toml`). It used to be copied eagerly from
+/// [`HomeGuard::new`], i.e. once per *process*. Under `cargo test` that is once
+/// per test binary — already paid by every binary whose tests never touch the
+/// contract. Under nextest, which runs one process per test, it is once per
+/// **test**: all ~2,600 `with_isolated_home` call sites paying for the handful
+/// that read `TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV`. Those readers call this
+/// instead, so the copy happens only where the bytes are actually used.
+///
+/// Deliberately defensive, because it can be handed any path a test put in the
+/// contract. It writes only when *all* of the following hold:
+/// - nothing exists at `path` yet,
+/// - `path` carries the fixture's own file name,
+/// - `path` is exactly what the contract currently names, and
+/// - a source executable is recorded alongside it.
+///
+/// A test that points the contract at a binary of its own therefore keeps
+/// precisely the bytes it chose.
+pub(crate) fn ensure_test_controller_fixture(path: &Path) {
+    // The branch every call after the first takes, in this process or in the
+    // parent that handed the path down.
+    if path.exists() {
+        return;
+    }
+    if path.file_name().and_then(|name| name.to_str()) != Some(CONTROLLER_FIXTURE_FILE_NAME) {
+        return;
+    }
+    let Some(destination) =
+        std::env::var_os(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV)
+    else {
+        return;
+    };
+    if Path::new(&destination) != path {
+        return;
+    }
+    let Some(source) =
+        std::env::var_os(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_SOURCE_ENV)
+    else {
+        return;
+    };
+    let source = PathBuf::from(source);
+
+    let mut published = PUBLISHED_CONTROLLER_FIXTURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Re-check under the lock. A sibling thread may have published while we
+    // waited, and paying the copy twice is the one thing this exists to avoid.
+    if published.contains(path) || path.exists() {
+        return;
+    }
+    publish_test_controller_fixture(&source, path);
+    published.insert(path.to_path_buf());
+}
+
+/// Copy `source` into place at `destination` so that `destination` never
+/// appears in a partial state.
+///
+/// The copy lands on a per-process staging name and is linked into place, which
+/// fails cleanly if someone else got there first. That matters because one
+/// destination can now be shared by more than one process: a child test process
+/// materializes into the tempdir its parent named, and a plain `fs::copy`
+/// straight to the destination would let one observe the other's half-written
+/// file. The two racers copy the same source bytes, so either winner is correct.
+///
+/// The link is deliberately *staging to destination* and never *source to
+/// destination*: the fixture is sealed read-only, and a hard link to the source
+/// would seal the real test binary along with it.
+fn publish_test_controller_fixture(source: &Path, destination: &Path) {
+    let parent = destination
+        .parent()
+        .expect("controller fixture destination has a parent directory");
+    fs::create_dir_all(parent).expect("create controller fixture directory");
+    let staging = parent.join(format!(
+        "{CONTROLLER_FIXTURE_FILE_NAME}.staging.{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&staging);
+    fs::copy(source, &staging).expect("copy controller fixture");
+    make_test_controller_fixture_read_only(&staging);
+    match fs::hard_link(&staging, destination) {
+        Ok(()) => {}
+        // Another process published the same source bytes first.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => panic!(
+            "publish controller fixture at {}: {error}",
+            destination.display()
+        ),
+    }
+    let _ = fs::remove_file(&staging);
 }
 
 /// Return the process-wide immutable controller-runtime pin store for tests
@@ -1018,11 +1142,16 @@ fn make_test_controller_fixture_read_only(path: &Path) {
 }
 
 /// Source executable selected by the hermetic controller-runtime test contract.
+///
+/// Materializes the fixture, so callers may execute, hash, or stat the returned
+/// path exactly as they could when the copy was made eagerly.
 pub fn controller_runtime_test_executable() -> PathBuf {
-    PathBuf::from(
+    let executable = PathBuf::from(
         std::env::var_os(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV)
             .expect("controller runtime test executable"),
-    )
+    );
+    ensure_test_controller_fixture(&executable);
+    executable
 }
 
 pub fn with_isolated_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {
