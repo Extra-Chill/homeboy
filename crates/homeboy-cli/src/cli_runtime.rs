@@ -1827,11 +1827,13 @@ fn try_augment_clap_error(
     let unrecognized = extract_unrecognized_from_error(e)?;
     let parent_command = extract_parent_command_from_error(e)?;
 
-    let mut hints = entity_suggest::find_entity_match(&unrecognized)
-        .map(|entity_match| {
-            entity_suggest::generate_entity_hints(&entity_match, &parent_command, &unrecognized)
-        })
-        .unwrap_or_default();
+    let mut hints = command_domain_hints(&unrecognized, &parent_command).unwrap_or_else(|| {
+        entity_suggest::find_entity_match(&unrecognized)
+            .map(|entity_match| {
+                entity_suggest::generate_entity_hints(&entity_match, &parent_command, &unrecognized)
+            })
+            .unwrap_or_default()
+    });
 
     append_extension_health_hints(&mut hints, extension_health);
 
@@ -1854,6 +1856,27 @@ fn try_augment_clap_error(
     }
 
     Some(output)
+}
+
+/// Keep well-known control-plane terms out of persisted entity matching.
+///
+/// Entity IDs are user-defined, so a component can be a closer textual match
+/// than the command domain the operator intended. These hints describe the
+/// generic runner surface and deliberately require discovery before selecting
+/// a runner ID.
+fn command_domain_hints(unrecognized: &str, parent_command: &str) -> Option<Vec<String>> {
+    if !parent_command.is_empty()
+        || !(unrecognized.eq_ignore_ascii_case("lab")
+            || homeboy::core::engine::text::levenshtein(&unrecognized.to_lowercase(), "runner")
+                <= 2)
+    {
+        return None;
+    }
+
+    Some(vec![format!(
+        "'{}' refers to the runner control plane. Discover runners with `homeboy runner list`, then inspect one with `homeboy runner status <runner-id>`",
+        unrecognized
+    )])
 }
 
 fn semantic_argument_migration_diagnostic(e: &clap::Error, argv: &[String]) -> Option<String> {
@@ -2357,6 +2380,87 @@ mod tests {
         assert!(output.contains("extension-provided commands may be unavailable"));
         assert!(output.contains("broken extension link(s): sample-runtime"));
         assert!(output.contains("homeboy extension list"));
+    }
+
+    #[test]
+    fn top_level_lab_prefers_generic_runner_guidance_over_component_matching() {
+        crate::test_support::with_isolated_home(|home| {
+            entity_suggest::reset_entity_suggestion_cache_for_test();
+            homeboy::core::component::write_standalone_registration(
+                &homeboy::core::component::Component {
+                    id: "chat".to_string(),
+                    local_path: home.path().display().to_string(),
+                    ..Default::default()
+                },
+            )
+            .expect("register component matching lab typo distance");
+
+            let err = build_augmented_command(&[], &ExtensionCliHealth::default())
+                .try_get_matches_from(["homeboy", "lab"])
+                .expect_err("lab is not a top-level command");
+            let output = try_augment_clap_error(
+                &err,
+                &argv(&["homeboy", "lab"]),
+                &ExtensionCliHealth::default(),
+            )
+            .expect("Lab should have a control-plane hint");
+
+            assert!(output.contains("homeboy runner list"));
+            assert!(output.contains("homeboy runner status <runner-id>"));
+            assert!(!output.contains("component 'chat'"));
+        });
+    }
+
+    #[test]
+    fn top_level_runner_misspellings_prefer_runner_guidance() {
+        for command in ["runer", "runnr"] {
+            let err = build_augmented_command(&[], &ExtensionCliHealth::default())
+                .try_get_matches_from(["homeboy", command])
+                .expect_err("misspelled runner command should not parse");
+            let output = try_augment_clap_error(
+                &err,
+                &argv(&["homeboy", command]),
+                &ExtensionCliHealth::default(),
+            )
+            .expect("runner typo should have a control-plane hint");
+
+            assert!(
+                output.contains("homeboy runner list"),
+                "{command}: {output}"
+            );
+            assert!(
+                output.contains("homeboy runner status <runner-id>"),
+                "{command}: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_top_level_tokens_still_suggest_matching_components() {
+        crate::test_support::with_isolated_home(|home| {
+            entity_suggest::reset_entity_suggestion_cache_for_test();
+            homeboy::core::component::write_standalone_registration(
+                &homeboy::core::component::Component {
+                    id: "catalog".to_string(),
+                    local_path: home.path().display().to_string(),
+                    ..Default::default()
+                },
+            )
+            .expect("register component");
+
+            let err = build_augmented_command(&[], &ExtensionCliHealth::default())
+                .try_get_matches_from(["homeboy", "catlog"])
+                .expect_err("component typo is not a top-level command");
+            let output = try_augment_clap_error(
+                &err,
+                &argv(&["homeboy", "catlog"]),
+                &ExtensionCliHealth::default(),
+            )
+            .expect("component typo should have an entity hint");
+
+            assert!(output.contains("component 'catalog'"));
+            assert!(output.contains("homeboy component catalog"));
+        });
     }
 
     #[cfg(unix)]
