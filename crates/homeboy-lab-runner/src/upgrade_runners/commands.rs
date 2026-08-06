@@ -17,7 +17,6 @@ pub fn runner_upgrade_command(
     let mut command = vec![
         homeboy_path.to_string(),
         "upgrade".to_string(),
-        "--no-restart".to_string(),
         "--skip-extensions".to_string(),
         "--skip-runners".to_string(),
     ];
@@ -44,6 +43,14 @@ pub fn reconnect_runner_daemon(runner_id: &str) -> Result<(String, Option<String
     let (report, exit_code) = runner::connect(runner_id)?;
     if exit_code == 0 && report.connected {
         let homeboy_version = report.homeboy_version;
+        crate::homeboy_refresh::probe_reconnected_admission_readiness(
+            runner_id,
+            report
+                .homeboy_build_identity
+                .as_deref()
+                .or(homeboy_version.as_deref())
+                .unwrap_or("the upgraded runner"),
+        )?;
         return Ok((
             format!(
                 "connected runner daemon restarted after upgrade; session reports {}",
@@ -235,7 +242,7 @@ pub fn runner_upgrade_recovery_commands(
     // the daemon. Only an explicit selected executable is safe to invoke remotely.
     if std::path::Path::new(selected_homeboy_path).is_absolute() {
         commands.push(format!(
-            "homeboy runner exec --ssh {} -- {} upgrade --no-restart",
+            "homeboy runner exec --ssh {} -- {} upgrade",
             shell_arg(runner_id),
             shell_arg(selected_homeboy_path)
         ));

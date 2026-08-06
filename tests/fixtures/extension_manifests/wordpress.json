@@ -3,7 +3,7 @@
   "version": "3.6.1",
   "provides": {
     "file_extensions": ["php", "css", "ts", "tsx", "js", "jsx", "json"],
-    "capabilities": ["fingerprint", "refactor", "crossref", "validate"]
+    "capabilities": ["fingerprint", "refactor", "validate"]
   },
   "structured_sidecars": {
     "lint.findings": true,
@@ -24,7 +24,6 @@
   "scripts": {
     "fingerprint": "scripts/fingerprint.sh",
     "refactor": "scripts/refactor.py",
-    "crossref": "scripts/test/crossref.php",
     "validate": "scripts/validation/validate-syntax.sh",
     "format": "scripts/format.sh"
   },

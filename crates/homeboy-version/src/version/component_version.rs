@@ -10,8 +10,8 @@
 //! silently.
 //!
 //! Everything that reads a declared version target now goes through
-//! [`require_targets`] / [`declared_targets`] (the config read) and
-//! [`read_target`] (the file read). Where the callers genuinely differ they
+//! `require_targets` / [`declared_targets`] (the config read) and
+//! `read_target` (the file read). Where the callers genuinely differ they
 //! differ *after* the read, on the [`TargetRead`] they get back:
 //!
 //! - `read` and the bump path treat a non-matching primary target as a hard
@@ -113,7 +113,7 @@ pub fn declared_targets(component: &Component) -> Result<Option<&[VersionTarget]
 /// version: validates `local_path` before any file operation, then requires a
 /// non-empty `versionTargets`. The returned slice is guaranteed non-empty, so
 /// callers may index `[0]` for the primary target.
-pub fn require_targets(component: &Component) -> Result<&[VersionTarget]> {
+pub(crate) fn require_targets(component: &Component) -> Result<&[VersionTarget]> {
     // Validate local_path is absolute and exists before any file operations.
     component::validate_local_path(component)?;
 
@@ -126,7 +126,7 @@ pub fn require_targets(component: &Component) -> Result<&[VersionTarget]> {
 /// Resolves the pattern (explicit, else the extension default) and the file
 /// path, reads the file, and parses every match. An unusable regex is an
 /// error; zero matches is not — see [`TargetRead::is_empty`].
-pub fn read_target(local_path: &str, target: &VersionTarget) -> Result<TargetRead> {
+pub(crate) fn read_target(local_path: &str, target: &VersionTarget) -> Result<TargetRead> {
     let pattern = resolve_target_pattern(target)?;
     let full_path = resolve_version_file_path(local_path, &target.file);
     let content = local_files::local().read(Path::new(&full_path))?;

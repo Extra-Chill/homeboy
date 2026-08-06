@@ -89,6 +89,54 @@ homeboy release <component_id>
 
 `homeboy release changelog show` prints Homeboy's embedded changelog, or a component changelog when a component ID is provided. The release pipeline owns changelog generation from conventional commits; feature PRs should describe changes in commit messages rather than editing `CHANGELOG.md` manually.
 
+### `contains` — is my fix released yet?
+
+`homeboy release contains` answers which release *first* contained a commit, and
+whether the build in front of you is running it. Before it existed the answer was
+hand-rolled `git merge-base --is-ancestor <sha> <tag>`, once per candidate tag.
+
+```sh
+homeboy release contains 6043c013d
+homeboy release contains --issue 11702
+```
+
+`--issue <n>` resolves through the merged pull request that closed the issue, so
+you do not have to find the sha first. That is the only part of the command that
+touches the network; everything else is pure git against already-fetched tags.
+
+The `status` field carries the verdict, and the four values map to different
+actions:
+
+| `status` | meaning | what to do |
+| --- | --- | --- |
+| `not_yet_released` | merged, but no release tag contains it | cut a release |
+| `released_not_installed` | a release has it, this build predates that release | `homeboy upgrade` |
+| `released_and_installed` | this build provably contains it | nothing |
+| `released_install_unknown` | released, but the installed tag is not in this checkout | `git fetch --tags`, then re-ask |
+
+"First released in" is the **earliest** release containing the commit, computed as
+the minimum by semantic version over `git tag --contains`. Tags are not ordered by
+ancestry — a patch cut from an older line can contain a commit a numerically later
+tag does not — so neither the first line of `git tag --contains` nor
+`git describe --contains` answers this question.
+
+Every answered query exits 0. "Not yet released" is a legitimate answer, not a
+command failure.
+
+### `gap` — how far behind is this build?
+
+```sh
+homeboy release gap
+```
+
+The inverse query: the installed version, the newest release tag in the checkout,
+how many releases and commits separate them, and whether that counts as behind at
+all. A source build on an unreleased branch reports `ahead`, not `behind`.
+
+Both commands accept `--component`, `--path`, and `--installed <version>`;
+`--installed` overrides the running binary's version so you can ask about a
+version you are not currently running.
+
 ### Regenerate a package for an existing tag
 
 ```sh

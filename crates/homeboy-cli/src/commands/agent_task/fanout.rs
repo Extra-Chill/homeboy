@@ -1069,6 +1069,7 @@ fn batch_artifacts(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
 
 fn run_batch_cook_fanout(args: AgentTaskFanoutRunPlanArgs) -> CmdResult<Value> {
     let mut plan = load_batch_cook_fanout_plan(&args.input)?;
+    plan.apply_ai_tool_override(args.ai_tool.as_deref());
     if let Some(record_run_id) = args.record_run_id {
         plan.rekey(record_run_id);
     }
@@ -1082,6 +1083,7 @@ pub(crate) fn run_batch_cook_fanout_with_attempt_dispatcher(
     attempt_dispatcher: &CookAttemptDispatcherFactory,
 ) -> CmdResult<Value> {
     let mut plan = load_batch_cook_fanout_plan(&args.input)?;
+    plan.apply_ai_tool_override(args.ai_tool.as_deref());
     if let Some(record_run_id) = args.record_run_id {
         plan.rekey(record_run_id);
     }
@@ -1622,6 +1624,13 @@ impl BatchCookFanoutPlan {
         self.fanout_id = fanout_id;
     }
 
+    fn apply_ai_tool_override(&mut self, ai_tool: Option<&str>) {
+        let Some(ai_tool) = ai_tool else { return };
+        for cook in &mut self.cooks {
+            cook.ai_tool = ai_tool.to_string();
+        }
+    }
+
     fn dependency_nodes(&self) -> Vec<AgentTaskDependencyNode> {
         self.cooks
             .iter()
@@ -2094,7 +2103,7 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
             title: Some(format!("Fix {}", issue.key)),
             commit_message: Some(format!("fix: address {}", issue.key)),
             protected_branches: super::review::default_protected_branches(),
-            ai_tool: default_ai_tool(),
+            ai_tool: args.ai_tool.clone().unwrap_or_else(default_ai_tool),
             ai_used_for: default_ai_used_for(),
         });
     }
@@ -2609,18 +2618,7 @@ fn default_gate_no_progress_timeout_seconds() -> u64 {
 }
 
 fn default_ai_tool() -> String {
-    AgentTaskProviderCatalog::discover()
-        .providers()
-        .iter()
-        .find_map(|provider| provider.cli.default_ai_disclosure.clone())
-        .or_else(|| {
-            AgentTaskProviderCatalog::discover()
-                .providers()
-                .iter()
-                .flat_map(|provider| provider.cli.profiles.iter())
-                .find_map(|profile| profile.ai_disclosure.clone())
-        })
-        .unwrap_or_else(|| GENERIC_AI_DISCLOSURE.to_string())
+    GENERIC_AI_DISCLOSURE.to_string()
 }
 
 /// Generic fallback disclosure used when no provider supplies one. Also the
@@ -3401,6 +3399,7 @@ fi
             provider_profile: None,
             secret_env: vec!["AI_PROVIDER_OPENAI_CODEX_TOKEN".to_string()],
             provider_config: Some(r#"{"runtime":"opencode"}"#.to_string()),
+            ai_tool: None,
             gates: super::super::args::VerifyGateArgs {
                 accept_inherited_failures: false,
                 gate_package_artifacts: Vec::new(),
@@ -3591,10 +3590,12 @@ fi
             &args(),
         )
         .expect("deserialize plan");
-        assert_eq!(
-            round_trip.cooks, plan.cooks,
-            "plan persistence preserves exact gate command bytes"
-        );
+        assert_eq!(round_trip.cooks.len(), plan.cooks.len());
+        for (reloaded, original) in round_trip.cooks.iter().zip(&plan.cooks) {
+            assert_eq!(reloaded.verification_profile, original.verification_profile);
+            assert_eq!(reloaded.verify, original.verify);
+            assert_eq!(reloaded.private_verify, original.private_verify);
+        }
         assert_eq!(
             round_trip.cooks[2]
                 .to_cook_invocation(&round_trip)
@@ -3635,6 +3636,71 @@ fi
         let plan = build_cook_batch_plan(&args).expect("plan before worktree creation");
         let error = validate_batch_cook_gates(&plan).expect_err("every child needs a gate");
         assert_eq!(error.details["problem"], "gate_missing: every cook-batch child requires verify or private_verify before worktree creation");
+    }
+
+    #[test]
+    fn fanout_ai_tool_override_is_typed_persisted_and_applied_to_every_child() {
+        with_materialized_cook_batch_worktrees(|| {
+            let mut cook_args = cook_batch_args();
+            cook_args.ai_tool = Some("OpenAI GPT-5.6 Sol via OpenCode".to_string());
+            let plan =
+                build_cook_batch_plan(&cook_args).expect("build plan with disclosure override");
+            assert!(plan
+                .cooks
+                .iter()
+                .all(|cook| cook.ai_tool == "OpenAI GPT-5.6 Sol via OpenCode"));
+
+            let serialized = serde_json::to_value(&plan).expect("serialize plan");
+            let mut loaded =
+                BatchCookFanoutPlan::from_value(serialized, &args()).expect("load persisted plan");
+            loaded.apply_ai_tool_override(Some("OpenAI GPT-5.6 Terra via OpenCode"));
+            persist_batch_cook_recipes(&loaded).expect("persist child recipes");
+            for cook in &loaded.cooks {
+                let invocation = cook.to_cook_invocation(&loaded).expect("cook invocation");
+                assert_eq!(
+                    invocation.options.ai_tool,
+                    "OpenAI GPT-5.6 Terra via OpenCode"
+                );
+                let recipe = agent_task_service::load_recipe(&cook.run_id())
+                    .expect("load persisted child recipe");
+                assert_eq!(
+                    recipe.finalization["ai_tool"],
+                    "OpenAI GPT-5.6 Terra via OpenCode"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn fanout_plan_keeps_child_disclosures_without_an_override() {
+        let plan = BatchCookFanoutPlan::from_value(
+            json!({
+                "schema": AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA,
+                "fanout_id": "mixed-disclosures",
+                "cooks": [
+                    {"cook_id":"sol","prompt":"sol","cwd":env!("CARGO_MANIFEST_DIR"),"to_worktree":"homeboy@sol","verify":["true"],"ai_tool":"OpenAI GPT-5.6 Sol via OpenCode"},
+                    {"cook_id":"terra","prompt":"terra","cwd":env!("CARGO_MANIFEST_DIR"),"to_worktree":"homeboy@terra","verify":["true"],"ai_tool":"OpenAI GPT-5.6 Terra via OpenCode"}
+                ]
+            }),
+            &args(),
+        )
+        .expect("load mixed-provider plan");
+        assert_eq!(
+            plan.cooks[0]
+                .to_cook_invocation(&plan)
+                .expect("sol invocation")
+                .options
+                .ai_tool,
+            "OpenAI GPT-5.6 Sol via OpenCode"
+        );
+        assert_eq!(
+            plan.cooks[1]
+                .to_cook_invocation(&plan)
+                .expect("terra invocation")
+                .options
+                .ai_tool,
+            "OpenAI GPT-5.6 Terra via OpenCode"
+        );
     }
 
     #[test]
@@ -4192,6 +4258,8 @@ fi
             "opencode-codex-gpt55",
             "--verify",
             "cargo test --lib",
+            "--ai-tool",
+            "OpenAI GPT-5.6 Sol via OpenCode",
             "https://github.com/Extra-Chill/homeboy/issues/6453",
             "https://github.com/Extra-Chill/homeboy/issues/6454",
         ])
@@ -4208,10 +4276,42 @@ fi
         };
         assert_eq!(args.issues.len(), 2);
         assert_eq!(args.gates.verify, vec!["cargo test --lib"]);
+        assert_eq!(
+            args.ai_tool.as_deref(),
+            Some("OpenAI GPT-5.6 Sol via OpenCode")
+        );
         assert_eq!(args.from, "origin/main");
         assert_eq!(
             args.provider_profile,
             Some("opencode-codex-gpt55".to_string())
+        );
+    }
+
+    #[test]
+    fn run_plan_cli_parses_ai_tool_override() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "run-plan",
+            "--input",
+            "@plan.json",
+            "--ai-tool",
+            "OpenAI GPT-5.6 Sol via OpenCode",
+        ])
+        .expect("run-plan parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let AgentTaskCommand::Fanout(fanout) = agent_task.command else {
+            panic!("fanout command");
+        };
+        let AgentTaskFanoutCommand::RunPlan(args) = fanout.command else {
+            panic!("run-plan command");
+        };
+        assert_eq!(
+            args.ai_tool.as_deref(),
+            Some("OpenAI GPT-5.6 Sol via OpenCode")
         );
     }
 

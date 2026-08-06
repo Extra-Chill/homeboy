@@ -48,7 +48,7 @@ pub fn report_fuzz_result_envelope(
 }
 
 /// Persist a fuzz result envelope produced by `homeboy fuzz report`.
-pub fn persist_fuzz_result_envelope(
+pub(crate) fn persist_fuzz_result_envelope(
     run_id: Option<&str>,
     envelope: &FuzzResultEnvelope,
     envelope_path: Option<&Path>,
@@ -57,7 +57,7 @@ pub fn persist_fuzz_result_envelope(
 }
 
 /// Persist a fuzz result envelope produced by `homeboy fuzz run`.
-pub fn persist_fuzz_run_result_envelope(
+pub(crate) fn persist_fuzz_run_result_envelope(
     run_id: Option<&str>,
     envelope: &FuzzResultEnvelope,
 ) -> homeboy_core::Result<Option<ArtifactRecord>> {
@@ -137,7 +137,9 @@ pub fn fuzz_result_envelope_evidence_ref(artifact: &ArtifactRecord) -> EvidenceR
 }
 
 /// Encode a fuzz result envelope to pretty JSON.
-pub fn fuzz_result_envelope_json(envelope: &FuzzResultEnvelope) -> homeboy_core::Result<String> {
+pub(crate) fn fuzz_result_envelope_json(
+    envelope: &FuzzResultEnvelope,
+) -> homeboy_core::Result<String> {
     serde_json::to_string_pretty(envelope).map_err(|error| {
         homeboy_core::Error::internal_unexpected(format!(
             "failed to encode fuzz result envelope: {error}"

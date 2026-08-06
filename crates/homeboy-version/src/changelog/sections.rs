@@ -2,11 +2,13 @@ mod normalize_heading_label;
 mod types;
 mod unreleased;
 
-pub use normalize_heading_label::{extract_last_release_snapshot, get_latest_finalized_version};
+pub(crate) use normalize_heading_label::extract_last_release_snapshot;
+pub use normalize_heading_label::get_latest_finalized_version;
 use normalize_heading_label::{is_matching_next_section_heading, validate_section_content};
 use std::collections::HashSet;
 use types::SectionContentStatus;
-pub use unreleased::{count_unreleased_entries, get_unreleased_entries};
+pub use unreleased::count_unreleased_entries;
+pub(crate) use unreleased::get_unreleased_entries;
 
 use chrono::Local;
 
@@ -15,7 +17,7 @@ use homeboy_core::error::{Error, Result};
 
 use super::settings::*;
 
-pub fn finalize_next_section(
+pub(crate) fn finalize_next_section(
     changelog_content: &str,
     next_section_aliases: &[String],
     new_version: &str,
@@ -128,7 +130,7 @@ pub fn finalize_next_section(
 /// memory and written directly as `## [version] - date`.
 ///
 /// `entries_by_type` maps changelog type names (e.g. "added", "fixed") to lists of messages.
-pub fn finalize_with_generated_entries(
+pub(crate) fn finalize_with_generated_entries(
     changelog_content: &str,
     aliases: &[String],
     entries_by_type: &std::collections::HashMap<&str, Vec<String>>,

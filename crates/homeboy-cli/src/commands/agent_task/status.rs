@@ -3121,6 +3121,27 @@ fn bounded_value(value: &Value) -> Value {
     }
 }
 
+/// Terminality of an untyped durable record, delegating to the single
+/// definition in `AgentTaskRunState::is_terminal`.
+///
+/// `status` reads records as untyped JSON, so the state has to be parsed back
+/// into the lifecycle enum instead of compared against an inline string list.
+/// An inline list is exactly how `partial_failure`, `partial_recoverable`, and
+/// `candidate_recoverable` runs came to be reported as `liveness.status:
+/// "active"` forever — the list named only `succeeded`/`failed`/`cancelled`, so
+/// an orchestrator polling liveness never saw those runs finish.
+///
+/// An absent or unparseable state is non-terminal: a record this build does not
+/// understand keeps its prior reading rather than being asserted as finished.
+fn record_state_is_terminal(record: &Value) -> bool {
+    record
+        .get("state")
+        .and_then(|state| {
+            serde_json::from_value::<agent_task_lifecycle::AgentTaskRunState>(state.clone()).ok()
+        })
+        .is_some_and(agent_task_lifecycle::AgentTaskRunState::is_terminal)
+}
+
 fn liveness_summary(record: &Value, run_id: &str, candidate_state: CandidateState) -> Value {
     let metadata = record.get("metadata").unwrap_or(&Value::Null);
     let provider_handle_count = record
@@ -3135,10 +3156,7 @@ fn liveness_summary(record: &Value, run_id: &str, candidate_state: CandidateStat
         .get("runner_job_id")
         .and_then(Value::as_str)
         .filter(|job_id| !job_id.trim().is_empty());
-    let terminal = record
-        .get("state")
-        .and_then(Value::as_str)
-        .is_some_and(|state| matches!(state, "succeeded" | "failed" | "cancelled"));
+    let terminal = record_state_is_terminal(record);
     let waiting_for_capacity = metadata
         .get("runner_queue")
         .and_then(|queue| queue.get("state"))
@@ -4934,6 +4952,51 @@ mod tests {
         assert_eq!(boundary["status"], "absent");
         assert_eq!(boundary["active_execution_count"], 0);
         assert!(boundary["active_executions"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn every_terminal_run_state_reports_terminal_liveness() {
+        // `liveness` used to compare `state` against an inline
+        // `"succeeded" | "failed" | "cancelled"` list, so a run that finished in
+        // `partial_failure`, `partial_recoverable`, or `candidate_recoverable`
+        // reported `status: "active"` forever and an orchestrator polling
+        // liveness never saw it finish. Terminality now has exactly one
+        // definition — `AgentTaskRunState::is_terminal` — and this pins every
+        // member of that set through the same untyped read path.
+        for state in [
+            "succeeded",
+            "candidate_recoverable",
+            "partial_recoverable",
+            "partial_failure",
+            "failed",
+            "cancelled",
+        ] {
+            let summary = liveness_summary(
+                &json!({ "run_id": "agent-task-terminal", "state": state, "tasks": [] }),
+                "agent-task-terminal",
+                CandidateState::Unknown,
+            );
+            assert_eq!(summary["status"], "terminal", "{state}");
+        }
+
+        for state in ["queued", "running"] {
+            let summary = liveness_summary(
+                &json!({ "run_id": "agent-task-active", "state": state, "tasks": [] }),
+                "agent-task-active",
+                CandidateState::Unknown,
+            );
+            assert_eq!(summary["status"], "active", "{state}");
+        }
+
+        // A state this build cannot parse keeps the prior non-terminal reading
+        // rather than being asserted as finished.
+        let unknown = liveness_summary(
+            &json!({ "run_id": "agent-task-unknown", "state": "not_a_state", "tasks": [] }),
+            "agent-task-unknown",
+            CandidateState::Unknown,
+        );
+        assert_eq!(unknown["status"], "active");
+        assert!(!record_state_is_terminal(&json!({ "tasks": [] })));
     }
 
     #[test]

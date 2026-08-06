@@ -9,6 +9,7 @@ use homeboy::core::source_snapshot::SourceSnapshot;
 use homeboy::core::stream_capture::StreamCaptureMetadata;
 use homeboy::core::Error;
 use homeboy::runner::runners::{self as runner, RunnerExecOutput, RunnerKind};
+use homeboy_engine_primitives::content_hash;
 
 use super::super::CmdResult;
 
@@ -467,13 +468,37 @@ pub(super) fn prepare_runner_exec_command(
         (true, true) => Ok(vec![
             "bash".to_string(),
             "-c".to_string(),
-            format!(
-                "printf '%s' {} | bash -s",
-                shell::quote_arg(script.expect("script is present"))
-            ),
+            runner_exec_script_wrapper(script.expect("script is present")),
         ]),
         (false, false) => Ok(command),
     }
+}
+
+/// Build the runner-side script lifecycle wrapper. `HOMEBOY_RUNNER_JOB_ID` is
+/// injected after daemon admission, so the path is stable for a durable job
+/// without trusting a controller-provided temporary path.
+fn runner_exec_script_wrapper(script: &str) -> String {
+    let digest = content_hash::sha256_hex(script.as_bytes());
+    format!(
+        r#"set -e
+job_id="${{HOMEBOY_RUNNER_JOB_ID:-local-$$}}"
+case "$job_id" in
+  ''|*[!A-Za-z0-9._-]*) job_id="local-$$" ;;
+esac
+script_root="${{XDG_RUNTIME_DIR:-/tmp}}/homeboy-runner-exec/$job_id"
+(umask 077; mkdir -p "$script_root")
+chmod 700 "$script_root"
+script_path="$script_root/script-{digest}.sh"
+cleanup() {{ rm -f "$script_path"; rmdir "$script_root" 2>/dev/null || true; }}
+trap cleanup EXIT
+umask 077
+printf '%s' {} > "$script_path"
+chmod 500 "$script_path"
+export HOMEBOY_RUNNER_EXEC_SCRIPT="$script_path"
+export HOMEBOY_RUNNER_EXEC_SCRIPT_SHA256="sha256:{digest}"
+bash "$script_path""#,
+        shell::quote_arg(script),
+    )
 }
 
 /// Validate only CLI-provided shape before a script source is opened. In

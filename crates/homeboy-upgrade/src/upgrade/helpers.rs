@@ -11,6 +11,7 @@ use super::execution::{
     execute_upgrade, installed_target_build_identity, prepare_source_workspace_for_upgrade,
     resolve_source_workspace,
 };
+use super::release_catalog::{self, InstallableSelection, ReleaseEntry, SelectedRelease};
 use super::services;
 use super::types::*;
 use super::validation::check_for_updates;
@@ -147,8 +148,14 @@ pub fn run_upgrade_with_method(
     runner_only: bool,
     runner_targets: &[String],
     source_path: Option<&Path>,
+    pinned_version: Option<&str>,
 ) -> Result<UpgradeResult> {
     if runner_only {
+        if pinned_version.is_some() {
+            return Err(pinned_version_scope_error(
+                "--runner-only refreshes runners without promoting the controller, so there is no controller release to pin",
+            ));
+        }
         return run_targeted_runner_upgrade(force, method_override, runner_targets, source_path);
     }
 
@@ -174,6 +181,11 @@ pub fn run_upgrade_with_method(
             defaults::secondary_install_method_key()
         )));
     }
+    validate_pinned_version(pinned_version, install_method)?;
+    // Pinning is as deliberate as `--force`: it names one release, possibly an
+    // older one, and must not be silently discarded by the "already at the
+    // latest release" gate (#11750).
+    let deliberate = controller_replacement_is_deliberate(force, pinned_version);
     let source_upgrade_path = source_upgrade_path_for_method(install_method, source_path)?;
     let runner_method_override = runner_method_override_for_method(method_override, install_method);
 
@@ -228,14 +240,17 @@ pub fn run_upgrade_with_method(
     // An approved explicit source build is the controller target, regardless of
     // whether the latest published release has the same semantic version.
     let replacement_approved =
-        controller_replacement_proceeds(force, source_upgrade_decision, false);
+        controller_replacement_proceeds(deliberate, source_upgrade_decision, false);
 
     // Check if a release update is available unless an explicit source target
     // has already been approved for controller replacement.
-    let release_target = if !replacement_approved {
+    if !replacement_approved {
         let check = check_for_updates()?;
-        if !controller_replacement_proceeds(force, source_upgrade_decision, check.update_available)
-        {
+        if !controller_replacement_proceeds(
+            deliberate,
+            source_upgrade_decision,
+            check.update_available,
+        ) {
             // Even when no binary update is needed, still run extension updates.
             let (extensions_updated, extensions_skipped) = if skip_extensions {
                 (vec![], vec![])
@@ -254,6 +269,7 @@ pub fn run_upgrade_with_method(
                         None,
                         runner_targets,
                         &extensions_updated,
+                        Some(&promotion_lease),
                     )
                 })?
             };
@@ -310,19 +326,15 @@ pub fn run_upgrade_with_method(
                 services_pending_restart: Vec::new(),
             });
         }
-        check.latest_version
-    } else {
-        None
-    };
+    }
 
-    // Binary upgrades install GitHub's latest release asset. Resolve that
-    // release before mutation so post-swap verification can prove the PATH
-    // destination runs the exact release selected for this operation.
-    let selected_binary_version = if install_method == InstallMethod::Binary {
-        match release_target {
-            Some(version) => Some(version),
-            None => Some(fetch_latest_version(InstallMethod::Binary)?),
-        }
+    // Binary upgrades install a published release asset. Resolve *which*
+    // release before mutation: the newest release is not necessarily
+    // installable on this target, so this selects the newest release that is,
+    // or the operator's explicit pin. Resolving it here also lets post-swap
+    // verification prove the PATH destination runs the exact release selected.
+    let selected_release = if install_method == InstallMethod::Binary {
+        Some(resolve_binary_release(pinned_version)?)
     } else {
         None
     };
@@ -350,7 +362,7 @@ pub fn run_upgrade_with_method(
                 source_path.is_some(),
                 force,
                 previous_build_identity.as_deref(),
-                selected_binary_version.as_deref(),
+                selected_release.as_ref(),
             )
         })?;
     let (success, new_version, new_build_identity, source_revision) = match controller_upgrade {
@@ -394,6 +406,7 @@ pub fn run_upgrade_with_method(
                 new_build_identity.as_deref(),
                 runner_targets,
                 &extensions_updated,
+                Some(&promotion_lease),
             )
         })?
     } else {
@@ -587,6 +600,149 @@ fn controller_replacement_proceeds(
     force || source_upgrade_bypasses_release_gate(source_decision) || release_update_available
 }
 
+/// A pinned release is an explicit instruction, including an explicit move to
+/// an older release. Treating it like `--force` at the release gate is what
+/// makes `--version <TAG>` mean anything: otherwise pinning a release that is
+/// not newer than the running one reports "already at latest" and installs
+/// nothing (#11750).
+fn controller_replacement_is_deliberate(force: bool, pinned_version: Option<&str>) -> bool {
+    force || pinned_version.is_some()
+}
+
+/// `--version` pins a published *release asset*, so it is only meaningful for
+/// the install method that downloads one. Silently ignoring it for a source or
+/// Homebrew install would be the same class of defect as the 404: the operator
+/// asks for one release and gets another.
+fn validate_pinned_version(pinned_version: Option<&str>, method: InstallMethod) -> Result<()> {
+    let Some(requested) = pinned_version else {
+        return Ok(());
+    };
+    if method == InstallMethod::Binary {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "version",
+        format!(
+            "--version pins a published release asset, which the {} install method does not download",
+            method.as_str()
+        ),
+        Some(requested.to_string()),
+        None,
+    )
+    .with_hint(format!(
+        "Pin a release binary explicitly with: homeboy upgrade --method binary --version {requested}"
+    ))
+    .with_hint("Source installs converge on a checkout, not a release: homeboy upgrade --method source --source-path <PATH>"))
+}
+
+fn pinned_version_scope_error(problem: &str) -> Error {
+    Error::validation_invalid_argument("version", problem, None, None)
+        .with_hint("Drop --version, or run the controller upgrade without --runner-only.")
+}
+
+/// Decide which published release a binary upgrade installs.
+///
+/// Without a pin this is the newest release that ships an asset for the running
+/// target — not simply the newest release. A release published without this
+/// platform's asset used to make `upgrade` 404 with no way past it (#11750);
+/// falling back one release is the difference between a stuck controller and a
+/// controller five minor versions ahead.
+fn resolve_binary_release(pinned_version: Option<&str>) -> Result<SelectedRelease> {
+    let target = release_catalog::running_target_triple();
+    let releases = release_catalog::fetch_release_catalog()?;
+
+    if let Some(requested) = pinned_version {
+        return resolve_pinned_release(&releases, requested, target);
+    }
+
+    let selection = release_catalog::select_installable(&releases, target);
+    let Some(installable) = selection.installable.clone() else {
+        return Err(no_installable_release_error(&selection, target));
+    };
+
+    match target {
+        Some(target) => {
+            if let Some(notice) = selection.upgrade_fallback_notice(target) {
+                homeboy_core::log_status!("upgrade", "{}", notice);
+            }
+        }
+        None => warn_unverified_target(),
+    }
+
+    Ok(SelectedRelease::new(installable, target))
+}
+
+fn resolve_pinned_release(
+    releases: &[ReleaseEntry],
+    requested: &str,
+    target: Option<&str>,
+) -> Result<SelectedRelease> {
+    let Some(release) = release_catalog::find_release(releases, requested) else {
+        return Err(Error::validation_invalid_argument(
+            "version",
+            format!("No published Homeboy release matches {requested}"),
+            Some(requested.to_string()),
+            Some(release_catalog::installable_tags(releases, target, 5)),
+        )
+        .with_hint(
+            "Releases are tagged `v<major>.<minor>.<patch>`; both `v0.332.0` and `0.332.0` are accepted.",
+        )
+        .with_hint("List what can be installed here with: homeboy upgrade --check"));
+    };
+
+    match target {
+        Some(target) => {
+            if release_catalog::release_installs_on(releases, requested, Some(target))
+                == Some(false)
+            {
+                return Err(Error::validation_invalid_argument(
+                    "version",
+                    format!("Release {} ships no {target} asset", release.tag),
+                    Some(release.tag.clone()),
+                    Some(release_catalog::installable_tags(releases, Some(target), 5)),
+                )
+                .with_hint(format!(
+                    "Looked for asset: {}",
+                    release_catalog::asset_archive_name(target)
+                ))
+                .with_hint("Pin one of the releases listed above, or build from source with: homeboy upgrade --method source --source-path <PATH>"));
+            }
+        }
+        None => warn_unverified_target(),
+    }
+
+    Ok(SelectedRelease::new(release, target))
+}
+
+/// An undetermined running target is reported, not guessed. Every downstream
+/// message then says asset availability was *not verified*, instead of
+/// implying a triple nobody established.
+fn warn_unverified_target() {
+    homeboy_core::log_status!(
+        "upgrade",
+        "The running target triple could not be determined ({}); release asset availability was not verified.",
+        release_catalog::running_platform_description()
+    );
+}
+
+fn no_installable_release_error(selection: &InstallableSelection, target: Option<&str>) -> Error {
+    let newest = selection
+        .newest
+        .as_ref()
+        .map(|release| release.tag.clone())
+        .unwrap_or_else(|| "none published".to_string());
+    let described = target
+        .map(str::to_string)
+        .unwrap_or_else(release_catalog::running_platform_description);
+
+    Error::internal_unexpected(format!(
+        "no published Homeboy release ships an installable asset for {described} (newest release: {newest})"
+    ))
+    .with_hint("Inspect what this platform can install with: homeboy upgrade --check")
+    .with_hint("Build from source instead with: homeboy upgrade --method source --source-path <PATH>")
+}
+
 /// Upgrade only explicitly selected runners without promoting the controller.
 /// Source controllers pin their checkout identity; packaged controllers retain
 /// the runner's existing install-method contract.
@@ -626,6 +782,7 @@ fn run_targeted_runner_upgrade(
             Some(&previous_build_identity),
             runner_targets,
             &installed_extension_catalog(),
+            None,
         )
     })?;
 
@@ -2262,5 +2419,181 @@ mod convergence_tests {
         let runner = runner("0.299.0", "0.300.0", true);
 
         assert!(runner_convergence_failed(&[runner], &[], Some("0.301.2")));
+    }
+}
+
+/// Release pinning and the deliberate-replacement gate (#11750).
+///
+/// These are the pure decisions behind `--version <TAG>`: which release a pin
+/// resolves to, when a pin is refused, and why a pin has to bypass the
+/// "already at the latest release" gate the way `--force` does.
+#[cfg(test)]
+mod pinned_release_tests {
+    use super::*;
+    use crate::upgrade::release_catalog::{ReleaseAsset, ReleaseEntry};
+
+    const LINUX: &str = "x86_64-unknown-linux-gnu";
+    const MAC: &str = "aarch64-apple-darwin";
+
+    fn release(tag: &str, targets: &[&str]) -> ReleaseEntry {
+        let mut assets = Vec::new();
+        for target in targets {
+            assets.push(ReleaseAsset {
+                name: format!("homeboy-{target}.tar.xz"),
+            });
+            assets.push(ReleaseAsset {
+                name: format!("homeboy-{target}.tar.xz.sha256"),
+            });
+        }
+
+        ReleaseEntry {
+            tag_name: tag.to_string(),
+            draft: false,
+            prerelease: false,
+            assets,
+        }
+    }
+
+    fn catalog() -> Vec<ReleaseEntry> {
+        vec![
+            release("v0.333.0", &[MAC]),
+            release("v0.332.0", &[LINUX, MAC]),
+            release("v0.331.0", &[LINUX, MAC]),
+        ]
+    }
+
+    /// The escape the issue asked for: reach `v0.332.0` deliberately while
+    /// `v0.333.0` is the newest tag and has no asset for this platform.
+    #[test]
+    fn a_pin_resolves_to_the_requested_release_and_its_target() {
+        let selected = resolve_pinned_release(&catalog(), "v0.332.0", Some(LINUX))
+            .expect("pinned release resolves");
+
+        assert_eq!(selected.tag, "v0.332.0");
+        assert_eq!(selected.version, "0.332.0");
+        assert_eq!(selected.target.as_deref(), Some(LINUX));
+        assert_eq!(
+            selected.asset_url().as_deref(),
+            Some("https://github.com/Extra-Chill/homeboy/releases/download/v0.332.0/homeboy-x86_64-unknown-linux-gnu.tar.xz")
+        );
+    }
+
+    #[test]
+    fn a_pin_accepts_the_bare_semver_spelling() {
+        let selected = resolve_pinned_release(&catalog(), "0.332.0", Some(LINUX))
+            .expect("pinned release resolves");
+
+        assert_eq!(selected.tag, "v0.332.0");
+    }
+
+    /// Pinning a release that cannot install here must fail before any binary
+    /// mutation, naming the target it looked for and the releases that would
+    /// work — the information the bare 404 withheld.
+    #[test]
+    fn a_pin_without_this_targets_asset_is_refused_with_alternatives() {
+        let error = resolve_pinned_release(&catalog(), "v0.333.0", Some(LINUX))
+            .expect_err("an uninstallable pin must not be attempted");
+
+        assert!(
+            error.message.contains(LINUX),
+            "refusal must name the target triple: {}",
+            error.message
+        );
+        assert!(
+            error.hints.iter().any(|hint| hint
+                .message
+                .contains("homeboy-x86_64-unknown-linux-gnu.tar.xz")),
+            "refusal must name the asset it looked for: {:?}",
+            error.hints
+        );
+        assert!(
+            error.details.to_string().contains("v0.332.0"),
+            "refusal must offer an installable release: {}",
+            error.details
+        );
+    }
+
+    #[test]
+    fn a_pin_to_an_unpublished_release_is_refused() {
+        let error = resolve_pinned_release(&catalog(), "v9.9.9", Some(LINUX))
+            .expect_err("an unpublished pin must not be attempted");
+
+        assert!(error.message.contains("v9.9.9"), "{}", error.message);
+        assert!(
+            error.details.to_string().contains("v0.332.0"),
+            "{}",
+            error.details
+        );
+    }
+
+    /// An undetermined target means asset availability was never verified. The
+    /// pin still resolves — the operator asked for it — but nothing pretends a
+    /// triple was established.
+    #[test]
+    fn a_pin_on_an_undetermined_target_resolves_without_claiming_verification() {
+        let selected =
+            resolve_pinned_release(&catalog(), "v0.333.0", None).expect("pinned release resolves");
+
+        assert_eq!(selected.tag, "v0.333.0");
+        assert!(selected.target.is_none());
+        assert!(selected.asset_url().is_none());
+    }
+
+    /// Without this, `--version <older tag>` reports "already at latest" and
+    /// installs nothing, which is exactly the dead end the pin exists to break.
+    #[test]
+    fn a_pin_is_as_deliberate_as_force_at_the_release_gate() {
+        assert!(controller_replacement_is_deliberate(
+            false,
+            Some("v0.332.0")
+        ));
+        assert!(controller_replacement_is_deliberate(true, None));
+        assert!(!controller_replacement_is_deliberate(false, None));
+
+        // The gate itself must then proceed on the deliberate flag alone, with
+        // no source decision and no available release update.
+        assert!(controller_replacement_proceeds(
+            controller_replacement_is_deliberate(false, Some("v0.332.0")),
+            None,
+            false
+        ));
+    }
+
+    /// A pin names a release asset, so an install method that does not download
+    /// one must refuse it rather than silently install something else.
+    #[test]
+    fn a_pin_is_refused_for_install_methods_that_download_no_release_asset() {
+        assert!(validate_pinned_version(Some("v0.332.0"), InstallMethod::Binary).is_ok());
+        assert!(validate_pinned_version(None, InstallMethod::Source).is_ok());
+
+        for method in [
+            InstallMethod::Source,
+            InstallMethod::Homebrew,
+            InstallMethod::Secondary,
+        ] {
+            let error = validate_pinned_version(Some("v0.332.0"), method)
+                .expect_err("a pin is meaningless without a release download");
+            assert!(
+                error
+                    .hints
+                    .iter()
+                    .any(|hint| hint.message.contains("--method binary")),
+                "refusal must offer the method that honors a pin: {:?}",
+                error.hints
+            );
+        }
+    }
+
+    #[test]
+    fn no_installable_release_anywhere_names_the_target_and_the_newest_tag() {
+        let selection = release_catalog::select_installable(
+            &[release("v0.333.0", &[MAC]), release("v0.332.0", &[MAC])],
+            Some(LINUX),
+        );
+
+        let error = no_installable_release_error(&selection, Some(LINUX));
+
+        assert!(error.message.contains(LINUX), "{}", error.message);
+        assert!(error.message.contains("v0.333.0"), "{}", error.message);
     }
 }

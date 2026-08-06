@@ -13,7 +13,9 @@ mod triage_items;
 
 pub use finding_records::*;
 pub use run_builder::NewRunRecordBuilder;
-pub use run_status::RunStatus;
+pub use run_status::{
+    RunStatus, OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES, RUNNING_HEARTBEAT_STALE_MINUTES,
+};
 pub use trace_run_builder::NewTraceRunRecordBuilder;
 pub use trace_span_builder::NewTraceSpanRecordBuilder;
 pub use triage_items::{NewTriageItemRecord, TriageItemRecord, TriagePullRequestSignals};

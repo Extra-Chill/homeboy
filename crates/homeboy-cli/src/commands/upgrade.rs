@@ -15,10 +15,6 @@ pub struct UpgradeArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Skip automatic restart after upgrade
-    #[arg(long)]
-    pub no_restart: bool,
-
     /// Skip extension updates (only upgrade the binary)
     #[arg(long)]
     pub skip_extensions: bool,
@@ -31,6 +27,23 @@ pub struct UpgradeArgs {
     /// They will be reported as pending with their recovery commands instead.
     #[arg(long)]
     pub no_restart_services: bool,
+
+    /// Accepted and ignored. `--no-restart` was declared but never read: it was
+    /// born inert in `90adfed70` and `git log -S'args.no_restart,'` finds no
+    /// commit in which it was consulted. `--no-restart-services` is the flag
+    /// that actually skips restarts.
+    ///
+    /// It is retained hidden purely as a cross-version compatibility shim,
+    /// because Homeboy passed it to itself over SSH: a controller older than
+    /// this change still emits `<homeboy> upgrade --no-restart ...` when
+    /// upgrading a runner. `upgrade --runner-only` installs the new binary on
+    /// the runner and *then* invokes it with the old controller's argv, so
+    /// rejecting the argument would break the very upgrade that creates the
+    /// skew. Accepting it costs nothing; refusing it bricks that path.
+    ///
+    /// Remove once no supported controller emits it. Tracked in #11786.
+    #[arg(long, hide = true)]
+    pub no_restart: bool,
 
     /// Select the configured runner to converge with the controller. Repeat to target multiple runners.
     #[arg(
@@ -51,11 +64,21 @@ pub struct UpgradeArgs {
     /// Homeboy source checkout to use with --method source
     #[arg(long, value_name = "PATH")]
     pub source_path: Option<PathBuf>,
+
+    /// Pin the published release tag to install instead of the newest installable release
+    #[arg(long = "version", value_name = "TAG", conflicts_with = "check")]
+    pub pin_version: Option<String>,
 }
 
 pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
     if args.check {
         let result = upgrade::check_for_updates()?;
+        // A check that quietly withholds an update because the newest release
+        // has no asset for this platform is indistinguishable from "you are
+        // current". Say which release was passed over and why (#11750).
+        if let Some(notice) = result.notice.as_deref() {
+            homeboy::log_status!("upgrade", "{}", notice);
+        }
         let json = serde_json::to_value(result)
             .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
         return Ok((json, 0));
@@ -90,6 +113,7 @@ pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
         args.runner_only,
         &args.runners,
         args.source_path.as_deref(),
+        args.pin_version.as_deref(),
     )?;
     let json = serde_json::to_value(&result)
         .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;

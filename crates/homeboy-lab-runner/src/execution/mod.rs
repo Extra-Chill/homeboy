@@ -904,23 +904,25 @@ pub(crate) fn exec_with_status_snapshot(
         append_runner_exec_diagnostic_hint(&mut output, run_id_hint);
         return Ok((output, exit_code));
     }
-    // Extension parity uses daemon-backed runner commands. Recover the direct
-    // session before that preparation so admission cannot fail before `/exec`.
+    // Observe the session before selecting diagnostic SSH. This keeps a stale
+    // runner diagnosable without bypassing healthy daemon admission.
     let connected = if should_force_diagnostic_ssh(&runner, &options) {
-        None
+        // Admission status reconnects a disconnected direct SSH session. A
+        // diagnostic must only observe controller state and must not rotate it.
+        status_snapshot.unwrap_or(crate::connection::status(runner_id)?)
     } else {
-        Some(execution_status(
-            runner_id,
-            status_snapshot,
-            options.detach_after_handoff,
-        )?)
+        execution_status(runner_id, status_snapshot, options.detach_after_handoff)?
     };
 
-    if !crate::execution_bundle::validate_bundle_env(
-        &request_env,
-        &options.command,
-        &required_extensions,
-    ) {
+    // Extension parity can materialize runner state, so diagnostics never enter
+    // that daemon-backed setup path.
+    if !should_force_diagnostic_ssh(&runner, &options)
+        && !crate::execution_bundle::validate_bundle_env(
+            &request_env,
+            &options.command,
+            &required_extensions,
+        )
+    {
         let extension_parity_plan = plan_extension_parity(
             runner_id,
             &runner,
@@ -962,6 +964,18 @@ pub(crate) fn exec_with_status_snapshot(
     };
 
     if should_force_diagnostic_ssh(&runner, &options) {
+        if !diagnostic_ssh_allowed(&connected) {
+            return Err(Error::validation_invalid_argument(
+                "ssh",
+                format!(
+                    "runner `{runner_id}` has a fresh connected daemon; use normal runner exec so admission remains attributed to that daemon"
+                ),
+                Some(runner_id.to_string()),
+                Some(vec![format!(
+                    "Use `homeboy runner exec {runner_id} -- <command>` for daemon-backed execution. `--ssh` is reserved for disconnected or non-fresh daemon diagnostics."
+                )]),
+            ));
+        }
         run_capability_preflight(&runner)?;
         // The diagnostic-SSH transport executes synchronously and never accepts
         // a durable runner job, so — unlike the daemon path — it must create the
@@ -979,7 +993,7 @@ pub(crate) fn exec_with_status_snapshot(
                 )?;
             }
         }
-        return exec_diagnostic_ssh(
+        let (mut output, exit_code) = exec_diagnostic_ssh(
             &runner,
             cwd,
             options.run_id.as_deref(),
@@ -989,10 +1003,12 @@ pub(crate) fn exec_with_status_snapshot(
             options.require_paths,
             options.path_materialization_plan,
             options.diagnostic_ssh_timeout,
-        );
+        )?;
+        append_runner_exec_binary_diagnostics(&mut output, &runner, connected.session.as_ref());
+        append_runner_exec_diagnostic_hint(&mut output, run_id_hint);
+        return Ok((output, exit_code));
     }
 
-    let connected = connected.expect("diagnostic SSH returned before daemon admission");
     if refuses_nonfresh_daemon_execution(&options, &connected) {
         return Err(Error::validation_invalid_argument(
             "runner",
@@ -1389,8 +1405,11 @@ fn runner_exec_homeboy_binaries(
 }
 
 fn should_force_diagnostic_ssh(runner: &Runner, options: &RunnerExecOptions) -> bool {
-    select_runner_transport(runner, None, options.allow_diagnostic_ssh)
-        == RunnerTransport::DiagnosticSsh
+    runner.kind == RunnerKind::Ssh && options.allow_diagnostic_ssh
+}
+
+fn diagnostic_ssh_allowed(status: &RunnerStatusReport) -> bool {
+    !status.connected || !status.daemon_fresh_for_admission()
 }
 
 /// Fire a run-completion notification directly from the runner, bypassing the

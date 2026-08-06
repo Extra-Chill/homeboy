@@ -93,11 +93,11 @@ Provide the work with one `--prompt` and optional `--goal` framing, point `--to-
 
 WAIT POLICY: Cook always persists a durable run id before materialization, so a returned command is not by itself proof of a completed cook.
 
-`--wait` observes until the lifecycle is terminal and returns the terminal Cook report. This is the default when neither flag is passed.
+By default Cook observes until the lifecycle is terminal and returns the terminal Cook report.
 
 `--detach-after-handoff` returns once the run is durably accepted. Its result describes a submission, not an outcome. It is honored on every placement: with `--placement local` the Cook is re-executed in its own session, so it survives a client that is interrupted or times out.
 
-Do not infer the wait policy from client interactivity. An orchestration client that needs one predictable contract should pass the flag rather than rely on the default, and read the terminal outcome from `agent-task status <run-id>` in either case.
+Do not infer the wait policy from client interactivity. An orchestration client that needs the detached contract should pass `--detach-after-handoff` rather than rely on the default, and read the terminal outcome from `agent-task status <run-id>` in either case.
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -685,6 +685,7 @@ Every child requires a deterministic gate from shared --verify/ --private-verify
 | `--provider-profile` | `<PROFILE>` | _no help text_ |
 | `--secret-env` | `<ENV>` | _no help text_ |
 | `--provider-config` | `<JSON>` | _no help text_ |
+| `--ai-tool` | `<TEXT>` | AI tool disclosure recorded in every child PR's assistance attribution. When omitted, each child derives its disclosure from its effective provider and model selection |
 | `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
 | `--private-verify` | `<COMMAND>` | Like `--verify`, but the command's output is treated as private: only a pass/fail summary is revealed by default (see `--private-gate-reveal`). Satisfies the same mandatory-gate requirement as `--verify`. Use for gates whose logs may contain secrets. Repeatable |
 | `--private-gate-reveal` | `<POLICY>` | How much of a `--private-verify` gate's output to reveal: `summary-only` (default) shows just pass/fail; other policies expose more detail Values: `full-evidence`, `summary-only`, `redacted`, `no-detail`. |
@@ -812,6 +813,7 @@ Successful child cooks open or update their own pull requests.
 | `--selector` | `<PROVIDER_ID>` | _no help text_ |
 | `--model` | `<MODEL>` | _no help text_ |
 | `--record-run-id` | `<ID>` | _no help text_ |
+| `--ai-tool` | `<TEXT>` | AI tool disclosure recorded in every child PR's assistance attribution. Overrides the persisted plan value for this execution |
 
 ## `homeboy agent-task review`
 

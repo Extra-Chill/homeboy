@@ -1339,8 +1339,8 @@ pub(super) fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<S
         RunnerTunnelMode::DirectSsh => {
             if report.active_job_count > 0 {
                 hints.push(format!(
-                    "Active daemon jobs for `{}` are listed from the direct daemon; inspect with `homeboy runner job logs {} <job-id> --follow` and cancel known jobs with `homeboy runner job cancel {} <job-id>`.",
-                    report.runner_id, report.runner_id, report.runner_id
+                    "Active daemon jobs block recovery for `{}`. List authoritative live jobs and retained durable projections with `homeboy runner job list {} --active` before inspecting or cancelling a known job.",
+                    report.runner_id, report.runner_id
                 ));
             }
         }
@@ -1362,7 +1362,7 @@ fn reverse_runner_status_hints(
         return;
     }
     hints.push(format!(
-        "Reverse runner `{}` active jobs are listed through the broker; inspect with `homeboy runner job logs {} <job-id> --follow`.",
+        "Reverse runner `{}` has a broker-backed job view. List authoritative live jobs and retained durable projections with `homeboy runner job list {} --active`.",
         report.runner_id, report.runner_id
     ));
     if report.active_job_count > 0 {
@@ -1381,6 +1381,20 @@ pub(super) fn runner_status_operator_commands(
     };
 
     let mut commands = Vec::new();
+    if report.active_job_count > 0 {
+        commands.push(RunnerOperatorCommand {
+            scope: "job_list",
+            runner_id: report.runner_id.clone(),
+            job_id: None,
+            command: format!(
+                "homeboy runner job list {} --active",
+                shell_arg(&report.runner_id)
+            ),
+            description:
+                "List the authoritative jobs blocking runner recovery before selecting a follow-up."
+                    .to_string(),
+        });
+    }
     for job in report
         .active_runner_jobs
         .iter()
@@ -1649,6 +1663,7 @@ mod tests {
                 local_url: Some("http://127.0.0.1:7331".to_string()),
                 tunnel_pid: Some(12345),
                 tunnel_process_start_identity: None,
+                proxy_forward: None,
                 remote_daemon_pid: Some(23456),
                 remote_daemon_lease_id: Some("lease-23456".to_string()),
                 homeboy_version: "homeboy 0.259.0".to_string(),

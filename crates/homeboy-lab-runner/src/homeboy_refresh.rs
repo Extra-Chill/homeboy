@@ -1364,7 +1364,10 @@ fn build_identity_commit(identity: &str) -> Option<&str> {
 /// immediately releases an admission against the reconnected session's own
 /// lease, so success guarantees the next handoff converges onto the same
 /// endpoint.
-fn probe_reconnected_admission_readiness(runner_id: &str, identity_commit: &str) -> Result<()> {
+pub(crate) fn probe_reconnected_admission_readiness(
+    runner_id: &str,
+    identity_commit: &str,
+) -> Result<()> {
     let session = super::connection::status_for_admission(runner_id)?
         .session
         .filter(|session| session.mode == super::RunnerTunnelMode::DirectSsh);

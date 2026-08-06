@@ -1,5 +1,7 @@
 # Build artifacts
 /target/
+/.cargo-target/
+/build/
 dist-manifest.json
 .homeboy-bin/
 /artifacts/

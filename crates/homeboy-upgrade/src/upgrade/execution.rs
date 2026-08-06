@@ -8,9 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::constants::{VERIFY_READBACK_ATTEMPTS, VERIFY_READBACK_DELAY};
+use super::constants::{RELEASE_TAG_ENV, VERIFY_READBACK_ATTEMPTS, VERIFY_READBACK_DELAY};
 use super::helpers::{current_version, version_is_newer};
 use super::planning::resolve_binary_on_path;
+use super::release_catalog::{self, SelectedRelease};
 use super::types::InstallMethod;
 
 /// Maximum number of bytes retained per captured stream when surfacing an
@@ -113,8 +114,9 @@ pub(crate) fn execute_upgrade(
     explicit_source_path: bool,
     force: bool,
     previous_build_identity: Option<&str>,
-    selected_binary_version: Option<&str>,
+    selected_release: Option<&SelectedRelease>,
 ) -> UpgradeExecutionResult {
+    let selected_binary_version = selected_release.map(|release| release.version.as_str());
     let defaults = defaults::load_defaults();
     // The binary installer replaces `command -v homeboy`. Capture that path
     // before its shell runs so verification proves the intended PATH target was
@@ -179,7 +181,16 @@ pub(crate) fn execute_upgrade(
         }
         InstallMethod::Binary => {
             let cmd = &defaults.install_methods.binary.upgrade_command;
-            Command::new("sh").args(["-c", cmd]).output().map_err(|e| {
+            // Pin the installer to the release this upgrade selected. Without
+            // the pin the installer always resolves `latest/download`, so a
+            // newest release missing this target's asset is unreachable past —
+            // there is no older release the operator can be moved to (#11750).
+            let mut command = Command::new("sh");
+            command.args(["-c", cmd]);
+            if let Some(release) = selected_release {
+                command.env(RELEASE_TAG_ENV, &release.tag);
+            }
+            command.output().map_err(|e| {
                 Error::internal_io(e.to_string(), Some("run binary upgrade".to_string()))
             })?
         }
@@ -209,7 +220,11 @@ pub(crate) fn execute_upgrade(
         } else {
             format!("exit code {}", output.status.code().unwrap_or(1))
         };
-        return Err(upgrade_failure_error(method, &error_detail));
+        return Err(upgrade_failure_error(
+            method,
+            &error_detail,
+            selected_release,
+        ));
     }
 
     // The upgrade command above succeeded, so the new binary is already on
@@ -376,6 +391,7 @@ fn run_source_upgrade_command(
                 return Err(upgrade_failure_error(
                     InstallMethod::Source,
                     &format!("source upgrade command exited with {}", status),
+                    None,
                 ));
             }
             Ok(None) if start.elapsed() >= timeout => {
@@ -829,15 +845,47 @@ where
     (false, last_seen)
 }
 
-fn upgrade_failure_error(method: InstallMethod, error_detail: &str) -> Error {
+/// Build the error for a failed upgrade command.
+///
+/// A binary 404 previously named neither the asset URL it fetched nor the
+/// target triple it looked for, so diagnosing one meant listing release assets
+/// by hand (#11750). `selected_release` carries both, and is `None` only when
+/// the failure did not come from a resolved release download.
+fn upgrade_failure_error(
+    method: InstallMethod,
+    error_detail: &str,
+    selected_release: Option<&SelectedRelease>,
+) -> Error {
     let mut error = Error::internal_io(
         format!("{} upgrade failed: {}", method.as_str(), error_detail),
         Some("execute upgrade".to_string()),
     );
 
     if method == InstallMethod::Binary && error_detail.contains("404") {
+        error = error.with_hint("No release asset was found for this Homeboy version.");
+
+        if let Some(release) = selected_release {
+            error = error.with_hint(format!("Resolved release: {}", release.tag));
+            match (release.target.as_deref(), release.asset_url()) {
+                (Some(target), Some(url)) => {
+                    error = error
+                        .with_hint(format!("Target triple looked for: {target}"))
+                        .with_hint(format!("Resolved asset URL: {url}"));
+                }
+                _ => {
+                    error = error.with_hint(format!(
+                        "The running target triple could not be determined ({}), so no asset name could be resolved.",
+                        release_catalog::running_platform_description()
+                    ));
+                }
+            }
+        }
+
         error = error
-            .with_hint("No release asset was found for this Homeboy version.")
+            .with_hint("List which releases can install here with: homeboy upgrade --check")
+            .with_hint(
+                "Pin a release that has this target's asset with: homeboy upgrade --version <TAG>",
+            )
             .with_hint("Try: homeboy upgrade --method source --source-path <PATH>");
     } else if method == InstallMethod::Secondary && error_detail.contains("not found") {
         error = error

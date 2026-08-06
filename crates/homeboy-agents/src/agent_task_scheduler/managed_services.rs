@@ -103,6 +103,7 @@ fn default_worker_ttl_ms() -> u64 {
 }
 
 const WORKER_CLEANUP_COORDINATION_MARGIN: Duration = Duration::from_secs(1);
+const WORKER_STARTUP_COORDINATION_MARGIN: Duration = Duration::from_secs(6);
 
 /// Execution-host service supervisor. It is instantiated by whichever host
 /// executes the plan (controller or Lab runner), never by a remote caller.
@@ -467,25 +468,7 @@ impl ManagedServices {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|error| format!("start managed service worker: {error}"))?;
-        for _ in 0..600 {
-            if let Some(state) = read_service_worker_state(run_id)? {
-                match state.state.as_str() {
-                    "ready" => {
-                        return Ok(Self::Worker {
-                            run_id: run_id.to_string(),
-                        })
-                    }
-                    "failed" => {
-                        return Err(state
-                            .detail
-                            .unwrap_or_else(|| "managed service worker failed".to_string()))
-                    }
-                    _ => {}
-                }
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        Err("managed service worker did not become ready".to_string())
+        wait_for_service_worker_start(specs, run_id)
     }
 
     pub(super) fn bind_into(&self, inputs: &mut Value, metadata: &mut Value) {
@@ -567,6 +550,32 @@ impl ManagedServices {
     }
 }
 
+fn wait_for_service_worker_start(
+    specs: &[AgentTaskManagedService],
+    run_id: &str,
+) -> Result<ManagedServices, String> {
+    let deadline = Instant::now() + worker_start_wait_budget(specs);
+    while Instant::now() < deadline {
+        if let Some(state) = read_service_worker_state(run_id)? {
+            match state.state.as_str() {
+                "ready" => {
+                    return Ok(ManagedServices::Worker {
+                        run_id: run_id.to_string(),
+                    })
+                }
+                "failed" => {
+                    return Err(state
+                        .detail
+                        .unwrap_or_else(|| "managed service worker failed".to_string()))
+                }
+                _ => {}
+            }
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Err("managed service worker did not become ready".to_string())
+}
+
 fn worker_cleanup_wait_budget(
     records: &[AgentTaskManagedServiceRecord],
 ) -> Result<Duration, String> {
@@ -578,6 +587,29 @@ fn worker_cleanup_wait_budget(
         .max()
         .unwrap_or(0);
     Ok(Duration::from_millis(cleanup_ms).saturating_add(WORKER_CLEANUP_COORDINATION_MARGIN))
+}
+
+fn worker_start_wait_budget(specs: &[AgentTaskManagedService]) -> Duration {
+    let readiness_ms = specs.iter().fold(0_u64, |total, spec| {
+        if spec.port.is_none() {
+            return total;
+        }
+        total.saturating_add(
+            spec.readiness
+                .as_ref()
+                .and_then(|readiness| readiness.timeout_ms)
+                .unwrap_or(10_000),
+        )
+    });
+    let cleanup_ms = specs
+        .iter()
+        .map(|spec| spec.cleanup_deadline_ms)
+        .max()
+        .unwrap_or(0)
+        .saturating_mul(2);
+    Duration::from_millis(readiness_ms)
+        .saturating_add(Duration::from_millis(cleanup_ms))
+        .saturating_add(WORKER_STARTUP_COORDINATION_MARGIN)
 }
 
 fn lease_port(spec: &AgentTaskManagedService) -> Result<PortLeaseAllocation, String> {
@@ -1145,7 +1177,11 @@ fn wait_ready(
                         .map(|path| format!("{url}{path}"))
                 })
                 .map(|url| {
-                    reqwest::blocking::get(url)
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    reqwest::blocking::Client::builder()
+                        .timeout(remaining.min(Duration::from_secs(1)))
+                        .build()
+                        .and_then(|client| client.get(url).send())
                         .map(|response| response.status().is_success())
                         .unwrap_or(false)
                 })
@@ -1558,6 +1594,70 @@ mod tests {
                 .unwrap_or_default()
                 .contains("start managed service"));
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_publishes_cleanup_before_readiness_failure() {
+        with_isolated_home(|_| {
+            let run_id = "worker-readiness-failure";
+            let mut service = fixture(free_port());
+            service.command = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "trap '' TERM; while :; do sleep 1; done".to_string(),
+            ];
+            service.readiness.as_mut().unwrap().timeout_ms = Some(50);
+            service.cleanup_deadline_ms = 100;
+            let specs = vec![service];
+            let request = worker_request(run_id, "start", specs.clone(), std::process::id());
+
+            let worker = thread::spawn(move || run_service_worker(&request));
+            let error = match wait_for_service_worker_start(&specs, run_id) {
+                Ok(_) => panic!("readiness should fail"),
+                Err(error) => error,
+            };
+            assert!(error.contains("readiness probe timed out"));
+            worker.join().expect("worker joins").expect("worker exits");
+            let state = wait_for_worker_state(run_id, "failed");
+            assert!(state
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("readiness probe timed out"));
+            let record: AgentTaskManagedServiceRecord = serde_json::from_slice(
+                &std::fs::read(
+                    homeboy_core::paths::homeboy_data()
+                        .expect("data path")
+                        .join("agent-task-runs")
+                        .join(run_id)
+                        .join("services/fixture.json"),
+                )
+                .expect("service record"),
+            )
+            .expect("parse service record");
+            assert_eq!(record.state, "failed");
+            assert_eq!(
+                record.cleanup.as_deref(),
+                Some("terminated_after_readiness_failure")
+            );
+            assert_eq!(
+                record.cleanup_outcome.as_deref(),
+                Some("deadline_escalation_forced")
+            );
+            assert!(record.pid.is_some_and(|pid| !super::process_is_alive(pid)));
+        });
+    }
+
+    #[test]
+    fn worker_start_wait_budget_honors_declared_readiness() {
+        let mut first = fixture(1);
+        first.readiness.as_mut().unwrap().timeout_ms = Some(120_000);
+        first.cleanup_deadline_ms = 10_000;
+        let mut second = fixture(2);
+        second.readiness.as_mut().unwrap().timeout_ms = Some(300_000);
+        second.cleanup_deadline_ms = 60_000;
+        assert!(worker_start_wait_budget(&[first, second]) >= Duration::from_secs(546));
     }
 
     #[test]

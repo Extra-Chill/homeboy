@@ -24,6 +24,32 @@ use super::super::status::{
 use super::super::types::RunnerConnectionOutput;
 use crate::cli_surface::Cli;
 
+fn runner_session_fixture() -> RunnerSession {
+    RunnerSession {
+        runner_id: String::new(),
+        mode: RunnerTunnelMode::DirectSsh,
+        role: runner::RunnerSessionRole::Controller,
+        server_id: None,
+        controller_id: None,
+        broker_url: None,
+        remote_daemon_address: None,
+        local_port: None,
+        local_url: None,
+        tunnel_pid: None,
+        tunnel_process_start_identity: None,
+        proxy_forward: None,
+        remote_daemon_pid: None,
+        remote_daemon_lease_id: None,
+        homeboy_version: String::new(),
+        homeboy_build_identity: None,
+        connected_at: String::new(),
+        worker_identity: None,
+        worker_pid: None,
+        last_seen_at: None,
+        leaseless_recovery_evidence: None,
+    }
+}
+
 #[test]
 fn runner_job_event_format_includes_sequence_kind_message_and_data() {
     let event = JobEvent {
@@ -59,6 +85,7 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
             local_url: None,
             tunnel_pid: None,
             tunnel_process_start_identity: None,
+            proxy_forward: None,
             remote_daemon_pid: None,
             remote_daemon_lease_id: None,
             homeboy_version: "test".to_string(),
@@ -68,6 +95,7 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
             worker_pid: None,
             last_seen_at: Some("2026-06-19T00:00:01Z".to_string()),
             leaseless_recovery_evidence: None,
+            ..runner_session_fixture()
         }),
         stale_daemon: None,
         daemon_freshness: None,
@@ -139,6 +167,7 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
     let commands = runner_status_operator_commands(&report);
     let serialized = serde_json::to_string(&commands).expect("serialize commands");
 
+    assert!(serialized.contains("homeboy runner job list homeboy-lab --active"));
     assert!(serialized.contains("homeboy runner job logs homeboy-lab job-123 --follow"));
     assert!(serialized.contains("homeboy runner job cancel homeboy-lab job-123"));
     assert!(serialized.contains("homeboy runs artifact get run-123 <artifact-id> -o <path>"));
@@ -188,6 +217,7 @@ fn direct_runner_status_exposes_the_explicit_generation_reconcile_command() {
             local_url: Some("http://127.0.0.1:4000".to_string()),
             tunnel_pid: Some(42),
             tunnel_process_start_identity: None,
+            proxy_forward: None,
             remote_daemon_pid: Some(43),
             remote_daemon_lease_id: Some("lease-active".to_string()),
             homeboy_version: "test".to_string(),
@@ -197,6 +227,7 @@ fn direct_runner_status_exposes_the_explicit_generation_reconcile_command() {
             worker_pid: None,
             last_seen_at: None,
             leaseless_recovery_evidence: None,
+            ..runner_session_fixture()
         }),
         stale_daemon: None,
         daemon_freshness: None,
@@ -238,6 +269,7 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
             local_url: Some("http://127.0.0.1:7331".to_string()),
             tunnel_pid: Some(12345),
             tunnel_process_start_identity: None,
+            proxy_forward: None,
             remote_daemon_pid: Some(23456),
             remote_daemon_lease_id: Some("lease-23456".to_string()),
             homeboy_version: "homeboy old".to_string(),
@@ -247,6 +279,7 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
             worker_pid: None,
             last_seen_at: None,
             leaseless_recovery_evidence: None,
+            ..runner_session_fixture()
         }),
         stale_daemon: None,
         daemon_freshness: Some(DaemonFreshnessReport {
@@ -720,6 +753,7 @@ fn runner_status_artifact_diagnostics_surface_controller_runner_checks_and_drift
             local_url: None,
             tunnel_pid: None,
             tunnel_process_start_identity: None,
+            proxy_forward: None,
             remote_daemon_pid: None,
             remote_daemon_lease_id: None,
             homeboy_version: "old".to_string(),
@@ -729,6 +763,7 @@ fn runner_status_artifact_diagnostics_surface_controller_runner_checks_and_drift
             worker_pid: None,
             last_seen_at: Some("2026-06-19T00:00:01Z".to_string()),
             leaseless_recovery_evidence: None,
+            ..runner_session_fixture()
         }),
         stale_daemon: None,
         daemon_freshness: None,
@@ -783,6 +818,7 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
             local_url: Some("http://127.0.0.1:7357".to_string()),
             tunnel_pid: Some(123),
             tunnel_process_start_identity: None,
+            proxy_forward: None,
             remote_daemon_pid: Some(456),
             remote_daemon_lease_id: Some("lease-456".to_string()),
             homeboy_version: "0.262.0".to_string(),
@@ -792,6 +828,7 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
             worker_pid: None,
             last_seen_at: None,
             leaseless_recovery_evidence: None,
+            ..runner_session_fixture()
         }),
         stale_daemon: None,
         daemon_freshness: None,
@@ -849,6 +886,7 @@ fn compact_status_names_runner_version_skew_when_the_controller_is_dirty() {
             local_url: Some("http://127.0.0.1:7357".to_string()),
             tunnel_pid: Some(123),
             tunnel_process_start_identity: None,
+            proxy_forward: None,
             remote_daemon_pid: Some(456),
             remote_daemon_lease_id: Some("lease-456".to_string()),
             homeboy_version: "0.321.0".to_string(),
@@ -858,6 +896,7 @@ fn compact_status_names_runner_version_skew_when_the_controller_is_dirty() {
             worker_pid: None,
             last_seen_at: None,
             leaseless_recovery_evidence: None,
+            ..runner_session_fixture()
         }),
         stale_daemon: Some(
             homeboy::runner::runners::RunnerStaleDaemonWarning::new(

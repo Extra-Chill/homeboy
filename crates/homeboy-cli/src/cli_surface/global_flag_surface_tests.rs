@@ -49,7 +49,6 @@ fn root_global_flag_surface_is_pinned() {
             "runner-secret-env",
             "runner-workspace-root",
             "skip-deps-hydration",
-            "wait",
         ],
         "the globally-propagated flag surface changed; update remote \
          capability negotiation and docs before accepting this",

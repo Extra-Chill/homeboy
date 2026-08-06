@@ -13,11 +13,9 @@ use crate::api_jobs::{self, ActiveRunnerJobSummary, JobStore, RunnerJobProjectio
 use crate::error::{Error, Result};
 use crate::observation::{
     run_owner_pid, running_status_note, FindingListFilter, ObservationStore, RunListFilter,
-    RunRecord, RunStatus, MAX_RUN_PAGE_LIMIT,
+    RunRecord, RunStatus, MAX_RUN_PAGE_LIMIT, OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES,
 };
 use crate::{activity, component, git, paths};
-
-const OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES: i64 = 30;
 
 mod analysis_job_runner;
 mod sandbox_tools;

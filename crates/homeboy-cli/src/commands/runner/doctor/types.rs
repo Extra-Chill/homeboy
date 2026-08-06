@@ -27,6 +27,9 @@ pub struct RunnerDoctorOutput {
     pub diagnostics: Option<RunnerDoctorDiagnostics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daemon_recovery: Option<homeboy::core::daemon::DaemonFreshnessReport>,
+    /// The same retained-job ownership projection used by status and reconcile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admission_summary: Option<homeboy::runner::runners::RunnerAdmissionSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub repairs: Vec<RunnerRepair>,
 }

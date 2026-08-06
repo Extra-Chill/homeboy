@@ -4,6 +4,11 @@
 use crate::agent_task::{AgentTaskRequest, AgentTaskSourceRef};
 use crate::agent_task_lifecycle::{self, AgentTaskRecordHealthSummary, AgentTaskRunRecord};
 use crate::agent_task_scheduler::AgentTaskState;
+// `agent-task active` treats a `Running` record that has gone this long without
+// an `updated_at` heartbeat as suspect even when its owner process/runner-job
+// liveness cannot be disproven (#5682). Shared with `activity` so the two
+// surfaces cannot disagree about what "stale" means.
+use homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES;
 use homeboy_core::{Error, Result};
 use serde_json::Value;
 
@@ -34,13 +39,6 @@ pub struct AgentTaskDiscoveryOptions {
     pub placement: Option<String>,
     pub parent_id: Option<String>,
 }
-
-/// Number of minutes a `Running` record may go without an `updated_at`
-/// heartbeat before `agent-task active` treats it as suspect even when its
-/// owner process/runner-job liveness cannot be disproven. Lab/offloaded runs
-/// whose runner process died silently surface here so operators can reconcile
-/// them instead of trusting a frozen `running` record indefinitely (#5682).
-const STALE_UPDATE_THRESHOLD_MINUTES: i64 = 30;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentTaskDiscoveryReport {
@@ -433,7 +431,7 @@ fn classify_liveness(
         let heartbeat_age =
             last_update_age_minutes.or_else(|| age_minutes(Some(&record.submitted_at), now));
         let has_fresh_heartbeat =
-            heartbeat_age.is_some_and(|age| age < STALE_UPDATE_THRESHOLD_MINUTES);
+            heartbeat_age.is_some_and(|age| age < RUNNING_HEARTBEAT_STALE_MINUTES);
         let has_live_owner = record.owner_process_is_running();
         let has_live_submission_intent =
             agent_task_lifecycle::has_live_pending_runner_submission_intent(record, now);
@@ -461,7 +459,7 @@ fn classify_liveness(
     }
 
     let stale_by_age =
-        last_update_age_minutes.is_some_and(|age| age >= STALE_UPDATE_THRESHOLD_MINUTES);
+        last_update_age_minutes.is_some_and(|age| age >= RUNNING_HEARTBEAT_STALE_MINUTES);
 
     let has_owner_signal =
         record.metadata.get("runner_pid").is_some() || record.runner_id().is_some();

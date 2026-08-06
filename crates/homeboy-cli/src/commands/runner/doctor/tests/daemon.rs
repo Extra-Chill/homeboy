@@ -29,6 +29,7 @@ fn healthy_session_health_probe_is_observational() {
         local_url: Some(format!("http://{addr}")),
         tunnel_pid: Some(1234),
         tunnel_process_start_identity: None,
+        proxy_forward: None,
         remote_daemon_pid: Some(4242),
         remote_daemon_lease_id: Some("lease-doctor".to_string()),
         homeboy_version: "test".to_string(),
@@ -257,7 +258,7 @@ fn disconnected_lab_doctor_reuses_daemon_recovery_envelope() {
         runner: None,
     };
 
-    let report = remote::disconnected_report("lab", &runner, &server, Some(recovery));
+    let report = remote::disconnected_report("lab", &runner, &server, Some(recovery), None);
 
     assert_eq!(report.checks.len(), 1);
     assert_eq!(report.checks[0].id, "daemon.recovery");

@@ -39,7 +39,7 @@ pub struct FuzzCoverageReconciliation {
     pub untested_operation_ids: Vec<String>,
 }
 
-pub fn reconcile_fuzz_coverage(
+pub(crate) fn reconcile_fuzz_coverage(
     request: &FuzzExecutionRequest,
     campaign: &FuzzCampaign,
 ) -> FuzzCoverageReconciliation {

@@ -309,7 +309,7 @@ pub(super) enum RunnerCommand {
         /// Runner ID
         id: String,
 
-        /// Remove only this controller's matching local tunnel/session state without contacting the remote runner
+        /// Retire only this controller's matching local tunnel/session state after a read-only SSH probe proves zero active jobs; it never stops the remote daemon
         #[arg(long)]
         local_recovery: bool,
     },
@@ -413,7 +413,7 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         project: Option<String>,
 
-        /// Allow diagnostic-only SSH command execution when no daemon session is connected
+        /// Allow diagnostic-only SSH command execution when the daemon is disconnected or non-fresh; it never uses or rotates daemon admission
         #[arg(long)]
         ssh: bool,
 
@@ -425,8 +425,8 @@ pub(super) enum RunnerCommand {
         #[arg(long = "require-path")]
         require_paths: Vec<String>,
 
-        /// Read a shell script from this path and execute it on the runner with bash.
-        /// Use `-` to read the script from stdin; stdin must contain at least one byte.
+        /// Read a shell script from this path and execute its materialized runner copy with bash.
+        /// Use `-` to read stdin on the controller; it is captured with the same bounded semantics.
         /// Whitespace-only scripts are executed verbatim.
         #[arg(long = "script-file")]
         script_file: Option<String>,
@@ -624,6 +624,31 @@ pub(super) enum RunnerBrokerCommand {
 
 #[derive(Subcommand)]
 pub(super) enum RunnerJobCommand {
+    /// List live daemon jobs and retained durable job projections
+    List {
+        /// Runner ID
+        runner_id: String,
+
+        /// Include only running jobs
+        #[arg(long, conflicts_with_all = ["queued", "terminal"])]
+        active: bool,
+
+        /// Include only queued jobs
+        #[arg(long, conflicts_with_all = ["active", "terminal"])]
+        queued: bool,
+
+        /// Include only observed terminal jobs
+        #[arg(long, conflicts_with_all = ["active", "queued"])]
+        terminal: bool,
+
+        /// Include only jobs owned by this daemon generation
+        #[arg(long)]
+        generation: Option<String>,
+
+        /// Match a job ID, durable run ID, or command summary
+        #[arg(long)]
+        correlation: Option<String>,
+    },
     /// Show or follow durable runner daemon job events
     Logs {
         /// Runner ID with an active daemon connection
@@ -743,6 +768,40 @@ mod tests {
             "--request",
             "{}",
             "--unknown"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn runner_job_list_accepts_recovery_filters_and_rejects_conflicting_states() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "runner",
+            "job",
+            "list",
+            "lab",
+            "--active",
+            "--generation",
+            "generation-a",
+            "--correlation",
+            "run-11770",
+        ])
+        .expect("parse runner job list filters");
+        assert!(matches!(
+            cli.command,
+            Commands::Runner(RunnerArgs {
+                command: RunnerCommand::Job {
+                    command: RunnerJobCommand::List {
+                        active: true,
+                        queued: false,
+                        terminal: false,
+                        ..
+                    }
+                }
+            })
+        ));
+        assert!(Cli::try_parse_from([
+            "homeboy", "runner", "job", "list", "lab", "--active", "--queued"
         ])
         .is_err());
     }

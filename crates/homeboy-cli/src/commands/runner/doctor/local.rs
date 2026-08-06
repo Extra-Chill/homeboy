@@ -203,6 +203,7 @@ pub fn report(
         secret_env_migration: None,
         diagnostics: None,
         daemon_recovery: None,
+        admission_summary: None,
         repairs: Vec::new(),
     }
 }

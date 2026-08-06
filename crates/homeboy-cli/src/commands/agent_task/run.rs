@@ -135,15 +135,7 @@ pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
         })?;
     let run_id = agent_task_service::resolve_cook_continuation_run_id(&args.cook_or_attempt_id)?;
     let record = agent_task_service::reconcile_recipe_attempt_for_continuation(&recipe, &run_id)?;
-    if !matches!(
-        record.state,
-        agent_task_lifecycle::AgentTaskRunState::Succeeded
-            | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
-            | agent_task_lifecycle::AgentTaskRunState::PartialFailure
-            | agent_task_lifecycle::AgentTaskRunState::Failed
-            | agent_task_lifecycle::AgentTaskRunState::Cancelled
-    ) {
+    if !record.state.is_terminal() {
         return Ok((
             cook_continuation_status(&recipe.cook_id, &run_id, &format!("{:?}", record.state)),
             0,
@@ -314,15 +306,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             ))
         }
     };
-    if !matches!(
-        record.state,
-        agent_task_lifecycle::AgentTaskRunState::Succeeded
-            | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
-            | agent_task_lifecycle::AgentTaskRunState::PartialFailure
-            | agent_task_lifecycle::AgentTaskRunState::Failed
-            | agent_task_lifecycle::AgentTaskRunState::Cancelled
-    ) {
+    if !record.state.is_terminal() {
         let error = homeboy::core::Error::validation_invalid_argument(
             "cook_or_attempt_id",
             "selected Cook attempt is not terminal and cannot be admitted to dispatch",

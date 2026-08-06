@@ -104,7 +104,7 @@ pub(crate) fn extract_first_bullet(lines: &[&str], start: usize) -> Option<Strin
     None
 }
 
-pub fn extract_last_release_snapshot(content: &str) -> Option<FinalizedReleaseSnapshot> {
+pub(crate) fn extract_last_release_snapshot(content: &str) -> Option<FinalizedReleaseSnapshot> {
     let lines: Vec<&str> = content.lines().collect();
 
     for (index, line) in lines.iter().enumerate() {

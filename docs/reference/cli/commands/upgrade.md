@@ -24,7 +24,6 @@ Upgrade Homeboy to the latest version
 | --- | --- | --- |
 | `--check` | flag | Check for updates without installing |
 | `--force` | flag | Force upgrade even if already at latest version |
-| `--no-restart` | flag | Skip automatic restart after upgrade |
 | `--skip-extensions` | flag | Skip extension updates (only upgrade the binary) |
 | `--skip-runners` | flag | Skip configured runner upgrades after the local upgrade |
 | `--no-restart-services` | flag | Skip restarting declared binary-resident services after the binary swap. They will be reported as pending with their recovery commands instead |
@@ -32,3 +31,4 @@ Upgrade Homeboy to the latest version
 | `--runner-only` | flag | Refresh selected runners without promoting the controller |
 | `--method` | `<METHOD>` | Override install method detection (homebrew\|cargo\|source\|binary) |
 | `--source-path` | `<PATH>` | Homeboy source checkout to use with --method source |
+| `--version` | `<TAG>` | Pin the published release tag to install instead of the newest installable release |

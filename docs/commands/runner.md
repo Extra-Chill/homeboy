@@ -129,6 +129,32 @@ Lab offload support is intentionally command-specific:
 
 Local-only resource-pressure commands still get resource-policy warnings, but those warnings explain why Lab offload is unavailable instead of suggesting `--runner`.
 
+### Stale daemon diagnostics and local recovery
+
+When a connected SSH runner has a non-fresh daemon admission session, normal
+`runner exec` remains fenced: it does not rotate or submit work through the
+stale daemon. Use the diagnostic transport for bounded direct SSH inspection:
+
+```sh
+homeboy runner exec <runner-id> --ssh -- homeboy daemon status
+```
+
+Diagnostic SSH is available only when the runner is disconnected or its daemon
+admission is non-fresh. It bypasses daemon job admission, does not materialize
+extensions or rotate the tunnel, and preserves the runner id, command, and an
+optional `--run-id` in the normal runner execution evidence.
+
+If `runner disconnect` reports `endpoint_identity_mismatch`, it retains local
+state and never sends a lifecycle mutation to the foreign endpoint. After the
+read-only SSH status probe proves an authoritative zero active-job count, retire
+only the controller-local state with:
+
+```sh
+homeboy runner disconnect <runner-id> --local-recovery
+```
+
+This operation does not claim the remote daemon was stopped or torn down.
+
 Configure a preferred runner with:
 
 ```sh
@@ -864,7 +890,9 @@ homeboy runner env <runner-id>
 
 `exec` submits the command to the connected runner daemon when `homeboy runner connect <runner-id>` has established a live loopback tunnel. If no daemon session is connected, local runners execute directly and SSH runners require explicit diagnostic `--ssh`. SSH runner raw exec is policy-denied by default until `policy.allow_raw_exec` is explicitly true.
 
-`--script-file -` reads stdin verbatim and requires at least one byte. Zero-byte stdin is a validation error before Homeboy builds or submits a runner execution plan. Whitespace-only stdin is valid and is passed to Bash verbatim, including newlines.
+`--script-file <path>` reads the controller-side source, then materializes it as a private, content-addressed `script-<sha256>.sh` under `${XDG_RUNTIME_DIR:-/tmp}/homeboy-runner-exec/<job-id>/` on the runner. Bash executes that file directly, so `$0` is its runner path. The job exports `HOMEBOY_RUNNER_EXEC_SCRIPT` with the same path and `HOMEBOY_RUNNER_EXEC_SCRIPT_SHA256` as `sha256:<digest>`; the wrapper records the digest in its durable command evidence, makes the file mode `0500`, and removes it when the runner job exits.
+
+`--script-file -` reads stdin verbatim on the controller with the same bounded capture and materialization behavior; it does not stream stdin through `bash -s`. Zero-byte stdin is a validation error before Homeboy builds or submits a runner execution plan. Whitespace-only stdin is valid and is materialized verbatim, including newlines.
 
 Place Homeboy options before the runner ID and use `--` before the remote command. Without the separator, Homeboy diagnoses known exec options that appear after a remote command; the separator preserves remote flags with names such as `--cwd`, `--raw`, and `--run-id`.
 

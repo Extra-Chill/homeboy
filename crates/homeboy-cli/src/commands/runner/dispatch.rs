@@ -954,6 +954,7 @@ fn map_env(result: CmdResult<RunnerEnvOutput>) -> CmdResult<RunnerCommandOutput>
 
 fn map_job(result: CmdResult<RunnerJobCommandOutput>) -> CmdResult<RunnerCommandOutput> {
     result.map(|(output, exit_code)| match output {
+        RunnerJobCommandOutput::List(output) => (RunnerCommandOutput::JobList(output), exit_code),
         RunnerJobCommandOutput::Daemon(output) => (RunnerCommandOutput::Job(output), exit_code),
         RunnerJobCommandOutput::Broker(output) => {
             (RunnerCommandOutput::BrokerJob(Box::new(output)), exit_code)
