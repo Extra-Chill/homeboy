@@ -2,6 +2,7 @@ pub use homeboy_extension_contract::test_result::TestScopeOutput;
 
 pub mod analyze;
 pub mod baseline;
+pub mod differential;
 pub mod drift;
 pub mod durations;
 pub mod parsing;
@@ -24,6 +25,12 @@ pub use analyze::{FailureCategory, FailureCluster, TestAnalysis, TestAnalysisInp
 pub use baseline::{
     compare as compare_baseline, load_baseline, load_baseline_from_ref, save_baseline,
     TestBaseline, TestBaselineComparison, TestCounts,
+};
+pub use differential::{
+    classify as classify_differential, classify_against_cache, measurement_from_test_output,
+    render_report, resolve_baseline_revision, BaselineCache, BaselineCacheKey, BaselineEvidence,
+    ComparisonBasis, DifferentialInput, DifferentialReport, DifferentialVerdict, MetricKind,
+    RunOutcome, TestMeasurement,
 };
 pub use drift::{ChangeType, DriftReport, DriftedTest, ProductionChange};
 pub use durations::{
