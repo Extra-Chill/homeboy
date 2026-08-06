@@ -19,7 +19,7 @@ pub const FUZZ_COVERAGE_RECONCILIATION_ARTIFACT_KIND: &str = "fuzz_coverage_reco
 /// reconciles it against `campaign`, writes the reconciliation JSON next to the
 /// request, and records it as a run artifact. Returns `Ok(None)` when the
 /// execution request file is absent.
-pub fn persist_fuzz_coverage_reconciliation(
+pub(crate) fn persist_fuzz_coverage_reconciliation(
     store: &ObservationStore,
     run_id: &str,
     execution_request_path: &Path,

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 
+use crate::parse::parse_fuzz_case_log_contents;
 use crate::*;
 
 #[test]

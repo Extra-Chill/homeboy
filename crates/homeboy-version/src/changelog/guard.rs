@@ -68,7 +68,7 @@ pub fn generated_file_mutation_is_authorized_for(
 /// changelog was modified it returns a [`ChangelogGuardViolation`] carrying a
 /// steering message. The caller decides whether to treat it as a warning hint
 /// or a hard failure.
-pub fn detect_changelog_edit(
+pub(crate) fn detect_changelog_edit(
     changelog_target: Option<&str>,
     changed_files: &[String],
 ) -> Option<ChangelogGuardViolation> {
