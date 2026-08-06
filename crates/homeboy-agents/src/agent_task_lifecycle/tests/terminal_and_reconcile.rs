@@ -1697,6 +1697,7 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
             local_url: Some(format!("http://{address}")),
             tunnel_pid: None,
             tunnel_process_start_identity: None,
+            proxy_forward: None,
             remote_daemon_pid: None,
             remote_daemon_lease_id: None,
             homeboy_version: "test".to_string(),
