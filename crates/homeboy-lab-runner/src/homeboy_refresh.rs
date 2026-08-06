@@ -479,6 +479,7 @@ pub fn refresh_homeboy_binary(
     // A Cook pin reserves its exact runtime from provider preflight through
     // durable runner-job binding. A refresh must drain that reservation rather
     // than rotating the configured binary underneath an admitted handoff.
+    let selected_binary_path = refreshed_binary_path(&plan, &exec_output.stdout)?;
     let promotion_candidate = parse_identity(&exec_output.stdout)
         .ok()
         .and_then(|identity| identity_commit(&identity))
@@ -579,7 +580,7 @@ pub fn refresh_homeboy_binary(
                 },
             )?;
             let updated_fields =
-                promote_verified_runner_binary(&plan.runner_id, &plan.binary_path)?;
+                promote_verified_runner_binary(&plan.runner_id, &selected_binary_path)?;
             Ok(SshBootstrapPromotion {
                 identity,
                 source_sha: source_sha_from_output(&exec_output.stdout),
@@ -670,19 +671,24 @@ pub fn refresh_homeboy_binary(
                 .and_then(Value::as_str)
                 .unwrap_or("candidate")
                 .to_string();
+            let candidate_binary_sha256 = materialized_binary_sha256(&exec_output.stdout);
+            let candidate_generation =
+                refreshed_generation_key(&candidate_identity, candidate_binary_sha256.clone());
             let draining_job_ids = active_jobs
                 .iter()
                 .map(|job| job.job_id.clone())
                 .collect::<Vec<_>>();
             if let Err(error) = rotate_daemon_generation(
                 &plan.runner_id,
-                &plan.binary_path,
+                &selected_binary_path,
                 &candidate_identity,
+                &candidate_generation,
+                candidate_binary_sha256.as_deref(),
                 &draining_job_ids,
             ) {
                 restore_runner_homeboy_path_if_selected(
                     &plan.runner_id,
-                    &plan.binary_path,
+                    &selected_binary_path,
                     previous_homeboy_path.as_deref(),
                 )?;
                 let mut phases = phase_summary.clone();
@@ -702,7 +708,7 @@ pub fn refresh_homeboy_binary(
                     phase_summary,
                     daemon_refreshed: true,
                     interrupted_job_ids: Vec::new(),
-                    selected_binary_path: plan.binary_path.clone(),
+                    selected_binary_path: selected_binary_path.clone(),
                     reconnect_required: false,
                     followup_commands: Vec::new(),
                     reconnect_deferred: None,
@@ -722,7 +728,7 @@ pub fn refresh_homeboy_binary(
             Err(_) => {
                 let deferred = defer_reconnect_after_promotion_race(
                     &plan.runner_id,
-                    &plan.binary_path,
+                    &selected_binary_path,
                     previous_homeboy_path.as_deref(),
                     &active_jobs,
                 )?;
@@ -738,7 +744,7 @@ pub fn refresh_homeboy_binary(
                         phase_summary,
                         daemon_refreshed: false,
                         interrupted_job_ids: Vec::new(),
-                        selected_binary_path: plan.binary_path.clone(),
+                        selected_binary_path: selected_binary_path.clone(),
                         reconnect_required: true,
                         followup_commands: deferred.followup_commands.clone(),
                         reconnect_deferred: Some(deferred),
@@ -756,7 +762,7 @@ pub fn refresh_homeboy_binary(
             return rollback_refresh_error_with(error, || {
                 restore_runner_homeboy_path_if_selected(
                     &plan.runner_id,
-                    &plan.binary_path,
+                    &selected_binary_path,
                     previous_homeboy_path.as_deref(),
                 )
                 .map(|_| ())
@@ -790,7 +796,7 @@ pub fn refresh_homeboy_binary(
                     || {
                         restore_runner_homeboy_path_if_selected(
                             &plan.runner_id,
-                            &plan.binary_path,
+                            &selected_binary_path,
                             previous_homeboy_path.as_deref(),
                         )
                         .map(|_| ())
@@ -872,7 +878,7 @@ pub fn refresh_homeboy_binary(
                     phase_summary,
                     daemon_refreshed: false,
                     interrupted_job_ids,
-                    selected_binary_path: plan.binary_path.clone(),
+                    selected_binary_path: selected_binary_path.clone(),
                     reconnect_required: true,
                     followup_commands: plan.followup_commands.clone(),
                     reconnect_deferred: None,
@@ -931,7 +937,7 @@ pub fn refresh_homeboy_binary(
                         phase_summary,
                         daemon_refreshed: false,
                         interrupted_job_ids,
-                        selected_binary_path: plan.binary_path.clone(),
+                        selected_binary_path: selected_binary_path.clone(),
                         reconnect_required: true,
                         followup_commands: plan.followup_commands.clone(),
                         reconnect_deferred: None,
@@ -970,7 +976,7 @@ pub fn refresh_homeboy_binary(
             phase_summary,
             daemon_refreshed,
             interrupted_job_ids,
-            selected_binary_path: plan.binary_path.clone(),
+            selected_binary_path: selected_binary_path.clone(),
             reconnect_required: !daemon_refreshed,
             followup_commands: plan.followup_commands,
             reconnect_deferred: None,
@@ -1325,7 +1331,8 @@ where
         Error::validation_invalid_argument("identity", message, Some(plan.runner_id.clone()), None)
     })?;
     let source_sha = source_sha_from_output(&stdout);
-    let (updated_fields, rollback) = promote(&plan.binary_path, &identity)?;
+    let binary_path = refreshed_binary_path(plan, &stdout)?;
+    let (updated_fields, rollback) = promote(&binary_path, &identity)?;
     Ok(SshBootstrapPromotion {
         identity,
         source_sha,
@@ -1935,7 +1942,7 @@ fn materialize_script(
     allow_downgrade: bool,
 ) -> String {
     format!(
-        "set -e\nsource={}\nref={}\ndir={}\nbinary={}\nallow_downgrade={}\nmkdir -p \"$(dirname \"$dir\")\"\ncheckout_existed=false\nif [ -d \"$dir/.git\" ]; then\n  checkout_existed=true\nelse\n  git clone \"$source\" \"$dir\"\nfi\ncurrent_remote=$(git -C \"$dir\" config --get remote.origin.url 2>/dev/null || true)\nif [ \"$current_remote\" != \"$source\" ]; then\n  git -C \"$dir\" remote set-url origin \"$source\" 2>/dev/null || git -C \"$dir\" remote add origin \"$source\"\nfi\ngit -C \"$dir\" fetch --prune origin\nrequested=$(git -C \"$dir\" rev-parse --verify --quiet \"origin/$ref\" || git -C \"$dir\" rev-parse --verify --quiet \"$ref\")\nif [ -z \"$requested\" ]; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ntarget=$(git -C \"$dir\" rev-parse --verify --quiet \"${{requested}}^{{commit}}\")\ncurrent=\nif [ \"$checkout_existed\" = true ]; then\n  current=$(git -C \"$dir\" rev-parse --verify --quiet HEAD || true)\nfi\nif [ -n \"$current\" ] && [ \"$current\" != \"$target\" ] && git -C \"$dir\" merge-base --is-ancestor \"$target\" \"$current\"; then\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$current\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target\" >&2\n  if [ \"$allow_downgrade\" != true ]; then\n    echo \"Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback\" >&2\n    exit 1\n  fi\nfi\ngit -C \"$dir\" checkout --quiet --force --detach \"$target\"\ngit -C \"$dir\" reset --hard \"$target\"\necho \"HOMEBOY_REFRESH_SOURCE_SHA=$target\"\ncargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\n\"$binary\" self identity\n",
+        "set -e\nsource={}\nref={}\ndir={}\nbinary={}\nallow_downgrade={}\nhash_binary() {{ (sha256sum \"$1\" 2>/dev/null || shasum -a 256 \"$1\") | awk '{{print $1}}'; }}\nmkdir -p \"$(dirname \"$dir\")\"\ncheckout_existed=false\nif [ -d \"$dir/.git\" ]; then\n  checkout_existed=true\nelse\n  git clone \"$source\" \"$dir\"\nfi\ncurrent_remote=$(git -C \"$dir\" config --get remote.origin.url 2>/dev/null || true)\nif [ \"$current_remote\" != \"$source\" ]; then\n  git -C \"$dir\" remote set-url origin \"$source\" 2>/dev/null || git -C \"$dir\" remote add origin \"$source\"\nfi\ngit -C \"$dir\" fetch --prune origin\nrequested=$(git -C \"$dir\" rev-parse --verify --quiet \"origin/$ref\" || git -C \"$dir\" rev-parse --verify --quiet \"$ref\")\nif [ -z \"$requested\" ]; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ntarget=$(git -C \"$dir\" rev-parse --verify --quiet \"${{requested}}^{{commit}}\")\ncurrent=\nif [ \"$checkout_existed\" = true ]; then\n  current=$(git -C \"$dir\" rev-parse --verify --quiet HEAD || true)\nfi\nif [ -n \"$current\" ] && [ \"$current\" != \"$target\" ] && git -C \"$dir\" merge-base --is-ancestor \"$target\" \"$current\"; then\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$current\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target\" >&2\n  if [ \"$allow_downgrade\" != true ]; then\n    echo \"Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback\" >&2\n    exit 1\n  fi\nfi\ngit -C \"$dir\" checkout --quiet --force --detach \"$target\"\ngit -C \"$dir\" reset --hard \"$target\"\necho \"HOMEBOY_REFRESH_SOURCE_SHA=$target\"\ncargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\nbinary_sha=$(hash_binary \"$binary\")\nif [ -z \"$binary_sha\" ]; then\n  echo \"could not hash materialized Homeboy binary\" >&2\n  exit 1\nfi\nslot_dir=\"$(dirname \"$dir\")/homeboy-$binary_sha\"\nimmutable_binary=\"$slot_dir/homeboy\"\nmkdir -p \"$slot_dir\"\nif [ -e \"$immutable_binary\" ]; then\n  existing_sha=$(hash_binary \"$immutable_binary\")\n  if [ \"$existing_sha\" != \"$binary_sha\" ]; then\n    echo \"immutable Homeboy binary slot hash mismatch\" >&2\n    exit 1\n  fi\nelse\n  staged_binary=$(mktemp \"$slot_dir/.homeboy.XXXXXX\")\n  trap 'rm -f \"$staged_binary\"' EXIT HUP INT TERM\n  cp \"$binary\" \"$staged_binary\"\n  chmod 0755 \"$staged_binary\"\n  staged_sha=$(hash_binary \"$staged_binary\")\n  if [ \"$staged_sha\" != \"$binary_sha\" ]; then\n    echo \"staged Homeboy binary hash mismatch\" >&2\n    exit 1\n  fi\n  if ! ln \"$staged_binary\" \"$immutable_binary\"; then\n    if [ ! -e \"$immutable_binary\" ] || [ \"$(hash_binary \"$immutable_binary\")\" != \"$binary_sha\" ]; then\n      echo \"immutable Homeboy binary slot publication failed\" >&2\n      exit 1\n    fi\n  fi\n  rm -f \"$staged_binary\"\n  trap - EXIT HUP INT TERM\nfi\necho \"HOMEBOY_REFRESH_BINARY_SHA256=$binary_sha\"\necho \"HOMEBOY_REFRESH_BINARY_PATH=$immutable_binary\"\n\"$immutable_binary\" self identity\n",
         quote_path(source),
         quote_path(git_ref),
         quote_path(target_dir),
@@ -1950,6 +1957,45 @@ fn source_sha_from_output(stdout: &str) -> Option<String> {
             .filter(|sha| !sha.is_empty())
             .map(str::to_string)
     })
+}
+
+fn materialized_binary_sha256(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(|line| {
+        line.strip_prefix("HOMEBOY_REFRESH_BINARY_SHA256=")
+            .filter(|sha| sha.len() == 64 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .map(str::to_string)
+    })
+}
+
+fn refreshed_binary_path(plan: &HomeboyBinaryRefreshPlan, stdout: &str) -> Result<String> {
+    if plan.mode != "materialize" {
+        return Ok(plan.binary_path.clone());
+    }
+    let path = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("HOMEBOY_REFRESH_BINARY_PATH="))
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "identity",
+                "materialized refresh did not report its immutable binary path",
+                Some(plan.runner_id.clone()),
+                None,
+            )
+        })?;
+    if materialized_binary_sha256(stdout).is_none() {
+        return Err(Error::validation_invalid_argument(
+            "identity",
+            "materialized refresh did not report its binary SHA-256",
+            Some(plan.runner_id.clone()),
+            None,
+        ));
+    }
+    Ok(path.to_string())
+}
+
+fn refreshed_generation_key(identity: &str, binary_sha256: Option<String>) -> String {
+    binary_sha256.unwrap_or_else(|| identity.to_string())
 }
 
 fn identity_probe_script(binary_path: &str) -> String {

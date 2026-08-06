@@ -899,6 +899,38 @@ fn materialize_script_records_the_peeled_commit_for_tags_and_direct_commits() {
             &parse_identity(&stdout).expect("source-built binary identity"),
         )
         .expect("peeled source identity matches the nested-workspace build commit");
+
+        let immutable_binary = refreshed_binary_path(&ssh_bootstrap_plan(), &stdout)
+            .expect("materialization reports immutable binary path");
+        let repeated = fixture_build_shell(&script)
+            .output()
+            .expect("repeat materialize script");
+        assert!(
+            repeated.status.success(),
+            "matching immutable slot is reusable: {}",
+            String::from_utf8_lossy(&repeated.stderr)
+        );
+        assert_eq!(
+            refreshed_binary_path(
+                &ssh_bootstrap_plan(),
+                &String::from_utf8(repeated.stdout).expect("repeat output is UTF-8"),
+            )
+            .expect("repeat reports immutable path"),
+            immutable_binary
+        );
+
+        if index == 2 {
+            std::fs::write(&immutable_binary, "corrupt immutable slot")
+                .expect("corrupt immutable slot for validation coverage");
+            let corrupt = fixture_build_shell(&script)
+                .output()
+                .expect("run materialize script against corrupt slot");
+            assert!(
+                !corrupt.status.success(),
+                "corrupt slot is never overwritten"
+            );
+            assert!(String::from_utf8_lossy(&corrupt.stderr).contains("slot hash mismatch"));
+        }
     }
 }
 
@@ -1414,6 +1446,16 @@ fn default_target_dir_is_ref_scoped() {
         default_target_dir("/runner/ws/", "origin/main"),
         "/runner/ws/_homeboy_binaries/homeboy-origin-main"
     );
+    let target_dir = default_target_dir("/home/chubes/Developer", "main");
+    let script = materialize_script(
+        "https://example.test/homeboy.git",
+        "main",
+        &target_dir,
+        &format!("{target_dir}/target/release/homeboy"),
+        false,
+    );
+    assert!(script.contains("slot_dir=\"$(dirname \"$dir\")/homeboy-$binary_sha\""));
+    assert!(!script.contains("_homeboy_binaries/$binary_sha"));
 }
 
 #[test]
