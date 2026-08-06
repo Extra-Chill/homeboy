@@ -12,8 +12,8 @@ pub struct AgentTaskFanoutArgs {
 pub enum AgentTaskFanoutCommand {
     /// Cook a wave of independent tasks, one child cook per issue.
     ///
-    /// Requires at least one deterministic gate: pass `--verify` or
-    /// `--private-verify`. The gate is not optional — a child cook that cannot
+    /// Every child requires a deterministic gate from shared --verify/
+    /// --private-verify inputs or --verification-profiles. A child that cannot
     /// verify its work cannot promote it (#9838).
     CookBatch(Box<AgentTaskFanoutCookBatchArgs>),
     /// Normalize and inspect a batch-cook plan without submitting or running it.
@@ -80,6 +80,10 @@ pub struct AgentTaskFanoutCookBatchArgs {
     pub ai_tool: Option<String>,
     #[command(flatten)]
     pub gates: VerifyGateArgs,
+    /// JSON verification profile declaration, inline or @file.json. Profiles
+    /// append to or replace shared --verify/--private-verify gates per issue.
+    #[arg(long = "verification-profiles", value_name = "JSON")]
+    pub verification_profiles: Option<String>,
     #[arg(long = "dry-run")]
     pub dry_run: bool,
     #[arg(long = "run-plan")]

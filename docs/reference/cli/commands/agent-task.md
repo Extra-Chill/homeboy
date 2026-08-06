@@ -665,7 +665,7 @@ homeboy agent-task fanout cook-batch [OPTIONS] <ISSUE_URL>...
 
 Cook a wave of independent tasks, one child cook per issue.
 
-Requires at least one deterministic gate: pass `--verify` or `--private-verify`. The gate is not optional — a child cook that cannot verify its work cannot promote it (#9838).
+Every child requires a deterministic gate from shared --verify/ --private-verify inputs or --verification-profiles. A child that cannot verify its work cannot promote it (#9838).
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -685,6 +685,7 @@ Requires at least one deterministic gate: pass `--verify` or `--private-verify`.
 | `--provider-profile` | `<PROFILE>` | _no help text_ |
 | `--secret-env` | `<ENV>` | _no help text_ |
 | `--provider-config` | `<JSON>` | _no help text_ |
+| `--ai-tool` | `<TEXT>` | AI tool disclosure recorded in every child PR's assistance attribution. When omitted, each child derives its disclosure from its effective provider and model selection |
 | `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
 | `--private-verify` | `<COMMAND>` | Like `--verify`, but the command's output is treated as private: only a pass/fail summary is revealed by default (see `--private-gate-reveal`). Satisfies the same mandatory-gate requirement as `--verify`. Use for gates whose logs may contain secrets. Repeatable |
 | `--private-gate-reveal` | `<POLICY>` | How much of a `--private-verify` gate's output to reveal: `summary-only` (default) shows just pass/fail; other policies expose more detail Values: `full-evidence`, `summary-only`, `redacted`, `no-detail`. |
@@ -702,6 +703,7 @@ Requires at least one deterministic gate: pass `--verify` or `--private-verify`.
 | `--gate-extension-input` | `<JSON>` | Explicit extension input as a JSON object with `id` and absolute `source`. Only selected inputs are copied into isolated HOME |
 | `--isolate-gate-home` | `<ISOLATE_GATE_HOME>` | Run gates with an isolated `$HOME` so gate side effects do not touch the operator's home directory (default true) Values: `true`, `false`. |
 | `--isolate-gate-xdg` | `<ISOLATE_GATE_XDG>` | Run gates with isolated XDG base directories so gate side effects do not touch the operator's config/cache/data dirs (default true) Values: `true`, `false`. |
+| `--verification-profiles` | `<JSON>` | JSON verification profile declaration, inline or @file.json. Profiles append to or replace shared --verify/--private-verify gates per issue |
 | `--dry-run` | flag | _no help text_ |
 | `--run-plan` | flag | _no help text_ |
 
@@ -811,6 +813,7 @@ Successful child cooks open or update their own pull requests.
 | `--selector` | `<PROVIDER_ID>` | _no help text_ |
 | `--model` | `<MODEL>` | _no help text_ |
 | `--record-run-id` | `<ID>` | _no help text_ |
+| `--ai-tool` | `<TEXT>` | AI tool disclosure recorded in every child PR's assistance attribution. Overrides the persisted plan value for this execution |
 
 ## `homeboy agent-task review`
 

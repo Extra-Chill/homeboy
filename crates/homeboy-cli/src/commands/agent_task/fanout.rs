@@ -1283,21 +1283,6 @@ fn cook_batch_inner(
     mut args: AgentTaskFanoutCookBatchArgs,
     attempt_dispatcher: Option<&CookAttemptDispatcherFactory>,
 ) -> CmdResult<Value> {
-    // Checked before provider readiness, worktree creation, or any other
-    // expensive preflight, so an operator who followed --help does not discover
-    // the requirement only after discovery succeeds (#9838).
-    if !args.gates.has_deterministic_gate() {
-        return Err(Error::validation_invalid_argument(
-            "verify",
-            "agent-task fanout cook-batch requires at least one deterministic gate: pass --verify or --private-verify",
-            None,
-            Some(vec![
-                "Add a public gate, e.g. --verify 'cargo test --workspace'.".to_string(),
-                "Use --private-verify for a gate whose output may contain secrets.".to_string(),
-                "A child cook that cannot verify its work cannot promote it, so the gate is not optional.".to_string(),
-            ]),
-        ));
-    }
     apply_provider_profile(&mut args);
     // Resolve the effective backend (explicit --backend or the configured
     // default) and validate it up front (#7717). Otherwise an omitted
@@ -1309,6 +1294,7 @@ fn cook_batch_inner(
     // pins every child cook to the same resolved backend.
     resolve_and_validate_effective_backend(&mut args)?;
     let mut plan = build_cook_batch_plan(&args)?;
+    validate_batch_cook_gates(&plan)?;
     let branches = plan
         .cooks
         .iter()
@@ -1387,10 +1373,7 @@ fn cook_batch_inner(
             "preflight": {
                 "provider_readiness_command": provider_readiness_command(&args),
                 "provider_selection": provider_selection_preflight(&args),
-                "deterministic_gates": {
-                    "verify": args.gates.verify,
-                    "private_verify": args.gates.private_verify,
-                }
+                "deterministic_gates": effective_batch_cook_gates(&plan)
             },
             "worktrees": worktrees,
             "plan": plan,
@@ -1768,6 +1751,8 @@ struct BatchCookSpec {
     verify: Vec<String>,
     #[serde(default)]
     private_verify: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verification_profile: Option<String>,
     #[serde(default = "default_private_gate_reveal")]
     private_gate_reveal: AgentTaskGateRevealPolicy,
     #[serde(default)]
@@ -2037,6 +2022,7 @@ fn cook_command(plan: &BatchCookFanoutPlan, _cook: &BatchCookSpec) -> Vec<String
 }
 
 fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCookFanoutPlan> {
+    let profiles = load_verification_profiles(args.verification_profiles.as_deref())?;
     let mut seen = HashSet::new();
     let mut cooks = Vec::with_capacity(args.issues.len());
     for issue_url in &args.issues {
@@ -2060,6 +2046,14 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
             &branch,
             &worktree,
         );
+        let task_selector = format!("issue-{}", issue.number);
+        let (verify, private_verify, verification_profile) = profiles.resolve(
+            issue_url,
+            &issue.key,
+            &task_selector,
+            &args.gates.verify,
+            &args.gates.private_verify,
+        )?;
         cooks.push(BatchCookSpec {
             cook_id: format!("issue-{}", issue.number),
             depends_on: Vec::new(),
@@ -2089,8 +2083,9 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
             ),
             to_worktree: worktree,
             provider_command: None,
-            verify: args.gates.verify.clone(),
-            private_verify: args.gates.private_verify.clone(),
+            verify,
+            private_verify,
+            verification_profile,
             private_gate_reveal: args.gates.private_gate_reveal,
             execution_policy: VerifyGateOptions::from(args.gates.clone()).execution_policy,
             gate_timeout_seconds: args.gates.gate_timeout_seconds,
@@ -2112,6 +2107,7 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
             ai_used_for: default_ai_used_for(),
         });
     }
+    profiles.validate_assignments(&cooks)?;
     let first = cooks
         .first()
         .map(|cook| cook.cook_id.clone())
@@ -2144,6 +2140,171 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
             "from": args.from,
         }),
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct VerificationProfiles {
+    #[serde(default)]
+    profiles: BTreeMap<String, VerificationProfile>,
+    #[serde(default)]
+    assignments: Vec<VerificationProfileAssignment>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VerificationProfile {
+    #[serde(default)]
+    verify: Vec<String>,
+    #[serde(default)]
+    private_verify: Vec<String>,
+    #[serde(default)]
+    mode: VerificationProfileMode,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+enum VerificationProfileMode {
+    #[default]
+    Append,
+    Replace,
+}
+
+#[derive(Debug, Deserialize)]
+struct VerificationProfileAssignment {
+    selector: String,
+    profile: String,
+}
+
+impl VerificationProfiles {
+    fn validate_assignments(&self, cooks: &[BatchCookSpec]) -> Result<()> {
+        for assignment in &self.assignments {
+            let matched = cooks.iter().any(|cook| {
+                cook.task_url.as_deref() == Some(assignment.selector.as_str())
+                    || cook
+                        .task_url
+                        .as_deref()
+                        .and_then(|url| IssueRef::parse(url).ok())
+                        .is_some_and(|issue| issue.key == assignment.selector)
+                    || cook.cook_id == assignment.selector
+            });
+            if !matched {
+                return Err(Error::validation_invalid_argument(
+                    "verification-profiles.assignments.selector",
+                    "selector_unmatched: verification profile selector did not match any batch child",
+                    Some(assignment.selector.clone()),
+                    Some(cooks.iter().map(|cook| cook.cook_id.clone()).collect()),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve(
+        &self,
+        issue_url: &str,
+        issue_key: &str,
+        task_selector: &str,
+        shared_verify: &[String],
+        shared_private_verify: &[String],
+    ) -> Result<(Vec<String>, Vec<String>, Option<String>)> {
+        let matches = self
+            .assignments
+            .iter()
+            .filter(|assignment| {
+                assignment.selector == issue_url
+                    || assignment.selector == issue_key
+                    || assignment.selector == task_selector
+            })
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            return Err(Error::validation_invalid_argument(
+                "verification-profiles.assignments",
+                "selector_ambiguous: more than one verification profile matches a child",
+                Some(task_selector.to_string()),
+                Some(
+                    matches
+                        .into_iter()
+                        .map(|entry| entry.profile.clone())
+                        .collect(),
+                ),
+            ));
+        }
+        let Some(assignment) = matches.into_iter().next() else {
+            return Ok((shared_verify.to_vec(), shared_private_verify.to_vec(), None));
+        };
+        let profile = self.profiles.get(&assignment.profile).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "verification-profiles.assignments",
+                "profile_unknown: assignment references an undeclared verification profile",
+                Some(assignment.profile.clone()),
+                Some(self.profiles.keys().cloned().collect()),
+            )
+        })?;
+        let (mut verify, mut private_verify) = match profile.mode {
+            VerificationProfileMode::Append => {
+                (shared_verify.to_vec(), shared_private_verify.to_vec())
+            }
+            VerificationProfileMode::Replace => (Vec::new(), Vec::new()),
+        };
+        verify.extend(profile.verify.clone());
+        private_verify.extend(profile.private_verify.clone());
+        Ok((verify, private_verify, Some(assignment.profile.clone())))
+    }
+}
+
+fn load_verification_profiles(spec: Option<&str>) -> Result<VerificationProfiles> {
+    let Some(spec) = spec else {
+        return Ok(VerificationProfiles {
+            profiles: BTreeMap::new(),
+            assignments: Vec::new(),
+        });
+    };
+    let raw = config::read_json_spec_to_string(spec)?;
+    let profiles: VerificationProfiles = serde_json::from_str(&raw).map_err(|error| {
+        Error::validation_invalid_argument(
+            "verification-profiles",
+            format!("invalid JSON verification profile declaration: {error}"),
+            None,
+            None,
+        )
+    })?;
+    for assignment in &profiles.assignments {
+        if assignment.selector.trim().is_empty() {
+            return Err(Error::invalid_argument(
+                "verification-profiles.assignments.selector",
+                "selector_empty: each profile assignment requires a selector",
+            ));
+        }
+    }
+    Ok(profiles)
+}
+
+fn validate_batch_cook_gates(plan: &BatchCookFanoutPlan) -> Result<()> {
+    for cook in &plan.cooks {
+        if cook.verify.is_empty() && cook.private_verify.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "verification-profiles",
+                "gate_missing: every cook-batch child requires verify or private_verify before worktree creation",
+                Some(cook.cook_id.clone()),
+                Some(vec!["Pass shared --verify/--private-verify gates, or assign a non-empty profile to this child.".to_string()]),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn effective_batch_cook_gates(plan: &BatchCookFanoutPlan) -> Vec<Value> {
+    plan.cooks
+        .iter()
+        .map(|cook| {
+            serde_json::json!({
+                "cook_id": cook.cook_id,
+                "task_url": cook.task_url,
+                "profile": cook.verification_profile,
+                "verify": cook.verify,
+                "private_verify": cook.private_verify,
+            })
+        })
+        .collect()
 }
 
 fn apply_provider_profile(args: &mut AgentTaskFanoutCookBatchArgs) {
@@ -3258,6 +3419,7 @@ fi
                 isolate_gate_home: true,
                 isolate_gate_xdg: true,
             },
+            verification_profiles: None,
             dry_run: true,
             run_plan: false,
         }
@@ -3380,8 +3542,105 @@ fi
     }
 
     #[test]
+    fn cook_batch_resolves_mixed_verification_profiles_and_round_trips_commands() {
+        let mut batch_args = cook_batch_args();
+        batch_args
+            .issues
+            .push("https://github.com/Extra-Chill/homeboy/issues/6455".to_string());
+        batch_args.gates.verify = vec!["shared gate --strict='exact bytes'".to_string()];
+        batch_args.verification_profiles = Some(
+            serde_json::json!({
+                "profiles": {
+                    "php": { "verify": ["composer audit --format=json"], "mode": "append" },
+                    "node": { "verify": ["npm audit --omit=dev"], "mode": "replace" },
+                    "rust": { "verify": ["cargo fmt --check", "cargo test -p homeboy-cli"] }
+                },
+                "assignments": [
+                    { "selector": "Extra-Chill/homeboy#6453", "profile": "php" },
+                    { "selector": "issue-6454", "profile": "node" },
+                    { "selector": "https://github.com/Extra-Chill/homeboy/issues/6455", "profile": "rust" }
+                ]
+            })
+            .to_string(),
+        );
+
+        let plan = build_cook_batch_plan(&batch_args).expect("mixed verification plan");
+        assert_eq!(plan.cooks[0].verification_profile.as_deref(), Some("php"));
+        assert_eq!(
+            plan.cooks[0].verify,
+            vec![
+                "shared gate --strict='exact bytes'",
+                "composer audit --format=json"
+            ]
+        );
+        assert_eq!(plan.cooks[1].verification_profile.as_deref(), Some("node"));
+        assert_eq!(plan.cooks[1].verify, vec!["npm audit --omit=dev"]);
+        assert_eq!(plan.cooks[2].verification_profile.as_deref(), Some("rust"));
+        assert_eq!(
+            plan.cooks[2].verify,
+            vec![
+                "shared gate --strict='exact bytes'",
+                "cargo fmt --check",
+                "cargo test -p homeboy-cli"
+            ]
+        );
+
+        let round_trip = BatchCookFanoutPlan::from_value(
+            serde_json::to_value(&plan).expect("serialize plan"),
+            &args(),
+        )
+        .expect("deserialize plan");
+        assert_eq!(round_trip.cooks.len(), plan.cooks.len());
+        for (reloaded, original) in round_trip.cooks.iter().zip(&plan.cooks) {
+            assert_eq!(reloaded.verification_profile, original.verification_profile);
+            assert_eq!(reloaded.verify, original.verify);
+            assert_eq!(reloaded.private_verify, original.private_verify);
+        }
+        assert_eq!(
+            round_trip.cooks[2]
+                .to_cook_invocation(&round_trip)
+                .expect("Lab handoff invocation")
+                .options
+                .gates
+                .verify,
+            plan.cooks[2].verify
+        );
+    }
+
+    #[test]
+    fn cook_batch_rejects_an_unmatched_verification_profile_selector() {
+        let mut args = cook_batch_args();
+        args.verification_profiles = Some(
+            r#"{"profiles":{"node":{"verify":["npm audit"]}},"assignments":[{"selector":"issue-9999","profile":"node"}]}"#.to_string(),
+        );
+
+        let error = build_cook_batch_plan(&args).expect_err("unmatched profile selector");
+        assert_eq!(
+            error.details["field"],
+            "verification-profiles.assignments.selector"
+        );
+        assert!(error.details["problem"]
+            .as_str()
+            .expect("typed problem")
+            .starts_with("selector_unmatched:"));
+    }
+
+    #[test]
+    fn cook_batch_requires_a_gate_for_every_resolved_child() {
+        let mut args = cook_batch_args();
+        args.gates.verify.clear();
+        args.verification_profiles = Some(
+            r#"{"profiles":{"rust":{"verify":["cargo test"]}},"assignments":[{"selector":"issue-6453","profile":"rust"}]}"#.to_string(),
+        );
+
+        let plan = build_cook_batch_plan(&args).expect("plan before worktree creation");
+        let error = validate_batch_cook_gates(&plan).expect_err("every child needs a gate");
+        assert_eq!(error.details["problem"], "gate_missing: every cook-batch child requires verify or private_verify before worktree creation");
+    }
+
+    #[test]
     fn fanout_ai_tool_override_is_typed_persisted_and_applied_to_every_child() {
-        with_isolated_home(|_| {
+        with_materialized_cook_batch_worktrees(|| {
             let mut cook_args = cook_batch_args();
             cook_args.ai_tool = Some("OpenAI GPT-5.6 Sol via OpenCode".to_string());
             let plan =
