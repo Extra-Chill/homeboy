@@ -7,7 +7,7 @@ mod types;
 // the historical spellings every caller already uses.
 pub use component_version::{
     read as read_component_version, read_by_id as read_version,
-    read_snapshot as read_component_snapshot, read_target, require_targets, TargetRead,
+    read_snapshot as read_component_snapshot, TargetRead,
 };
 // These were `pub(crate)` while version lived inside the release crate. They
 // are now read across a crate boundary by `homeboy-release` (version_guard,
@@ -162,7 +162,7 @@ pub fn canonical_version_target(component: &Component) -> Option<&VersionTarget>
         })
 }
 
-pub fn replace_versions(
+pub(crate) fn replace_versions(
     content: &str,
     pattern: &str,
     new_version: &str,
@@ -184,7 +184,7 @@ fn find_version_pattern_in_extension(
 
 /// Update version in a file, handling both JSON and text-based version files.
 /// Returns the number of replacements made.
-pub fn update_version_in_file(
+pub(crate) fn update_version_in_file(
     path: &str,
     pattern: &str,
     old_version: &str,

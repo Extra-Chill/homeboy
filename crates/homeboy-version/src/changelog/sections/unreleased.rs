@@ -24,7 +24,7 @@ pub fn count_unreleased_entries(content: &str, aliases: &[String]) -> usize {
 
 /// Extract bullet item text from the unreleased section.
 /// Returns normalized bullet content without the leading marker.
-pub fn get_unreleased_entries(content: &str, aliases: &[String]) -> Vec<String> {
+pub(crate) fn get_unreleased_entries(content: &str, aliases: &[String]) -> Vec<String> {
     let lines: Vec<&str> = content.lines().collect();
     let start = match find_next_section_start(&lines, aliases) {
         Some(idx) => idx,
