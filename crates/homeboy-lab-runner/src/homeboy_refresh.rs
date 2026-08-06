@@ -1136,10 +1136,13 @@ fn refresh_readiness_postcondition(runner_id: &str) -> Result<HomeboyRefreshRead
     let report = super::status(runner_id)?;
     let generations =
         super::runner_generation_inventory_for_session(runner_id, report.session.as_ref())?;
+    let owners =
+        super::runner_generation_job_owners_for_session(runner_id, report.session.as_ref())?;
     Ok(refresh_readiness_from_status(
         runner_id,
         &report,
         &generations,
+        &owners,
     ))
 }
 
@@ -1147,12 +1150,13 @@ fn refresh_readiness_from_status(
     runner_id: &str,
     report: &super::RunnerStatusReport,
     generations: &[super::RunnerDaemonGenerationStatus],
+    owners: &[super::RunnerGenerationJobOwners],
 ) -> HomeboyRefreshReadiness {
     let draining_count = generations
         .iter()
         .filter(|generation| !generation.admission_owner)
         .count();
-    let summary = report.admission_summary_with_generations(generations, draining_count);
+    let summary = report.admission_summary_with_generations(generations, owners, draining_count);
     if summary.accepting_jobs {
         return HomeboyRefreshReadiness {
             state: HomeboyRefreshReadinessState::Ready,
