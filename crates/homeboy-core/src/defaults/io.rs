@@ -1,6 +1,8 @@
 use std::fs;
 use std::sync::{OnceLock, RwLock};
 
+use serde_json::Value;
+
 use crate::engine::local_files;
 use crate::paths;
 
@@ -120,6 +122,20 @@ pub fn save_config(config: &HomeboyConfig) -> crate::Result<()> {
 /// Check if the product config file exists.
 pub fn config_exists() -> bool {
     paths::homeboy_json().map(|p| p.exists()).unwrap_or(false)
+}
+
+/// Return an explicitly configured value from the on-disk file.
+///
+/// The effective configuration adds serde defaults, so callers that need to
+/// report ownership must distinguish a file override from a built-in value.
+pub fn config_file_value(pointer: &str) -> Option<Value> {
+    let path = paths::homeboy_json().ok()?;
+    let content = local_files::read_file(&path, &format!("read {}", path.display())).ok()?;
+    serde_json::from_str::<HomeboyConfig>(&content).ok()?;
+    let value = serde_json::from_str::<Value>(&content).ok()?;
+    crate::config::get_json_pointer(&value, pointer)
+        .ok()?
+        .cloned()
 }
 
 /// Delete the product config file (reset to defaults).
