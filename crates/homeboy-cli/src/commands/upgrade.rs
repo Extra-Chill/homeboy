@@ -15,10 +15,6 @@ pub struct UpgradeArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Skip automatic restart after upgrade
-    #[arg(long)]
-    pub no_restart: bool,
-
     /// Skip extension updates (only upgrade the binary)
     #[arg(long)]
     pub skip_extensions: bool,

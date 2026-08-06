@@ -17,7 +17,6 @@ pub fn runner_upgrade_command(
     let mut command = vec![
         homeboy_path.to_string(),
         "upgrade".to_string(),
-        "--no-restart".to_string(),
         "--skip-extensions".to_string(),
         "--skip-runners".to_string(),
     ];
@@ -243,7 +242,7 @@ pub fn runner_upgrade_recovery_commands(
     // the daemon. Only an explicit selected executable is safe to invoke remotely.
     if std::path::Path::new(selected_homeboy_path).is_absolute() {
         commands.push(format!(
-            "homeboy runner exec --ssh {} -- {} upgrade --no-restart",
+            "homeboy runner exec --ssh {} -- {} upgrade",
             shell_arg(runner_id),
             shell_arg(selected_homeboy_path)
         ));

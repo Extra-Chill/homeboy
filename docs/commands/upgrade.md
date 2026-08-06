@@ -24,7 +24,6 @@ Runner sync uses this contract:
 
 - `--check`: Check for updates without installing. Returns version information without making changes.
 - `--force`: Force upgrade even if already at the latest version.
-- `--no-restart`: Skip automatic restart after upgrade. Useful for scripted environments.
 - `--skip-extensions`: Skip automatic extension updates.
 - `--skip-runners`: Upgrade the controller only; cannot be combined with `--upgrade-runner`.
 - `--upgrade-runner`: Select configured runners to converge with the controller upgrade. Repeat to target multiple runners.
@@ -73,12 +72,6 @@ Upgrade to the latest version:
 
 ```sh
 homeboy upgrade
-```
-
-Upgrade without auto-restart:
-
-```sh
-homeboy upgrade --no-restart
 ```
 
 Force reinstall:
