@@ -55,6 +55,19 @@ pub enum CommandCapability {
     Mutation,
 }
 
+/// Position of the bare `--` that divides Homeboy's arguments from the ones it
+/// forwards verbatim, if the invocation has one.
+///
+/// This is the single separator primitive. Only the FIRST bare `--` divides:
+/// any later one is part of the forwarded command (`homeboy ssh host -- sh -c
+/// -- x`) and belongs to whoever receives it. Every question about the boundary
+/// — "which arguments may Homeboy read" ([`homeboy_owned_args`]) and "where
+/// does the passthrough begin" (`mark_explicit_passthrough`) — resolves through
+/// this one answer rather than through a private rescan (#11755).
+pub fn argv_separator_index(args: &[String]) -> Option<usize> {
+    args.iter().position(|arg| arg == "--")
+}
+
 /// The arguments Homeboy itself owns: everything before the first bare `--`.
 ///
 /// Everything after it is forwarded verbatim to a remote or child command —
@@ -63,8 +76,13 @@ pub enum CommandCapability {
 /// remote `-h` short-circuit this function to `ReadOnly` on an `ssh` invocation
 /// that is otherwise `Mutation`, and made the startup help fast path claim an
 /// invocation clap would go on to parse successfully (#11577).
+///
+/// This is the only sanctioned way to inspect argv for a flag Homeboy owns.
+/// `owned_args_guard_test` fails the build when a new raw argv flag scan
+/// appears outside it, because the two sites above were written months apart
+/// and nothing but review stood between them and a third.
 pub fn homeboy_owned_args(args: &[String]) -> &[String] {
-    match args.iter().position(|arg| arg == "--") {
+    match argv_separator_index(args) {
         Some(separator) => &args[..separator],
         None => args,
     }
@@ -335,4 +353,35 @@ mod tests {
         let nested = args(&["ssh", "host", "--", "sh", "-c", "--", "x"]);
         assert_eq!(homeboy_owned_args(&nested), &args(&["ssh", "host"])[..]);
     }
+
+    #[test]
+    fn the_separator_primitive_names_only_the_first_boundary() {
+        assert_eq!(argv_separator_index(&args(&["runner", "status"])), None);
+        assert_eq!(
+            argv_separator_index(&args(&["ssh", "host", "--", "df"])),
+            Some(2)
+        );
+
+        // A nested separator is the forwarded command's own argument.
+        let nested = args(&["ssh", "host", "--", "sh", "-c", "--", "x"]);
+        assert_eq!(argv_separator_index(&nested), Some(2));
+
+        // The two views agree by construction: the owned prefix ends exactly
+        // where the primitive says the boundary is.
+        for argv in [
+            args(&["runner", "status"]),
+            args(&["ssh", "host", "--", "df"]),
+            nested,
+        ] {
+            let owned = homeboy_owned_args(&argv);
+            assert_eq!(
+                owned.len(),
+                argv_separator_index(&argv).unwrap_or(argv.len())
+            );
+        }
+    }
 }
+
+#[cfg(test)]
+#[path = "owned_args_guard_test.rs"]
+mod owned_args_guard_test;
