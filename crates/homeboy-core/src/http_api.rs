@@ -767,6 +767,15 @@ fn api_reconcile_metadata(run: &RunRecord, reason: &str) -> Value {
     })
 }
 
+/// Exact-id run lookup for HTTP handlers.
+///
+/// Intentionally **not** routed through
+/// [`crate::observation::runs_service::require_run`] (#6768). The facade adds
+/// durable label aliasing plus a connected-runner probe that mirrors remote run
+/// records into the local store — a network round trip and a write. This module
+/// is a read-only, transport-free contract whose handlers must stay latency
+/// bounded, so it resolves record ids only. Every other run read path (CLI
+/// `runs`, `fuzz`, dossier, evidence) uses the facade.
 fn require_run(store: &ObservationStore, run_id: &str) -> Result<RunRecord> {
     store.get_run(run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
