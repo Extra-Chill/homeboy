@@ -36,6 +36,16 @@ use super::{
 /// environment resolves to this durable store and its executable is the active
 /// binary; absent evidence remains ambiguous.
 pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonProcessCandidate>> {
+    // macOS cannot expose another process's environment through `ps`, so a live
+    // operator daemon has no durable-store evidence there. Test harnesses opt
+    // into this debug-only namespace to exclude every process except ones that
+    // explicitly name the test store in their argv.
+    let test_namespace = cfg!(debug_assertions)
+        && std::env::var_os("HOMEBOY_TEST_DAEMON_NAMESPACE").is_some_and(|namespace| {
+            jobs_path
+                .parent()
+                .is_some_and(|state_dir| Path::new(&namespace) == state_dir)
+        });
     let output = Command::new("ps")
         .args(["-axeww", "-o", "pid=", "-o", "comm=", "-o", "command="])
         .output()
@@ -61,6 +71,9 @@ pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonPr
                 candidate.durable_store_path = Some(store.display().to_string());
                 candidate.ownership = classify_candidate_store(&candidate, jobs_path, &store);
             }
+            if test_namespace && candidate.durable_store_path.as_deref() != jobs_path.to_str() {
+                candidate.ownership = DaemonProcessOwnership::Unrelated;
+            }
             candidate
         })
         .collect())
@@ -75,6 +88,10 @@ pub fn supervise(addr: &str, startup_token: &str) -> Result<()> {
             Some("resolve current executable".to_string()),
         )
     })?;
+    let state_dir = crate::paths::daemon_state_file()?
+        .parent()
+        .ok_or_else(|| Error::internal_unexpected("daemon state file has no parent"))?
+        .to_path_buf();
     let child = Command::new(exe)
         // The argument is the portable, exact ownership proof used when a
         // platform cannot inspect a process environment. Keep it aligned with
@@ -86,7 +103,9 @@ pub fn supervise(addr: &str, startup_token: &str) -> Result<()> {
             addr,
             "--startup-token",
             startup_token,
+            "--state-dir",
         ])
+        .arg(state_dir)
         .env(DAEMON_STARTUP_TOKEN_ENV, startup_token)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
