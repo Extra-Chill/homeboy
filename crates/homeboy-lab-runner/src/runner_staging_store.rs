@@ -129,12 +129,23 @@ struct StoredStage {
     envelope: RemoteRunnerStagingEnvelope,
     receipt: RemoteRunnerStagingReceipt,
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StagingIntent {
+    envelope: RemoteRunnerStagingEnvelope,
+    source_artifact: RunnerSourceArtifact,
+    state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runner_job_id: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StagingStoreState {
     schema: String,
     stages: BTreeMap<String, StoredStage>,
+    #[serde(default)]
+    intents: BTreeMap<String, StagingIntent>,
 }
 
 impl Default for StagingStoreState {
@@ -142,6 +153,7 @@ impl Default for StagingStoreState {
         Self {
             schema: STORE_SCHEMA.to_string(),
             stages: BTreeMap::new(),
+            intents: BTreeMap::new(),
         }
     }
 }
@@ -200,6 +212,16 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
         runner_job_id: impl Into<String>,
     ) -> Result<RemoteRunnerStagingReceipt> {
         let runner_job_id = runner_job_id.into();
+        self.stage_durable_with_submit(envelope, |_| Ok(runner_job_id))
+    }
+
+    /// Lock-held admission state machine: intent -> source_ready -> job_submitted
+    /// -> receipt. `submit` must use the handoff idempotency key.
+    pub fn stage_durable_with_submit(
+        &mut self,
+        envelope: &RemoteRunnerStagingEnvelope,
+        submit: impl FnOnce(&RemoteRunnerStagingEnvelope) -> Result<String>,
+    ) -> Result<RemoteRunnerStagingReceipt> {
         envelope.validate()?;
         if envelope.handoff.runner_id != self.runner_id {
             return Err(Error::validation_invalid_argument(
@@ -232,9 +254,38 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
             return Ok(existing.receipt.clone());
         }
 
+        state
+            .intents
+            .entry(key.clone())
+            .or_insert_with(|| StagingIntent {
+                envelope: envelope.clone(),
+                source_artifact: source_artifact.clone(),
+                state: "intent_created".to_string(),
+                runner_job_id: None,
+            });
+        self.persist(&state)?;
+
         // The lock covers materialization and receipt publication. Concurrent
         // requests therefore observe one durable admission, not two writes.
         self.persist_source_artifact(&source_artifact, &bytes)?;
+        // Source bytes are now durable before any queue entry can become claimable.
+        state.intents.get_mut(key).expect("intent").state = "source_ready".to_string();
+        self.persist(&state)?;
+        let runner_job_id = match state
+            .intents
+            .get(key)
+            .and_then(|intent| intent.runner_job_id.clone())
+        {
+            Some(job_id) => job_id,
+            None => {
+                let job_id = submit(envelope)?;
+                let intent = state.intents.get_mut(key).expect("intent");
+                intent.runner_job_id = Some(job_id.clone());
+                intent.state = "job_submitted".to_string();
+                self.persist(&state)?;
+                job_id
+            }
+        };
         let artifacts = self.materializer.materialize(envelope)?;
         let receipt = RemoteRunnerStagingReceipt {
             schema: REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA.to_string(),
@@ -252,6 +303,7 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
                 receipt: receipt.clone(),
             },
         );
+        state.intents.remove(key);
         self.persist(&state)?;
         Ok(receipt)
     }
@@ -767,34 +819,37 @@ impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionS
             .as_ref()
             .expect("validated source artifact")
             .descriptor();
-        let job =
-            jobs.submit_remote_runner_job(homeboy_core::api_jobs::RemoteRunnerJobRequest {
-                runner_id: request.envelope.handoff.runner_id.clone(),
-                project_id: None,
-                operation: "runner_staged_execution".to_string(),
-                command: request.envelope.handoff.recipe.normalized_args.clone(),
-                cwd: None,
-                env: std::collections::HashMap::new(),
-                secret_env_names: Vec::new(),
-                secret_env_plan: Default::default(),
-                env_materialization: None,
-                capture_patch: request.envelope.handoff.recipe.capture_patch,
-                source_snapshot: None,
-                path_materialization_plan: None,
-                require_paths: Vec::new(),
-                extension_env_providers: Vec::new(),
-                lab_runner_workload: None,
-                lifecycle: None,
-                workspace_claim_binding: None,
-                workspace_owner_lease: None,
-                metadata: Some(serde_json::json!({
-                    "submission_key": request.envelope.handoff.idempotency_key,
-                    "staged_source_artifact": source_artifact,
-                })),
-            })?;
         let receipt = transport
             .store
-            .stage_durable_with_job_id(&request.envelope, job.id.to_string())?;
+            .stage_durable_with_submit(&request.envelope, |envelope| {
+                let job = jobs.submit_remote_runner_job(
+                    homeboy_core::api_jobs::RemoteRunnerJobRequest {
+                        runner_id: envelope.handoff.runner_id.clone(),
+                        project_id: None,
+                        operation: "runner_staged_execution".to_string(),
+                        command: envelope.handoff.recipe.normalized_args.clone(),
+                        cwd: None,
+                        env: std::collections::HashMap::new(),
+                        secret_env_names: Vec::new(),
+                        secret_env_plan: Default::default(),
+                        env_materialization: None,
+                        capture_patch: envelope.handoff.recipe.capture_patch,
+                        source_snapshot: None,
+                        path_materialization_plan: None,
+                        require_paths: Vec::new(),
+                        extension_env_providers: Vec::new(),
+                        lab_runner_workload: None,
+                        lifecycle: None,
+                        workspace_claim_binding: None,
+                        workspace_owner_lease: None,
+                        metadata: Some(serde_json::json!({
+                            "submission_key": envelope.handoff.idempotency_key,
+                            "staged_source_artifact": source_artifact,
+                        })),
+                    },
+                )?;
+                Ok(job.id.to_string())
+            })?;
         Ok(serde_json::json!({ "receipt": receipt }))
     }
 }
