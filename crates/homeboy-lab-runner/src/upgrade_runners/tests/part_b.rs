@@ -269,11 +269,11 @@ fn fails_when_configured_runner_path_remains_older_than_local_after_successful_u
 }
 
 #[test]
-fn binary_store_source_pin_realigns_to_materialized_controller_binary() {
+fn version_addressed_binary_store_source_pin_realigns_to_materialized_controller_binary() {
     let source_dir = git_source_checkout();
     let expected_identity = source_checkout_build_identity(source_dir.path()).unwrap();
     let stale_path =
-        "/home/user/Developer/_homeboy_binaries/homeboy-2f9a1eb64e0bb84d/target/release/homeboy";
+        "/home/user/Developer/_homeboy_binaries/homeboy-v0-331-0/target/release/homeboy";
     let remote_source = "/home/user/Developer/_homeboy_binaries/homeboy-current";
     let selected_binary = format!("{remote_source}/target/release/homeboy");
     let runner = ssh_runner("lab", Some(stale_path));
@@ -314,6 +314,9 @@ fn binary_store_source_pin_realigns_to_materialized_controller_binary() {
     assert_eq!(updated[0].homeboy_path, selected_binary);
     assert_eq!(updates, vec![("lab".to_string(), selected_binary)]);
     assert!(is_homeboy_source_build_path(stale_path));
+    assert_eq!(commands[2][0], stale_path);
+    assert_eq!(commands[2][commands[2].len() - 2], "--source-path");
+    assert_eq!(commands[2][commands[2].len() - 1], remote_source);
     assert!(!commands
         .iter()
         .any(|command| command.first() == Some(&"homeboy".to_string())));
