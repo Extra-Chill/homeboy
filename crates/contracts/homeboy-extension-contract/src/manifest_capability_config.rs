@@ -72,12 +72,15 @@ pub struct DiscoveryMarkerConfig {
 /// Each key maps a capability name to a script path relative to the extension directory.
 ///
 /// Every field here must have a live consumer in core. A key with no reader is
-/// not a feature, it is a promise the manifest cannot keep: `crossref` is
-/// declared by the WordPress extension and has *never* existed on this struct,
-/// so serde has silently dropped it since the day it was added, leaving a
-/// ~185-line script and a README row wired to nothing. `topology` was the
-/// mirror image — it existed here, and nothing ever declared it — and was
-/// removed in #11124.
+/// not a feature, it is a promise the manifest cannot keep. `crossref` is the
+/// cautionary case: the WordPress extension declared it, but it *never* existed
+/// as a field on this struct, so serde silently dropped it on every parse for
+/// the entire life of the key — leaving a 573-line script and a README row
+/// wired to nothing. Nothing failed, nothing warned; the cost was only ever
+/// visible to someone who went looking. It was removed at the source in
+/// Extra-Chill/homeboy-extensions#2565 (key, script, and README row).
+/// `topology` was the mirror image — it existed here, and nothing ever
+/// declared it — and was removed in #11124.
 ///
 /// Unknown keys are dropped rather than rejected (no `deny_unknown_fields`),
 /// which is the right call for forward compatibility but means a typo or a

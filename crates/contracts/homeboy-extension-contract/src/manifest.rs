@@ -177,12 +177,24 @@ pub struct ExtensionManifest {
     /// (`lifecycle::source_metadata`) — and nothing else in here has a reader.
     ///
     /// Landing anything else here makes it inert *silently*, which is how
-    /// shipped manifests accumulated `dependency_materialization_recipes` (51
-    /// lines), `required_output_declarations` (26 lines), `testing`, and `docs`:
-    /// all parse, all survive a round-trip, none are ever consulted by anything
-    /// in this workspace. A key that core is meant to act on belongs on a typed
-    /// field, where its absence of a reader is a compile-time fact rather than
-    /// something a grep has to discover. (#11124)
+    /// shipped manifests accumulated `required_output_declarations` (26 lines),
+    /// `testing`, `docs`, `component_type`, and `homeboy_version_target`: all
+    /// parsed, all survived a round-trip, none were ever consulted by anything
+    /// in this workspace. Extra-Chill/homeboy-extensions#2565 removed that set
+    /// at the source.
+    ///
+    /// Two things deliberately stayed, and the distinction matters: no reader
+    /// *here* is not the same as no reader *anywhere*.
+    /// `dependency_materialization_recipes` (51 lines) is still inert to core
+    /// but is asserted on by the WordPress extension's own smoke tests.
+    /// managed-preview's `browser_trace_helpers` and `preview_backends` have no
+    /// reader in this workspace or in the extensions repo, which makes their
+    /// inertness an unprovable negative from here rather than a demonstrated
+    /// one — so they were left alone.
+    ///
+    /// A key that core is meant to act on belongs on a typed field, where its
+    /// absence of a reader is a compile-time fact rather than something a grep
+    /// has to discover. (#11124)
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
 
