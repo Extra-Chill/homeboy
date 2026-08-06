@@ -22,6 +22,22 @@ homeboy extension show <extension_id> [--skip-ready-check]
 
 Print detailed manifest, runtime, capability, and readiness information for one installed extension.
 
+### Notification transport discovery
+
+`extension list` includes each extension's compact `notification_transports`
+inventory. `extension show <extension_id>` provides the same declared transport
+`id` and `schema` for one extension. These read-only outputs deliberately omit
+the transport command argv.
+
+Use the discovered ID as the route-less default or pair it with an explicit
+route for a schedule:
+
+```sh
+homeboy extension list --skip-ready-check
+homeboy config set /notifications/default_transport '"<transport-id>"'
+homeboy schedule add --notification-transport <transport-id> --notification-route '<transport-route>' ...
+```
+
 ### Readiness is the expensive part of inventory
 
 Everything `list`/`show` report except `ready`, `ready_reason`, and
@@ -261,11 +277,12 @@ Extension entry (`extensions[]`):
   each of which means the check did not produce a live pass/fail)
 - `linked`: whether the extension is symlinked
 - `path`: extension directory path (may be empty if unknown)
-- Optional fields include `ready_reason`, `ready_detail`, `error`, `symlink_target`, `source_revision`, `cli_tool`, `cli_display_name`, `actions`, `has_setup`, and `has_ready_check`.
+- Optional fields include `ready_reason`, `ready_detail`, `error`, `symlink_target`, `source_revision`, `cli_tool`, `cli_display_name`, `actions`, `notification_transports`, `has_setup`, and `has_ready_check`.
 
 Extension detail (`extension.show`):
 
 - `structured_sidecars`: declared structured sidecar contracts, each with `name`, `path`, and `schema_version`
+- `notification_transports`: declared transport descriptors with `id` and `schema`; command argv is not exposed
 
 ## Exit code
 
