@@ -155,7 +155,53 @@ fn split_lint_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_core::component::{Component, ScopedExtensionConfig};
     use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn summary_runner_captures_streams_for_evidence() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let extension = home.path().join(".config/homeboy/extensions/fixture");
+            std::fs::create_dir_all(&extension).expect("extension directory");
+            std::fs::write(
+                extension.join("fixture.json"),
+                r#"{"name":"fixture","version":"1.0.0","lint":{"extension_script":"lint.sh"}}"#,
+            )
+            .expect("extension manifest");
+            let component = Component {
+                id: "fixture".to_string(),
+                extensions: Some(HashMap::from([(
+                    "fixture".to_string(),
+                    ScopedExtensionConfig::default(),
+                )])),
+                ..Default::default()
+            };
+            let run_dir = RunDir::create().expect("run dir");
+
+            let summary = build_lint_runner(LintRunnerRequest {
+                component: &component,
+                path_override: None,
+                settings: &[],
+                summary: true,
+                file: None,
+                glob: None,
+                errors_only: false,
+                sniffs: None,
+                exclude_sniffs: None,
+                category: None,
+                step: None,
+                changed_files: None,
+                run_dir: &run_dir,
+            })
+            .expect("summary runner");
+
+            assert!(
+                !summary.is_passthrough(),
+                "summary mode captures full child output in run evidence"
+            );
+        });
+    }
 
     #[test]
     fn split_lint_settings_preserves_typed_json_values() {

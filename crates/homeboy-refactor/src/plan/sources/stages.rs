@@ -317,7 +317,7 @@ pub(super) fn run_lint_stage(
             component,
             path_override: None,
             settings,
-            summary: false,
+            summary: options.summary,
             file: options.file.as_deref(),
             glob: effective_glob,
             errors_only: options.sniff_filters.errors_only,
@@ -876,7 +876,7 @@ mod tests {
         fs::write(
             extension.join("lint.sh"),
             format!(
-                "#!/bin/sh\nset -eu\nfile=\"$HOMEBOY_COMPONENT_PATH/src/example.fixture\"\necho \"${{HOMEBOY_FIX_ONLY:-diagnose}}:${{HOMEBOY_STEP:-all}}\" >> \"$HOMEBOY_COMPONENT_PATH/runner.log\"\nif [ \"${{HOMEBOY_FIX_ONLY:-}}\" = 1 ]; then\n  [ \"${{HOMEBOY_STEP:-}}\" = fixture-fixer ] || exit 91\n  {}\n  exit 0\nfi\nif grep -q unresolved \"$file\"; then\n  printf '%s\\n' '[{{\"tool\":\"fixture\",\"file\":\"src/example.fixture\",\"message\":\"unresolved fixture finding\",\"rule\":\"fixture.rule\",\"fixable\":true}}]' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nelse\n  printf '%s\\n' '[]' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nfi\n",
+                "#!/bin/sh\nset -eu\nfile=\"$HOMEBOY_COMPONENT_PATH/src/example.fixture\"\necho \"${{HOMEBOY_FIX_ONLY:-diagnose}}:${{HOMEBOY_STEP:-all}}:${{HOMEBOY_SUMMARY_MODE:-0}}\" >> \"$HOMEBOY_COMPONENT_PATH/runner.log\"\nif [ \"${{HOMEBOY_FIX_ONLY:-}}\" = 1 ]; then\n  [ \"${{HOMEBOY_STEP:-}}\" = fixture-fixer ] || exit 91\n  {}\n  exit 0\nfi\nif grep -q unresolved \"$file\"; then\n  printf '%s\\n' '[{{\"tool\":\"fixture\",\"file\":\"src/example.fixture\",\"message\":\"unresolved fixture finding\",\"rule\":\"fixture.rule\",\"fixable\":true}}]' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nelse\n  printf '%s\\n' '[]' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nfi\n",
                 if mutates { "printf 'resolved\\n' > \"$file\"" } else { ":" }
             ),
         )
@@ -941,7 +941,37 @@ mod tests {
             assert_eq!(stage.summary.files_modified, 1);
             assert_eq!(
                 fs::read_to_string(root.join("runner.log")).unwrap(),
-                "diagnose:all\n1:fixture-fixer\ndiagnose:all\n"
+                "diagnose:all:0\n1:fixture-fixer:0\ndiagnose:all:0\n"
+            );
+            let _ = fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn lint_fix_summary_mode_is_forwarded_to_diagnostics_and_fixer() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let root = tmp_dir("summary-fix");
+            init_routed_lint_repo(&root);
+            write_routed_lint_extension(home.path(), "summary-fixture", true);
+            let run_dir = RunDir::create().unwrap();
+
+            run_lint_stage(
+                &routed_component(&root, "summary-fixture"),
+                &root,
+                &[],
+                &LintSourceOptions {
+                    summary: true,
+                    ..Default::default()
+                },
+                None,
+                true,
+                &run_dir,
+            )
+            .expect("summary fix should succeed");
+
+            assert_eq!(
+                fs::read_to_string(root.join("runner.log")).unwrap(),
+                "diagnose:all:1\n1:fixture-fixer:1\ndiagnose:all:1\n"
             );
             let _ = fs::remove_dir_all(root);
         });
@@ -978,7 +1008,7 @@ mod tests {
             assert!(error.message.contains("unresolved fixture finding"));
             assert_eq!(
                 fs::read_to_string(root.join("runner.log")).unwrap(),
-                "diagnose:all\n1:fixture-fixer\ndiagnose:all\n"
+                "diagnose:all:0\n1:fixture-fixer:0\ndiagnose:all:0\n"
             );
             let _ = fs::remove_dir_all(root);
         });

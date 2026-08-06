@@ -96,6 +96,7 @@ pub fn build_test_refactor_request(
 #[derive(Debug, Clone, Default)]
 pub struct LintSourceOptions {
     pub selected_files: Option<Vec<String>>,
+    pub summary: bool,
     pub file: Option<String>,
     pub glob: Option<String>,
     pub sniff_filters: homeboy_extension::lint::LintSniffFilters,

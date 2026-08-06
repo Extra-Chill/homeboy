@@ -229,7 +229,10 @@ pub(super) fn build_lint_summary(
     LintSummaryOutput {
         total_findings: findings.len(),
         categories,
-        top_findings: findings.iter().take(20).cloned().collect(),
+        // Individual findings remain in the persisted lint evidence and the
+        // non-summary response. A summary must stay bounded regardless of the
+        // number of findings or the size of their messages.
+        top_findings: Vec::new(),
         producer_summaries: producer_summaries.to_vec(),
         exit_code,
     }
