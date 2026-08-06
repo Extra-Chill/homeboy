@@ -609,6 +609,38 @@ fn pin_update(
     ))
 }
 
+fn pin_rename(
+    project_id: &str,
+    old_path: &str,
+    new_path: &str,
+    pin_type: ProjectPinType,
+) -> CmdResult<ProjectOutput> {
+    let pin = project::rename_pin(project_id, map_pin_type(pin_type), old_path, new_path)?;
+
+    Ok((
+        project::build_pin_output("project.pin.rename", project_id, pin),
+        0,
+    ))
+}
+
+fn map_pin_type(pin_type: ProjectPinType) -> project::PinType {
+    match pin_type {
+        ProjectPinType::File => project::PinType::File,
+        ProjectPinType::Log => project::PinType::Log,
+    }
+}
+
+fn status(project_id: &str, health_only: bool) -> CmdResult<ProjectOutput> {
+    homeboy::log_status!("project", "Checking '{}'...", project_id);
+
+    let report = project::status_report(project_id, health_only)?;
+    let exit_code = report
+        .health
+        .as_ref()
+        .is_some_and(|health| !health.state.is_healthy()) as i32;
+    Ok((project::build_status_output(project_id, report), exit_code))
+}
+
 #[cfg(test)]
 mod tests {
     use super::status;
@@ -687,36 +719,4 @@ mod tests {
             );
         });
     }
-}
-
-fn pin_rename(
-    project_id: &str,
-    old_path: &str,
-    new_path: &str,
-    pin_type: ProjectPinType,
-) -> CmdResult<ProjectOutput> {
-    let pin = project::rename_pin(project_id, map_pin_type(pin_type), old_path, new_path)?;
-
-    Ok((
-        project::build_pin_output("project.pin.rename", project_id, pin),
-        0,
-    ))
-}
-
-fn map_pin_type(pin_type: ProjectPinType) -> project::PinType {
-    match pin_type {
-        ProjectPinType::File => project::PinType::File,
-        ProjectPinType::Log => project::PinType::Log,
-    }
-}
-
-fn status(project_id: &str, health_only: bool) -> CmdResult<ProjectOutput> {
-    homeboy::log_status!("project", "Checking '{}'...", project_id);
-
-    let report = project::status_report(project_id, health_only)?;
-    let exit_code = report
-        .health
-        .as_ref()
-        .is_some_and(|health| !health.state.is_healthy()) as i32;
-    Ok((project::build_status_output(project_id, report), exit_code))
 }

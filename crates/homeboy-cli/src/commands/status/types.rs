@@ -377,7 +377,7 @@ fn is_zero(value: &usize) -> bool {
 pub enum StatusResult {
     Summary(StatusOutput),
     UnregisteredContext(UnregisteredContextStatusOutput),
-    Full(homeboy::core::context::report::ContextReport),
+    Full(Box<homeboy::core::context::report::ContextReport>),
     Dashboard(ProjectDashboardOutput),
 }
 

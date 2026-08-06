@@ -120,7 +120,40 @@ pub fn bind_materialized_component_to_project(
     apply_component_overrides(&component, project)
 }
 
-fn apply_standalone_component_fallbacks(
+/// Reapply project-owned configuration after loading source-owned configuration
+/// from an alternate checkout of an attached component.
+pub fn bind_materialized_component_at_path(
+    component: crate::component::Component,
+    project: &Project,
+) -> Result<crate::component::Component> {
+    let attachment = project
+        .components
+        .iter()
+        .find(|attachment| attachment.id == component.id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "components",
+                format!(
+                    "Project '{}' has no attached component '{}'",
+                    project.id, component.id
+                ),
+                Some(project.id.clone()),
+                None,
+            )
+        })?;
+    let mut component = bind_materialized_component_to_project(
+        component,
+        project,
+        None,
+        attachment.remote_path.clone(),
+        attachment.deployment_provider.clone(),
+    );
+    inherit_project_extensions(&mut component, project);
+    crate::component::resolve_remote_path(&mut component);
+    Ok(component)
+}
+
+pub(crate) fn apply_standalone_component_fallbacks(
     component: &mut crate::component::Component,
     standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
 ) {
@@ -142,6 +175,17 @@ fn apply_standalone_component_fallbacks(
 
     if component.remote_url.is_none() {
         component.remote_url = standalone.remote_url;
+    }
+}
+
+fn inherit_project_extensions(component: &mut crate::component::Component, project: &Project) {
+    if component.extensions.is_none() || component.extensions.as_ref().is_some_and(|e| e.is_empty())
+    {
+        if let Some(project_extensions) = &project.extensions {
+            if !project_extensions.is_empty() {
+                component.extensions = Some(project_extensions.clone());
+            }
+        }
     }
 }
 

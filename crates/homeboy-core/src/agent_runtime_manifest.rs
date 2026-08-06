@@ -358,17 +358,12 @@ fn default_runtime_freshness() -> String {
     "unverifiable".to_string()
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRuntimeFreshness {
     Pinned,
+    #[default]
     Unverifiable,
-}
-
-impl Default for AgentRuntimeFreshness {
-    fn default() -> Self {
-        Self::Unverifiable
-    }
 }
 
 pub fn runtime_materialization_plan(
@@ -725,7 +720,7 @@ fn discover_standalone_agent_runtime_catalog_in(
     for entry in entries.flatten() {
         match load_standalone_agent_runtime_manifest(&entry.path(), manifest_path_for) {
             StandaloneAgentRuntimeManifestLoad::Loaded(manifest) => {
-                catalog.manifests.push(manifest)
+                catalog.manifests.push(*manifest)
             }
             StandaloneAgentRuntimeManifestLoad::Skipped => {}
             StandaloneAgentRuntimeManifestLoad::Invalid(diagnostic) => {
@@ -737,7 +732,7 @@ fn discover_standalone_agent_runtime_catalog_in(
 }
 
 enum StandaloneAgentRuntimeManifestLoad {
-    Loaded(AgentRuntimeManifest),
+    Loaded(Box<AgentRuntimeManifest>),
     Skipped,
     Invalid(AgentRuntimeDiscoveryDiagnostic),
 }
@@ -782,7 +777,7 @@ fn load_standalone_agent_runtime_manifest(
                 class: class.to_string(),
                 message: error
                     .validation_json_error()
-                    .unwrap_or_else(|| error.message.as_str())
+                    .unwrap_or(error.message.as_str())
                     .to_string(),
                 runtime_id: Some(id),
                 extension_id: None,
@@ -819,7 +814,7 @@ fn load_standalone_agent_runtime_manifest(
     ) {
         return StandaloneAgentRuntimeManifestLoad::Invalid(diagnostic);
     }
-    StandaloneAgentRuntimeManifestLoad::Loaded(manifest)
+    StandaloneAgentRuntimeManifestLoad::Loaded(Box::new(manifest))
 }
 
 pub(crate) fn discover_agent_runtime_catalog_from_extensions(

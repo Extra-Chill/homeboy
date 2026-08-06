@@ -234,10 +234,12 @@ fn run_audit(args: &AuditRunWorkflowArgs) -> homeboy_error::Result<Option<AuditW
             &args.source_path,
             &changed,
             Some(git_ref),
-            &plan,
-            &args.reference_paths,
-            &args.extension_overrides,
-            None,
+            crate::AuditExecution {
+                plan: &plan,
+                reference_paths: &args.reference_paths,
+                extension_overrides: &args.extension_overrides,
+                dead_code_references: None,
+            },
         )?))
     } else {
         Ok(Some(crate::audit_path_with_id_with_plan_and_analysis(
@@ -482,10 +484,12 @@ fn audit_reference_result(
         &reference_root.path().to_string_lossy(),
         &changed,
         None,
-        &audit_plan(args),
-        &args.reference_paths,
-        &args.extension_overrides,
-        dead_code_references,
+        crate::AuditExecution {
+            plan: &audit_plan(args),
+            reference_paths: &args.reference_paths,
+            extension_overrides: &args.extension_overrides,
+            dead_code_references,
+        },
     )?
     .result;
     apply_finding_filters(&mut reference, &args.only_kinds, &args.exclude_kinds);
@@ -591,7 +595,7 @@ fn build_comparison_output(
                 baseline_comparison: comparison,
                 measurement: measurement_for(args),
                 changed_since: changed_since_summary,
-                summary: None,
+                summary: Box::new(None),
                 fixability,
                 extension_phase_timings: Vec::new(),
                 actionable: None,

@@ -35,12 +35,14 @@ pub(crate) fn validate_source_roots(
     let missing = rules
         .iter()
         .flat_map(|rule| {
-            rule.include_path_contains.iter().filter_map(|root| {
-                (!fingerprints
-                    .iter()
-                    .any(|fingerprint| fingerprint.relative_path.contains(root)))
-                .then(|| format!("{}: {root}", rule.id))
-            })
+            rule.include_path_contains
+                .iter()
+                .filter(|root| {
+                    !fingerprints
+                        .iter()
+                        .any(|fingerprint| fingerprint.relative_path.contains(*root))
+                })
+                .map(|root| format!("{}: {root}", rule.id))
         })
         .collect::<Vec<_>>();
 

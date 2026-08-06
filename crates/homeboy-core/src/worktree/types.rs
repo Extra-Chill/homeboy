@@ -26,17 +26,12 @@ pub enum CleanupPolicy {
     PreserveOnFailure,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BranchCleanupIntent {
+    #[default]
     DeleteWhenMerged,
     Preserve,
-}
-
-impl Default for BranchCleanupIntent {
-    fn default() -> Self {
-        Self::DeleteWhenMerged
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -250,6 +245,7 @@ pub struct AdoptedWorkspaceRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // Registry records are returned by value.
 pub enum WorkspaceRefRecord {
     Task(TaskWorktreeRecord),
     Adopted(AdoptedWorkspaceRecord),

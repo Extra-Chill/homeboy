@@ -65,8 +65,29 @@ struct CliEnvelope {
     error: Option<Value>,
 }
 
+struct RemoteDaemonConnectOptions<'a> {
+    orphan_lease_id: Option<&'a str>,
+    confirmed_no_pid_job_ids: &'a [uuid::Uuid],
+    reconcile_leaseless_orphans: bool,
+    missing_lease_id: Option<&'a str>,
+    recorded_pid: Option<u32>,
+    recorded_endpoint: Option<&'a str>,
+    live_lease_expectation: Option<(&'a str, u32)>,
+}
+
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
-    connect_with_orphan_adoption(runner_id, None, &[], false, None, None, None)
+    connect_with_orphan_adoption_and_live_lease(
+        runner_id,
+        RemoteDaemonConnectOptions {
+            orphan_lease_id: None,
+            confirmed_no_pid_job_ids: &[],
+            reconcile_leaseless_orphans: false,
+            missing_lease_id: None,
+            recorded_pid: None,
+            recorded_endpoint: None,
+            live_lease_expectation: None,
+        },
+    )
 }
 
 /// Start and validate a second daemon without touching the recorded admission
@@ -109,8 +130,7 @@ pub(crate) fn rotate_daemon_generation(
     let state_dir =
         format!("$HOME/.config/homeboy/daemon-generations/{runner_segment}/{generation}");
     let command = format!(
-        "HOMEBOY_DAEMON_STATE_DIR={} {} daemon ensure-running --addr 127.0.0.1:0",
-        format!("\"{state_dir}\""),
+        "HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\" {} daemon ensure-running --addr 127.0.0.1:0",
         shell::quote_arg(candidate_homeboy),
     );
     let output = client.execute_with_timeout(&command, REMOTE_RUNNER_CONNECT_TIMEOUT);
@@ -158,40 +178,42 @@ pub(crate) fn rotate_daemon_generation(
         inspected_freshness: None,
     };
     let session_path = session_path(runner_id)?;
-    let (local_port, tunnel_pid, local_url, daemon) = match connect_remote_daemon(
-        &server,
-        &client,
-        candidate_homeboy,
-        daemon.clone(),
-        "",
-        candidate_identity,
-        runner_id,
-        &session_path,
-    ) {
-        Ok(connection) => connection,
-        Err((report, _)) => {
-            // Startup may have created the candidate lease even though tunnel
-            // or identity validation failed. Stop that exact lease and erase a
-            // pre-existing candidate ledger entry before returning to A.
-            if let Some(lease_id) = daemon.lease_id.as_deref() {
-                let command = format!(
-                    "{} daemon stop --force --lease-id {}",
-                    shell::quote_arg(candidate_homeboy),
-                    shell::quote_arg(lease_id),
-                );
-                let _ = client.execute(&command);
+    let (local_port, tunnel_pid, local_url, daemon) =
+        match connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
+            server: &server,
+            homeboy: candidate_homeboy,
+            daemon: daemon.clone(),
+            expected_version: "",
+            expected_identity: candidate_identity,
+            runner_id,
+            session_path: &session_path,
+        }) {
+            Ok(connection) => connection,
+            Err(report) => {
+                let (report, _) = *report;
+                // Startup may have created the candidate lease even though tunnel
+                // or identity validation failed. Stop that exact lease and erase a
+                // pre-existing candidate ledger entry before returning to A.
+                if let Some(lease_id) = daemon.lease_id.as_deref() {
+                    let command = format!(
+                        "{} daemon stop --force --lease-id {}",
+                        shell::quote_arg(candidate_homeboy),
+                        shell::quote_arg(lease_id),
+                    );
+                    let _ = client.execute(&command);
+                }
+                let _ =
+                    super::generation_store::rollback_candidate(runner_id, &current, &generation);
+                return Err(Error::validation_invalid_argument(
+                    "reconnect",
+                    report
+                        .failure_message
+                        .unwrap_or_else(|| "candidate daemon tunnel validation failed".to_string()),
+                    Some(runner_id.to_string()),
+                    None,
+                ));
             }
-            let _ = super::generation_store::rollback_candidate(runner_id, &current, &generation);
-            return Err(Error::validation_invalid_argument(
-                "reconnect",
-                report
-                    .failure_message
-                    .unwrap_or_else(|| "candidate daemon tunnel validation failed".to_string()),
-                Some(runner_id.to_string()),
-                None,
-            ));
-        }
-    };
+        };
     let candidate = RunnerSession {
         runner_id: runner_id.to_string(),
         mode: RunnerTunnelMode::DirectSsh,
@@ -306,13 +328,15 @@ pub fn connect_with_orphan_adoption(
 ) -> Result<(RunnerConnectReport, i32)> {
     connect_with_orphan_adoption_and_live_lease(
         runner_id,
-        orphan_lease_id,
-        confirmed_no_pid_job_ids,
-        reconcile_leaseless_orphans,
-        missing_lease_id,
-        recorded_pid,
-        recorded_endpoint,
-        None,
+        RemoteDaemonConnectOptions {
+            orphan_lease_id,
+            confirmed_no_pid_job_ids,
+            reconcile_leaseless_orphans,
+            missing_lease_id,
+            recorded_pid,
+            recorded_endpoint,
+            live_lease_expectation: None,
+        },
     )
 }
 
@@ -326,26 +350,31 @@ pub fn connect_with_live_lease_adoption(
 ) -> Result<(RunnerConnectReport, i32)> {
     connect_with_orphan_adoption_and_live_lease(
         runner_id,
-        None,
-        &[],
-        false,
-        None,
-        None,
-        None,
-        Some((lease_id, pid)),
+        RemoteDaemonConnectOptions {
+            orphan_lease_id: None,
+            confirmed_no_pid_job_ids: &[],
+            reconcile_leaseless_orphans: false,
+            missing_lease_id: None,
+            recorded_pid: None,
+            recorded_endpoint: None,
+            live_lease_expectation: Some((lease_id, pid)),
+        },
     )
 }
 
 fn connect_with_orphan_adoption_and_live_lease(
     runner_id: &str,
-    orphan_lease_id: Option<&str>,
-    confirmed_no_pid_job_ids: &[uuid::Uuid],
-    reconcile_leaseless_orphans: bool,
-    missing_lease_id: Option<&str>,
-    recorded_pid: Option<u32>,
-    recorded_endpoint: Option<&str>,
-    live_lease_expectation: Option<(&str, u32)>,
+    options: RemoteDaemonConnectOptions<'_>,
 ) -> Result<(RunnerConnectReport, i32)> {
+    let RemoteDaemonConnectOptions {
+        orphan_lease_id,
+        confirmed_no_pid_job_ids,
+        reconcile_leaseless_orphans,
+        missing_lease_id,
+        recorded_pid,
+        recorded_endpoint,
+        live_lease_expectation,
+    } = options;
     // Reconnect replaces daemon runtime state. It shares the promotion lease
     // with binary selection so a second session cannot reconnect against a
     // different configured executable halfway through the transaction.
@@ -778,19 +807,19 @@ fn connect_with_orphan_adoption_and_live_lease(
             previous_session.as_ref(),
             "ensure_remote_daemon",
             |admission_fence| {
-                ensure_remote_daemon(
-                    &client,
+                ensure_remote_daemon(remote_daemon::RemoteDaemonEnsureRequest {
+                    client: &client,
                     homeboy,
                     runner_id,
-                    previous_session.as_ref(),
-                    &configured_build_identity,
+                    previous_session: previous_session.as_ref(),
+                    configured_identity: &configured_build_identity,
                     orphan_lease_id,
                     confirmed_no_pid_job_ids,
                     live_lease_expectation,
-                    Some(&replacement_operation_id),
+                    replacement_operation_id: Some(&replacement_operation_id),
                     admission_fence,
-                    false,
-                )
+                    registry_lock_held: false,
+                })
                 .map_err(Error::internal_unexpected)
             },
         )
@@ -834,19 +863,19 @@ fn connect_with_orphan_adoption_and_live_lease(
         .build_identity
         .clone()
         .unwrap_or(configured_build_identity.clone());
-    let connection = connect_remote_daemon(
-        &server,
-        &client,
+    let connection = connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
+        server: &server,
         homeboy,
         daemon,
-        &expected_version,
-        &expected_identity,
+        expected_version: &expected_version,
+        expected_identity: &expected_identity,
         runner_id,
-        &session_path,
-    );
+        session_path: &session_path,
+    });
     let (local_port, tunnel_pid, local_url, daemon) = match connection {
         Ok(connection) => connection,
-        Err((mut report, exit_code)) => {
+        Err(report) => {
+            let (mut report, exit_code) = *report;
             attach_state_loss_recovery(&mut report, state_loss_recovery);
             attach_leaseless_recovery(&mut report, leaseless_recovery, recovery_evidence);
             return Ok((report, exit_code));
@@ -1610,9 +1639,22 @@ pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
 /// Return the persisted controller-side session projection without reconnecting,
 /// probing a daemon, or reconciling generation state.
 pub fn persisted_status(runner_id: &str) -> Result<RunnerStatusReport> {
+    persisted_status_until(
+        runner_id,
+        std::time::Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+    )
+}
+
+/// Return the persisted session projection under one caller-owned deadline.
+/// This is intentionally observation-only: recovery may read a stale record,
+/// but every direct-session liveness probe receives only the time remaining.
+pub fn persisted_status_until(
+    runner_id: &str,
+    deadline: std::time::Instant,
+) -> Result<RunnerStatusReport> {
     let session_path = session_path(runner_id)?;
-    let session = read_session_for_status(runner_id)?;
-    let state = status_session_state(session.as_ref());
+    let session = read_session_for_status_until(runner_id, deadline)?;
+    let state = status_session_state_until(session.as_ref(), deadline);
     Ok(RunnerStatusReport {
         runner_id: runner_id.to_string(),
         connected: state == RunnerSessionState::Connected,
@@ -1717,7 +1759,7 @@ fn reconnect_job_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
             None,
         ));
     }
-    let Some((_server_id, server, client)) = resolve_ssh_runner(&runner)? else {
+    let Some((_server_id, server, _client)) = resolve_ssh_runner(&runner)? else {
         return Err(Error::validation_invalid_argument(
             "runner",
             "job log recovery requires an SSH-backed runner",
@@ -1736,26 +1778,27 @@ fn reconnect_job_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
         inspected_freshness: None,
     };
     let session_path = session_path(runner_id)?;
-    let (local_port, tunnel_pid, local_url, daemon) = connect_remote_daemon(
-        &server,
-        &client,
-        "",
-        daemon,
-        &owner.homeboy_version,
-        owner.homeboy_build_identity.as_deref().unwrap_or(""),
-        runner_id,
-        &session_path,
-    )
-    .map_err(|(report, _)| {
-        Error::validation_invalid_argument(
-            "runner",
-            report.failure_message.unwrap_or_else(|| {
-                "unable to reattach the job-owning daemon generation".to_string()
-            }),
-            Some(runner_id.to_string()),
-            None,
-        )
-    })?;
+    let (local_port, tunnel_pid, local_url, daemon) =
+        connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
+            server: &server,
+            homeboy: "",
+            daemon,
+            expected_version: &owner.homeboy_version,
+            expected_identity: owner.homeboy_build_identity.as_deref().unwrap_or(""),
+            runner_id,
+            session_path: &session_path,
+        })
+        .map_err(|report| {
+            let (report, _) = *report;
+            Error::validation_invalid_argument(
+                "runner",
+                report.failure_message.unwrap_or_else(|| {
+                    "unable to reattach the job-owning daemon generation".to_string()
+                }),
+                Some(runner_id.to_string()),
+                None,
+            )
+        })?;
     let tunnel_process_start_identity = match capture_tunnel_process_start_identity(tunnel_pid) {
         Ok(identity) => identity,
         Err(error) => {
@@ -2210,40 +2253,50 @@ fn runner_jobs(
     runner_id: &str,
     session: &RunnerSession,
 ) -> Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> {
+    let timeout = crate::readonly_probe::readonly_probe_timeout();
     let client = Client::builder()
-        .timeout(crate::readonly_probe::readonly_probe_timeout())
+        .timeout(timeout)
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build active job client: {err}")))?;
-    let (body, source) = if let Some(local_url) = session.local_url.as_deref() {
-        let data = daemon_get(&client, local_url, "/jobs")?;
-        (
-            data.get("body").cloned().ok_or_else(|| {
-                Error::internal_unexpected("daemon jobs response missing data.body")
-            })?,
-            RunnerJobSource::Daemon,
-        )
-    } else if session.mode == RunnerTunnelMode::Reverse {
-        let Some(broker_url) = session.broker_url.as_deref() else {
+    runner_jobs_with_client(runner_id, session, &client, timeout)
+}
+
+fn runner_jobs_with_client(
+    runner_id: &str,
+    session: &RunnerSession,
+    client: &Client,
+    timeout: Duration,
+) -> Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> {
+    let result: Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> = (|| {
+        let (body, source) = if let Some(local_url) = session.local_url.as_deref() {
+            let data = daemon_get(client, local_url, "/jobs")?;
+            (
+                data.get("body").cloned().ok_or_else(|| {
+                    Error::internal_unexpected("daemon jobs response missing data.body")
+                })?,
+                RunnerJobSource::Daemon,
+            )
+        } else if session.mode == RunnerTunnelMode::Reverse {
+            let broker_url = session.broker_url.as_deref().ok_or_else(|| {
+                Error::internal_unexpected(format!(
+                    "reverse runner `{runner_id}` is connected but has no broker URL for active-job status"
+                ))
+            })?;
+            (
+                broker_http::get_json(
+                    client,
+                    broker_url,
+                    "/jobs",
+                    "list reverse runner broker jobs",
+                    None,
+                )?,
+                RunnerJobSource::Broker,
+            )
+        } else {
             return Err(Error::internal_unexpected(format!(
-                "reverse runner `{runner_id}` is connected but has no broker URL for active-job status"
+                "runner `{runner_id}` is connected but has no active-job status endpoint"
             )));
         };
-        (
-            broker_http::get_json(
-                &client,
-                broker_url,
-                "/jobs",
-                "list reverse runner broker jobs",
-                None,
-            )?,
-            RunnerJobSource::Broker,
-        )
-    } else {
-        return Err(Error::internal_unexpected(format!(
-            "runner `{runner_id}` is connected but has no active-job status endpoint"
-        )));
-    };
-    let result: Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> = (|| {
         let active_jobs = parse_runner_jobs(
             &body,
             "active_runner_jobs",
@@ -2261,8 +2314,9 @@ fn runner_jobs(
         Ok((active_jobs, stale_jobs))
     })();
     if let Err(error) = &result {
-        let timeout = crate::readonly_probe::readonly_probe_timeout();
-        let timed_out = error.message.to_ascii_lowercase().contains("timed out");
+        let timed_out = error.details["request_timeout"]
+            .as_bool()
+            .unwrap_or_else(|| error.message.to_ascii_lowercase().contains("timed out"));
         crate::readonly_probe::record_degradation(crate::readonly_probe::ReadOnlyProbeDegradation {
             probe: "runner_typed_jobs".to_string(),
             runner_id: Some(runner_id.to_string()),
@@ -2271,7 +2325,7 @@ fn runner_jobs(
             } else {
                 crate::readonly_probe::REASON_PROBE_UNAVAILABLE
             },
-            timeout_seconds: timed_out.then_some(timeout.as_secs()).unwrap_or(0),
+            timeout_seconds: if timed_out { timeout.as_secs() } else { 0 },
             detail: format!(
                 "read-only typed-job probe for runner `{runner_id}` did not complete; active-job state is partial: {}",
                 error.message

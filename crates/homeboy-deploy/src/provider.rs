@@ -203,7 +203,7 @@ fn run_component(
         )
     }?;
     if !dry_run {
-        if let Some(observation) = observation.as_deref_mut() {
+        if let Some(observation) = observation {
             observation.phase("verify", true)?;
         }
     }
@@ -211,13 +211,11 @@ fn run_component(
     let output = format!("{}{}", evidence.stdout, evidence.stderr);
     // Layered input can contain target secrets. Provider output is therefore not
     // promoted into deploy evidence or errors on that path.
-    let provider_result = if is_layered && layered_result_schema.is_some() {
-        layered_provider_evidence(&evidence.stdout, layered_result_schema.expect("checked"))
-    } else if is_layered {
-        serde_json::json!({ "status": "opaque" })
-    } else {
-        serde_json::from_str::<serde_json::Value>(&evidence.stdout)
-            .unwrap_or_else(|_| serde_json::json!({ "status": "unstructured", "output": output }))
+    let provider_result = match (is_layered, layered_result_schema) {
+        (true, Some(schema)) => layered_provider_evidence(&evidence.stdout, schema),
+        (true, None) => serde_json::json!({ "status": "opaque" }),
+        (false, _) => serde_json::from_str::<serde_json::Value>(&evidence.stdout)
+            .unwrap_or_else(|_| serde_json::json!({ "status": "unstructured", "output": output })),
     };
     let status = if run.exit_code == 0 {
         if config.dry_run || config.check {

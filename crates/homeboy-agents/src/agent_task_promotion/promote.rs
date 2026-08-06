@@ -219,10 +219,10 @@ fn validate_resume_provenance(
     previous: &Value,
 ) -> Result<()> {
     let previous_status = previous.get("status").and_then(Value::as_str);
-    if !matches!(
+    if !(matches!(
         previous_status,
         Some("gate_failed" | "verification_pending")
-    ) && !(options.gates.rerun_completed_gates && previous_status == Some("applied"))
+    ) || options.gates.rerun_completed_gates && previous_status == Some("applied"))
     {
         return Err(Error::validation_invalid_argument(
             "promotion",
@@ -2116,6 +2116,10 @@ fn promotion_notification_with_gate_summary(
     notification
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "report construction keeps durable promotion evidence explicit"
+)]
 fn post_apply_report(
     options: &AgentTaskPromotionOptions,
     source_kind: &str,

@@ -91,7 +91,23 @@ pub struct ExecutionPlacementOutcome {
     pub runner_id: Option<String>,
 }
 
+/// Policy id of the decision a submission authors for itself when no router
+/// supplied one.
+///
+/// It is authoritative about ownership — a run submitted and executed by this
+/// controller really is controller-owned — but it is *derived*, not routed. A
+/// real routing decision for the same run therefore supersedes it, and a
+/// verifier that holds no routing decision treats it as absent rather than
+/// contradicting it.
+pub const CONTROLLER_LOCAL_SUBMISSION_POLICY_ID: &str = "controller-local-submission";
+
 impl ExecutionPlacementDecision {
+    /// Whether this decision was derived by a submission in the absence of
+    /// routing. See [`CONTROLLER_LOCAL_SUBMISSION_POLICY_ID`].
+    pub fn is_submission_stamp(&self) -> bool {
+        self.policy_id == CONTROLLER_LOCAL_SUBMISSION_POLICY_ID
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         policy_id: impl Into<String>,
@@ -129,6 +145,39 @@ impl ExecutionPlacementDecision {
             fallback,
             override_authorization,
         }
+    }
+
+    /// The canonical decision for a run that executes on the controller.
+    ///
+    /// A controller-local run is still a *routed* run: it has an owner, and
+    /// recovery, retry, and outcome verification all read that owner off this
+    /// record. Leaving it null — which is what every purely local submission
+    /// used to do — made an explicitly local run unrecoverable, because retry
+    /// could not decode a decision that was never written (#11600).
+    pub fn controller_local(
+        policy_id: impl Into<String>,
+        policy_revision: impl Into<String>,
+        identity: ExecutionPlacementIdentity,
+        requested: Placement,
+    ) -> Self {
+        let authorized = requested == Placement::Local;
+        Self::new(
+            policy_id,
+            policy_revision,
+            identity,
+            requested,
+            ExecutionPlacementRequirement::Either,
+            EffectiveExecutionPlacement::Local,
+            None,
+            ExecutionPlacementFallback {
+                local_allowed: false,
+                reason: None,
+            },
+            ExecutionPlacementOverrideAuthorization {
+                authorized,
+                authority: authorized.then(|| "operator --placement local".to_string()),
+            },
+        )
     }
 
     pub fn permits_local_execution(&self) -> bool {

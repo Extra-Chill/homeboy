@@ -569,8 +569,16 @@ mod tests {
                 .join("repo-local-gates")
                 .join("gate-task");
             assert_eq!(execution.artifact_root, expected);
-            assert!(
-                !execution.artifact_root.starts_with(std::env::temp_dir()),
+            // The regression this guards is the pre-#11128 fallback shape, not
+            // "lives under the temp dir": an isolated test home is itself a temp
+            // directory, so a `starts_with(temp_dir())` check cannot tell the
+            // fallback apart from correct isolation and fails for every caller
+            // that sets one.
+            assert_ne!(
+                execution.artifact_root,
+                std::env::temp_dir()
+                    .join("homeboy-repo-local-gates")
+                    .join("gate-task"),
                 "gate artifacts must not fall back to the process temp dir"
             );
         });

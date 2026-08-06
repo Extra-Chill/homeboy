@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
 use homeboy_core::engine::shell;
-use homeboy_core::server::{Server, SshClient};
+use homeboy_core::server::Server;
 
 use super::super::session::RunnerStaleRuntimePath;
 use super::{
@@ -32,16 +32,33 @@ struct DaemonHealthReport {
     pid: Option<u32>,
 }
 
+pub(super) struct RemoteDaemonConnectRequest<'a> {
+    pub(super) server: &'a Server,
+    pub(super) homeboy: &'a str,
+    pub(super) daemon: RemoteDaemon,
+    pub(super) expected_version: &'a str,
+    pub(super) expected_identity: &'a str,
+    pub(super) runner_id: &'a str,
+    pub(super) session_path: &'a Path,
+}
+
+type RemoteDaemonConnectResult =
+    std::result::Result<(u16, Option<u32>, String, RemoteDaemon), Box<(RunnerConnectReport, i32)>>;
+type TunnelOpenResult =
+    std::result::Result<(u16, Option<u32>, String), Box<(RunnerConnectReport, i32)>>;
+
 pub(super) fn connect_remote_daemon(
-    server: &Server,
-    _client: &SshClient,
-    homeboy: &str,
-    daemon: RemoteDaemon,
-    expected_version: &str,
-    expected_identity: &str,
-    runner_id: &str,
-    session_path: &Path,
-) -> std::result::Result<(u16, Option<u32>, String, RemoteDaemon), (RunnerConnectReport, i32)> {
+    request: RemoteDaemonConnectRequest<'_>,
+) -> RemoteDaemonConnectResult {
+    let RemoteDaemonConnectRequest {
+        server,
+        homeboy,
+        daemon,
+        expected_version,
+        expected_identity,
+        runner_id,
+        session_path,
+    } = request;
     let failed_after_tunnel = |tunnel_pid: Option<u32>,
                                message: String,
                                health_attempts: Vec<String>,
@@ -70,7 +87,7 @@ pub(super) fn connect_remote_daemon(
             health_attempt_count: health_attempts.len(),
             health_attempts,
         });
-        (report, exit_code)
+        Box::new((report, exit_code))
     };
     let (local_port, tunnel_pid, local_url) =
         open_daemon_tunnel(server, &daemon, runner_id, session_path)?;
@@ -190,14 +207,14 @@ fn open_daemon_tunnel(
     daemon: &RemoteDaemon,
     runner_id: &str,
     session_path: &Path,
-) -> std::result::Result<(u16, Option<u32>, String), (RunnerConnectReport, i32)> {
+) -> TunnelOpenResult {
     let Ok(remote_addr) = parse_loopback_daemon_addr(&daemon.address) else {
-        return Err(failed_connect(
+        return Err(Box::new(failed_connect(
             runner_id,
             session_path.to_path_buf(),
             RunnerFailureKind::DaemonStartupFailure,
             "remote daemon did not report a loopback address".to_string(),
-        ));
+        )));
     };
 
     // A loopback runner already shares the controller network namespace, so
@@ -207,12 +224,12 @@ fn open_daemon_tunnel(
         remote_addr.port()
     } else {
         reserve_loopback_port().map_err(|err| {
-            failed_connect(
+            Box::new(failed_connect(
                 runner_id,
                 session_path.to_path_buf(),
                 RunnerFailureKind::TunnelFailure,
                 err.to_string(),
-            )
+            ))
         })?
     };
     let tunnel = open_loopback_tunnel(
@@ -222,19 +239,19 @@ fn open_daemon_tunnel(
         remote_addr.port(),
     );
     if !tunnel.success {
-        return Err(failed_connect(
+        return Err(Box::new(failed_connect(
             runner_id,
             session_path.to_path_buf(),
             RunnerFailureKind::TunnelFailure,
             format!("SSH tunnel setup failed: {}", tunnel.stderr.trim()),
-        ));
+        )));
     }
 
     if !wait_for_tcp(local_port, Duration::from_secs(5)) {
         if let Some(pid) = tunnel.pid {
             terminate_pid(pid);
         }
-        return Err(failed_connect(
+        return Err(Box::new(failed_connect(
             runner_id,
             session_path.to_path_buf(),
             RunnerFailureKind::TunnelFailure,
@@ -242,7 +259,7 @@ fn open_daemon_tunnel(
                 "local tunnel 127.0.0.1:{} did not become reachable",
                 local_port
             ),
-        ));
+        )));
     }
     Ok((
         local_port,

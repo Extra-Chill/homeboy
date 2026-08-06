@@ -92,6 +92,7 @@ pub use workspace_claims::*;
 
 pub(crate) use conversion::*;
 pub(crate) use lifecycle_record_ops::*;
+pub(crate) use runner_continuation::with_runner_continuation;
 
 #[cfg(test)]
 mod tests;

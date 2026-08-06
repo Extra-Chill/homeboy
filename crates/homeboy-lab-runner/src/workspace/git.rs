@@ -94,24 +94,28 @@ fn ensure_clean_git_working_tree(
     Ok(())
 }
 
+pub(super) struct GitMaterializationRequest<'a> {
+    pub remote_path: &'a str,
+    pub remote_url: &'a str,
+    pub head: &'a str,
+    pub branch: Option<&'a str>,
+    pub changed_since_base: Option<&'a str>,
+    pub git_fetch_refs: &'a [String],
+    pub allow_dirty_lab_workspace: bool,
+}
+
 pub(super) fn materialize_git(
     runner: &Runner,
-    remote_path: &str,
-    remote_url: &str,
-    head: &str,
-    branch: Option<&str>,
-    changed_since_base: Option<&str>,
-    git_fetch_refs: &[String],
-    allow_dirty_lab_workspace: bool,
+    request: GitMaterializationRequest<'_>,
 ) -> Result<()> {
     let command = materialize_git_command(
-        remote_path,
-        remote_url,
-        head,
-        branch,
-        changed_since_base,
-        git_fetch_refs,
-        allow_dirty_lab_workspace,
+        request.remote_path,
+        request.remote_url,
+        request.head,
+        request.branch,
+        request.changed_since_base,
+        request.git_fetch_refs,
+        request.allow_dirty_lab_workspace,
     );
     match runner.kind {
         RunnerKind::Local => run_shell_command(&command, "materialize local git workspace"),
@@ -124,7 +128,7 @@ pub(super) fn materialize_git(
                 Err(Error::validation_invalid_argument(
                     "changed_since",
                     "runner dispatch could not make the requested --changed-since base reachable in the runner workspace before dispatch",
-                    changed_since_base.map(str::to_string),
+                    request.changed_since_base.map(str::to_string),
                     Some(vec![
                         "Verify the branch and base commit are pushed to origin.".to_string(),
                         "Run with --placement local to execute the changed-since command locally."
@@ -137,18 +141,22 @@ pub(super) fn materialize_git(
     }
 }
 
+pub(super) struct ControllerGitBundleMaterializationRequest<'a> {
+    pub local_path: &'a Path,
+    pub remote_path: &'a str,
+    pub head: &'a str,
+    pub branch: Option<&'a str>,
+    pub remote_url: &'a str,
+    pub changed_since_base: Option<&'a str>,
+    pub git_fetch_refs: &'a [String],
+    pub allow_dirty_lab_workspace: bool,
+}
+
 pub(super) fn materialize_git_from_controller_bundle(
     runner: &Runner,
-    local_path: &Path,
-    remote_path: &str,
-    head: &str,
-    branch: Option<&str>,
-    remote_url: &str,
-    changed_since_base: Option<&str>,
-    git_fetch_refs: &[String],
-    allow_dirty_lab_workspace: bool,
+    request: ControllerGitBundleMaterializationRequest<'_>,
 ) -> Result<ControllerGitBundleProvenance> {
-    validate_controller_git_bundle_source(local_path)?;
+    validate_controller_git_bundle_source(request.local_path)?;
 
     let bundle_dir = tempfile::tempdir().map_err(|err| {
         Error::internal_io(
@@ -160,15 +168,15 @@ pub(super) fn materialize_git_from_controller_bundle(
 
     // `HEAD` preserves the complete selected ancestry in a bundle. The exact
     // resolved SHA is recorded separately in provenance and verified on Lab.
-    let refs = controller_bundle_refs("HEAD", changed_since_base, git_fetch_refs);
-    hydrate_controller_bundle_objects(local_path, &refs)?;
+    let refs = controller_bundle_refs("HEAD", request.changed_since_base, request.git_fetch_refs);
+    hydrate_controller_bundle_objects(request.local_path, &refs)?;
 
     let output = Command::new("git")
         .arg("bundle")
         .arg("create")
         .arg(&bundle_path)
         .args(&refs)
-        .current_dir(local_path)
+        .current_dir(request.local_path)
         .output()
         .map_err(|err| {
             Error::internal_io(err.to_string(), Some("create git bundle".to_string()))
@@ -182,13 +190,13 @@ pub(super) fn materialize_git_from_controller_bundle(
     let sha256 = sha256_file(&bundle_path)?;
 
     let install_command = git_bundle_install_command(
-        remote_path,
-        head,
-        branch,
-        remote_url,
-        changed_since_base,
+        request.remote_path,
+        request.head,
+        request.branch,
+        request.remote_url,
+        request.changed_since_base,
         &sha256,
-        allow_dirty_lab_workspace,
+        request.allow_dirty_lab_workspace,
     );
     let result = match runner.kind {
         RunnerKind::Local => materialize_git_bundle_piped(
@@ -224,7 +232,7 @@ pub(super) fn materialize_git_from_controller_bundle(
     result?;
     Ok(ControllerGitBundleProvenance {
         provenance: "controller_git_bundle",
-        source_sha: head.to_string(),
+        source_sha: request.head.to_string(),
         source_refs: refs,
         sha256,
         cleanup_owner: "controller",
@@ -252,14 +260,16 @@ pub(super) fn materialize_git_snapshot_from_controller_bundle(
         .unwrap_or_else(|| "homeboy-controller-bundle".to_string());
     let provenance = materialize_git_from_controller_bundle(
         runner,
-        local_path,
-        remote_path,
-        &head,
-        branch.as_deref(),
-        &remote_url,
-        None,
-        &[],
-        false,
+        ControllerGitBundleMaterializationRequest {
+            local_path,
+            remote_path,
+            head: &head,
+            branch: branch.as_deref(),
+            remote_url: &remote_url,
+            changed_since_base: None,
+            git_fetch_refs: &[],
+            allow_dirty_lab_workspace: false,
+        },
     )?;
     materialize_snapshot_overlay(runner, local_path, remote_path, excludes)?;
     Ok(Some(provenance))

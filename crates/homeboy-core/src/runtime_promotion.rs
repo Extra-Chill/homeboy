@@ -553,6 +553,7 @@ pub fn pin_cook_generation(cook_id: &str) -> Result<RuntimeGenerationPinGuard> {
 fn open_admission_lock(root: &Path) -> Result<fs::File> {
     fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(root.join(ADMISSION_LOCK_FILE))
@@ -922,8 +923,8 @@ fn wait_for_foreign_generation_pins(
             .filter_map(|content| serde_json::from_str::<RuntimeGenerationPin>(&content).ok())
             .any(|pin| {
                 pin.pid != pid
-                    && !subprocess_capability
-                        .is_some_and(|capability| capability.owner_pid == pin.pid)
+                    && subprocess_capability
+                        .is_none_or(|capability| capability.owner_pid != pin.pid)
             });
         if !foreign_pin {
             return Ok(());

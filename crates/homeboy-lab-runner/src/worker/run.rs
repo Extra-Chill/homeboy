@@ -411,6 +411,7 @@ fn run_once_output(
             capability_preflight,
             claimed_run_id,
             execution_context.clone(),
+            claim.job.id.to_string(),
         )?,
         || {
             let recovered =
@@ -1149,6 +1150,7 @@ fn runner_exec_options_from_envelope(
     capability_preflight: Option<crate::RunnerCapabilityPreflight>,
     run_id: Option<String>,
     execution_context: homeboy_core::runner_job_execution_context::RunnerJobExecutionContext,
+    runner_job_id: String,
 ) -> Result<RunnerExecOptions> {
     let dispatch = envelope.dispatch.ok_or_else(|| {
         Error::internal_unexpected("runner execution envelope is missing dispatch payload")
@@ -1161,6 +1163,11 @@ fn runner_exec_options_from_envelope(
         .map(|workload| workload.required_extensions.clone())
         .unwrap_or_default();
 
+    let mut env = dispatch.env;
+    // Match the direct daemon child contract: nested agent-task services use
+    // this exact broker job identity as their runner-local supervisor owner.
+    env.insert("HOMEBOY_RUNNER_JOB_ID".to_string(), runner_job_id);
+
     Ok(RunnerExecOptions {
         execution_context,
         cwd: dispatch.cwd,
@@ -1168,7 +1175,7 @@ fn runner_exec_options_from_envelope(
         allow_diagnostic_ssh: false,
         diagnostic_ssh_timeout: None,
         command: dispatch.command,
-        env: dispatch.env,
+        env,
         secret_env_names,
         secret_env_plan: Some(secret_env_plan),
         env_materialization: envelope.env_materialization,

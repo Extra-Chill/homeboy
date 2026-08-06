@@ -552,6 +552,20 @@ fn direct_run_with_multi_workload_profile_and_workload_is_still_rejected() {
     // The acceptance guard: `fuzz run --profile <multi> --workload <id>` (i.e.
     // a profile combined with an explicit workload) must remain rejected. Only
     // the campaign expansion path is allowed to resolve profiles into workloads.
+    let parse_result = FuzzCli::try_parse_from([
+        "fuzz",
+        "run",
+        "component-a",
+        "--profile",
+        "full-surface",
+        "--workload",
+        "db-fuzz",
+    ]);
+    let Err(error) = parse_result else {
+        panic!("Clap must reject combined profile and workload selectors");
+    };
+    assert!(error.to_string().contains("cannot be used with"));
+
     let error = resolve_profile_workload_id(None, Some("full-surface"), Some("db-fuzz"))
         .expect_err("profile + explicit workload must be rejected");
     assert!(
@@ -564,16 +578,8 @@ fn direct_run_with_multi_workload_profile_and_workload_is_still_rejected() {
 
 #[test]
 fn generic_lab_profile_expands_safe_destructive_evidence_defaults() {
-    let cli = FuzzCli::try_parse_from([
-        "fuzz",
-        "run",
-        "component-a",
-        "--workload",
-        "api-fuzz",
-        "--profile",
-        "lab",
-    ])
-    .expect("parse generic lab profile");
+    let cli = FuzzCli::try_parse_from(["fuzz", "run", "component-a", "--profile", "lab"])
+        .expect("parse generic lab profile");
     let Some(FuzzCommand::Run(args)) = cli.args.command else {
         panic!("expected fuzz run command");
     };

@@ -610,11 +610,11 @@ fn show(rig_id: &str) -> CmdResult<RigCommandOutput> {
     let rig = rig::load(rig_id)?;
     let resources = rig::expand::expand_resources(&rig);
     Ok((
-        RigCommandOutput::Show(RigShowOutput {
+        RigCommandOutput::Show(Box::new(RigShowOutput {
             command: "rig.show",
             rig,
             resources,
-        }),
+        })),
         0,
     ))
 }
@@ -977,7 +977,7 @@ fn run_profile(args: RigRunArgs) -> CmdResult<RigCommandOutput> {
 
     if !sync_report.success {
         return Ok((
-            RigCommandOutput::Run(RigRunOutput {
+            RigCommandOutput::Run(Box::new(RigRunOutput {
                 command: "rig.run",
                 rig_id: rig.id,
                 profile,
@@ -985,14 +985,14 @@ fn run_profile(args: RigRunArgs) -> CmdResult<RigCommandOutput> {
                 sync: sync_report,
                 bench_invocation,
                 bench: None,
-            }),
+            })),
             1,
         ));
     }
 
     let (bench, bench_exit_code) = super::bench::run_rig_profile(bench_options)?;
     Ok((
-        RigCommandOutput::Run(RigRunOutput {
+        RigCommandOutput::Run(Box::new(RigRunOutput {
             command: "rig.run",
             rig_id: rig.id,
             profile,
@@ -1000,7 +1000,7 @@ fn run_profile(args: RigRunArgs) -> CmdResult<RigCommandOutput> {
             sync: sync_report,
             bench_invocation,
             bench: Some(bench),
-        }),
+        })),
         bench_exit_code,
     ))
 }

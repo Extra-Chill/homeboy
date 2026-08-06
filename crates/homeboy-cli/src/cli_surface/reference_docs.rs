@@ -89,7 +89,7 @@ pub fn live_generated_reference_docs() -> BTreeMap<String, String> {
     for command in documented_subcommands(&root) {
         let name = command.get_name().to_string();
         node_count += count_nodes(command);
-        commands_without_description(&[name.clone()], command, &mut undocumented);
+        commands_without_description(std::slice::from_ref(&name), command, &mut undocumented);
         summaries.push((
             name.clone(),
             styled(command.get_about())
@@ -206,7 +206,7 @@ fn render_node(out: &mut String, path: &[String], command: &Command) {
     let subcommands = documented_subcommands(command);
     if !subcommands.is_empty() {
         out.push_str("| Subcommand | Summary |\n| --- | --- |\n");
-        for subcommand in subcommands.iter().copied() {
+        for &subcommand in &subcommands {
             let name = subcommand.get_name();
             let summary = styled(subcommand.get_about())
                 .map(|about| cell(&about))

@@ -4,17 +4,12 @@ use crate::{Error, Result};
 
 pub const RESOURCE_CLEANUP_INTENT_SCHEMA: &str = "homeboy/resource-cleanup-intent/v1";
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceCleanupIntent {
+    #[default]
     DryRun,
     Apply,
-}
-
-impl Default for ResourceCleanupIntent {
-    fn default() -> Self {
-        Self::DryRun
-    }
 }
 
 impl ResourceCleanupIntent {

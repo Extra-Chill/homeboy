@@ -457,7 +457,17 @@ fn workspace_bound_reverse_jobs_reject_old_or_missing_worker_capability() {
     let job = store.submit_remote_runner_job(request).expect("job queues");
 
     assert!(store
-        .claim_remote_runner_job_with_protocols("homeboy-lab", None, 30_000, None, None, None, None)
+        .claim_remote_runner_job_with_protocols(
+            "homeboy-lab",
+            None,
+            30_000,
+            None,
+            super::remote_runner::RemoteRunnerClaimProtocols {
+                execution: None,
+                workspace_claim: None,
+                workspace_owner_lease: None
+            }
+        )
         .is_err());
     assert_eq!(
         store.get(job.id).expect("queued job").status,
@@ -474,9 +484,13 @@ fn workspace_bound_reverse_jobs_reject_old_or_missing_worker_capability() {
             None,
             30_000,
             None,
-            Some(&crate::runner_job_execution_context::RunnerJobExecutionProtocol::current()),
-            Some(&old),
-            None,
+            super::remote_runner::RemoteRunnerClaimProtocols {
+                execution: Some(
+                    &crate::runner_job_execution_context::RunnerJobExecutionProtocol::current()
+                ),
+                workspace_claim: Some(&old),
+                workspace_owner_lease: None
+            },
         )
         .is_err());
     assert_eq!(

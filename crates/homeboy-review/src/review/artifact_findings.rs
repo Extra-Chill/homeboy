@@ -129,7 +129,7 @@ mod tests {
                 drift_increased: false,
             },
             changed_since: None,
-            summary: None,
+            summary: Box::new(None),
             fixability: None,
             extension_phase_timings: Vec::new(),
             actionable: None,

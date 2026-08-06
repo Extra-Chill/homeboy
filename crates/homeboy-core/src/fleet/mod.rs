@@ -166,12 +166,12 @@ pub fn resolve_fleet_projects(fleet: &Fleet) -> Result<FleetProjectResolution> {
     Ok(resolution)
 }
 
-pub fn component_usage_with_resolution(
-    fleet_id: &str,
-) -> Result<(
+pub type FleetComponentUsage = (
     std::collections::HashMap<String, Vec<String>>,
     Vec<FleetProjectResolutionError>,
-)> {
+);
+
+pub fn component_usage_with_resolution(fleet_id: &str) -> Result<FleetComponentUsage> {
     let fleet = load(fleet_id)?;
     let mut usage: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();

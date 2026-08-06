@@ -528,7 +528,7 @@ fn status_service(id: &str) -> CmdResult<TunnelOutput> {
             command: "tunnel.service.status".to_string(),
             id: Some(id.to_string()),
             extra: TunnelExtra {
-                service: Some(ServiceTunnelActionOutput::Status(report)),
+                service: Some(ServiceTunnelActionOutput::Status(Box::new(report))),
                 ..Default::default()
             },
             ..Default::default()
@@ -545,7 +545,7 @@ fn start_service(spec: StartServiceTunnelSpec) -> CmdResult<TunnelOutput> {
             command: "tunnel.service.start".to_string(),
             id: Some(id),
             extra: TunnelExtra {
-                service: Some(ServiceTunnelActionOutput::Status(report)),
+                service: Some(ServiceTunnelActionOutput::Status(Box::new(report))),
                 ..Default::default()
             },
             ..Default::default()
@@ -561,7 +561,7 @@ fn stop_service(id: &str) -> CmdResult<TunnelOutput> {
             command: "tunnel.service.stop".to_string(),
             id: Some(id.to_string()),
             extra: TunnelExtra {
-                service: Some(ServiceTunnelActionOutput::Status(report)),
+                service: Some(ServiceTunnelActionOutput::Status(Box::new(report))),
                 ..Default::default()
             },
             ..Default::default()

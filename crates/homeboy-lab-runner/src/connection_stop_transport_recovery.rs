@@ -340,7 +340,7 @@ fn should_stop_remote_daemon(
     ownership: Option<&RunnerSession>,
     has_live_peer: bool,
 ) -> bool {
-    let owns_daemon = ownership.map_or(true, |owner| {
+    let owns_daemon = ownership.is_none_or(|owner| {
         same_remote_daemon_ownership(&session.runner_id, session, owner)
             && owner.controller_id == session.controller_id
     });
@@ -517,7 +517,7 @@ where
     Probe: FnOnce() -> std::result::Result<remote_daemon::RemoteDaemonStatus, String>,
 {
     match confirm_remote_daemon_stopped_after_transport_error(session, initial_status) {
-        Ok(()) => return Ok(()),
+        Ok(()) => Ok(()),
         Err(_initial_error) if exact_live_remote_daemon_owner(session, initial_status) => {
             let stop_error = stop().err();
             let final_status = probe().map_err(|error| {
@@ -712,7 +712,7 @@ pub(super) fn remote_lease_bound_daemon_stop_command(
     format!(
         "{} daemon stop{} --lease-id {}",
         shell::quote_arg(homeboy),
-        force.then_some(" --force").unwrap_or_default(),
+        if force { " --force" } else { "" },
         shell::quote_arg(lease_id)
     )
 }
@@ -1191,6 +1191,7 @@ mod tests {
                 os_evidence: "test".to_string(),
                 exit_code: None,
                 signal: None,
+                supervisor_signal: None,
                 stdout: None,
                 stderr: None,
                 stop_requested: true,

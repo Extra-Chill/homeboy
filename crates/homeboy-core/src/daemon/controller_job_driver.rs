@@ -89,10 +89,11 @@ impl ControllerJobHandle {
     }
 }
 
-fn drivers() -> &'static Mutex<HashMap<(String, u32), Arc<dyn ControllerJobDriver>>> {
-    static DRIVERS: std::sync::OnceLock<
-        Mutex<HashMap<(String, u32), Arc<dyn ControllerJobDriver>>>,
-    > = std::sync::OnceLock::new();
+type ControllerJobDriverKey = (String, u32);
+type ControllerJobDrivers = Mutex<HashMap<ControllerJobDriverKey, Arc<dyn ControllerJobDriver>>>;
+
+fn drivers() -> &'static ControllerJobDrivers {
+    static DRIVERS: std::sync::OnceLock<ControllerJobDrivers> = std::sync::OnceLock::new();
     DRIVERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

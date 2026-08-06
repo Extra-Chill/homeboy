@@ -35,7 +35,9 @@ pub(crate) mod version_targets;
 pub(crate) use git_push::run_git_push;
 pub(crate) use github_release::release_notes_path as github_release_notes_path;
 pub(crate) use github_release::run_github_release;
-pub(crate) use package::{build_release_payload, run_extension_release_preflight, run_package};
+pub(crate) use package::{
+    build_release_payload, run_extension_release_preflight, run_package, PackageRequest,
+};
 pub(crate) use publish::{publish_response_output, run_publish};
 pub(crate) use tagging::{
     github_release_exists_for_tag, run_git_tag, run_tag_availability_preflight,
@@ -506,7 +508,7 @@ fn should_amend_release_commit(local_path: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::package::store_artifacts_from_output;
-    use super::{github_release, package_preflight, run_cleanup, run_package};
+    use super::{github_release, package_preflight, run_cleanup, run_package, PackageRequest};
     use crate::release::types::ReleaseState;
     use crate::release::{ReleaseArtifact, ReleaseStepStatus};
     use homeboy_core::component::Component;
@@ -907,9 +909,11 @@ mod tests {
                 &component_config,
                 "fixture",
                 &component.path().to_string_lossy(),
-                None,
-                None,
-                false,
+                PackageRequest {
+                    component_source_path: None,
+                    declared_build_artifact: None,
+                    skip_build_validation: false,
+                },
             )
             .expect("package step");
 
@@ -974,9 +978,11 @@ mod tests {
                 &component,
                 "plugin",
                 &component.local_path,
-                None,
-                Some("packages/plugin/dist/plugin.zip"),
-                false,
+                PackageRequest {
+                    component_source_path: None,
+                    declared_build_artifact: Some("packages/plugin/dist/plugin.zip"),
+                    skip_build_validation: false,
+                },
             )
             .expect("package step should collect declared artifact");
 
@@ -1030,9 +1036,11 @@ mod tests {
                 &component,
                 "plugin",
                 &component.local_path,
-                None,
-                component.build_artifact.as_deref(),
-                false,
+                PackageRequest {
+                    component_source_path: None,
+                    declared_build_artifact: component.build_artifact.as_deref(),
+                    skip_build_validation: false,
+                },
             )
             .expect("component build package step");
 
@@ -1097,9 +1105,11 @@ mod tests {
                 &Component::default(),
                 "plugin",
                 &component.path().to_string_lossy(),
-                None,
-                Some("packages/plugin/dist/plugin.zip"),
-                false,
+                PackageRequest {
+                    component_source_path: None,
+                    declared_build_artifact: Some("packages/plugin/dist/plugin.zip"),
+                    skip_build_validation: false,
+                },
             )
             .expect_err("unrelated provider artifact must not complete the release package");
 
@@ -1263,9 +1273,11 @@ mod tests {
                 &Component::default(),
                 "fixture",
                 &component.path().to_string_lossy(),
-                None,
-                None,
-                false,
+                PackageRequest {
+                    component_source_path: None,
+                    declared_build_artifact: None,
+                    skip_build_validation: false,
+                },
             )
             .expect("package step");
 
@@ -1299,9 +1311,11 @@ mod tests {
                 &Component::default(),
                 "intelligence-horse-theme",
                 &component.path().to_string_lossy(),
-                None,
-                None,
-                false,
+                PackageRequest {
+                    component_source_path: None,
+                    declared_build_artifact: None,
+                    skip_build_validation: false,
+                },
             )
             .expect("package step");
 
@@ -1401,9 +1415,11 @@ mod tests {
                 &Component::default(),
                 "fixture",
                 &component.path().to_string_lossy(),
-                None,
-                None,
-                true,
+                PackageRequest {
+                    component_source_path: None,
+                    declared_build_artifact: None,
+                    skip_build_validation: true,
+                },
             )
             .expect_err("failing final package should surface output");
 
@@ -1434,9 +1450,11 @@ mod tests {
                 &Component::default(),
                 "fixture",
                 &component.path().to_string_lossy(),
-                None,
-                None,
-                false,
+                PackageRequest {
+                    component_source_path: None,
+                    declared_build_artifact: None,
+                    skip_build_validation: false,
+                },
             )
             .expect_err("failing package provider should fail the step");
 
@@ -1473,9 +1491,11 @@ mod tests {
                 &Component::default(),
                 "fixture",
                 &component.path().to_string_lossy(),
-                None,
-                None,
-                false,
+                PackageRequest {
+                    component_source_path: None,
+                    declared_build_artifact: None,
+                    skip_build_validation: false,
+                },
             )
             .expect_err("persistently failing package should fail after retry");
 
@@ -1526,9 +1546,11 @@ mod tests {
                 &Component::default(),
                 "fixture",
                 &component.path().to_string_lossy(),
-                None,
-                None,
-                false,
+                PackageRequest {
+                    component_source_path: None,
+                    declared_build_artifact: None,
+                    skip_build_validation: false,
+                },
             )
             .expect("retry after transient failure should succeed");
 

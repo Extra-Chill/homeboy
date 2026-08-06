@@ -72,7 +72,7 @@ pub fn calculate_deploy_readiness(project: &Project) -> (bool, Vec<String>) {
             // readiness signal, and this closure has no error channel. Treat
             // it as "not deployable" here; `build`/`deploy` surface the
             // actionable ambiguity error when the component is used.
-            let has_artifact = component::resolve_artifact(&comp).ok().flatten().is_some();
+            let has_artifact = component::resolve_artifact(comp).ok().flatten().is_some();
             has_provider || is_git || has_artifact
         });
 

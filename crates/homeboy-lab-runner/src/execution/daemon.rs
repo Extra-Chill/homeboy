@@ -237,6 +237,27 @@ pub(super) fn exec_via_daemon(
             )?;
         }
     }
+    let foreground_source_lease = run_id
+        .as_deref()
+        .map(|run_id| {
+            let token = uuid::Uuid::new_v4().to_string();
+            let store = ObservationStore::open_initialized()?;
+            if !store.claim_running_runner_exec_recovery_source(
+                run_id,
+                "foreground-runner-exec",
+                &token,
+                &job.id.to_string(),
+            )? {
+                return Err(Error::validation_invalid_argument(
+                    "runner_exec",
+                    "runner exec source is already owned by an active lifecycle",
+                    Some(run_id.to_string()),
+                    None,
+                ));
+            }
+            Ok::<_, Error>((run_id.to_string(), token))
+        })
+        .transpose()?;
     let persisted_run_id = mirror_evidence
         .then(|| {
             persist_lab_offload_handoff_run(runner, &cwd, &command, &job, run_id.as_deref(), None)
@@ -280,6 +301,10 @@ pub(super) fn exec_via_daemon(
             ));
         }
         std::thread::sleep(Duration::from_millis(200));
+        if let Some((run_id, token)) = &foreground_source_lease {
+            let _ = ObservationStore::open_initialized()?
+                .renew_running_runner_exec_source_lease(run_id, token)?;
+        }
         let job_id = job.id.to_string();
         let (refreshed_job, refreshed_endpoint) = fetch_daemon_job_resilient_with_endpoint_reload(
             &client,
@@ -331,7 +356,7 @@ pub(super) fn exec_via_daemon(
     } = runner_job_result_fields(&events, job.status, &env, &secret_env_names);
 
     let mirror = if mirror_evidence {
-        mirror_daemon_evidence(
+        mirror_daemon_evidence(crate::evidence::MirrorEvidenceRequest::new(
             runner,
             &cwd,
             &command,
@@ -342,10 +367,14 @@ pub(super) fn exec_via_daemon(
             lab_runner_workload
                 .as_ref()
                 .and_then(|workload| workload.notification_route.as_ref()),
-        )?
+        ))?
     } else {
         None
     };
+    if let Some((run_id, token)) = &foreground_source_lease {
+        let _ = ObservationStore::open_initialized()?
+            .release_running_runner_exec_source_lease(run_id, token)?;
+    }
     let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
     let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.clone());
     validate_generic_exec_mirror_run_id(
@@ -1078,6 +1107,10 @@ fn spawn_admission_renewer(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::items_after_test_module,
+    reason = "Production daemon helpers remain below focused admission tests after the staged source split."
+)]
 mod admission_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1434,6 +1467,10 @@ pub(super) fn validate_daemon_job_identity(requested_job_id: &str, job: &Job) ->
     ))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Detached handoff retains durable job, source, materialization, and mirror identities independently."
+)]
 pub(super) fn detached_handoff_output(
     runner: &Runner,
     mode: RunnerExecMode,

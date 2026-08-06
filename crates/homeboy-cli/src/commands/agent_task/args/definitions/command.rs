@@ -75,7 +75,7 @@ pub enum AgentTaskCommand {
     /// client that needs one predictable contract should pass the flag rather than
     /// rely on the default, and read the terminal outcome from
     /// `agent-task status <run-id>` in either case.
-    Cook(AgentTaskCookArgs),
+    Cook(Box<AgentTaskCookArgs>),
     /// Continue a detached Cook from its durable Cook ID or provider attempt ID.
     /// The persisted recipe supplies the original prompt, transport, gates,
     /// worktree, and disclosure policy.
@@ -155,7 +155,7 @@ pub enum AgentTaskCommand {
     /// and promotion hints.
     Review(ReviewArgs),
     /// Promote a completed generic patch artifact into a managed worktree.
-    Promote(PromoteArgs),
+    Promote(Box<PromoteArgs>),
     /// Adopt an immutable commit candidate through a tracked cook's normal gates and finalization.
     Adopt(AdoptArgs),
     #[command(hide = true)]
@@ -163,7 +163,7 @@ pub enum AgentTaskCommand {
     /// Finalize a green run, or recover publication from a durable Cook record.
     ///
     /// This is the core-owned publication boundary for external runtimes.
-    FinalizePr(FinalizePrArgs),
+    FinalizePr(Box<FinalizePrArgs>),
     /// Attach authorized candidate-bound replacement gate proof after an infrastructure gate failure.
     RecordReplacementGateProof(RecordReplacementGateProofArgs),
     /// Record an independent, durable acceptance verdict for a candidate.
@@ -389,6 +389,9 @@ pub struct ProvidersArgs {
     /// Return the complete provider declarations and discovery diagnostics.
     #[arg(long)]
     pub full: bool,
+    /// Emit the unfiltered provider DTO catalog for machine admission clients.
+    #[arg(long, hide = true)]
+    pub machine_catalog: bool,
 }
 #[derive(Args, Debug)]
 pub struct AgentTaskDoctorArgs {

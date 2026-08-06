@@ -107,7 +107,7 @@ pub(crate) fn auto_discover_groups_from_snapshot(
         let file_is_test = is_test_path(&fp.relative_path);
         let key = (
             parent,
-            fp.language.clone(),
+            fp.language,
             file_is_test,
             fp.convention_tags.clone(),
         );

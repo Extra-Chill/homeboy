@@ -19,7 +19,7 @@ use super::repair::{gh_auth_failure_message, github_release_repair_commands, log
 use super::results::{
     create_failed_result, not_created_result, published_existing_draft_result,
     published_release_url, skipped_result, unfinished_release_result, upload_failed_result,
-    upload_success_result_with_publications,
+    upload_success_result_with_publications, UploadFailedResultRequest,
 };
 use super::{
     download_small_release_asset, gh_failure_diagnostic, gh_release_metadata,
@@ -471,13 +471,15 @@ pub(crate) fn run_github_release(
             return Ok(upload_failed_result(
                 &tag,
                 &github,
-                upload_output.stdout,
-                upload_output.stderr,
-                upload_output.exit_code,
-                upload_output.timed_out,
-                artifact_paths.len(),
-                repair,
-                &[diagnostic],
+                UploadFailedResultRequest {
+                    stdout: upload_output.stdout,
+                    stderr: upload_output.stderr,
+                    exit_code: upload_output.exit_code,
+                    timed_out: upload_output.timed_out,
+                    artifact_count: artifact_paths.len(),
+                    repair,
+                    diagnostics: &[diagnostic],
+                },
             ));
         }
 
@@ -489,13 +491,15 @@ pub(crate) fn run_github_release(
                     return Ok(upload_failed_result(
                         &tag,
                         &github,
-                        String::new(),
-                        error.message,
-                        None,
-                        false,
-                        artifact_paths.len(),
-                        repair_commands(None, None),
-                        &diagnostics,
+                        UploadFailedResultRequest {
+                            stdout: String::new(),
+                            stderr: error.message,
+                            exit_code: None,
+                            timed_out: false,
+                            artifact_count: artifact_paths.len(),
+                            repair: repair_commands(None, None),
+                            diagnostics: &diagnostics,
+                        },
                     ));
                 }
             };
@@ -510,13 +514,15 @@ pub(crate) fn run_github_release(
             return Ok(upload_failed_result(
                 &tag,
                 &github,
-                String::new(),
-                error.message,
-                None,
-                false,
-                artifact_paths.len(),
-                repair_commands(None, None),
-                &diagnostics,
+                UploadFailedResultRequest {
+                    stdout: String::new(),
+                    stderr: error.message,
+                    exit_code: None,
+                    timed_out: false,
+                    artifact_count: artifact_paths.len(),
+                    repair: repair_commands(None, None),
+                    diagnostics: &diagnostics,
+                },
             ));
         }
         if metadata.is_draft {
@@ -534,13 +540,15 @@ pub(crate) fn run_github_release(
                 return Ok(upload_failed_result(
                     &tag,
                     &github,
-                    publish_output.stdout,
-                    publish_output.stderr,
-                    publish_output.exit_code,
-                    publish_output.timed_out,
-                    artifact_paths.len(),
-                    repair_commands(None, None),
-                    &[diagnostic],
+                    UploadFailedResultRequest {
+                        stdout: publish_output.stdout,
+                        stderr: publish_output.stderr,
+                        exit_code: publish_output.exit_code,
+                        timed_out: publish_output.timed_out,
+                        artifact_count: artifact_paths.len(),
+                        repair: repair_commands(None, None),
+                        diagnostics: &[diagnostic],
+                    },
                 ));
             }
         }
@@ -660,13 +668,18 @@ pub(crate) fn run_github_release(
             return Ok(upload_failed_result(
                 &tag,
                 &github,
-                String::new(),
-                error.message,
-                None,
-                false,
-                artifact_paths.len(),
-                repair_commands(notes_start_tag.as_deref(), persisted_notes_path.as_deref()),
-                &diagnostics,
+                UploadFailedResultRequest {
+                    stdout: String::new(),
+                    stderr: error.message,
+                    exit_code: None,
+                    timed_out: false,
+                    artifact_count: artifact_paths.len(),
+                    repair: repair_commands(
+                        notes_start_tag.as_deref(),
+                        persisted_notes_path.as_deref(),
+                    ),
+                    diagnostics: &diagnostics,
+                },
             ));
         }
     };
@@ -681,13 +694,18 @@ pub(crate) fn run_github_release(
         return Ok(upload_failed_result(
             &tag,
             &github,
-            String::new(),
-            error.message,
-            None,
-            false,
-            artifact_paths.len(),
-            repair_commands(notes_start_tag.as_deref(), persisted_notes_path.as_deref()),
-            &diagnostics,
+            UploadFailedResultRequest {
+                stdout: String::new(),
+                stderr: error.message,
+                exit_code: None,
+                timed_out: false,
+                artifact_count: artifact_paths.len(),
+                repair: repair_commands(
+                    notes_start_tag.as_deref(),
+                    persisted_notes_path.as_deref(),
+                ),
+                diagnostics: &diagnostics,
+            },
         ));
     }
     let publish_args = ["release", "edit", &tag, "--draft=false", "-R", &repo_flag];
@@ -704,13 +722,18 @@ pub(crate) fn run_github_release(
         return Ok(upload_failed_result(
             &tag,
             &github,
-            publish_output.stdout,
-            publish_output.stderr,
-            publish_output.exit_code,
-            publish_output.timed_out,
-            artifact_paths.len(),
-            repair_commands(notes_start_tag.as_deref(), persisted_notes_path.as_deref()),
-            &[diagnostic],
+            UploadFailedResultRequest {
+                stdout: publish_output.stdout,
+                stderr: publish_output.stderr,
+                exit_code: publish_output.exit_code,
+                timed_out: publish_output.timed_out,
+                artifact_count: artifact_paths.len(),
+                repair: repair_commands(
+                    notes_start_tag.as_deref(),
+                    persisted_notes_path.as_deref(),
+                ),
+                diagnostics: &[diagnostic],
+            },
         ));
     }
 

@@ -63,4 +63,5 @@ pub(crate) use repair::{
 pub(crate) use results::{
     create_failed_result, not_created_result, published_existing_draft_result,
     published_release_url, unfinished_release_result, upload_failed_result, upload_success_result,
+    UploadFailedResultRequest,
 };

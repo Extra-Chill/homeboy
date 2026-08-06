@@ -81,7 +81,7 @@ pub fn run(args: StatusArgs) -> CmdResult<StatusResult> {
     if args.full {
         let mut report = context::build_report(args.all, "status")?;
         report.command = "status".to_string();
-        return Ok((StatusResult::Full(report), 0));
+        return Ok((StatusResult::Full(Box::new(report)), 0));
     }
 
     let mut timer = StatusTimer::new(args.timings);
@@ -281,7 +281,7 @@ fn run_path_status(args: &StatusArgs, controller: ControllerStaleness) -> CmdRes
     if args.full {
         let mut report = context::build_report_for_component(args.all, "status", component, path)?;
         report.command = "status".to_string();
-        return Ok((StatusResult::Full(report), 0));
+        return Ok((StatusResult::Full(Box::new(report)), 0));
     }
 
     summarize_components(vec![component], args, timer, controller)

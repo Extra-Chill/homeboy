@@ -85,16 +85,16 @@ pub(super) fn run_compare_variant(mut args: TraceArgs) -> CmdResult<TraceCommand
     compare_artifacts::write_compare_variant_json(&variant_path, &variant)?;
     compare_artifacts::write_compare_variant_json(&run_order_path, &run_order)?;
 
-    let compare = compare_trace_aggregates_with_focus(
-        &baseline_path,
-        aggregate_to_compare_input(&baseline),
-        &variant_path,
-        aggregate_to_compare_input(&variant),
-        &focus_spans,
-        regression_threshold,
+    let compare = compare_trace_aggregates_with_focus(super::output::TraceCompareRequest {
+        before_path: &baseline_path,
+        before: aggregate_to_compare_input(&baseline),
+        after_path: &variant_path,
+        after: aggregate_to_compare_input(&variant),
+        focus_span_ids: &focus_spans,
+        regression_threshold_percent: regression_threshold,
         regression_min_delta_ms,
-        &metric_guardrails,
-    );
+        metric_guardrail_specs: &metric_guardrails,
+    });
     compare_artifacts::write_compare_variant_json(&compare_path, &compare)?;
     write_trace_compare_variant_summary(
         &summary_path,
@@ -115,7 +115,7 @@ pub(super) fn run_compare_variant(mut args: TraceArgs) -> CmdResult<TraceCommand
     } else {
         1
     };
-    Ok((TraceCommandOutput::Compare(compare), exit_code))
+    Ok((TraceCommandOutput::Compare(Box::new(compare)), exit_code))
 }
 
 fn run_compare_variant_pair(
@@ -336,7 +336,7 @@ fn run_repeat_output(
 ) -> homeboy::core::Result<extension_trace::TraceAggregateOutput> {
     let (output, _exit_code) = run_repeat(args)?;
     match output {
-        TraceCommandOutput::Aggregate(aggregate) => Ok(aggregate),
+        TraceCommandOutput::Aggregate(aggregate) => Ok(*aggregate),
         _ => Err(homeboy::core::Error::internal_unexpected(
             "trace compare-variant expected aggregate output",
         )),

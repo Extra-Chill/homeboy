@@ -22,10 +22,11 @@ use super::sync::{reap_run_workspace, record_workspace_terminal_evidence};
 use super::types::{RunnerWorkspaceReconciliation, RunnerWorkspaceTerminalEvidence};
 
 /// Teardown policy for a run-owned materialized workspace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum WorkspaceCleanupPolicy {
     /// Reap every terminal outcome. Use this for job-private runtime state that
     /// must never survive a completed or cancelled offload.
+    #[default]
     DeleteAlways,
     /// Reap the workspace when the run succeeds; preserve it on failure so
     /// post-mortem evidence survives on the lab through its registered TTL.
@@ -63,12 +64,6 @@ impl WorkspaceTerminalOutcome {
             Self::Panic => "panic",
             Self::UncertainHandoff => "uncertain_handoff",
         }
-    }
-}
-
-impl Default for WorkspaceCleanupPolicy {
-    fn default() -> Self {
-        Self::DeleteAlways
     }
 }
 

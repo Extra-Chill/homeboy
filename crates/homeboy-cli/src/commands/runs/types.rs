@@ -242,7 +242,7 @@ pub enum RunsOutput {
     FieldSelection(RunsFieldSelectionOutput),
     Dossier(RunsDossierOutput),
     ResumePlan(RunsResumePlanOutput),
-    Evidence(RunsEvidenceOutput),
+    Evidence(Box<RunsEvidenceOutput>),
     Env(RunsEnvOutput),
     Artifacts(RunsArtifactsOutput),
     ArtifactAttach(RunsArtifactAttachOutput),
@@ -923,10 +923,11 @@ pub(super) fn actionable_for_run_detail(run: &RunDetail) -> CommandActionableMet
             semantic_key: Some(artifact.artifact_type.clone()),
         })
         .collect();
-    metadata
-        .next_actions
-        .extend(run.artifacts.iter().filter_map(|artifact| {
-            (artifact.artifact_type == "file").then(|| {
+    metadata.next_actions.extend(
+        run.artifacts
+            .iter()
+            .filter(|artifact| artifact.artifact_type == "file")
+            .map(|artifact| {
                 CommandNextAction::new(
                     format!("get artifact {}", artifact.id),
                     format!(
@@ -935,8 +936,8 @@ pub(super) fn actionable_for_run_detail(run: &RunDetail) -> CommandActionableMet
                     ),
                 )
                 .with_kind(CommandNextActionKind::Artifacts)
-            })
-        }));
+            }),
+    );
     metadata
 }
 

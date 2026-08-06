@@ -1237,48 +1237,50 @@ fn exact_no_pid_recovery_requires_unexpected_termination_and_refuses_process_con
     let daemon = fake_daemon(4242, "lease-dead");
     let mismatch = super::reconcile_dead_lease_orphans_with_operations(
         "other-lease",
-        &[uuid::Uuid::new_v4()],
-        || Ok(dead_status_with_unexpected_termination(daemon.clone())),
-        |_| false,
-        || Ok(Some(())),
-        || unreachable!("lease mismatch blocks owner probe"),
-        |_| unreachable!("lease mismatch blocks mutation"),
-        || unreachable!("lease mismatch blocks replacement"),
+        super::DeadLeaseOrphanRecoveryOperations {
+            status: || Ok(dead_status_with_unexpected_termination(daemon.clone())),
+            pid_is_running: |_| false,
+            acquire_owner: || Ok(Some(())),
+            prove_no_owner: || unreachable!("lease mismatch blocks owner probe"),
+            reconcile: |_| unreachable!("lease mismatch blocks mutation"),
+            start: || unreachable!("lease mismatch blocks replacement"),
+        },
     )
     .expect_err("mismatched lease is refused");
     assert!(mismatch.message.contains("does not match"));
 
     let missing = super::reconcile_dead_lease_orphans_with_operations(
         "lease-dead",
-        &[uuid::Uuid::new_v4()],
-        || Ok(fake_dead_status(daemon.clone())),
-        |_| false,
-        || Ok(Some(())),
-        || Ok(vec!["no owner".to_string()]),
-        |_| unreachable!("missing evidence blocks mutation"),
-        || unreachable!("missing evidence blocks replacement"),
+        super::DeadLeaseOrphanRecoveryOperations {
+            status: || Ok(fake_dead_status(daemon.clone())),
+            pid_is_running: |_| false,
+            acquire_owner: || Ok(Some(())),
+            prove_no_owner: || Ok(vec!["no owner".to_string()]),
+            reconcile: |_| unreachable!("missing evidence blocks mutation"),
+            start: || unreachable!("missing evidence blocks replacement"),
+        },
     )
     .expect_err("missing unexpected-exit evidence is refused");
     assert!(missing.message.contains("unexpected-termination evidence"));
 
-    let job = uuid::Uuid::new_v4();
     let status = dead_status_with_unexpected_termination(daemon.clone());
     let contradiction = super::reconcile_dead_lease_orphans_with_operations(
         "lease-dead",
-        &[job],
-        || Ok(status),
-        |_| false,
-        || Ok(Some(())),
-        || {
-            Err(crate::error::Error::validation_invalid_argument(
-                "owner_probe",
-                "live workload process evidence contradicts operator confirmation",
-                None,
-                None,
-            ))
+        super::DeadLeaseOrphanRecoveryOperations {
+            status: || Ok(status),
+            pid_is_running: |_| false,
+            acquire_owner: || Ok(Some(())),
+            prove_no_owner: || {
+                Err(crate::error::Error::validation_invalid_argument(
+                    "owner_probe",
+                    "live workload process evidence contradicts operator confirmation",
+                    None,
+                    None,
+                ))
+            },
+            reconcile: |_| unreachable!("contradictory process evidence blocks mutation"),
+            start: || unreachable!("contradictory process evidence blocks replacement"),
         },
-        |_| unreachable!("contradictory process evidence blocks mutation"),
-        || unreachable!("contradictory process evidence blocks replacement"),
     )
     .expect_err("contradictory process evidence is refused");
     assert!(contradiction.message.contains("contradicts"));
@@ -1290,19 +1292,20 @@ fn exact_no_pid_recovery_starts_only_after_reconciliation() {
     let job = uuid::Uuid::new_v4();
     let result = super::reconcile_dead_lease_orphans_with_operations(
         "lease-dead",
-        &[job],
-        || Ok(dead_status_with_unexpected_termination(daemon)),
-        |_| false,
-        || Ok(Some(())),
-        || Ok(vec!["owner lock acquired".to_string()]),
-        |_| {
-            Ok(crate::api_jobs::DaemonLeaseJobDiagnostics {
-                expected_lease_id: "lease-dead".to_string(),
-                matching_job_ids: vec![job],
-                ..Default::default()
-            })
+        super::DeadLeaseOrphanRecoveryOperations {
+            status: || Ok(dead_status_with_unexpected_termination(daemon)),
+            pid_is_running: |_| false,
+            acquire_owner: || Ok(Some(())),
+            prove_no_owner: || Ok(vec!["owner lock acquired".to_string()]),
+            reconcile: |_| {
+                Ok(crate::api_jobs::DaemonLeaseJobDiagnostics {
+                    expected_lease_id: "lease-dead".to_string(),
+                    matching_job_ids: vec![job],
+                    ..Default::default()
+                })
+            },
+            start: || Ok(fake_daemon(4343, "replacement")),
         },
-        || Ok(fake_daemon(4343, "replacement")),
     )
     .expect("exact reconciliation succeeds before replacement");
     assert_eq!(result.reconciled_job_ids, vec![job]);
@@ -1716,52 +1719,61 @@ fn state_loss_exact_lease_recovery_terminalizes_only_matching_jobs_and_starts_on
         #[cfg(not(target_os = "linux"))]
         {
             let blocked = super::recover_missing_lease_state_with_operations(
-                "exact-lease",
-                4242,
-                recorded_endpoint(),
-                || Ok(leaseless_status(1)),
-                |_| false,
-                |_| Ok("recorded endpoint was unreachable".to_string()),
-                || Ok(Some(())),
-                || {
-                    let raw = std::fs::read(&path).expect("store bytes");
-                    let snapshot = super::snapshot_job_store(&path, &raw).expect("snapshot");
-                    let recovered = JobStore::open_without_reconciliation_from_bytes(&path, &raw)
-                        .expect("recovery store");
-                    Ok((
-                        snapshot,
-                        recovered.reconcile_dead_daemon_lease_jobs("exact-lease")?,
-                    ))
+                super::MissingLeaseStateRecoveryRequest {
+                    lease_id: "exact-lease".to_string(),
+                    recorded_pid: 4242,
+                    recorded_endpoint: recorded_endpoint(),
                 },
-                || unreachable!("unsupported identity must block replacement"),
+                super::MissingLeaseStateRecoveryOperations {
+                    status: || Ok(leaseless_status(1)),
+                    pid_is_running: |_| false,
+                    probe_endpoint: |_| Ok("recorded endpoint was unreachable".to_string()),
+                    acquire_owner: || Ok(Some(())),
+                    reconcile: || {
+                        let raw = std::fs::read(&path).expect("store bytes");
+                        let snapshot = super::snapshot_job_store(&path, &raw).expect("snapshot");
+                        let recovered =
+                            JobStore::open_without_reconciliation_from_bytes(&path, &raw)
+                                .expect("recovery store");
+                        Ok((
+                            snapshot,
+                            recovered.reconcile_dead_daemon_lease_jobs("exact-lease")?,
+                        ))
+                    },
+                    start: || unreachable!("unsupported identity must block replacement"),
+                },
             )
             .expect_err("unsupported process identity blocks recovery");
             assert!(blocked.message.contains("active child process"));
             return;
         }
         let result = super::recover_missing_lease_state_with_operations(
-            "exact-lease",
-            4242,
-            recorded_endpoint(),
-            || Ok(leaseless_status(1)),
-            |_| false,
-            |_| Ok("recorded endpoint was unreachable".to_string()),
-            || Ok(Some(())),
-            || {
-                let raw = std::fs::read(&path).expect("store bytes");
-                let snapshot = super::snapshot_job_store(&path, &raw).expect("snapshot");
-                let recovered = JobStore::open_without_reconciliation_from_bytes(&path, &raw)
-                    .expect("recovery store");
-                let diagnostics = recovered.daemon_lease_job_diagnostics("exact-lease");
-                assert!(diagnostics.other_lease_job_ids.is_empty());
-                Ok((
-                    snapshot,
-                    recovered.reconcile_dead_daemon_lease_jobs("exact-lease")?,
-                ))
+            super::MissingLeaseStateRecoveryRequest {
+                lease_id: "exact-lease".to_string(),
+                recorded_pid: 4242,
+                recorded_endpoint: recorded_endpoint(),
             },
-            move || {
-                *start_count.lock().expect("starts") += 1;
-                Ok(fake_daemon(4343, "replacement"))
+            super::MissingLeaseStateRecoveryOperations {
+                status: || Ok(leaseless_status(1)),
+                pid_is_running: |_| false,
+                probe_endpoint: |_| Ok("recorded endpoint was unreachable".to_string()),
+                acquire_owner: || Ok(Some(())),
+                reconcile: || {
+                    let raw = std::fs::read(&path).expect("store bytes");
+                    let snapshot = super::snapshot_job_store(&path, &raw).expect("snapshot");
+                    let recovered = JobStore::open_without_reconciliation_from_bytes(&path, &raw)
+                        .expect("recovery store");
+                    let diagnostics = recovered.daemon_lease_job_diagnostics("exact-lease");
+                    assert!(diagnostics.other_lease_job_ids.is_empty());
+                    Ok((
+                        snapshot,
+                        recovered.reconcile_dead_daemon_lease_jobs("exact-lease")?,
+                    ))
+                },
+                start: move || {
+                    *start_count.lock().expect("starts") += 1;
+                    Ok(fake_daemon(4343, "replacement"))
+                },
             },
         )
         .expect("exact recovery");
@@ -1783,15 +1795,19 @@ fn state_loss_exact_lease_recovery_terminalizes_only_matching_jobs_and_starts_on
 fn state_loss_exact_recovery_refuses_live_pid_lock_endpoint_and_mixed_lease() {
     let refusal = |status: DaemonStatus, pid_live: bool, owner_available: bool| {
         super::recover_missing_lease_state_with_operations(
-            "exact-lease",
-            4242,
-            recorded_endpoint(),
-            || Ok(status),
-            move |_| pid_live,
-            |_| Ok("recorded endpoint was unreachable".to_string()),
-            move || Ok(owner_available.then_some(())),
-            || unreachable!("refused recovery must not mutate jobs"),
-            || unreachable!("refused recovery must not start a daemon"),
+            super::MissingLeaseStateRecoveryRequest {
+                lease_id: "exact-lease".to_string(),
+                recorded_pid: 4242,
+                recorded_endpoint: recorded_endpoint(),
+            },
+            super::MissingLeaseStateRecoveryOperations {
+                status: || Ok(status),
+                pid_is_running: move |_| pid_live,
+                probe_endpoint: |_| Ok("recorded endpoint was unreachable".to_string()),
+                acquire_owner: move || Ok(owner_available.then_some(())),
+                reconcile: || unreachable!("refused recovery must not mutate jobs"),
+                start: || unreachable!("refused recovery must not start a daemon"),
+            },
         )
         .expect_err("unsafe state must fail closed")
     };
@@ -1807,15 +1823,19 @@ fn state_loss_exact_recovery_refuses_live_pid_lock_endpoint_and_mixed_lease() {
         .message
         .contains("unreachable endpoint"));
     let replay = super::recover_missing_lease_state_with_operations(
-        "exact-lease",
-        4242,
-        recorded_endpoint(),
-        || Ok(fake_dead_status(fake_daemon(4343, "replacement"))),
-        |_| false,
-        |_| Ok("recorded endpoint was unreachable".to_string()),
-        || Ok(Some(())),
-        || unreachable!("replay must not reconcile jobs"),
-        || unreachable!("replay must not start another daemon"),
+        super::MissingLeaseStateRecoveryRequest {
+            lease_id: "exact-lease".to_string(),
+            recorded_pid: 4242,
+            recorded_endpoint: recorded_endpoint(),
+        },
+        super::MissingLeaseStateRecoveryOperations {
+            status: || Ok(fake_dead_status(fake_daemon(4343, "replacement"))),
+            pid_is_running: |_| false,
+            probe_endpoint: |_| Ok("recorded endpoint was unreachable".to_string()),
+            acquire_owner: || Ok(Some(())),
+            reconcile: || unreachable!("replay must not reconcile jobs"),
+            start: || unreachable!("replay must not start another daemon"),
+        },
     )
     .expect_err("replacement state makes recovery replay fail closed");
     assert!(replay.message.contains("absent daemon state"));
@@ -1833,29 +1853,33 @@ fn state_loss_exact_recovery_refuses_live_pid_lock_endpoint_and_mixed_lease() {
         let other_job = other.create("runner.exec");
         other.start(other_job.id).expect("start other");
         let error = super::recover_missing_lease_state_with_operations(
-            "exact-lease",
-            4242,
-            recorded_endpoint(),
-            || Ok(leaseless_status(2)),
-            |_| false,
-            |_| Ok("recorded endpoint was unreachable".to_string()),
-            || Ok(Some(())),
-            || {
-                let raw = std::fs::read(&path).expect("store bytes");
-                let recovered =
-                    JobStore::open_without_reconciliation_from_bytes(&path, &raw).expect("store");
-                let diagnostics = recovered.daemon_lease_job_diagnostics("exact-lease");
-                if !diagnostics.other_lease_job_ids.is_empty() {
-                    return Err(crate::Error::validation_invalid_argument(
-                        "lease_id",
-                        "mixed exact leases",
-                        None,
-                        None,
-                    ));
-                }
-                unreachable!("mixed lease must not reconcile")
+            super::MissingLeaseStateRecoveryRequest {
+                lease_id: "exact-lease".to_string(),
+                recorded_pid: 4242,
+                recorded_endpoint: recorded_endpoint(),
             },
-            || unreachable!("mixed lease must not start"),
+            super::MissingLeaseStateRecoveryOperations {
+                status: || Ok(leaseless_status(2)),
+                pid_is_running: |_| false,
+                probe_endpoint: |_| Ok("recorded endpoint was unreachable".to_string()),
+                acquire_owner: || Ok(Some(())),
+                reconcile: || {
+                    let raw = std::fs::read(&path).expect("store bytes");
+                    let recovered = JobStore::open_without_reconciliation_from_bytes(&path, &raw)
+                        .expect("store");
+                    let diagnostics = recovered.daemon_lease_job_diagnostics("exact-lease");
+                    if !diagnostics.other_lease_job_ids.is_empty() {
+                        return Err(crate::Error::validation_invalid_argument(
+                            "lease_id",
+                            "mixed exact leases",
+                            None,
+                            None,
+                        ));
+                    }
+                    unreachable!("mixed lease must not reconcile")
+                },
+                start: || unreachable!("mixed lease must not start"),
+            },
         )
         .expect_err("mixed leases must fail closed");
         assert!(error.message.contains("mixed exact leases"));
@@ -2260,6 +2284,7 @@ fn dead_status_with_unexpected_termination(daemon: super::DaemonStartResult) -> 
         os_evidence: "test".to_string(),
         exit_code: None,
         signal: Some(libc::SIGTERM),
+        supervisor_signal: None,
         stdout: None,
         stderr: None,
         stop_requested: false,

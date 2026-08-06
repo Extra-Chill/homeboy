@@ -167,6 +167,9 @@ impl Cli {
 }
 
 #[derive(Subcommand)]
+// Clap derives this public transport enum directly. Boxing variants would
+// cascade through typed command dispatch without improving the CLI boundary.
+#[allow(clippy::large_enum_variant)]
 pub enum Commands {
     /// Unified view of active and recently finished Homeboy work
     Activity(activity::ActivityArgs),

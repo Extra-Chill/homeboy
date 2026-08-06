@@ -2259,6 +2259,8 @@ fn force_stop_escalates_when_a_token_owned_daemon_ignores_sigterm() {
     assert!(result.stopped);
     let evidence = result.termination_evidence.expect("termination evidence");
     assert!(evidence.os_evidence.contains("SIGKILL"));
+    assert_eq!(evidence.signal, Some(libc::SIGKILL));
+    assert_eq!(evidence.supervisor_signal, None);
     assert!(!pid_is_running(pid));
 }
 
@@ -2311,6 +2313,8 @@ fn lease_bound_stop_converges_term_resistant_mixed_version_supervisor_and_daemon
     let evidence = result.termination_evidence.expect("termination evidence");
     assert!(evidence.os_evidence.contains("daemon pid"));
     assert!(evidence.os_evidence.contains("supervisor SIGKILL"));
+    assert_eq!(evidence.signal, Some(libc::SIGKILL));
+    assert_eq!(evidence.supervisor_signal, Some(libc::SIGKILL));
     assert!(!pid_is_running(daemon_pid));
     assert!(!pid_is_running(supervisor_pid));
     assert!(!state_path().expect("state path").exists());
@@ -2362,6 +2366,8 @@ fn ordinary_stop_escalates_a_fresh_term_resistant_supervised_daemon() {
     let evidence = result.termination_evidence.expect("termination evidence");
     assert!(evidence.os_evidence.contains("daemon pid"));
     assert!(evidence.os_evidence.contains("supervisor SIGKILL"));
+    assert_eq!(evidence.signal, Some(libc::SIGKILL));
+    assert_eq!(evidence.supervisor_signal, Some(libc::SIGKILL));
     assert!(!pid_is_running(daemon_pid));
     assert!(!pid_is_running(supervisor_pid));
 }
