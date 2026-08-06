@@ -99,6 +99,26 @@ pub struct AgentTaskManagedServiceBrowserOriginProbe {
 
 impl AgentTaskManagedService {
     pub const VERSION: u32 = 1;
+    pub const FIELDS: &'static [&'static str] = &[
+        "version",
+        "id",
+        "command",
+        "cwd",
+        "env",
+        "env_allowlist",
+        "secret_env",
+        "secret_env_plan",
+        "host",
+        "port",
+        "port_env",
+        "socket_handoff",
+        "readiness",
+        "cleanup_deadline_ms",
+        "public_url",
+        "browser_origin_probe",
+        "lifecycle",
+        "target",
+    ];
     pub const DEFAULT_CLEANUP_DEADLINE_MS: u64 = 2_000;
     pub const MAX_CLEANUP_DEADLINE_MS: u64 = 60_000;
 
@@ -123,6 +143,10 @@ pub enum AgentTaskManagedServiceLifecycle {
     /// The service is owned by the selected execution target and must be
     /// reconciled there after an interrupted controller handoff.
     Target,
+}
+
+impl AgentTaskManagedServiceLifecycle {
+    pub const VALUES: &'static [&'static str] = &["plan", "target"];
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
