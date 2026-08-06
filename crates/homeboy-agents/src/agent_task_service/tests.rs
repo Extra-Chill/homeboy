@@ -1409,7 +1409,7 @@ fn discovery_keeps_controller_handoff_commands_resolvable_after_runner_reconnect
             .expect("unaccepted controller handoff listed");
         assert_eq!(
             queued.commands.status,
-            "homeboy agent-task status controller-handoff-reconnect"
+            "homeboy --placement local agent-task status controller-handoff-reconnect"
         );
         agent_task_lifecycle::record_detached_lab_run(agent_task_lifecycle::DetachedLabRunRecord {
             run_id: "controller-handoff-reconnect",
@@ -1430,11 +1430,11 @@ fn discovery_keeps_controller_handoff_commands_resolvable_after_runner_reconnect
         assert_eq!(run.runner_id.as_deref(), Some("homeboy-lab"));
         assert_eq!(
             run.commands.status,
-            "homeboy agent-task status controller-handoff-reconnect"
+            "homeboy --placement local agent-task status controller-handoff-reconnect"
         );
         assert_eq!(
             run.commands.logs,
-            "homeboy agent-task logs controller-handoff-reconnect"
+            "homeboy --placement local agent-task logs controller-handoff-reconnect"
         );
         assert!(agent_task_lifecycle::status(&run.run_id).is_ok());
         assert!(agent_task_lifecycle::logs(&run.run_id).is_ok());
@@ -1489,7 +1489,7 @@ fn reconcile_terminalizes_an_unaccepted_controller_handoff_after_its_deadline() 
         assert_eq!(run.liveness, Some(AgentTaskLiveness::Unreconciled));
         assert_eq!(
             run.commands.status,
-            "homeboy agent-task status controller-handoff-unaccepted"
+            "homeboy --placement local agent-task status controller-handoff-unaccepted"
         );
 
         let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(

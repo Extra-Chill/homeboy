@@ -1270,6 +1270,46 @@ fn controller_local_lifecycle_reads_never_acquire_a_default_lab_runner() {
 }
 
 #[test]
+fn controller_local_record_owns_lifecycle_reads_before_default_lab_selection() {
+    crate::test_support::with_isolated_home(|_| {
+        let inferred = connected_default_lab_runner();
+        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            "local-owner-routing",
+            vec![serde_json::from_value(serde_json::json!({
+                "task_id": "local-owner-task",
+                "executor": { "backend": "fixture" },
+                "instructions": "exercise local lifecycle ownership"
+            }))
+            .expect("task")],
+        );
+        agent_task_lifecycle::submit_plan(&plan, Some(OWNER_LOCAL_RUN_ID))
+            .expect("controller-local record");
+
+        for args in [
+            ["homeboy", "agent-task", "status", OWNER_LOCAL_RUN_ID].as_slice(),
+            ["homeboy", "agent-task", "logs", OWNER_LOCAL_RUN_ID].as_slice(),
+            ["homeboy", "agent-task", "evidence", OWNER_LOCAL_RUN_ID].as_slice(),
+            ["homeboy", "agent-task", "diagnose", OWNER_LOCAL_RUN_ID].as_slice(),
+            ["homeboy", "agent-task", "review", OWNER_LOCAL_RUN_ID].as_slice(),
+            ["homeboy", "agent-task", "reconcile", OWNER_LOCAL_RUN_ID].as_slice(),
+        ] {
+            let cli = Cli::try_parse_from(args).expect("lifecycle command parses");
+            assert!(
+                controller_owns_agent_task_lifecycle_command(&cli).expect("owner resolves"),
+                "{args:?} must remain controller-local before the connected default Lab is selected"
+            );
+            let route_runner =
+                if controller_owns_agent_task_lifecycle_command(&cli).expect("owner resolves") {
+                    None
+                } else {
+                    route_runner_for(args, &inferred)
+                };
+            assert_eq!(route_runner, None, "{args:?} must not use homeboy-lab");
+        }
+    });
+}
+
+#[test]
 fn every_generated_next_action_command_round_trips_to_the_record_owner() {
     // A generated next action that walks the operator back into the failure it
     // was printed to resolve is worse than no guidance at all (#11599). Each of

@@ -533,13 +533,13 @@ fn discovery_run(
     let command_prefix = if metadata_string(&record.metadata, "lifecycle_store_owner").as_deref()
         == Some("controller")
     {
-        "homeboy agent-task".to_string()
+        "homeboy --placement local agent-task".to_string()
     } else {
         match runner_id.as_deref() {
             // Lifecycle records resident on a runner must execute there. The
             // global `--runner` flag is only for portable Lab offload commands.
             Some(runner_id) => format!("homeboy runner exec {runner_id} -- homeboy agent-task"),
-            None => "homeboy agent-task".to_string(),
+            None => "homeboy --placement local agent-task".to_string(),
         }
     };
 
