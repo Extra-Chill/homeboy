@@ -75,6 +75,25 @@ install_wp_codebox() {
         esac
     }
 
+    # A wrapper written into ${HOME}/.local/bin by an earlier install keeps
+    # resolving on PATH after its exec target is pruned or a build is
+    # interrupted. Anything that trusts PATH then reaches a missing entrypoint
+    # and dies inside the runtime rather than here, so drop the wrapper as soon
+    # as its target is gone.
+    prune_stale_wp_codebox_wrapper() {
+        local wrapper="$1"
+        local target
+
+        [ -f "${wrapper}" ] || return 0
+
+        target="$(sed -n 's/^exec \(node \)\?"\([^"]*\)".*$/\2/p' "${wrapper}" | head -1)"
+        [ -n "${target}" ] || return 0
+        [ ! -e "${target}" ] || return 0
+
+        echo "Removing stale WP Codebox wrapper ${wrapper}; its target no longer exists: ${target}" >&2
+        rm -f "${wrapper}"
+    }
+
     first_non_empty_env() {
         local name
         for name in "$@"; do
@@ -162,6 +181,8 @@ install_wp_codebox() {
         done
         return 1
     }
+
+    prune_stale_wp_codebox_wrapper "${HOME}/.local/bin/wp-codebox"
 
     if configure_explicit_overrides; then
         return 0

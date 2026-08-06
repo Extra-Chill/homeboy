@@ -16,6 +16,11 @@ const componentPath = required(process.env.HOMEBOY_COMPONENT_PATH, 'HOMEBOY_COMP
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const extensionRoot = path.resolve(scriptDirectory, '../..');
 const harnessSource = path.join(extensionRoot, 'vendor');
+// Resolved WP Codebox invocation as an argv array, e.g.
+// ['node', '/abs/packages/cli/dist/index.js'] or ['/abs/bin/wp-codebox'].
+// Declared with the module's other top-level bindings: the statements below run
+// before any later declaration is initialized.
+let wpCodeboxCommandCache;
 const NATIVE_MARIADB_CAPABILITY = 'runtime-service:mysql:native:mariadb';
 const RUNTIME_SERVICE_CAPABILITIES_SCHEMA = 'wp-codebox/runtime-service-capabilities/v1';
 const slug = process.env.COMPONENT_ID || path.basename(componentPath);
@@ -110,7 +115,8 @@ async function runCaptured(args) {
   const secretValues = configuredSecretValues();
 
   return new Promise((resolve, reject) => {
-    const child = spawn(process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox', args, { cwd: componentPath, stdio: ['ignore', 'pipe', 'pipe'] });
+    const [command, ...prefix] = wpCodeboxCommand();
+    const child = spawn(command, [...prefix, ...args], { cwd: componentPath, stdio: ['ignore', 'pipe', 'pipe'] });
     const stdoutFile = createWriteStream(stdoutPath);
     const stderrFile = createWriteStream(stderrPath);
     const stdoutRedactor = createLineRedactor(secretValues);
@@ -189,7 +195,8 @@ function createLineRedactor(secretValues) {
 }
 
 function run(args) {
-  const result = spawnSync(process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox', args, { cwd: componentPath, env: environmentWithoutDatabaseAdministration(), encoding: 'utf8', stdio: 'inherit' });
+  const [command, ...prefix] = wpCodeboxCommand();
+  const result = spawnSync(command, [...prefix, ...args], { cwd: componentPath, env: environmentWithoutDatabaseAdministration(), encoding: 'utf8', stdio: 'inherit' });
   if (result.error) {
     throw result.error;
   }
@@ -197,6 +204,45 @@ function run(args) {
     process.exit(result.status ?? 1);
   }
 }
+function wpCodeboxCommand() {
+  if (wpCodeboxCommandCache === undefined) {
+    wpCodeboxCommandCache = resolveWpCodeboxCommand();
+  }
+  return wpCodeboxCommandCache;
+}
+
+// The shell library at scripts/lib/wp-codebox-paths.sh is the single source of
+// truth for candidate precedence, the runtime probe, and `node` prefixing.
+// `test-runner-wp-codebox.sh` normally resolves and exports the argv before this
+// adapter starts; when the adapter is invoked directly, delegate to the same
+// library rather than maintaining a second precedence list here.
+function resolveWpCodeboxCommand() {
+  const exported = parseCommandArgv(process.env.HOMEBOY_WP_CODEBOX_COMMAND_JSON);
+  if (exported) {
+    return exported;
+  }
+
+  const library = path.join(scriptDirectory, '../lib/wp-codebox-paths.sh');
+  const result = spawnSync('bash', ['-c', `source "$1" && homeboy_wp_codebox_export_command "\${HOMEBOY_SETTINGS_JSON:-}" && printf '%s' "$HOMEBOY_WP_CODEBOX_COMMAND_JSON"`, 'wp-codebox-resolve', library], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] });
+
+  const resolved = result.status === 0 ? parseCommandArgv(result.stdout) : undefined;
+  if (!resolved) {
+    throw new Error('WP Codebox CLI could not be resolved; see the resolver diagnostics above.');
+  }
+  return resolved;
+}
+
+function parseCommandArgv(value) {
+  const parsed = json(value, undefined);
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    return undefined;
+  }
+  if (!parsed.every((entry) => typeof entry === 'string' && entry !== '')) {
+    return undefined;
+  }
+  return parsed;
+}
+
 function required(value, name) { if (!value) { throw new Error(`${name} is required`); } return value; }
 async function resolveWordPressTopology(configuration, pluginDirectory) {
   const fromEnv = process.env.HOMEBOY_WORDPRESS_MULTISITE;
@@ -409,7 +455,8 @@ function requireDatabaseServiceCapability(service) {
   if (!service?.requiredCapability) {
     return;
   }
-  const result = spawnSync(process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox', ['runtime', 'descriptor', '--json'], {
+  const [command, ...prefix] = wpCodeboxCommand();
+  const result = spawnSync(command, [...prefix, 'runtime', 'descriptor', '--json'], {
     cwd: componentPath,
     env: environmentWithoutDatabaseAdministration(),
     encoding: 'utf8',
@@ -1115,11 +1162,13 @@ function resolvePhpunitBootstrap(configuration, profile) {
 }
 async function persistRecipeEvidence(artifactDirectory, recipeOptions, generatedRecipePath, profile, resolvedDependencies) {
   const sourceRefs = [{ slug, source: root, source_subpath: subpath || null }, ...resolvedDependencies.map((dependency) => ({ slug: dependency.slug, source: dependency.source }))];
+  const wpCodeboxArgv = wpCodeboxCommand();
+  const wpCodeboxCli = wpCodeboxArgv[wpCodeboxArgv.length - 1];
   await Promise.all([
     copyFile(generatedRecipePath, path.join(artifactDirectory, 'wp-codebox-phpunit-recipe.json')),
     writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-recipe-options.json'), `${JSON.stringify(recipeOptions, null, 2)}\n`),
     writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-profile.json'), `${JSON.stringify({ wordpress: { topology }, phpunit: { config: profile.config, cwd: profile.cwd, test_root: profile.testRoot, environment: profile.environment, bootstrap_mode: recipeOptions.bootstrapMode, project_bootstrap: recipeOptions.projectBootstrap || null, passthrough_args: recipeOptions.phpunitArgs, extra_mounts: recipeOptions.mounts } }, null, 2)}\n`),
-    writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-provenance.json'), `${JSON.stringify({ source_refs: sourceRefs, activation: { order: activationPlan.map(({ role, slug: planSlug }) => ({ role, slug: planSlug, activate: true })) }, scope: { selected_test_file: selectedTestFile || null, changed_test_files: changedTestFiles }, wp_codebox: { cli_bin: process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox', resolved_cli_path: process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox', command: [process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox'] } }, null, 2)}\n`),
+    writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-provenance.json'), `${JSON.stringify({ source_refs: sourceRefs, activation: { order: activationPlan.map(({ role, slug: planSlug }) => ({ role, slug: planSlug, activate: true })) }, scope: { selected_test_file: selectedTestFile || null, changed_test_files: changedTestFiles }, wp_codebox: { cli_bin: wpCodeboxCli, resolved_cli_path: wpCodeboxCli, command: wpCodeboxArgv } }, null, 2)}\n`),
   ]);
 }
 function runScript(script, args) {

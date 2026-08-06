@@ -94,7 +94,12 @@ homeboy_wp_codebox_resolve_bin() {
         fi
     done
 
-    if ! command -v wp-codebox >/dev/null 2>&1; then
+    if homeboy_wp_codebox_managed_cache_is_incomplete; then
+        local managed_cli
+        managed_cli="$(homeboy_wp_codebox_managed_cli_candidates | head -1)"
+        echo "Error: the managed WP Codebox cache is incomplete; its built CLI entrypoint is missing at ${managed_cli}." >&2
+        echo "       Re-run the WordPress extension setup to rebuild it, or set HOMEBOY_WP_CODEBOX_BIN / settings wp_codebox_bin to a working CLI." >&2
+    elif ! command -v wp-codebox >/dev/null 2>&1; then
         if [ "$config_label" = "config" ]; then
             echo "ERROR: wp-codebox not found; set HOMEBOY_WP_CODEBOX_BIN or config wp_codebox_bin" >&2
         else
@@ -139,10 +144,29 @@ homeboy_wp_codebox_global_cli_candidates() {
     done
 }
 
+homeboy_wp_codebox_managed_install_root() {
+    printf '%s\n' "${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
+}
+
 homeboy_wp_codebox_managed_cli_candidates() {
-    local install_dir="${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
+    local install_dir
+    install_dir="$(homeboy_wp_codebox_managed_install_root)"
 
     printf '%s\n' "${install_dir}/source/packages/cli/dist/index.js"
+}
+
+# True when the managed source checkout exists but its built CLI entrypoint does
+# not. That is an incomplete cache: the clone succeeded and the build did not,
+# or the build output was pruned. Callers refresh it rather than treating the
+# checkout as a satisfied install.
+homeboy_wp_codebox_managed_cache_is_incomplete() {
+    local install_dir
+    local repo_dir
+    install_dir="$(homeboy_wp_codebox_managed_install_root)"
+    repo_dir="${install_dir}/source"
+
+    [ -d "${repo_dir}" ] || return 1
+    [ ! -f "${repo_dir}/packages/cli/dist/index.js" ]
 }
 
 homeboy_wp_codebox_bin_is_runnable() {
@@ -165,6 +189,26 @@ homeboy_wp_codebox_bin_is_runnable() {
     "$bin" commands >/dev/null 2>&1
 }
 
+# Presence check for a binary a caller pinned explicitly. An ambient candidate
+# additionally has to answer `commands`, because an install can leave a wrapper
+# on PATH after its target is gone. A pinned binary is not ambient: the caller
+# named it, so only require that it is actually there to run.
+homeboy_wp_codebox_bin_is_present() {
+    local bin="$1"
+
+    case "$bin" in
+        *.js|*.cjs|*.mjs)
+            [ -f "$bin" ]
+            ;;
+        /*|./*|../*)
+            [ -x "$bin" ]
+            ;;
+        *)
+            command -v "$bin" >/dev/null 2>&1
+            ;;
+    esac
+}
+
 homeboy_wp_codebox_set_command() {
     local bin="$1"
 
@@ -183,6 +227,56 @@ homeboy_wp_codebox_resolve_command() {
     bin="$(homeboy_wp_codebox_resolve_bin "$settings_json")" || return 1
     homeboy_wp_codebox_set_command "$bin"
     printf '%s\n' "$bin"
+}
+
+# Serialize the resolved invocation as a JSON argv array so non-shell consumers
+# (the PHPUnit adapter) inherit this resolver's precedence and `node` prefixing
+# instead of maintaining a second candidate list.
+homeboy_wp_codebox_command_json() {
+    local element
+    local encoded
+    local out=""
+
+    for element in "${HOMEBOY_WP_CODEBOX_COMMAND[@]}"; do
+        encoded="$(printf '%s' "$element" | jq -R -s '.')"
+        if [ -z "$out" ]; then
+            out="$encoded"
+        else
+            out="${out},${encoded}"
+        fi
+    done
+
+    printf '[%s]\n' "$out"
+}
+
+homeboy_wp_codebox_publish_command() {
+    HOMEBOY_WP_CODEBOX_COMMAND_JSON="$(homeboy_wp_codebox_command_json)"
+    export HOMEBOY_WP_CODEBOX_COMMAND_JSON
+}
+
+# Resolve once and export the argv contract for child processes.
+#
+# An explicit override that is present wins outright. The general resolver
+# deliberately ranks the managed cache ahead of the environment so a stale
+# exported path cannot shadow a freshly built cache, but a caller that pins a
+# binary — a test fixture, or an operator pointing at a local build — means it.
+# An override pointing at something that is not there is skipped rather than
+# trusted, so a dangling pin still falls through to full resolution and its
+# diagnostics instead of reaching the runtime.
+homeboy_wp_codebox_export_command() {
+    local settings_json="${1:-${HOMEBOY_SETTINGS_JSON:-}}"
+    local override
+
+    for override in "${HOMEBOY_WP_CODEBOX_BIN:-}" "${WP_CODEBOX_BIN:-}"; do
+        [ -n "$override" ] || continue
+        homeboy_wp_codebox_bin_is_present "$override" || continue
+        homeboy_wp_codebox_set_command "$override"
+        homeboy_wp_codebox_publish_command
+        return 0
+    done
+
+    homeboy_wp_codebox_resolve_command "$settings_json" >/dev/null || return 1
+    homeboy_wp_codebox_publish_command
 }
 
 homeboy_wp_codebox_resolved_bin_path() {
