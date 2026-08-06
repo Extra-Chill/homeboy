@@ -1725,6 +1725,7 @@ fn reserve_admission(
     let workspace_claim_binding = workspace_claim_binding_from_body(&Some(body.clone()))?;
     let workspace_owner_request = body
         .get("workspace_owner_request")
+        .filter(|value| !value.is_null())
         .cloned()
         .map(serde_json::from_value::<WorkspaceOwnerRegisterRequest>)
         .transpose()
@@ -2255,6 +2256,7 @@ fn release_admission(
     let workspace_owner_lease = body
         .as_ref()
         .and_then(|body| body.get("workspace_owner_lease"))
+        .filter(|value| !value.is_null())
         .cloned()
         .map(serde_json::from_value::<crate::workspace_claim::WorkspaceOwnerLease>)
         .transpose()
@@ -2334,6 +2336,7 @@ fn renew_admission(
     let workspace_owner_lease = body
         .as_ref()
         .and_then(|body| body.get("workspace_owner_lease"))
+        .filter(|value| !value.is_null())
         .cloned()
         .map(serde_json::from_value::<crate::workspace_claim::WorkspaceOwnerLease>)
         .transpose()
@@ -3968,6 +3971,48 @@ mod tests {
                 error.details["workspace_owner_lease_cleanup"]["released"],
                 true
             );
+        });
+    }
+
+    #[test]
+    fn admission_accepts_legacy_null_owner_request_but_rejects_malformed_structured_value() {
+        with_isolated_home(|_| {
+            let lease_id = "lease-null-owner-request";
+            write_test_lease(lease_id);
+            let store = JobStore::default();
+            for payload in [
+                json!({
+                    "runner_id": "lab",
+                    "expected_daemon_lease_id": lease_id,
+                    "admission_lease_protocol": 1,
+                }),
+                // Older controllers serialized `Option::None` as JSON null.
+                json!({
+                    "runner_id": "lab",
+                    "expected_daemon_lease_id": lease_id,
+                    "admission_lease_protocol": 1,
+                    "workspace_owner_request": null,
+                }),
+            ] {
+                let reserved = reserve_admission(Some(payload), &store)
+                    .expect("optional owner request must be accepted");
+                assert!(reserved.get("workspace_owner_lease").is_some());
+                assert!(reserved["workspace_owner_lease"].is_null());
+            }
+            let error = reserve_admission(
+                Some(json!({
+                    "runner_id": "lab",
+                    "expected_daemon_lease_id": lease_id,
+                    "admission_lease_protocol": 1,
+                    "workspace_owner_request": { "owner_id": "missing-workspace" },
+                })),
+                &store,
+            )
+            .expect_err("non-null owner requests remain structured and strict");
+            assert_eq!(error.details["field"], "workspace_owner_request");
+            assert!(error
+                .message
+                .contains("malformed direct workspace owner request"));
         });
     }
 
