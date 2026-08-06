@@ -17,6 +17,7 @@ use super::CmdResult;
 
 pub mod changelog;
 pub mod changes;
+pub mod contains;
 pub mod version;
 
 #[derive(Args)]
@@ -56,6 +57,10 @@ enum ReleaseSubcommand {
     Version(ReleaseVersionArgs),
     /// Write a source-authority manifest for assembled release artifacts
     ArtifactSourceAuthority(ArtifactSourceAuthorityArgs),
+    /// Report which release first contained a commit, and whether the installed build has it
+    Contains(contains::ContainsArgs),
+    /// Report how far the installed build is behind the newest release
+    Gap(contains::GapArgs),
 }
 
 #[derive(Args)]
@@ -270,6 +275,8 @@ pub enum ReleaseCommandOutput {
     Changes(changes::ChangesCommandOutput),
     Changelog(changelog::ChangelogOutput),
     Version(version::VersionOutput),
+    Contains(Box<release::ReleaseContainsReport>),
+    Gap(Box<release::ReleaseGapReport>),
 }
 
 fn map_nested<T>(
@@ -380,6 +387,16 @@ pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
                 version::run_command(args.command),
                 ReleaseCommandOutput::Version,
             );
+        }
+        Some(ReleaseSubcommand::Contains(args)) => {
+            return map_nested(contains::run_contains(args), |report| {
+                ReleaseCommandOutput::Contains(Box::new(report))
+            });
+        }
+        Some(ReleaseSubcommand::Gap(args)) => {
+            return map_nested(contains::run_gap(args), |report| {
+                ReleaseCommandOutput::Gap(Box::new(report))
+            });
         }
         Some(ReleaseSubcommand::ArtifactSourceAuthority(args)) => {
             let manifest = release::write_artifact_source_authority_manifest(

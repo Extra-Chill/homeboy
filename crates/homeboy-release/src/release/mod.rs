@@ -1,6 +1,10 @@
 mod advanced_remote;
 pub mod cascade;
 mod checkout_guard;
+// "Is my fix released yet?" — commit→release containment and the inverse
+// installed-versus-latest gap (#11754). Public because the CLI surfaces it
+// directly and it is pure git plus release metadata.
+pub mod containment;
 mod context;
 mod deployment;
 mod execution_dispatch;
@@ -50,6 +54,10 @@ pub mod version {
 }
 
 pub use cascade::{run_cascade, CascadeResult, CascadeStepResult, ReleasedCoordinates};
+pub use containment::{
+    ContainmentAssessment, ContainmentStatus, ContainsQuery, GapStatus, ReleaseContainsReport,
+    ReleaseGapAssessment, ReleaseGapReport,
+};
 pub use executor::artifacts::{
     write_artifact_source_authority_manifest, ArtifactSourceAuthorityManifest,
 };
