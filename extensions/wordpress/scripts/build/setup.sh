@@ -86,6 +86,16 @@ install_wp_codebox() {
         return 1
     }
 
+    is_managed_install_path() {
+        local candidate="$1"
+        local install_root="${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
+
+        case "${candidate}" in
+            "${install_root}"/*) return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+
     configure_explicit_overrides() {
         local explicit_bin=""
         local explicit_core_module=""
@@ -107,10 +117,18 @@ install_wp_codebox() {
         explicit_core_module="$(first_non_empty_env WP_CODEBOX_CORE_MODULE HOMEBOY_WP_CODEBOX_CORE_MODULE || true)"
         if [ -n "${explicit_core_module}" ]; then
             configure_core_module "${explicit_core_module}" || {
-                echo "Explicit WP Codebox core module override is not a file: ${explicit_core_module}" >&2
-                exit 1
+                if is_managed_install_path "${explicit_core_module}"; then
+                    echo "Managed WP Codebox core module is missing; reinstalling: ${explicit_core_module}" >&2
+                    unset WP_CODEBOX_CORE_MODULE HOMEBOY_WP_CODEBOX_CORE_MODULE
+                    explicit_core_module=""
+                else
+                    echo "Explicit WP Codebox core module override is not a file: ${explicit_core_module}" >&2
+                    exit 1
+                fi
             }
-            configured_core_module=1
+            if [ -n "${explicit_core_module}" ]; then
+                configured_core_module=1
+            fi
         fi
 
         if [ "${configured_bin}" -eq 1 ] && { [ "${configured_core_module}" -eq 1 ] || resolve_core_module_from_known_locations; } && probe_wp_codebox_runtime "${HOMEBOY_WP_CODEBOX_BIN}" && probe_wp_codebox_native_runtime "$(wp_codebox_dependency_root "${HOMEBOY_WP_CODEBOX_BIN}")"; then

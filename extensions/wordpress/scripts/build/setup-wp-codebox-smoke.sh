@@ -235,6 +235,7 @@ printf '%s\n' 'module.exports = require("./native.js");' > "${COLD_INSTALL_DIR}/
     PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
     GITHUB_ENV="${COLD_GITHUB_ENV_FILE}" \
     HOMEBOY_WP_CODEBOX_BIN="${COLD_BIN}" \
+    HOMEBOY_WP_CODEBOX_CORE_MODULE="${COLD_INSTALL_DIR}/source/packages/runtime-core/dist/index.js" \
     HOMEBOY_WP_CODEBOX_INSTALL_DIR="${COLD_INSTALL_DIR}" \
     FAKE_WP_CODEBOX_RELEASE_MISSING="1" \
     bash "${ROOT_DIR}/scripts/build/setup.sh" > "${TMPDIR}/cold-setup.out"
@@ -260,6 +261,25 @@ fi
 
 if ! node -e 'require(require.resolve("sharp", { paths: [ process.argv[1] ] }));' "${COLD_INSTALL_DIR}/source"; then
     echo "Expected source hydration to restore the cached native runtime dependency" >&2
+    exit 1
+fi
+
+EXTERNAL_CORE_ERROR="${TMPDIR}/external-core.err"
+if (
+    cd "${EXTENSION_DIR}"
+    HOME="${COLD_HOME}" \
+    PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${COLD_INSTALL_DIR}" \
+    HOMEBOY_WP_CODEBOX_CORE_MODULE="${TMPDIR}/external/missing-core.js" \
+    bash "${ROOT_DIR}/scripts/build/setup.sh" >/dev/null 2> "${EXTERNAL_CORE_ERROR}"
+); then
+    echo "Missing external WP Codebox core overrides must fail closed" >&2
+    exit 1
+fi
+
+if ! grep -q 'Explicit WP Codebox core module override is not a file' "${EXTERNAL_CORE_ERROR}"; then
+    echo "Expected an explicit external core override diagnostic" >&2
+    cat "${EXTERNAL_CORE_ERROR}" >&2
     exit 1
 fi
 
