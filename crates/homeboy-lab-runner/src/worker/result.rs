@@ -2,6 +2,10 @@ use base64::Engine;
 use serde_json::json;
 use std::collections::HashSet;
 
+use crate::agent_task_handoff_event::{
+    agent_task_dispatch_handoff_event_from_job_events,
+    agent_task_dispatch_handoff_event_from_workload_result, AGENT_TASK_DISPATCH_HANDOFF_EVENT_KEY,
+};
 use crate::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events;
 use homeboy_core::api_jobs::{
     Job, JobArtifactMetadata, RemoteRunnerJobRequest, RemoteRunnerJobResult,
@@ -56,6 +60,28 @@ pub(super) fn remote_runner_result_from_exec_output(
     {
         data["agent_task_lifecycle_event"] =
             serde_json::to_value(lifecycle_event).unwrap_or(serde_json::Value::Null);
+    }
+    // Same treatment for the cook/dispatch handoff seam (#7530): carry the
+    // typed, contract-keyed event on the terminal result so a controller
+    // reading only the result never has to rescan streams. Prefer an event the
+    // inner daemon already emitted; otherwise derive it here, where both the
+    // workload and the streams are in hand.
+    if let Some(handoff_event) =
+        agent_task_dispatch_handoff_event_from_job_events(exec_output.job_events.as_deref())
+            .or_else(|| {
+                agent_task_dispatch_handoff_event_from_workload_result(
+                    lab_runner_workload.as_ref(),
+                    &exec_output.runner_id,
+                    exec_output.job_id.as_deref().unwrap_or_default(),
+                    &json!({
+                        "stdout": &exec_output.stdout,
+                        "stderr": &exec_output.stderr,
+                    }),
+                )
+            })
+    {
+        data[AGENT_TASK_DISPATCH_HANDOFF_EVENT_KEY] =
+            serde_json::to_value(handoff_event).unwrap_or(serde_json::Value::Null);
     }
     if let Some(lab_runner_workload) = lab_runner_workload {
         data["runner_workload"] = serde_json::to_value(
