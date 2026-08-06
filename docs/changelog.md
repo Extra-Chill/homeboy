@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.332.0] - 2026-08-06
+
+### Added
+- add durable managed services
+
+### Fixed
+- gate executor root device/inode check to unix
+- restore Rust 1.95 warning-clean gate
+
 ## [0.331.0] - 2026-08-05
 
 ### Added
