@@ -1649,6 +1649,7 @@ mod tests {
                 local_url: Some("http://127.0.0.1:7331".to_string()),
                 tunnel_pid: Some(12345),
                 tunnel_process_start_identity: None,
+                proxy_forward: None,
                 remote_daemon_pid: Some(23456),
                 remote_daemon_lease_id: Some("lease-23456".to_string()),
                 homeboy_version: "homeboy 0.259.0".to_string(),
