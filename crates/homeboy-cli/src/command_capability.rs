@@ -55,8 +55,24 @@ pub enum CommandCapability {
     Mutation,
 }
 
+/// The arguments Homeboy itself owns: everything before the first bare `--`.
+///
+/// Everything after it is forwarded verbatim to a remote or child command —
+/// `homeboy ssh <target> -- df -h /` — so it must never influence how Homeboy
+/// classifies or routes its own invocation. Reading through the separator let a
+/// remote `-h` short-circuit this function to `ReadOnly` on an `ssh` invocation
+/// that is otherwise `Mutation`, and made the startup help fast path claim an
+/// invocation clap would go on to parse successfully (#11577).
+pub fn homeboy_owned_args(args: &[String]) -> &[String] {
+    match args.iter().position(|arg| arg == "--") {
+        Some(separator) => &args[..separator],
+        None => args,
+    }
+}
+
 pub fn classify(args: &[String]) -> CommandCapability {
     let args = args.get(1..).unwrap_or_default();
+    let args = homeboy_owned_args(args);
 
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         return CommandCapability::ReadOnly;
@@ -272,5 +288,51 @@ mod tests {
         ] {
             assert!(requires_startup_reconciliation(&command));
         }
+    }
+
+    #[test]
+    fn a_forwarded_remote_argument_cannot_reclassify_the_invocation() {
+        // `homeboy ssh <target> --timeout 30 -- df -h /` is a mutation that
+        // happens to forward `-h`. Reading through the separator classified it
+        // ReadOnly and skipped the mutation path entirely (#11577).
+        let ssh_with_remote_help = args(&[
+            "homeboy",
+            "ssh",
+            "chubes-net",
+            "--timeout",
+            "30",
+            "--",
+            "df",
+            "-h",
+            "/",
+        ]);
+        assert_eq!(classify(&ssh_with_remote_help), CommandCapability::Mutation);
+
+        // Homeboy's own help is still help, before or after other flags.
+        assert_eq!(
+            classify(&args(&["homeboy", "ssh", "--help"])),
+            CommandCapability::ReadOnly
+        );
+
+        // A remote command whose own flags mimic Homeboy's read-only surface
+        // must not borrow that classification either.
+        assert_eq!(
+            classify(&args(&["homeboy", "ssh", "host", "--", "runner", "status"])),
+            CommandCapability::Mutation
+        );
+    }
+
+    #[test]
+    fn homeboy_owned_args_stops_at_the_first_separator() {
+        let forwarded = args(&["ssh", "host", "--", "df", "-h"]);
+        assert_eq!(homeboy_owned_args(&forwarded), &args(&["ssh", "host"])[..]);
+
+        // No separator means every argument is Homeboy's.
+        let all = args(&["runner", "status"]);
+        assert_eq!(homeboy_owned_args(&all), &all[..]);
+
+        // Only the first separator delimits; later ones belong to the remote.
+        let nested = args(&["ssh", "host", "--", "sh", "-c", "--", "x"]);
+        assert_eq!(homeboy_owned_args(&nested), &args(&["ssh", "host"])[..]);
     }
 }

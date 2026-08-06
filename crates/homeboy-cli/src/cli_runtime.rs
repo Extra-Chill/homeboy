@@ -10,7 +10,8 @@ use crate::cli_surface::{
     ExtensionCommandHealth, ExtensionCommandManifest,
 };
 use crate::command_capability::{
-    classify as classify_command_capability, requires_startup_reconciliation, CommandCapability,
+    classify as classify_command_capability, homeboy_owned_args, requires_startup_reconciliation,
+    CommandCapability,
 };
 use crate::commands;
 use crate::commands::cli;
@@ -83,10 +84,17 @@ fn startup_fast_path_output(args: &[String]) -> Option<StartupFastPathOutput> {
         // Rendered help never displays readiness, so probing it was pure cost
         // on the hottest command in the CLI (#10616).
         StartupFastPath::Help => {
-            let error = CliRuntime::new()
+            // Fall through to normal parsing rather than asserting. This used
+            // to `expect_err`, so any argv the fast path read as help but clap
+            // parsed successfully aborted the process instead of running the
+            // command (#11577). The fast path is an optimization; disagreeing
+            // with clap must cost a slow path, never a panic.
+            let Err(error) = CliRuntime::new()
                 .build_augmented_command()
                 .try_get_matches_from(args)
-                .expect_err("an explicit help flag must stop argument parsing");
+            else {
+                return None;
+            };
             if error.kind() != clap::error::ErrorKind::DisplayHelp {
                 return None;
             }
@@ -1148,7 +1156,13 @@ fn startup_fast_path(args: &[String]) -> Option<StartupFastPath> {
     }
 
     match args {
-        [_, rest @ ..] if rest.iter().any(|arg| arg == "--help" || arg == "-h") => {
+        // Only Homeboy's own arguments can request help. A forwarded remote
+        // command may legitimately contain `-h` (#11577).
+        [_, rest @ ..]
+            if homeboy_owned_args(rest)
+                .iter()
+                .any(|arg| arg == "--help" || arg == "-h") =>
+        {
             Some(StartupFastPath::Help)
         }
         [_, flag] if flag == "--version" || flag == "-V" => Some(StartupFastPath::Version),
