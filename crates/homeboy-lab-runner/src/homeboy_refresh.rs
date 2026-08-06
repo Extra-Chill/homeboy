@@ -101,6 +101,11 @@ pub struct HomeboyBinaryRefreshOutput {
     pub selected_binary_path: String,
     pub reconnect_required: bool,
     pub followup_commands: Vec<String>,
+    /// The observed admission postcondition after a reconnect. A rotated daemon
+    /// may be healthy while older generations still own work, so daemon startup
+    /// alone is not convergence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<HomeboyRefreshReadiness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reconnect_deferred: Option<HomeboyReconnectDeferred>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,6 +114,28 @@ pub struct HomeboyBinaryRefreshOutput {
     pub bootstrap_provenance: Option<HomeboyBootstrapProvenance>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rollback: Option<HomeboyBinaryRefreshRollback>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HomeboyRefreshReadinessState {
+    Ready,
+    Draining,
+    Blocked,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HomeboyRefreshReadiness {
+    pub state: HomeboyRefreshReadinessState,
+    pub accepting_jobs: bool,
+    pub daemon_fresh: bool,
+    /// Exact generation or lease owners that still fence convergence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owners: Vec<String>,
+    /// One command that resumes the blocked lifecycle from its current state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -379,6 +406,7 @@ pub fn refresh_homeboy_binary(
                 selected_binary_path: plan.binary_path.clone(),
                 reconnect_required: !plan.reconnect,
                 followup_commands: plan.followup_commands.clone(),
+                readiness: None,
                 reconnect_deferred: None,
                 failure: None,
                 bootstrap_provenance: None,
@@ -422,6 +450,7 @@ pub fn refresh_homeboy_binary(
                 selected_binary_path: plan.binary_path.clone(),
                 reconnect_required: !plan.reconnect,
                 followup_commands: plan.followup_commands.clone(),
+                readiness: Some(failed_refresh_readiness(&plan)),
                 reconnect_deferred: None,
                 failure: Some(refresh_failure(&plan, exec_output, exit_code)),
                 bootstrap_provenance: None,
@@ -461,6 +490,13 @@ pub fn refresh_homeboy_binary(
                 selected_binary_path: plan.binary_path.clone(),
                 reconnect_required: true,
                 followup_commands: followup_commands.clone(),
+                readiness: Some(HomeboyRefreshReadiness {
+                    state: HomeboyRefreshReadinessState::Draining,
+                    accepting_jobs: false,
+                    daemon_fresh: false,
+                    owners: active_job_ids.clone(),
+                    continuation: followup_commands.last().cloned(),
+                }),
                 reconnect_deferred: Some(HomeboyReconnectDeferred {
                     reason: "active_daemon_jobs",
                     active_job_ids,
@@ -479,6 +515,7 @@ pub fn refresh_homeboy_binary(
     // A Cook pin reserves its exact runtime from provider preflight through
     // durable runner-job binding. A refresh must drain that reservation rather
     // than rotating the configured binary underneath an admitted handoff.
+    let selected_binary_path = refreshed_binary_path(&plan, &exec_output.stdout)?;
     let promotion_candidate = parse_identity(&exec_output.stdout)
         .ok()
         .and_then(|identity| identity_commit(&identity))
@@ -579,7 +616,7 @@ pub fn refresh_homeboy_binary(
                 },
             )?;
             let updated_fields =
-                promote_verified_runner_binary(&plan.runner_id, &plan.binary_path)?;
+                promote_verified_runner_binary(&plan.runner_id, &selected_binary_path)?;
             Ok(SshBootstrapPromotion {
                 identity,
                 source_sha: source_sha_from_output(&exec_output.stdout),
@@ -623,6 +660,7 @@ pub fn refresh_homeboy_binary(
                     selected_binary_path: plan.binary_path.clone(),
                     reconnect_required: !plan.reconnect,
                     followup_commands: plan.followup_commands.clone(),
+                    readiness: Some(failed_refresh_readiness(&plan)),
                     reconnect_deferred: None,
                     failure: Some(failure),
                     bootstrap_provenance: None,
@@ -670,19 +708,24 @@ pub fn refresh_homeboy_binary(
                 .and_then(Value::as_str)
                 .unwrap_or("candidate")
                 .to_string();
+            let candidate_binary_sha256 = materialized_binary_sha256(&exec_output.stdout);
+            let candidate_generation =
+                refreshed_generation_key(&candidate_identity, candidate_binary_sha256.clone());
             let draining_job_ids = active_jobs
                 .iter()
                 .map(|job| job.job_id.clone())
                 .collect::<Vec<_>>();
             if let Err(error) = rotate_daemon_generation(
                 &plan.runner_id,
-                &plan.binary_path,
+                &selected_binary_path,
                 &candidate_identity,
+                &candidate_generation,
+                candidate_binary_sha256.as_deref(),
                 &draining_job_ids,
             ) {
                 restore_runner_homeboy_path_if_selected(
                     &plan.runner_id,
-                    &plan.binary_path,
+                    &selected_binary_path,
                     previous_homeboy_path.as_deref(),
                 )?;
                 let mut phases = phase_summary.clone();
@@ -690,6 +733,14 @@ pub fn refresh_homeboy_binary(
                 return Err(refresh_error_with_phase_summary(error, &phases));
             }
             phase_summary.push(refresh_phase("generation_rotation", true, 0));
+            let readiness = refresh_readiness_postcondition(&plan.runner_id)?;
+            let converged = readiness.state == HomeboyRefreshReadinessState::Ready;
+            phase_summary.push(refresh_phase(
+                "admission_readiness",
+                true,
+                if converged { 0 } else { 1 },
+            ));
+            let followup_commands = readiness.continuation.clone().into_iter().collect();
             return Ok((
                 HomeboyBinaryRefreshOutput {
                     variant: "refresh_homeboy",
@@ -700,17 +751,21 @@ pub fn refresh_homeboy_binary(
                     identity: Some(identity.clone()),
                     updated_fields: updated_fields.clone(),
                     phase_summary,
+                    // Rotation completed even when older generations still
+                    // fence admission. `readiness` and the exit code report
+                    // convergence without rewriting this operation fact.
                     daemon_refreshed: true,
                     interrupted_job_ids: Vec::new(),
-                    selected_binary_path: plan.binary_path.clone(),
-                    reconnect_required: false,
-                    followup_commands: Vec::new(),
+                    selected_binary_path: selected_binary_path.clone(),
+                    reconnect_required: reconnect_required_after_refresh(true),
+                    followup_commands,
+                    readiness: Some(readiness),
                     reconnect_deferred: None,
                     failure: None,
                     bootstrap_provenance: None,
                     rollback: rollback.clone(),
                 },
-                0,
+                if converged { 0 } else { 1 },
             ));
         }
         interrupted_job_ids = match protect_active_jobs_before_reconnect(
@@ -722,7 +777,7 @@ pub fn refresh_homeboy_binary(
             Err(_) => {
                 let deferred = defer_reconnect_after_promotion_race(
                     &plan.runner_id,
-                    &plan.binary_path,
+                    &selected_binary_path,
                     previous_homeboy_path.as_deref(),
                     &active_jobs,
                 )?;
@@ -738,9 +793,16 @@ pub fn refresh_homeboy_binary(
                         phase_summary,
                         daemon_refreshed: false,
                         interrupted_job_ids: Vec::new(),
-                        selected_binary_path: plan.binary_path.clone(),
+                        selected_binary_path: selected_binary_path.clone(),
                         reconnect_required: true,
                         followup_commands: deferred.followup_commands.clone(),
+                        readiness: Some(HomeboyRefreshReadiness {
+                            state: HomeboyRefreshReadinessState::Draining,
+                            accepting_jobs: false,
+                            daemon_fresh: false,
+                            owners: deferred.active_job_ids.clone(),
+                            continuation: deferred.followup_commands.last().cloned(),
+                        }),
                         reconnect_deferred: Some(deferred),
                         failure: None,
                         bootstrap_provenance: None,
@@ -756,7 +818,7 @@ pub fn refresh_homeboy_binary(
             return rollback_refresh_error_with(error, || {
                 restore_runner_homeboy_path_if_selected(
                     &plan.runner_id,
-                    &plan.binary_path,
+                    &selected_binary_path,
                     previous_homeboy_path.as_deref(),
                 )
                 .map(|_| ())
@@ -790,7 +852,7 @@ pub fn refresh_homeboy_binary(
                     || {
                         restore_runner_homeboy_path_if_selected(
                             &plan.runner_id,
-                            &plan.binary_path,
+                            &selected_binary_path,
                             previous_homeboy_path.as_deref(),
                         )
                         .map(|_| ())
@@ -872,9 +934,10 @@ pub fn refresh_homeboy_binary(
                     phase_summary,
                     daemon_refreshed: false,
                     interrupted_job_ids,
-                    selected_binary_path: plan.binary_path.clone(),
+                    selected_binary_path: selected_binary_path.clone(),
                     reconnect_required: true,
                     followup_commands: plan.followup_commands.clone(),
+                    readiness: Some(failed_refresh_readiness(&plan)),
                     reconnect_deferred: None,
                     failure: Some(refresh_reconnect_failure(
                         &plan,
@@ -931,9 +994,10 @@ pub fn refresh_homeboy_binary(
                         phase_summary,
                         daemon_refreshed: false,
                         interrupted_job_ids,
-                        selected_binary_path: plan.binary_path.clone(),
+                        selected_binary_path: selected_binary_path.clone(),
                         reconnect_required: true,
                         followup_commands: plan.followup_commands.clone(),
+                        readiness: Some(failed_refresh_readiness(&plan)),
                         reconnect_deferred: None,
                         failure: Some(refresh_reconnect_failure(
                             &plan,
@@ -955,9 +1019,21 @@ pub fn refresh_homeboy_binary(
         interrupted_job_ids = Vec::new();
     }
 
+    let readiness = options
+        .reconnect
+        .then(|| refresh_readiness_postcondition(&plan.runner_id))
+        .transpose()?;
+    let converged = readiness
+        .as_ref()
+        .is_none_or(|readiness| readiness.state == HomeboyRefreshReadinessState::Ready);
     if daemon_refreshed {
         clear_refresh_partial_state(&plan.runner_id)?;
     }
+    let followup_commands = readiness
+        .as_ref()
+        .and_then(|readiness| readiness.continuation.clone())
+        .map(|continuation| vec![continuation])
+        .unwrap_or_else(|| plan.followup_commands.clone());
     Ok((
         HomeboyBinaryRefreshOutput {
             variant: "refresh_homeboy",
@@ -970,9 +1046,10 @@ pub fn refresh_homeboy_binary(
             phase_summary,
             daemon_refreshed,
             interrupted_job_ids,
-            selected_binary_path: plan.binary_path.clone(),
-            reconnect_required: !daemon_refreshed,
-            followup_commands: plan.followup_commands,
+            selected_binary_path: selected_binary_path.clone(),
+            reconnect_required: reconnect_required_after_refresh(daemon_refreshed),
+            followup_commands,
+            readiness,
             reconnect_deferred: None,
             failure: None,
             bootstrap_provenance: Some(HomeboyBootstrapProvenance {
@@ -996,7 +1073,7 @@ pub fn refresh_homeboy_binary(
             }),
             rollback,
         },
-        0,
+        if converged { 0 } else { 1 },
     ))
 }
 
@@ -1031,6 +1108,110 @@ fn should_rotate_daemon_generation(
     force: bool,
 ) -> bool {
     !force && (has_active_jobs || preserve_generations)
+}
+
+fn failed_refresh_readiness(plan: &HomeboyBinaryRefreshPlan) -> HomeboyRefreshReadiness {
+    HomeboyRefreshReadiness {
+        state: HomeboyRefreshReadinessState::Failed,
+        accepting_jobs: false,
+        daemon_fresh: false,
+        owners: Vec::new(),
+        continuation: Some(format!(
+            "homeboy runner refresh-homeboy {} --reconnect",
+            shell_arg(&plan.runner_id)
+        )),
+    }
+}
+
+/// `daemon_refreshed` records a completed daemon operation. A later readiness
+/// failure can require reconciliation without requiring another reconnect.
+fn reconnect_required_after_refresh(daemon_refreshed: bool) -> bool {
+    !daemon_refreshed
+}
+
+/// Evaluate refresh completion from the admission authority, not from daemon
+/// process startup. This is intentionally shared with `runner status`'s status
+/// and generation projections so refresh cannot certify a state status rejects.
+fn refresh_readiness_postcondition(runner_id: &str) -> Result<HomeboyRefreshReadiness> {
+    let report = super::status(runner_id)?;
+    let generations =
+        super::runner_generation_inventory_for_session(runner_id, report.session.as_ref())?;
+    Ok(refresh_readiness_from_status(
+        runner_id,
+        &report,
+        &generations,
+    ))
+}
+
+fn refresh_readiness_from_status(
+    runner_id: &str,
+    report: &super::RunnerStatusReport,
+    generations: &[super::RunnerDaemonGenerationStatus],
+) -> HomeboyRefreshReadiness {
+    let draining_count = generations
+        .iter()
+        .filter(|generation| !generation.admission_owner)
+        .count();
+    let summary = report.admission_summary_with_generations(generations, draining_count);
+    if summary.accepting_jobs {
+        return HomeboyRefreshReadiness {
+            state: HomeboyRefreshReadinessState::Ready,
+            accepting_jobs: true,
+            daemon_fresh: true,
+            owners: Vec::new(),
+            continuation: None,
+        };
+    }
+    let owners = generations
+        .iter()
+        .filter(|generation| !generation.admission_owner && generation.active_job_count > 0)
+        .map(|generation| {
+            generation
+                .remote_daemon_lease_id
+                .clone()
+                .unwrap_or_else(|| generation.generation.clone())
+        })
+        .collect::<Vec<_>>();
+    if !owners.is_empty() {
+        return HomeboyRefreshReadiness {
+            state: HomeboyRefreshReadinessState::Draining,
+            accepting_jobs: false,
+            daemon_fresh: summary.daemon_fresh,
+            owners,
+            continuation: Some(format!("homeboy runner reconcile {}", shell_arg(runner_id))),
+        };
+    }
+    HomeboyRefreshReadiness {
+        state: HomeboyRefreshReadinessState::Blocked,
+        accepting_jobs: false,
+        daemon_fresh: summary.daemon_fresh,
+        owners: generations
+            .iter()
+            .filter(|generation| generation.admission_owner)
+            .map(|generation| {
+                generation
+                    .remote_daemon_lease_id
+                    .clone()
+                    .unwrap_or_else(|| generation.generation.clone())
+            })
+            .chain(
+                generations
+                    .is_empty()
+                    .then(|| {
+                        report
+                            .daemon_freshness
+                            .as_ref()
+                            .and_then(|freshness| freshness.lease_id.clone())
+                    })
+                    .flatten(),
+            )
+            .collect(),
+        continuation: Some(
+            summary.next_action.unwrap_or_else(|| {
+                format!("homeboy runner status {} --full", shell_arg(runner_id))
+            }),
+        ),
+    }
 }
 
 fn refresh_owned_lease(session: super::RunnerSession) -> Option<String> {
@@ -1325,7 +1506,8 @@ where
         Error::validation_invalid_argument("identity", message, Some(plan.runner_id.clone()), None)
     })?;
     let source_sha = source_sha_from_output(&stdout);
-    let (updated_fields, rollback) = promote(&plan.binary_path, &identity)?;
+    let binary_path = refreshed_binary_path(plan, &stdout)?;
+    let (updated_fields, rollback) = promote(&binary_path, &identity)?;
     Ok(SshBootstrapPromotion {
         identity,
         source_sha,
@@ -1935,7 +2117,7 @@ fn materialize_script(
     allow_downgrade: bool,
 ) -> String {
     format!(
-        "set -e\nsource={}\nref={}\ndir={}\nbinary={}\nallow_downgrade={}\nmkdir -p \"$(dirname \"$dir\")\"\ncheckout_existed=false\nif [ -d \"$dir/.git\" ]; then\n  checkout_existed=true\nelse\n  git clone \"$source\" \"$dir\"\nfi\ncurrent_remote=$(git -C \"$dir\" config --get remote.origin.url 2>/dev/null || true)\nif [ \"$current_remote\" != \"$source\" ]; then\n  git -C \"$dir\" remote set-url origin \"$source\" 2>/dev/null || git -C \"$dir\" remote add origin \"$source\"\nfi\ngit -C \"$dir\" fetch --prune origin\nrequested=$(git -C \"$dir\" rev-parse --verify --quiet \"origin/$ref\" || git -C \"$dir\" rev-parse --verify --quiet \"$ref\")\nif [ -z \"$requested\" ]; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ntarget=$(git -C \"$dir\" rev-parse --verify --quiet \"${{requested}}^{{commit}}\")\ncurrent=\nif [ \"$checkout_existed\" = true ]; then\n  current=$(git -C \"$dir\" rev-parse --verify --quiet HEAD || true)\nfi\nif [ -n \"$current\" ] && [ \"$current\" != \"$target\" ] && git -C \"$dir\" merge-base --is-ancestor \"$target\" \"$current\"; then\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$current\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target\" >&2\n  if [ \"$allow_downgrade\" != true ]; then\n    echo \"Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback\" >&2\n    exit 1\n  fi\nfi\ngit -C \"$dir\" checkout --quiet --force --detach \"$target\"\ngit -C \"$dir\" reset --hard \"$target\"\necho \"HOMEBOY_REFRESH_SOURCE_SHA=$target\"\ncargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\n\"$binary\" self identity\n",
+        "set -e\nsource={}\nref={}\ndir={}\nbinary={}\nallow_downgrade={}\nhash_binary() {{ (sha256sum \"$1\" 2>/dev/null || shasum -a 256 \"$1\") | awk '{{print $1}}'; }}\nmkdir -p \"$(dirname \"$dir\")\"\ncheckout_existed=false\nif [ -d \"$dir/.git\" ]; then\n  checkout_existed=true\nelse\n  git clone \"$source\" \"$dir\"\nfi\ncurrent_remote=$(git -C \"$dir\" config --get remote.origin.url 2>/dev/null || true)\nif [ \"$current_remote\" != \"$source\" ]; then\n  git -C \"$dir\" remote set-url origin \"$source\" 2>/dev/null || git -C \"$dir\" remote add origin \"$source\"\nfi\ngit -C \"$dir\" fetch --prune origin\nrequested=$(git -C \"$dir\" rev-parse --verify --quiet \"origin/$ref\" || git -C \"$dir\" rev-parse --verify --quiet \"$ref\")\nif [ -z \"$requested\" ]; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ntarget=$(git -C \"$dir\" rev-parse --verify --quiet \"${{requested}}^{{commit}}\")\ncurrent=\nif [ \"$checkout_existed\" = true ]; then\n  current=$(git -C \"$dir\" rev-parse --verify --quiet HEAD || true)\nfi\nif [ -n \"$current\" ] && [ \"$current\" != \"$target\" ] && git -C \"$dir\" merge-base --is-ancestor \"$target\" \"$current\"; then\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$current\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target\" >&2\n  if [ \"$allow_downgrade\" != true ]; then\n    echo \"Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback\" >&2\n    exit 1\n  fi\nfi\ngit -C \"$dir\" checkout --quiet --force --detach \"$target\"\ngit -C \"$dir\" reset --hard \"$target\"\necho \"HOMEBOY_REFRESH_SOURCE_SHA=$target\"\ncargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\nbinary_sha=$(hash_binary \"$binary\")\nif [ -z \"$binary_sha\" ]; then\n  echo \"could not hash materialized Homeboy binary\" >&2\n  exit 1\nfi\nslot_dir=\"$(dirname \"$dir\")/homeboy-$binary_sha\"\nimmutable_binary=\"$slot_dir/homeboy\"\nmkdir -p \"$slot_dir\"\nif [ -e \"$immutable_binary\" ]; then\n  existing_sha=$(hash_binary \"$immutable_binary\")\n  if [ \"$existing_sha\" != \"$binary_sha\" ]; then\n    echo \"immutable Homeboy binary slot hash mismatch\" >&2\n    exit 1\n  fi\nelse\n  staged_binary=$(mktemp \"$slot_dir/.homeboy.XXXXXX\")\n  trap 'rm -f \"$staged_binary\"' EXIT HUP INT TERM\n  cp \"$binary\" \"$staged_binary\"\n  chmod 0755 \"$staged_binary\"\n  staged_sha=$(hash_binary \"$staged_binary\")\n  if [ \"$staged_sha\" != \"$binary_sha\" ]; then\n    echo \"staged Homeboy binary hash mismatch\" >&2\n    exit 1\n  fi\n  if ! ln \"$staged_binary\" \"$immutable_binary\"; then\n    if [ ! -e \"$immutable_binary\" ] || [ \"$(hash_binary \"$immutable_binary\")\" != \"$binary_sha\" ]; then\n      echo \"immutable Homeboy binary slot publication failed\" >&2\n      exit 1\n    fi\n  fi\n  rm -f \"$staged_binary\"\n  trap - EXIT HUP INT TERM\nfi\necho \"HOMEBOY_REFRESH_BINARY_SHA256=$binary_sha\"\necho \"HOMEBOY_REFRESH_BINARY_PATH=$immutable_binary\"\n\"$immutable_binary\" self identity\n",
         quote_path(source),
         quote_path(git_ref),
         quote_path(target_dir),
@@ -1950,6 +2132,45 @@ fn source_sha_from_output(stdout: &str) -> Option<String> {
             .filter(|sha| !sha.is_empty())
             .map(str::to_string)
     })
+}
+
+fn materialized_binary_sha256(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(|line| {
+        line.strip_prefix("HOMEBOY_REFRESH_BINARY_SHA256=")
+            .filter(|sha| sha.len() == 64 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .map(str::to_string)
+    })
+}
+
+fn refreshed_binary_path(plan: &HomeboyBinaryRefreshPlan, stdout: &str) -> Result<String> {
+    if plan.mode != "materialize" {
+        return Ok(plan.binary_path.clone());
+    }
+    let path = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("HOMEBOY_REFRESH_BINARY_PATH="))
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "identity",
+                "materialized refresh did not report its immutable binary path",
+                Some(plan.runner_id.clone()),
+                None,
+            )
+        })?;
+    if materialized_binary_sha256(stdout).is_none() {
+        return Err(Error::validation_invalid_argument(
+            "identity",
+            "materialized refresh did not report its binary SHA-256",
+            Some(plan.runner_id.clone()),
+            None,
+        ));
+    }
+    Ok(path.to_string())
+}
+
+fn refreshed_generation_key(identity: &str, binary_sha256: Option<String>) -> String {
+    binary_sha256.unwrap_or_else(|| identity.to_string())
 }
 
 fn identity_probe_script(binary_path: &str) -> String {

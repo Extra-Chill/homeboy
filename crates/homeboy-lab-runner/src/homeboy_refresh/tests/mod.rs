@@ -21,5 +21,5 @@ pub(super) fn ssh_bootstrap_plan() -> HomeboyBinaryRefreshPlan {
 }
 
 pub(super) fn verified_bootstrap_output(sha: &str) -> String {
-    format!("HOMEBOY_REFRESH_SOURCE_SHA={sha}\n{{\"data\":{{\"git_commit\":\"{sha}\",\"git_dirty\":false}}}}")
+    format!("HOMEBOY_REFRESH_SOURCE_SHA={sha}\nHOMEBOY_REFRESH_BINARY_SHA256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nHOMEBOY_REFRESH_BINARY_PATH=/verified/homeboy\n{{\"data\":{{\"git_commit\":\"{sha}\",\"git_dirty\":false}}}}")
 }

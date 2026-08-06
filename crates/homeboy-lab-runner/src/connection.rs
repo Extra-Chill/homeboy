@@ -97,6 +97,8 @@ pub(crate) fn rotate_daemon_generation(
     runner_id: &str,
     candidate_homeboy: &str,
     candidate_identity: &str,
+    candidate_generation: &str,
+    candidate_binary_sha256: Option<&str>,
     draining_job_ids: &[String],
 ) -> Result<()> {
     let current = read_session_or_live_peer(runner_id)?.ok_or_else(|| {
@@ -116,7 +118,7 @@ pub(crate) fn rotate_daemon_generation(
             None,
         ));
     };
-    let generation = candidate_identity
+    let generation = candidate_generation
         .chars()
         .filter(|character| character.is_ascii_alphanumeric())
         .take(48)
@@ -214,6 +216,37 @@ pub(crate) fn rotate_daemon_generation(
                 ));
             }
         };
+    if let Some(expected_binary_sha256) = candidate_binary_sha256 {
+        let freshness = daemon_http_freshness(runner_id, &local_url, "", candidate_identity);
+        let hash_matches = freshness.as_ref().is_ok_and(|report| {
+            report.fresh && report.binary_hash.as_deref() == Some(expected_binary_sha256)
+        });
+        if !hash_matches {
+            if let Some(lease_id) = daemon.lease_id.as_deref() {
+                let command = format!(
+                    "{} daemon stop --force --lease-id {}",
+                    shell::quote_arg(candidate_homeboy),
+                    shell::quote_arg(lease_id),
+                );
+                let _ = client.execute(&command);
+            }
+            if let Some(pid) = tunnel_pid {
+                terminate_pid(pid);
+            }
+            return Err(Error::validation_invalid_argument(
+                "reconnect",
+                freshness.err().map_or_else(
+                    || {
+                        "candidate daemon did not report the validated binary SHA-256 as fresh"
+                            .to_string()
+                    },
+                    |error| format!("candidate daemon freshness verification failed: {error}"),
+                ),
+                Some(runner_id.to_string()),
+                None,
+            ));
+        }
+    }
     let candidate = RunnerSession {
         runner_id: runner_id.to_string(),
         mode: RunnerTunnelMode::DirectSsh,
