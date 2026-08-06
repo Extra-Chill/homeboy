@@ -4169,7 +4169,7 @@ mod tests {
             let args = vec![
                 "sh".to_string(),
                 "-c".to_string(),
-                format!("printf staged-worker-ok > {}", output.display()),
+                format!("cat input.txt | tee {}", output.display()),
             ];
             let plan = homeboy_agents::agent_task_scheduler::AgentTaskPlan::new(
                 "authenticated-reverse-staging",
@@ -4234,7 +4234,7 @@ mod tests {
             assert!(worker.claimed);
             assert_eq!(
                 std::fs::read_to_string(&output).expect("worker side effect"),
-                "staged-worker-ok"
+                "staged-source\n"
             );
             let job = broker
                 .store
@@ -4249,9 +4249,15 @@ mod tests {
                     .count(),
                 1
             );
-            assert!(results
+            let terminal_result = results
                 .iter()
-                .any(|event| event.kind == JobEventKind::Result && event.data.is_some()));
+                .find(|event| event.kind == JobEventKind::Result)
+                .and_then(|event| event.data.as_ref())
+                .expect("terminal result data");
+            assert_eq!(
+                terminal_result["stdout"],
+                serde_json::json!("staged-source\n")
+            );
 
             assert_eq!(
                 crate::controller_fallback_projection::reconcile_on_controller_startup()
