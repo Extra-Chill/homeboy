@@ -9,15 +9,38 @@ use homeboy::runner::runners::{self as runner, runner_job_log_snapshot};
 
 use super::super::CmdResult;
 use super::cli::RunnerJobCommand;
-use super::types::{RunnerBrokerJobOutput, RunnerJobOutput};
+use super::types::{
+    RunnerBrokerJobOutput, RunnerJobListEntry, RunnerJobListOutput, RunnerJobOutput,
+};
 
 pub(super) enum RunnerJobCommandOutput {
+    List(Box<RunnerJobListOutput>),
     Daemon(Box<RunnerJobOutput>),
     Broker(RunnerBrokerJobOutput),
 }
 
 pub(super) fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobCommandOutput> {
     match command {
+        RunnerJobCommand::List {
+            runner_id,
+            active,
+            queued,
+            terminal,
+            generation,
+            correlation,
+        } => Ok((
+            RunnerJobCommandOutput::List(Box::new(job_list(
+                &runner_id,
+                JobListFilter {
+                    active,
+                    queued,
+                    terminal,
+                    generation,
+                    correlation,
+                },
+            )?)),
+            0,
+        )),
         RunnerJobCommand::Logs {
             runner_id,
             job_id,
@@ -39,6 +62,120 @@ pub(super) fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobCommandOutput
             artifact_id,
         } => job_artifacts(&runner_id, &job_id, &artifact_id),
     }
+}
+
+#[derive(Default)]
+struct JobListFilter {
+    active: bool,
+    queued: bool,
+    terminal: bool,
+    generation: Option<String>,
+    correlation: Option<String>,
+}
+
+fn job_list(runner_id: &str, filter: JobListFilter) -> homeboy::core::Result<RunnerJobListOutput> {
+    let report = runner::status(runner_id)?;
+    let owners =
+        runner::runner_generation_job_owners_for_session(runner_id, report.session.as_ref())?;
+    let jobs = project_job_list(
+        runner_id,
+        &report.active_runner_jobs,
+        &report.stale_runner_jobs,
+        &owners,
+        &filter,
+    );
+    Ok(RunnerJobListOutput {
+        variant: "job_list",
+        command: "runner.job.list",
+        runner_id: runner_id.to_string(),
+        live_daemon_job_count: report.active_runner_jobs.len(),
+        retained_durable_projection_count: owners.iter().map(|owner| owner.job_ids.len()).sum(),
+        jobs,
+    })
+}
+
+fn project_job_list(
+    runner_id: &str,
+    active: &[runner::RunnerJob],
+    terminal: &[runner::RunnerJob],
+    owners: &[runner::RunnerGenerationJobOwners],
+    filter: &JobListFilter,
+) -> Vec<RunnerJobListEntry> {
+    let generation_for = |job_id: &str| {
+        owners.iter().find_map(|owner| {
+            owner
+                .job_ids
+                .iter()
+                .any(|id| id == job_id)
+                .then(|| owner.generation.clone())
+        })
+    };
+    let mut jobs: Vec<_> = active
+        .iter()
+        .chain(terminal)
+        .map(|job| RunnerJobListEntry {
+            job_id: job.job_id.clone(),
+            source: "live_daemon",
+            daemon_source: Some(job.source.clone()),
+            state: Some(job.status),
+            command: Some(job.command.clone()),
+            owner: job.claim.claimed_by_runner_id.clone(),
+            correlation: job.durable_run_id.clone(),
+            generation: generation_for(&job.job_id),
+            started_at_ms: job.started_at_ms,
+            logs_command: Some(format!(
+                "homeboy runner job logs {runner_id} {} --follow",
+                job.job_id
+            )),
+            cancel_command: (!job.status.is_terminal())
+                .then(|| format!("homeboy runner job cancel {runner_id} {}", job.job_id)),
+        })
+        .collect();
+    for owner in owners {
+        for job_id in &owner.job_ids {
+            if jobs.iter().all(|job| job.job_id != *job_id) {
+                jobs.push(RunnerJobListEntry {
+                    job_id: job_id.clone(),
+                    source: "retained_durable_projection",
+                    daemon_source: None,
+                    state: None,
+                    command: None,
+                    owner: None,
+                    correlation: None,
+                    generation: Some(owner.generation.clone()),
+                    started_at_ms: None,
+                    logs_command: Some(format!(
+                        "homeboy runner job logs {runner_id} {job_id} --follow"
+                    )),
+                    cancel_command: None,
+                });
+            }
+        }
+    }
+    jobs.retain(|job| job_matches_filter(job, filter));
+    jobs.sort_by(|left, right| left.job_id.cmp(&right.job_id));
+    jobs
+}
+
+fn job_matches_filter(job: &RunnerJobListEntry, filter: &JobListFilter) -> bool {
+    let state_matches = (!filter.active || job.state == Some(JobStatus::Running))
+        && (!filter.queued || job.state == Some(JobStatus::Queued))
+        && (!filter.terminal || job.state.is_some_and(JobStatus::is_terminal));
+    let generation_matches = filter
+        .generation
+        .as_ref()
+        .is_none_or(|generation| job.generation.as_deref() == Some(generation));
+    let correlation_matches = filter.correlation.as_ref().is_none_or(|correlation| {
+        [
+            Some(job.job_id.as_str()),
+            job.correlation.as_deref(),
+            job.command.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| value.contains(correlation))
+    });
+    state_matches && generation_matches && correlation_matches
 }
 
 fn map_daemon_job(result: CmdResult<RunnerJobOutput>) -> CmdResult<RunnerJobCommandOutput> {
@@ -379,7 +516,8 @@ fn runner_job_terminal(status: JobStatus) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy::core::api_jobs::JobEventKind;
+    use homeboy::core::api_jobs::{JobClaimMetadata, JobEventKind};
+    use homeboy::runner::runners::{RunnerGenerationJobOwners, RunnerJob, RunnerLifecycleOwner};
     use homeboy::runner::runners::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -395,6 +533,105 @@ mod tests {
             message: None,
             data: None,
         }
+    }
+
+    fn runner_job(job_id: &str, status: JobStatus, command: &str) -> RunnerJob {
+        RunnerJob {
+            runner_id: "lab".to_string(),
+            job_id: job_id.to_string(),
+            operation: "runner.exec".to_string(),
+            status,
+            command: command.to_string(),
+            cwd: None,
+            source: "daemon".to_string(),
+            lifecycle_owner: RunnerLifecycleOwner::Controller,
+            lifecycle: None,
+            started_at_ms: Some(1000),
+            updated_at_ms: Some(1500),
+            elapsed_ms: Some(500),
+            heartbeat_age_ms: Some(0),
+            claim: JobClaimMetadata {
+                claim_id: Some("claim-1".to_string()),
+                claimed_by_runner_id: Some("operator-a".to_string()),
+                claimed_at_ms: Some(1000),
+                claim_expires_at_ms: None,
+            },
+            claim_expires_in_ms: None,
+            durable_run_id: Some("run-11770".to_string()),
+            stale_reason: None,
+            lifecycle_state: Some("active".to_string()),
+            retryable: Some(false),
+            artifact_refs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn job_list_distinguishes_live_jobs_from_retained_projections_and_filters() {
+        let active = vec![runner_job("job-running", JobStatus::Running, "cargo test")];
+        let terminal = vec![runner_job(
+            "job-finished",
+            JobStatus::Succeeded,
+            "cargo fmt",
+        )];
+        let owners = vec![RunnerGenerationJobOwners {
+            generation: "generation-a".to_string(),
+            job_ids: vec!["job-running".to_string(), "job-retained".to_string()],
+        }];
+
+        let jobs = project_job_list(
+            "lab",
+            &active,
+            &terminal,
+            &owners,
+            &JobListFilter::default(),
+        );
+
+        assert_eq!(jobs.len(), 3);
+        assert_eq!(jobs[1].job_id, "job-retained");
+        assert_eq!(jobs[1].source, "retained_durable_projection");
+        assert_eq!(jobs[1].state, None);
+        assert_eq!(jobs[1].generation.as_deref(), Some("generation-a"));
+        assert_eq!(
+            jobs[1].logs_command.as_deref(),
+            Some("homeboy runner job logs lab job-retained --follow")
+        );
+        assert_eq!(jobs[1].cancel_command, None);
+        assert_eq!(jobs[2].source, "live_daemon");
+        assert!(jobs[2]
+            .cancel_command
+            .as_deref()
+            .is_some_and(|command| command.contains("job-running")));
+
+        let running = project_job_list(
+            "lab",
+            &active,
+            &terminal,
+            &owners,
+            &JobListFilter {
+                active: true,
+                ..JobListFilter::default()
+            },
+        );
+        assert_eq!(
+            running
+                .iter()
+                .map(|job| job.job_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["job-running"]
+        );
+
+        let correlated = project_job_list(
+            "lab",
+            &active,
+            &terminal,
+            &owners,
+            &JobListFilter {
+                correlation: Some("11770".to_string()),
+                ..JobListFilter::default()
+            },
+        );
+        assert_eq!(correlated.len(), 2);
+        assert!(correlated.iter().all(|job| job.source == "live_daemon"));
     }
 
     fn job(status: JobStatus, event_count: usize) -> homeboy::core::api_jobs::Job {

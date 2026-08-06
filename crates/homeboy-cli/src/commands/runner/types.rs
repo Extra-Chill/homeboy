@@ -1,7 +1,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::core::api_jobs::{Job, JobEvent};
+use homeboy::core::api_jobs::{Job, JobEvent, JobStatus};
 use homeboy::core::EntityCrudOutput;
 use homeboy::runner::readonly_probe::ReadOnlyProbeDegradation;
 use homeboy::runner::runners::{
@@ -352,6 +352,7 @@ pub enum RunnerCommandOutput {
     Execution(Box<RunnerExecutionCommandOutput>),
     Env(Box<RunnerEnvOutput>),
     Lifecycle(Box<lifecycle::RunnerLifecycleOutput>),
+    JobList(Box<RunnerJobListOutput>),
     Job(Box<RunnerJobOutput>),
     BrokerJob(Box<RunnerBrokerJobOutput>),
     RefreshHomeboy(Box<RunnerRefreshHomeboyCommandOutput>),
@@ -361,6 +362,45 @@ pub enum RunnerCommandOutput {
     Workspace(Box<workspace::RunnerWorkspaceOutput>),
     RefreshPlan(Box<refresh_plan::LabRefreshPlanOutput>),
     Broker(Box<RunnerBrokerOutput>),
+}
+
+/// An authoritative job observation or a retained generation ownership record.
+/// Retained projections deliberately omit fields the daemon no longer provides.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct RunnerJobListEntry {
+    pub job_id: String,
+    pub source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<JobStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logs_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancel_command: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerJobListOutput {
+    pub variant: &'static str,
+    pub command: &'static str,
+    pub runner_id: String,
+    /// Live entries are a read-only daemon/broker observation at invocation time.
+    pub live_daemon_job_count: usize,
+    /// Retained entries are durable generation ownership records, not evidence
+    /// that a process is still running.
+    pub retained_durable_projection_count: usize,
+    pub jobs: Vec<RunnerJobListEntry>,
 }
 
 #[derive(Debug, Serialize)]

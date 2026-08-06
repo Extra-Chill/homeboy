@@ -167,6 +167,7 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
     let commands = runner_status_operator_commands(&report);
     let serialized = serde_json::to_string(&commands).expect("serialize commands");
 
+    assert!(serialized.contains("homeboy runner job list homeboy-lab --active"));
     assert!(serialized.contains("homeboy runner job logs homeboy-lab job-123 --follow"));
     assert!(serialized.contains("homeboy runner job cancel homeboy-lab job-123"));
     assert!(serialized.contains("homeboy runs artifact get run-123 <artifact-id> -o <path>"));

@@ -624,6 +624,31 @@ pub(super) enum RunnerBrokerCommand {
 
 #[derive(Subcommand)]
 pub(super) enum RunnerJobCommand {
+    /// List live daemon jobs and retained durable job projections
+    List {
+        /// Runner ID
+        runner_id: String,
+
+        /// Include only running jobs
+        #[arg(long, conflicts_with_all = ["queued", "terminal"])]
+        active: bool,
+
+        /// Include only queued jobs
+        #[arg(long, conflicts_with_all = ["active", "terminal"])]
+        queued: bool,
+
+        /// Include only observed terminal jobs
+        #[arg(long, conflicts_with_all = ["active", "queued"])]
+        terminal: bool,
+
+        /// Include only jobs owned by this daemon generation
+        #[arg(long)]
+        generation: Option<String>,
+
+        /// Match a job ID, durable run ID, or command summary
+        #[arg(long)]
+        correlation: Option<String>,
+    },
     /// Show or follow durable runner daemon job events
     Logs {
         /// Runner ID with an active daemon connection
@@ -743,6 +768,40 @@ mod tests {
             "--request",
             "{}",
             "--unknown"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn runner_job_list_accepts_recovery_filters_and_rejects_conflicting_states() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "runner",
+            "job",
+            "list",
+            "lab",
+            "--active",
+            "--generation",
+            "generation-a",
+            "--correlation",
+            "run-11770",
+        ])
+        .expect("parse runner job list filters");
+        assert!(matches!(
+            cli.command,
+            Commands::Runner(RunnerArgs {
+                command: RunnerCommand::Job {
+                    command: RunnerJobCommand::List {
+                        active: true,
+                        queued: false,
+                        terminal: false,
+                        ..
+                    }
+                }
+            })
+        ));
+        assert!(Cli::try_parse_from([
+            "homeboy", "runner", "job", "list", "lab", "--active", "--queued"
         ])
         .is_err());
     }
