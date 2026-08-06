@@ -250,12 +250,11 @@ pub(super) fn exec_via_daemon(
                 &token,
                 &job.id.to_string(),
             )? {
-                return Err(Error::validation_invalid_argument(
-                    "runner_exec",
-                    "runner exec source is already owned by an active lifecycle",
-                    Some(run_id.to_string()),
-                    None,
-                ));
+                return Err(runner_exec_source_claim_error(
+                    &store,
+                    run_id,
+                    &job.id.to_string(),
+                )?);
             }
             Ok::<_, Error>((run_id.to_string(), token))
         })
@@ -487,6 +486,63 @@ pub(super) fn exec_via_daemon(
         },
         exit_code,
     ))
+}
+
+pub(super) fn runner_exec_source_claim_error(
+    store: &ObservationStore,
+    run_id: &str,
+    runner_job_id: &str,
+) -> Result<Error> {
+    let Some(run) = store.get_run(run_id)? else {
+        return Ok(Error::validation_invalid_argument(
+            "runner_exec",
+            "runner exec source observation identity is missing",
+            Some(run_id.to_string()),
+            Some(vec![
+                "Persist the running agent-task observation record before accepting its daemon job."
+                    .to_string(),
+            ]),
+        ));
+    };
+    if run.status != RunStatus::Running.as_str() {
+        return Ok(Error::validation_invalid_argument(
+            "runner_exec",
+            "runner exec source observation identity is not running",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    if runner_exec_source_job_id(&run.metadata_json) != Some(runner_job_id) {
+        return Ok(Error::validation_invalid_argument(
+            "runner_exec",
+            "runner exec source observation identity is not bound to the accepted daemon job",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    if run.metadata_json["runner_exec_source_lease"]["expires_at_ms"]
+        .as_i64()
+        .is_some_and(|expires_at| expires_at >= chrono::Utc::now().timestamp_millis())
+    {
+        return Ok(Error::validation_invalid_argument(
+            "runner_exec",
+            "runner exec source is already owned by an active lifecycle",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    Ok(Error::validation_invalid_argument(
+        "runner_exec",
+        "runner exec source observation identity could not be claimed",
+        Some(run_id.to_string()),
+        None,
+    ))
+}
+
+fn runner_exec_source_job_id(metadata: &serde_json::Value) -> Option<&str> {
+    metadata["runner_job_id"]
+        .as_str()
+        .or_else(|| metadata["agent_task_run"]["metadata"]["runner_job_id"].as_str())
 }
 
 /// Workspace-bound direct work must establish that the daemon understands the

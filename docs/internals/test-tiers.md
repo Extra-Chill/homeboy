@@ -90,7 +90,9 @@ Test verdict inside the existing 1500-second per-shard budget.
 
 Ordinary Rust tests must use `homeboy::test_support::HermeticTestContext` for
 Homeboy subprocesses. It supplies owned HOME, config, data, artifact, runtime,
-temporary, daemon, and runner locations, and requires an explicit binary choice:
+temporary, daemon, and runner locations, explicitly replacing inherited
+`HOMEBOY_DATA_DIR` and `HOMEBOY_DAEMON_STATE_DIR` so process discovery and
+lifecycle/source ownership stay in the test namespace. It requires an explicit binary choice:
 `TestBinary::HomeboyFixture` for Cargo's fixture binary or
 `TestBinary::CurrentTest` for the running test executable. This prevents tests
 from reading operator configuration or resolving an installed `homeboy` through

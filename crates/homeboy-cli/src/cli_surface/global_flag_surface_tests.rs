@@ -46,6 +46,7 @@ fn root_global_flag_surface_is_pinned() {
             "preserve-workspace-on-failure",
             "runner",
             "runner-env",
+            "runner-secret-env",
             "runner-workspace-root",
             "skip-deps-hydration",
             "wait",
