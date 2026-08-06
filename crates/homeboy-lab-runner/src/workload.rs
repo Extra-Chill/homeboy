@@ -2,8 +2,9 @@ use homeboy_agents::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy
 use homeboy_core::error::{Error, Result};
 use homeboy_core::lab_contract::{
     lab_capability_is_pipeline_enforced, LabRunnerWorkload, LabRunnerWorkloadAgentTask,
-    LabRunnerWorkloadAgentTaskDispatchKind, LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy,
-    LabRunnerWorkloadAssignment, LabRunnerWorkloadCapability, LabRunnerWorkloadCommandFamily,
+    LabRunnerWorkloadAgentTaskDispatchKind, LabRunnerWorkloadAgentTaskHandoffMirrorPolicy,
+    LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy, LabRunnerWorkloadAssignment,
+    LabRunnerWorkloadCapability, LabRunnerWorkloadCommandFamily,
     LabRunnerWorkloadExtensionRevision, LabRunnerWorkloadKind, LabRunnerWorkloadMutationPolicy,
     LabRunnerWorkloadResultRefs, LabRunnerWorkloadSecrets, LabRunnerWorkloadState,
     LabRunnerWorkloadWorkspaceMappings, LAB_CAPABILITY_EXTENSION_PARITY,
@@ -170,12 +171,18 @@ pub(crate) fn lab_runner_workload_agent_task_from_command(
     let agent_task_index = args.iter().position(|arg| arg == "agent-task")?;
     let action = args.get(agent_task_index + 1)?.as_str();
     match action {
+        // Cook and dispatch produce a handoff document, not a run-plan
+        // aggregate, so they declare the handoff mirror policy and leave the
+        // lifecycle (aggregate) mirror policy at `None`.
         "cook" => run_id.map(|run_id| LabRunnerWorkloadAgentTask {
             run_id: run_id.to_string(),
             plan_ref: None,
             resolved_provider_policy: resolved_provider_policy_from_command(args),
             dispatch_kind: LabRunnerWorkloadAgentTaskDispatchKind::Cook,
             lifecycle_mirror_policy: LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::None,
+            handoff_mirror_policy: Some(
+                LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff,
+            ),
         }),
         "dispatch" => run_id.map(|run_id| LabRunnerWorkloadAgentTask {
             run_id: run_id.to_string(),
@@ -183,6 +190,9 @@ pub(crate) fn lab_runner_workload_agent_task_from_command(
             resolved_provider_policy: resolved_provider_policy_from_command(args),
             dispatch_kind: LabRunnerWorkloadAgentTaskDispatchKind::Dispatch,
             lifecycle_mirror_policy: LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::None,
+            handoff_mirror_policy: Some(
+                LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff,
+            ),
         }),
         "run-plan" => {
             let plan_ref = option_value_after(args, agent_task_index + 1, "--plan")?;
@@ -196,6 +206,10 @@ pub(crate) fn lab_runner_workload_agent_task_from_command(
                 dispatch_kind: LabRunnerWorkloadAgentTaskDispatchKind::RunPlan,
                 lifecycle_mirror_policy:
                     LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
+                // A run-plan has no dispatch handoff. Declaring `None` rather
+                // than leaving the field unset keeps "no handoff to mirror"
+                // distinguishable from "emitter predates the field".
+                handoff_mirror_policy: Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None),
             })
         }
         _ => None,
@@ -1707,6 +1721,59 @@ mod tests {
             agent_task.lifecycle_mirror_policy,
             LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate
         );
+        // A run-plan has no dispatch handoff, and says so explicitly rather
+        // than leaving the field unset (which means "emitter predates it").
+        assert_eq!(
+            agent_task.handoff_mirror_policy,
+            Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None)
+        );
+    }
+
+    /// Cook and dispatch are the seam #7530 is about: they produce a handoff
+    /// document, not a run-plan aggregate, so they must declare the handoff
+    /// mirror policy that turns on the controller's typed mirror.
+    #[test]
+    fn lab_runner_workload_agent_task_contract_declares_dispatch_handoff_mirroring() {
+        for action in ["cook", "dispatch"] {
+            let agent_task = lab_runner_workload_agent_task_from_command(
+                &[
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    action.to_string(),
+                    "--run-id".to_string(),
+                    "run-7530".to_string(),
+                ],
+                Some("run-7530"),
+            )
+            .unwrap_or_else(|| panic!("agent task workload contract for {action}"));
+
+            assert_eq!(agent_task.run_id, "run-7530");
+            assert_eq!(agent_task.plan_ref, None);
+            assert_eq!(
+                agent_task.lifecycle_mirror_policy,
+                LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::None,
+                "{action} mirrors a handoff, not a run-plan aggregate"
+            );
+            assert_eq!(
+                agent_task.handoff_mirror_policy,
+                Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff)
+            );
+        }
+    }
+
+    /// Without a run id there is no identity to key a typed mirror on, so no
+    /// section is emitted at all and the consumer keeps its output fallback.
+    #[test]
+    fn lab_runner_workload_agent_task_contract_is_absent_without_a_run_id() {
+        assert!(lab_runner_workload_agent_task_from_command(
+            &[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+            ],
+            None,
+        )
+        .is_none());
     }
 
     #[test]

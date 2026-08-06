@@ -134,7 +134,7 @@ use super::super::workload::{
 use super::agent_task_bridge::{
     agent_task_dispatch_run_isolation_token, ensure_agent_task_lifecycle_identity_with,
     lab_pre_dispatch_failure_message, mirror_agent_task_run_plan_lifecycle,
-    parse_offloaded_agent_task_handoff_from_outputs,
+    resolve_offloaded_agent_task_handoff,
 };
 use super::evidence::terminal_lab_run_evidence;
 use super::fallback::{

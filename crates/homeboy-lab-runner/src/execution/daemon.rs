@@ -345,6 +345,12 @@ pub(super) fn exec_via_daemon(
         &runner.id,
         &job_id,
     )?;
+    append_agent_task_dispatch_handoff_workload_event(
+        &mut events,
+        lab_runner_workload.as_ref(),
+        &runner.id,
+        &job_id,
+    );
 
     let RunnerJobResultFields {
         result,
@@ -2131,6 +2137,56 @@ fn append_agent_task_lifecycle_workload_event(
         })),
     });
     Ok(())
+}
+
+/// The cook/dispatch counterpart of [`append_agent_task_lifecycle_workload_event`].
+///
+/// Extracts the dispatch handoff on the side that owns the output, gated by the
+/// workload's `agent_task.handoff_mirror_policy`, and republishes it as a typed
+/// event carrying the workload's run id. The controller mirrors from this event
+/// instead of rescanning stdout/stderr (#7530).
+///
+/// Infallible on purpose: a missing or unrecognized handoff is not a job
+/// failure, it just means the controller's retained output fallback runs. This
+/// is the opposite of the run-plan path, where a malformed aggregate is a hard
+/// error because the controller has no other source for it.
+fn append_agent_task_dispatch_handoff_workload_event(
+    events: &mut Vec<JobEvent>,
+    lab_runner_workload: Option<&LabRunnerWorkload>,
+    runner_id: &str,
+    runner_job_id: &str,
+) {
+    let Some(result) = result_event_data(events) else {
+        return;
+    };
+    let Some(event) =
+        crate::agent_task_handoff_event::agent_task_dispatch_handoff_event_from_workload_result(
+            lab_runner_workload,
+            runner_id,
+            runner_job_id,
+            &result,
+        )
+    else {
+        return;
+    };
+    events.push(JobEvent {
+        sequence: events
+            .last()
+            .map(|event| event.sequence.saturating_add(1))
+            .unwrap_or(1),
+        job_id: events
+            .last()
+            .map(|event| event.job_id)
+            .unwrap_or_else(uuid::Uuid::nil),
+        kind: homeboy_core::api_jobs::JobEventKind::Progress,
+        timestamp_ms: events.last().map(|event| event.timestamp_ms).unwrap_or(0),
+        message: Some("agent-task dispatch handoff".to_string()),
+        data: Some(
+            crate::agent_task_handoff_event::agent_task_dispatch_handoff_workload_event_payload(
+                &event,
+            ),
+        ),
+    });
 }
 
 /// Stream + metric fields derived from a runner job's terminal result event.

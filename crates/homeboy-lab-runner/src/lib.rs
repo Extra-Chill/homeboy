@@ -15,6 +15,10 @@ use homeboy_core::server::{self, RunnerPolicy, RunnerSecretEnvRef, RunnerSetting
 // exported here so runner-internal `super::agent_task_lifecycle_event` /
 // `crate::agent_task_lifecycle_event` call sites resolve unchanged.
 pub(crate) use homeboy_agents::agent_task_lifecycle::agent_task_lifecycle_event;
+// The cook/dispatch counterpart of `agent_task_lifecycle_event`: turns a
+// runner terminal result into a typed, contract-keyed handoff event so the
+// controller stops depending on the offloaded command's output format (#7530).
+pub(crate) use homeboy_agents::agent_task_lifecycle::agent_task_handoff_event;
 mod apply;
 pub mod artifact_attach;
 mod availability_provider;

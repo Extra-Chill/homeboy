@@ -11,6 +11,9 @@
 #[cfg(test)]
 use std::fs;
 
+use crate::agent_task_handoff_event::{
+    agent_task_dispatch_handoff_event_from_job_events, agent_task_mirrors_dispatch_handoff,
+};
 use crate::agent_task_lifecycle_event::{
     agent_task_run_plan_lifecycle_event_from_job_events, is_agent_task_run_plan_envelope,
     parse_offloaded_run_plan_envelope,
@@ -30,6 +33,8 @@ use homeboy_core::api_jobs::JobEvent;
 use homeboy_core::api_jobs::JobEventKind;
 use homeboy_core::artifact_manifest::ArtifactManifest;
 use homeboy_core::engine::local_files::write_file_owner_only;
+#[cfg(test)]
+use homeboy_core::lab_contract::LabRunnerWorkloadAgentTaskHandoffMirrorPolicy;
 use homeboy_core::lab_contract::{
     LabRunnerWorkloadAgentTask, LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy,
 };
@@ -191,6 +196,52 @@ fn agent_task_run_plan_lifecycle_output<'a>(
     output_file_content: Option<&'a str>,
 ) -> &'a str {
     output_file_content.unwrap_or(stdout)
+}
+
+/// Resolve the cook/dispatch handoff for an offloaded agent-task run.
+///
+/// Typed path first: when the workload declared
+/// `agent_task.handoff_mirror_policy = dispatch_handoff`, the runner emits a
+/// `homeboy/agent-task-dispatch-handoff-event/v1` job event carrying the
+/// handoff document and the controller-owned run id. Mirroring from that means
+/// a change to what the offloaded command prints can no longer break
+/// failure-evidence mirroring for a job that ran fine (#7530).
+///
+/// The stdout/stderr scan is retained as the fallback and is NOT dead code: it
+/// is the only path for a runner that predates the typed event, and the typed
+/// path cannot be proven end to end without a connected Lab runner. Deleting
+/// the fallback is a separate change, gated on that proof.
+pub(super) fn resolve_offloaded_agent_task_handoff(
+    agent_task: Option<&LabRunnerWorkloadAgentTask>,
+    job_events: Option<&[JobEvent]>,
+    stdout: &str,
+    stderr: &str,
+) -> Result<Option<AgentTaskLabHandoff>> {
+    if let Some(handoff) = typed_offloaded_agent_task_handoff(agent_task, job_events)? {
+        return Ok(Some(handoff));
+    }
+    parse_offloaded_agent_task_handoff_from_outputs(stdout, stderr)
+}
+
+fn typed_offloaded_agent_task_handoff(
+    agent_task: Option<&LabRunnerWorkloadAgentTask>,
+    job_events: Option<&[JobEvent]>,
+) -> Result<Option<AgentTaskLabHandoff>> {
+    let Some(agent_task) = agent_task else {
+        return Ok(None);
+    };
+    if !agent_task_mirrors_dispatch_handoff(agent_task) {
+        return Ok(None);
+    }
+    let Some(event) = agent_task_dispatch_handoff_event_from_job_events(job_events) else {
+        return Ok(None);
+    };
+    // Identity is checked against the workload, not against the document. A
+    // stale or misrouted event is treated as absent so the fallback still runs.
+    if event.run_id != agent_task.run_id {
+        return Ok(None);
+    }
+    agent_task_handoff_value(&event.handoff)
 }
 
 pub(super) fn parse_offloaded_agent_task_handoff_from_outputs(
@@ -979,6 +1030,136 @@ mod tests {
         assert!(err.message.contains("artifact path must be relative"));
     }
 
+    fn dispatch_agent_task(
+        run_id: &str,
+        handoff_mirror_policy: Option<LabRunnerWorkloadAgentTaskHandoffMirrorPolicy>,
+    ) -> LabRunnerWorkloadAgentTask {
+        LabRunnerWorkloadAgentTask {
+            run_id: run_id.to_string(),
+            plan_ref: None,
+            resolved_provider_policy: None,
+            dispatch_kind: homeboy_core::lab_contract::LabRunnerWorkloadAgentTaskDispatchKind::Cook,
+            lifecycle_mirror_policy: LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::None,
+            handoff_mirror_policy,
+        }
+    }
+
+    fn typed_handoff_job_event(run_id: &str, handoff_run_id: &str) -> JobEvent {
+        JobEvent {
+            sequence: 1,
+            job_id: uuid::Uuid::nil(),
+            kind: JobEventKind::Progress,
+            timestamp_ms: 1,
+            message: Some("agent-task dispatch handoff".to_string()),
+            data: Some(serde_json::json!({
+                "schema": "homeboy/runner-workload-agent-task-handoff-event/v1",
+                "agent_task_dispatch_handoff_event": {
+                    "schema": "homeboy/agent-task-dispatch-handoff-event/v1",
+                    "identity": {
+                        "runner_id": "lab-default",
+                        "runner_job_id": "job-typed",
+                        "run_id": run_id
+                    },
+                    "run_id": run_id,
+                    "handoff": {
+                        "schema": "homeboy/agent-task-lab-handoff/v1",
+                        "run_id": handoff_run_id
+                    }
+                }
+            })),
+        }
+    }
+
+    /// #7530: the controller mirrors the cook/dispatch handoff from the typed
+    /// event, so stdout can be anything at all — including output that would
+    /// previously have been scraped into a *different* handoff.
+    #[test]
+    fn typed_dispatch_handoff_is_taken_from_the_job_event_not_stdout() {
+        let agent_task = dispatch_agent_task(
+            "run-typed-handoff",
+            Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff),
+        );
+        let events = vec![typed_handoff_job_event("run-typed-handoff", "from-event")];
+        let decoy = concat!(
+            "{\"schema\":\"homeboy/agent-task-lab-handoff/v1\",",
+            "\"run_id\":\"from-stdout\"}\n"
+        );
+
+        let handoff = resolve_offloaded_agent_task_handoff(
+            Some(&agent_task),
+            Some(&events),
+            decoy,
+            "not json at all",
+        )
+        .expect("typed handoff resolves")
+        .expect("handoff found");
+
+        assert_eq!(handoff.run_id.as_deref(), Some("from-event"));
+    }
+
+    /// The stdout fallback is retained, not replaced. Every one of these is a
+    /// shape a connected Lab runner can still produce, and the typed path is
+    /// unproven end to end until one is connected.
+    #[test]
+    fn dispatch_handoff_falls_back_to_output_scraping() {
+        let stdout = concat!(
+            "{\"schema\":\"homeboy/agent-task-lab-handoff/v1\",",
+            "\"run_id\":\"from-stdout\"}\n"
+        );
+
+        let cases: Vec<(
+            &str,
+            Option<LabRunnerWorkloadAgentTask>,
+            Option<Vec<JobEvent>>,
+        )> = vec![
+            // No workload contract at all (pre-typed controller path).
+            ("no workload", None, None),
+            // Workload emitted before `handoff_mirror_policy` existed.
+            (
+                "pre-typed workload",
+                Some(dispatch_agent_task("run-typed-handoff", None)),
+                Some(vec![typed_handoff_job_event(
+                    "run-typed-handoff",
+                    "from-event",
+                )]),
+            ),
+            // Contract says mirror, but the runner emitted no typed event.
+            (
+                "typed workload, untyped runner",
+                Some(dispatch_agent_task(
+                    "run-typed-handoff",
+                    Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff),
+                )),
+                None,
+            ),
+            // A typed event for a different run must not be adopted.
+            (
+                "mismatched run identity",
+                Some(dispatch_agent_task(
+                    "run-typed-handoff",
+                    Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff),
+                )),
+                Some(vec![typed_handoff_job_event(
+                    "some-other-run",
+                    "from-event",
+                )]),
+            ),
+        ];
+
+        for (label, agent_task, events) in cases {
+            let handoff = resolve_offloaded_agent_task_handoff(
+                agent_task.as_ref(),
+                events.as_deref(),
+                stdout,
+                "",
+            )
+            .unwrap_or_else(|error| panic!("{label}: {error:?}"))
+            .unwrap_or_else(|| panic!("{label}: fallback must still find the handoff"));
+
+            assert_eq!(handoff.run_id.as_deref(), Some("from-stdout"), "{label}");
+        }
+    }
+
     #[test]
     fn typed_run_plan_lifecycle_ignores_stdout_without_job_event() {
         let args = vec![
@@ -1000,6 +1181,7 @@ mod tests {
                 homeboy_core::lab_contract::LabRunnerWorkloadAgentTaskDispatchKind::RunPlan,
             lifecycle_mirror_policy:
                 LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
+            handoff_mirror_policy: Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None),
         };
 
         mirror_agent_task_run_plan_lifecycle(&args, Some(&agent_task), None, stdout, None, None)
@@ -1024,6 +1206,7 @@ mod tests {
                     homeboy_core::lab_contract::LabRunnerWorkloadAgentTaskDispatchKind::RunPlan,
                 lifecycle_mirror_policy:
                     LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
+                handoff_mirror_policy: Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None),
             };
             let events = vec![JobEvent {
                 sequence: 1,
@@ -1081,6 +1264,7 @@ mod tests {
                     homeboy_core::lab_contract::LabRunnerWorkloadAgentTaskDispatchKind::RunPlan,
                 lifecycle_mirror_policy:
                     LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
+                handoff_mirror_policy: Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None),
             };
             let events = vec![JobEvent {
                 sequence: 1,
@@ -1216,6 +1400,7 @@ mod tests {
                     homeboy_core::lab_contract::LabRunnerWorkloadAgentTaskDispatchKind::RunPlan,
                 lifecycle_mirror_policy:
                     LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
+                handoff_mirror_policy: Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None),
             };
             let events = vec![JobEvent {
                 sequence: 1,

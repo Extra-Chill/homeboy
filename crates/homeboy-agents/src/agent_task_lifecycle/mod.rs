@@ -31,6 +31,7 @@ use lifecycle_store as store;
 
 mod acceptance_verifier;
 pub mod activity_provider;
+pub mod agent_task_handoff_event;
 pub mod agent_task_lifecycle_event;
 mod artifact_materialization;
 mod cancellation;
