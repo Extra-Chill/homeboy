@@ -221,6 +221,31 @@ impl<'a> ValidationProgressRecorder<'a> {
         self.persist()
     }
 
+    /// Add a command discovered after the workflow started.
+    ///
+    /// Some workflows must diagnose before they know which producer-specific
+    /// commands they will run. Persist each discovered command before spawning
+    /// it so an interrupted run still identifies its next phase.
+    pub fn append(&mut self, label: String, command: String) -> Result<usize> {
+        let index = self.ledger.commands.len();
+        self.ledger.commands.push(ValidationCommandRecord {
+            index,
+            label,
+            command,
+            status: "pending".to_string(),
+            started_at: None,
+            finished_at: None,
+            elapsed_ms: None,
+            exit_code: None,
+            stdout_artifact: None,
+            stderr_artifact: None,
+        });
+        self.ledger.command_count = self.ledger.commands.len();
+        self.ledger.recompute();
+        self.persist()?;
+        Ok(index)
+    }
+
     pub fn finish(
         &mut self,
         index: usize,
@@ -373,6 +398,35 @@ mod tests {
             .resume_hints()
             .iter()
             .any(|hint| hint.contains("Resume from command 2: check two")));
+    }
+
+    #[test]
+    fn appends_discovered_command_to_persisted_ledger() {
+        let run_dir = RunDir::create().expect("run dir");
+        let mut recorder = ValidationProgressRecorder::new(
+            &run_dir,
+            None,
+            vec![("diagnostics".to_string(), "lint".to_string())],
+        )
+        .expect("recorder");
+
+        recorder.start(0).expect("start diagnostics");
+        recorder
+            .finish(0, 1, None, None)
+            .expect("finish diagnostics");
+        let index = recorder
+            .append("post-fix verification".to_string(), "lint".to_string())
+            .expect("append verification");
+        recorder.start(index).expect("start verification");
+        recorder
+            .finish(index, 0, None, None)
+            .expect("finish verification");
+
+        let ledger = ValidationProgressLedger::read_from_run_dir(&run_dir).expect("ledger");
+        assert_eq!(ledger.command_count, 2);
+        assert_eq!(ledger.commands[1].label, "post-fix verification");
+        assert_eq!(ledger.commands[1].status, "passed");
+        assert!(ledger.active_command.is_none());
     }
 
     #[test]

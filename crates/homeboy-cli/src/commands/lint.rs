@@ -475,6 +475,7 @@ fn run_fix(
 
     let lint_options = LintSourceOptions {
         selected_files,
+        summary: args.summary,
         file: args.file.clone(),
         glob: args.glob.clone(),
         sniff_filters: args.sniff_filters.to_lint_sniff_filters(),
@@ -701,6 +702,7 @@ mod tests {
             vec![("mode".to_string(), serde_json::json!("strict"))],
             LintSourceOptions {
                 selected_files: Some(vec!["src/lib.rs".to_string()]),
+                summary: false,
                 file: None,
                 glob: Some("/tmp/demo/src/lib.rs".to_string()),
                 sniff_filters: homeboy_extension::lint::LintSniffFilters {
