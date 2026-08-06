@@ -135,7 +135,7 @@ fn safe_transport_result(result: Option<&Value>) -> Option<Value> {
             _ => {}
         }
     }
-    (!safe.is_empty()).then(|| Value::Object(safe))
+    (!safe.is_empty()).then_some(Value::Object(safe))
 }
 
 fn cook_subject(cook_id: &str, run_id: &str, component: Option<&str>) -> NotifySubject {
