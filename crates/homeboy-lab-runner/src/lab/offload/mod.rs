@@ -124,6 +124,8 @@ use crate::runtime_materializer::{
 
 #[cfg(test)]
 pub(super) use inner::accepted_runner_job_id_with;
+#[cfg(test)]
+pub(super) use inner::detached_staging_submission_output;
 
 use super::super::workload::{
     build_lab_runner_workload_for_dispatched_command, lab_runner_workload_agent_task_from_command,

@@ -41,6 +41,7 @@ mod command_path;
 )]
 mod connection;
 mod continuation_provider;
+pub mod controller_fallback_projection;
 mod daemon_exec_driver;
 mod daemon_health;
 mod daemon_http_get;
@@ -74,6 +75,8 @@ mod generation_store;
     reason = "Staging compatibility states support optional Lab workflows."
 )]
 pub mod lab_staging_controller;
+pub mod runner_staging_operation;
+pub mod runner_staging_store;
 pub fn runner_generation_inventory(runner_id: &str) -> Result<Vec<RunnerDaemonGenerationStatus>> {
     let report = connection::status(runner_id)?;
     runner_generation_inventory_for_session(runner_id, report.session.as_ref())
@@ -298,6 +301,9 @@ pub use resource_metrics::{
 };
 pub use rolling_generation::{
     RollingDrainState, RollingGeneration, RollingGenerations, RollingStart,
+};
+pub use runner_staging_store::{
+    register_runner_staging_provider, resolve_runner_staging_transport,
 };
 pub use runtime_materialization_status::{RunnerBinarySource, RuntimeMaterializationStatus};
 pub use session::{
