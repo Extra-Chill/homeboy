@@ -61,6 +61,17 @@ The bound is per extension, not aggregate: `list` over *n* extensions is bounded
 by *n* × the per-check budget. Use `--skip-ready-check` when only metadata is
 wanted.
 
+### Invalid installed manifests
+
+`extension list` reports every discoverable extension directory, including an
+installed manifest that cannot be loaded. Broken entries have `ready: false`
+and include `id`, `path`, `manifest_path`, `error`, and `diagnostic`. `error`
+is a machine-readable category such as `manifest_json_malformed`,
+`manifest_deserialize_incompatible`, or `manifest_validation_incompatible`.
+The diagnostic describes the failure without echoing manifest values. `extension
+show <id>` returns the same fields in its structured command error so a broken
+installed extension is distinguishable from an absent extension.
+
 ### `run`
 
 ```sh
@@ -277,7 +288,7 @@ Extension entry (`extensions[]`):
   each of which means the check did not produce a live pass/fail)
 - `linked`: whether the extension is symlinked
 - `path`: extension directory path (may be empty if unknown)
-- Optional fields include `ready_reason`, `ready_detail`, `error`, `symlink_target`, `source_revision`, `cli_tool`, `cli_display_name`, `actions`, `notification_transports`, `has_setup`, and `has_ready_check`.
+- Optional fields include `ready_reason`, `ready_detail`, `manifest_path`, `error`, `diagnostic`, `symlink_target`, `source_revision`, `cli_tool`, `cli_display_name`, `actions`, `notification_transports`, `has_setup`, and `has_ready_check`.
 
 Extension detail (`extension.show`):
 

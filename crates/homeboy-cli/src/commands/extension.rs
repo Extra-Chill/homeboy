@@ -1786,7 +1786,9 @@ mod tests {
             ready_detail: None,
             linked: true,
             path: "/tmp/homeboy-extensions/rust".to_string(),
+            manifest_path: None,
             error: None,
+            diagnostic: None,
             symlink_target: None,
             source_revision: Some("abc1234".to_string()),
             cli_tool: None,
@@ -1842,7 +1844,9 @@ mod tests {
                 ready_detail: None,
                 linked: false,
                 path: extension_dir.to_string_lossy().to_string(),
+                manifest_path: None,
                 error: None,
+                diagnostic: None,
                 symlink_target: None,
                 source_revision: Some("abc1234".to_string()),
                 cli_tool: None,
@@ -1885,7 +1889,9 @@ mod tests {
                 ready: true,
                 ready_reason: None,
                 ready_detail: None,
+                manifest_path: None,
                 error: None,
+                diagnostic: None,
                 symlink_target: None,
                 cli_tool: None,
                 cli_display_name: None,
@@ -1898,6 +1904,33 @@ mod tests {
                 installed_extension_diff_next_command(&stale_summary, "stale"),
                 "homeboy extension update copied-runtime"
             );
+        });
+    }
+
+    #[test]
+    fn extension_show_reports_the_safe_manifest_failure_for_an_installed_extension() {
+        with_isolated_home(|home| {
+            let extension_id = "broken";
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions")
+                .join(extension_id);
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(extension_dir.join("broken.json"), "{secret-value").expect("manifest");
+
+            let error = match show_extension(extension_id, ExtensionReadinessMode::Skip) {
+                Err(error) => error,
+                Ok(_) => panic!("show must report the manifest failure"),
+            };
+
+            assert_eq!(error.code, homeboy::core::ErrorCode::ConfigInvalidValue);
+            assert_eq!(error.details["id"], extension_id);
+            assert_eq!(error.details["category"], "manifest_json_malformed");
+            assert_eq!(
+                error.details["diagnostic"],
+                "The extension manifest contains malformed JSON."
+            );
+            assert!(!error.details.to_string().contains("secret-value"));
         });
     }
 

@@ -2,7 +2,7 @@ use crate::config;
 use crate::error::{Error, ErrorCode, Result};
 use crate::output::MergeOutput;
 use crate::paths;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use homeboy_extension_contract::ExtensionManifest;
 
@@ -13,28 +13,168 @@ pub struct BrokenExtensionLink {
     pub target: PathBuf,
 }
 
+/// A safe, machine-readable explanation for an installed extension that cannot
+/// be loaded. Manifest values are intentionally never included in this shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionManifestFailure {
+    pub id: String,
+    pub path: PathBuf,
+    pub manifest_path: PathBuf,
+    pub category: &'static str,
+    pub diagnostic: &'static str,
+    pub symlink_target: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub enum DiscoveredExtension {
+    Valid(Box<ExtensionManifest>),
+    Invalid(ExtensionManifestFailure),
+}
+
 pub fn load_extension(id: &str) -> Result<ExtensionManifest> {
     if let Some(link) = broken_extension_link(id) {
         return Err(broken_extension_error(&link));
     }
 
-    let mut manifest = config::load::<ExtensionManifest>(id)?;
-    manifest.validate_notification_transports()?;
     let extension_dir = paths::extension(id)?;
+    load_extension_at(id, &extension_dir).map_err(|failure| manifest_failure_error(&failure))
+}
+
+pub fn load_all_extensions() -> Result<Vec<ExtensionManifest>> {
+    Ok(discover_extensions()
+        .into_iter()
+        .filter_map(|extension| match extension {
+            DiscoveredExtension::Valid(manifest) => Some(*manifest),
+            DiscoveredExtension::Invalid(_) => None,
+        })
+        .collect())
+}
+
+/// Discover every installed extension directory, including manifests that are
+/// malformed or incompatible with this Homeboy version.
+pub fn discover_extensions() -> Vec<DiscoveredExtension> {
+    let Ok(extensions_dir) = paths::extensions() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&extensions_dir) else {
+        return Vec::new();
+    };
+
+    let mut extensions = entries
+        .flatten()
+        .filter_map(|entry| discover_extension_entry(entry.path()))
+        .collect::<Vec<_>>();
+    extensions
+        .sort_by(|left, right| discovered_extension_id(left).cmp(discovered_extension_id(right)));
+    extensions
+}
+
+fn discover_extension_entry(path: PathBuf) -> Option<DiscoveredExtension> {
+    let id = path.file_name()?.to_string_lossy().to_string();
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    if metadata.file_type().is_symlink() && !path.exists() {
+        let target = std::fs::read_link(&path).ok();
+        return Some(DiscoveredExtension::Invalid(ExtensionManifestFailure {
+            manifest_path: path.join(format!("{id}.json")),
+            id,
+            path,
+            category: "target_missing",
+            diagnostic: "The linked extension target does not exist.",
+            symlink_target: target,
+        }));
+    }
+    if !path.is_dir() {
+        return None;
+    }
+
+    match load_extension_at(&id, &path) {
+        Ok(manifest) => Some(DiscoveredExtension::Valid(Box::new(manifest))),
+        Err(failure) => Some(DiscoveredExtension::Invalid(*failure)),
+    }
+}
+
+fn discovered_extension_id(extension: &DiscoveredExtension) -> &str {
+    match extension {
+        DiscoveredExtension::Valid(manifest) => &manifest.id,
+        DiscoveredExtension::Invalid(failure) => &failure.id,
+    }
+}
+
+fn load_extension_at(
+    id: &str,
+    extension_dir: &Path,
+) -> std::result::Result<ExtensionManifest, Box<ExtensionManifestFailure>> {
+    let manifest_path = extension_dir.join(format!("{id}.json"));
+    let content = std::fs::read_to_string(&manifest_path).map_err(|_| {
+        Box::new(ExtensionManifestFailure {
+            id: id.to_string(),
+            path: extension_dir.to_path_buf(),
+            manifest_path: manifest_path.clone(),
+            category: if manifest_path.exists() {
+                "manifest_unreadable"
+            } else {
+                "manifest_missing"
+            },
+            diagnostic: if manifest_path.exists() {
+                "The extension manifest could not be read."
+            } else {
+                "The extension manifest is missing."
+            },
+            symlink_target: None,
+        })
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&content).map_err(|_| {
+        Box::new(ExtensionManifestFailure {
+            id: id.to_string(),
+            path: extension_dir.to_path_buf(),
+            manifest_path: manifest_path.clone(),
+            category: "manifest_json_malformed",
+            diagnostic: "The extension manifest contains malformed JSON.",
+            symlink_target: None,
+        })
+    })?;
+    let mut manifest: ExtensionManifest = serde_json::from_value(value).map_err(|_| {
+        Box::new(ExtensionManifestFailure {
+            id: id.to_string(),
+            path: extension_dir.to_path_buf(),
+            manifest_path: manifest_path.clone(),
+            category: "manifest_deserialize_incompatible",
+            diagnostic: "The extension manifest does not match the supported schema.",
+            symlink_target: None,
+        })
+    })?;
+    manifest.id = id.to_string();
+    manifest.validate_notification_transports().map_err(|_| {
+        Box::new(ExtensionManifestFailure {
+            id: id.to_string(),
+            path: extension_dir.to_path_buf(),
+            manifest_path,
+            category: "manifest_validation_incompatible",
+            diagnostic: "The extension manifest contains unsupported configuration.",
+            symlink_target: None,
+        })
+    })?;
     manifest.extension_path = Some(extension_dir.to_string_lossy().to_string());
     Ok(manifest)
 }
 
-pub fn load_all_extensions() -> Result<Vec<ExtensionManifest>> {
-    let extensions = config::list::<ExtensionManifest>()?;
-    let mut extensions_with_paths = Vec::new();
-    for mut extension in extensions {
-        extension.validate_notification_transports()?;
-        let extension_dir = paths::extension(&extension.id)?;
-        extension.extension_path = Some(extension_dir.to_string_lossy().to_string());
-        extensions_with_paths.push(extension);
-    }
-    Ok(extensions_with_paths)
+fn manifest_failure_error(failure: &ExtensionManifestFailure) -> Error {
+    Error::new(
+        ErrorCode::ConfigInvalidValue,
+        format!("Extension '{}' has an invalid manifest", failure.id),
+        serde_json::json!({
+            "id": failure.id,
+            "path": failure.path,
+            "manifest_path": failure.manifest_path,
+            "category": failure.category,
+            "diagnostic": failure.diagnostic,
+        }),
+    )
+    .with_hint(format!(
+        "Repair the manifest at {} and run homeboy extension show {} again.",
+        failure.manifest_path.display(),
+        failure.id
+    ))
 }
 
 pub fn broken_extension_links() -> Vec<BrokenExtensionLink> {
@@ -187,6 +327,85 @@ mod tests {
     fn test_load_all_extensions() {
         crate::test_support::with_isolated_home(|_| {
             assert!(load_all_extensions().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn discovery_reports_malformed_json_without_manifest_contents() {
+        crate::test_support::with_isolated_home(|_| {
+            let extension_dir = paths::extensions().unwrap().join("malformed");
+            std::fs::create_dir_all(&extension_dir).unwrap();
+            std::fs::write(extension_dir.join("malformed.json"), "{not json").unwrap();
+
+            let discovered = discover_extensions();
+            let DiscoveredExtension::Invalid(failure) = &discovered[0] else {
+                panic!("malformed manifest must be reported");
+            };
+            assert_eq!(failure.id, "malformed");
+            assert_eq!(failure.category, "manifest_json_malformed");
+            assert_eq!(
+                failure.diagnostic,
+                "The extension manifest contains malformed JSON."
+            );
+            assert!(!failure.diagnostic.contains("not json"));
+        });
+    }
+
+    #[test]
+    fn discovery_reports_deserialize_incompatible_notification_transport() {
+        crate::test_support::with_isolated_home(|_| {
+            let extension_dir = paths::extensions().unwrap().join("deserialize");
+            std::fs::create_dir_all(&extension_dir).unwrap();
+            std::fs::write(
+                extension_dir.join("deserialize.json"),
+                r#"{"name":"Fixture","version":"1.0.0","notification_transports":[{"id":"notify","command":"secret-command"}]}"#,
+            )
+            .unwrap();
+
+            let discovered = discover_extensions();
+            let DiscoveredExtension::Invalid(failure) = &discovered[0] else {
+                panic!("deserialize-incompatible manifest must be reported");
+            };
+            assert_eq!(failure.category, "manifest_deserialize_incompatible");
+            assert_eq!(
+                failure.diagnostic,
+                "The extension manifest does not match the supported schema."
+            );
+            assert!(!failure.diagnostic.contains("secret-command"));
+        });
+    }
+
+    #[test]
+    fn discovery_reports_validation_incompatible_notification_transport_schema() {
+        crate::test_support::with_isolated_home(|_| {
+            let extension_dir = paths::extensions().unwrap().join("validation");
+            std::fs::create_dir_all(&extension_dir).unwrap();
+            std::fs::write(
+                extension_dir.join("validation.json"),
+                r#"{"name":"Fixture","version":"1.0.0","notification_transports":[{"schema":"homeboy/notification-transport/v2","id":"notify","command":["secret-command"]}]}"#,
+            )
+            .unwrap();
+
+            let discovered = discover_extensions();
+            let DiscoveredExtension::Invalid(failure) = &discovered[0] else {
+                panic!("validation-incompatible manifest must be reported");
+            };
+            assert_eq!(failure.category, "manifest_validation_incompatible");
+            assert_eq!(
+                failure.diagnostic,
+                "The extension manifest contains unsupported configuration."
+            );
+            assert!(!failure.diagnostic.contains("secret-command"));
+
+            let error = load_extension("validation").expect_err("invalid manifest must not load");
+            assert_eq!(error.code, ErrorCode::ConfigInvalidValue);
+            assert_eq!(
+                error.details["category"],
+                "manifest_validation_incompatible"
+            );
+            assert_eq!(error.details["diagnostic"], failure.diagnostic);
+            assert!(error.details.to_string().contains("validation.json"));
+            assert!(!error.details.to_string().contains("secret-command"));
         });
     }
 

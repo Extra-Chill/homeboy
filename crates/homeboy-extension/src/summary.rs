@@ -6,7 +6,7 @@ use super::execution::{
 use super::manifest::ActionType;
 use super::{evaluate_core_compatibility, CoreCompatibilityReport};
 use homeboy_core::extension_store::{
-    broken_extension_links, is_extension_linked, load_all_extensions,
+    discover_extensions, is_extension_linked, DiscoveredExtension, ExtensionManifestFailure,
 };
 use homeboy_extension_contract::NotificationTransportDescriptor;
 
@@ -28,7 +28,11 @@ pub struct ExtensionSummary {
     pub linked: bool,
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symlink_target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -74,119 +78,129 @@ pub fn list_summaries_with(
     project: Option<&homeboy_core::project::Project>,
     readiness: ExtensionReadinessMode,
 ) -> Vec<ExtensionSummary> {
-    let extensions = load_all_extensions().unwrap_or_default();
+    let extensions = discover_extensions();
 
     let mut summaries: Vec<ExtensionSummary> = extensions
-        .iter()
-        .map(|ext| {
-            let ready_status = extension_ready_status_with(ext, readiness);
-            let compatible = is_extension_compatible(ext, project);
-            let linked = is_extension_linked(&ext.id);
+        .into_iter()
+        .map(|extension| match extension {
+            DiscoveredExtension::Valid(ext) => {
+                let ready_status = extension_ready_status_with(&ext, readiness);
+                let compatible = is_extension_compatible(&ext, project);
+                let linked = is_extension_linked(&ext.id);
 
-            let (cli_tool, cli_display_name) = ext
-                .cli
-                .as_ref()
-                .map(|cli| (Some(cli.tool.clone()), Some(cli.display_name.clone())))
-                .unwrap_or((None, None));
-
-            let actions: Vec<ActionSummary> = ext
-                .actions
-                .iter()
-                .map(|a| ActionSummary {
-                    id: a.id.clone(),
-                    label: a.label.clone(),
-                    action_type: a.action_type.clone(),
-                })
-                .collect();
-            let notification_transports = ext
-                .notification_transports
-                .iter()
-                .map(|transport| transport.descriptor())
-                .collect();
-
-            let has_setup = ext
-                .runtime()
-                .and_then(|r| r.setup_command.as_ref())
-                .map(|_| true);
-            let has_ready_check = ext
-                .runtime()
-                .and_then(|r| r.ready_check.as_ref())
-                .map(|_| true);
-
-            let source_revision =
-                homeboy_core::extension_update_check::read_source_revision(&ext.id);
-            let core_compatibility = evaluate_core_compatibility(
-                ext.requires
+                let (cli_tool, cli_display_name) = ext
+                    .cli
                     .as_ref()
-                    .and_then(|requires| requires.homeboy.as_deref()),
-                source_revision.clone(),
-            )
-            .unwrap_or_else(|_| CoreCompatibilityReport::undeclared(source_revision.clone()));
+                    .map(|cli| (Some(cli.tool.clone()), Some(cli.display_name.clone())))
+                    .unwrap_or((None, None));
 
-            ExtensionSummary {
-                id: ext.id.clone(),
-                name: ext.name.clone(),
-                version: ext.version.clone(),
-                description: ext
-                    .description
-                    .as_ref()
-                    .and_then(|d| d.lines().next())
-                    .unwrap_or("")
-                    .to_string(),
-                runtime: if ext.executable.is_some() {
-                    "executable".to_string()
-                } else {
-                    "platform".to_string()
-                },
-                compatible,
-                core_compatibility,
-                ready: ready_status.ready,
-                ready_reason: ready_status.reason,
-                ready_detail: ready_status.detail,
-                linked,
-                path: ext.extension_path.clone().unwrap_or_default(),
-                error: None,
-                symlink_target: None,
-                source_revision,
-                cli_tool,
-                cli_display_name,
-                actions,
-                notification_transports,
-                has_setup,
-                has_ready_check,
+                let actions: Vec<ActionSummary> = ext
+                    .actions
+                    .iter()
+                    .map(|a| ActionSummary {
+                        id: a.id.clone(),
+                        label: a.label.clone(),
+                        action_type: a.action_type.clone(),
+                    })
+                    .collect();
+                let notification_transports = ext
+                    .notification_transports
+                    .iter()
+                    .map(|transport| transport.descriptor())
+                    .collect();
+
+                let has_setup = ext
+                    .runtime()
+                    .and_then(|r| r.setup_command.as_ref())
+                    .map(|_| true);
+                let has_ready_check = ext
+                    .runtime()
+                    .and_then(|r| r.ready_check.as_ref())
+                    .map(|_| true);
+
+                let source_revision =
+                    homeboy_core::extension_update_check::read_source_revision(&ext.id);
+                let core_compatibility = evaluate_core_compatibility(
+                    ext.requires
+                        .as_ref()
+                        .and_then(|requires| requires.homeboy.as_deref()),
+                    source_revision.clone(),
+                )
+                .unwrap_or_else(|_| CoreCompatibilityReport::undeclared(source_revision.clone()));
+
+                ExtensionSummary {
+                    id: ext.id.clone(),
+                    name: ext.name.clone(),
+                    version: ext.version.clone(),
+                    description: ext
+                        .description
+                        .as_ref()
+                        .and_then(|d| d.lines().next())
+                        .unwrap_or("")
+                        .to_string(),
+                    runtime: if ext.executable.is_some() {
+                        "executable".to_string()
+                    } else {
+                        "platform".to_string()
+                    },
+                    compatible,
+                    core_compatibility,
+                    ready: ready_status.ready,
+                    ready_reason: ready_status.reason,
+                    ready_detail: ready_status.detail,
+                    linked,
+                    path: ext.extension_path.clone().unwrap_or_default(),
+                    manifest_path: None,
+                    error: None,
+                    diagnostic: None,
+                    symlink_target: None,
+                    source_revision,
+                    cli_tool,
+                    cli_display_name,
+                    actions,
+                    notification_transports,
+                    has_setup,
+                    has_ready_check,
+                }
             }
+            DiscoveredExtension::Invalid(failure) => invalid_summary(failure),
         })
         .collect();
 
-    summaries.extend(broken_extension_links().into_iter().map(|link| {
-        let target = link.target.to_string_lossy().to_string();
-        ExtensionSummary {
-            id: link.id,
-            name: String::new(),
-            version: String::new(),
-            description: String::new(),
-            runtime: String::new(),
-            compatible: false,
-            core_compatibility: CoreCompatibilityReport::undeclared(None),
-            ready: false,
-            ready_reason: Some("target_missing".to_string()),
-            ready_detail: Some(format!("Linked target does not exist: {}", target)),
-            linked: true,
-            path: link.path.to_string_lossy().to_string(),
-            error: Some("target_missing".to_string()),
-            symlink_target: Some(target),
-            source_revision: None,
-            cli_tool: None,
-            cli_display_name: None,
-            actions: Vec::new(),
-            notification_transports: Vec::new(),
-            has_setup: None,
-            has_ready_check: None,
-        }
-    }));
-
     summaries.sort_by(|a, b| a.id.cmp(&b.id));
     summaries
+}
+
+fn invalid_summary(failure: ExtensionManifestFailure) -> ExtensionSummary {
+    let symlink_target = failure
+        .symlink_target
+        .as_ref()
+        .map(|target| target.to_string_lossy().to_string());
+    ExtensionSummary {
+        id: failure.id,
+        name: String::new(),
+        version: String::new(),
+        description: String::new(),
+        runtime: String::new(),
+        compatible: false,
+        core_compatibility: CoreCompatibilityReport::undeclared(None),
+        ready: false,
+        ready_reason: Some(failure.category.to_string()),
+        ready_detail: Some(failure.diagnostic.to_string()),
+        linked: failure.path.is_symlink(),
+        path: failure.path.to_string_lossy().to_string(),
+        manifest_path: Some(failure.manifest_path.to_string_lossy().to_string()),
+        error: Some(failure.category.to_string()),
+        diagnostic: Some(failure.diagnostic.to_string()),
+        symlink_target,
+        source_revision: None,
+        cli_tool: None,
+        cli_display_name: None,
+        actions: Vec::new(),
+        notification_transports: Vec::new(),
+        has_setup: None,
+        has_ready_check: None,
+    }
 }
 
 #[cfg(test)]
@@ -213,9 +227,45 @@ mod tests {
             assert_eq!(summaries[0].error.as_deref(), Some("target_missing"));
             assert_eq!(summaries[0].ready_reason.as_deref(), Some("target_missing"));
             assert_eq!(
+                summaries[0].diagnostic.as_deref(),
+                Some("The linked extension target does not exist.")
+            );
+            assert_eq!(
                 summaries[0].symlink_target.as_deref(),
                 Some(target.to_string_lossy().as_ref())
             );
+        });
+    }
+
+    #[test]
+    fn list_summaries_includes_invalid_manifests_alongside_valid_extensions() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let extensions_dir = paths::extensions().unwrap();
+            let valid_dir = extensions_dir.join("valid");
+            let invalid_dir = extensions_dir.join("invalid");
+            std::fs::create_dir_all(&valid_dir).unwrap();
+            std::fs::create_dir_all(&invalid_dir).unwrap();
+            std::fs::write(
+                valid_dir.join("valid.json"),
+                r#"{"name":"Valid","version":"1.0.0"}"#,
+            )
+            .unwrap();
+            std::fs::write(invalid_dir.join("invalid.json"), "{").unwrap();
+
+            let summaries = list_summaries(None);
+
+            assert_eq!(summaries.len(), 2);
+            assert_eq!(summaries[0].id, "invalid");
+            assert_eq!(
+                summaries[0].error.as_deref(),
+                Some("manifest_json_malformed")
+            );
+            assert!(summaries[0]
+                .manifest_path
+                .as_deref()
+                .is_some_and(|path| path.ends_with("invalid/invalid.json")));
+            assert_eq!(summaries[1].id, "valid");
+            assert_eq!(summaries[1].name, "Valid");
         });
     }
 }
