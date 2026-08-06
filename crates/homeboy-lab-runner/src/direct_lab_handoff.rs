@@ -64,7 +64,7 @@ impl DirectLabHandoffEnvelope {
                 None,
             ));
         }
-        self.recipe.validate()
+        self.recipe.validate_for_runner_staging()
     }
 }
 

@@ -5616,6 +5616,16 @@ where
     Ok(())
 }
 
+/// Test-support network entry point for the production reverse-broker routes.
+/// Authentication and route handling remain identical to a daemon connection.
+#[cfg(any(test, feature = "test-support"))]
+pub fn handle_reverse_broker_test_connection(
+    stream: TcpStream,
+    job_store: &JobStore,
+) -> std::io::Result<()> {
+    handle_connection(stream, job_store, UnsupportedAnalysisJobRunner, false)
+}
+
 fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     let mut request = Vec::new();
     let mut buffer = [0; 8 * 1024];
