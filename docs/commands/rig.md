@@ -250,6 +250,30 @@ If the user replaced an installed config file with their own file, update preser
 
 ### `sources`
 
+### `package`
+
+Validates rig package artifacts without touching the live environment.
+
+### `sync`
+
+Synchronizes the stacks declared by a rig's components.
+
+### `run`
+
+Refreshes, synchronizes, checks, and benchmarks a rig profile end-to-end.
+
+### `release-lock`
+
+Releases a stale active-run lock after the holder is gone or its TTL has expired.
+
+### `app`
+
+Installs, updates, or removes the rig's desktop app launcher.
+
+### `artifact`
+
+Registers local command-step evidence with the enclosing rig run.
+
 ```sh
 homeboy rig sources list
 homeboy rig sources refresh
