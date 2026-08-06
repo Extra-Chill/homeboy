@@ -889,27 +889,38 @@ fn validate_runner_extension_revision(
         );
     }
 
-    let local_revision = homeboy_core::extension_update_check::read_source_revision(extension_id);
-    let remote_revision = remote_extension_source_revision(remote_stdout);
-    if matches!(
-        (
-            local_revision
-                .as_deref()
-                .filter(|revision| !revision.trim().is_empty()),
-            remote_revision
-                .as_deref()
-                .filter(|revision| !revision.trim().is_empty()),
-        ),
-        (Some(local), Some(remote)) if local == remote
-    ) {
-        return Ok(());
+    let local_revision = homeboy_core::extension_update_check::read_source_revision(extension_id)
+        .filter(|revision| !revision.trim().is_empty());
+    let remote_revision = remote_extension_source_revision(remote_stdout)
+        .filter(|revision| !revision.trim().is_empty());
+
+    // Content identity is the parity gate; the git revision is provenance.
+    //
+    // A committed SHA only describes the bytes on disk while the controller
+    // checkout is clean. Edit an extension without committing and both sides
+    // still report the same SHA, so revision-only parity passed and the Lab
+    // silently ran the *committed* code instead of the edited code. A dirty
+    // controller checkout is therefore stale parity by definition, whatever the
+    // revisions say.
+    let cleanliness = homeboy_core::extension_update_check::read_source_cleanliness(extension_id);
+    if let homeboy_core::extension_update_check::ExtensionSourceCleanliness::Dirty {
+        changed_paths,
+    } = &cleanliness
+    {
+        return Err(uncommitted_controller_extension_source_error(
+            runner_id,
+            homeboy_path,
+            extension_id,
+            local_revision.as_deref(),
+            remote_revision.as_deref(),
+            changed_paths,
+        ));
     }
 
-    let Some(local_revision) = local_revision.filter(|revision| !revision.trim().is_empty()) else {
+    let Some(local_revision) = local_revision else {
         return Ok(());
     };
-    let Some(remote_revision) = remote_revision.filter(|revision| !revision.trim().is_empty())
-    else {
+    let Some(remote_revision) = remote_revision else {
         return Err(Error::validation_invalid_argument(
             "runner_extension",
             format!(
@@ -927,6 +938,7 @@ fn validate_runner_extension_revision(
     };
 
     if local_revision == remote_revision {
+        warn_revision_only_extension_parity(runner_id, extension_id, &local_revision, &cleanliness);
         return Ok(());
     }
 
@@ -944,6 +956,87 @@ fn validate_runner_extension_revision(
             ),
         ]),
     ))
+}
+
+/// Warn when parity rested on the revision alone.
+///
+/// A non-git extension install (monorepo extraction, snapshot install) has no
+/// working tree to inspect, so matching revisions are the only evidence
+/// available and an uncommitted local edit is undetectable. Say so rather than
+/// letting the operator read a silent pass as a content guarantee.
+fn warn_revision_only_extension_parity(
+    runner_id: &str,
+    extension_id: &str,
+    local_revision: &str,
+    cleanliness: &homeboy_core::extension_update_check::ExtensionSourceCleanliness,
+) {
+    if !matches!(
+        cleanliness,
+        homeboy_core::extension_update_check::ExtensionSourceCleanliness::Unknown
+    ) {
+        return;
+    }
+
+    eprintln!(
+        "warning: runner '{runner_id}' extension parity for '{extension_id}' was verified by revision only ({local_revision}). The controller-local extension is not a git checkout, so uncommitted local edits cannot be detected and the runner may execute different bytes. Use `homeboy runner dev-sync {runner_id} --extensions {extension_id}=<source-path>` to pin parity by content hash."
+    );
+}
+
+/// The controller-local extension has uncommitted edits, so its revision is not
+/// a content identity and the runner is holding the committed bytes instead.
+///
+/// Reported as stale parity on purpose: that classification routes into the
+/// existing auto-materialization path, which snapshots the actual controller
+/// bytes onto the runner and records a content-hash dev overlay. Subsequent
+/// dispatches then validate by content hash rather than revision.
+fn uncommitted_controller_extension_source_error(
+    runner_id: &str,
+    homeboy_path: &str,
+    extension_id: &str,
+    local_revision: Option<&str>,
+    remote_revision: Option<&str>,
+    changed_paths: &[String],
+) -> Error {
+    let local_revision = local_revision.unwrap_or("<missing>");
+    let remote_revision = remote_revision.unwrap_or("<missing>");
+    let dev_sync_command = format!(
+        "homeboy runner dev-sync {} --extensions {}=<source-path>",
+        shell::quote_arg(runner_id),
+        shell::quote_arg(extension_id)
+    );
+    Error::new(
+        ErrorCode::ValidationInvalidArgument,
+        format!(
+            "Invalid argument 'runner_extension': Runner '{runner_id}' has stale extension parity for '{extension_id}' before command execution because the controller-local extension has uncommitted changes"
+        ),
+        serde_json::json!({
+            "field": "runner_extension",
+            "problem": "controller_extension_source_uncommitted",
+            "id": extension_id,
+            "diagnostic": {
+                "code": "runner_extension.controller_source_uncommitted",
+                "location": "controller",
+                "runner_id": runner_id,
+                "extension_id": extension_id,
+                "homeboy_path": homeboy_path,
+                "local_source_revision": local_revision,
+                "runner_extension_source_revision": remote_revision,
+                "uncommitted_paths": changed_paths,
+                "remediation_command": dev_sync_command,
+            },
+            "tried": [
+                format!("Local extension source_revision (provenance only): {local_revision}"),
+                format!("Runner extension source_revision (provenance only): {remote_revision}"),
+                format!(
+                    "Controller-local extension has uncommitted changes: {}",
+                    changed_paths.join(", ")
+                ),
+                "Matching revisions do not prove matching content: the runner holds the committed bytes, not the edited ones.",
+                format!("Sync the working bytes to the runner before dispatch: {dev_sync_command}"),
+                format!("Or commit the edits so the revision describes them: {homeboy_path} extension update {extension_id}"),
+            ]
+        }),
+    )
 }
 
 fn validate_dev_overlay_extension_revision(
@@ -1133,14 +1226,14 @@ mod tests {
     use super::{
         controller_extension_metadata_required_error, controller_local_source_path,
         dev_sync_extension_overlay, ensure_extension_materialized,
-        ensure_extension_materialized_with_exec, plan_extension_parity,
-        record_materialized_extension_overlay, remote_extension_core_compatibility,
-        remote_extension_ready_status, remote_extension_setting_ids,
-        remote_extension_source_revision, requested_setting_keys_for_command,
-        runner_extension_sync_command, validate_extension_ready,
-        validate_runner_extension_core_compatibility, validate_runner_extension_ready,
-        validate_runner_extension_revision, validate_runner_extension_settings,
-        ExtensionParityPlan, ExtensionParityPlanStep,
+        ensure_extension_materialized_with_exec, is_stale_runner_extension_parity_error,
+        plan_extension_parity, record_materialized_extension_overlay,
+        remote_extension_core_compatibility, remote_extension_ready_status,
+        remote_extension_setting_ids, remote_extension_source_revision,
+        requested_setting_keys_for_command, runner_extension_sync_command,
+        validate_extension_ready, validate_runner_extension_core_compatibility,
+        validate_runner_extension_ready, validate_runner_extension_revision,
+        validate_runner_extension_settings, ExtensionParityPlan, ExtensionParityPlanStep,
     };
     use homeboy_core::test_support::with_isolated_home;
 
@@ -1746,6 +1839,178 @@ mod tests {
         });
     }
 
+    fn git(path: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Commit an extension checkout and return its HEAD SHA, which is what both
+    /// sides report as `source_revision`.
+    fn commit_extension_checkout(dir: &std::path::Path) -> String {
+        git(dir, &["init", "-b", "main"]);
+        git(dir, &["config", "user.email", "test@example.com"]);
+        git(dir, &["config", "user.name", "Homeboy Test"]);
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-m", "initial"]);
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir)
+            .output()
+            .expect("run git rev-parse");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn extension_show_stdout(extension_id: &str, source_revision: &str) -> String {
+        format!(
+            r#"{{"success":true,"data":{{"extension":{{"id":"{extension_id}","ready":true,"source_revision":"{source_revision}"}}}}}}"#
+        )
+    }
+
+    /// The bug this gate exists to catch: different bytes, same commit.
+    ///
+    /// Edit an extension locally without committing and both sides still report
+    /// the same SHA, so revision-only parity passed and the Lab ran the
+    /// committed code instead of the edited code.
+    #[test]
+    fn revision_parity_rejects_uncommitted_controller_extension_edits() {
+        with_isolated_home(|home| {
+            let extension_dir = home.path().join(".config/homeboy/extensions/wordpress");
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join("wordpress.json"),
+                r#"{"id":"wordpress"}"#,
+            )
+            .expect("manifest");
+            fs::write(extension_dir.join("lint.sh"), "echo committed\n").expect("step");
+            let revision = commit_extension_checkout(&extension_dir);
+            fs::write(extension_dir.join("lint.sh"), "echo edited\n").expect("uncommitted edit");
+            let remote_stdout = extension_show_stdout("wordpress", &revision);
+            let runner = runner_with_overlay("other", "/tmp/other", "unused");
+
+            let err = validate_runner_extension_revision(
+                "homeboy-lab",
+                &runner,
+                "homeboy",
+                "wordpress",
+                &remote_stdout,
+            )
+            .expect_err("uncommitted controller edits must not pass parity on a matching revision");
+
+            assert_eq!(
+                err.details["diagnostic"]["code"],
+                "runner_extension.controller_source_uncommitted"
+            );
+            assert_eq!(err.details["diagnostic"]["uncommitted_paths"][0], "lint.sh");
+            // The revision is still recorded, as provenance.
+            assert_eq!(
+                err.details["diagnostic"]["local_source_revision"],
+                revision.as_str()
+            );
+            assert_eq!(
+                err.details["diagnostic"]["runner_extension_source_revision"],
+                revision.as_str()
+            );
+            // Classified as stale parity so the existing auto-materialization
+            // path picks it up and snapshots the working bytes to the runner.
+            assert!(is_stale_runner_extension_parity_error(&err));
+        });
+    }
+
+    #[test]
+    fn revision_parity_accepts_a_clean_controller_extension_checkout() {
+        with_isolated_home(|home| {
+            let extension_dir = home.path().join(".config/homeboy/extensions/wordpress");
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join("wordpress.json"),
+                r#"{"id":"wordpress"}"#,
+            )
+            .expect("manifest");
+            fs::write(extension_dir.join("lint.sh"), "echo committed\n").expect("step");
+            let revision = commit_extension_checkout(&extension_dir);
+            let remote_stdout = extension_show_stdout("wordpress", &revision);
+            let runner = runner_with_overlay("other", "/tmp/other", "unused");
+
+            validate_runner_extension_revision(
+                "homeboy-lab",
+                &runner,
+                "homeboy",
+                "wordpress",
+                &remote_stdout,
+            )
+            .expect("a clean checkout at the runner's revision is genuine parity");
+        });
+    }
+
+    /// Homeboy writes `.source-url` / `.source-revision` / `.source-requested-ref`
+    /// into installed extension directories. They are install-local provenance,
+    /// not extension source, and must never be read as uncommitted edits.
+    #[test]
+    fn revision_parity_ignores_generated_install_metadata_when_classifying_edits() {
+        with_isolated_home(|home| {
+            let extension_dir = home.path().join(".config/homeboy/extensions/wordpress");
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join("wordpress.json"),
+                r#"{"id":"wordpress"}"#,
+            )
+            .expect("manifest");
+            let revision = commit_extension_checkout(&extension_dir);
+            fs::write(
+                extension_dir.join(".source-url"),
+                "https://example.test/wordpress",
+            )
+            .expect("source url");
+            fs::write(extension_dir.join(".source-requested-ref"), "main").expect("requested ref");
+            let remote_stdout = extension_show_stdout("wordpress", &revision);
+            let runner = runner_with_overlay("other", "/tmp/other", "unused");
+
+            validate_runner_extension_revision(
+                "homeboy-lab",
+                &runner,
+                "homeboy",
+                "wordpress",
+                &remote_stdout,
+            )
+            .expect("generated install metadata is not an uncommitted source edit");
+        });
+    }
+
+    /// Backward compatibility: a non-git install (monorepo extraction, snapshot
+    /// install, or any runner/controller predating content-addressed parity)
+    /// has no working tree to inspect. Parity falls back to the revision and
+    /// warns that uncommitted local edits cannot be detected.
+    #[test]
+    fn revision_parity_falls_back_to_revision_for_a_non_git_controller_extension() {
+        with_isolated_home(|home| {
+            let extension_dir = home.path().join(".config/homeboy/extensions/wordpress");
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(extension_dir.join(".source-revision"), "abc123\n").expect("revision");
+            let remote_stdout = extension_show_stdout("wordpress", "abc123");
+            let runner = runner_with_overlay("other", "/tmp/other", "unused");
+
+            validate_runner_extension_revision(
+                "homeboy-lab",
+                &runner,
+                "homeboy",
+                "wordpress",
+                &remote_stdout,
+            )
+            .expect("revision-only parity still passes when cleanliness is unknowable");
+        });
+    }
+
+    /// Same bytes, different commit: already the contract on the dev-overlay
+    /// path, which is content-addressed rather than revision-addressed.
     #[test]
     fn revision_parity_accepts_matching_dev_overlay_content_hash() {
         let tempdir = tempfile::tempdir().expect("source dir");

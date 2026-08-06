@@ -163,6 +163,23 @@ pub fn status_porcelain_bytes(git_root: &Path) -> Option<Vec<u8>> {
     output_optional_bytes(git_root, &["status", "--porcelain=v1", "-z"])
 }
 
+/// Get porcelain status text limited to `dir` itself rather than the whole
+/// repository.
+///
+/// `git status` reports the entire repository no matter which subdirectory it
+/// runs from. Callers that ask "did *this* directory change" — a single
+/// extension inside a monorepo checkout of many extensions, for example — need
+/// the `-- .` pathspec so an unrelated sibling's edits do not answer for it.
+/// Paths in the output stay repo-root-relative, as porcelain always reports
+/// them.
+///
+/// Returns `None` when `dir` is not inside a git repository or git could not
+/// answer; `Some("")` is a clean, in-scope tree.
+pub fn status_porcelain_scoped(dir: &Path) -> Option<String> {
+    output_optional_bytes(dir, &["status", "--porcelain=v1", "--", "."])
+        .map(|output| String::from_utf8_lossy(&output).to_string())
+}
+
 /// Get porcelain status text from a git directory.
 pub fn status_porcelain(git_root: &Path) -> Option<String> {
     output_optional_bytes(git_root, &["status", "--porcelain=v1"])
