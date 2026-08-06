@@ -122,6 +122,32 @@ The reserved metadata shape is:
 `artifacts`, or `repair`. Commands not migrated to this metadata contract emit
 empty actionable envelope fields rather than guessed actions.
 
+### Declared-but-broken metadata
+
+Lifting `_homeboy_actionable` removes it from `data` whether or not it parses.
+When it does not parse, dropping it silently would leave the consumer with a
+well-formed envelope asserting there is no run — indistinguishable from a
+command that never declared one. So the failure is reported in-band on
+`contract_warnings`:
+
+```json
+{
+  "contract_warnings": [
+    {
+      "code": "actionable_metadata_unparsable",
+      "message": "actionable metadata at `/_homeboy_actionable` does not match the command-result contract and could not be lifted into the envelope: missing field `watch_command`",
+      "pointer": "/stages/1/_homeboy_actionable"
+    }
+  ]
+}
+```
+
+`pointer` is an RFC 6901 JSON pointer into the payload that became `data`.
+`contract_warnings` is additive and omitted when empty, so the serialized shape
+of a healthy result is unchanged and pre-existing v3 consumers keep parsing it.
+An orchestrator that wants to fail loudly on contract regressions can treat a
+non-empty `contract_warnings` as a producer bug.
+
 ## Full status report output
 
 The `homeboy status --full` command returns actionable intelligence about the current context.
