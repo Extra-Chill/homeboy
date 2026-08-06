@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::cli_surface::{CommandArgumentProvenance, Commands};
+use crate::cli_surface::{CommandArgumentProvenance, Commands, Placement};
 use crate::command_contract::{CommandJsonFamily, CommandSpec};
 
 use super::agent_task_summary::{agent_task_summary_kind, render_agent_task_summary};
@@ -14,10 +14,14 @@ mod workspace;
 type JsonRun = (homeboy::core::Result<Value>, i32);
 
 /// Dispatch a command to its handler and map the structured result to JSON.
-pub fn run(command: Commands, spec: &CommandSpec) -> (homeboy::core::Result<Value>, i32) {
+pub fn run(
+    command: Commands,
+    spec: &CommandSpec,
+    placement: Placement,
+) -> (homeboy::core::Result<Value>, i32) {
     crate::commands::utils::tty::status("homeboy is working...");
 
-    dispatch(command, spec)
+    dispatch(command, spec, placement)
 }
 
 pub fn run_command_output(
@@ -25,6 +29,7 @@ pub fn run_command_output(
     spec: &CommandSpec,
     output_file: Option<&str>,
     provenance: &CommandArgumentProvenance,
+    placement: Placement,
 ) -> CommandRun {
     crate::commands::utils::tty::status("homeboy is working...");
     let run = match command {
@@ -77,7 +82,7 @@ pub fn run_command_output(
                 }
             }
             command_run_with_summary(
-                dispatch(Commands::AgentTask(args), spec),
+                dispatch(Commands::AgentTask(args), spec, placement),
                 |payload, exit_code| {
                     if let Some(output_file) = run_from_spec_output_ref {
                         return render_controller_run_from_spec_output_ref(
@@ -92,20 +97,22 @@ pub fn run_command_output(
             )
         }
         Commands::Runner(args) => runner::run_command_output(args),
-        Commands::Activity(args) => {
-            command_run_with_summary(dispatch(Commands::Activity(args), spec), |payload, _| {
-                super::activity::render_activity_summary(payload)
-            })
-        }
+        Commands::Activity(args) => command_run_with_summary(
+            dispatch(Commands::Activity(args), spec, placement),
+            |payload, _| super::activity::render_activity_summary(payload),
+        ),
         Commands::Bench(args) => {
             let summarize = args.is_run_invocation()
                 && !args.wants_full_json()
                 && !homeboy::core::lab_routing::is_lab_offload_subprocess();
-            command_run_with_summary(dispatch(Commands::Bench(args), spec), |payload, _| {
-                summarize
-                    .then(|| super::bench_summary::render_bench_summary(payload))
-                    .flatten()
-            })
+            command_run_with_summary(
+                dispatch(Commands::Bench(args), spec, placement),
+                |payload, _| {
+                    summarize
+                        .then(|| super::bench_summary::render_bench_summary(payload))
+                        .flatten()
+                },
+            )
         }
         Commands::Cleanup(args) => {
             let summarize = matches!(
@@ -114,33 +121,41 @@ pub fn run_command_output(
                     | Some(crate::commands::cleanup::CleanupCommand::Worktrees(_))
                     | Some(crate::commands::cleanup::CleanupCommand::AutomaticRetention)
             ) && !homeboy::core::lab_routing::is_lab_offload_subprocess();
-            command_run_with_summary(dispatch(Commands::Cleanup(args), spec), |payload, _| {
-                summarize
-                    .then(|| super::cleanup::render_cleanup_summary(payload))
-                    .flatten()
-            })
+            command_run_with_summary(
+                dispatch(Commands::Cleanup(args), spec, placement),
+                |payload, _| {
+                    summarize
+                        .then(|| super::cleanup::render_cleanup_summary(payload))
+                        .flatten()
+                },
+            )
         }
         Commands::Runs(args) => {
             let operator_output = !homeboy::core::lab_routing::is_lab_offload_subprocess();
             let summarize_show = args.show_summary_eligible() && operator_output;
             let summarize_dossier = args.dossier_summary_eligible() && operator_output;
             let summarize_proof = args.proof_summary_eligible() && operator_output;
-            command_run_with_summary(dispatch(Commands::Runs(args), spec), |payload, _| {
-                if let Some(rendered) = super::runs_summary::render_runs_field_selection(payload) {
-                    Some(rendered)
-                } else if summarize_show {
-                    super::runs_summary::render_runs_show_summary(payload)
-                } else if summarize_dossier {
-                    super::runs_dossier_summary::render_runs_dossier_summary(payload)
-                } else if summarize_proof {
-                    super::runs_proof_summary::render_runs_proof_summary(payload)
-                } else {
-                    None
-                }
-            })
+            command_run_with_summary(
+                dispatch(Commands::Runs(args), spec, placement),
+                |payload, _| {
+                    if let Some(rendered) =
+                        super::runs_summary::render_runs_field_selection(payload)
+                    {
+                        Some(rendered)
+                    } else if summarize_show {
+                        super::runs_summary::render_runs_show_summary(payload)
+                    } else if summarize_dossier {
+                        super::runs_dossier_summary::render_runs_dossier_summary(payload)
+                    } else if summarize_proof {
+                        super::runs_proof_summary::render_runs_proof_summary(payload)
+                    } else {
+                        None
+                    }
+                },
+            )
         }
         command => {
-            let (stdout_result, exit_code) = dispatch(command, spec);
+            let (stdout_result, exit_code) = dispatch(command, spec, placement);
             CommandRun::from_stdout_result(stdout_result, exit_code)
         }
     };
@@ -292,7 +307,14 @@ fn agent_task_summary_kind_for_output_mode(
     }
 }
 
-fn dispatch(command: Commands, spec: &CommandSpec) -> (homeboy::core::Result<Value>, i32) {
+fn dispatch(
+    command: Commands,
+    spec: &CommandSpec,
+    placement: Placement,
+) -> (homeboy::core::Result<Value>, i32) {
+    if let Commands::Cleanup(args) = command {
+        return map(crate::commands::cleanup::run(args, placement));
+    }
     let command = match adapter::command_adapter(
         command,
         crate::command_contract::CommandOutputFileMode::None,
@@ -329,6 +351,7 @@ mod tests {
                 ),
             }),
             crate::command_contract::registered_command("contract").unwrap(),
+            Placement::Auto,
         );
 
         assert_eq!(exit_code, 0);

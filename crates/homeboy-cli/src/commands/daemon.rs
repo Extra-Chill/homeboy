@@ -690,7 +690,8 @@ impl AnalysisJobRunner for CommandAnalysisJobRunner {
             })?;
         let (cli, spec) = crate::cli_surface::Cli::from_registered_arg_matches(&matches)
             .expect("validated arguments should produce a typed CLI");
-        let (result, exit_code) = crate::commands::json_output::run(cli.command, spec);
+        let (result, exit_code) =
+            crate::commands::json_output::run(cli.command, spec, cli.placement);
         Ok(AnalysisJobRunOutput {
             exit_code,
             output: result?,
