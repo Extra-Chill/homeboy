@@ -471,6 +471,13 @@ pub fn wait_with_bounded_output_until_cancelled_with_stdout_observer(
 
     let status = loop {
         if let Some(status) = child.try_wait()? {
+            // The command exited, but a background descendant can still hold
+            // the inherited stdout/stderr pipes open. Joining the capture
+            // readers first would block until that descendant exits, which is
+            // an unbounded wait after the work is already done (#11702). Reap
+            // the remaining group before joining, exactly as the supervised
+            // sibling loop does.
+            terminate_remaining_process_group(child.id())?;
             break status;
         }
         if is_cancelled() {
@@ -1542,6 +1549,45 @@ mod tests {
 
         assert!(started.elapsed() < Duration::from_secs(3));
         assert_eq!(result.termination, SupervisedCommandTermination::Completed);
+        let descendant_pid = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .trim()
+            .parse::<libc::pid_t>()
+            .expect("numeric descendant pid");
+        assert_ne!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellable_wait_does_not_deadlock_on_a_background_output_holder() {
+        // The sibling of the supervised case above, for the cancellable path
+        // `review lint --fix` runs through. A fixer that leaves a background
+        // descendant holding the inherited pipes used to strand the capture
+        // join after the command had already exited and written its edits,
+        // so the run only ended at the caller's timeout (#11702).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let pid_file = temp.path().join("descendant.pid");
+        let script = format!(
+            "sleep 30 & echo $! > {}; printf fixed",
+            crate::shell::quote_path(&pid_file.display().to_string())
+        );
+        let mut command = Command::new("sh");
+        command.args(["-c", &script]);
+        command.stdout(std::process::Stdio::piped());
+        command.stderr(std::process::Stdio::piped());
+        isolate_process_tree(&mut command);
+        let mut child = command.spawn().expect("spawn process tree");
+
+        let started = std::time::Instant::now();
+        let output = wait_with_bounded_output_until_cancelled(&mut child, 64, || false)
+            .expect("completed command returns a terminal result");
+
+        // The point of the fix: this returns promptly instead of blocking for
+        // as long as the descendant lives.
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"fixed");
+
         let descendant_pid = std::fs::read_to_string(&pid_file)
             .expect("descendant pid")
             .trim()
