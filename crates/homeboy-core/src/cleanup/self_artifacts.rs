@@ -19,21 +19,89 @@ use super::{
 };
 
 pub(super) fn homeboy_source_checkout() -> Result<PathBuf> {
-    let manifest_dir = option_env!("CARGO_MANIFEST_DIR").ok_or_else(|| {
+    let executable = std::env::current_exe().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("resolve current Homeboy executable".to_string()),
+        )
+    })?;
+    homeboy_source_checkout_from_binary(&executable, &crate::build_identity::current())
+}
+
+/// Resolve the source checkout that owns a source-built Homeboy binary.
+///
+/// `CARGO_MANIFEST_DIR` is compiled into binaries and may name a discarded CI
+/// filesystem, so it is intentionally not a source-resolution input here.
+fn homeboy_source_checkout_from_binary(
+    binary: &Path,
+    identity: &crate::build_identity::BuildIdentity,
+) -> Result<PathBuf> {
+    let checkout = source_checkout_from_binary_path(binary).ok_or_else(|| {
         Error::validation_invalid_argument(
             "self_artifacts",
-            "Homeboy source checkout is unavailable for this binary",
+            format!("no managed Homeboy source checkout owns {}", binary.display()),
             None,
             None,
         )
+        .with_hint(
+            "`--self` requires a source-built binary at <checkout>/target/{debug,release}/homeboy. Pass an explicit checkout with `homeboy cleanup artifacts --path <PATH>` for an installed binary.",
+        )
     })?;
-    let manifest_dir = Path::new(manifest_dir);
-    for candidate in manifest_dir.ancestors() {
-        if let Ok(root) = validate_homeboy_manifest_dir(candidate) {
-            return Ok(root);
-        }
+    let checkout = validate_homeboy_manifest_dir(&checkout)?;
+    validate_homeboy_build_identity(&checkout, identity)?;
+    Ok(checkout)
+}
+
+fn source_checkout_from_binary_path(binary: &Path) -> Option<PathBuf> {
+    let binary = fs::canonicalize(binary).ok()?;
+    let binary_name = binary.file_name()?.to_str()?;
+    let expected_name = homeboy_product_identity::PRODUCT_IDENTITY.binary_name;
+    if binary_name != expected_name && binary_name != format!("{expected_name}.exe") {
+        return None;
     }
-    validate_homeboy_manifest_dir(manifest_dir)
+    let profile = binary.parent()?;
+    if !matches!(profile.file_name()?.to_str()?, "debug" | "release") {
+        return None;
+    }
+    let target = profile.parent()?;
+    if target.file_name()?.to_str()? != "target" {
+        return None;
+    }
+    target.parent().map(Path::to_path_buf)
+}
+
+fn validate_homeboy_build_identity(
+    checkout: &Path,
+    identity: &crate::build_identity::BuildIdentity,
+) -> Result<()> {
+    let Some(expected_commit) = identity.git_commit.as_deref() else {
+        return Err(no_managed_source(
+            checkout,
+            "the running binary has no durable source revision",
+        ));
+    };
+    let actual_commit = git::run_git(checkout, &["rev-parse", "HEAD"], "git revision")
+        .map_err(|_| no_managed_source(checkout, "the checkout has no readable source revision"))?;
+    if !actual_commit.trim().starts_with(expected_commit) {
+        return Err(no_managed_source(
+            checkout,
+            "the checkout revision does not match the running binary",
+        ));
+    }
+    Ok(())
+}
+
+fn no_managed_source(path: &Path, reason: &str) -> Error {
+    Error::validation_invalid_argument(
+        "self_artifacts",
+        format!(
+            "no managed Homeboy source checkout: {reason} ({})",
+            path.display()
+        ),
+        None,
+        None,
+    )
+    .with_hint("Pass an explicit checkout with `homeboy cleanup artifacts --path <PATH>`.")
 }
 
 pub(super) fn validate_homeboy_manifest_dir(manifest_dir: &Path) -> Result<PathBuf> {
@@ -56,11 +124,11 @@ pub(super) fn validate_homeboy_manifest_dir(manifest_dir: &Path) -> Result<PathB
         ));
     }
 
-    if !is_git_checkout(manifest_dir) {
-        let mut error = Error::validation_invalid_argument(
+    if !is_canonical_git_root(manifest_dir) {
+        let error = Error::validation_invalid_argument(
             "self_artifacts",
             format!(
-                "{} is not a Homeboy source git checkout",
+                "{} is not the canonical root of a Homeboy source git checkout",
                 manifest_dir.display()
             ),
             None,
@@ -68,47 +136,32 @@ pub(super) fn validate_homeboy_manifest_dir(manifest_dir: &Path) -> Result<PathB
         )
         .with_hint("`homeboy cleanup artifacts --self` requires a source checkout, not a packaged Cargo registry source.")
         .with_hint("Pass an explicit checkout with `homeboy cleanup artifacts --path <PATH>`, or configure and run from a source checkout.");
-
-        if let Some(checkout) = discover_active_homeboy_checkout()? {
-            error = error.with_hint(format!(
-                "Active Homeboy checkout appears to be: {}; retry with `homeboy cleanup artifacts --path {}`.",
-                checkout.display(),
-                checkout.display()
-            ));
-        }
-
         return Err(error);
+    }
+
+    if !manifest_dir.join("src/main.rs").is_file() {
+        return Err(Error::validation_invalid_argument(
+            "self_artifacts",
+            format!(
+                "{} is not a Homeboy binary source checkout",
+                manifest_dir.display()
+            ),
+            None,
+            None,
+        ));
     }
 
     Ok(manifest_dir.to_path_buf())
 }
 
-fn is_git_checkout(path: &Path) -> bool {
-    git::run_git(
-        path,
-        &["rev-parse", "--is-inside-work-tree"],
-        "git checkout",
-    )
-    .map(|output| output.trim() == "true")
-    .unwrap_or(false)
-}
-
-fn discover_active_homeboy_checkout() -> Result<Option<PathBuf>> {
-    let Ok(current_dir) = std::env::current_dir() else {
-        return Ok(None);
+fn is_canonical_git_root(path: &Path) -> bool {
+    let Ok(root) = git::run_git(path, &["rev-parse", "--show-toplevel"], "git checkout") else {
+        return false;
     };
-
-    for candidate in current_dir.ancestors() {
-        let manifest = candidate.join("Cargo.toml");
-        if manifest.is_file()
-            && is_git_checkout(candidate)
-            && cargo_manifest_package_is_homeboy(&manifest)?
-        {
-            return Ok(Some(candidate.to_path_buf()));
-        }
-    }
-
-    Ok(None)
+    let (Ok(path), Ok(root)) = (fs::canonicalize(path), fs::canonicalize(root.trim())) else {
+        return false;
+    };
+    path == root
 }
 
 pub(super) fn self_temp_artifact_candidates(
@@ -417,4 +470,172 @@ fn is_detached_homeboy_temp_artifact(path: &Path) -> bool {
     };
     name.starts_with("homeboy-")
         && (name.ends_with("-target") || name.contains("-target-") || name.ends_with("-build"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build_identity::BuildIdentity;
+    use tempfile::TempDir;
+
+    #[test]
+    fn resolves_the_canonical_checkout_that_owns_a_source_built_binary() {
+        let fixture = TempDir::new().expect("fixture root");
+        let checkout = homeboy_checkout(fixture.path(), "source");
+        let binary = source_binary(&checkout);
+        let identity = build_identity(&checkout);
+
+        let resolved = homeboy_source_checkout_from_binary(&binary, &identity)
+            .expect("source-built binary should resolve its checkout");
+
+        assert_eq!(
+            resolved,
+            fs::canonicalize(checkout).expect("canonical checkout")
+        );
+    }
+
+    #[test]
+    fn moved_or_installed_binary_does_not_fall_back_to_a_build_machine_path() {
+        let fixture = TempDir::new().expect("fixture root");
+        let checkout = homeboy_checkout(fixture.path(), "ci-homeboy");
+        let source_binary = source_binary(&checkout);
+        let moved_binary = fixture.path().join("installed/bin/homeboy");
+        fs::create_dir_all(moved_binary.parent().expect("binary parent")).expect("binary parent");
+        fs::copy(source_binary, &moved_binary).expect("copy installed binary");
+
+        let error = homeboy_source_checkout_from_binary(&moved_binary, &build_identity(&checkout))
+            .expect_err("moved binary has no source-layout attachment");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error
+            .message
+            .contains("no managed Homeboy source checkout owns"));
+        assert!(!error.message.contains(&checkout.display().to_string()));
+    }
+
+    #[test]
+    fn rejects_an_unrelated_homeboy_like_checkout_with_a_different_revision() {
+        let fixture = TempDir::new().expect("fixture root");
+        let expected = homeboy_checkout(fixture.path(), "expected");
+        let unrelated = homeboy_checkout(fixture.path(), "unrelated");
+
+        let error = homeboy_source_checkout_from_binary(
+            &source_binary(&unrelated),
+            &build_identity(&expected),
+        )
+        .expect_err("unrelated checkout must not be selected");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("checkout revision does not match"));
+    }
+
+    #[test]
+    fn rejects_a_source_layout_when_the_binary_has_no_durable_revision() {
+        let fixture = TempDir::new().expect("fixture root");
+        let checkout = homeboy_checkout(fixture.path(), "source");
+        let mut identity = build_identity(&checkout);
+        identity.git_commit = None;
+
+        let error = homeboy_source_checkout_from_binary(&source_binary(&checkout), &identity)
+            .expect_err("a revisionless binary must not guess its source checkout");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("no durable source revision"));
+    }
+
+    #[test]
+    fn rejects_a_nested_vendor_manifest_that_is_not_a_canonical_git_root() {
+        let fixture = TempDir::new().expect("fixture root");
+        let outer = fixture.path().join("outer");
+        let vendor = outer.join("vendor/homeboy");
+        fs::create_dir_all(vendor.join("src")).expect("vendor directories");
+        fs::write(
+            vendor.join("Cargo.toml"),
+            "[package]\nname = \"homeboy\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        fs::write(vendor.join("src/main.rs"), "fn main() {}\n").expect("source");
+        let binary = source_binary(&vendor);
+        commit_git_repository(&outer);
+
+        let error = homeboy_source_checkout_from_binary(&binary, &build_identity(&outer))
+            .expect_err("nested vendor manifest must not be accepted");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("canonical root"));
+    }
+
+    fn homeboy_checkout(parent: &Path, name: &str) -> PathBuf {
+        let checkout = parent.join(name);
+        fs::create_dir_all(checkout.join("src")).expect("checkout directories");
+        fs::write(
+            checkout.join("Cargo.toml"),
+            "[package]\nname = \"homeboy\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        fs::write(checkout.join("src/main.rs"), "fn main() {}\n").expect("source");
+        commit_git_repository(&checkout);
+        checkout
+    }
+
+    fn source_binary(checkout: &Path) -> PathBuf {
+        let binary = checkout.join("target/release/homeboy");
+        fs::create_dir_all(binary.parent().expect("binary parent")).expect("binary parent");
+        fs::write(&binary, "binary").expect("binary");
+        binary
+    }
+
+    fn build_identity(checkout: &Path) -> BuildIdentity {
+        let commit = git_output(checkout, &["rev-parse", "--short=12", "HEAD"]);
+        BuildIdentity {
+            version: "0.1.0".to_string(),
+            git_commit: Some(commit.clone()),
+            git_dirty: Some(false),
+            display: format!("homeboy 0.1.0+{commit}"),
+        }
+    }
+
+    fn commit_git_repository(path: &Path) {
+        run_git(path, &["init", "-q"]);
+        run_git(path, &["add", "."]);
+        run_git(
+            path,
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-qm",
+                "initial",
+            ],
+        );
+    }
+
+    fn git_output(path: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {} failed", args.join(" "));
+        String::from_utf8(output.stdout)
+            .expect("git output")
+            .trim()
+            .to_string()
+    }
+
+    fn run_git(path: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

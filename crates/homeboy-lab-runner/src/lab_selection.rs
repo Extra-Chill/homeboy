@@ -84,7 +84,8 @@ pub enum PlacementReadinessInvocation {
         /// Controller pins are typed data, never caller-provided executable
         /// readiness probes. They let preflight report materialization drift.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        runtime_identity: Option<homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity>,
+        runtime_identity:
+            Box<Option<homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity>>,
     },
     CapabilityAudit {
         source_path: String,
@@ -333,7 +334,7 @@ pub fn placement_readiness(request: &PlacementReadinessRequest) -> Result<Placem
         let status = status(&request.runner_id)?;
         let command_prefix = crate::lab_command::lab_offload_command_prefix(
             source_path,
-            &super::remote_runner_homeboy_path(&runner, "placement readiness")?,
+            super::remote_runner_homeboy_path(&runner, "placement readiness")?,
         );
         Ok(PlacementReadinessObservation {
             capacity: runner.settings.concurrency_limit,
@@ -634,7 +635,7 @@ fn provider_admission_for_request(
                     backend: provider.clone(),
                     selector: selector.clone(),
                     model: model.clone(),
-                    runtime_identity: runtime_identity.clone(),
+                    runtime_identity: runtime_identity.as_ref().clone(),
                 },
                 catalog,
             )
@@ -645,7 +646,7 @@ fn provider_admission_for_request(
                     backend: provider.clone(),
                     selector: selector.clone(),
                     model: model.clone(),
-                    runtime_identity: runtime_identity.clone(),
+                    runtime_identity: runtime_identity.as_ref().clone(),
                 },
             )
         }
@@ -1915,7 +1916,7 @@ mod placement_readiness_tests {
                 durable_plan: None,
                 selector: selector.map(str::to_string),
                 model: Some("model".to_string()),
-                runtime_identity: None,
+                runtime_identity: Box::new(None),
             },
         }
     }
@@ -1993,10 +1994,10 @@ mod placement_readiness_tests {
             runtime_identity, ..
         } = &mut request.invocation
         {
-            *runtime_identity = Some(serde_json::from_value(serde_json::json!({
+            *runtime_identity = Box::new(Some(serde_json::from_value(serde_json::json!({
                 "runtime_id": "runtime-11", "provider_id": "provider-11", "source_selector": "catalog",
                 "source_revision": "abc", "freshness": "pinned", "provider": {}, "materialization_plan": {}
-            })).expect("runtime pin"));
+            })).expect("runtime pin")));
         }
         let readiness = placement_readiness_with_transport(&request, |_, _| {
             Ok(observed(vec![provider("provider-11")]))
@@ -2012,11 +2013,11 @@ mod placement_readiness_tests {
             runtime_identity, ..
         } = &mut request.invocation
         {
-            *runtime_identity = Some(serde_json::from_value(serde_json::json!({
+            *runtime_identity = Box::new(Some(serde_json::from_value(serde_json::json!({
                 "runtime_id": "runtime-11", "provider_id": "provider-11", "source_selector": "catalog",
                 "source_revision": "abc", "freshness": "pinned", "provider": {}, "materialization_plan": null
             }))
-            .expect("runtime pin"));
+            .expect("runtime pin")));
         }
         let readiness = placement_readiness_with_transport(&request, |_, _| {
             Ok(observed(vec![provider_with_runtime("provider-11", "abc")]))
@@ -2153,7 +2154,7 @@ mod placement_readiness_tests {
             durable_plan: None,
             selector: None,
             model: None,
-            runtime_identity: None,
+            runtime_identity: Box::new(None),
         };
         assert!(validate_placement_readiness_request(&request).is_err());
     }

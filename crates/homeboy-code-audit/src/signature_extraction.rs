@@ -64,7 +64,7 @@ pub fn extract_signatures_from_items(content: &str, language: &Language) -> Vec<
             Some(MethodSignature {
                 name,
                 signature,
-                language: language.clone(),
+                language: *language,
                 body,
             })
         })

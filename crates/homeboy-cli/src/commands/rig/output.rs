@@ -14,7 +14,7 @@ use homeboy::rig::{self, RigResourcesSpec, RigSpec};
 #[serde(tag = "variant", content = "payload", rename_all = "snake_case")]
 pub enum RigCommandOutput {
     List(RigListOutput),
-    Show(RigShowOutput),
+    Show(Box<RigShowOutput>),
     Materialize(RigMaterializeOutput),
     Up(RigUpOutput),
     UpPlan(RigUpPlanOutput),
@@ -29,7 +29,7 @@ pub enum RigCommandOutput {
     App(RigAppOutput),
     ArtifactRegister(RigArtifactRegisterOutput),
     ReleaseLock(RigReleaseLockOutput),
-    Run(RigRunOutput),
+    Run(Box<RigRunOutput>),
 }
 
 #[derive(Serialize)]
@@ -169,7 +169,7 @@ pub type RigSourcesOutput = CommandReport<RigSourcesReport>;
 #[serde(tag = "variant", content = "payload", rename_all = "snake_case")]
 pub enum RigSourcesReport {
     List(rig::RigSourceListResult),
-    Remove(rig::RigSourceRemoveResult),
+    Remove(Box<rig::RigSourceRemoveResult>),
     Refresh(rig::RigSourceUpdateResult),
 }
 

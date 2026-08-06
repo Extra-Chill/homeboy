@@ -285,7 +285,7 @@ mod tests {
             poller,
             "run-1",
             cfg,
-            |d| advance(d),
+            advance,
             || clock.get(),
             |_run, _poll| {},
         )

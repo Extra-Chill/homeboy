@@ -19,19 +19,14 @@ use serde_json::Value;
 use crate::status as tunnel_status;
 
 /// Execution mode for a preview consumer run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PreviewConsumerRunMode {
     /// Run the command to completion and record output after it exits.
+    #[default]
     Blocking,
     /// Start the command under supervision and return as soon as the preview is
     /// ready (or the readiness wait elapses), leaving the command running.
     NonBlocking,
-}
-
-impl Default for PreviewConsumerRunMode {
-    fn default() -> Self {
-        Self::Blocking
-    }
 }
 
 /// Lifecycle status reported by a preview consumer run.

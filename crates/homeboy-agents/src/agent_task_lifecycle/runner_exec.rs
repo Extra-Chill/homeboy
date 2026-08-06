@@ -46,13 +46,11 @@ pub fn accepted_lab_runner_job_identity(
 pub(crate) fn accepted_lab_runner_job_identity_from_record(
     record: &AgentTaskRunRecord,
 ) -> Option<homeboy_core::lab_contract::RunnerJobIdentity> {
-    let Some(handoff) = record.lab_handoff.as_ref().filter(|handoff| {
+    let handoff = record.lab_handoff.as_ref().filter(|handoff| {
         handoff.validation_error().is_none()
             && handoff.state == AgentTaskLabHandoffState::Accepted
             && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
-    }) else {
-        return None;
-    };
+    })?;
     let identity = homeboy_core::lab_contract::RunnerJobIdentity::new(
         &record.run_id,
         &handoff.runner_id,

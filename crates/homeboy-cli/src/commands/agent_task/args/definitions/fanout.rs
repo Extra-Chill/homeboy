@@ -15,7 +15,7 @@ pub enum AgentTaskFanoutCommand {
     /// Requires at least one deterministic gate: pass `--verify` or
     /// `--private-verify`. The gate is not optional — a child cook that cannot
     /// verify its work cannot promote it (#9838).
-    CookBatch(AgentTaskFanoutCookBatchArgs),
+    CookBatch(Box<AgentTaskFanoutCookBatchArgs>),
     /// Normalize and inspect a batch-cook plan without submitting or running it.
     Plan(AgentTaskFanoutPlanArgs),
     /// Submit a batch of independent cooks and print the exact per-cook commands

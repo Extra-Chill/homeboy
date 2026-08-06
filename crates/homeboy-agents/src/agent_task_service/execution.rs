@@ -874,11 +874,21 @@ fn prepare_plan_workspaces(plan: &mut AgentTaskPlan, run_id: Option<&str>) -> Re
 }
 
 fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
-    let secret_env_plan = SecretEnvPlan::from_secret_env_names(
+    let mut secret_env_plan = SecretEnvPlan::from_secret_env_names(
         plan.tasks
             .iter()
             .flat_map(|task| task.executor.secret_env.iter().cloned()),
     );
+    // Service secrets are execution-host requirements too. Validate them before
+    // any Lab handoff or local supervisor spawn, never after a listener/lease
+    // has been admitted.
+    for service in &plan.services {
+        if let Some(service_plan) = &service.secret_env_plan {
+            secret_env_plan.merge_from(service_plan.clone());
+        } else {
+            secret_env_plan.extend_secret_env_names(service.secret_env.clone());
+        }
+    }
 
     validate_secret_env_with_fallbacks(
         &secret_env_plan.secret_env_names(),

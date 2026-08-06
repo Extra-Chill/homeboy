@@ -118,7 +118,7 @@ const AUTOMATIC_RETENTION_OUT_OF_SCOPE: [(CleanupCategoryArg, &str); 4] = [
     ),
 ];
 
-pub fn run(args: CleanupArgs) -> CmdResult<Value> {
+pub fn run(args: CleanupArgs, placement: homeboy::cli_surface::Placement) -> CmdResult<Value> {
     match args.command {
         Some(CleanupCommand::Artifacts(args)) => cleanup::cleanup_resources_from_config(
             ResourceCleanupOptions {
@@ -189,7 +189,7 @@ pub fn run(args: CleanupArgs) -> CmdResult<Value> {
         Some(CleanupCommand::Resume(args)) => {
             cleanup_job_resume(&args.job_id).map(|output| (output, 0))
         }
-        None if args.apply => apply_cleanup(args).map(|output| (output, 0)),
+        None if args.apply => apply_cleanup(args, placement),
         None => cleanup_inventory(args).map(|result| (result.output, result.exit_code)),
     }
 }
@@ -352,7 +352,21 @@ fn cleanup_job_parse_error(error: serde_json::Error) -> homeboy::core::Error {
 /// database that is merely corrupt, still surfaces its own error — silently
 /// downgrading a durable `--apply` into a partial in-process sweep for an
 /// unrelated fault would be worse than failing.
-fn apply_cleanup(args: CleanupArgs) -> homeboy::core::Result<Value> {
+fn apply_cleanup(
+    args: CleanupArgs,
+    placement: homeboy::cli_surface::Placement,
+) -> CmdResult<Value> {
+    if placement.is_explicit_local_override() {
+        let mut result = cleanup_inventory(args)?;
+        result.output["execution"] = serde_json::json!({
+            "placement": "local",
+            "mode": "synchronous",
+            "durable": false,
+            "reason": "explicit operator --placement local",
+        });
+        return Ok((result.output, result.exit_code));
+    }
+
     // Captured before `args` is consumed. The subcommand is `None` on this
     // path, so these are the only fields the degraded sweep needs.
     let overrides = CleanupPolicyOverrides {
@@ -361,7 +375,7 @@ fn apply_cleanup(args: CleanupArgs) -> homeboy::core::Result<Value> {
         ..CleanupPolicyOverrides::default()
     };
     let error = match submit_cleanup(args) {
-        Ok(output) => return Ok(output),
+        Ok(output) => return Ok((output, 0)),
         Err(error) => error,
     };
 
@@ -380,12 +394,14 @@ fn apply_cleanup(args: CleanupArgs) -> homeboy::core::Result<Value> {
             error.message
         ),
     );
-    serde_json::to_value(outcome).map_err(|error| {
-        homeboy::core::Error::internal_json(
-            error.to_string(),
-            Some("serialize degraded cleanup output".to_string()),
-        )
-    })
+    serde_json::to_value(outcome)
+        .map(|output| (output, 0))
+        .map_err(|error| {
+            homeboy::core::Error::internal_json(
+                error.to_string(),
+                Some("serialize degraded cleanup output".to_string()),
+            )
+        })
 }
 
 fn submit_cleanup(args: CleanupArgs) -> homeboy::core::Result<Value> {
@@ -1306,6 +1322,9 @@ pub struct CleanupInventoryOutput {
     pub candidate_count: usize,
     pub applied_count: usize,
     pub skipped_count: usize,
+    /// Records that require a separate reconciliation authority before cleanup
+    /// can act on them. They are excluded from `candidate_count`.
+    pub reconciliation_blocker_count: usize,
     /// Categories that executed and removed at least one resource. Counted in
     /// categories, never in resources.
     pub applied_category_count: usize,
@@ -1337,6 +1356,7 @@ pub struct CleanupInventoryCategory {
     pub candidate_count: usize,
     pub applied_count: usize,
     pub skipped_count: usize,
+    pub reconciliation_blocker_count: usize,
     pub estimated_bytes: u64,
     pub reclaimed_bytes: u64,
     pub output: Value,
@@ -1729,11 +1749,13 @@ fn cleanup_inventory_with_deadline(
                 category_from_output(
                     WORKTREE_PROVIDERS_METADATA,
                     apply,
-                    0,
-                    0,
-                    output.failure_count,
-                    0,
-                    0,
+                    CleanupCategoryMetrics {
+                        candidate_count: 0,
+                        applied_count: 0,
+                        skipped_count: output.failure_count,
+                        estimated_bytes: 0,
+                        reclaimed_bytes: 0,
+                    },
                     output,
                 )
                 .map(|category| vec![category])
@@ -1763,11 +1785,13 @@ fn cleanup_inventory_with_deadline(
                 category_from_output(
                     TERMINAL_RUNS_METADATA,
                     apply,
-                    output.candidate_run_ids.len(),
-                    output.removed_run_count,
-                    output.skipped_run_ids.len(),
-                    lifecycle_bytes,
-                    if apply { lifecycle_bytes } else { 0 },
+                    CleanupCategoryMetrics {
+                        candidate_count: output.candidate_run_ids.len(),
+                        applied_count: output.removed_run_count,
+                        skipped_count: output.skipped_run_ids.len(),
+                        estimated_bytes: lifecycle_bytes,
+                        reclaimed_bytes: if apply { lifecycle_bytes } else { 0 },
+                    },
                     output,
                 )
                 .map(|category| vec![category])
@@ -1838,11 +1862,13 @@ fn cleanup_inventory_with_deadline(
                 category_from_output(
                     ORPHANED_ARTIFACT_BYTES_METADATA,
                     apply,
-                    output.planned_count,
-                    output.removed_count,
-                    output.skipped_count,
-                    output.planned_size_bytes,
-                    output.removed_size_bytes,
+                    CleanupCategoryMetrics {
+                        candidate_count: output.planned_count,
+                        applied_count: output.removed_count,
+                        skipped_count: output.skipped_count,
+                        estimated_bytes: output.planned_size_bytes,
+                        reclaimed_bytes: output.removed_size_bytes,
+                    },
                     output,
                 )
                 .map(|category| vec![category])
@@ -1885,11 +1911,13 @@ fn cleanup_inventory_with_deadline(
                 category_from_output(
                     RUNNER_DOWNLOADS_METADATA,
                     apply,
-                    output.planned_count,
-                    output.removed_count,
-                    output.skipped_count,
-                    output.planned_size_bytes,
-                    output.removed_size_bytes,
+                    CleanupCategoryMetrics {
+                        candidate_count: output.planned_count,
+                        applied_count: output.removed_count,
+                        skipped_count: output.skipped_count,
+                        estimated_bytes: output.planned_size_bytes,
+                        reclaimed_bytes: output.removed_size_bytes,
+                    },
                     output,
                 )
                 .map(|category| vec![category])
@@ -1957,11 +1985,13 @@ fn cleanup_inventory_with_deadline(
                 let mut category = category_from_output(
                     RUNTIME_TMP_METADATA,
                     apply,
-                    output.planned_count,
-                    output.removed_count,
-                    output.skipped_count,
-                    output.totals.planned_size_bytes,
-                    output.totals.removed_size_bytes,
+                    CleanupCategoryMetrics {
+                        candidate_count: output.planned_count,
+                        applied_count: output.removed_count,
+                        skipped_count: output.skipped_count,
+                        estimated_bytes: output.totals.planned_size_bytes,
+                        reclaimed_bytes: output.totals.removed_size_bytes,
+                    },
                     output,
                 )?;
                 if let Some((canonical, specialist)) = commands {
@@ -2000,11 +2030,13 @@ fn cleanup_inventory_with_deadline(
                 category_from_output(
                     LEAKED_TEST_HOMES_METADATA,
                     apply,
-                    output.planned_count,
-                    output.removed_count,
-                    output.skipped_count,
-                    output.planned_size_bytes,
-                    output.removed_size_bytes,
+                    CleanupCategoryMetrics {
+                        candidate_count: output.planned_count,
+                        applied_count: output.removed_count,
+                        skipped_count: output.skipped_count,
+                        estimated_bytes: output.planned_size_bytes,
+                        reclaimed_bytes: output.removed_size_bytes,
+                    },
                     output,
                 )
                 .map(|category| vec![category])
@@ -2039,11 +2071,13 @@ fn cleanup_inventory_with_deadline(
                 category_from_output(
                     CONTROLLER_SCRATCH_METADATA,
                     apply,
-                    output.candidate_count,
-                    output.applied_count,
-                    output.skipped_count,
-                    output.estimated_bytes,
-                    output.reclaimed_bytes,
+                    CleanupCategoryMetrics {
+                        candidate_count: output.candidate_count,
+                        applied_count: output.applied_count,
+                        skipped_count: output.skipped_count,
+                        estimated_bytes: output.estimated_bytes,
+                        reclaimed_bytes: output.reclaimed_bytes,
+                    },
                     output,
                 )
                 .map(|category| vec![category])
@@ -2077,15 +2111,17 @@ fn cleanup_inventory_with_deadline(
                 category_from_output(
                     CONTROLLER_RUNTIMES_METADATA,
                     apply,
-                    output
-                        .snapshots
-                        .iter()
-                        .filter(|snapshot| snapshot.eligible)
-                        .count(),
-                    output.removed_identities.len(),
-                    output.retained.len(),
-                    estimated_bytes,
-                    output.reclaimed_bytes,
+                    CleanupCategoryMetrics {
+                        candidate_count: output
+                            .snapshots
+                            .iter()
+                            .filter(|snapshot| snapshot.eligible)
+                            .count(),
+                        applied_count: output.removed_identities.len(),
+                        skipped_count: output.retained.len(),
+                        estimated_bytes,
+                        reclaimed_bytes: output.reclaimed_bytes,
+                    },
                     output,
                 )
                 .map(|category| vec![category])
@@ -2116,11 +2152,17 @@ fn cleanup_inventory_with_deadline(
                 category_from_output(
                     SHARED_CARGO_TARGETS_METADATA,
                     apply,
-                    output.candidate_count,
-                    output.applied_count,
-                    output.skipped_count,
-                    output.candidates.iter().map(|store| store.size_bytes).sum(),
-                    output.reclaimed_bytes,
+                    CleanupCategoryMetrics {
+                        candidate_count: output.candidate_count,
+                        applied_count: output.applied_count,
+                        skipped_count: output.skipped_count,
+                        estimated_bytes: output
+                            .candidates
+                            .iter()
+                            .map(|store| store.size_bytes)
+                            .sum(),
+                        reclaimed_bytes: output.reclaimed_bytes,
+                    },
                     output,
                 )
                 .map(|category| vec![category])
@@ -2139,6 +2181,10 @@ fn cleanup_inventory_with_deadline(
     let skipped_count = categories
         .iter()
         .map(|category| category.skipped_count)
+        .sum();
+    let reconciliation_blocker_count = categories
+        .iter()
+        .map(|category| category.reconciliation_blocker_count)
         .sum();
     let estimated_bytes = categories
         .iter()
@@ -2167,6 +2213,7 @@ fn cleanup_inventory_with_deadline(
         candidate_count,
         applied_count,
         skipped_count,
+        reconciliation_blocker_count,
         applied_category_count,
         estimated_bytes,
         reclaimed_bytes,
@@ -2328,6 +2375,7 @@ fn store_unavailable_category(
         candidate_count: 0,
         applied_count: 0,
         skipped_count: 1,
+        reconciliation_blocker_count: 0,
         estimated_bytes: 0,
         reclaimed_bytes: 0,
         output: serde_json::to_value(store).unwrap_or(Value::Null),
@@ -2368,6 +2416,7 @@ fn cleanup_category_failure(
         candidate_count: 0,
         applied_count: 0,
         skipped_count: 1,
+        reconciliation_blocker_count: 0,
         estimated_bytes: 0,
         reclaimed_bytes: 0,
         output: error.details,
@@ -2472,6 +2521,7 @@ fn repo_artifacts_category(apply: bool) -> homeboy::core::Result<CleanupInventor
         candidate_count: output.candidate_count,
         applied_count: output.applied_count,
         skipped_count: output.skipped_count + failure_count,
+        reconciliation_blocker_count: 0,
         estimated_bytes: output.estimated_bytes,
         reclaimed_bytes: output.reclaimed_bytes,
         output: serde_json::to_value(output.diagnostics).map_err(|error| {
@@ -2608,55 +2658,61 @@ fn applied_category_count(categories: &[CleanupInventoryCategory]) -> usize {
         .count()
 }
 
-fn category_from_output<T: Serialize>(
-    metadata: CleanupInventoryCategoryMetadata,
-    apply: bool,
+struct CleanupCategoryMetrics {
     candidate_count: usize,
     applied_count: usize,
     skipped_count: usize,
     estimated_bytes: u64,
     reclaimed_bytes: u64,
+}
+
+struct CleanupCategoryCommands {
+    category: &'static str,
+    canonical_cleanup_command: String,
+    specialist_command: String,
+}
+
+fn category_from_output<T: Serialize>(
+    metadata: CleanupInventoryCategoryMetadata,
+    apply: bool,
+    metrics: CleanupCategoryMetrics,
     output: T,
 ) -> homeboy::core::Result<CleanupInventoryCategory> {
     category_from_command(
-        metadata.category,
-        metadata.canonical_cleanup_command(apply),
-        metadata.specialist_command(apply).to_string(),
-        candidate_count,
-        applied_count,
-        skipped_count,
-        estimated_bytes,
-        reclaimed_bytes,
+        CleanupCategoryCommands {
+            category: metadata.category,
+            canonical_cleanup_command: metadata.canonical_cleanup_command(apply),
+            specialist_command: metadata.specialist_command(apply).to_string(),
+        },
+        metrics,
         output,
     )
 }
 
 fn category_from_command<T: Serialize>(
-    category: &'static str,
-    canonical_cleanup_command: String,
-    specialist_command: String,
-    candidate_count: usize,
-    applied_count: usize,
-    skipped_count: usize,
-    estimated_bytes: u64,
-    reclaimed_bytes: u64,
+    commands: CleanupCategoryCommands,
+    metrics: CleanupCategoryMetrics,
     output: T,
 ) -> homeboy::core::Result<CleanupInventoryCategory> {
     Ok(CleanupInventoryCategory {
-        category,
-        canonical_cleanup_command,
-        specialist_command,
+        category: commands.category,
+        canonical_cleanup_command: commands.canonical_cleanup_command,
+        specialist_command: commands.specialist_command,
         included: true,
         skipped: false,
         skip_reason: None,
         failure: None,
-        candidate_count,
-        applied_count,
-        skipped_count,
-        estimated_bytes,
-        reclaimed_bytes,
+        candidate_count: metrics.candidate_count,
+        applied_count: metrics.applied_count,
+        skipped_count: metrics.skipped_count,
+        reconciliation_blocker_count: 0,
+        estimated_bytes: metrics.estimated_bytes,
+        reclaimed_bytes: metrics.reclaimed_bytes,
         output: serde_json::to_value(output).map_err(|err| {
-            homeboy::core::Error::internal_json(err.to_string(), Some(category.to_string()))
+            homeboy::core::Error::internal_json(
+                err.to_string(),
+                Some(commands.category.to_string()),
+            )
         })?,
     })
 }
@@ -2665,16 +2721,21 @@ fn task_worktrees_category(
     output: WorktreeCleanupOutput,
     apply: bool,
 ) -> homeboy::core::Result<CleanupInventoryCategory> {
-    category_from_output(
+    let reconciliation_blocker_count = output.counts.reconciliation_blockers;
+    let mut category = category_from_output(
         TASK_WORKTREES_METADATA,
         apply,
-        output.counts.candidates,
-        output.counts.removed + output.counts.branches_deleted,
-        output.counts.skipped,
-        0,
-        0,
+        CleanupCategoryMetrics {
+            candidate_count: output.counts.candidates,
+            applied_count: output.counts.removed + output.counts.branches_deleted,
+            skipped_count: output.counts.skipped,
+            estimated_bytes: 0,
+            reclaimed_bytes: 0,
+        },
         output,
-    )
+    )?;
+    category.reconciliation_blocker_count = reconciliation_blocker_count;
+    Ok(category)
 }
 
 fn persisted_artifacts_category(
@@ -2705,6 +2766,7 @@ fn persisted_artifacts_category(
         candidate_count: persisted.planned_record_count + resource_cleanup_candidates,
         applied_count: persisted.removed_record_count,
         skipped_count: persisted.skipped_count,
+        reconciliation_blocker_count: 0,
         estimated_bytes: persisted.totals.planned_size_bytes,
         reclaimed_bytes: persisted.totals.removed_size_bytes,
         output,
@@ -2733,6 +2795,7 @@ fn remote_lab_workspace_categories(
                 candidate_count: 0,
                 applied_count: 0,
                 skipped_count: 1,
+                reconciliation_blocker_count: 0,
                 estimated_bytes: 0,
                 reclaimed_bytes: 0,
                 output: serde_json::json!({ "runner_id": status.runner_id, "connected": status.connected }),
@@ -2783,14 +2846,19 @@ fn remote_workspace_category(
 ) -> homeboy::core::Result<CleanupInventoryCategory> {
     let command = runner_workspace_specialist_command(&output.runner_id, apply);
     category_from_command(
-        "remote_lab_workspaces",
-        REMOTE_LAB_WORKSPACES_METADATA.canonical_cleanup_command(apply),
-        command,
-        output.total_candidate_count,
-        output.removed.len(),
-        output.skipped.len(),
-        output.total_candidate_bytes,
-        output.total_removed_bytes,
+        CleanupCategoryCommands {
+            category: "remote_lab_workspaces",
+            canonical_cleanup_command: REMOTE_LAB_WORKSPACES_METADATA
+                .canonical_cleanup_command(apply),
+            specialist_command: command,
+        },
+        CleanupCategoryMetrics {
+            candidate_count: output.total_candidate_count,
+            applied_count: output.removed.len(),
+            skipped_count: output.skipped.len(),
+            estimated_bytes: output.total_candidate_bytes,
+            reclaimed_bytes: output.total_removed_bytes,
+        },
         output,
     )
 }
@@ -2853,14 +2921,19 @@ fn runner_binary_cache_output_category(
     specialist_command: String,
 ) -> homeboy::core::Result<CleanupInventoryCategory> {
     category_from_command(
-        RUNNER_BINARY_CACHES_METADATA.category,
-        RUNNER_BINARY_CACHES_METADATA.canonical_cleanup_command(apply),
-        specialist_command,
-        output.eligible.len(),
-        output.removed.len(),
-        output.skipped.len(),
-        output.eligible_bytes,
-        output.removed_bytes,
+        CleanupCategoryCommands {
+            category: RUNNER_BINARY_CACHES_METADATA.category,
+            canonical_cleanup_command: RUNNER_BINARY_CACHES_METADATA
+                .canonical_cleanup_command(apply),
+            specialist_command,
+        },
+        CleanupCategoryMetrics {
+            candidate_count: output.eligible.len(),
+            applied_count: output.removed.len(),
+            skipped_count: output.skipped.len(),
+            estimated_bytes: output.eligible_bytes,
+            reclaimed_bytes: output.removed_bytes,
+        },
         output,
     )
 }
@@ -2880,6 +2953,15 @@ fn cleanup_actionable(
                 .with_kind(CommandNextActionKind::Repair),
             );
             continue;
+        }
+        if category.reconciliation_blocker_count > 0 {
+            actionable.next_actions.push(
+                CommandNextAction::new(
+                    format!("reconcile {}", category.category.replace('_', " ")),
+                    "homeboy worktree inventory --apply",
+                )
+                .with_kind(CommandNextActionKind::Repair),
+            );
         }
         if category.skipped || category.candidate_count == 0 {
             continue;
@@ -3212,14 +3294,18 @@ mod count_unit_tests {
 
     fn category(name: &'static str, candidates: usize, applied: usize) -> CleanupInventoryCategory {
         category_from_command(
-            name,
-            format!("homeboy cleanup --include {name} --apply"),
-            format!("homeboy {name} --apply"),
-            candidates,
-            applied,
-            0,
-            0,
-            0,
+            CleanupCategoryCommands {
+                category: name,
+                canonical_cleanup_command: format!("homeboy cleanup --include {name} --apply"),
+                specialist_command: format!("homeboy {name} --apply"),
+            },
+            CleanupCategoryMetrics {
+                candidate_count: candidates,
+                applied_count: applied,
+                skipped_count: 0,
+                estimated_bytes: 0,
+                reclaimed_bytes: 0,
+            },
             serde_json::json!({}),
         )
         .expect("category fixture")
@@ -4009,11 +4095,13 @@ mod tests {
                 category_from_output(
                     CONTROLLER_SCRATCH_METADATA,
                     true,
-                    1,
-                    1,
-                    0,
-                    128,
-                    128,
+                    CleanupCategoryMetrics {
+                        candidate_count: 1,
+                        applied_count: 1,
+                        skipped_count: 0,
+                        estimated_bytes: 128,
+                        reclaimed_bytes: 128,
+                    },
                     serde_json::json!({ "reclaimed": "scratch" }),
                 )
                 .map(|category| vec![category])
@@ -4030,11 +4118,13 @@ mod tests {
                 category_from_output(
                     CONTROLLER_RUNTIMES_METADATA,
                     true,
-                    1,
-                    1,
-                    0,
-                    256,
-                    256,
+                    CleanupCategoryMetrics {
+                        candidate_count: 1,
+                        applied_count: 1,
+                        skipped_count: 0,
+                        estimated_bytes: 256,
+                        reclaimed_bytes: 256,
+                    },
                     serde_json::json!({ "reclaimed": "runtimes" }),
                 )
                 .map(|category| vec![category])
@@ -4075,29 +4165,32 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_runtime_tmp_failure_returns_partial_json_and_continues() {
+    fn local_aggregate_failure_isolated_across_categories() {
         homeboy::test_support::with_isolated_home(|root| {
             let blocked_root = root.path().join("runtime-tmp-file");
             std::fs::write(&blocked_root, "not a directory").expect("runtime temp fixture");
             let previous = std::env::var_os("HOMEBOY_RUNTIME_TMPDIR");
             std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", &blocked_root);
 
-            let result = run(CleanupArgs {
-                apply: true,
-                include: vec![
-                    CleanupCategoryArg::RuntimeTmp,
-                    CleanupCategoryArg::ControllerScratch,
-                    CleanupCategoryArg::ControllerRuntimes,
-                ],
-                exclude: Vec::new(),
-                include_untagged: false,
-                older_than_days: None,
-                runtime_tmp_managed_older_than_days: Some(3),
-                limit: Some(10),
-                full: false,
-                cursor: None,
-                command: None,
-            });
+            let result = run(
+                CleanupArgs {
+                    apply: true,
+                    include: vec![
+                        CleanupCategoryArg::RuntimeTmp,
+                        CleanupCategoryArg::ControllerScratch,
+                        CleanupCategoryArg::ControllerRuntimes,
+                    ],
+                    exclude: Vec::new(),
+                    include_untagged: false,
+                    older_than_days: None,
+                    runtime_tmp_managed_older_than_days: Some(3),
+                    limit: Some(10),
+                    full: false,
+                    cursor: None,
+                    command: None,
+                },
+                homeboy::cli_surface::Placement::Local,
+            );
 
             match previous {
                 Some(value) => std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", value),
@@ -4107,6 +4200,9 @@ mod tests {
             let (output, exit_code) = result.expect("aggregate result");
             assert_eq!(exit_code, 1);
             assert_eq!(output["status"], "partial_failure");
+            assert_eq!(output["execution"]["placement"], "local");
+            assert_eq!(output["execution"]["mode"], "synchronous");
+            assert_eq!(output["execution"]["durable"], false);
             assert_eq!(output["failed_category_count"], 1);
             let categories = output["categories"].as_array().expect("categories");
             assert_eq!(categories.len(), 3);
@@ -4538,6 +4634,7 @@ mod tests {
                 candidate_count: 1,
                 applied_count: 0,
                 skipped_count: 0,
+                reconciliation_blocker_count: 0,
                 estimated_bytes: 0,
                 reclaimed_bytes: 0,
                 output: Value::Null,
@@ -4546,6 +4643,63 @@ mod tests {
             let actionable = cleanup_actionable(&[category], apply);
             assert_eq!(actionable.next_actions[0].command, command);
         }
+    }
+
+    #[test]
+    fn task_worktree_cleanup_separates_mixed_and_blocked_only_actions() {
+        let mixed = task_worktrees_category(
+            WorktreeCleanupOutput {
+                dry_run: true,
+                counts: worktree::WorktreeCleanupCounts {
+                    candidates: 1,
+                    skipped: 1,
+                    reconciliation_blockers: 1,
+                    ..Default::default()
+                },
+                candidates: Vec::new(),
+                removed: Vec::new(),
+                skipped: Vec::new(),
+            },
+            false,
+        )
+        .expect("mixed category");
+        assert_eq!(mixed.candidate_count, 1);
+        assert_eq!(mixed.reconciliation_blocker_count, 1);
+        assert_eq!(mixed.skipped_count, 1);
+        let mixed_actions = cleanup_actionable(&[mixed], false);
+        assert_eq!(
+            mixed_actions.next_actions[0].command,
+            "homeboy worktree inventory --apply"
+        );
+        assert_eq!(
+            mixed_actions.next_actions[1].command,
+            "homeboy worktree cleanup --cleanup-branches --apply"
+        );
+
+        let blocked = task_worktrees_category(
+            WorktreeCleanupOutput {
+                dry_run: true,
+                counts: worktree::WorktreeCleanupCounts {
+                    skipped: 4,
+                    reconciliation_blockers: 4,
+                    ..Default::default()
+                },
+                candidates: Vec::new(),
+                removed: Vec::new(),
+                skipped: Vec::new(),
+            },
+            false,
+        )
+        .expect("blocked category");
+        assert_eq!(blocked.candidate_count, 0);
+        assert_eq!(blocked.reconciliation_blocker_count, 4);
+        assert_eq!(blocked.skipped_count, 4);
+        let blocked_actions = cleanup_actionable(&[blocked], false);
+        assert_eq!(blocked_actions.next_actions.len(), 1);
+        assert_eq!(
+            blocked_actions.next_actions[0].command,
+            "homeboy worktree inventory --apply"
+        );
     }
 
     #[test]

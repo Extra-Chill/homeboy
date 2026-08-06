@@ -1017,144 +1017,6 @@ pub fn terminal_artifact_projection_readiness(run_id: &str) -> Result<Option<Str
     ))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn artifact(id: &str, kind: &str, runner_id: Option<&str>) -> AgentTaskArtifact {
-        AgentTaskArtifact {
-            schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-            id: id.to_string(),
-            kind: kind.to_string(),
-            name: None,
-            label: None,
-            role: None,
-            semantic_key: None,
-            path: Some("/runner/patch.diff".to_string()),
-            url: None,
-            mime: None,
-            size_bytes: Some(1),
-            sha256: Some("a".repeat(64)),
-            metadata: runner_id.map_or_else(
-                || json!({}),
-                |runner_id| json!({ "source_provenance": { "runner_id": runner_id } }),
-            ),
-        }
-    }
-
-    #[test]
-    fn legacy_runner_provenance_uses_only_actionable_patch_artifacts() {
-        let mut aggregate = AgentTaskAggregate {
-            schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
-            plan_id: "plan".to_string(),
-            status: AgentTaskAggregateStatus::Succeeded,
-            totals: AgentTaskAggregateTotals::default(),
-            outcomes: Vec::new(),
-            events: Vec::new(),
-            artifact_lineage: Vec::new(),
-            child_runs: Vec::new(),
-            artifact_bindings: Vec::new(),
-            queue: AgentTaskQueueStatus::default(),
-        };
-        aggregate.outcomes.push(AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-            task_id: "task".to_string(),
-            status: AgentTaskOutcomeStatus::Succeeded,
-            summary: None,
-            failure_classification: None,
-            artifacts: vec![
-                artifact("patch", "patch", Some("runner-a")),
-                artifact("transcript", "transcript", None),
-                artifact("result", "result", None),
-                artifact("runtime-log", "runtime-log", None),
-            ],
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
-        });
-
-        assert_eq!(
-            runner_id_from_artifact_provenance(&aggregate).expect("consistent provenance"),
-            "runner-a"
-        );
-        aggregate.outcomes[0]
-            .artifacts
-            .push(artifact("second-patch", "patch", Some("runner-b")));
-        assert!(runner_id_from_artifact_provenance(&aggregate).is_err());
-    }
-
-    #[test]
-    fn artifact_runner_provenance_must_match_the_lifecycle_binding() {
-        let artifact = artifact("patch", "patch", Some("runner-a"));
-
-        validate_artifact_runner_binding(&artifact, "runner-a").expect("matching runner binding");
-        let error = validate_artifact_runner_binding(&artifact, "runner-b")
-            .expect_err("conflicting runner identity must fail closed");
-
-        assert!(error
-            .message
-            .contains("conflicts with lifecycle runner binding"));
-    }
-
-    #[test]
-    fn reusable_artifact_rejects_conflicting_persisted_logical_identity() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            let store = homeboy_core::observation::ObservationStore::open_initialized()
-                .expect("observation store");
-            let run = store
-                .start_run(
-                    homeboy_core::observation::NewRunRecord::builder("agent-task")
-                        .cwd_path(home.path())
-                        .build(),
-                )
-                .expect("run");
-            let path = home.path().join("patch.diff");
-            let bytes = b"patch";
-            std::fs::write(&path, bytes).expect("patch bytes");
-            let mut artifact = artifact("patch", "patch", None);
-            artifact.size_bytes = Some(bytes.len() as u64);
-            artifact.sha256 = Some(format!("{:x}", sha2::Sha256::digest(bytes)));
-            store
-                .record_artifact_with_id(
-                    &run.id,
-                    "patch",
-                    &path,
-                    "stable-patch",
-                    json!({
-                        "agent_task": {
-                            "task_id": "other-task",
-                            "logical_artifact_id": "patch",
-                        }
-                    }),
-                )
-                .expect("imported artifact");
-
-            let error = reusable_terminal_artifact(
-                &store,
-                &run.id,
-                "task",
-                &artifact,
-                "stable-patch",
-                &json!({
-                    "agent_task": {
-                        "task_id": "task",
-                        "logical_artifact_id": "patch",
-                    }
-                }),
-            )
-            .expect_err("conflicting logical identity must fail closed");
-
-            assert!(error
-                .message
-                .contains("conflicts with terminal artifact projection"));
-        });
-    }
-}
-
 /// Project finalized executor artifacts into the standard observation registry.
 /// The lifecycle aggregate remains the source of task semantics; the registry
 /// supplies the canonical retrievable-byte index used by `runs artifact get`.
@@ -1295,7 +1157,7 @@ pub(crate) fn project_terminal_artifacts(
                     None => {
                         let remote_ref = homeboy_core::execution_contract::EXECUTION_CONTRACT
                             .artifacts
-                            .runner_artifact_ref(runner_id, &record.run_id, &logical_id);
+                            .runner_artifact_ref(runner_id, &record.run_id, logical_id);
                         let mirror_result = if requires_durable_lab_projection(artifact) {
                             (|| -> Result<()> {
                                 let mirror = tempfile::NamedTempFile::new().map_err(|error| {
@@ -1800,5 +1662,143 @@ fn persist_provider_handle_models(
             .as_object_mut()
             .expect("provider handle metadata object")
             .insert("model".to_string(), json!(model));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn artifact(id: &str, kind: &str, runner_id: Option<&str>) -> AgentTaskArtifact {
+        AgentTaskArtifact {
+            schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: id.to_string(),
+            kind: kind.to_string(),
+            name: None,
+            label: None,
+            role: None,
+            semantic_key: None,
+            path: Some("/runner/patch.diff".to_string()),
+            url: None,
+            mime: None,
+            size_bytes: Some(1),
+            sha256: Some("a".repeat(64)),
+            metadata: runner_id.map_or_else(
+                || json!({}),
+                |runner_id| json!({ "source_provenance": { "runner_id": runner_id } }),
+            ),
+        }
+    }
+
+    #[test]
+    fn legacy_runner_provenance_uses_only_actionable_patch_artifacts() {
+        let mut aggregate = AgentTaskAggregate {
+            schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: "plan".to_string(),
+            status: AgentTaskAggregateStatus::Succeeded,
+            totals: AgentTaskAggregateTotals::default(),
+            outcomes: Vec::new(),
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: AgentTaskQueueStatus::default(),
+        };
+        aggregate.outcomes.push(AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: "task".to_string(),
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: None,
+            failure_classification: None,
+            artifacts: vec![
+                artifact("patch", "patch", Some("runner-a")),
+                artifact("transcript", "transcript", None),
+                artifact("result", "result", None),
+                artifact("runtime-log", "runtime-log", None),
+            ],
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        });
+
+        assert_eq!(
+            runner_id_from_artifact_provenance(&aggregate).expect("consistent provenance"),
+            "runner-a"
+        );
+        aggregate.outcomes[0]
+            .artifacts
+            .push(artifact("second-patch", "patch", Some("runner-b")));
+        assert!(runner_id_from_artifact_provenance(&aggregate).is_err());
+    }
+
+    #[test]
+    fn artifact_runner_provenance_must_match_the_lifecycle_binding() {
+        let artifact = artifact("patch", "patch", Some("runner-a"));
+
+        validate_artifact_runner_binding(&artifact, "runner-a").expect("matching runner binding");
+        let error = validate_artifact_runner_binding(&artifact, "runner-b")
+            .expect_err("conflicting runner identity must fail closed");
+
+        assert!(error
+            .message
+            .contains("conflicts with lifecycle runner binding"));
+    }
+
+    #[test]
+    fn reusable_artifact_rejects_conflicting_persisted_logical_identity() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let store = homeboy_core::observation::ObservationStore::open_initialized()
+                .expect("observation store");
+            let run = store
+                .start_run(
+                    homeboy_core::observation::NewRunRecord::builder("agent-task")
+                        .cwd_path(home.path())
+                        .build(),
+                )
+                .expect("run");
+            let path = home.path().join("patch.diff");
+            let bytes = b"patch";
+            std::fs::write(&path, bytes).expect("patch bytes");
+            let mut artifact = artifact("patch", "patch", None);
+            artifact.size_bytes = Some(bytes.len() as u64);
+            artifact.sha256 = Some(format!("{:x}", sha2::Sha256::digest(bytes)));
+            store
+                .record_artifact_with_id(
+                    &run.id,
+                    "patch",
+                    &path,
+                    "stable-patch",
+                    json!({
+                        "agent_task": {
+                            "task_id": "other-task",
+                            "logical_artifact_id": "patch",
+                        }
+                    }),
+                )
+                .expect("imported artifact");
+
+            let error = reusable_terminal_artifact(
+                &store,
+                &run.id,
+                "task",
+                &artifact,
+                "stable-patch",
+                &json!({
+                    "agent_task": {
+                        "task_id": "task",
+                        "logical_artifact_id": "patch",
+                    }
+                }),
+            )
+            .expect_err("conflicting logical identity must fail closed");
+
+            assert!(error
+                .message
+                .contains("conflicts with terminal artifact projection"));
+        });
     }
 }

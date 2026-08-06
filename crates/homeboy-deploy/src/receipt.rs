@@ -77,16 +77,28 @@ pub(super) fn load(
     Ok(Some(receipt))
 }
 
-pub(super) fn write(
-    project: &Project,
-    component_id: &str,
-    target: &str,
-    version: &str,
-    manifest: Manifest,
-    payload_sha256: String,
-    build_provenance: BuildProvenance,
-    exclusions: Vec<String>,
-) -> Result<(), Error> {
+pub(super) struct ReceiptWrite<'a> {
+    pub(super) project: &'a Project,
+    pub(super) component_id: &'a str,
+    pub(super) target: &'a str,
+    pub(super) version: &'a str,
+    pub(super) manifest: Manifest,
+    pub(super) payload_sha256: String,
+    pub(super) build_provenance: BuildProvenance,
+    pub(super) exclusions: Vec<String>,
+}
+
+pub(super) fn write(input: ReceiptWrite<'_>) -> Result<(), Error> {
+    let ReceiptWrite {
+        project,
+        component_id,
+        target,
+        version,
+        manifest,
+        payload_sha256,
+        build_provenance,
+        exclusions,
+    } = input;
     let path = path(project, component_id, target, version)?;
     let parent = path.parent().expect("receipt path has a parent");
     fs::create_dir_all(parent)

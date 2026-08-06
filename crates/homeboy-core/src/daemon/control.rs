@@ -138,6 +138,7 @@ fn supervise_child(mut child: std::process::Child) -> Result<()> {
         resource_evidence: "unavailable: launcher does not collect OS resource snapshots".to_string(),
         os_evidence: "unavailable: no OS evidence collected; exit status and signal are launcher observations only".to_string(),
         exit_code, signal,
+        supervisor_signal: None,
         stdout, stderr, stop_requested,
     };
     super::write_termination_evidence(&evidence)
@@ -775,6 +776,28 @@ where
     }
 }
 
+struct MissingLeaseStateRecoveryRequest {
+    lease_id: String,
+    recorded_pid: u32,
+    recorded_endpoint: SocketAddr,
+}
+
+struct MissingLeaseStateRecoveryOperations<
+    Status,
+    PidIsRunning,
+    ProbeEndpoint,
+    AcquireOwner,
+    Reconcile,
+    Start,
+> {
+    status: Status,
+    pid_is_running: PidIsRunning,
+    probe_endpoint: ProbeEndpoint,
+    acquire_owner: AcquireOwner,
+    reconcile: Reconcile,
+    start: Start,
+}
+
 fn recover_missing_lease_state_with_operations<
     Status,
     PidIsRunning,
@@ -784,15 +807,15 @@ fn recover_missing_lease_state_with_operations<
     Reconcile,
     Start,
 >(
-    lease_id: &str,
-    recorded_pid: u32,
-    recorded_endpoint: SocketAddr,
-    status: Status,
-    pid_is_running: PidIsRunning,
-    probe_endpoint: ProbeEndpoint,
-    acquire_owner: AcquireOwner,
-    reconcile: Reconcile,
-    start: Start,
+    request: MissingLeaseStateRecoveryRequest,
+    operations: MissingLeaseStateRecoveryOperations<
+        Status,
+        PidIsRunning,
+        ProbeEndpoint,
+        AcquireOwner,
+        Reconcile,
+        Start,
+    >,
 ) -> Result<super::DaemonStateLossRecoveryResult>
 where
     Status: FnOnce() -> Result<super::DaemonStatus>,
@@ -802,6 +825,19 @@ where
     Reconcile: FnOnce() -> Result<(PathBuf, crate::api_jobs::DaemonLeaseJobDiagnostics)>,
     Start: FnOnce() -> Result<super::DaemonStartResult>,
 {
+    let MissingLeaseStateRecoveryRequest {
+        lease_id,
+        recorded_pid,
+        recorded_endpoint,
+    } = request;
+    let MissingLeaseStateRecoveryOperations {
+        status,
+        pid_is_running,
+        probe_endpoint,
+        acquire_owner,
+        reconcile,
+        start,
+    } = operations;
     let status = status()?;
     if status.state.is_some()
         || status.freshness.stale_reason_code != Some(DaemonStaleReasonCode::LeaseMissing)
@@ -841,7 +877,7 @@ where
                 reconciled.protected_count(),
                 reconciled.protected_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
             ),
-            Some(lease_id.to_string()),
+            Some(lease_id.clone()),
             Some(vec!["Wait for the recorded child process to finish, then retry recovery.".to_string()]),
         ));
     }
@@ -849,7 +885,7 @@ where
         return Err(Error::validation_invalid_argument(
             "lease_id",
             format!("no active durable jobs belong to exact lease `{lease_id}`"),
-            Some(lease_id.to_string()),
+            Some(lease_id.clone()),
             None,
         ));
     }
@@ -1286,18 +1322,36 @@ pub fn reconcile_dead_lease_orphans(
     let _lock = acquire_daemon_operation_lock()?;
     reconcile_dead_lease_orphans_with_operations(
         lease_id,
-        job_ids,
-        read_status,
-        pid_is_running,
-        try_acquire_daemon_owner_lock,
-        || prove_no_daemon_owner(addr),
-        |pid| {
-            let store =
-                super::JobStore::open_without_reconciliation(crate::paths::daemon_jobs_file()?)?;
-            store.reconcile_exact_daemon_loss_jobs(lease_id, job_ids, pid)
+        DeadLeaseOrphanRecoveryOperations {
+            status: read_status,
+            pid_is_running,
+            acquire_owner: try_acquire_daemon_owner_lock,
+            prove_no_owner: || prove_no_daemon_owner(addr),
+            reconcile: |pid| {
+                let store = super::JobStore::open_without_reconciliation(
+                    crate::paths::daemon_jobs_file()?,
+                )?;
+                store.reconcile_exact_daemon_loss_jobs(lease_id, job_ids, pid)
+            },
+            start: || start_or_return_live_unlocked(addr),
         },
-        || start_or_return_live_unlocked(addr),
     )
+}
+
+struct DeadLeaseOrphanRecoveryOperations<
+    Status,
+    PidIsRunning,
+    AcquireOwner,
+    ProveNoOwner,
+    Reconcile,
+    Start,
+> {
+    status: Status,
+    pid_is_running: PidIsRunning,
+    acquire_owner: AcquireOwner,
+    prove_no_owner: ProveNoOwner,
+    reconcile: Reconcile,
+    start: Start,
 }
 
 fn reconcile_dead_lease_orphans_with_operations<
@@ -1310,13 +1364,14 @@ fn reconcile_dead_lease_orphans_with_operations<
     Start,
 >(
     lease_id: &str,
-    _job_ids: &[uuid::Uuid],
-    status: Status,
-    pid_is_running: PidIsRunning,
-    acquire_owner: AcquireOwner,
-    prove_no_owner: ProveNoOwner,
-    reconcile: Reconcile,
-    start: Start,
+    operations: DeadLeaseOrphanRecoveryOperations<
+        Status,
+        PidIsRunning,
+        AcquireOwner,
+        ProveNoOwner,
+        Reconcile,
+        Start,
+    >,
 ) -> Result<DaemonExactOrphanRecoveryResult>
 where
     Status: FnOnce() -> Result<super::DaemonStatus>,
@@ -1326,6 +1381,14 @@ where
     Reconcile: FnOnce(u32) -> Result<crate::api_jobs::DaemonLeaseJobDiagnostics>,
     Start: FnOnce() -> Result<super::DaemonStartResult>,
 {
+    let DeadLeaseOrphanRecoveryOperations {
+        status,
+        pid_is_running,
+        acquire_owner,
+        prove_no_owner,
+        reconcile,
+        start,
+    } = operations;
     let status = status()?;
     let state = status.state.ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -2570,6 +2633,7 @@ mod termination_tests {
             os_evidence: "unavailable: fixture has no OS evidence".to_string(),
             exit_code: Some(23),
             signal: None,
+            supervisor_signal: None,
             stdout: None,
             stderr: Some("panic: fixture".to_string()),
             stop_requested: false,

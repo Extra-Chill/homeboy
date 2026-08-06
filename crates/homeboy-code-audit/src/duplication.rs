@@ -607,6 +607,7 @@ pub(crate) fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<F
 /// signature; enforced again here so the detector is robust to fingerprints
 /// produced by an older engine.
 const SKELETON_MIN_TOKENS: usize = 4;
+type SkeletonDuplicateGroups<'a> = HashMap<&'a str, Vec<(&'a str, &'a str, Option<&'a str>)>>;
 
 /// Maximum locations a skeleton group may span before it is treated as an
 /// idiomatic shape rather than a reimplemented primitive. A backbone shared by
@@ -695,7 +696,7 @@ pub(crate) fn detect_skeleton_duplicates(fingerprints: &[&FileFingerprint]) -> V
         .collect();
 
     // skeleton_hash -> [(file, name, structural_hash)]
-    let mut by_skeleton: HashMap<&str, Vec<(&str, &str, Option<&str>)>> = HashMap::new();
+    let mut by_skeleton: SkeletonDuplicateGroups = HashMap::new();
     for fp in fingerprints {
         for (name, raw) in &fp.skeleton_hashes {
             let Some((token_count, hash)) = parse_skeleton_value(raw) else {

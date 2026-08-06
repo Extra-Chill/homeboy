@@ -42,6 +42,13 @@ const ROOT_ONLY_DETECTOR_IDS: &[&str] = &[
     "thin_command_adapter",
 ];
 
+pub(super) struct AuditExecution<'a> {
+    pub plan: &'a AuditExecutionPlan,
+    pub reference_paths: &'a [String],
+    pub extension_overrides: &'a [String],
+    pub dead_code_references: Option<DeadCodeReferenceAnalysis>,
+}
+
 /// Internal audit implementation supporting optional file scoping and impact tracing.
 ///
 /// `reference_paths` are external codebases whose fingerprints are included in
@@ -52,11 +59,14 @@ pub(super) fn audit_internal(
     source_path: &str,
     file_filter: Option<&[String]>,
     git_ref: Option<&str>,
-    reference_paths: &[String],
-    plan: &AuditExecutionPlan,
-    extension_overrides: &[String],
-    dead_code_references: Option<DeadCodeReferenceAnalysis>,
+    execution: AuditExecution<'_>,
 ) -> Result<AuditWithAnalysis> {
+    let AuditExecution {
+        plan,
+        reference_paths,
+        extension_overrides,
+        dead_code_references,
+    } = execution;
     let root = Path::new(source_path);
     let audit_config = audit_config_for(component_id, root, extension_overrides);
     let mut timing = AuditTiming::default();
@@ -340,8 +350,7 @@ pub(super) fn audit_internal(
                 .collect()
         });
     let policy_scan_fingerprints: &[&fingerprint::FileFingerprint] = scoped_policy_fingerprints
-        .as_ref()
-        .map(|subset| subset.as_slice())
+        .as_deref()
         .unwrap_or(policy_fingerprints.as_slice());
 
     let dead_code_references = dead_code_references.or_else(|| {

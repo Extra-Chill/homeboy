@@ -354,6 +354,8 @@ pub fn resolve_anchor(content: &str, anchor: &InsertAnchor, language: &Language)
     }
 }
 
+type DeferredTransform = Box<dyn Fn(&str) -> Option<String>>;
+
 /// Apply edit operations to a content string (no I/O).
 ///
 /// This is the testable core. All 5 `EditOp` variants are handled:
@@ -375,7 +377,7 @@ pub fn apply_edit_ops_to_content(
     let mut insert_ops: Vec<(usize, &str)> = Vec::new(); // (resolved_line, code)
     let mut reexport_removals: Vec<&str> = Vec::new();
     // Deferred whole-content transformations (namespace replace, type conformance)
-    let mut deferred_transforms: Vec<Box<dyn Fn(&str) -> Option<String>>> = Vec::new();
+    let mut deferred_transforms: Vec<DeferredTransform> = Vec::new();
 
     for op in ops {
         match op {
@@ -410,7 +412,7 @@ pub fn apply_edit_ops_to_content(
                     InsertAnchor::FileTop => {
                         // For PHP namespace declarations, replace-if-exists
                         let code_clone = code.clone();
-                        let lang = language.clone();
+                        let lang = *language;
                         deferred_transforms.push(Box::new(move |c: &str| {
                             try_replace_namespace(c, &code_clone, &lang)
                         }));
@@ -418,7 +420,7 @@ pub fn apply_edit_ops_to_content(
                     InsertAnchor::TypeDeclaration => {
                         // For PHP/TS, inline type conformance modification
                         let code_clone = code.clone();
-                        let lang = language.clone();
+                        let lang = *language;
                         deferred_transforms.push(Box::new(move |c: &str| {
                             try_inline_type_conformance(c, &code_clone, &lang)
                         }));
@@ -468,7 +470,7 @@ pub fn apply_edit_ops_to_content(
     }
 
     // 3. Apply RemoveLines — sort bottom-to-top to avoid drift
-    remove_ops.sort_by(|a, b| b.0.cmp(&a.0));
+    remove_ops.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     for (start, end) in &remove_ops {
         let start_idx = start.saturating_sub(1);
         let end_idx = (*end).min(lines.len());
@@ -499,7 +501,7 @@ pub fn apply_edit_ops_to_content(
     }
 
     // 4. Apply InsertLines — sort bottom-to-top to avoid drift
-    insert_ops.sort_by(|a, b| b.0.cmp(&a.0));
+    insert_ops.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     for (target_line, code) in &insert_ops {
         let idx = target_line.saturating_sub(1).min(lines.len());
         // Split the code into individual lines and insert them

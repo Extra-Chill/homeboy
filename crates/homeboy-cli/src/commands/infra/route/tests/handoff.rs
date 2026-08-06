@@ -1219,3 +1219,159 @@ fn rewrite_ad_hoc_lab_workspace_skips_registered_component_or_path() {
     )
     .is_none());
 }
+
+/// The run id from #11599's reproduction. A controller-local Cook whose reads
+/// all failed with `agent-task run record not found` because they were answered
+/// by a runner that never owned the record.
+const OWNER_LOCAL_RUN_ID: &str = "agent-task-a7fdaeff-8fb8-4ab2-b7da-d985f4228dcd";
+
+/// The condition under which the regression fired: a connected default Lab
+/// runner that readiness happily selects for anything holding a Lab contract.
+fn connected_default_lab_runner() -> Option<String> {
+    Some("homeboy-lab".to_string())
+}
+
+fn route_runner_for(args: &[&str], inferred: &Option<String>) -> Option<String> {
+    let cli = Cli::try_parse_from(args).expect("generated command parses");
+    let lab_command = lab_offload_command(&cli.command)
+        .expect("lab route contract resolves")
+        .expect("agent-task commands carry a Lab contract");
+    generic_route_runner_id(&cli, Some(&lab_command), inferred).map(str::to_string)
+}
+
+#[test]
+fn controller_local_lifecycle_reads_never_acquire_a_default_lab_runner() {
+    // These are read-only introspection commands over a durable record this
+    // controller owns. Relocating them does not just cost a round trip — it
+    // asks a machine that has never seen the record to answer for it, which is
+    // exactly the `agent-task run record not found` in #11599.
+    let inferred = connected_default_lab_runner();
+    for args in [
+        ["homeboy", "agent-task", "providers"].as_slice(),
+        ["homeboy", "agent-task", "status", OWNER_LOCAL_RUN_ID].as_slice(),
+        [
+            "homeboy",
+            "agent-task",
+            "status",
+            OWNER_LOCAL_RUN_ID,
+            "--full",
+        ]
+        .as_slice(),
+        ["homeboy", "agent-task", "logs", OWNER_LOCAL_RUN_ID].as_slice(),
+        ["homeboy", "agent-task", "diagnose", OWNER_LOCAL_RUN_ID].as_slice(),
+        ["homeboy", "agent-task", "evidence", OWNER_LOCAL_RUN_ID].as_slice(),
+    ] {
+        assert_eq!(
+            route_runner_for(args, &inferred),
+            None,
+            "{args:?} must resolve against the owner of its durable record",
+        );
+    }
+}
+
+#[test]
+fn every_generated_next_action_command_round_trips_to_the_record_owner() {
+    // A generated next action that walks the operator back into the failure it
+    // was printed to resolve is worse than no guidance at all (#11599). Each of
+    // these strings is emitted verbatim by a diagnosis/status projection.
+    let inferred = connected_default_lab_runner();
+    for generated in [
+        format!("homeboy agent-task status {OWNER_LOCAL_RUN_ID} --full"),
+        format!("homeboy agent-task logs {OWNER_LOCAL_RUN_ID}"),
+        format!("homeboy agent-task diagnose {OWNER_LOCAL_RUN_ID}"),
+        format!("homeboy agent-task diagnose {OWNER_LOCAL_RUN_ID} --full"),
+        format!("homeboy agent-task evidence {OWNER_LOCAL_RUN_ID}"),
+    ] {
+        let args: Vec<&str> = generated.split_whitespace().collect();
+        assert_eq!(
+            route_runner_for(&args, &inferred),
+            None,
+            "`{generated}` must resolve against the controller that owns the record",
+        );
+    }
+}
+
+#[test]
+fn explicit_local_placement_keeps_a_retry_controller_owned() {
+    // `--placement local` at creation is an ownership statement for the whole
+    // lifecycle. Acquiring a Lab runner here is what staged a retry handoff for
+    // a controller-local Cook and left its successor unable to decode a
+    // canonical placement decision (#11600).
+    assert_eq!(
+        route_runner_for(
+            &[
+                "homeboy",
+                "--placement",
+                "local",
+                "agent-task",
+                "retry",
+                OWNER_LOCAL_RUN_ID,
+                "--run",
+            ],
+            &connected_default_lab_runner(),
+        ),
+        None,
+    );
+}
+
+#[test]
+fn an_explicit_runner_still_reaches_the_runner_for_provider_discovery() {
+    // Pinning is its own authority: a runner catalog read is exactly what
+    // `--runner` is for, and #9651/#9763 kept that probe available.
+    assert_eq!(
+        route_runner_for(
+            &[
+                "homeboy",
+                "--runner",
+                "homeboy-lab",
+                "agent-task",
+                "providers",
+            ],
+            &connected_default_lab_runner(),
+        ),
+        Some("homeboy-lab".to_string()),
+    );
+}
+
+#[test]
+fn explicit_lab_placement_still_reaches_the_default_runner() {
+    assert_eq!(
+        route_runner_for(
+            &["homeboy", "--placement", "lab", "agent-task", "providers",],
+            &connected_default_lab_runner(),
+        ),
+        Some("homeboy-lab".to_string()),
+    );
+}
+
+#[test]
+fn genuine_lab_workloads_still_offload_automatically() {
+    // The fix must not turn off automatic offload for the commands whose
+    // contracts actually declare it.
+    let inferred = connected_default_lab_runner();
+    for args in [
+        ["homeboy", "agent-task", "run-plan", "--plan", "-"].as_slice(),
+        [
+            "homeboy",
+            "agent-task",
+            "retry",
+            OWNER_LOCAL_RUN_ID,
+            "--run",
+        ]
+        .as_slice(),
+    ] {
+        assert_eq!(
+            route_runner_for(args, &inferred),
+            Some("homeboy-lab".to_string()),
+            "{args:?} declares automatic Lab offload and must keep it",
+        );
+    }
+}
+
+#[test]
+fn no_connected_runner_yields_no_route_runner_regardless_of_contract() {
+    assert_eq!(
+        route_runner_for(&["homeboy", "agent-task", "run-plan", "--plan", "-"], &None),
+        None,
+    );
+}

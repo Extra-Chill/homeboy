@@ -716,6 +716,38 @@ fn parent_snapshot_from_transport(raw: &str) -> Result<Value> {
     })
 }
 
+pub(crate) fn git_output(cwd: &std::path::Path, args: &[&str]) -> Result<String> {
+    git_output_with_env(cwd, args, &[])
+}
+
+pub(crate) fn git_output_with_env(
+    cwd: &std::path::Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .envs(env.iter().copied())
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("git {}", args.join(" "))))
+        })?;
+    if !output.status.success() {
+        return Err(Error::validation_invalid_argument(
+            "promotion",
+            format!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            None,
+            None,
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,44 +864,8 @@ mod tests {
             );
             assert_eq!(
                 promotion.status,
-                if accepted {
-                    crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
-                } else {
-                    crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
-                }
+                crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
             );
         }
     }
-}
-
-pub(crate) fn git_output(cwd: &std::path::Path, args: &[&str]) -> Result<String> {
-    git_output_with_env(cwd, args, &[])
-}
-
-pub(crate) fn git_output_with_env(
-    cwd: &std::path::Path,
-    args: &[&str],
-    env: &[(&str, &str)],
-) -> Result<String> {
-    let output = Command::new("git")
-        .args(args)
-        .envs(env.iter().copied())
-        .current_dir(cwd)
-        .output()
-        .map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("git {}", args.join(" "))))
-        })?;
-    if !output.status.success() {
-        return Err(Error::validation_invalid_argument(
-            "promotion",
-            format!(
-                "git {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-            None,
-            None,
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

@@ -160,8 +160,8 @@ pub fn run_extension_dev_run(
         runner_id,
         source,
         command,
-        |runner_id, options| crate::runners::sync_workspace(runner_id, options),
-        |runner_id, options| crate::runners::exec(runner_id, options),
+        crate::runners::sync_workspace,
+        crate::runners::exec,
     )
 }
 

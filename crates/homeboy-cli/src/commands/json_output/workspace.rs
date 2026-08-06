@@ -14,7 +14,7 @@ pub(super) fn dispatch(command: Commands) -> JsonRun {
         Commands::Component(args) => map(component::run(args)),
         Commands::Config(args) => map(config::run(args)),
         Commands::Extension(args) => map(extension::run(args)),
-        Commands::Cleanup(args) => map(cleanup::run(args)),
+        Commands::Cleanup(args) => map(cleanup::run(args, crate::cli_surface::Placement::Auto)),
         Commands::Release(args) => map(release::run(args)),
         Commands::Report(args) => map(report::run(args)),
         Commands::Refactor(args) => map(refactor::run(args)),

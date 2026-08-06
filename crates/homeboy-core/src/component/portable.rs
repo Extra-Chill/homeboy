@@ -289,7 +289,18 @@ pub fn try_discover_from_portable(dir: &Path) -> Result<Option<Component>> {
         }
     }
 
-    Ok(serde_json::from_value::<Component>(json).ok())
+    serde_json::from_value::<Component>(json)
+        .map(Some)
+        .map_err(|error| {
+            Error::validation_invalid_json(
+                error,
+                Some(format!(
+                    "parse component config at {}",
+                    dir.join("homeboy.json").display()
+                )),
+                None,
+            )
+        })
 }
 
 #[cfg(test)]

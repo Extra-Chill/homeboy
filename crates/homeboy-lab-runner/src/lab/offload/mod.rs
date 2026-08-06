@@ -124,6 +124,8 @@ use crate::runtime_materializer::{
 
 #[cfg(test)]
 pub(super) use inner::accepted_runner_job_id_with;
+#[cfg(test)]
+pub(super) use inner::detached_staging_submission_output;
 
 use super::super::workload::{
     build_lab_runner_workload_for_dispatched_command, lab_runner_workload_agent_task_from_command,
@@ -141,8 +143,8 @@ use super::fallback::{
 };
 use super::provider_preflight::preflight_agent_task_provider_on_runner;
 use super::secrets::{
-    build_lab_secret_env_handoff_plan, preflight_agent_task_runner_secret_env_plan,
-    preflight_lab_secret_env_handoff,
+    build_lab_secret_env_handoff_plan, merge_managed_service_secret_env,
+    preflight_agent_task_runner_secret_env_plan, preflight_lab_secret_env_handoff,
 };
 use super::trace_fetch_refs::lab_offload_git_fetch_refs;
 use super::workspace_plan::{lab_workspace_sync_mode, preflight_required_git_checkout_workspace};

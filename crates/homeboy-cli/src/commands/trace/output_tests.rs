@@ -9,7 +9,7 @@ use super::output::{
     render_compare_markdown, render_trace_aggregate_evidence_markdown,
     render_trace_compare_evidence_markdown, render_trace_run_evidence_markdown, run_compare,
     TraceAggregateIdentity, TraceAggregateInput, TraceAggregateMetricInput,
-    TraceAggregateSpanInput,
+    TraceAggregateSpanInput, TraceCompareRequest,
 };
 use super::*;
 
@@ -130,16 +130,16 @@ fn trace_compare_focus_spans_report_independent_regression_status() {
         guardrail_failure_count: 0,
     };
 
-    let compare = compare_trace_aggregates_with_focus(
-        Path::new("before.json"),
+    let compare = compare_trace_aggregates_with_focus(TraceCompareRequest {
+        before_path: Path::new("before.json"),
         before,
-        Path::new("after.json"),
+        after_path: Path::new("after.json"),
         after,
-        &["focused".to_string()],
-        20.0,
-        10,
-        &[],
-    );
+        focus_span_ids: &["focused".to_string()],
+        regression_threshold_percent: 20.0,
+        regression_min_delta_ms: 10,
+        metric_guardrail_specs: &[],
+    });
 
     assert_eq!(compare.span_count, 2);
     assert_eq!(compare.spans.len(), 2);
@@ -299,20 +299,20 @@ fn trace_compare_reports_scalar_metric_deltas_and_passing_guardrails() {
         guardrail_failure_count: 0,
     };
 
-    let compare = compare_trace_aggregates_with_focus(
-        Path::new("before.json"),
+    let compare = compare_trace_aggregates_with_focus(TraceCompareRequest {
+        before_path: Path::new("before.json"),
         before,
-        Path::new("after.json"),
+        after_path: Path::new("after.json"),
         after,
-        &[],
-        20.0,
-        10,
-        &[
+        focus_span_ids: &[],
+        regression_threshold_percent: 20.0,
+        regression_min_delta_ms: 10,
+        metric_guardrail_specs: &[
             super::output::parse_metric_guardrail("request_count:required").unwrap(),
             super::output::parse_metric_guardrail("request_count:equal").unwrap(),
             super::output::parse_metric_guardrail("request_count.max:lte").unwrap(),
         ],
-    );
+    });
 
     assert_eq!(compare.metrics.len(), 1);
     assert_eq!(compare.metrics[0].id, "request_count");
@@ -357,20 +357,20 @@ fn trace_compare_fails_scalar_metric_guardrails() {
         guardrail_failure_count: 0,
     };
 
-    let compare = compare_trace_aggregates_with_focus(
-        Path::new("before.json"),
+    let compare = compare_trace_aggregates_with_focus(TraceCompareRequest {
+        before_path: Path::new("before.json"),
         before,
-        Path::new("after.json"),
+        after_path: Path::new("after.json"),
         after,
-        &[],
-        20.0,
-        10,
-        &[
+        focus_span_ids: &[],
+        regression_threshold_percent: 20.0,
+        regression_min_delta_ms: 10,
+        metric_guardrail_specs: &[
             super::output::parse_metric_guardrail("page_errors:lte").unwrap(),
             super::output::parse_metric_guardrail("page_errors:delta:0.5").unwrap(),
             super::output::parse_metric_guardrail("missing_metric:required").unwrap(),
         ],
-    );
+    });
 
     assert_eq!(compare.metric_guardrail_status.as_deref(), Some("fail"));
     assert_eq!(compare.metric_guardrail_failure_count, 3);

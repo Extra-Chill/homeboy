@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use homeboy_core::materialization_currency::{self, Currency};
 use homeboy_core::source_snapshot::SourceSnapshot;
 use homeboy_core::{Error, Result};
-use homeboy_rig;
 
 use super::{
     dependency_cache_save_request, exec, load, materialize_git_dependency,
@@ -332,11 +331,11 @@ pub(super) fn sync_lab_offload_rigs(
                         .git_branch
                         .clone()
                         .or_else(|| metadata.source_ref.clone()),
-                    source_dirty: source_snapshot
-                        .git_sha
-                        .is_some()
-                        .then_some(source_snapshot.dirty)
-                        .unwrap_or(metadata.source_dirty),
+                    source_dirty: if source_snapshot.git_sha.is_some() {
+                        source_snapshot.dirty
+                    } else {
+                        metadata.source_dirty
+                    },
                     linked: metadata.linked,
                     materialized: metadata.materialized,
                     freshness_verified: false,

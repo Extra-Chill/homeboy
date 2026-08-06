@@ -743,23 +743,23 @@ fn apply_hoist_static_context(
         };
 
         // Rename all references within the function scope (skip the declaration line itself)
-        for i in start..end {
+        for (i, line) in new_lines.iter_mut().enumerate().take(end).skip(start) {
             if i == *match_line {
                 continue; // Already replaced
             }
-            if var_re.is_match(&new_lines[i]) {
-                let renamed = var_re.replace_all(&new_lines[i], new_var.as_str());
-                if renamed != new_lines[i] {
+            if var_re.is_match(line) {
+                let renamed = var_re.replace_all(line, new_var.as_str());
+                if renamed != *line {
                     record_match(
                         &mut replacement_count,
                         &mut matches,
                         detail_limit,
                         relative_path,
                         i + 1,
-                        &new_lines[i],
+                        line,
                         renamed.as_ref(),
                     );
-                    new_lines[i] = renamed.to_string();
+                    *line = renamed.to_string();
                 }
             }
         }
@@ -808,8 +808,8 @@ fn find_enclosing_fn_start(lines: &[String], from: usize) -> Option<usize> {
 fn find_enclosing_fn_end(lines: &[String], fn_line: usize) -> Option<usize> {
     let mut depth: i32 = 0;
     let mut found_open = false;
-    for i in fn_line..lines.len() {
-        for ch in lines[i].chars() {
+    for (i, line) in lines.iter().enumerate().skip(fn_line) {
+        for ch in line.chars() {
             if ch == '{' {
                 depth += 1;
                 found_open = true;

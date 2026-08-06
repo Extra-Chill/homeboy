@@ -65,10 +65,10 @@ impl ControllerChildGuard {
                 }
             }
             isolate_process_tree(command);
-            return Ok(Self {
+            Ok(Self {
                 controller_liveness_read_fd: fds[0],
                 controller_liveness_fd: fds[1],
-            });
+            })
         }
 
         #[cfg(not(unix))]
@@ -1155,7 +1155,7 @@ pub fn terminate_process_tree_and_reap(child: &mut Child) -> io::Result<ExitStat
                 ));
             }
         }
-        return status.map(Ok).unwrap_or_else(|| child.wait());
+        status.map(Ok).unwrap_or_else(|| child.wait())
     }
 
     #[cfg(not(unix))]

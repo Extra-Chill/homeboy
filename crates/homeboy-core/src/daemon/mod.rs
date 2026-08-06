@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::api_jobs::{
     ControllerJobState, DaemonActiveJobRecoveryEvidence, JobStatus, JobStore, LocalRunnerJob,
-    RunnerJobLifecycleMetadata,
+    LocalRunnerJobRequest, RunnerJobLifecycleMetadata,
 };
 use crate::build_identity;
 use crate::error::{Error, ExecutableAction, RemoteCommandFailedDetails, Result, TargetDetails};
@@ -37,6 +37,7 @@ pub mod recovery_actions;
 mod remote_runner;
 pub mod runner_exec_driver;
 mod runner_files;
+pub mod runner_staging;
 mod stop;
 pub(crate) use stop::stop_unlocked;
 use stop::{active_daemon_job_ids, active_jobs_block_daemon_stop_error, stop_with_force_for_lease};
@@ -467,6 +468,11 @@ pub struct DaemonTerminationEvidence {
     pub exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signal: Option<i32>,
+    /// Signal used to terminate the supervising process, if escalation needs
+    /// one. This is additive: older evidence deserializes without it and `None`
+    /// remains omitted from serialized evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_signal: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stdout: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1654,6 +1660,9 @@ where
         | ("POST", "/runner/workspace-owners/release") => {
             remote_runner::route(method, path, body, job_store, &broker_auth)
         }
+        ("POST", "/runner/staging") | ("POST", "/runner/staging/capabilities") => {
+            remote_runner::route(method, path, body, job_store, &broker_auth)
+        }
         ("GET", "/runner/sessions")
         | ("GET", "/runner/jobs")
         | ("GET", "/runner/jobs/reconcile")
@@ -1717,7 +1726,7 @@ fn reserve_admission(
     let workspace_owner_request = body
         .get("workspace_owner_request")
         .cloned()
-        .map(|value| serde_json::from_value::<WorkspaceOwnerRegisterRequest>(value))
+        .map(serde_json::from_value::<WorkspaceOwnerRegisterRequest>)
         .transpose()
         .map_err(|error| {
             Error::validation_invalid_argument(
@@ -2788,14 +2797,16 @@ fn enqueue_exec_job(
     let workspace_owner_renewal_store = (*job_store).clone();
     let runner = match job_store
         .try_run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
-            operation,
-            source_snapshot.clone(),
-            Some(run_ref_metadata),
-            path_materialization_plan.clone(),
-            local_runner,
-            lifecycle
-                .as_ref()
-                .and_then(|lifecycle| lifecycle.durable_run_id.clone()),
+            LocalRunnerJobRequest {
+                operation,
+                source_snapshot: source_snapshot.clone(),
+                metadata: Some(run_ref_metadata),
+                path_materialization_plan: path_materialization_plan.clone(),
+                local_runner: Some(local_runner),
+                admission_idempotency_key: lifecycle
+                    .as_ref()
+                    .and_then(|lifecycle| lifecycle.durable_run_id.clone()),
+            },
             capacity,
             move |job| {
                 let mut plan = plan;
@@ -2846,6 +2857,12 @@ fn enqueue_exec_job(
                 }))?;
                 plan.env
                     .insert("HOMEBOY_RUNNER_CHILD_RESERVATION".to_string(), reservation_id);
+                // Runner-local supervisors need the durable job identity to
+                // attach their child-service ledger to this daemon owner.
+                plan.env.insert(
+                    "HOMEBOY_RUNNER_JOB_ID".to_string(),
+                    job.job_id().to_string(),
+                );
                 let liveness = Arc::new(Mutex::new(ExecLiveness::new(Instant::now())));
                 let cancellation_requested = Arc::new(AtomicBool::new(false));
                 let _workspace_owner_renewer = workspace_owner_lease.clone().map(|lease| {
@@ -3126,7 +3143,7 @@ fn enqueue_controller_job(
         }
         crate::api_jobs::ControllerJobSubmissionOutcome::Existing(job) => {
             let compacted = job_store.get(job.id).is_err();
-            (job, compacted)
+            (*job, compacted)
         }
     };
     let job_id = job.id;
@@ -3567,7 +3584,8 @@ fn daemon_job_store() -> &'static JobStore {
 mod tests {
     use super::*;
     use crate::daemon::runner_exec_driver::{
-        self, DaemonExecOutput, PreparedDaemonExec, RunnerExecDriver, RunnerExecPrepareRequest,
+        self, DaemonExecOutput, PreparedDaemonExec, PreparedDaemonExecRequest, RunnerExecDriver,
+        RunnerExecPrepareRequest,
     };
 
     /// Round-trip the envelope through the exact functions that build it on the
@@ -4744,19 +4762,23 @@ mod tests {
     impl RunnerExecDriver for EnqueueTestDriver {
         fn prepare(&self, request: RunnerExecPrepareRequest) -> Result<PreparedDaemonExec> {
             let cwd = request.cwd.unwrap_or_else(|| "/tmp".to_string());
-            Ok(PreparedDaemonExec::new(
-                request.runner_id.clone(),
-                cwd.clone(),
-                request.command,
-                request.env,
-                request.secret_env_names,
-                crate::source_snapshot::existing_remote(&request.runner_id, &cwd, None),
-                request.require_paths,
-                Some(1),
-                crate::server::HeartbeatOnlyStallPolicy::default(),
-                serde_json::Value::Null,
-                Arc::new(()),
-            ))
+            Ok(PreparedDaemonExec::new(PreparedDaemonExecRequest {
+                runner_id: request.runner_id.clone(),
+                cwd: cwd.clone(),
+                command: request.command,
+                env: request.env,
+                secret_env_names: request.secret_env_names,
+                source_snapshot: crate::source_snapshot::existing_remote(
+                    &request.runner_id,
+                    &cwd,
+                    None,
+                ),
+                require_paths: request.require_paths,
+                concurrency_limit: Some(1),
+                heartbeat_only_stall: crate::server::HeartbeatOnlyStallPolicy::default(),
+                extension_env_provenance: serde_json::Value::Null,
+                plan_token: Arc::new(()),
+            }))
         }
 
         fn execute(
@@ -5288,6 +5310,7 @@ pub(super) fn acquire_daemon_operation_lock() -> Result<DaemonOperationLock> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&path)
         .map_err(|error| {
             Error::internal_io(error.to_string(), Some(format!("open {}", path.display())))
@@ -5319,6 +5342,7 @@ pub(super) fn try_acquire_daemon_owner_lock() -> Result<Option<DaemonOwnerLock>>
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(parent.join("owner.lock"))
         .map_err(|error| {
             Error::internal_io(
@@ -5610,6 +5634,16 @@ where
         let _ = stop_with_force_for_lease(&request.lease_id, request.force);
     }
     Ok(())
+}
+
+/// Test-support network entry point for the production reverse-broker routes.
+/// Authentication and route handling remain identical to a daemon connection.
+#[cfg(any(test, feature = "test-support"))]
+pub fn handle_reverse_broker_test_connection(
+    stream: TcpStream,
+    job_store: &JobStore,
+) -> std::io::Result<()> {
+    handle_connection(stream, job_store, UnsupportedAnalysisJobRunner, false)
 }
 
 fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {

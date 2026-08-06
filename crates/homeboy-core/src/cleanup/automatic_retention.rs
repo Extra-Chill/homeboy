@@ -94,6 +94,7 @@ fn run_automatic_cargo_retention_in(
         .map_err(|error| io_error(error, "create retention state directory"))?;
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(data.join(LOCK_FILE))
@@ -165,6 +166,7 @@ fn run_automatic_runtime_temp_retention_in(
         .map_err(|error| io_error(error, "create retention state directory"))?;
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(data.join(RUNTIME_TMP_LOCK_FILE))

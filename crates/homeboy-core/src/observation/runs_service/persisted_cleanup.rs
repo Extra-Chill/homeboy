@@ -183,8 +183,8 @@ pub fn remove_persisted_artifact_record_bytes(
 /// validated cleanup plan. This deliberately leaves its database record for a
 /// higher-level lifecycle transaction to remove with its owning run.
 pub fn remove_persisted_artifact_bytes(path: &Path, artifact_root: &Path) -> Result<()> {
-    if let Some(metadata) = symlink_metadata_if_exists(&path)? {
-        if metadata.file_type().is_symlink() || !path_is_within_root(&path, artifact_root) {
+    if let Some(metadata) = symlink_metadata_if_exists(path)? {
+        if metadata.file_type().is_symlink() || !path_is_within_root(path, artifact_root) {
             return Err(Error::validation_invalid_argument(
                 "path",
                 "artifact path failed cleanup safety revalidation",
@@ -193,9 +193,9 @@ pub fn remove_persisted_artifact_bytes(path: &Path, artifact_root: &Path) -> Res
             ));
         }
         if metadata.is_dir() {
-            fs::remove_dir_all(&path).map_err(|err| persisted_artifact_remove_error(&path, err))?;
+            fs::remove_dir_all(path).map_err(|err| persisted_artifact_remove_error(path, err))?;
         } else {
-            fs::remove_file(&path).map_err(|err| persisted_artifact_remove_error(&path, err))?;
+            fs::remove_file(path).map_err(|err| persisted_artifact_remove_error(path, err))?;
         }
     }
     Ok(())

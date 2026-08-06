@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum CandidateState {
     Finalized,
     Promoted,
@@ -13,13 +13,8 @@ pub(crate) enum CandidateState {
     Unreadable,
     Conflicting,
     RetainedOnly,
+    #[default]
     Unknown,
-}
-
-impl Default for CandidateState {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 impl CandidateState {
@@ -170,10 +165,12 @@ pub(crate) fn classify_candidates(payload: &Value) -> CandidateResult {
         by_identity.entry(identity).or_default().push(artifact);
     }
 
-    let mut counts = CandidateResult::default();
-    counts.attempts_omitted = attempts_omitted;
-    counts.outcomes_omitted = outcomes_omitted;
-    counts.artifacts_omitted = artifacts_omitted;
+    let mut counts = CandidateResult {
+        attempts_omitted,
+        outcomes_omitted,
+        artifacts_omitted,
+        ..Default::default()
+    };
     for artifacts in by_identity.into_values() {
         let artifact = artifacts[0];
         let size = artifact.get("size_bytes").and_then(Value::as_u64);
@@ -296,7 +293,6 @@ fn candidate_result_from_projection(value: &Value) -> Option<CandidateResult> {
         outcomes_omitted: omitted("outcomes_omitted"),
         artifacts_omitted: omitted("artifacts_omitted"),
         no_changes_produced: state == CandidateState::NoChangesProduced,
-        ..Default::default()
     })
 }
 

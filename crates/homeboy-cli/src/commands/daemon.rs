@@ -622,9 +622,8 @@ fn rendered_plan(plan: &daemon::recovery_actions::DaemonRecoveryPlan) -> String 
 fn legacy_child_recovery_migration_error() -> Error {
     Error::validation_invalid_argument(
         "recover_missing_child_identity",
-        format!(
-            "--recover-missing-child-identity is migration-only. Recover each job with exact persisted evidence instead"
-        ),
+        "--recover-missing-child-identity is migration-only. Recover each job with exact persisted evidence instead"
+            .to_string(),
         None,
         Some(vec![
             "Use `homeboy daemon recover-missing-child-identity --lease-id <expected-lease> --recorded-daemon-pid <recorded-daemon-pid> --recorded-daemon-endpoint <recorded-daemon-endpoint> --job-id <job-id> --child-pid <child-pid> --child-starttime-ticks <child-starttime-ticks>`.".to_string(),
@@ -691,7 +690,8 @@ impl AnalysisJobRunner for CommandAnalysisJobRunner {
             })?;
         let (cli, spec) = crate::cli_surface::Cli::from_registered_arg_matches(&matches)
             .expect("validated arguments should produce a typed CLI");
-        let (result, exit_code) = crate::commands::json_output::run(cli.command, spec);
+        let (result, exit_code) =
+            crate::commands::json_output::run(cli.command, spec, cli.placement);
         Ok(AnalysisJobRunOutput {
             exit_code,
             output: result?,
@@ -983,6 +983,21 @@ mod tests {
             Cli::try_parse_from(["homeboy", "daemon", "recover", "--yes", "--dry-run"]).is_err(),
             "a dry run and an execution are not the same request"
         );
+    }
+
+    #[test]
+    fn deferred_staging_follow_up_commands_are_registered_cli_commands() {
+        for args in [
+            ["homeboy", "agent-task", "status", "run-1"].as_slice(),
+            ["homeboy", "agent-task", "logs", "run-1"].as_slice(),
+            ["homeboy", "agent-task", "cancel", "run-1"].as_slice(),
+            ["homeboy", "agent-task", "evidence", "run-1", "--full"].as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(args).is_ok(),
+                "deferred staging emitted an invalid command: {args:?}"
+            );
+        }
     }
 
     /// Dry run is the default. Recovery mutates the daemon that owns the

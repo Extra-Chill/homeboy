@@ -55,7 +55,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
       - name: Compile all workspace test targets
         run: cargo check --workspace --tests --locked
 
@@ -66,7 +66,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
       - name: Build the shipped CLI without warnings
         run: RUSTFLAGS=-Dwarnings cargo build --locked -p homeboy --bin homeboy
       - name: Run a focused agent test without warnings
@@ -84,7 +84,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
       - name: Check all workspace crates for Windows
         run: cargo check --workspace --locked
 
@@ -101,7 +101,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt
       - name: Check workspace formatting
@@ -176,9 +176,9 @@ jobs:
       scope: auto
       differential-gating: 'false'
       baseline-commands: none
-      test-shards: '4'
-      execution-timeout-seconds: '3000'
-      test-timeout-seconds: '2700'
+      test-shards: '16'
+      execution-timeout-seconds: '1800'
+      test-timeout-seconds: '1500'
       comment-section-key: test
       comment-section-title: Test
     secrets: inherit

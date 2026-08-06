@@ -217,7 +217,7 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
             Ok(snapshot) => snapshot,
             Err(error) => {
                 worker.renew(&store)?;
-                record_evicted_evidence_loss(&store, &run, &error, &worker.token, job_id)?;
+                record_evicted_evidence_loss(&store, run, &error, &worker.token, job_id)?;
                 // A 404 is a durable per-job result. Other failures describe the
                 // endpoint, so avoid amplifying one unavailable daemon into N probes.
                 if error.details.get("http_status").and_then(Value::as_u64) != Some(404) {
@@ -252,11 +252,11 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
                 })
                 .unwrap_or_default()
         };
-        let output = recovered_output(&run, &snapshot, cwd);
+        let output = recovered_output(run, &snapshot, cwd);
         let mut artifacts = Vec::new();
         for declaration in strings("artifacts") {
             if homeboy_agents::agent_task_lifecycle::runner_exec_declaration_is_promoted(
-                &run,
+                run,
                 "artifact",
                 &declaration,
             ) {
@@ -279,7 +279,7 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
         let mut directories = Vec::new();
         for declaration in strings("artifact_dirs") {
             if homeboy_agents::agent_task_lifecycle::runner_exec_declaration_is_promoted(
-                &run,
+                run,
                 "artifact_dir",
                 &declaration,
             ) {
@@ -302,7 +302,7 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
         let mut summaries = Vec::new();
         for declaration in strings("summaries") {
             if homeboy_agents::agent_task_lifecycle::runner_exec_declaration_is_promoted(
-                &run,
+                run,
                 "summary",
                 &declaration,
             ) {
@@ -696,6 +696,7 @@ fn try_acquire_child_lock(child_id: &str) -> Result<Option<std::fs::File>> {
     let path = root.join(format!("{child_id}.lock"));
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&path)

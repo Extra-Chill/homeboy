@@ -38,9 +38,7 @@ const RESERVED_RUNNER_WORKSPACE_PATHS: &[&str] =
 /// runner-owned materialization artifact that must never contribute to a
 /// workspace content identity.
 fn is_reserved_runner_workspace_path(relative: &str) -> bool {
-    RESERVED_RUNNER_WORKSPACE_PATHS
-        .iter()
-        .any(|reserved| relative == *reserved)
+    RESERVED_RUNNER_WORKSPACE_PATHS.contains(&relative)
 }
 
 // The workspace-content *identity spec* (permission-policy names, the default
@@ -175,16 +173,14 @@ pub(crate) fn workspace_content_hash_for_policy(
     hasher.update(algorithm.as_bytes());
     hasher.update(b"\0");
     let root = content_hash_root(path)?;
-    collect_content_hash_entries_v2(
-        &root,
-        &root,
-        Path::new(""),
+    ContentHashTraversal {
+        root: &root,
         excludes,
-        &mut vec![root.clone()],
-        &mut hasher,
+        hasher: &mut hasher,
         executable_capability,
-        None,
-    )?;
+        manifest: None,
+    }
+    .collect(&root, Path::new(""), &mut vec![root.clone()])?;
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
@@ -215,16 +211,14 @@ pub(crate) fn workspace_content_manifest_for_policy(
     // Use the authoritative v2 traversal so diagnostics and the content hash
     // have identical symlink, exclusion, and metadata behavior.
     let mut hasher = Sha256::new();
-    collect_content_hash_entries_v2(
-        &root,
-        &root,
-        Path::new(""),
+    ContentHashTraversal {
+        root: &root,
         excludes,
-        &mut vec![root.clone()],
-        &mut hasher,
+        hasher: &mut hasher,
         executable_capability,
-        Some(&mut manifest),
-    )?;
+        manifest: Some(&mut manifest),
+    }
+    .collect(&root, Path::new(""), &mut vec![root.clone()])?;
     Ok(manifest)
 }
 
@@ -260,143 +254,145 @@ fn content_hash_root(path: &Path) -> Result<std::path::PathBuf> {
     })
 }
 
-fn collect_content_hash_entries_v2(
-    root: &Path,
-    path: &Path,
-    logical: &Path,
-    excludes: &[String],
-    ancestors: &mut Vec<std::path::PathBuf>,
-    hasher: &mut Sha256,
+struct ContentHashTraversal<'a> {
+    root: &'a Path,
+    excludes: &'a [String],
+    hasher: &'a mut Sha256,
     executable_capability: ExecutableCapability,
-    mut manifest: Option<&mut WorkspaceContentManifest>,
-) -> Result<()> {
-    let mut children = fs::read_dir(path)
-        .map_err(|err| {
-            Error::internal_io(err.to_string(), Some("read sync directory".to_string()))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("read sync directory entry".to_string()),
-            )
-        })?;
-    children.sort_by_key(|entry| entry.path());
-    for entry in children {
-        let entry_path = entry.path();
-        let relative_path = logical.join(entry.file_name());
-        let relative = relative_path.to_string_lossy().replace('\\', "/");
-        let is_runner_metadata_directory = relative == ".homeboy";
-        if relative == ".git"
-            || is_excluded(root, &root.join(&relative_path), excludes, &[])
-            || is_reserved_runner_workspace_path(&relative)
-        {
-            continue;
-        }
-        let link_metadata = fs::symlink_metadata(&entry_path).map_err(|err| {
-            Error::internal_io(err.to_string(), Some("read sync file metadata".to_string()))
-        })?;
-        // A symlink whose target resolves is dereferenced so its target content
-        // stays provenance-bound (target drift changes the hash). A symlink whose
-        // target is intentionally unavailable on the controller (e.g. a tracked
-        // `blogs.dir -> /nfs`) is a valid Git workspace shape: bind its target
-        // text deterministically instead of refusing the whole hash. (#8374)
-        let resolved = if link_metadata.file_type().is_symlink() {
-            match entry_path.canonicalize() {
-                Ok(resolved) => resolved,
-                Err(_) => {
-                    let target = fs::read_link(&entry_path).map_err(|err| {
-                        Error::internal_io(
-                            err.to_string(),
-                            Some("read sync symlink target".to_string()),
-                        )
-                    })?;
-                    let target = target.to_string_lossy().replace('\\', "/");
-                    hasher.update(relative.as_bytes());
-                    hasher.update(b"\0symlink\0");
-                    hasher.update((target.len() as u64).to_le_bytes());
-                    hasher.update(target.as_bytes());
+    manifest: Option<&'a mut WorkspaceContentManifest>,
+}
+
+impl ContentHashTraversal<'_> {
+    fn collect(
+        &mut self,
+        path: &Path,
+        logical: &Path,
+        ancestors: &mut Vec<std::path::PathBuf>,
+    ) -> Result<()> {
+        let mut children = fs::read_dir(path)
+            .map_err(|err| {
+                Error::internal_io(err.to_string(), Some("read sync directory".to_string()))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some("read sync directory entry".to_string()),
+                )
+            })?;
+        children.sort_by_key(|entry| entry.path());
+        for entry in children {
+            let entry_path = entry.path();
+            let relative_path = logical.join(entry.file_name());
+            let relative = relative_path.to_string_lossy().replace('\\', "/");
+            let is_runner_metadata_directory = relative == ".homeboy";
+            if relative == ".git"
+                || is_excluded(
+                    self.root,
+                    &self.root.join(&relative_path),
+                    self.excludes,
+                    &[],
+                )
+                || is_reserved_runner_workspace_path(&relative)
+            {
+                continue;
+            }
+            let link_metadata = fs::symlink_metadata(&entry_path).map_err(|err| {
+                Error::internal_io(err.to_string(), Some("read sync file metadata".to_string()))
+            })?;
+            // A symlink whose target resolves is dereferenced so its target content
+            // stays provenance-bound (target drift changes the hash). A symlink whose
+            // target is intentionally unavailable on the controller (e.g. a tracked
+            // `blogs.dir -> /nfs`) is a valid Git workspace shape: bind its target
+            // text deterministically instead of refusing the whole hash. (#8374)
+            let resolved = if link_metadata.file_type().is_symlink() {
+                match entry_path.canonicalize() {
+                    Ok(resolved) => resolved,
+                    Err(_) => {
+                        let target = fs::read_link(&entry_path).map_err(|err| {
+                            Error::internal_io(
+                                err.to_string(),
+                                Some("read sync symlink target".to_string()),
+                            )
+                        })?;
+                        let target = target.to_string_lossy().replace('\\', "/");
+                        self.hasher.update(relative.as_bytes());
+                        self.hasher.update(b"\0symlink\0");
+                        self.hasher.update((target.len() as u64).to_le_bytes());
+                        self.hasher.update(target.as_bytes());
+                        record_workspace_content_manifest_entry(
+                            &mut self.manifest,
+                            relative,
+                            "symlink",
+                            Some(format!(
+                                "sha256:{}",
+                                content_hash::sha256_hex(target.as_bytes())
+                            )),
+                            Some(target.len() as u64),
+                            None,
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                entry_path.clone()
+            };
+            let metadata = fs::metadata(&resolved).map_err(|err| {
+                Error::internal_io(err.to_string(), Some("read sync file metadata".to_string()))
+            })?;
+            if metadata.is_dir() {
+                let canonical = resolved
+                    .canonicalize()
+                    .map_err(|err| Error::internal_io(err.to_string(), None))?;
+                if ancestors.contains(&canonical) {
+                    return Err(Error::validation_invalid_argument(
+                        "workspace",
+                        "workspace content hash refused a symlink cycle",
+                        Some(entry_path.display().to_string()),
+                        None,
+                    ));
+                }
+                // The runner adds `.homeboy/runner-workspace.json` after transport.
+                // Recurse through the directory so user-owned children remain bound,
+                // but omit the transport-owned container entry and record itself.
+                if !is_runner_metadata_directory {
+                    self.hasher.update(relative.as_bytes());
+                    self.hasher.update(b"\0dir\0");
                     record_workspace_content_manifest_entry(
-                        &mut manifest,
-                        relative,
-                        "symlink",
-                        Some(format!(
-                            "sha256:{}",
-                            content_hash::sha256_hex(target.as_bytes())
-                        )),
-                        Some(target.len() as u64),
+                        &mut self.manifest,
+                        relative.clone(),
+                        "directory",
+                        None,
+                        None,
                         None,
                     );
-                    continue;
                 }
-            }
-        } else {
-            entry_path.clone()
-        };
-        let metadata = fs::metadata(&resolved).map_err(|err| {
-            Error::internal_io(err.to_string(), Some("read sync file metadata".to_string()))
-        })?;
-        if metadata.is_dir() {
-            let canonical = resolved
-                .canonicalize()
-                .map_err(|err| Error::internal_io(err.to_string(), None))?;
-            if ancestors.contains(&canonical) {
-                return Err(Error::validation_invalid_argument(
-                    "workspace",
-                    "workspace content hash refused a symlink cycle",
-                    Some(entry_path.display().to_string()),
-                    None,
-                ));
-            }
-            // The runner adds `.homeboy/runner-workspace.json` after transport.
-            // Recurse through the directory so user-owned children remain bound,
-            // but omit the transport-owned container entry and record itself.
-            if !is_runner_metadata_directory {
-                hasher.update(relative.as_bytes());
-                hasher.update(b"\0dir\0");
+                ancestors.push(canonical);
+                self.collect(&resolved, &relative_path, ancestors)?;
+                ancestors.pop();
+            } else if metadata.is_file() {
+                let contents = fs::read(&resolved).map_err(|err| {
+                    Error::internal_io(err.to_string(), Some("read sync file".to_string()))
+                })?;
+                self.hasher.update(relative.as_bytes());
+                self.hasher.update(b"\0file\0");
+                if let Some(executable) = self.executable_capability.value(&metadata) {
+                    self.hasher.update([executable as u8]);
+                }
+                self.hasher.update((contents.len() as u64).to_le_bytes());
+                self.hasher.update(&contents);
                 record_workspace_content_manifest_entry(
-                    &mut manifest,
-                    relative.clone(),
-                    "directory",
-                    None,
-                    None,
-                    None,
+                    &mut self.manifest,
+                    relative,
+                    "file",
+                    Some(format!("sha256:{}", content_hash::sha256_hex(&contents))),
+                    Some(contents.len() as u64),
+                    self.executable_capability.owner_value(&metadata),
                 );
             }
-            ancestors.push(canonical);
-            collect_content_hash_entries_v2(
-                root,
-                &resolved,
-                &relative_path,
-                excludes,
-                ancestors,
-                hasher,
-                executable_capability,
-                manifest.as_deref_mut(),
-            )?;
-            ancestors.pop();
-        } else if metadata.is_file() {
-            let contents = fs::read(&resolved).map_err(|err| {
-                Error::internal_io(err.to_string(), Some("read sync file".to_string()))
-            })?;
-            hasher.update(relative.as_bytes());
-            hasher.update(b"\0file\0");
-            if let Some(executable) = executable_capability.value(&metadata) {
-                hasher.update([executable as u8]);
-            }
-            hasher.update((contents.len() as u64).to_le_bytes());
-            hasher.update(&contents);
-            record_workspace_content_manifest_entry(
-                &mut manifest,
-                relative,
-                "file",
-                Some(format!("sha256:{}", content_hash::sha256_hex(&contents))),
-                Some(contents.len() as u64),
-                executable_capability.owner_value(&metadata),
-            );
         }
+        Ok(())
     }
-    Ok(())
 }
 
 fn record_workspace_content_manifest_entry(
@@ -850,7 +846,8 @@ pub(crate) fn snapshot_manifest_delta(
     let seed_entries = index(seed)?;
     let changed_paths = controller_entries
         .iter()
-        .filter_map(|(path, entry)| (seed_entries.get(path) != Some(entry)).then(|| path.clone()))
+        .filter(|(path, entry)| seed_entries.get(*path) != Some(*entry))
+        .map(|(path, _)| path.clone())
         .collect::<Vec<_>>();
     let replaced_paths = changed_paths
         .iter()
@@ -958,8 +955,8 @@ pub(crate) fn materialize_snapshot_incremental(
         materialize_snapshot(runner, local_path, remote_path, excludes)?;
         return Ok(SnapshotTransferStats {
             reused: ByteFileCounts::default(),
-            transferred: delta.transfer.final_size.clone(),
-            final_size: delta.transfer.final_size.clone(),
+            transferred: delta.transfer.final_size,
+            final_size: delta.transfer.final_size,
         });
     }
     let prepare = incremental_prepare_command(remote_path, &temporary, seed_path, delta);
@@ -967,8 +964,8 @@ pub(crate) fn materialize_snapshot_incremental(
         materialize_snapshot(runner, local_path, remote_path, excludes)?;
         return Ok(SnapshotTransferStats {
             reused: ByteFileCounts::default(),
-            transferred: delta.transfer.final_size.clone(),
-            final_size: delta.transfer.final_size.clone(),
+            transferred: delta.transfer.final_size,
+            final_size: delta.transfer.final_size,
         });
     }
     let finalize = incremental_finalize_command(remote_path, &temporary);
@@ -1374,7 +1371,7 @@ fn incremental_prepare_command(
         "{owner_capture} ; mkdir -p {parent} && rm -rf {temporary} && mkdir -p {temporary} && {seed} && {cleanup} {removals}",
         owner_capture = owner_capture_shell(&parent),
         parent = shell::quote_arg(&parent),
-        temporary = shell::quote_arg(&temporary),
+        temporary = shell::quote_arg(temporary),
         seed = seed_snapshot_command(seed_path, temporary),
         cleanup = cleanup,
         removals = if removals.is_empty() { String::new() } else { format!(" && {removals}") },

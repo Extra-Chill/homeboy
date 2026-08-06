@@ -40,7 +40,7 @@ pub(crate) fn project_cook_alias_adoption(
             adoption,
         );
         let replace = selected.as_ref().is_none_or(|current| {
-            candidate.0 > current.0
+            candidate.0 & !current.0
                 // Among equally active or inactive attempts, the newest
                 // adoption timestamp wins; index order breaks timestamp ties.
                 || (candidate.0 == current.0

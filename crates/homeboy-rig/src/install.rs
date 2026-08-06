@@ -334,7 +334,7 @@ pub(crate) fn write_rig_config_from_source(
 /// The conventional `rigs/<id>/rig.json` layout inherits templates from its
 /// package root. Other layouts are bounded by the rig directory.
 pub fn default_materialize_source_root(path: &Path) -> PathBuf {
-    if path.file_name().map_or(true, |name| name != "rig.json") {
+    if path.file_name().is_none_or(|name| name != "rig.json") {
         return path.parent().unwrap_or(path).to_path_buf();
     }
     let Some(rig_directory) = path.parent() else {

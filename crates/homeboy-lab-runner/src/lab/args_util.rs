@@ -53,10 +53,8 @@ impl ArgEditor {
         index: usize,
         values: impl IntoIterator<Item = String>,
     ) -> Self {
-        let mut insertion_index = index + 1;
-        for value in values {
+        for (insertion_index, value) in (index + 1..).zip(values) {
             self.args.insert(insertion_index, value);
-            insertion_index += 1;
         }
         self
     }

@@ -180,6 +180,10 @@ pub fn upgrade_runners_with_executor(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Compatibility entry point exposes separately injectable upgrade operations for focused tests."
+)]
 pub fn upgrade_runners_with_executor_and_source_materializer(
     runners: &[Runner],
     force: bool,
@@ -203,6 +207,10 @@ pub fn upgrade_runners_with_executor_and_source_materializer(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The internal operation keeps expected controller identity explicit through source materialization."
+)]
 fn upgrade_runners_with_executor_and_source_materializer_with_expected_controller_identity(
     runners: &[Runner],
     force: bool,
@@ -228,6 +236,10 @@ fn upgrade_runners_with_executor_and_source_materializer_with_expected_controlle
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Compatibility entry point preserves injectable execution, materialization, and path update operations."
+)]
 pub fn upgrade_runners_with_executor_source_materializer_and_path_updater(
     runners: &[Runner],
     force: bool,
@@ -253,6 +265,10 @@ pub fn upgrade_runners_with_executor_source_materializer_and_path_updater(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The internal upgrade operation retains explicit controller identity and path mutation boundaries."
+)]
 fn upgrade_runners_with_executor_source_materializer_and_path_updater_with_expected_controller_identity(
     runners: &[Runner],
     force: bool,
@@ -280,6 +296,10 @@ fn upgrade_runners_with_executor_source_materializer_and_path_updater_with_expec
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Compatibility entry point preserves independently injectable reconnect and path operations."
+)]
 pub fn upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector(
     runners: &[Runner],
     force: bool,
@@ -307,7 +327,10 @@ pub fn upgrade_runners_with_executor_source_materializer_path_updater_and_reconn
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The orchestration boundary keeps every mutating operation explicit for deterministic runner upgrade recovery."
+)]
 fn upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector_with_expected_controller_identity(
     runners: &[Runner],
     force: bool,
@@ -355,6 +378,10 @@ fn upgrade_runners_with_executor_source_materializer_path_updater_and_reconnecto
     (updated, skipped)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "A single runner upgrade retains explicit diagnostic inputs and operations to preserve callback order."
+)]
 pub fn upgrade_runner_with_executor(
     runner: &Runner,
     force: bool,

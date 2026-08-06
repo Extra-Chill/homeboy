@@ -240,6 +240,10 @@ fn resolved_provider_from_request(
     Ok(Some(provider))
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "caller must retain the original request and artifact path to record a durable failure"
+)]
 fn materialize_executor_request(
     request: AgentTaskRequest,
     context: &AgentTaskExecutionContext,
@@ -257,6 +261,10 @@ fn materialize_executor_request(
     materialize_executor_request_at_root(request, context, root)
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "caller must retain the original request and artifact path to record a durable failure"
+)]
 fn materialize_executor_request_at_root(
     request: AgentTaskRequest,
     context: &AgentTaskExecutionContext,
@@ -301,62 +309,6 @@ fn materialize_executor_request_at_root(
         resolved_runtime_tools: Vec::new(),
         artifacts_root_identity,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agent_task::{
-        AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
-    };
-
-    #[test]
-    fn materialization_fails_before_execution_when_runner_root_is_not_a_directory() {
-        let blocked_root = tempfile::NamedTempFile::new().expect("blocked artifact root");
-        let request = AgentTaskRequest {
-            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
-            task_id: "blocked-artifacts".to_string(),
-            group_key: None,
-            parent_plan_id: None,
-            executor: AgentTaskExecutor {
-                backend: "test".to_string(),
-                selector: None,
-                runtime_selection: None,
-                required_capabilities: Vec::new(),
-                secret_env: Vec::new(),
-                model: None,
-                config: Value::Null,
-            },
-            instructions: "run".to_string(),
-            inputs: Value::Null,
-            source_refs: Vec::new(),
-            workspace: AgentTaskWorkspace::default(),
-            component_contracts: Vec::new(),
-            policy: AgentTaskPolicy::default(),
-            limits: AgentTaskLimits::default(),
-            expected_artifacts: Vec::new(),
-            artifact_declarations: Vec::new(),
-            output_declarations: Vec::new(),
-            runtime_tools: Vec::new(),
-            metadata: Value::Null,
-        };
-        let context = AgentTaskExecutionContext {
-            plan_id: "blocked-plan".to_string(),
-            run_id: Some("blocked-run".to_string()),
-            attempt: 1,
-            cancellation: Default::default(),
-        };
-
-        let (_, path, error) = materialize_executor_request_at_root(
-            request,
-            &context,
-            blocked_root.path().to_path_buf(),
-        )
-        .expect_err("file root must fail");
-
-        assert!(path.starts_with(blocked_root.path()));
-        assert!(!error.to_string().is_empty());
-    }
 }
 
 fn ensure_writable_directory(path: &Path) -> std::io::Result<()> {
@@ -441,5 +393,61 @@ fn selector_mismatch_message(backend: &str, selector: Option<&str>) -> String {
     match selector_runtime_provider_hint(backend, selector) {
         Some(hint) => format!("{base}; {hint}"),
         None => base,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_task::{
+        AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
+    };
+
+    #[test]
+    fn materialization_fails_before_execution_when_runner_root_is_not_a_directory() {
+        let blocked_root = tempfile::NamedTempFile::new().expect("blocked artifact root");
+        let request = AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "blocked-artifacts".to_string(),
+            group_key: None,
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend: "test".to_string(),
+                selector: None,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: None,
+                config: Value::Null,
+            },
+            instructions: "run".to_string(),
+            inputs: Value::Null,
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace::default(),
+            component_contracts: Vec::new(),
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
+            metadata: Value::Null,
+        };
+        let context = AgentTaskExecutionContext {
+            plan_id: "blocked-plan".to_string(),
+            run_id: Some("blocked-run".to_string()),
+            attempt: 1,
+            cancellation: Default::default(),
+        };
+
+        let (_, path, error) = materialize_executor_request_at_root(
+            request,
+            &context,
+            blocked_root.path().to_path_buf(),
+        )
+        .expect_err("file root must fail");
+
+        assert!(path.starts_with(blocked_root.path()));
+        assert!(!error.to_string().is_empty());
     }
 }

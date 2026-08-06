@@ -211,7 +211,7 @@ struct ProviderChangedScopeResponse {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum BuildResult {
-    Single(BuildOutput),
+    Single(Box<BuildOutput>),
     Bulk(BulkResult<BuildOutput>),
 }
 
@@ -315,7 +315,7 @@ fn run_single_changed_since(
     changed_since: Option<&str>,
 ) -> Result<(BuildResult, i32)> {
     let (output, exit_code) = execute_build(component_id, None, changed_since)?;
-    Ok((BuildResult::Single(output), exit_code))
+    Ok((BuildResult::Single(Box::new(output)), exit_code))
 }
 
 /// Build a single component with an overridden local_path.
@@ -332,7 +332,7 @@ pub fn run_with_path_changed_since(
     changed_since: Option<&str>,
 ) -> Result<(BuildResult, i32)> {
     let (output, exit_code) = execute_build(component_id, Some(path), changed_since)?;
-    Ok((BuildResult::Single(output), exit_code))
+    Ok((BuildResult::Single(Box::new(output)), exit_code))
 }
 
 fn run_bulk_changed_since(
@@ -374,7 +374,7 @@ pub fn run_component_with_changed_since(
     changed_since: Option<&str>,
 ) -> Result<(BuildResult, i32)> {
     let (output, exit_code) = execute_build_component(component, changed_since)?;
-    Ok((BuildResult::Single(output), exit_code))
+    Ok((BuildResult::Single(Box::new(output)), exit_code))
 }
 
 /// Build multiple pre-resolved components.
@@ -517,13 +517,15 @@ fn execute_build_component(
     let runner_output = if let ResolvedBuildCommand::ComponentScript { .. } = &resolved {
         crate::component_script::run_component_scripts_with_run_dir_and_timeout(
             comp,
-            extension::ExtensionCapability::Build,
-            &validated_path,
-            &run_dir,
-            true,
-            &build_env(changed_since, changed_scope.as_ref()),
-            &[],
-            Some(build_timeout),
+            crate::component_script::ComponentScriptRunRequest {
+                capability: extension::ExtensionCapability::Build,
+                source_path: &validated_path,
+                run_dir: &run_dir,
+                passthrough: true,
+                extra_env: &build_env(changed_since, changed_scope.as_ref()),
+                script_args: &[],
+                timeout: Some(build_timeout),
+            },
         )?
         .into()
     } else if let Some(context) = build_context {
@@ -976,6 +978,27 @@ mod tests {
             "HOMEBOY_BUILD_SCOPE_OUTCOME".to_string(),
             "full".to_string()
         )));
+    }
+
+    #[test]
+    fn build_result_single_serializes_with_the_existing_output_shape() {
+        let result = BuildResult::Single(Box::new(BuildOutput {
+            command: "build.run".to_string(),
+            component_id: "example".to_string(),
+            build_command: "make build".to_string(),
+            active_env_keys: Vec::new(),
+            output: CapturedOutput::new(String::new(), String::new()),
+            artifact_inputs: Vec::new(),
+            extension_phase_timings: Vec::new(),
+            changed_scope: None,
+            success: true,
+        }));
+
+        let value = serde_json::to_value(result).expect("build result serializes");
+
+        assert_eq!(value["command"], "build.run");
+        assert_eq!(value["component_id"], "example");
+        assert!(value.get("Single").is_none());
     }
 }
 

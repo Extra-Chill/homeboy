@@ -2283,7 +2283,7 @@ fn failed_task_statuses(
                     | AgentTaskOutcomeStatus::UnableToRemediate
             )
         })
-        .map(|outcome| (outcome.task_id.clone(), outcome.status.clone()))
+        .map(|outcome| (outcome.task_id.clone(), outcome.status))
         .collect()
 }
 

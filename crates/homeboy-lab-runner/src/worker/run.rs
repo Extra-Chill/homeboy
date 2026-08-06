@@ -363,6 +363,11 @@ fn run_once_output(
     let _command_assets =
         materialize_command_assets(&claim.job.id.to_string(), &mut execution_envelope)?;
     let _private_at_files = verify_private_at_files(&mut execution_envelope)?;
+    materialize_staged_source_artifact(
+        &options.runner_id,
+        &claim.job.id.to_string(),
+        &mut execution_envelope,
+    )?;
     materialize_snapshot_git_baseline(&execution_envelope)?;
     // Shared finisher so the exec-error and exec-success paths submit their
     // terminal job result through identical broker plumbing (#5091).
@@ -411,6 +416,7 @@ fn run_once_output(
             capability_preflight,
             claimed_run_id,
             execution_context.clone(),
+            claim.job.id.to_string(),
         )?,
         || {
             let recovered =
@@ -993,6 +999,42 @@ fn reverse_worker_lab_offload(raw: &str) -> Result<serde_json::Value> {
     })
 }
 
+/// A staged job's source is runner-owned durable storage, not a controller path.
+/// Verify and extract it before the normal queue executor consumes the command.
+fn materialize_staged_source_artifact(
+    runner_id: &str,
+    job_id: &str,
+    envelope: &mut RunnerExecutionEnvelope,
+) -> Result<()> {
+    let Some(source) = envelope.metadata.get("staged_source_artifact") else {
+        return Ok(());
+    };
+    let source = serde_json::from_value(source.clone()).map_err(|error| {
+        Error::validation_invalid_argument(
+            "staged_source_artifact",
+            format!("invalid staged source artifact: {error}"),
+            None,
+            None,
+        )
+    })?;
+    let session_path = homeboy_core::paths::runner_session_file(runner_id)?;
+    let store_path = session_path.with_file_name(format!("{runner_id}-staging/store.json"));
+    let workspace_root = session_path
+        .with_file_name(format!("{runner_id}-staging/workloads"))
+        .join(job_id);
+    let workspace = crate::runner_staging_store::extract_staged_source_artifact(
+        store_path,
+        &source,
+        &workspace_root,
+    )?;
+    let dispatch = envelope
+        .dispatch
+        .as_mut()
+        .ok_or_else(|| Error::internal_unexpected("staged runner job has no execution dispatch"))?;
+    dispatch.cwd = Some(workspace.display().to_string());
+    Ok(())
+}
+
 /// Materialize broker-owned command files in the worker's durable data root and
 /// rewrite their argv entries before execution. The request body survives broker
 /// restart; controller temporary files are never consulted after claim.
@@ -1149,6 +1191,7 @@ fn runner_exec_options_from_envelope(
     capability_preflight: Option<crate::RunnerCapabilityPreflight>,
     run_id: Option<String>,
     execution_context: homeboy_core::runner_job_execution_context::RunnerJobExecutionContext,
+    runner_job_id: String,
 ) -> Result<RunnerExecOptions> {
     let dispatch = envelope.dispatch.ok_or_else(|| {
         Error::internal_unexpected("runner execution envelope is missing dispatch payload")
@@ -1161,6 +1204,11 @@ fn runner_exec_options_from_envelope(
         .map(|workload| workload.required_extensions.clone())
         .unwrap_or_default();
 
+    let mut env = dispatch.env;
+    // Match the direct daemon child contract: nested agent-task services use
+    // this exact broker job identity as their runner-local supervisor owner.
+    env.insert("HOMEBOY_RUNNER_JOB_ID".to_string(), runner_job_id);
+
     Ok(RunnerExecOptions {
         execution_context,
         cwd: dispatch.cwd,
@@ -1168,7 +1216,7 @@ fn runner_exec_options_from_envelope(
         allow_diagnostic_ssh: false,
         diagnostic_ssh_timeout: None,
         command: dispatch.command,
-        env: dispatch.env,
+        env,
         secret_env_names,
         secret_env_plan: Some(secret_env_plan),
         env_materialization: envelope.env_materialization,

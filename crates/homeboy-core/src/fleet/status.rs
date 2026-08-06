@@ -151,7 +151,7 @@ pub fn collect_status(
             if let Some(cached_health) = server_health_cache.get(server_id) {
                 cached_health.clone()
             } else {
-                let h = health::collect_project_health(&proj);
+                let h = health::collect_project_health(proj);
                 server_health_cache.insert(server_id.clone(), h.clone());
                 h
             }
@@ -204,7 +204,7 @@ pub fn collect_status(
 
         // Collect component status: version drift + release state
         let component_statuses =
-            collect_project_component_statuses(project_id, &proj, &mut summary.components);
+            collect_project_component_statuses(project_id, proj, &mut summary.components);
 
         project_statuses.push(FleetProjectStatus {
             project_id: project_id.clone(),
@@ -247,8 +247,8 @@ fn collect_cached_status(
         summary.projects.healthy += 1; // Can't know health without SSH
 
         let mut component_statuses = Vec::new();
-        for component_id in project::project_component_ids(&proj) {
-            let local_version = match project::resolve_project_component(&proj, &component_id) {
+        for component_id in project::project_component_ids(proj) {
+            let local_version = match project::resolve_project_component(proj, &component_id) {
                 Ok(comp) => release_provider::get_component_version(&comp),
                 Err(_) => None,
             };

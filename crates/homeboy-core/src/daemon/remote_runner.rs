@@ -153,6 +153,14 @@ pub(in crate::daemon) fn route(
     auth: &BrokerAuthContext,
 ) -> HttpResponse {
     match (method, path) {
+        ("POST", "/runner/staging/capabilities") => match staging_capabilities(body, auth) {
+            Ok(body) => daemon_endpoint_response("runner.staging.capabilities", body),
+            Err(err) => auth_or_bad_request(err),
+        },
+        ("POST", "/runner/staging") => match stage(body, job_store, auth) {
+            Ok(body) => daemon_endpoint_response("runner.staging.submit", body),
+            Err(err) => auth_or_bad_request(err),
+        },
         ("GET", "/runner/workspace-claims/capabilities") => {
             match workspace_claim_capabilities(auth) {
                 Ok(body) => daemon_endpoint_response("runner.workspace_claims.capabilities", body),
@@ -229,6 +237,51 @@ pub(in crate::daemon) fn route(
             ),
         ),
     }
+}
+
+fn staging_runner_id(body: &Option<Value>) -> Result<String> {
+    body.as_ref()
+        .and_then(|body| body.pointer("/envelope/handoff/runner_id"))
+        .and_then(Value::as_str)
+        .filter(|runner_id| !runner_id.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "runner_id",
+                "sealed staging request requires envelope.handoff.runner_id",
+                None,
+                None,
+            )
+        })
+}
+
+fn staging_capabilities(body: Option<Value>, auth: &BrokerAuthContext) -> Result<Value> {
+    let runner_id = body
+        .as_ref()
+        .and_then(|body| body.get("runner_id"))
+        .and_then(Value::as_str)
+        .filter(|runner_id| !runner_id.trim().is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "runner_id",
+                "sealed staging capability lookup requires runner_id",
+                None,
+                None,
+            )
+        })?;
+    auth.authorize(BrokerScope::Submit, Some(runner_id))?;
+    Ok(json!({
+        "runner_id": runner_id,
+        "capabilities": crate::daemon::runner_staging::with_provider(|provider| provider.capabilities(runner_id))?,
+    }))
+}
+
+fn stage(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) -> Result<Value> {
+    let runner_id = staging_runner_id(&body)?;
+    auth.authorize(BrokerScope::Submit, Some(&runner_id))?;
+    crate::daemon::runner_staging::with_provider(|provider| {
+        provider.stage(body.unwrap_or(Value::Null), job_store)
+    })
 }
 
 fn lookup(path: &str, job_store: &JobStore, auth: &BrokerAuthContext) -> HttpResponse {
@@ -622,9 +675,11 @@ fn claim(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) ->
         request.project_id.as_deref(),
         request.lease_ms.unwrap_or(30_000),
         concurrency_limit,
-        request.execution_protocol.as_ref(),
-        request.workspace_claim_protocol.as_ref(),
-        request.workspace_owner_lease_protocol.as_ref(),
+        crate::api_jobs::RemoteRunnerClaimProtocols {
+            execution: request.execution_protocol.as_ref(),
+            workspace_claim: request.workspace_claim_protocol.as_ref(),
+            workspace_owner_lease: request.workspace_owner_lease_protocol.as_ref(),
+        },
     )?;
     Ok(json!({
         "command": "api.runner.jobs.claim",

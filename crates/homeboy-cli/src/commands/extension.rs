@@ -664,7 +664,7 @@ fn runner_diff_installed(
         RunnerKind::Local => {
             let output = Command::new(homeboy_path)
                 .args(["extension", "diff-installed"])
-                .args(extension_id.into_iter())
+                .args(extension_id)
                 .output()
                 .map_err(|err| {
                     homeboy::core::Error::internal_io(

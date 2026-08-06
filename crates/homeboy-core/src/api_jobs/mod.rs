@@ -13,9 +13,9 @@ use homeboy_api_jobs_contract::types;
 pub use crate::runner_job_execution_context::RunnerJobExecutionContext;
 pub(crate) use persistence::timestamp_ms;
 pub use remote_runner::{
-    JobArtifactMetadata, RemoteRunnerJobClaim, RemoteRunnerJobRequest, RemoteRunnerJobResult,
-    RemoteRunnerObservationRunDetail, RemoteRunnerSubmissionLookup, RunnerJobLifecycleMetadata,
-    RunnerJobProjectionCancelRequest,
+    JobArtifactMetadata, RemoteRunnerClaimProtocols, RemoteRunnerJobClaim, RemoteRunnerJobRequest,
+    RemoteRunnerJobResult, RemoteRunnerObservationRunDetail, RemoteRunnerSubmissionLookup,
+    RunnerJobLifecycleMetadata, RunnerJobProjectionCancelRequest,
 };
 pub(crate) use runner_job_preparation::with_runner_job_preparation;
 pub use runner_job_preparation::{
@@ -26,6 +26,7 @@ pub(crate) use store::ControllerJobState;
 pub(crate) use store::ControllerJobSubmissionOutcome;
 pub(crate) use store::LocalChildStartDiscriminator;
 pub(crate) use store::LocalRunnerJob;
+pub(crate) use store::LocalRunnerJobRequest;
 pub use store::{JobHandle, JobRunner, JobStore, RecoveredTerminalJob};
 pub use summary::{active_runner_job_run_summary, active_runner_job_run_summary_if_durable};
 pub use types::{

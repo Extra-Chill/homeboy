@@ -988,7 +988,7 @@ pub fn compile_cook_attempt(
         &dispatch.tasks,
         dispatch.core.tasks_json.as_deref(),
     )?;
-    let request = agent_task_dispatch_service::resolve_dispatch_request(dispatch.into())?;
+    let request = agent_task_dispatch_service::resolve_dispatch_request(dispatch)?;
     options.initial_plan = build_dispatch_plan(&request)?;
     crate::agent_task_provider::AgentTaskProviderCatalog::discover()
         .validate_explicit_models(&options.initial_plan)?;
@@ -1544,6 +1544,10 @@ fn review_budget_authority(
 /// Append and dispatch one remediation attempt from an authenticated promoted
 /// candidate. Both ordinary Cook feedback and external candidate adoption use
 /// this boundary so their budget, provenance, and baseline authority match.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Cook follow-up retains explicit durable recipe and dispatch identity fields"
+)]
 pub(crate) fn dispatch_cook_follow_up<E>(
     options: &AgentTaskCookServiceOptions,
     executor: E,
@@ -2414,11 +2418,12 @@ where
         &options.ai_tool,
     );
     let required_toolchains = options.gates.required_toolchains();
-    let preflight = (required_toolchains.is_empty()
+    let preflight = if required_toolchains.is_empty()
         && options.gates.gate_package_artifacts.is_empty()
-        && options.gates.gate_environment.extension_inputs.is_empty())
-    .then_some(Ok(()))
-    .unwrap_or_else(|| {
+        && options.gates.gate_environment.extension_inputs.is_empty()
+    {
+        Ok(())
+    } else {
         let gate_workspace = options.source_worktree_path.as_deref().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "workspace",
@@ -2435,7 +2440,7 @@ where
             None,
             options.gates.gate_timeout(),
         )
-    });
+    };
     if let Err(error) = preflight {
         let error = with_pre_execution_phase(error, "gate_toolchain_preflight");
         record_pre_execution_failure(

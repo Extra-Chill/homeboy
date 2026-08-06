@@ -33,7 +33,7 @@ impl ActivityCollector {
         for item in &mut items {
             finalize_item(item);
         }
-        items.sort_by(|left, right| item_sort_key(right).cmp(&item_sort_key(left)));
+        items.sort_by_key(|item| std::cmp::Reverse(item_sort_key(item)));
         if scope == ActivityScope::ActiveRecent {
             items.retain(|item| is_active(item.state) || item.finished_at.is_some());
         }

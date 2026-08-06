@@ -23,6 +23,7 @@ use super::support::{
     write_reverse_controller_session,
 };
 use super::worker_options;
+use crate::runner_staging_operation::SourceArtifactTransfer;
 
 #[test]
 fn reverse_worker_executes_claimed_job_and_finishes_it() {
@@ -927,6 +928,55 @@ fn reverse_worker_executes_from_envelope_dispatch_fields() {
             result["data"]["execution_record"]["path_materialization_plan"]["entries"][0]
                 ["remote_path"],
             serde_json::json!("/tmp")
+        );
+    });
+}
+
+#[test]
+fn reverse_worker_executes_a_verified_staged_source_package() {
+    test_support::with_isolated_home(|_| {
+        create_shell_runner();
+        let path = tempfile::tempdir()
+            .expect("tempdir")
+            .path()
+            .join("jobs.json");
+        let store = JobStore::open_without_reconciliation(&path).expect("open durable store");
+        let transfer = SourceArtifactTransfer::from_bytes("staged-source-1", b"staged output");
+        let artifact = transfer.descriptor();
+        let session_path = homeboy_core::paths::runner_session_file("lab").expect("session path");
+        let artifact_path = session_path
+            .parent()
+            .expect("session parent")
+            .join("lab-staging/source-artifacts/staged-source-1");
+        std::fs::create_dir_all(artifact_path.parent().expect("artifact parent"))
+            .expect("create artifact root");
+        std::fs::write(&artifact_path, transfer.decode_verified().expect("package"))
+            .expect("write staged package");
+        let mut request = run_id_echo_request();
+        request.command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "cat source.bin; printf ' side-effect' > result; cat result".to_string(),
+        ];
+        request.metadata = Some(serde_json::json!({
+            "submission_key": "staged-source-job-1",
+            "staged_source_artifact": artifact,
+        }));
+        let job = store
+            .submit_remote_runner_job(request)
+            .expect("submit staged job");
+        drop(store);
+        let store = JobStore::open_without_reconciliation(&path).expect("reopen durable store");
+        let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
+        let (output, exit_code) =
+            run_reverse_worker(worker_options(broker_url)).expect("run worker");
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.job.expect("job").id, job.id);
+        handle.join().expect("mock broker joins");
+        let result = result_event_data(&store, job.id);
+        assert_eq!(
+            result["stdout"],
+            serde_json::json!("staged output side-effect")
         );
     });
 }
