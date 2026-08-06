@@ -751,6 +751,25 @@ jobs:
           name: homeboy-test-shard-candidate-${{ matrix.shard_id }}-${{ github.run_attempt }}
           path: differential-phase
 
+      # Mirrors "Fail candidate phase when terminal evidence is not pass" in the
+      # unsharded candidate job. The action deliberately continues through
+      # publication so reconciliation receives the terminal evidence, and the
+      # upload above has already run, so aggregation is unaffected -- but the
+      # shard check itself must still report its own terminal failure.
+      #
+      # Without this, a shard that fails or exceeds test-timeout-seconds reports
+      # success while writing "timeout" into its manifest. Reconciliation then
+      # correctly refuses to pass an unmeasured suite, producing N green shard
+      # checks and one red aggregator: a reviewer scanning shard results sees
+      # only success, and the real cause is nowhere near the failing check.
+      #
+      # Deliberately not mirrored onto baseline-test-shards: like the unsharded
+      # baseline job, a red baseline is informational under differential gating
+      # and must not block a merge.
+      - name: Fail candidate Test shard when terminal evidence is not pass
+        if: always() && steps.phase.outcome == 'failure'
+        run: exit 1
+
   reconcile-test-shards:
     name: Test
     needs: [candidate-test-shards, baseline-test-shards, baseline-test-plan, plan]
