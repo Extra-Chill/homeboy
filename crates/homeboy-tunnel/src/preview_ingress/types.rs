@@ -193,6 +193,13 @@ pub(crate) struct PreviewClientSessions {
 pub(crate) struct PreviewIngressAuth {
     pub(crate) token_sha256_env: String,
     pub(crate) token_sha256: Option<String>,
+    /// The operator-declared host authority for this ingress, lowercased.
+    ///
+    /// The bearer token proves *a* client is allowed to talk to this ingress; it
+    /// does not say which public host that client may claim. Without this bound,
+    /// any token holder can register any host and take over another client's
+    /// route, because sessions are keyed by public host.
+    pub(crate) public_host_pattern: String,
 }
 
 #[derive(Debug, Deserialize)]
