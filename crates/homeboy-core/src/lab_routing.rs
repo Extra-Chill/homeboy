@@ -322,13 +322,23 @@ pub fn dispatch_lab_offload(
     runner_id: Option<&str>,
     observer: Box<dyn LabDispatchObserver>,
 ) -> Result<LabRouteOutcome> {
-    lab_offload_outcome_to_route_outcome(route_lab_offload(request), runner_id, observer)
+    let preserve_result_payload = request
+        .command
+        .as_ref()
+        .is_some_and(|command| command.command.routing_policy.preserve_result_payload);
+    lab_offload_outcome_to_route_outcome(
+        route_lab_offload(request),
+        runner_id,
+        observer,
+        preserve_result_payload,
+    )
 }
 
 fn lab_offload_outcome_to_route_outcome(
     outcome: Result<crate::lab_offload::LabOffloadOutcome>,
     runner_id: Option<&str>,
     observer: Box<dyn LabDispatchObserver>,
+    preserve_result_payload: bool,
 ) -> Result<LabRouteOutcome> {
     match outcome {
         Err(err) => {
@@ -391,6 +401,7 @@ fn lab_offload_outcome_to_route_outcome(
                 runner_id,
                 exit_code,
                 retrieval.as_ref(),
+                preserve_result_payload,
             );
             Ok(LabRouteOutcome::Offloaded(LabRouteOutput {
                 stdout,
@@ -493,7 +504,13 @@ fn compact_lab_terminal_output(
     runner_id: Option<&str>,
     exit_code: i32,
     retrieval: Option<&PersistedRunRetrieval>,
+    preserve_result_payload: bool,
 ) -> (String, String) {
+    if preserve_result_payload {
+        if let Some(payload) = command_result_payload(stdout) {
+            return (payload, stderr.to_string());
+        }
+    }
     let Some(mut rendered) = compact_command_result_output(stdout) else {
         return (
             stdout_with_persisted_run_retrieval(stdout, retrieval),
@@ -518,6 +535,20 @@ fn compact_lab_terminal_output(
     // command failure, so avoid printing that transcript a second time.
     let _ = stderr;
     (bound_terminal_output(rendered), String::new())
+}
+
+fn command_result_payload(stream: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(stream).ok()?;
+    if value.get("schema").and_then(serde_json::Value::as_str) != Some("homeboy/command-result/v3")
+    {
+        return None;
+    }
+    serde_json::to_string_pretty(value.get("data")?)
+        .ok()
+        .map(|mut payload| {
+            payload.push('\n');
+            payload
+        })
 }
 
 fn command_result_root_cause(value: &serde_json::Value) -> Option<String> {
@@ -1038,6 +1069,7 @@ mod tests {
                 requires_extension_parity: true,
                 read_only_polling: false,
                 offload_only_when_hot: false,
+                preserve_result_payload: false,
             },
         }
     }
@@ -1360,6 +1392,7 @@ mod tests {
             Some("homeboy-lab"),
             0,
             Some(&PersistedRunRetrieval::for_run("fuzz-1")),
+            false,
         );
 
         assert!(stdout.contains("Lab runner: homeboy-lab"));
@@ -1381,6 +1414,7 @@ mod tests {
             Some("homeboy-lab"),
             1,
             None,
+            false,
         );
 
         assert!(stdout.contains("Root cause: workspace staging failed: dependency install failed"));
@@ -1397,11 +1431,26 @@ mod tests {
             Some("homeboy-lab"),
             1,
             Some(&PersistedRunRetrieval::for_run("fuzz-fail")),
+            false,
         );
 
         assert!(stdout.contains("Root cause: Error: Cannot find module 'tar'"));
         assert_eq!(stdout.matches("Cannot find module 'tar'").count(), 1);
         assert!(stdout.len() <= COMPACT_COMMAND_RESULT_LIMIT_BYTES);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn lab_provider_catalog_preserves_remote_rows_and_scope() {
+        let nested = r#"{"schema":"homeboy/command-result/v3","command":"agent-task","operation":"providers","success":true,"status":"passed","data":{"schema":"homeboy/agent-task-providers/v1","observed_scope":{"location":"runner","runner_id":"homeboy-lab"},"scope":{"shown":0,"matched":0,"total":0},"providers":[]}}"#;
+        let (stdout, stderr) =
+            compact_lab_terminal_output(nested, "", Some("homeboy-lab"), 0, None, true);
+
+        let value: serde_json::Value = serde_json::from_str(&stdout).expect("provider payload");
+        assert_eq!(value["observed_scope"]["location"], "runner");
+        assert_eq!(value["observed_scope"]["runner_id"], "homeboy-lab");
+        assert_eq!(value["scope"]["matched"], 0);
+        assert_eq!(value["providers"], serde_json::json!([]));
         assert!(stderr.is_empty());
     }
 
@@ -1445,6 +1494,7 @@ mod tests {
             }),
             Some("homeboy-lab"),
             observer,
+            false,
         )
         .expect("route outcome");
 
@@ -1540,6 +1590,7 @@ mod tests {
             }),
             Some("homeboy-lab"),
             observer,
+            false,
         )
         .expect("route outcome");
 
@@ -1579,6 +1630,7 @@ mod tests {
             }),
             Some("homeboy-lab"),
             Box::new(NoopLabDispatchObserver),
+            false,
         )
         .expect("route outcome");
 
@@ -1609,6 +1661,7 @@ mod tests {
             }),
             Some("homeboy-lab"),
             observer,
+            false,
         )
         .expect("route outcome");
 

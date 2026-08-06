@@ -13,6 +13,8 @@ mod cook_budget;
 mod cook_pre_execution;
 mod cook_promotion;
 mod cook_recipe;
+/// Resource supervision of a running Cook against its declared budgets.
+mod cook_supervision;
 mod discovery;
 mod execution;
 /// Read-only process-tree activity sampling for a running Cook.
@@ -35,6 +37,7 @@ pub use cook_budget::*;
 pub(crate) use cook_pre_execution::*;
 pub use cook_promotion::*;
 pub use cook_recipe::*;
+pub use cook_supervision::{resolve_supervision_policy, CookSupervisionTick, CookSupervisor};
 pub use discovery::*;
 pub use execution::*;
 pub use promotion_service::*;

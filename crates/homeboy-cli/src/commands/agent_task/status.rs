@@ -145,6 +145,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     }
     let mut value = serde_json::to_value(&record).unwrap_or(Value::Null);
     attach_status_identity(&mut value, &args.run_id, &target);
+    attach_cook_notification_delivery(&mut value, &record, &target);
     attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
     let acceptance_is_actionable = record.state
         == agent_task_lifecycle::AgentTaskRunState::Succeeded
@@ -195,6 +196,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
         bound_full_reader_payload(&mut value);
         attach_runner_probe(&mut value, &runner_probe);
         attach_agent_task_status_actionable(&mut value, run_id);
+        preserve_controller_owner_placement(&mut value, run_id);
         let exit_code = status_exit_code(&value);
         return Ok((value, exit_code));
     }
@@ -206,6 +208,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     }
     attach_runner_probe(&mut summary, &runner_probe);
     attach_agent_task_status_actionable(&mut summary, run_id);
+    preserve_controller_owner_placement(&mut summary, run_id);
     let exit_code = status_exit_code(&summary);
     Ok((summary, exit_code))
 }
@@ -221,6 +224,42 @@ fn attach_status_identity(value: &mut Value, requested_run_id: &str, target: &Co
             identity["cook_alias"] = cook_alias.clone();
         }
         fields.insert("identity".to_string(), identity);
+    }
+}
+
+/// The outcome is stored beside the Cook index rather than copied to every
+/// attempt record. Project it onto the resolved read so compact and full status
+/// answer whether terminal silence means delivered, unconfigured, or failed.
+fn attach_cook_notification_delivery(
+    value: &mut Value,
+    record: &AgentTaskRunRecord,
+    target: &CookReaderTarget,
+) {
+    let cook_id = target
+        .cook_alias
+        .as_ref()
+        .and_then(|alias| alias.get("cook_id"))
+        .and_then(Value::as_str)
+        .or_else(|| record.metadata.get("cook_id").and_then(Value::as_str));
+    let Some(cook_id) = cook_id else { return };
+    let Ok(Some(mut outcome)) = agent_task_lifecycle::cook_terminal_notification_outcome(cook_id)
+    else {
+        return;
+    };
+    if outcome.get("status").and_then(Value::as_str) != Some("delivered") {
+        outcome["retry_command"] = Value::String(format!(
+            "homeboy agent-task cook --continue {}",
+            quote_arg(cook_id)
+        ));
+    }
+    if outcome.get("status").and_then(Value::as_str) == Some("not_configured") {
+        outcome["configuration_command"] = Value::String(
+            "homeboy config set /notifications/default_transport '<installed-transport-id>'"
+                .to_string(),
+        );
+    }
+    if let Value::Object(fields) = value {
+        fields.insert("notification_delivery".to_string(), outcome);
     }
 }
 
@@ -742,6 +781,28 @@ fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
         );
     }
 
+    if let Some(command) = value
+        .get("notification_delivery")
+        .and_then(|delivery| delivery.get("retry_command"))
+        .and_then(Value::as_str)
+    {
+        metadata.next_actions.push(
+            CommandNextAction::new("retry terminal notification", command)
+                .with_kind(CommandNextActionKind::Repair),
+        );
+    }
+
+    if let Some(command) = value
+        .get("notification_delivery")
+        .and_then(|delivery| delivery.get("configuration_command"))
+        .and_then(Value::as_str)
+    {
+        metadata.next_actions.push(
+            CommandNextAction::new("configure terminal notifications", command)
+                .with_kind(CommandNextActionKind::Repair),
+        );
+    }
+
     if value
         .pointer("/metadata/stale_running")
         .and_then(Value::as_bool)
@@ -1001,6 +1062,47 @@ fn attach_actionable_metadata(value: &mut Value, metadata: CommandActionableMeta
     }
 }
 
+/// Follow-up lifecycle commands must retain the controller-local ownership of
+/// the record even when a default Lab runner becomes available between reads.
+fn preserve_controller_owner_placement(value: &mut Value, run_id: &str) {
+    match value {
+        Value::String(command) => {
+            let prefix = "homeboy agent-task ";
+            let lifecycle_command = command
+                .strip_prefix(prefix)
+                .and_then(|rest| rest.split_whitespace().next())
+                .is_some_and(|operation| {
+                    matches!(
+                        operation,
+                        "status"
+                            | "logs"
+                            | "artifacts"
+                            | "evidence"
+                            | "diagnose"
+                            | "review"
+                            | "retry"
+                            | "reconcile"
+                            | "cancel"
+                    )
+                });
+            if lifecycle_command && command.contains(run_id) {
+                *command = command.replacen(prefix, "homeboy --placement local agent-task ", 1);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                preserve_controller_owner_placement(value, run_id);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                preserve_controller_owner_placement(value, run_id);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn logs(args: LogsArgs) -> CmdResult<Value> {
     let log = if args.raw {
         agent_task_service_direct::logs_with_raw(&args.run_id)?
@@ -1030,6 +1132,7 @@ pub(super) fn artifacts(args: StatusArgs) -> CmdResult<Value> {
             ),
         );
     }
+    preserve_controller_owner_placement(&mut value, &args.run_id);
     Ok((value, 0))
 }
 
@@ -1115,6 +1218,7 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
             ),
         );
     }
+    preserve_controller_owner_placement(&mut value, run_id);
     Ok((value, 0))
 }
 
@@ -1211,6 +1315,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         retry.action.as_ref(),
     );
     bound_full_reader_payload(&mut value);
+    preserve_controller_owner_placement(&mut value, run_id);
     Ok((value, 0))
 }
 
@@ -2814,6 +2919,24 @@ fn compact_status_summary_with_aggregate(
             );
         }
     }
+    if let Some(delivery) = record.get("notification_delivery") {
+        summary["notification_delivery"] = compact_fields(
+            delivery,
+            &[
+                "schema",
+                "cook_id",
+                "event_id",
+                "event_kind",
+                "transport",
+                "route_classification",
+                "status",
+                "error_class",
+                "transport_result",
+                "retry_command",
+                "configuration_command",
+            ],
+        );
+    }
     summary
 }
 
@@ -3049,6 +3172,7 @@ fn liveness_summary(record: &Value, run_id: &str, candidate_state: CandidateStat
             "local_owner": local_provider_ownership,
         },
         "provider_activity": provider_activity_summary(metadata),
+        "supervision": supervision_summary(metadata),
         "stale_reason": metadata.get("stale_running_reason"),
         "runner_queue": metadata.get("runner_queue"),
         "next_action": if terminal && candidate_recoverable {
@@ -3099,6 +3223,40 @@ fn provider_activity_summary(metadata: &Value) -> Value {
         }
     }
     summary
+}
+
+/// Project the durable resource timeline and supervision decisions into the
+/// status summary.
+///
+/// The decisions are reported in full and the timeline is not: a run reaches a
+/// handful of decisions and hundreds of samples, and a status summary that
+/// inlined the whole timeline would bury the one fact a reader came for. The
+/// latest sample plus a count is enough to say "this is holding nine gigabytes
+/// and has been sampled forty times"; the full timeline stays in the run record
+/// for anyone who wants the curve.
+///
+/// Absent when nothing was recorded, so a run from before supervision existed
+/// does not acquire a misleading empty report.
+fn supervision_summary(metadata: &Value) -> Value {
+    let timeline = metadata
+        .get("cook_resource_timeline")
+        .and_then(Value::as_array);
+    let events = metadata
+        .get("cook_supervision_events")
+        .and_then(Value::as_array);
+    if timeline.is_none() && events.is_none() {
+        return Value::Null;
+    }
+    json!({
+        "resource_samples": timeline.map_or(0, |timeline| timeline.len()),
+        "latest_resource_sample": timeline.and_then(|timeline| timeline.last()).cloned(),
+        "events": events.cloned().unwrap_or_default(),
+        "stopped_by_policy": events.is_some_and(|events| {
+            events
+                .iter()
+                .any(|event| event.get("kind").and_then(Value::as_str) == Some("stop_executed"))
+        }),
+    })
 }
 
 /// Project the durable `provider_executions` metadata into a compact list of the
@@ -4071,6 +4229,39 @@ mod tests {
     }
 
     #[test]
+    fn compact_status_surfaces_actionable_notification_delivery_without_destination() {
+        let summary = compact_status_summary(
+            &json!({
+                "run_id": "cook-attempt-1",
+                "state": "failed",
+                "tasks": [],
+                "notification_delivery": {
+                    "schema": "homeboy/cook-notification-delivery/v1",
+                    "cook_id": "cook-1",
+                    "event_id": "terminal",
+                    "event_kind": "needs_attention",
+                    "transport": "generic.transport",
+                    "route_classification": "explicit",
+                    "status": "failed",
+                    "error_class": "transport_spawn_failed",
+                    "retry_command": "homeboy agent-task cook --continue cook-1",
+                    "raw_destination": "must-not-appear"
+                }
+            }),
+            "cook-attempt-1",
+        );
+
+        assert_eq!(summary["notification_delivery"]["status"], "failed");
+        assert_eq!(
+            summary["notification_delivery"]["retry_command"],
+            "homeboy agent-task cook --continue cook-1"
+        );
+        assert!(summary["notification_delivery"]
+            .get("raw_destination")
+            .is_none());
+    }
+
+    #[test]
     fn compact_status_answers_what_the_provider_is_doing_right_now() {
         // #11482: this is the question `agent-task status` could not answer, so
         // diagnosing a stalled cook meant `ps aux | grep` and `git status` on a
@@ -4123,6 +4314,50 @@ mod tests {
         );
 
         assert!(summary["liveness"]["provider_activity"].is_null());
+        // A run recorded before supervision existed must not acquire an empty
+        // supervision report that reads as "supervised, nothing to say".
+        assert!(summary["liveness"]["supervision"].is_null());
+    }
+
+    #[test]
+    fn compact_status_reports_why_a_run_was_stopped_by_policy() {
+        // #7015: the resource cost of a session used to be discoverable only by
+        // having watched it. The decision that ended a run has to survive in the
+        // status envelope, and it must not be buried under the sample stream.
+        let summary = compact_status_summary(
+            &json!({
+                "run_id": "agent-task-supervised",
+                "state": "failed",
+                "tasks": [],
+                "metadata": {
+                    "cook_resource_timeline": [
+                        { "at": "2026-08-06T00:00:00Z", "attempt": 1,
+                          "sample": { "rss_mib": 4096, "child_processes": 12 } },
+                        { "at": "2026-08-06T00:00:15Z", "attempt": 1,
+                          "sample": { "rss_mib": 10_500, "child_processes": 41 } }
+                    ],
+                    "cook_supervision_events": [
+                        { "kind": "budget_breached", "attempt": 1, "decision": {
+                            "metric": "rss_mib", "action": "stop",
+                            "limit": 10_240, "observed": 10_500,
+                            "reason": "15Gi box", "remediation": "narrow the task"
+                        }},
+                        { "kind": "stop_executed", "attempt": 1,
+                          "outcome": { "status": "terminated", "signal": "SIGTERM" } }
+                    ]
+                }
+            }),
+            "agent-task-supervised",
+        );
+
+        let supervision = &summary["liveness"]["supervision"];
+        assert_eq!(supervision["resource_samples"], 2);
+        assert_eq!(
+            supervision["latest_resource_sample"]["sample"]["rss_mib"],
+            10_500
+        );
+        assert_eq!(supervision["events"][0]["decision"]["action"], "stop");
+        assert_eq!(supervision["stopped_by_policy"], true);
     }
 
     #[test]

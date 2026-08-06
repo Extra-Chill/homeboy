@@ -260,11 +260,17 @@ fn load_fuzz_artifacts_for_runs(
     store: &ObservationStore,
     run_ids: &[String],
 ) -> homeboy::core::Result<LoadedFuzzArtifacts> {
+    // Route run lookup through the observation facade so `runs hotspots` shares
+    // the one activity-aware surface: durable label aliases, Lab mirror
+    // resolution, and the stable missing-run error with runner guidance (#6768).
     let runs = run_ids
         .iter()
-        .map(|run_id| require_run(store, run_id))
+        .map(|run_id| runs_service::require_run(store, run_id))
         .collect::<homeboy::core::Result<Vec<_>>>()?;
-    let mut artifacts_by_run = store.list_artifacts_for_runs(run_ids)?;
+    // The facade accepts labels as well as record ids, so the batched artifact
+    // read must key on the resolved record ids, not the caller-supplied strings.
+    let resolved_run_ids = runs.iter().map(|run| run.id.clone()).collect::<Vec<_>>();
+    let mut artifacts_by_run = store.list_artifacts_for_runs(&resolved_run_ids)?;
     let mut artifacts = Vec::new();
     let mut skipped = Vec::new();
     let mut inspected_artifact_count = 0;
@@ -295,17 +301,6 @@ fn load_fuzz_artifacts_for_runs(
         artifacts,
         skipped,
         inspected_artifact_count,
-    })
-}
-
-fn require_run(store: &ObservationStore, run_id: &str) -> homeboy::core::Result<RunRecord> {
-    store.get_run(run_id)?.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "run_id",
-            format!("run record not found: {run_id}"),
-            Some(run_id.to_string()),
-            None,
-        )
     })
 }
 
@@ -887,6 +882,83 @@ mod tests {
             assert!(output.skipped_artifacts[0]
                 .reason
                 .contains("homeboy runs artifact get"));
+        });
+    }
+
+    #[test]
+    fn hotspot_run_lookup_resolves_a_durable_run_label_through_the_facade() {
+        // #6768: this command used to carry a private `require_run` that only
+        // matched record ids, so a durable run label errored out. Routing
+        // through `runs_service::require_run` resolves the alias, and the
+        // batched artifact read must key on the resolved record id — keying on
+        // the caller-supplied label would silently yield zero artifacts.
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(
+                    NewRunRecord::builder("bench")
+                        .component_id("homeboy")
+                        .command("homeboy bench homeboy --run-id hotspot-label")
+                        .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
+                        .homeboy_version("test-version")
+                        .git_sha(Some("abc123".to_string()))
+                        .rig_id("studio")
+                        .metadata(json!({ "requested_run_id": "hotspot-label" }))
+                        .build(),
+                )
+                .expect("run");
+            store
+                .finish_run(&run.id, RunStatus::Pass, None)
+                .expect("finish run");
+            let directory = home.path().join("fuzz-artifacts");
+            std::fs::create_dir_all(&directory).expect("directory");
+            std::fs::write(directory.join("result.json"), b"{}").expect("file");
+            store
+                .record_directory_artifact(&run.id, "fuzz_artifacts", &directory)
+                .expect("directory artifact");
+
+            let (output, _) = runs_hotspots(RunsHotspotsArgs {
+                run_ids: vec!["hotspot-label".to_string()],
+                baseline_runs: Vec::new(),
+                candidate_runs: Vec::new(),
+                limit: 20,
+            })
+            .expect("durable run label resolves through runs_service::require_run");
+
+            let RunsOutput::Hotspots(output) = output else {
+                panic!("expected hotspots output");
+            };
+            // A non-zero skipped count proves the artifact read was keyed on
+            // the resolved record id rather than the label.
+            assert_eq!(output.skipped_artifact_count, 1);
+            assert!(output.skipped_artifacts[0]
+                .reason
+                .contains(&format!("homeboy runs artifacts {} --pull", run.id)));
+        });
+    }
+
+    #[test]
+    fn hotspot_run_lookup_reports_the_facade_missing_run_error() {
+        // The facade's missing-run error carries runner guidance the private
+        // helper never produced. Preserve the stable argument/message contract.
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            // `RunsOutput` is not `Debug`, so match rather than `expect_err`.
+            let error = match runs_hotspots(RunsHotspotsArgs {
+                run_ids: vec!["definitely-missing-run".to_string()],
+                baseline_runs: Vec::new(),
+                candidate_runs: Vec::new(),
+                limit: 20,
+            }) {
+                Ok(_) => panic!("expected a missing-run error"),
+                Err(error) => error,
+            };
+            assert!(
+                error.message.contains("run record not found"),
+                "unexpected message: {}",
+                error.message
+            );
         });
     }
 

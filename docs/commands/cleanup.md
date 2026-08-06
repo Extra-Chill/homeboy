@@ -123,16 +123,29 @@ directory accumulating hundreds of megabytes per kill at an unbounded rate.
 
 ## Automatic Retention
 
-Declare the bounded retention pass through Homeboy's scheduler:
+Starting the Homeboy daemon installs the bounded retention pass by default:
+
+```bash
+homeboy daemon ensure-running
+```
+
+The installed `automatic-retention` schedule runs hourly with `--on-overlap skip`. The daemon owns cadence, overlap prevention, and stale-run recovery; no external timer is needed. Disable it to opt out:
+
+```bash
+homeboy schedule disable automatic-retention
+```
+
+To change its cadence, replace the installed declaration:
 
 ```bash
 homeboy schedule add automatic-retention \
   --command "cleanup automatic-retention" \
-  --every 1h \
-  --on-overlap skip
+  --every 6h \
+  --on-overlap skip \
+  --force
 ```
 
-The schedule declaration is the explicit opt-in to unattended mutation. The Homeboy daemon owns cadence, overlap prevention, and stale-run recovery; no external timer is needed. Each pass first reconciles stale agent-task records, then applies the existing terminal-run, persisted-artifact, orphaned-byte, runtime-temp, leaked-test-home, controller-scratch, controller-runtime, shared-Cargo, and reconstructable repo-artifact cleanup policies. Leaked test homes are unattended for the reason they exist: the process that would have cleaned up after itself was killed, so nothing reclaims them by hand. Repo-artifact retention uses controller-accessible registered workspace roots, one global largest-first `retention.limit`, `retention.reconstructable_artifact_days`, and `retention.automatic_retention_max_run_seconds`; a configured `retention.reconstructable_artifact_reserve_bytes` enables early retention under free-space pressure. The output records reclaimed and retained evidence. It also prunes remote lab workspaces and runner binary caches: both accumulate on hosts an operator rarely inspects, and both are cursor-paginated and age-floored, so they fit the pass's wall-clock budget. A disconnected or failing runner degrades only its own category. Runner downloads and task worktrees remain outside unattended scope, because both can hold inputs or uncommitted work that is still live. Cargo retains its configured aggregate byte budget and active-lease predicate. The controller has a process and cross-process single-flight lock, writes combined pass evidence under the Homeboy data directory, and returns `homeboy cleanup automatic-retention` as the exact resume command.
+Existing declarations, including disabled schedules, are preserved when the daemon starts. Each pass first reconciles stale agent-task records, then applies the existing terminal-run, persisted-artifact, orphaned-byte, runtime-temp, leaked-test-home, controller-scratch, controller-runtime, shared-Cargo, and reconstructable repo-artifact cleanup policies. Leaked test homes are unattended for the reason they exist: the process that would have cleaned up after itself was killed, so nothing reclaims them by hand. Repo-artifact retention uses controller-accessible registered workspace roots, one global largest-first `retention.limit`, `retention.reconstructable_artifact_days`, and `retention.automatic_retention_max_run_seconds`; a configured `retention.reconstructable_artifact_reserve_bytes` enables early retention under free-space pressure. The output records reclaimed and retained evidence. It also prunes remote lab workspaces and runner binary caches: both accumulate on hosts an operator rarely inspects, and both are cursor-paginated and age-floored, so they fit the pass's wall-clock budget. A disconnected or failing runner degrades only its own category. Runner downloads and task worktrees remain outside unattended scope, because both can hold inputs or uncommitted work that is still live. Cargo retains its configured aggregate byte budget and active-lease predicate. The controller has a process and cross-process single-flight lock, writes combined pass evidence under the Homeboy data directory, and returns `homeboy cleanup automatic-retention` as the exact resume command.
 
 Terminal agent-task convergence also runs bounded reconstructable artifact retention over controller-accessible task workspace roots. It is best-effort: inaccessible roots and retention failures are retained as terminal evidence while aggregate persistence continues. Later scheduled retention reevaluates registered roots after the age floor expires.
 

@@ -106,7 +106,7 @@ pub(super) fn exec_via_daemon(
     if workspace_owner_request.is_some() {
         require_daemon_workspace_owner_lease_v2(&client, local_url)?;
     }
-    let payload = json!({
+    let mut payload = json!({
         "runner_id": runner.id,
         "runner": runner,
         "project_id": project_id,
@@ -127,12 +127,14 @@ pub(super) fn exec_via_daemon(
         // reconstruct it from nested lifecycle/metadata, so a resubmission after
         // a transport drop is a safe no-op. Uses the durable run id when present.
         "idempotency_key": run_id,
-        "workspace_owner_request": workspace_owner_request.as_ref().map(|(workspace, owner_id)| json!({
+    });
+    if let Some((workspace, owner_id)) = workspace_owner_request.as_ref() {
+        payload["workspace_owner_request"] = json!({
             "workspace": workspace,
             "owner_id": owner_id,
             "ttl_ms": homeboy_core::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
-        })),
-    });
+        });
+    }
     let response = submit_daemon_exec_with_session_recovery(
         local_url,
         accepted_session.as_ref(),
@@ -344,6 +346,12 @@ pub(super) fn exec_via_daemon(
         &runner.id,
         &job_id,
     )?;
+    append_agent_task_dispatch_handoff_workload_event(
+        &mut events,
+        lab_runner_workload.as_ref(),
+        &runner.id,
+        &job_id,
+    );
 
     let RunnerJobResultFields {
         result,
@@ -728,14 +736,20 @@ impl Drop for DaemonAdmissionReservation {
         else {
             return;
         };
+        let mut payload = json!({ "admission_token": self.token.as_deref() });
+        if let Some(lease) = self
+            .workspace_owner_lease
+            .lock()
+            .expect("admission owner lease lock")
+            .as_ref()
+        {
+            payload["workspace_owner_lease"] = json!(lease);
+        }
         let _ = daemon_post_json_text(
             &client,
             &self.local_url,
             &format!("/admissions/{}/release", self.job_id),
-            &json!({
-                "admission_token": self.token.as_deref(),
-                "workspace_owner_lease": self.workspace_owner_lease.lock().expect("admission owner lease lock").as_ref(),
-            }),
+            &payload,
             DaemonPostOptions::default(),
         );
     }
@@ -760,22 +774,25 @@ pub(crate) fn reserve_daemon_admission(
     if workspace_owner_registration.is_some() {
         require_daemon_workspace_owner_lease_v2(&client, local_url)?;
     }
+    let mut payload = json!({
+        "runner_id": runner_id,
+        "command": command,
+        "expected_daemon_lease_id": expected_daemon_lease_id,
+        "idempotency_key": idempotency_key,
+        "admission_lease_protocol": 1,
+    });
+    if let Some((workspace, owner_id)) = workspace_owner_registration.as_ref() {
+        payload["workspace_owner_request"] = json!({
+            "workspace": workspace,
+            "owner_id": owner_id,
+            "ttl_ms": homeboy_core::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
+        });
+    }
     let response = daemon_post_json_text(
         &client,
         local_url,
         "/admissions",
-        &json!({
-            "runner_id": runner_id,
-            "command": command,
-            "expected_daemon_lease_id": expected_daemon_lease_id,
-            "idempotency_key": idempotency_key,
-            "admission_lease_protocol": 1,
-            "workspace_owner_request": workspace_owner_registration.as_ref().map(|(workspace, owner_id)| json!({
-                "workspace": workspace,
-                "owner_id": owner_id,
-                "ttl_ms": homeboy_core::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
-            })),
-        }),
+        &payload,
         DaemonPostOptions::default(),
     )?;
     let envelope: DaemonEnvelope = serde_json::from_str(&response.body).map_err(|err| {
@@ -822,6 +839,7 @@ pub(crate) fn reserve_daemon_admission(
     })?;
     let workspace_owner_lease = body
         .get("workspace_owner_lease")
+        .filter(|value| !value.is_null())
         .cloned()
         .map(serde_json::from_value)
         .transpose()
@@ -1098,14 +1116,19 @@ fn spawn_admission_renewer(
                     .failure = Some("build daemon renewal client".to_string());
                 return;
             };
+            let mut payload = json!({ "admission_token": token });
+            if let Some(lease) = workspace_owner_lease
+                .lock()
+                .expect("admission owner lease lock")
+                .as_ref()
+            {
+                payload["workspace_owner_lease"] = json!(lease);
+            }
             let response = daemon_post_json_text(
                 &client,
                 &local_url,
                 &format!("/admissions/{job_id}/renew"),
-                &json!({
-                    "admission_token": token,
-                    "workspace_owner_lease": workspace_owner_lease.lock().expect("admission owner lease lock").as_ref(),
-                }),
+                &payload,
                 DaemonPostOptions::default(),
             );
             let body = response
@@ -2187,6 +2210,56 @@ fn append_agent_task_lifecycle_workload_event(
         })),
     });
     Ok(())
+}
+
+/// The cook/dispatch counterpart of [`append_agent_task_lifecycle_workload_event`].
+///
+/// Extracts the dispatch handoff on the side that owns the output, gated by the
+/// workload's `agent_task.handoff_mirror_policy`, and republishes it as a typed
+/// event carrying the workload's run id. The controller mirrors from this event
+/// instead of rescanning stdout/stderr (#7530).
+///
+/// Infallible on purpose: a missing or unrecognized handoff is not a job
+/// failure, it just means the controller's retained output fallback runs. This
+/// is the opposite of the run-plan path, where a malformed aggregate is a hard
+/// error because the controller has no other source for it.
+fn append_agent_task_dispatch_handoff_workload_event(
+    events: &mut Vec<JobEvent>,
+    lab_runner_workload: Option<&LabRunnerWorkload>,
+    runner_id: &str,
+    runner_job_id: &str,
+) {
+    let Some(result) = result_event_data(events) else {
+        return;
+    };
+    let Some(event) =
+        crate::agent_task_handoff_event::agent_task_dispatch_handoff_event_from_workload_result(
+            lab_runner_workload,
+            runner_id,
+            runner_job_id,
+            &result,
+        )
+    else {
+        return;
+    };
+    events.push(JobEvent {
+        sequence: events
+            .last()
+            .map(|event| event.sequence.saturating_add(1))
+            .unwrap_or(1),
+        job_id: events
+            .last()
+            .map(|event| event.job_id)
+            .unwrap_or_else(uuid::Uuid::nil),
+        kind: homeboy_core::api_jobs::JobEventKind::Progress,
+        timestamp_ms: events.last().map(|event| event.timestamp_ms).unwrap_or(0),
+        message: Some("agent-task dispatch handoff".to_string()),
+        data: Some(
+            crate::agent_task_handoff_event::agent_task_dispatch_handoff_workload_event_payload(
+                &event,
+            ),
+        ),
+    });
 }
 
 /// Stream + metric fields derived from a runner job's terminal result event.

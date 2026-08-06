@@ -981,9 +981,12 @@ pub(crate) fn exec_lab_context(
         );
         append_runner_failure_context_summary(&mut stderr, &exec_output);
         if let Some(run_id) = context.agent_task_run_id.as_deref() {
-            if let Some(handoff) =
-                parse_offloaded_agent_task_handoff_from_outputs(&stdout, &exec_output.stderr)?
-            {
+            if let Some(handoff) = resolve_offloaded_agent_task_handoff(
+                agent_task_workload.as_ref(),
+                exec_output.job_events.as_deref(),
+                &stdout,
+                &exec_output.stderr,
+            )? {
                 if let Some(record) = agent_task_lifecycle::record_remote_dispatch_failure(
                     agent_task_lifecycle::AgentTaskRemoteDispatchFailure {
                         identity: agent_task_lifecycle::RunDispatchIdentity { run_id, runner_id },

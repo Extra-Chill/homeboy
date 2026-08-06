@@ -496,6 +496,7 @@ fn record_lab_offload_proxy(
     remote_command: &[String],
     durable_plan: Option<&AgentTaskPlan>,
 ) -> Result<AgentTaskRunRecord> {
+    validate_lab_handoff_plan(durable_plan)?;
     let run_id = sanitize_run_id(requested_run_id);
     let input = DetachedLabRunRecord {
         run_id: &run_id,
@@ -619,6 +620,51 @@ fn record_lab_offload_proxy(
     );
     store::write_record(&record)?;
     Ok(record)
+}
+
+fn validate_lab_handoff_plan(durable_plan: Option<&AgentTaskPlan>) -> Result<()> {
+    if let Some(plan) = durable_plan {
+        plan.validate_managed_services().map_err(|message| {
+            Error::validation_invalid_argument("services.cleanup_deadline_ms", message, None, None)
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::agent_task_scheduler::{AgentTaskManagedService, AgentTaskManagedServiceLifecycle};
+
+    #[test]
+    fn lab_handoff_admission_rejects_an_invalid_managed_service() {
+        let mut plan = AgentTaskPlan::new("invalid-lab-service", Vec::new());
+        plan.services.push(AgentTaskManagedService {
+            version: AgentTaskManagedService::VERSION,
+            id: "invalid".to_string(),
+            command: vec!["fixture".to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            env_allowlist: Vec::new(),
+            secret_env: Vec::new(),
+            secret_env_plan: None,
+            host: "127.0.0.1".to_string(),
+            port: None,
+            port_env: None,
+            socket_handoff: false,
+            readiness: None,
+            cleanup_deadline_ms: 0,
+            public_url: None,
+            browser_origin_probe: None,
+            lifecycle: AgentTaskManagedServiceLifecycle::Plan,
+            target: None,
+        });
+
+        let error = validate_lab_handoff_plan(Some(&plan)).expect_err("invalid plan");
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+    }
 }
 
 fn fail_missing_lab_attempt_plan(record: &mut AgentTaskRunRecord, error: &Error) -> Result<()> {

@@ -1,7 +1,9 @@
 use clap::Args;
 use serde::Serialize;
 
-use homeboy::core::observation::{FindingListFilter, ObservationStore, RecordedHomeboyFinding};
+use homeboy::core::observation::{
+    runs_service, FindingListFilter, ObservationStore, RecordedHomeboyFinding,
+};
 use homeboy::core::Error;
 
 use crate::commands::{
@@ -80,7 +82,12 @@ pub fn findings(args: RunsFindingsArgs) -> CmdResult<RunsOutput> {
         .run_id
         .ok_or_else(|| Error::validation_missing_argument(vec!["run_id".to_string()]))?;
     let store = ObservationStore::open_initialized()?;
-    require_run(&store, &run_id)?;
+    // Route run lookup through the observation facade so `runs findings` shares
+    // the one activity-aware surface: durable label aliases, Lab mirror
+    // resolution, and the stable missing-run error with runner guidance (#6768).
+    // Filter on the resolved record id — the facade accepts labels, which are
+    // not themselves finding `run_id` values.
+    let run_id = runs_service::require_run(&store, &run_id)?.id;
     let findings = store
         .list_findings(FindingListFilter {
             run_id: Some(run_id.clone()),
@@ -160,14 +167,139 @@ pub fn latest_finding(args: RunsLatestFindingArgs) -> CmdResult<RunsOutput> {
     ))
 }
 
-fn require_run(store: &ObservationStore, run_id: &str) -> homeboy::core::Result<()> {
-    if store.get_run(run_id)?.is_some() {
-        return Ok(());
+#[cfg(test)]
+mod tests {
+    use homeboy::core::observation::{NewFindingRecord, NewRunRecord, ObservationStore};
+    use homeboy::test_support::with_isolated_home;
+    use serde_json::json;
+
+    use super::*;
+
+    struct XdgGuard(Option<String>);
+
+    impl XdgGuard {
+        fn unset() -> Self {
+            let prior = std::env::var("XDG_DATA_HOME").ok();
+            std::env::remove_var("XDG_DATA_HOME");
+            Self(prior)
+        }
     }
-    Err(Error::validation_invalid_argument(
-        "run_id",
-        format!("run record not found: {run_id}"),
-        Some(run_id.to_string()),
-        None,
-    ))
+
+    impl Drop for XdgGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+        }
+    }
+
+    fn labeled_run(store: &ObservationStore, label: &str) -> String {
+        store
+            .start_run(
+                NewRunRecord::builder("bench")
+                    .component_id("homeboy")
+                    .command(format!("homeboy bench homeboy --run-id {label}"))
+                    .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
+                    .homeboy_version("test-version")
+                    .rig_id("studio")
+                    .metadata(json!({ "requested_run_id": label }))
+                    .build(),
+            )
+            .expect("run")
+            .id
+    }
+
+    fn record_finding(store: &ObservationStore, run_id: &str) {
+        store
+            .record_finding(&NewFindingRecord {
+                run_id: run_id.to_string(),
+                tool: "lint".to_string(),
+                rule: Some("style".to_string()),
+                file: Some("src/lib.rs".to_string()),
+                line: Some(7),
+                severity: Some("error".to_string()),
+                fingerprint: Some("lint::style".to_string()),
+                message: "style violation".to_string(),
+                fixable: None,
+                metadata_json: json!({}),
+            })
+            .expect("finding");
+    }
+
+    #[test]
+    fn findings_resolve_a_durable_run_label_and_report_the_record_id() {
+        // #6768: this command used to carry a private `require_run` that only
+        // matched record ids, and then filtered findings on the *caller's*
+        // string. Routing through `runs_service::require_run` resolves the
+        // alias, and filtering on the resolved id is what makes the lookup
+        // return the run's findings instead of an empty list.
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run_id = labeled_run(&store, "findings-label");
+            record_finding(&store, &run_id);
+
+            let (output, exit) = findings(RunsFindingsArgs {
+                run_id: Some("findings-label".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .expect("durable run label resolves through runs_service::require_run");
+
+            assert_eq!(exit, 0);
+            let RunsOutput::Findings(output) = output else {
+                panic!("expected findings output");
+            };
+            assert_eq!(output.run_id, run_id);
+            assert_eq!(output.findings.len(), 1);
+        });
+    }
+
+    #[test]
+    fn findings_still_resolve_an_exact_record_id() {
+        // Behavior preservation: the facade tries the exact record id first, so
+        // the pre-existing contract is unchanged.
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run_id = labeled_run(&store, "findings-exact");
+            record_finding(&store, &run_id);
+
+            let (output, _) = findings(RunsFindingsArgs {
+                run_id: Some(run_id.clone()),
+                limit: 100,
+                ..Default::default()
+            })
+            .expect("record id resolves");
+
+            let RunsOutput::Findings(output) = output else {
+                panic!("expected findings output");
+            };
+            assert_eq!(output.run_id, run_id);
+            assert_eq!(output.findings.len(), 1);
+        });
+    }
+
+    #[test]
+    fn findings_report_the_facade_missing_run_error() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let _store = ObservationStore::open_initialized().expect("store");
+            // `RunsOutput` is not `Debug`, so match rather than `expect_err`.
+            let error = match findings(RunsFindingsArgs {
+                run_id: Some("definitely-missing-run".to_string()),
+                limit: 100,
+                ..Default::default()
+            }) {
+                Ok(_) => panic!("expected a missing-run error"),
+                Err(error) => error,
+            };
+            assert!(
+                error.message.contains("run record not found"),
+                "unexpected message: {}",
+                error.message
+            );
+        });
+    }
 }

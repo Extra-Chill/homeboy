@@ -36,6 +36,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 
 [dev-dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }
+homeboy-extension-contract = { version = "0.1.0", path = "../contracts/homeboy-extension-contract" }
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }
 # Self-referencing dev-dependency: this crate's own integration tests link the
 # library externally, where `cfg(test)` is off. Enabling `test-support` for the

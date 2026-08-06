@@ -26,11 +26,25 @@ use std::process::Command;
 /// and its leading arguments — so truncate rather than drop.
 pub const MAX_ACTIVITY_COMMAND_CHARS: usize = 200;
 
+/// The `ps` projection [`descendant_activity`] requests.
+///
+/// `rss` is in the projection because supervision needs a resource number, and
+/// the walk that already answers "what is this tree doing" is the cheapest
+/// place to also answer "how much is it holding". One `ps` still, one column
+/// wider.
+pub const PS_ACTIVITY_FORMAT: &str = "pid=,ppid=,rss=,etime=,args=";
+
 /// One row of the process table, as sampled from `ps`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessActivityRow {
     pub pid: u32,
     pub ppid: u32,
+    /// Resident set size in KiB, when the projection carried one.
+    ///
+    /// `None` rather than `0` when the column is absent: a `ps` that did not
+    /// report memory is not a process holding no memory, and a supervision
+    /// budget must never fire on a fabricated zero.
+    pub rss_kib: Option<u64>,
     /// Wall-clock seconds since this process started.
     pub elapsed_seconds: u64,
     pub command: String,
@@ -44,6 +58,8 @@ pub struct DescendantActivity {
     /// provider process itself); `2` and deeper is work the provider spawned.
     pub depth: usize,
     pub elapsed_seconds: u64,
+    /// Resident set size of the selected process alone, in KiB, when observed.
+    pub rss_kib: Option<u64>,
     /// Command line, truncated to [`MAX_ACTIVITY_COMMAND_CHARS`].
     pub command: String,
     /// Process-table evidence, rather than a controller lifecycle assertion.
@@ -97,6 +113,15 @@ pub struct ProviderActivitySample {
     pub activity: Option<DescendantActivity>,
     /// Descendants observed under the owner, Homeboy's own processes included.
     pub descendant_count: usize,
+    /// Summed resident set size across every observed descendant, in KiB.
+    ///
+    /// Summing double-counts pages shared between a provider and the tools it
+    /// spawned, so this is an upper bound on the tree's footprint rather than a
+    /// precise figure. It is the number an operator watching a box run out of
+    /// memory actually reasons about, and an upper bound is the safe side for a
+    /// budget. `None` when no sampled row carried an `rss` column at all —
+    /// never `0`, which would read as "this tree holds nothing".
+    pub tree_rss_kib: Option<u64>,
     pub unavailable: Option<ActivityUnavailable>,
 }
 
@@ -108,31 +133,53 @@ impl ProviderActivitySample {
     }
 }
 
-/// Parse `ps -axo pid=,ppid=,etime=,args=` output into activity rows.
+/// Parse `ps` activity output into rows.
 ///
 /// Kept separate from the `ps` invocation so selection behavior is testable on
 /// every platform, including ones where the probe itself returns nothing.
+///
+/// Two projections parse here: the current [`PS_ACTIVITY_FORMAT`]
+/// (`pid ppid rss etime args`) and the original memory-free
+/// `pid ppid etime args`. Tolerating both is not backwards compatibility
+/// theatre — durable evidence and recovery commands recorded before the `rss`
+/// column existed are still read back, and a `ps` that silently drops a column
+/// must narrow the sample rather than discard every row in it.
 pub fn parse_process_activity_rows(ps_output: &str) -> Vec<ProcessActivityRow> {
     ps_output
         .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let pid = fields.next()?.parse().ok()?;
-            let ppid = fields.next()?.parse().ok()?;
-            let etime = fields.next()?;
-            let elapsed_seconds = parse_ps_elapsed_seconds(etime)?;
-            // `args` is the remainder of the line, spaces included. Recover it
-            // from the original line rather than re-joining split fields so
-            // internal spacing survives.
-            let command = remainder_after_fields(line, 3).trim().to_string();
-            Some(ProcessActivityRow {
-                pid,
-                ppid,
-                elapsed_seconds,
-                command,
-            })
-        })
+        .filter_map(parse_process_activity_row)
         .collect()
+}
+
+fn parse_process_activity_row(line: &str) -> Option<ProcessActivityRow> {
+    let mut fields = line.split_whitespace();
+    let pid = fields.next()?.parse().ok()?;
+    let ppid = fields.next()?.parse().ok()?;
+    let third = fields.next()?;
+    // `rss` is a bare integer and `etime` is `[[dd-]hh:]mm:ss`, which overlap
+    // only when `etime` is a bare seconds count. Prefer the wider projection
+    // when the field after a numeric third field is itself a valid `etime`,
+    // because that is the shape this module actually asks `ps` for.
+    let (rss_kib, elapsed_seconds, leading_fields) = match third.parse::<u64>().ok() {
+        Some(rss) => match fields.next().and_then(parse_ps_elapsed_seconds) {
+            Some(elapsed) => (Some(rss), elapsed, 4),
+            None => (None, parse_ps_elapsed_seconds(third)?, 3),
+        },
+        None => (None, parse_ps_elapsed_seconds(third)?, 3),
+    };
+    // `args` is the remainder of the line, spaces included. Recover it from the
+    // original line rather than re-joining split fields so internal spacing
+    // survives.
+    let command = remainder_after_fields(line, leading_fields)
+        .trim()
+        .to_string();
+    Some(ProcessActivityRow {
+        pid,
+        ppid,
+        rss_kib,
+        elapsed_seconds,
+        command,
+    })
 }
 
 /// Skip `count` whitespace-separated fields and return the rest of the line.
@@ -222,6 +269,14 @@ pub fn select_provider_activity(
         .filter(|(row, _)| !excluded.contains(&row.pid))
         .collect();
     let descendant_count = descendants.len();
+    // Footprint is a property of the whole tree, not of the one process that
+    // best answers "what is it doing": a provider that spawned four linkers is
+    // holding what the linkers hold. Homeboy's own descendants are counted too
+    // — they are still occupying this host's memory.
+    let tree_rss_kib = descendants
+        .iter()
+        .filter_map(|(row, _)| row.rss_kib)
+        .reduce(u64::saturating_add);
     let selected = descendants
         .iter()
         .filter(|(row, _)| !row.command.is_empty())
@@ -233,17 +288,20 @@ pub fn select_provider_activity(
                 pid: row.pid,
                 depth: *depth,
                 elapsed_seconds: row.elapsed_seconds,
+                rss_kib: row.rss_kib,
                 command: truncate_command(&row.command),
                 source: "process_tree",
                 activity_type: if *depth == 1 { "executor" } else { "tool" },
                 descendant_count,
             }),
             descendant_count,
+            tree_rss_kib,
             unavailable: None,
         },
         None => ProviderActivitySample {
             activity: None,
             descendant_count,
+            tree_rss_kib,
             unavailable: Some(if descendant_count == 0 {
                 ActivityUnavailable::NoDescendants
             } else {
@@ -373,7 +431,7 @@ pub fn descendant_activity(owner_pid: u32) -> ProviderActivitySample {
     #[cfg(unix)]
     {
         let Some(output) = Command::new("ps")
-            .args(["-axo", "pid=,ppid=,etime=,args="])
+            .args(["-axo", PS_ACTIVITY_FORMAT])
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .output()
@@ -426,6 +484,81 @@ mod tests {
             rows[0].command,
             "timeout 1200 cargo test -q -p homeboy-agents"
         );
+    }
+
+    #[test]
+    fn parses_the_resident_set_size_column_of_the_current_projection() {
+        let ps = "4242 100 1048576 06:12 cargo test -q -p homeboy-agents\n";
+
+        let rows = parse_process_activity_rows(ps);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, 4242);
+        assert_eq!(rows[0].rss_kib, Some(1_048_576));
+        assert_eq!(rows[0].elapsed_seconds, 372);
+        assert_eq!(rows[0].command, "cargo test -q -p homeboy-agents");
+    }
+
+    #[test]
+    fn a_projection_without_memory_narrows_the_row_instead_of_dropping_it() {
+        // The original `pid ppid etime args` projection still parses, and the
+        // absent column reads as "not observed" rather than as zero memory.
+        let ps = "4242 100 06:12 cargo test -q\n";
+
+        let rows = parse_process_activity_rows(ps);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].rss_kib, None);
+        assert_eq!(rows[0].elapsed_seconds, 372);
+        assert_eq!(rows[0].command, "cargo test -q");
+    }
+
+    #[test]
+    fn a_bare_seconds_etime_is_not_mistaken_for_a_memory_column() {
+        // `etime` degenerates to a bare integer under a minute, which is the
+        // one shape the two projections could be confused over.
+        let ps = "4242 100 05 opencode run\n";
+
+        let rows = parse_process_activity_rows(ps);
+
+        assert_eq!(rows[0].rss_kib, None);
+        assert_eq!(rows[0].elapsed_seconds, 5);
+        assert_eq!(rows[0].command, "opencode run");
+    }
+
+    #[test]
+    fn tree_memory_is_summed_across_every_observed_descendant() {
+        // The supervision question is what the whole tree is holding on this
+        // host, so a provider plus the compilers it launched is one number.
+        let ps = concat!(
+            "100 1 262144 06:20 opencode run --format json\n",
+            "200 100 524288 06:12 cargo test -q\n",
+            "300 200 1048576 00:03 rustc --crate-name homeboy_agents\n",
+        );
+        let rows = parse_process_activity_rows(ps);
+
+        let sample = select_provider_activity(&rows, 1, &[]);
+
+        assert_eq!(sample.tree_rss_kib, Some(1_835_008));
+        assert_eq!(sample.descendant_count, 3);
+        let activity = sample.activity.expect("provider is observable");
+        // Selection is longest-running non-homeboy descendant (#11598 removed
+        // the depth preference that reported the controller). `opencode run`
+        // has been alive longest, so it is what is reported — and it carries
+        // only its own footprint, which is why the tree sum above exists.
+        assert_eq!(activity.command, "opencode run --format json");
+        assert_eq!(activity.rss_kib, Some(262_144));
+    }
+
+    #[test]
+    fn an_unmeasured_tree_reports_no_memory_rather_than_zero() {
+        // A budget that fired on a fabricated zero would be worse than no
+        // budget at all, so the absence has to survive selection.
+        let ps = "100 1 06:20 opencode run\n";
+        let rows = parse_process_activity_rows(ps);
+
+        assert_eq!(select_provider_activity(&rows, 1, &[]).tree_rss_kib, None);
+        assert_eq!(ProviderActivitySample::unsampled().tree_rss_kib, None);
     }
 
     #[test]

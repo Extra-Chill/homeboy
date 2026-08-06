@@ -17,10 +17,16 @@ use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::engine::undo::UndoSnapshot;
 use homeboy_core::git;
+use homeboy_core::validation_progress::{write_command_artifact, ValidationProgressRecorder};
 use homeboy_core::Error;
 use homeboy_extension as extension;
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+/// Keep a mutating lint invocation below the client command timeout while
+/// retaining enough time for large producer-specific fixers to finish.
+const LINT_FIX_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 pub(super) struct AuditStageRequest<'a> {
     pub(super) component: &'a Component,
@@ -309,6 +315,19 @@ pub(super) fn run_lint_stage(
     } else {
         options.glob.clone()
     };
+    let mut fix_progress = write
+        .then(|| {
+            ValidationProgressRecorder::new(
+                run_dir,
+                None,
+                vec![(
+                    "lint diagnostics".to_string(),
+                    "diagnose lint findings".to_string(),
+                )],
+            )
+        })
+        .transpose()?;
+    let fix_started = Instant::now();
 
     // Helper: build the lint runner with the current stage options.
     // Used by both the diagnostic pass and the fix-only pass.
@@ -343,6 +362,10 @@ pub(super) fn run_lint_stage(
             "Using {} cached lint findings — skipping diagnostic pass",
             count
         );
+        if let Some(progress) = fix_progress.as_mut() {
+            progress.start(0)?;
+            progress.finish(0, 0, None, None)?;
+        }
         // Parse cached findings for reporting
         let output_dir = std::env::var(OUTPUT_DIR_ENV).ok();
         let cached_findings = output_dir
@@ -359,7 +382,19 @@ pub(super) fn run_lint_stage(
         cached_findings
     } else {
         // No cached findings — run the diagnostic pass.
-        build_lint_runner(diagnostic_glob.as_deref(), None)?.run()?;
+        let runner = build_lint_runner(diagnostic_glob.as_deref(), None)?;
+        if let Some(progress) = fix_progress.as_mut() {
+            run_lint_fix_phase(
+                progress,
+                0,
+                "lint diagnostics",
+                runner,
+                run_dir,
+                remaining_lint_fix_budget(fix_started, "lint diagnostics")?,
+            )?;
+        } else {
+            runner.run()?;
+        }
 
         homeboy_extension::lint::baseline::parse_findings_file(&findings_file).unwrap_or_default()
     };
@@ -436,9 +471,24 @@ pub(super) fn run_lint_stage(
         let fix_output = (|| -> std::result::Result<(), Error> {
             for route in &fix_routes {
                 let route_glob = lint_scope_glob(&root_str, &route.files);
-                build_lint_runner(route_glob.as_deref(), route.step.as_deref())?
-                    .env("HOMEBOY_FIX_ONLY", "1")
-                    .run()?;
+                let runner = build_lint_runner(route_glob.as_deref(), route.step.as_deref())?
+                    .env("HOMEBOY_FIX_ONLY", "1");
+                if let Some(progress) = fix_progress.as_mut() {
+                    let step = route.step.as_deref().unwrap_or("default");
+                    let phase = format!("lint fixer {step}");
+                    let index =
+                        progress.append(phase.clone(), route_glob.clone().unwrap_or_default())?;
+                    run_lint_fix_phase(
+                        progress,
+                        index,
+                        &phase,
+                        runner,
+                        run_dir,
+                        remaining_lint_fix_budget(fix_started, &phase)?,
+                    )?;
+                } else {
+                    runner.run()?;
+                }
             }
             Ok(())
         })();
@@ -456,7 +506,24 @@ pub(super) fn run_lint_stage(
         )?;
         reject_unsafe_lint_autofix_changes(root, &scope_outcome.changed_files)?;
 
-        build_lint_runner(diagnostic_glob.as_deref(), None)?.run()?;
+        let runner = build_lint_runner(diagnostic_glob.as_deref(), None)?;
+        if let Some(progress) = fix_progress.as_mut() {
+            let phase = "post-fix verification";
+            let index = progress.append(
+                phase.to_string(),
+                "verify lint findings after fixes".to_string(),
+            )?;
+            run_lint_fix_phase(
+                progress,
+                index,
+                phase,
+                runner,
+                run_dir,
+                remaining_lint_fix_budget(fix_started, phase)?,
+            )?;
+        } else {
+            runner.run()?;
+        }
         let remaining_findings =
             homeboy_extension::lint::baseline::parse_findings_file(&findings_file)?;
         reject_remaining_lint_fix_findings(&remaining_findings)?;
@@ -504,6 +571,61 @@ pub(super) fn run_lint_stage(
         },
         fix_results,
     })
+}
+
+fn remaining_lint_fix_budget(started: Instant, phase: &str) -> homeboy_core::Result<Duration> {
+    LINT_FIX_LIFECYCLE_TIMEOUT
+        .checked_sub(started.elapsed())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "fix",
+                format!(
+                    "Lint fix lifecycle exceeded its {}s budget before {phase}",
+                    LINT_FIX_LIFECYCLE_TIMEOUT.as_secs()
+                ),
+                None,
+                Some(vec![
+                    "Inspect validation-progress.json to identify the last completed phase"
+                        .to_string(),
+                ]),
+            )
+        })
+}
+
+fn run_lint_fix_phase(
+    progress: &mut ValidationProgressRecorder<'_>,
+    index: usize,
+    phase: &str,
+    runner: extension::ExtensionRunner,
+    run_dir: &RunDir,
+    timeout: Duration,
+) -> homeboy_core::Result<()> {
+    progress.start(index)?;
+    let output = match runner.timeout(Some(timeout)).run() {
+        Ok(output) => output,
+        Err(error) => {
+            progress.finish(index, -1, None, None)?;
+            return Err(error);
+        }
+    };
+    let stdout_artifact = write_command_artifact(run_dir, index, "stdout", &output.stdout)?;
+    let stderr_artifact = write_command_artifact(run_dir, index, "stderr", &output.stderr)?;
+    progress.finish(index, output.exit_code, stdout_artifact, stderr_artifact)?;
+    if output.timed_out {
+        return Err(Error::validation_invalid_argument(
+            "fix",
+            format!("Lint fix {phase} timed out after {}ms", timeout.as_millis()),
+            None,
+            Some(vec![
+                "Inspect validation-progress.json and child-supervision.json for the stalled phase"
+                    .to_string(),
+                "Rerun homeboy review lint without --fix to inspect the current diagnostics"
+                    .to_string(),
+            ]),
+        ));
+    }
+    Ok(())
 }
 
 /// Fail a write that advertised fixable findings but left the local worktree
@@ -891,6 +1013,40 @@ mod tests {
         }
     }
 
+    fn write_multi_producer_lint_extension(home: &Path, id: &str) {
+        let extension = home.join(".config/homeboy/extensions").join(id);
+        fs::create_dir_all(&extension).unwrap();
+        fs::write(
+            extension.join(format!("{id}.json")),
+            serde_json::json!({
+                "name": "Multi producer lint fixture",
+                "version": "0.0.0",
+                "lint": {
+                    "extension_script": "lint.sh",
+                    "changed_file_routes": [
+                        { "extensions": ["fixture"], "step": "fixture-fixer" },
+                        { "extensions": ["other"], "step": "other-fixer" }
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            extension.join("lint.sh"),
+            "#!/bin/sh\nset -eu\nfixture=\"$HOMEBOY_COMPONENT_PATH/src/example.fixture\"\nother=\"$HOMEBOY_COMPONENT_PATH/src/example.other\"\necho \"${HOMEBOY_FIX_ONLY:-diagnose}:${HOMEBOY_STEP:-all}\" >> \"$HOMEBOY_COMPONENT_PATH/runner.log\"\nif [ \"${HOMEBOY_FIX_ONLY:-}\" = 1 ]; then\n  case \"$HOMEBOY_STEP\" in\n    fixture-fixer) printf 'resolved\\n' > \"$fixture\" ;;\n    other-fixer) printf 'resolved\\n' > \"$other\" ;;\n    *) exit 91 ;;\n  esac\n  exit 0\nfi\nif grep -q unresolved \"$fixture\" || grep -q unresolved \"$other\"; then\n  printf '%s\\n' '[{\"tool\":\"fixture\",\"file\":\"src/example.fixture\",\"message\":\"fixture finding\",\"rule\":\"fixture.rule\",\"fixable\":true},{\"tool\":\"other\",\"file\":\"src/example.other\",\"message\":\"other finding\",\"rule\":\"other.rule\",\"fixable\":true}]' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nelse\n  printf '%s\\n' '[]' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nfi\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = extension.join("lint.sh");
+            let mut permissions = fs::metadata(&script).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(script, permissions).unwrap();
+        }
+    }
+
     fn init_routed_lint_repo(root: &Path) {
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("src/example.fixture"), "unresolved\n").unwrap();
@@ -972,6 +1128,54 @@ mod tests {
             assert_eq!(
                 fs::read_to_string(root.join("runner.log")).unwrap(),
                 "diagnose:all:1\n1:fixture-fixer:1\ndiagnose:all:1\n"
+            );
+            let _ = fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn local_lint_write_records_multi_producer_fix_lifecycle_through_verification() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let root = tmp_dir("multi-producer-fix");
+            init_routed_lint_repo(&root);
+            fs::write(root.join("src/example.other"), "unresolved\n").unwrap();
+            write_multi_producer_lint_extension(home.path(), "multi-producer-fixture");
+            let run_dir = RunDir::create().unwrap();
+
+            let stage = run_lint_stage(
+                &routed_component(&root, "multi-producer-fixture"),
+                &root,
+                &[],
+                &LintSourceOptions::default(),
+                None,
+                true,
+                &run_dir,
+            )
+            .expect("both producers and post-fix verification should complete");
+
+            assert_eq!(
+                stage.summary.changed_files,
+                vec!["src/example.fixture", "src/example.other"]
+            );
+            let ledger =
+                homeboy_core::validation_progress::ValidationProgressLedger::read_from_run_dir(
+                    &run_dir,
+                )
+                .expect("fix lifecycle ledger");
+            assert_eq!(ledger.status, "passed");
+            assert_eq!(ledger.command_count, 4);
+            assert_eq!(ledger.commands[0].label, "lint diagnostics");
+            assert_eq!(ledger.commands[1].label, "lint fixer fixture-fixer");
+            assert_eq!(ledger.commands[2].label, "lint fixer other-fixer");
+            assert_eq!(ledger.commands[3].label, "post-fix verification");
+            assert!(ledger
+                .commands
+                .iter()
+                .all(|command| command.finished_at.is_some()));
+            assert!(ledger.active_command.is_none());
+            assert_eq!(
+                fs::read_to_string(root.join("runner.log")).unwrap(),
+                "diagnose:all\n1:fixture-fixer\n1:other-fixer\ndiagnose:all\n"
             );
             let _ = fs::remove_dir_all(root);
         });

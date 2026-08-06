@@ -12,6 +12,11 @@ use crate::core::io::output_file::{write_output_file_atomically, OutputWriteOpti
 const COMMAND_RESULT_SCHEMA: &str = "homeboy/command-result/v3";
 pub const ACTIONABLE_METADATA_KEY: &str = "_homeboy_actionable";
 
+/// A producer embedded [`ACTIONABLE_METADATA_KEY`] in its payload, but the
+/// value did not match the actionable-metadata contract, so the run pointer,
+/// next actions, artifacts and evidence it carried could not be lifted.
+pub const CONTRACT_WARNING_ACTIONABLE_UNPARSABLE: &str = "actionable_metadata_unparsable";
+
 #[derive(Debug, Serialize)]
 pub struct CommandResultEnvelope<T: Serialize> {
     pub schema: &'static str,
@@ -39,6 +44,29 @@ pub struct CommandResultEnvelope<T: Serialize> {
     pub data: Option<T>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presentation: Option<CommandPresentationEnvelope>,
+    /// Contract defects detected while assembling this envelope.
+    ///
+    /// Additive and omitted when empty, so the serialized shape is unchanged
+    /// for every well-formed result and pre-existing v3 consumers keep parsing
+    /// (serde ignores unknown fields). It exists so that a *present but broken*
+    /// actionable contract is distinguishable from an absent one instead of
+    /// being silently swallowed — see [`CONTRACT_WARNING_ACTIONABLE_UNPARSABLE`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contract_warnings: Vec<CommandContractWarning>,
+}
+
+/// A defect in the contract a command payload declared, reported in-band on the
+/// envelope rather than dropped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandContractWarning {
+    /// Stable machine-matchable identifier, e.g.
+    /// [`CONTRACT_WARNING_ACTIONABLE_UNPARSABLE`].
+    pub code: String,
+    pub message: String,
+    /// RFC 6901 JSON pointer to the offending value, relative to the payload
+    /// that became `data`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pointer: Option<String>,
 }
 
 /// The resolved CLI identity carried by command-result envelopes. `command` is
@@ -319,6 +347,7 @@ impl<T: Serialize> CommandResultEnvelope<T> {
             diagnostics: None,
             data: Some(data),
             presentation: None,
+            contract_warnings: Vec::new(),
         }
     }
 
@@ -359,6 +388,7 @@ impl CommandResultEnvelope<()> {
             }),
             data: None,
             presentation: None,
+            contract_warnings: Vec::new(),
         }
     }
 }
@@ -571,6 +601,7 @@ impl CommandResultEnvelope<()> {
             diagnostics: self.diagnostics,
             data: None,
             presentation: self.presentation,
+            contract_warnings: self.contract_warnings,
         }
     }
 }
@@ -582,7 +613,11 @@ fn envelope_for_data(
     presentation: Option<CommandPresentationEnvelope>,
 ) -> CommandResultEnvelope<Value> {
     let success = exit_code == 0;
-    let mut actionable = actionable_metadata_for_payload(&mut data).unwrap_or_default();
+    let ActionableMetadataExtraction {
+        metadata,
+        warnings: contract_warnings,
+    } = actionable_metadata_for_payload(&mut data);
+    let mut actionable = metadata.unwrap_or_default();
     if actionable.run.is_none() {
         actionable.run = actionable.refs.runs.first().cloned();
     }
@@ -634,6 +669,7 @@ fn envelope_for_data(
         diagnostics,
         data: Some(data),
         presentation,
+        contract_warnings,
     }
 }
 
@@ -1113,29 +1149,95 @@ fn normalize_status(status: &str) -> Option<&'static str> {
     }
 }
 
-fn actionable_metadata_for_payload(data: &mut Value) -> Option<CommandActionableMetadata> {
+/// The total result of searching a payload for its actionable contract.
+///
+/// The predecessor returned a bare `Option`, which the caller collapsed with
+/// `unwrap_or_default()`. That made three very different situations
+/// indistinguishable: no contract declared, a contract declared and lifted, and
+/// a contract declared but *unparsable*. In the third case the key had already
+/// been removed from the payload, so the run pointer, next actions, artifacts
+/// and evidence were destroyed and the orchestrator received a well-formed
+/// envelope that simply claimed no run existed (#10305).
+#[derive(Debug, Default)]
+struct ActionableMetadataExtraction {
+    metadata: Option<CommandActionableMetadata>,
+    warnings: Vec<CommandContractWarning>,
+}
+
+fn actionable_metadata_for_payload(data: &mut Value) -> ActionableMetadataExtraction {
+    let mut extraction = ActionableMetadataExtraction::default();
+    let mut pointer = String::new();
+    collect_actionable_metadata(data, &mut pointer, &mut extraction);
+    extraction
+}
+
+/// Walks the payload, lifting the first well-formed actionable contract and
+/// recording a warning for every declared-but-unparsable one.
+///
+/// Traversal and key-removal behaviour deliberately matches the predecessor:
+/// the search stops at the first contract that parses, so nested keys below an
+/// already-satisfied lookup are left untouched exactly as before.
+fn collect_actionable_metadata(
+    data: &mut Value,
+    pointer: &mut String,
+    extraction: &mut ActionableMetadataExtraction,
+) {
+    if extraction.metadata.is_some() {
+        return;
+    }
+
     match data {
         Value::Object(map) => {
-            if let Some(metadata) = map.remove(ACTIONABLE_METADATA_KEY) {
-                return serde_json::from_value(metadata).ok();
-            }
-            for child in map.values_mut() {
-                if let Some(metadata) = actionable_metadata_for_payload(child) {
-                    return Some(metadata);
+            if let Some(raw) = map.remove(ACTIONABLE_METADATA_KEY) {
+                let found_at = format!("{pointer}/{ACTIONABLE_METADATA_KEY}");
+                match serde_json::from_value::<CommandActionableMetadata>(raw) {
+                    Ok(metadata) => {
+                        extraction.metadata = Some(metadata);
+                        return;
+                    }
+                    Err(error) => {
+                        extraction.warnings.push(CommandContractWarning {
+                            code: CONTRACT_WARNING_ACTIONABLE_UNPARSABLE.to_string(),
+                            message: format!(
+                                "actionable metadata at `{found_at}` does not match the \
+                                 command-result contract and could not be lifted into the \
+                                 envelope: {error}"
+                            ),
+                            pointer: Some(found_at),
+                        });
+                    }
                 }
             }
-            None
+            for (key, child) in map.iter_mut() {
+                let restore = pointer.len();
+                pointer.push('/');
+                pointer.push_str(&escape_json_pointer_token(key));
+                collect_actionable_metadata(child, pointer, extraction);
+                pointer.truncate(restore);
+                if extraction.metadata.is_some() {
+                    return;
+                }
+            }
         }
         Value::Array(items) => {
-            for child in items {
-                if let Some(metadata) = actionable_metadata_for_payload(child) {
-                    return Some(metadata);
+            for (index, child) in items.iter_mut().enumerate() {
+                let restore = pointer.len();
+                pointer.push('/');
+                pointer.push_str(&index.to_string());
+                collect_actionable_metadata(child, pointer, extraction);
+                pointer.truncate(restore);
+                if extraction.metadata.is_some() {
+                    return;
                 }
             }
-            None
         }
-        _ => None,
+        _ => {}
     }
+}
+
+/// RFC 6901 token escaping: `~` becomes `~0` and `/` becomes `~1`.
+fn escape_json_pointer_token(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
 }
 
 fn summary_for_payload(
@@ -1659,6 +1761,158 @@ mod tests {
         assert!(value.get("next_actions").is_none());
         assert!(value.get("artifacts").is_none());
         assert!(value.get("evidence").is_none());
+        // An absent contract is not a defective one.
+        assert!(value.get("contract_warnings").is_none());
+    }
+
+    /// #10305: a payload that *declares* an actionable contract but gets it
+    /// wrong used to be indistinguishable from one that declared nothing. The
+    /// key was removed from `data` and the parse failure was swallowed by
+    /// `unwrap_or_default()`, so the orchestrator saw a well-formed envelope
+    /// asserting there was no run.
+    #[test]
+    fn malformed_actionable_metadata_is_reported_instead_of_silently_dropped() {
+        let response = cli_response_for_json_result_for_command(
+            &Ok(json!({
+                "run_id": "run-9",
+                ACTIONABLE_METADATA_KEY: {
+                    // `watch_command` is required by CommandRunRef; omitting it
+                    // makes the whole metadata blob fail to deserialize.
+                    "run": {
+                        "id": "run-9",
+                        "kind": "bench",
+                        "source": "test",
+                        "status_command": "homeboy runs show run-9"
+                    }
+                }
+            })),
+            0,
+            "observe",
+            None,
+        );
+        let value = serde_json::to_value(response).expect("response json");
+
+        let warnings = value["contract_warnings"]
+            .as_array()
+            .expect("contract warnings are reported");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0]["code"], CONTRACT_WARNING_ACTIONABLE_UNPARSABLE);
+        assert_eq!(warnings[0]["pointer"], "/_homeboy_actionable");
+        let message = warnings[0]["message"].as_str().expect("warning message");
+        assert!(
+            message.contains("watch_command"),
+            "warning should name the failing field, got: {message}"
+        );
+
+        // The lift genuinely could not happen, so the run pointer is still
+        // absent — but that absence is now declared rather than silent.
+        assert!(value.get("run").is_none());
+        // The internal key still never leaks into consumer-visible data.
+        assert!(value["data"].get(ACTIONABLE_METADATA_KEY).is_none());
+    }
+
+    #[test]
+    fn malformed_nested_actionable_metadata_reports_its_json_pointer() {
+        let response = cli_response_for_json_result_for_command(
+            &Ok(json!({
+                "stages": [
+                    { "name": "first" },
+                    {
+                        "name": "second",
+                        ACTIONABLE_METADATA_KEY: { "next_actions": [{ "label": "no command" }] }
+                    }
+                ]
+            })),
+            0,
+            "release",
+            None,
+        );
+        let value = serde_json::to_value(response).expect("response json");
+
+        let warnings = value["contract_warnings"]
+            .as_array()
+            .expect("contract warnings are reported");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0]["pointer"], "/stages/1/_homeboy_actionable");
+    }
+
+    /// A well-formed contract must not gain the new field, so the serialized
+    /// shape of every healthy result is byte-for-byte what v3 consumers already
+    /// receive.
+    #[test]
+    fn well_formed_actionable_metadata_adds_no_contract_warnings() {
+        let response = cli_response_for_json_result_for_command(
+            &Ok(json!({
+                ACTIONABLE_METADATA_KEY: actionable_metadata_value_for_run_ref(
+                    "run-7", "bench", "test",
+                )
+            })),
+            0,
+            "observe",
+            None,
+        );
+        let value = serde_json::to_value(response).expect("response json");
+
+        assert_eq!(value["run"]["id"], "run-7");
+        assert!(value.get("contract_warnings").is_none());
+    }
+
+    /// The envelope stayed backward compatible: `contract_warnings` is additive
+    /// and optional, so a consumer compiled against the pre-change v3 shape
+    /// still parses a new envelope that carries warnings.
+    #[test]
+    fn pre_change_v3_consumer_still_parses_an_envelope_carrying_contract_warnings() {
+        /// The v3 envelope exactly as it existed before `contract_warnings`,
+        /// standing in for an already-deployed client.
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct LegacyV3Envelope {
+            schema: String,
+            command: String,
+            #[serde(default)]
+            operation: Option<String>,
+            success: bool,
+            exit_code: i32,
+            status: String,
+            #[serde(default)]
+            run: Option<CommandRunRef>,
+            #[serde(default)]
+            refs: CommandResultRefs,
+            #[serde(default)]
+            summary: Option<String>,
+            #[serde(default)]
+            next_actions: Vec<CommandNextAction>,
+            #[serde(default)]
+            artifacts: Vec<CommandArtifactRef>,
+            #[serde(default)]
+            evidence: Vec<CommandArtifactRef>,
+            #[serde(default)]
+            diagnostics: Option<Value>,
+            #[serde(default)]
+            data: Option<Value>,
+        }
+
+        let response = cli_response_for_json_result_for_command(
+            &Ok(json!({
+                "run_id": "run-9",
+                ACTIONABLE_METADATA_KEY: { "run": { "id": "run-9" } }
+            })),
+            0,
+            "observe",
+            None,
+        );
+        let serialized = serde_json::to_string(&response).expect("serialize envelope");
+
+        // Precondition: this envelope really does carry the new field.
+        let raw: Value = serde_json::from_str(&serialized).expect("raw json");
+        assert_eq!(raw["contract_warnings"].as_array().map(Vec::len), Some(1));
+
+        let legacy: LegacyV3Envelope =
+            serde_json::from_str(&serialized).expect("pre-change consumer still parses");
+        assert_eq!(legacy.schema, COMMAND_RESULT_SCHEMA);
+        assert_eq!(legacy.command, "observe");
+        assert_eq!(legacy.status, "succeeded");
+        assert!(legacy.success);
     }
 
     #[test]

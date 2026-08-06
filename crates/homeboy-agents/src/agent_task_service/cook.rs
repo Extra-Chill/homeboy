@@ -46,6 +46,7 @@ use super::cook_promotion::{
     refreshed_moving_base_recovery, retryable_provider_discovery_failure, CookReportInput,
     MovingBaseCookRecovery,
 };
+use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
 use super::AgentTaskRunResult;
 
@@ -2747,23 +2748,94 @@ where
                     );
                     // The provider runs as a descendant of this controller
                     // process, so the controller pid is the root of the tree to
-                    // sample.
+                    // sample — and, when a budget orders a stop, the root of
+                    // the tree to terminate. `terminate_process_tree` excludes
+                    // the calling process, so this ends the provider's work
+                    // without ending the controller that has to record why.
                     let heartbeat_owner_pid = std::process::id();
+                    // Resolved before the thread so a malformed policy document
+                    // fails the attempt loudly. An operator who declared a stop
+                    // budget and silently got none believes this host is
+                    // protected and is not (#7015).
+                    let supervision_policy = resolve_supervision_policy()?;
+                    let supervision_backend = dispatch_plan
+                        .tasks
+                        .first()
+                        .map(|task| task.executor.backend.clone());
                     std::thread::scope(|scope| {
                         scope.spawn(move || {
+                            let mut supervisor =
+                                CookSupervisor::new(supervision_policy, supervision_backend);
                             while let Err(mpsc::RecvTimeoutError::Timeout) =
                                 heartbeat_wait.recv_timeout(COOK_HEARTBEAT_INTERVAL)
                             {
                                 let activity = heartbeat_activity.sample(heartbeat_owner_pid);
+                                let tick = supervisor.observe(&activity);
+                                let detail = tick.detail_line();
                                 let _ = report_cook_progress_with_activity(
                                     durable_observer,
                                     &heartbeat_cook_id,
                                     &heartbeat_run_id,
                                     "heartbeat",
                                     attempt,
-                                    Some("provider execution is still running"),
+                                    Some(
+                                        detail
+                                            .as_deref()
+                                            .unwrap_or("provider execution is still running"),
+                                    ),
                                     (!activity.is_empty()).then_some(&activity),
                                 );
+                                // Supervision evidence is written even when the
+                                // policy is undeclared: the resource timeline is
+                                // how "was this run expensive?" stops being a
+                                // question only answerable by having watched it.
+                                if !tick.is_empty() {
+                                    let _ = agent_task_lifecycle::record_cook_supervision(
+                                        &heartbeat_run_id,
+                                        attempt,
+                                        (!tick.sample.is_empty())
+                                            .then(|| serde_json::to_value(tick.sample))
+                                            .and_then(std::result::Result::ok),
+                                        tick.decisions
+                                            .iter()
+                                            .filter_map(|decision| {
+                                                serde_json::to_value(decision).ok()
+                                            })
+                                            .collect(),
+                                    );
+                                }
+                                if tick.stop_now {
+                                    let outcome = match homeboy_core::process::terminate_process_tree(
+                                        heartbeat_owner_pid,
+                                    ) {
+                                        Ok(termination) => serde_json::json!({
+                                            "status": "terminated",
+                                            "signal": termination.signal,
+                                            "signalled_pids": termination.signalled_pids,
+                                            "killed_pids": termination.killed_pids,
+                                            "surviving_pids": termination.surviving_pids,
+                                            "recovery_commands": termination.recovery_commands,
+                                        }),
+                                        // A host that cannot terminate a tree
+                                        // (no process-tree cancellation, a pid
+                                        // that outlives SIGKILL) must say so.
+                                        // Recording the order alone would let a
+                                        // reader conclude the run was stopped.
+                                        Err(error) => serde_json::json!({
+                                            "status": "termination_failed",
+                                            "error": error.to_string(),
+                                            "recovery_commands":
+                                                homeboy_core::process::process_tree_recovery_commands(
+                                                    heartbeat_owner_pid,
+                                                ),
+                                        }),
+                                    };
+                                    let _ = agent_task_lifecycle::record_cook_supervision_stop(
+                                        &heartbeat_run_id,
+                                        attempt,
+                                        outcome,
+                                    );
+                                }
                             }
                         });
                         let result = run_loaded_plan_with_derived_cook_baseline(

@@ -59,6 +59,9 @@ pub fn read_plan(spec: &str) -> Result<AgentTaskPlan> {
             Some(raw.clone()),
         )
     })?;
+    plan.validate_managed_services().map_err(|message| {
+        Error::validation_invalid_argument("services.cleanup_deadline_ms", message, None, None)
+    })?;
     normalize_plan_workspaces(&mut plan)?;
     Ok(plan)
 }
@@ -1084,4 +1087,58 @@ fn materialization_string(materialization: &Value, key: &str) -> Option<String> 
         .get(key)
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::agent_task_scheduler::{
+        AgentTaskManagedService, AgentTaskManagedServiceLifecycle, AgentTaskPlan,
+    };
+
+    fn invalid_service() -> AgentTaskManagedService {
+        AgentTaskManagedService {
+            version: AgentTaskManagedService::VERSION,
+            id: "invalid".to_string(),
+            command: vec!["fixture".to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            env_allowlist: Vec::new(),
+            secret_env: Vec::new(),
+            secret_env_plan: None,
+            host: "127.0.0.1".to_string(),
+            port: None,
+            port_env: None,
+            socket_handoff: false,
+            readiness: None,
+            cleanup_deadline_ms: 0,
+            public_url: None,
+            browser_origin_probe: None,
+            lifecycle: AgentTaskManagedServiceLifecycle::Plan,
+            target: None,
+        }
+    }
+
+    #[test]
+    fn direct_run_plan_read_rejects_an_invalid_managed_service() {
+        let mut plan = AgentTaskPlan::new("invalid-service", Vec::new());
+        plan.services.push(invalid_service());
+        plan.rebuild_homeboy_plan();
+        let file = tempfile::NamedTempFile::new().expect("plan file");
+        std::fs::write(
+            file.path(),
+            serde_json::to_vec(&plan).expect("serialize plan"),
+        )
+        .expect("write plan");
+
+        let spec = format!("@{}", file.path().display());
+        let error = read_plan(&spec).expect_err("invalid plan");
+        assert_eq!(
+            error.code,
+            homeboy_core::ErrorCode::ValidationInvalidArgument
+        );
+        assert!(error.message.contains("cleanup_deadline_ms"));
+    }
 }

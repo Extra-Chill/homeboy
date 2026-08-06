@@ -35,6 +35,37 @@ pub use types::{
 
 crate::entity_crud!(Schedule; list_ids);
 
+pub const AUTOMATIC_RETENTION_SCHEDULE_ID: &str = "automatic-retention";
+
+/// Install the built-in bounded retention pass unless an operator already owns
+/// this schedule's declaration. Disabling the installed schedule is the opt-out.
+pub fn ensure_automatic_retention_schedule() -> crate::Result<Schedule> {
+    if exists(AUTOMATIC_RETENTION_SCHEDULE_ID) {
+        return load(AUTOMATIC_RETENTION_SCHEDULE_ID);
+    }
+
+    let schedule = Schedule {
+        id: AUTOMATIC_RETENTION_SCHEDULE_ID.to_string(),
+        command: Some(vec![
+            "cleanup".to_string(),
+            "automatic-retention".to_string(),
+        ]),
+        exec: None,
+        steps: Vec::new(),
+        every: Cadence::from_seconds(60 * 60)?,
+        notify_on: NotifyPolicy::Change,
+        on_overlap: OverlapPolicy::Skip,
+        notification_transport: None,
+        notification_route: None,
+        jitter_seconds: None,
+        enabled: true,
+        description: Some("Bounded automatic retention of Homeboy-managed storage.".to_string()),
+        aliases: Vec::new(),
+    };
+    save(&schedule)?;
+    Ok(schedule)
+}
+
 /// Schedules that are due at `now`, in declaration order.
 pub fn due_schedules(now: chrono::DateTime<chrono::Utc>) -> crate::Result<Vec<Schedule>> {
     Ok(list()?
@@ -87,6 +118,32 @@ mod tests {
             assert!(ids.contains(&"never-run"));
             assert!(!ids.contains(&"disabled"));
             assert!(!ids.contains(&"just-ran"));
+        });
+    }
+
+    #[test]
+    fn automatic_retention_schedule_is_installed_once_and_preserves_opt_out() {
+        crate::test_support::with_isolated_home(|_| {
+            let installed = ensure_automatic_retention_schedule().expect("install schedule");
+            assert_eq!(installed.id, AUTOMATIC_RETENTION_SCHEDULE_ID);
+            assert_eq!(
+                installed.command,
+                Some(vec![
+                    "cleanup".to_string(),
+                    "automatic-retention".to_string()
+                ])
+            );
+            assert_eq!(installed.every.seconds(), 3_600);
+            assert_eq!(installed.on_overlap, OverlapPolicy::Skip);
+
+            let mut opted_out = installed;
+            opted_out.enabled = false;
+            opted_out.every = Cadence::from_seconds(7_200).expect("cadence");
+            save(&opted_out).expect("save opt-out");
+
+            let preserved = ensure_automatic_retention_schedule().expect("preserve schedule");
+            assert!(!preserved.enabled);
+            assert_eq!(preserved.every.seconds(), 7_200);
         });
     }
 }

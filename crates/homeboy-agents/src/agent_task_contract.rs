@@ -26,7 +26,7 @@ use crate::agent_task_provider::{
     RESOLVED_AGENT_RUNTIME_EXECUTION_CONTRACT_SCHEMA,
 };
 use crate::agent_task_schedule::{
-    AgentTaskAggregateStatus, AgentTaskState, AGENT_TASK_PLAN_SCHEMA,
+    AgentTaskAggregateStatus, AgentTaskManagedService, AgentTaskState, AGENT_TASK_PLAN_SCHEMA,
 };
 use crate::agent_tool_control_plane::AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA;
 use homeboy_core::command_invocation::COMMAND_INVOCATION_SCHEMA;
@@ -57,9 +57,21 @@ pub struct AgentTaskCoreContract {
     pub schema: String,
     pub schemas: AgentTaskCoreContractSchemas,
     pub provider_capability: AgentTaskCoreProviderCapabilityContract,
+    pub managed_services: AgentTaskManagedServiceContract,
     pub agent_runtime_handshake: AgentRuntimeContractHandshake,
     pub enums: AgentTaskCoreContractEnums,
     pub redaction_defaults: AgentTaskCoreRedactionDefaults,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentTaskManagedServiceContract {
+    pub direct_plan_field: String,
+    pub durable_plan_path: String,
+    pub version: u32,
+    pub fields: Vec<String>,
+    pub lifecycle_values: Vec<String>,
+    pub default_cleanup_deadline_ms: u64,
+    pub max_cleanup_deadline_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -300,6 +312,17 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
                 "metadata",
                 "extra",
             ]),
+        },
+        managed_services: AgentTaskManagedServiceContract {
+            direct_plan_field: "services".to_string(),
+            durable_plan_path: "inputs.managed_services".to_string(),
+            version: AgentTaskManagedService::VERSION,
+            fields: string_vec(AgentTaskManagedService::FIELDS),
+            lifecycle_values: string_vec(
+                crate::agent_task_schedule::AgentTaskManagedServiceLifecycle::VALUES,
+            ),
+            default_cleanup_deadline_ms: AgentTaskManagedService::DEFAULT_CLEANUP_DEADLINE_MS,
+            max_cleanup_deadline_ms: AgentTaskManagedService::MAX_CLEANUP_DEADLINE_MS,
         },
         agent_runtime_handshake: agent_runtime_contract_handshake(),
         enums: AgentTaskCoreContractEnums {
@@ -599,6 +622,35 @@ mod tests {
             .provider_capability
             .workspace_mount_spec_fields
             .contains(&"target_path".to_string()));
+        assert_eq!(contract.managed_services.direct_plan_field, "services");
+        assert_eq!(
+            contract.managed_services.durable_plan_path,
+            "inputs.managed_services"
+        );
+        assert_eq!(
+            contract.managed_services.version,
+            AgentTaskManagedService::VERSION
+        );
+        assert!(contract
+            .managed_services
+            .fields
+            .contains(&"cleanup_deadline_ms".to_string()));
+        assert_eq!(
+            contract.managed_services.fields,
+            string_vec(AgentTaskManagedService::FIELDS)
+        );
+        assert_eq!(
+            contract.managed_services.lifecycle_values,
+            string_vec(crate::agent_task_schedule::AgentTaskManagedServiceLifecycle::VALUES)
+        );
+        assert_eq!(
+            contract.managed_services.default_cleanup_deadline_ms,
+            AgentTaskManagedService::DEFAULT_CLEANUP_DEADLINE_MS
+        );
+        assert_eq!(
+            contract.managed_services.max_cleanup_deadline_ms,
+            AgentTaskManagedService::MAX_CLEANUP_DEADLINE_MS
+        );
     }
 
     #[test]

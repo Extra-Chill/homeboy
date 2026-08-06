@@ -247,6 +247,34 @@ pub fn validate_payload(key: &str, payload: &Value) -> Result<()> {
     }
 }
 
+/// Project the legacy test parser's successful summary onto the declared
+/// `test.failures` array contract. The parser writes aggregate counts beside
+/// an empty failure list, while the sidecar itself represents only failures.
+fn payload_for_validation<'a>(key: &str, payload: &'a Value) -> &'a Value {
+    if key != "test.failures" {
+        return payload;
+    }
+
+    let Some(object) = payload.as_object() else {
+        return payload;
+    };
+    let Some(failures) = object.get("failures").filter(|value| value.is_array()) else {
+        return payload;
+    };
+    let Some(total) = object.get("total").and_then(Value::as_u64) else {
+        return payload;
+    };
+    let Some(passed) = object.get("passed").and_then(Value::as_u64) else {
+        return payload;
+    };
+
+    if failures.as_array().is_some_and(Vec::is_empty) && total == passed {
+        failures
+    } else {
+        payload
+    }
+}
+
 /// What a post-run check of one declared sidecar file found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -302,7 +330,7 @@ pub fn validate_sidecar_file(key: &str, path: &Path) -> Result<SidecarFileCheck>
             None,
         )
     })?;
-    validate_payload(key, &payload)?;
+    validate_payload(key, payload_for_validation(key, &payload))?;
 
     Ok(SidecarFileCheck::Valid)
 }
@@ -579,5 +607,38 @@ mod tests {
         let err =
             validate_sidecar_file("bench.results", &bench).expect_err("browser evidence shape");
         assert!(err.to_string().contains("network"), "{err}");
+    }
+
+    #[test]
+    fn sidecar_file_validation_normalizes_successful_legacy_test_failure_summaries() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let failures = dir.path().join("test-failures.json");
+        std::fs::write(
+            &failures,
+            r#"{"failures":[],"total":10,"passed":10,"metadata":{"assertions":42}}"#,
+        )
+        .expect("test failure summary");
+
+        assert_eq!(
+            validate_sidecar_file("test.failures", &failures)
+                .expect("successful legacy summary is an empty failure sidecar"),
+            SidecarFileCheck::Valid
+        );
+    }
+
+    #[test]
+    fn sidecar_file_validation_rejects_invalid_test_failure_summary_shapes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        for (name, payload) in [
+            ("not-an-array", r#"{"failures":{},"total":10,"passed":10}"#),
+            ("not-successful", r#"{"failures":[],"total":10,"passed":9}"#),
+        ] {
+            let path = dir.path().join(format!("{name}.json"));
+            std::fs::write(&path, payload).expect("invalid test failure summary");
+            let error = validate_sidecar_file("test.failures", &path)
+                .expect_err("only successful empty legacy summaries are normalized");
+            assert!(error.to_string().contains("JSON array"), "{error}");
+        }
     }
 }
