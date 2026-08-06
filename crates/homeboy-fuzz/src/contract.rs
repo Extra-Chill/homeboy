@@ -171,7 +171,7 @@ pub enum FuzzFindingStatus {
     Suppressed,
 }
 
-pub fn canonical_operation_family(kind: &str) -> Option<FuzzOperationFamily> {
+pub(crate) fn canonical_operation_family(kind: &str) -> Option<FuzzOperationFamily> {
     let normalized = kind.trim().to_ascii_lowercase().replace(['-', ' '], "_");
     match normalized.as_str() {
         "get" | "read" => Some(FuzzOperationFamily::Read),

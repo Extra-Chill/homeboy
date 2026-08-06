@@ -73,7 +73,7 @@ pub struct FuzzHotspotCohortDelta {
     pub run_count_delta: i64,
 }
 
-pub fn compare_fuzz_hotspot_sets(
+pub(crate) fn compare_fuzz_hotspot_sets(
     baseline: &FuzzHotspotSet,
     candidate: &FuzzHotspotSet,
 ) -> FuzzHotspotCohortComparison {

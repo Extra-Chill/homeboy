@@ -32,21 +32,19 @@ pub use artifact_envelope::{
     FuzzResultEnvelopeArtifactSummary,
 };
 pub use cohorts::{
-    compare_fuzz_hotspot_cohorts, compare_fuzz_hotspot_sets, FuzzHotspotCohortBaselineDrift,
-    FuzzHotspotCohortComparison, FuzzHotspotCohortDelta, FuzzHotspotCohortItem,
+    compare_fuzz_hotspot_cohorts, FuzzHotspotCohortBaselineDrift, FuzzHotspotCohortComparison,
+    FuzzHotspotCohortDelta, FuzzHotspotCohortItem,
 };
 pub use contract::{
-    canonical_operation_family, fuzz_core_contract, FuzzContractSchemas, FuzzCoreContract,
-    FuzzFindingStatus, FuzzOperationFamily, FuzzSafetyClass,
+    fuzz_core_contract, FuzzContractSchemas, FuzzCoreContract, FuzzFindingStatus,
+    FuzzOperationFamily, FuzzSafetyClass,
 };
 pub use coverage::{
-    reconcile_fuzz_coverage, FuzzArtifact, FuzzCoverage, FuzzCoverageGap, FuzzCoverageGroupSummary,
+    FuzzArtifact, FuzzCoverage, FuzzCoverageGap, FuzzCoverageGroupSummary,
     FuzzCoverageReconciliation, FuzzCoverageSkip, FuzzCoverageSummary, FuzzFinding, FuzzProvenance,
     FuzzReplayMetadata, FuzzThreshold, FuzzThresholdOperator,
 };
-pub use coverage_reconciliation_persistence::{
-    persist_fuzz_coverage_reconciliation, FUZZ_COVERAGE_RECONCILIATION_ARTIFACT_KIND,
-};
+pub use coverage_reconciliation_persistence::FUZZ_COVERAGE_RECONCILIATION_ARTIFACT_KIND;
 pub use defaults::{
     default_fuzz_gates, default_fuzz_required_artifacts, fuzz_gate_profile_contract,
     FuzzGateProfile,
@@ -69,10 +67,9 @@ pub use observations::{
     parse_fuzz_observation_set_value, FuzzObservation, FuzzObservationFamily, FuzzObservationSet,
 };
 pub use parse::{
-    merge_fuzz_target_inventory, parse_fuzz_action_model_file, parse_fuzz_case_log_contents,
-    parse_fuzz_case_log_file, parse_fuzz_exploration_policy_file, parse_fuzz_result_envelope_file,
-    parse_fuzz_results_file, parse_fuzz_sequence_plan_file, parse_fuzz_target_inventory_file,
-    parse_fuzz_workload_file,
+    merge_fuzz_target_inventory, parse_fuzz_action_model_file, parse_fuzz_case_log_file,
+    parse_fuzz_exploration_policy_file, parse_fuzz_result_envelope_file, parse_fuzz_results_file,
+    parse_fuzz_sequence_plan_file, parse_fuzz_target_inventory_file,
 };
 pub use payloads::{
     externalize_fuzz_campaign_payloads, FuzzPayload, FuzzPayloadBudget, FuzzPayloadExternalization,
@@ -85,10 +82,19 @@ pub use proof::{
     FuzzProofVerdict,
 };
 pub use result_envelope_persistence::{
-    fuzz_result_envelope_evidence_ref, fuzz_result_envelope_json, persist_fuzz_result_envelope,
-    persist_fuzz_run_result_envelope, report_fuzz_result_envelope,
+    fuzz_result_envelope_evidence_ref, report_fuzz_result_envelope,
     FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND,
 };
+
+// Crate-internal surface. These stages have no consumer outside homeboy-fuzz —
+// they are reached only through the public entry points above (and through
+// `persist_fuzz_run_evidence`). Re-exporting them at `pub(crate)` keeps the
+// in-crate `use crate::…` call sites working while leaving them subject to
+// rustc's dead-code analysis; a `pub` re-export at the crate root would exempt
+// them from it.
+pub(crate) use coverage::reconcile_fuzz_coverage;
+pub(crate) use coverage_reconciliation_persistence::persist_fuzz_coverage_reconciliation;
+pub(crate) use result_envelope_persistence::persist_fuzz_run_result_envelope;
 pub use run_dir_writers::{persist_fuzz_execution_request, persist_fuzz_sequence_plan};
 pub use run_evidence_persistence::{persist_fuzz_run_evidence, FuzzRunEvidence};
 pub use schemas::{
