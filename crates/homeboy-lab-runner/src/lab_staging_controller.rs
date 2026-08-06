@@ -971,6 +971,25 @@ pub(crate) fn submit_detached_staging(
     tunnel_mode: crate::RunnerTunnelMode,
     request: &LabOffloadRequest<'_>,
 ) -> Result<DetachedStagingSubmission> {
+    submit_detached_staging_with_daemon_ensure(
+        run_id,
+        runner_id,
+        tunnel_mode,
+        request,
+        ensure_current_controller_daemon,
+    )
+}
+
+fn submit_detached_staging_with_daemon_ensure<Ensure>(
+    run_id: &str,
+    runner_id: &str,
+    tunnel_mode: crate::RunnerTunnelMode,
+    request: &LabOffloadRequest<'_>,
+    ensure_daemon: Ensure,
+) -> Result<DetachedStagingSubmission>
+where
+    Ensure: FnOnce() -> Result<homeboy_core::daemon::DaemonStartResult>,
+{
     if !routing_ready() {
         return Err(Error::validation_invalid_argument(
             "lab_staging_adapter",
@@ -979,7 +998,7 @@ pub(crate) fn submit_detached_staging(
             None,
         ));
     }
-    let daemon = match ensure_current_controller_daemon() {
+    let daemon = match ensure_daemon() {
         Ok(daemon) => daemon,
         Err(daemon_error) => {
             return submit_deferred_runner_staging(
@@ -4062,6 +4081,189 @@ mod tests {
             Some(run_id),
         )
         .expect("submit durable attempt");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detached_staging_falls_back_through_authenticated_reverse_broker_and_projects_terminal_result_once(
+    ) {
+        use homeboy_core::api_jobs::{JobEventKind, JobStatus};
+        use homeboy_core::server::RunnerPolicy;
+        use homeboy_core::test_support::{with_isolated_home, AuthenticatedReverseBrokerFixture};
+
+        with_isolated_home(|home| {
+            let _adapter_guard = global_state_lock().lock().expect("adapter lock");
+            std::env::set_var("HOMEBOY_CONTROLLER_ID", "fixture-controller");
+            clear_installed_adapter();
+            register();
+            enable_production_routing();
+            crate::register_runner_staging_provider();
+            crate::create(
+                r#"{"id":"lab","kind":"local","workspace_root":"/tmp"}"#,
+                false,
+            )
+            .expect("create Lab runner");
+            crate::merge(
+                Some("lab"),
+                &serde_json::json!({
+                    "policy": RunnerPolicy {
+                        allow_raw_exec: Some(true),
+                        workspace_roots: vec!["/tmp".to_string()],
+                        allowed_commands: vec!["sh".to_string()],
+                        ..Default::default()
+                    }
+                })
+                .to_string(),
+                &[],
+            )
+            .expect("allow deterministic fixture command");
+            let broker = AuthenticatedReverseBrokerFixture::start("lab");
+            let (connected, code) = crate::connect_reverse(crate::ReverseRunnerConnectOptions {
+                controller_id: "fixture-controller".to_string(),
+                runner_id: "lab".to_string(),
+                broker_url: Some(broker.url().to_string()),
+            })
+            .expect("register authenticated reverse session");
+            assert_eq!(code, 0);
+            assert!(connected.connected);
+            // `connect_reverse` is the runner-side registration protocol. The
+            // controller observes that runner through its controller-role
+            // session record, just as the two production processes do.
+            let controller_session = crate::RunnerSession {
+                runner_id: "lab".to_string(),
+                mode: crate::RunnerTunnelMode::Reverse,
+                role: crate::RunnerSessionRole::Controller,
+                server_id: None,
+                controller_id: Some("fixture-controller".to_string()),
+                broker_url: Some(broker.url().to_string()),
+                remote_daemon_address: None,
+                local_port: None,
+                local_url: None,
+                tunnel_pid: None,
+                tunnel_process_start_identity: None,
+                remote_daemon_pid: None,
+                remote_daemon_lease_id: None,
+                homeboy_version: env!("CARGO_PKG_VERSION").to_string(),
+                homeboy_build_identity: Some(homeboy_product_identity::build_identity().display),
+                connected_at: chrono::Utc::now().to_rfc3339(),
+                worker_identity: Some("fixture-worker".to_string()),
+                worker_pid: Some(std::process::id()),
+                last_seen_at: Some(chrono::Utc::now().to_rfc3339()),
+                leaseless_recovery_evidence: None,
+            };
+            let controller_session_path =
+                homeboy_core::paths::runner_controller_session_file("lab", "fixture-controller")
+                    .expect("controller session path");
+            std::fs::create_dir_all(controller_session_path.parent().expect("session parent"))
+                .expect("create controller session parent");
+            std::fs::write(
+                controller_session_path,
+                serde_json::to_vec(&controller_session).expect("serialize controller session"),
+            )
+            .expect("write controller session");
+
+            let source = home.path().join("source");
+            std::fs::create_dir_all(&source).expect("create source");
+            std::fs::write(source.join("input.txt"), "staged-source\n").expect("write source");
+            let output = home.path().join("worker-output.txt");
+            let args = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("printf staged-worker-ok > {}", output.display()),
+            ];
+            let plan = homeboy_agents::agent_task_scheduler::AgentTaskPlan::new(
+                "authenticated-reverse-staging",
+                Vec::new(),
+            );
+            let run_id = "authenticated-reverse-staging-run";
+            submit_recipe_run(run_id);
+            let mut request = recipe_request(Some(recipe_command()), &args, HashMap::new());
+            request.placement_decision =
+                homeboy_core::lab_routing::compatibility_placement_decision(
+                    homeboy_lab_runner_contract::Placement::Lab,
+                    Some("lab"),
+                    false,
+                );
+            request.source_path = Some(&source);
+            request.durable_agent_task_plan = Some(&plan);
+            let pre_provider = || {
+                Err(Error::internal_unexpected(
+                    "fixture typed pre-provider daemon admission failure",
+                ))
+            };
+            let receipt = submit_detached_staging_with_daemon_ensure(
+                run_id,
+                "lab",
+                crate::RunnerTunnelMode::Reverse,
+                &request,
+                pre_provider,
+            )
+            .expect("admit durable fallback staging");
+            let DetachedStagingSubmission::Deferred(receipt) = receipt else {
+                panic!("typed pre-provider failure must select deferred staging");
+            };
+            let job_id = receipt.runner_receipt.handoff.runner_job_id.clone();
+            assert!(!job_id.is_empty());
+            assert_eq!(broker.jobs().len(), 1, "staging owns queue admission");
+            assert_eq!(broker.jobs()[0].status, JobStatus::Queued);
+            let warning = crate::status("lab")
+                .expect("read reverse runner status")
+                .stale_daemon
+                .expect("reverse verification warning");
+            assert_eq!(
+                warning.compatibility_reason.as_deref(),
+                Some("reverse_unverified")
+            );
+
+            let (worker, worker_code) =
+                crate::run_reverse_worker(crate::ReverseRunnerWorkerOptions {
+                    runner_id: "lab".to_string(),
+                    broker_url: broker.url().to_string(),
+                    broker_token: Some(broker.token().to_string()),
+                    project_id: None,
+                    lease_ms: 30_000,
+                    concurrency_limit: Some(1),
+                    loop_mode: false,
+                    idle_backoff_ms: 1,
+                    max_idle_backoff_ms: 10,
+                    broker_failure_backoff_ms: 1,
+                    broker_retry_limit: 1,
+                })
+                .expect("execute staged reverse job");
+            assert_eq!(worker_code, 0, "worker={worker:#?}");
+            assert!(worker.claimed);
+            assert_eq!(
+                std::fs::read_to_string(&output).expect("worker side effect"),
+                "staged-worker-ok"
+            );
+            let job = broker
+                .store
+                .get(uuid::Uuid::parse_str(&job_id).expect("job id"))
+                .expect("broker job");
+            assert_eq!(job.status, JobStatus::Succeeded);
+            let results = broker.store.events(job.id).expect("terminal evidence");
+            assert_eq!(
+                results
+                    .iter()
+                    .filter(|event| event.kind == JobEventKind::Result)
+                    .count(),
+                1
+            );
+            assert!(results
+                .iter()
+                .any(|event| event.kind == JobEventKind::Result && event.data.is_some()));
+
+            assert_eq!(
+                crate::controller_fallback_projection::reconcile_on_controller_startup()
+                    .expect("project terminal result"),
+                1
+            );
+            assert_eq!(
+                crate::controller_fallback_projection::reconcile_on_controller_startup()
+                    .expect("replay projection"),
+                0
+            );
+        });
     }
 
     fn envelope() -> LabStagingDispatchEnvelope {
