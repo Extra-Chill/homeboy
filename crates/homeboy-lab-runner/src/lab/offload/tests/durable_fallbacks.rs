@@ -9,6 +9,74 @@ fn detached_staging_controller_job_commands_use_activity_surface() {
 }
 
 #[test]
+fn deferred_staging_emits_only_durable_run_commands() {
+    let receipt = crate::controller_fallback_projection::DeferredControllerReceipt {
+        schema: "homeboy/controller-fallback-projection/v1".to_string(),
+        mission_id: "run-1".to_string(),
+        runner_receipt: crate::runner_staging_operation::RemoteRunnerStagingReceipt {
+            schema: "homeboy/remote-runner-staging-receipt/v1".to_string(),
+            handoff: crate::direct_lab_handoff::DirectLabHandoffReceipt {
+                schema: "homeboy/direct-lab-handoff-receipt/v1".to_string(),
+                run_id: "run-1".to_string(),
+                runner_id: "runner-1".to_string(),
+                runner_job_id: "00000000-0000-0000-0000-000000000001".to_string(),
+                idempotency_key: "run-1".to_string(),
+                controller_identity: "controller-1".to_string(),
+                acceptance_state: "accepted".to_string(),
+                controller_projection: "deferred".to_string(),
+                status_command: "homeboy agent-task status run-1".to_string(),
+                cancel_command: "homeboy agent-task cancel run-1".to_string(),
+                evidence_command: "homeboy agent-task evidence run-1 --full".to_string(),
+            },
+            artifacts: crate::runner_staging_operation::RunnerStagingArtifacts {
+                lifecycle_id: "staging-run-1".to_string(),
+                source_artifact_id: "source-1".to_string(),
+                workspace_artifact_id: "workspace-1".to_string(),
+                source_artifact: Some(
+                    crate::runner_staging_operation::SourceArtifactTransfer::from_bytes(
+                        "source-run-1",
+                        b"sealed source package",
+                    )
+                    .descriptor(),
+                ),
+            },
+        },
+        controller_projection: "deferred".to_string(),
+    };
+    let output = detached_staging_submission_output(
+        crate::lab_staging_controller::DetachedStagingSubmission::Deferred(receipt.clone()),
+        "run-1",
+    );
+
+    assert_eq!(output["status"], "staged");
+    assert_eq!(
+        output["runner_job_id"],
+        "00000000-0000-0000-0000-000000000001"
+    );
+    assert_eq!(
+        output["runner_staging_id"],
+        "00000000-0000-0000-0000-000000000001"
+    );
+    assert!(output.get("controller_job_id").is_none());
+    assert!(output["retrieval_commands"].get("controller_job").is_none());
+    assert_eq!(
+        output["retrieval_commands"]["status"],
+        "homeboy agent-task status run-1"
+    );
+    assert_eq!(
+        output["retrieval_commands"]["logs"],
+        "homeboy agent-task logs run-1"
+    );
+    let source = receipt
+        .runner_receipt
+        .artifacts
+        .source_artifact
+        .expect("source artifact descriptor");
+    assert_eq!(source.package.extraction_root, "workspace");
+    assert_eq!(source.package.entries[0].path, "source.bin");
+}
+
+#[test]
 fn emit_durable_run_id_writes_json_to_output_before_execution() {
     let dir = tempfile::tempdir().expect("temp dir");
     let output_path = dir.path().join("cook-output.json");

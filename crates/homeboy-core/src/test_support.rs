@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeSet,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use tempfile::TempDir;
 
@@ -1306,6 +1310,105 @@ pub struct ReverseBrokerFixture {
     broker_url: String,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
+}
+
+/// An authenticated reverse broker backed by the daemon's production HTTP
+/// routes and durable job store. The Lab runner registers its staging provider
+/// before using this fixture.
+pub struct AuthenticatedReverseBrokerFixture {
+    pub store: JobStore,
+    runner_id: String,
+    broker_url: String,
+    token: String,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl AuthenticatedReverseBrokerFixture {
+    pub fn start(runner_id: impl Into<String>) -> Self {
+        let runner_id = runner_id.into();
+        let mut auth = crate::broker_auth::BrokerAuthStore::default();
+        let credential = auth
+            .pair(
+                format!("test-{runner_id}"),
+                &runner_id,
+                [
+                    crate::broker_auth::BrokerScope::Submit,
+                    crate::broker_auth::BrokerScope::Work,
+                ]
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            )
+            .expect("pair authenticated reverse broker fixture");
+        auth.save()
+            .expect("persist authenticated reverse broker fixture auth");
+        let token = credential.token;
+        let store = JobStore::default();
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("bind authenticated reverse broker fixture");
+        listener
+            .set_nonblocking(true)
+            .expect("make authenticated reverse broker fixture nonblocking");
+        let broker_url = format!("http://{}", listener.local_addr().expect("broker address"));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let thread_shutdown = Arc::clone(&shutdown);
+        let thread_store = store.clone();
+        let handle = std::thread::spawn(move || {
+            while !thread_shutdown.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream
+                            .set_nonblocking(false)
+                            .expect("make authenticated reverse broker fixture stream blocking");
+                        crate::daemon::handle_reverse_broker_test_connection(stream, &thread_store)
+                            .expect("serve authenticated reverse broker fixture request");
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => {
+                        panic!("accept authenticated reverse broker fixture request: {error}")
+                    }
+                }
+            }
+        });
+        Self {
+            store,
+            runner_id,
+            broker_url,
+            token,
+            shutdown,
+            handle: Some(handle),
+        }
+    }
+
+    pub fn url(&self) -> &str {
+        &self.broker_url
+    }
+
+    pub fn runner_id(&self) -> &str {
+        &self.runner_id
+    }
+
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    pub fn jobs(&self) -> Vec<Job> {
+        self.store.list()
+    }
+}
+
+impl Drop for AuthenticatedReverseBrokerFixture {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect(self.broker_url.trim_start_matches("http://"));
+        if let Some(handle) = self.handle.take() {
+            handle
+                .join()
+                .expect("authenticated reverse broker fixture joins");
+        }
+    }
 }
 
 impl ReverseBrokerFixture {

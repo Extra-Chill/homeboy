@@ -64,7 +64,7 @@ impl DirectLabHandoffEnvelope {
                 None,
             ));
         }
-        self.recipe.validate()
+        self.recipe.validate_for_runner_staging()
     }
 }
 
@@ -99,18 +99,11 @@ impl DirectLabHandoffReceipt {
             controller_identity: envelope.controller_identity.clone(),
             acceptance_state: "accepted".to_string(),
             controller_projection: "deferred".to_string(),
-            status_command: format!(
-                "homeboy runner jobs show {} {}",
-                envelope.runner_id, runner_job_id
-            ),
-            cancel_command: format!(
-                "homeboy runner jobs cancel {} {}",
-                envelope.runner_id, runner_job_id
-            ),
-            evidence_command: format!(
-                "homeboy runner jobs evidence {} {}",
-                envelope.runner_id, runner_job_id
-            ),
+            // Sealed staging has no runner daemon job yet. The durable run is
+            // the status, cancellation, and evidence authority.
+            status_command: format!("homeboy agent-task status {}", envelope.run_id),
+            cancel_command: format!("homeboy agent-task cancel {}", envelope.run_id),
+            evidence_command: format!("homeboy agent-task evidence {} --full", envelope.run_id),
         }
     }
 
@@ -248,7 +241,12 @@ mod tests {
         assert_eq!(first, repeated);
         assert_eq!(receiver.receipts.len(), 1);
         assert_eq!(first.controller_projection, "deferred");
-        assert!(first.status_command.contains("runner-job-1"));
+        assert_eq!(first.status_command, "homeboy agent-task status run-1");
+        assert_eq!(first.cancel_command, "homeboy agent-task cancel run-1");
+        assert_eq!(
+            first.evidence_command,
+            "homeboy agent-task evidence run-1 --full"
+        );
     }
 
     #[test]

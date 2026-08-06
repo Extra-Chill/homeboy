@@ -1454,7 +1454,9 @@ fn register_reverse_session_with_broker(broker_url: &str, session: &RunnerSessio
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build broker HTTP client: {err}")))?;
-    let response = client
+    let broker_token =
+        homeboy_core::broker_auth::broker_submit_token_for_runner(&session.runner_id)?;
+    let request = client
         .post(format!(
             "{}/runner/sessions",
             broker_url.trim_end_matches('/')
@@ -1468,11 +1470,15 @@ fn register_reverse_session_with_broker(broker_url: &str, session: &RunnerSessio
             "worker_identity": session.worker_identity,
             "worker_pid": session.worker_pid,
             "last_seen_at": session.last_seen_at,
-        }))
-        .send()
-        .map_err(|err| {
-            Error::internal_unexpected(format!("register reverse runner session: {err}"))
-        })?;
+        }));
+    let request = if let Some(token) = broker_token.as_deref() {
+        request.header(homeboy_core::broker_auth::BROKER_TOKEN_HEADER, token)
+    } else {
+        request
+    };
+    let response = request.send().map_err(|err| {
+        Error::internal_unexpected(format!("register reverse runner session: {err}"))
+    })?;
     let status_code = response.status().as_u16();
     let envelope: CliEnvelope = response.json().map_err(|err| {
         Error::internal_json(

@@ -81,9 +81,11 @@ use policy::{preflight_remote_argv, remote_execution_preflight};
 // API. `use` re-exports are not counted as structural items.
 use broker::*;
 use daemon::*;
-pub(crate) use daemon_api::daemon_api_get_for_session;
-pub(crate) use daemon_api::daemon_api_get_for_session_with_timeout;
 use daemon_api::*;
+pub(crate) use daemon_api::{
+    daemon_api_get_for_session, daemon_api_get_for_session_with_timeout,
+    daemon_api_post_json_for_session,
+};
 use failure::*;
 use handoff::*;
 use paths::*;
