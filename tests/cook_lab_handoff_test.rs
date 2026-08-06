@@ -237,6 +237,37 @@ fn cook_detaches_local_placement_instead_of_rejecting_it() {
     }
 }
 
+/// Piped stdio is not permission to turn an explicit local wait into a durable
+/// handoff. This target fails during foreground resolution, which makes the
+/// assertion bounded while proving the launcher did not emit a detach envelope.
+#[test]
+fn non_tty_local_wait_stays_foreground() {
+    let output = homeboy(&[
+        "--placement",
+        "local",
+        "--wait",
+        "agent-task",
+        "cook",
+        "--prompt",
+        "implement the fix",
+        "--to-worktree",
+        "missing@worktree",
+        "--verify",
+        "true",
+    ]);
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("homeboy/agent-task-cook-local-detach-handoff/v1"),
+        "explicit --wait must not return a detach handoff: {stdout}"
+    );
+    assert!(
+        !stdout.contains("\"status\": \"in_flight\""),
+        "explicit --wait must not return an in-flight Cook report: {stdout}"
+    );
+}
+
 /// Historical runner recovery is a distinct owner, never an admission gate for
 /// an accepted Cook. This invokes the actual detached Cook command path rather
 /// than a scheduler helper so its output and durable handoff remain observable.
