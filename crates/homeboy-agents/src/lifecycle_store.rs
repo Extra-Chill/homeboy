@@ -92,17 +92,9 @@ fn validate_execution_budget(plan: &AgentTaskPlan) -> Result<()> {
 }
 
 fn validate_managed_services(plan: &AgentTaskPlan) -> Result<()> {
-    for service in &plan.services {
-        service.validate_cleanup_deadline().map_err(|message| {
-            Error::validation_invalid_argument(
-                "services.cleanup_deadline_ms",
-                message,
-                Some(service.cleanup_deadline_ms.to_string()),
-                None,
-            )
-        })?;
-    }
-    Ok(())
+    plan.validate_managed_services().map_err(|message| {
+        Error::validation_invalid_argument("services.cleanup_deadline_ms", message, None, None)
+    })
 }
 
 fn migrate_execution_budget(plan: &mut AgentTaskPlan) -> Result<bool> {

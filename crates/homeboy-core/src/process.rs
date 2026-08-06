@@ -847,6 +847,13 @@ pub fn terminate_isolated_process_group_with_grace(
                 )));
             }
         }
+        if !wait_for_isolated_process_group_exit(owner_pid, SIGKILL_REAP_GRACE)
+            .map_err(Error::internal_unexpected)?
+        {
+            return Err(Error::internal_unexpected(format!(
+                "isolated process group {owner_pid} survived SIGKILL escalation"
+            )));
+        }
         Ok(true)
     }
     #[cfg(not(unix))]
@@ -1017,6 +1024,10 @@ fn terminate_linux_scope_members_with_grace(scope: &str, grace: Duration) -> Res
     }
     let survivors = linux_scope_pids(scope)?;
     signal_pids(&survivors, libc::SIGKILL)?;
+    if !wait_for_linux_scope_exit(scope, SIGKILL_REAP_GRACE)? {
+        let survivors = linux_scope_pids(scope)?;
+        return ensure_sigkill_reaped("owned process scope", 0, &survivors);
+    }
     Ok(true)
 }
 
@@ -1118,6 +1129,7 @@ pub fn terminate_process_tree_with_grace(
         // tree to actually exit before snapshotting survivors so we don't
         // misreport processes that are merely mid-teardown.
         let surviving_pids = wait_for_exit_with_owner_reap(&targets, owner_pid, SIGKILL_REAP_GRACE);
+        ensure_sigkill_reaped("owned process tree", owner_pid, &surviving_pids)?;
 
         let signal = if killed_pids.is_empty() {
             "SIGTERM"
@@ -1245,6 +1257,20 @@ fn join_pids(pids: &[u32]) -> String {
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(unix)]
+fn ensure_sigkill_reaped(scope: &str, owner_pid: u32, survivors: &[u32]) -> Result<()> {
+    if survivors.is_empty() {
+        return Ok(());
+    }
+    let owner = (owner_pid != 0)
+        .then(|| format!(" {owner_pid}"))
+        .unwrap_or_default();
+    Err(Error::internal_unexpected(format!(
+        "{scope}{owner} survived SIGKILL escalation; surviving pids: {}",
+        join_pids(survivors)
+    )))
 }
 
 #[cfg(unix)]
@@ -1526,6 +1552,14 @@ mod process_tree_tests {
         assert!(!commands.is_empty());
         assert!(commands.iter().any(|cmd| cmd.contains("4242")));
         assert!(commands.iter().any(|cmd| cmd.contains("kill -KILL 4242")));
+    }
+
+    #[test]
+    fn sigkill_survivors_fail_termination_with_the_remaining_pids() {
+        let error = ensure_sigkill_reaped("owned process tree", 42, &[7, 9])
+            .expect_err("survivors must fail cleanup");
+        assert!(error.message.contains("SIGKILL escalation"));
+        assert!(error.message.contains("7 9"));
     }
 
     #[test]
