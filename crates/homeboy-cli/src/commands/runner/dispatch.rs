@@ -995,6 +995,13 @@ mod tests {
             selected_binary_path: "/runner/homeboy".to_string(),
             reconnect_required: true,
             followup_commands: Vec::new(),
+            readiness: Some(runner::HomeboyRefreshReadiness {
+                state: runner::HomeboyRefreshReadinessState::Failed,
+                accepting_jobs: false,
+                daemon_fresh: false,
+                owners: Vec::new(),
+                continuation: Some("homeboy runner refresh-homeboy lab --reconnect".to_string()),
+            }),
             reconnect_deferred: None,
             failure: Some(runner::HomeboyBinaryRefreshFailure {
                 exit_code: 2,
@@ -1024,6 +1031,10 @@ mod tests {
         assert_eq!(exit_code, 2);
         let value = serde_json::to_value(mapped).expect("JSON envelope");
         assert_eq!(value["_homeboy_actionable"]["run"]["id"], "run-1");
+        assert_eq!(value["readiness"]["state"], "failed");
+        assert!(!value["readiness"]["accepting_jobs"]
+            .as_bool()
+            .expect("readiness acceptance flag"));
         assert_eq!(
             value["_homeboy_actionable"]["refs"]["jobs"][0]["id"],
             "job-1"

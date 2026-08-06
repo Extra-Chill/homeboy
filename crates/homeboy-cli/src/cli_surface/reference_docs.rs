@@ -42,12 +42,12 @@
 //! canary lives in `global_flag_surface_tests`, where a definition defect
 //! reports as a definition defect instead of as stale documentation.
 //!
-//! # Why it does not overwrite `docs/commands/`
+//! # Why it only overwrites the command index in `docs/commands/`
 //!
 //! `docs/commands/*.md` is hand-written narrative: concepts, recipes, contracts,
-//! and migration tables that clap cannot derive. This module writes to a
-//! disjoint directory and links back to the narrative page; nothing hand-written
-//! is read, rewritten, or deleted.
+//! and migration tables that clap cannot derive. The top-level command list is
+//! different: it must exactly match the Clap tree, so this generator owns
+//! `commands-index.md`. Individual narrative pages remain hand-written.
 
 use super::Cli;
 use clap::{Arg, ArgAction, Command, CommandFactory};
@@ -56,6 +56,7 @@ use std::collections::BTreeMap;
 
 /// Repo-root-relative directory owned entirely by this generator.
 pub const GENERATED_DIR: &str = "docs/reference/cli/commands";
+const COMMAND_INDEX_PATH: &str = "docs/commands/commands-index.md";
 
 /// Set to any value to rewrite [`GENERATED_DIR`] instead of asserting currency.
 pub const WRITE_ENV: &str = "HOMEBOY_WRITE_CLI_REFERENCE";
@@ -106,6 +107,65 @@ pub fn live_generated_reference_docs() -> BTreeMap<String, String> {
     files
 }
 
+/// Renders the narrative command index from the live Clap tree.
+pub fn generated_command_index() -> String {
+    let root = Cli::command();
+    let mut commands = documented_subcommands(&root)
+        .into_iter()
+        .map(|command| command.get_name().to_string())
+        .chain(crate::command_contract::runtime_extension_command_doc_slugs().map(str::to_string))
+        .collect::<Vec<_>>();
+    commands.sort_unstable();
+
+    let mut out = String::from(
+        "<!-- GENERATED FILE. DO NOT EDIT BY HAND.\n\
+         Source of truth: the Clap command tree in `crates/homeboy-cli`.\n\
+         Regenerate with:\n\
+         cargo run -p homeboy-cli --bin generate-cli-reference -->\n\n\
+         # Commands index\n\n",
+    );
+    for command in commands {
+        out.push_str(&format!("- [{command}]({command}.md)\n"));
+    }
+    out.push_str(/*
+         Agents and automation that need command safety metadata should read the recursive \\\n+         manifest with `homeboy contract manifest`.\n\n\
+         Every command page above is hand-written narrative. The exhaustive, always-current \\\n+         synopsis/flag/subcommand surface for each command is generated from Clap into \\\n+         [the CLI reference](../reference/cli/commands/index.md).\n\n\
+         Related:\n\n\
+         - [Root command](../reference/cli/homeboy-root-command.md)\n\
+         - [JSON output contract](../architecture/output-system.md) (global output envelope)\n\
+         - [Embedded docs](../architecture/embedded-docs-topic-resolution.md)\n\
+         - [Schema Reference](../reference/schemas/index.md) - JSON configuration schemas (component, project, server, extension)\n\
+         - [Architecture](../architecture/) - System internals (API client, keychain, SSH, release pipeline, execution context)\n\
+         - [Internals](../internals/index.md) - Contributing guides (architecture overview, config directory, error handling)\n",
+        */ concat!(
+            "\nThis list covers the top-level core CLI commands currently surfaced by `homeboy ",
+            "--help` in this checkout. Hidden internal commands are omitted from this index.\n\n",
+            "Agents and automation that need command safety metadata should read the recursive ",
+            "manifest with `homeboy contract manifest`.\n\n",
+            "Every command page above is hand-written narrative. The exhaustive, always-current ",
+            "synopsis/flag/subcommand surface for each command is generated from Clap into ",
+            "[the CLI reference](../reference/cli/commands/index.md).\n\n",
+            "Related:\n\n",
+            "- [Root command](../reference/cli/homeboy-root-command.md)\n",
+            "- [JSON output contract](../architecture/output-system.md) (global output envelope)\n",
+            "- [Embedded docs](../architecture/embedded-docs-topic-resolution.md)\n",
+            "- [Schema Reference](../reference/schemas/index.md) - JSON configuration schemas (component, project, server, extension)\n",
+            "- [Architecture](../architecture/) - System internals (API client, keychain, SSH, release pipeline, execution context)\n",
+            "- [Internals](../internals/index.md) - Contributing guides (architecture overview, config directory, error handling)\n",
+        ), /*
+         Agents and automation that need command safety metadata should read the recursive \\\n+         manifest with `homeboy contract manifest`.\n\n\
+         Every command page above is hand-written narrative. The exhaustive, always-current \\\n+         synopsis/flag/subcommand surface for each command is generated from Clap into \\\n+         [the CLI reference](../reference/cli/commands/index.md).\n\n\
+         Related:\n\n\
+         - [Root command](../reference/cli/homeboy-root-command.md)\n\
+         - [JSON output contract](../architecture/output-system.md) (global output envelope)\n\
+         - [Embedded docs](../architecture/embedded-docs-topic-resolution.md)\n\
+         - [Schema Reference](../reference/schemas/index.md) - JSON configuration schemas (component, project, server, extension)\n\
+         - [Architecture](../architecture/) - System internals (API client, keychain, SSH, release pipeline, execution context)\n\
+         - [Internals](../internals/index.md) - Contributing guides (architecture overview, config directory, error handling)\n",
+    */);
+    out
+}
+
 /// Write the checked-in CLI reference directly from the production clap tree.
 /// This binary-facing path intentionally avoids compiling test-only fixtures.
 pub fn write_cli_reference(workspace_root: &std::path::Path) -> std::io::Result<()> {
@@ -125,6 +185,10 @@ pub fn write_cli_reference(workspace_root: &std::path::Path) -> std::io::Result<
     std::fs::write(
         workspace_root.join("docs/reference/cli/command-surface.json"),
         format!("{contract}\n"),
+    )?;
+    std::fs::write(
+        workspace_root.join(COMMAND_INDEX_PATH),
+        generated_command_index(),
     )
 }
 
