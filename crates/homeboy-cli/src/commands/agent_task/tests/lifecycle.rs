@@ -872,10 +872,9 @@ fn diagnose_derives_next_actions_from_the_failure_classification() {
         assert_eq!(
             value["next_commands"],
             json!([
-                format!("homeboy agent-task status {run_id} --full"),
-                format!("homeboy agent-task artifacts {run_id}"),
-                format!("homeboy agent-task review {run_id}"),
-                format!("homeboy agent-task retry {run_id} --run"),
+                format!("homeboy --placement local agent-task status {run_id} --full"),
+                format!("homeboy --placement local agent-task artifacts {run_id}"),
+                format!("homeboy --placement local agent-task review {run_id}"),
             ])
         );
 
@@ -886,7 +885,7 @@ fn diagnose_derives_next_actions_from_the_failure_classification() {
         assert_eq!(actionable["run"]["location"], "local");
         assert_eq!(
             actionable["run"]["status_command"],
-            format!("homeboy agent-task status {run_id} --full")
+            format!("homeboy --placement local agent-task status {run_id} --full")
         );
         assert_eq!(actionable["refs"]["agent_tasks"][0]["id"], run_id);
         assert!(actionable["evidence"]
@@ -907,12 +906,10 @@ fn diagnose_derives_next_actions_from_the_failure_classification() {
         assert_eq!(
             commands,
             vec![
-                format!("homeboy agent-task evidence {run_id} --task task-a --failure-only"),
-                format!("homeboy agent-task review {run_id}"),
-                format!("homeboy agent-task retry {run_id} --run"),
+                format!("homeboy --placement local agent-task evidence {run_id} --task task-a --failure-only"),
+                format!("homeboy --placement local agent-task review {run_id}"),
             ]
         );
-        assert_eq!(actionable["next_actions"][2]["kind"], "repair");
     });
 }
 

@@ -196,6 +196,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
         bound_full_reader_payload(&mut value);
         attach_runner_probe(&mut value, &runner_probe);
         attach_agent_task_status_actionable(&mut value, run_id);
+        preserve_controller_owner_placement(&mut value, run_id);
         let exit_code = status_exit_code(&value);
         return Ok((value, exit_code));
     }
@@ -207,6 +208,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     }
     attach_runner_probe(&mut summary, &runner_probe);
     attach_agent_task_status_actionable(&mut summary, run_id);
+    preserve_controller_owner_placement(&mut summary, run_id);
     let exit_code = status_exit_code(&summary);
     Ok((summary, exit_code))
 }
@@ -1060,6 +1062,47 @@ fn attach_actionable_metadata(value: &mut Value, metadata: CommandActionableMeta
     }
 }
 
+/// Follow-up lifecycle commands must retain the controller-local ownership of
+/// the record even when a default Lab runner becomes available between reads.
+fn preserve_controller_owner_placement(value: &mut Value, run_id: &str) {
+    match value {
+        Value::String(command) => {
+            let prefix = "homeboy agent-task ";
+            let lifecycle_command = command
+                .strip_prefix(prefix)
+                .and_then(|rest| rest.split_whitespace().next())
+                .is_some_and(|operation| {
+                    matches!(
+                        operation,
+                        "status"
+                            | "logs"
+                            | "artifacts"
+                            | "evidence"
+                            | "diagnose"
+                            | "review"
+                            | "retry"
+                            | "reconcile"
+                            | "cancel"
+                    )
+                });
+            if lifecycle_command && command.contains(run_id) {
+                *command = command.replacen(prefix, "homeboy --placement local agent-task ", 1);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                preserve_controller_owner_placement(value, run_id);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                preserve_controller_owner_placement(value, run_id);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn logs(args: LogsArgs) -> CmdResult<Value> {
     let log = if args.raw {
         agent_task_service_direct::logs_with_raw(&args.run_id)?
@@ -1089,6 +1132,7 @@ pub(super) fn artifacts(args: StatusArgs) -> CmdResult<Value> {
             ),
         );
     }
+    preserve_controller_owner_placement(&mut value, &args.run_id);
     Ok((value, 0))
 }
 
@@ -1174,6 +1218,7 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
             ),
         );
     }
+    preserve_controller_owner_placement(&mut value, run_id);
     Ok((value, 0))
 }
 
@@ -1270,6 +1315,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         retry.action.as_ref(),
     );
     bound_full_reader_payload(&mut value);
+    preserve_controller_owner_placement(&mut value, run_id);
     Ok((value, 0))
 }
 
