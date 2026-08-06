@@ -542,8 +542,12 @@ mod tests {
         assert_eq!(sample.tree_rss_kib, Some(1_835_008));
         assert_eq!(sample.descendant_count, 3);
         let activity = sample.activity.expect("provider is observable");
-        // The selected process reports only its own footprint.
-        assert_eq!(activity.rss_kib, Some(524_288));
+        // Selection is longest-running non-homeboy descendant (#11598 removed
+        // the depth preference that reported the controller). `opencode run`
+        // has been alive longest, so it is what is reported — and it carries
+        // only its own footprint, which is why the tree sum above exists.
+        assert_eq!(activity.command, "opencode run --format json");
+        assert_eq!(activity.rss_kib, Some(262_144));
     }
 
     #[test]
