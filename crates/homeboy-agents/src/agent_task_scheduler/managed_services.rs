@@ -13,7 +13,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use homeboy_core::agent_task_config::AgentTaskManagedServiceReadiness;
 use homeboy_core::process::{
-    process_identity_state_with_start_identity, process_start_identity, terminate_process_tree,
+    process_identity_state_with_start_identity, process_start_identity,
+    terminate_isolated_process_group_with_grace, terminate_process_tree_with_grace,
     ProcessIdentityState, ProcessStartIdentity,
 };
 use serde_json::{json, Value};
@@ -34,6 +35,10 @@ pub struct AgentTaskManagedServiceRecord {
     pub log_path: Option<String>,
     pub pid: Option<u32>,
     pub cleanup: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_cleanup_deadline_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_outcome: Option<String>,
     pub provenance: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_identity: Option<ProcessStartIdentity>,
@@ -97,6 +102,8 @@ fn default_worker_ttl_ms() -> u64 {
     30_000
 }
 
+const WORKER_CLEANUP_COORDINATION_MARGIN: Duration = Duration::from_secs(1);
+
 /// Execution-host service supervisor. It is instantiated by whichever host
 /// executes the plan (controller or Lab runner), never by a remote caller.
 pub(crate) struct AgentTaskServiceSupervisor {
@@ -142,6 +149,7 @@ impl AgentTaskServiceSupervisor {
             if !safe_service_id(&spec.id) || spec.command.is_empty() {
                 return Err("managed service requires a non-empty id and command argv".to_string());
             }
+            spec.validate_cleanup_deadline()?;
             if services
                 .services
                 .iter()
@@ -203,7 +211,9 @@ impl AgentTaskServiceSupervisor {
             log_path: Some(log_path.display().to_string()),
             pid: None,
             cleanup: None,
-            provenance: json!({"schema":"homeboy/agent-task-managed-service/v3", "run_id": run_id, "argv": spec.command, "cwd": spec.cwd, "host": spec.host, "port": spec.port, "target": spec.target, "lifecycle": spec.lifecycle, "socket_handoff": spec.socket_handoff, "env_allowlist": spec.env_allowlist, "secret_env": spec.secret_env, "secret_env_plan": spec.secret_env_plan.as_ref().map(|plan| plan.redacted()), "owner": { "runner_id": owner_runner_id, "runner_job_id": owner_runner_job_id }, "endpoint_ownership": { "host": spec.host, "port": spec.port, "lease": port_lease.as_ref().map(|lease| lease.path.display().to_string()) }}),
+            requested_cleanup_deadline_ms: Some(spec.cleanup_deadline_ms),
+            cleanup_outcome: None,
+            provenance: json!({"schema":"homeboy/agent-task-managed-service/v3", "run_id": run_id, "argv": spec.command, "cwd": spec.cwd, "host": spec.host, "port": spec.port, "target": spec.target, "lifecycle": spec.lifecycle, "socket_handoff": spec.socket_handoff, "cleanup_deadline_ms": spec.cleanup_deadline_ms, "env_allowlist": spec.env_allowlist, "secret_env": spec.secret_env, "secret_env_plan": spec.secret_env_plan.as_ref().map(|plan| plan.redacted()), "owner": { "runner_id": owner_runner_id, "runner_job_id": owner_runner_job_id }, "endpoint_ownership": { "host": spec.host, "port": spec.port, "lease": port_lease.as_ref().map(|lease| lease.path.display().to_string()) }}),
             process_identity: None,
             process_group_id: None,
             owner_runner_id,
@@ -268,9 +278,12 @@ impl AgentTaskServiceSupervisor {
         persist_record(run_id, &record)?;
         if let Err(error) = wait_ready(&spec, local_url.as_deref(), &mut record.readiness_attempts)
         {
-            let _ = containment.terminate_on_failure_bounded(Duration::from_secs(2), false);
+            let cleanup = containment
+                .cleanup_with_grace(Duration::from_millis(spec.cleanup_deadline_ms), false);
             record.state = "failed".to_string();
             record.cleanup = Some("terminated_after_readiness_failure".to_string());
+            record.cleanup_outcome = Some(cleanup_outcome(cleanup));
+            let _ = persist_record(run_id, &record);
             return Err(format!("managed service '{}': {error}", spec.id));
         }
         record.state = "ready".to_string();
@@ -314,24 +327,43 @@ impl AgentTaskServiceSupervisor {
     }
 
     pub(super) fn cleanup(mut self, reason: &str) -> Vec<AgentTaskManagedServiceRecord> {
-        for service in &mut self.services {
-            let exited = service.child.try_wait().ok().flatten().is_some();
-            let cleanup = if exited {
-                // A daemonized child can outlive its direct service leader.
-                // ProcessContainment owns the platform-specific scope marker
-                // needed to reap those descendants after a normal leader exit.
-                service
-                    .containment
-                    .cleanup_after_leader_exit_bounded(Duration::from_secs(2))
-            } else {
-                service
-                    .containment
-                    .terminate_on_failure_bounded(Duration::from_secs(2), false)
-            };
-            let _ = service.child.wait();
+        // Each containment boundary is independent. Terminate them together so
+        // total cleanup is bounded by the longest declared grace period, then
+        // persist ordered results here to avoid ledger write races.
+        let cleanups = thread::scope(|scope| {
+            self.services
+                .iter_mut()
+                .map(|service| {
+                    scope.spawn(move || {
+                        let exited = service.child.try_wait().ok().flatten().is_some();
+                        let cleanup = service.containment.cleanup_with_grace(
+                            Duration::from_millis(service.spec.cleanup_deadline_ms),
+                            exited,
+                        );
+                        let _ = service.child.wait();
+                        cleanup
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| {
+                    handle.join().unwrap_or_else(|_| {
+                        Err(homeboy_core::Error::internal_unexpected(
+                            "managed service cleanup worker panicked",
+                        ))
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        for (service, cleanup) in self.services.iter_mut().zip(cleanups) {
             service.record.state = "stopped".to_string();
+            service.record.cleanup_outcome = Some(match &cleanup {
+                Ok(false) => "graceful".to_string(),
+                Ok(true) => "deadline_escalation_forced".to_string(),
+                Err(_) => "failed".to_string(),
+            });
             service.record.cleanup = Some(match cleanup {
-                Ok(()) => format!("cleaned_up:{reason}"),
+                Ok(_) => format!("cleaned_up:{reason}"),
                 Err(error) => format!("cleanup_failed:{reason}:{}", error.message),
             });
             if let Some(run_id) = service
@@ -344,6 +376,14 @@ impl AgentTaskServiceSupervisor {
             }
         }
         self.records()
+    }
+}
+
+fn cleanup_outcome(cleanup: Result<bool, homeboy_core::Error>) -> String {
+    match cleanup {
+        Ok(false) => "graceful".to_string(),
+        Ok(true) => "deadline_escalation_forced".to_string(),
+        Err(_) => "failed".to_string(),
     }
 }
 
@@ -483,7 +523,8 @@ impl ManagedServices {
         match self {
             Self::Local(supervisor) => supervisor.cleanup(reason),
             Self::Worker { run_id } => {
-                if let Ok(Some(mut state)) = read_service_worker_state(&run_id) {
+                let initial_state = read_service_worker_state(&run_id).ok().flatten();
+                if let Some(mut state) = initial_state.clone() {
                     state.state = "stop_requested".to_string();
                     state.heartbeat_unix_ms = now_unix_ms();
                     let _ = write_json_atomically(
@@ -491,7 +532,21 @@ impl ManagedServices {
                         &state,
                     );
                 }
-                for _ in 0..600 {
+                let wait_budget = initial_state
+                    .as_ref()
+                    .map(|state| worker_cleanup_wait_budget(&state.services))
+                    .transpose();
+                let Ok(wait_budget) = wait_budget else {
+                    // The worker remains the only owner for a requested stop.
+                    // A corrupt ledger must not cause controller-side concurrent
+                    // reconciliation against a potentially live worker.
+                    return initial_state
+                        .map(|state| state.services)
+                        .unwrap_or_default();
+                };
+                let deadline =
+                    Instant::now() + wait_budget.unwrap_or(WORKER_CLEANUP_COORDINATION_MARGIN);
+                while Instant::now() < deadline {
                     if let Ok(Some(state)) = read_service_worker_state(&run_id) {
                         if state.state == "stopped" {
                             return state.services;
@@ -499,10 +554,30 @@ impl ManagedServices {
                     }
                     thread::sleep(Duration::from_millis(10));
                 }
-                reconcile_run_services(&run_id, reason).unwrap_or_default()
+                // A late worker owns the processes until an independently
+                // proven interruption triggers reconciliation elsewhere.
+                let _ = reason;
+                read_service_worker_state(&run_id)
+                    .ok()
+                    .flatten()
+                    .map(|state| state.services)
+                    .unwrap_or_default()
             }
         }
     }
+}
+
+fn worker_cleanup_wait_budget(
+    records: &[AgentTaskManagedServiceRecord],
+) -> Result<Duration, String> {
+    let cleanup_ms = records
+        .iter()
+        .map(requested_cleanup_deadline)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+    Ok(Duration::from_millis(cleanup_ms).saturating_add(WORKER_CLEANUP_COORDINATION_MARGIN))
 }
 
 fn lease_port(spec: &AgentTaskManagedService) -> Result<PortLeaseAllocation, String> {
@@ -909,6 +984,18 @@ pub(crate) fn reconcile_run_services(
         let Ok(mut record) = serde_json::from_slice::<AgentTaskManagedServiceRecord>(&bytes) else {
             continue;
         };
+        let cleanup_deadline = match requested_cleanup_deadline(&record) {
+            Ok(deadline) => deadline,
+            Err(error) => {
+                record.state = "failed".to_string();
+                record.cleanup_outcome = Some("failed_invalid_cleanup_deadline".to_string());
+                record.cleanup = Some(format!("cleanup_failed_invalid_deadline:{reason}:{error}"));
+                persist_record(run_id, &record)?;
+                records.push(record);
+                continue;
+            }
+        };
+        record.requested_cleanup_deadline_ms = Some(cleanup_deadline);
         if matches!(record.state.as_str(), "stopped" | "failed") {
             records.push(record);
             continue;
@@ -916,14 +1003,26 @@ pub(crate) fn reconcile_run_services(
         let outcome = match (record.pid, record.process_identity.as_ref()) {
             (Some(pid), identity) => {
                 match process_identity_state_with_start_identity(pid, None, identity) {
-                    ProcessIdentityState::Live => terminate_process_tree(pid)
-                        .map(|_| "reaped".to_string())
-                        .unwrap_or_else(|error| format!("cleanup_failed:{error}")),
+                    ProcessIdentityState::Live => terminate_process_tree_with_grace(
+                        pid,
+                        Duration::from_millis(cleanup_deadline),
+                    )
+                    .map(|termination| {
+                        record.cleanup_outcome = Some(if termination.signal == "SIGKILL" {
+                            "deadline_escalation_forced".to_string()
+                        } else {
+                            "graceful".to_string()
+                        });
+                        "reaped".to_string()
+                    })
+                    .unwrap_or_else(|error| format!("cleanup_failed:{error}")),
                     ProcessIdentityState::Dead => "already_exited".to_string(),
                     ProcessIdentityState::IdentityMismatch => {
+                        record.cleanup_outcome = Some("skipped_ownership_mismatch".to_string());
                         "ownership_mismatch_not_signalled".to_string()
                     }
                     ProcessIdentityState::Unverifiable => {
+                        record.cleanup_outcome = Some("skipped_ownership_unverifiable".to_string());
                         "ownership_unverifiable_not_signalled".to_string()
                     }
                 }
@@ -936,21 +1035,86 @@ pub(crate) fn reconcile_run_services(
         let outcome = match (record.process_group_id, outcome.as_str()) {
             (Some(group), "already_exited" | "no_process_identity") => {
                 match homeboy_core::process::isolated_process_group_is_running(group) {
-                    Ok(true) => homeboy_core::process::terminate_isolated_process_group(group)
-                        .map(|_| "reaped_process_group".to_string())
-                        .unwrap_or_else(|error| format!("cleanup_failed:{error}")),
+                    Ok(true) => terminate_isolated_process_group_with_grace(
+                        group,
+                        Duration::from_millis(cleanup_deadline),
+                    )
+                    .map(|forced| {
+                        record.cleanup_outcome = Some(if forced {
+                            "deadline_escalation_forced".to_string()
+                        } else {
+                            "graceful".to_string()
+                        });
+                        "reaped_process_group".to_string()
+                    })
+                    .unwrap_or_else(|error| format!("cleanup_failed:{error}")),
                     Ok(false) => outcome,
                     Err(error) => format!("cleanup_unverifiable:{error}"),
                 }
             }
             _ => outcome,
         };
-        record.state = "stopped".to_string();
+        record.state = if matches!(
+            record.cleanup_outcome.as_deref(),
+            Some("skipped_ownership_mismatch" | "skipped_ownership_unverifiable")
+        ) || outcome.starts_with("cleanup_failed")
+        {
+            "failed".to_string()
+        } else {
+            "stopped".to_string()
+        };
+        if record.cleanup_outcome.is_none() {
+            record.cleanup_outcome = Some(if outcome.starts_with("cleanup_failed") {
+                "failed".to_string()
+            } else {
+                "graceful".to_string()
+            });
+        }
         record.cleanup = Some(format!("{outcome}:{reason}"));
         persist_record(run_id, &record)?;
         records.push(record);
     }
     Ok(records)
+}
+
+fn requested_cleanup_deadline(record: &AgentTaskManagedServiceRecord) -> Result<u64, String> {
+    let validate = |value: u64, source: &str| {
+        if value == 0 || value > AgentTaskManagedService::MAX_CLEANUP_DEADLINE_MS {
+            return Err(format!(
+                "managed service '{}' {source} cleanup deadline {value}ms is outside 1..={}ms",
+                record.id,
+                AgentTaskManagedService::MAX_CLEANUP_DEADLINE_MS
+            ));
+        }
+        Ok(value)
+    };
+    let requested = record
+        .requested_cleanup_deadline_ms
+        .map(|value| validate(value, "requested"))
+        .transpose()?;
+    let provenance = match record.provenance.get("cleanup_deadline_ms") {
+        Some(value) => Some(
+            value
+                .as_u64()
+                .ok_or_else(|| {
+                    format!(
+                        "managed service '{}' provenance cleanup deadline is invalid",
+                        record.id
+                    )
+                })
+                .and_then(|value| validate(value, "provenance"))?,
+        ),
+        None => None,
+    };
+    match (requested, provenance) {
+        (Some(requested), Some(provenance)) if requested != provenance => Err(format!(
+            "managed service '{}' requested and provenance cleanup deadlines disagree",
+            record.id
+        )),
+        (Some(requested), _) => Ok(requested),
+        (_, Some(provenance)) => Ok(provenance),
+        (None, None) => Ok(AgentTaskManagedService::DEFAULT_CLEANUP_DEADLINE_MS),
+    }
 }
 
 fn wait_ready(
@@ -1032,6 +1196,7 @@ mod tests {
                 kind: AgentTaskManagedServiceReadinessKind::Http,
                 path: Some("/".to_string()), timeout_ms: Some(5_000),
             }),
+            cleanup_deadline_ms: AgentTaskManagedService::DEFAULT_CLEANUP_DEADLINE_MS,
             public_url: Some("https://preview.example.test/fixture".to_string()),
             browser_origin_probe: None,
             lifecycle: AgentTaskManagedServiceLifecycle::Plan,
@@ -1065,10 +1230,122 @@ mod tests {
             assert!(records[0].process_identity.is_some());
             assert!(records[0].process_group_id.is_some());
             assert_eq!(records[0].cleanup.as_deref(), Some("cleaned_up:success"));
+            assert_eq!(
+                records[0].requested_cleanup_deadline_ms,
+                Some(AgentTaskManagedService::DEFAULT_CLEANUP_DEADLINE_MS)
+            );
+            assert_eq!(records[0].cleanup_outcome.as_deref(), Some("graceful"));
             assert!(std::path::Path::new(records[0].log_path.as_deref().unwrap()).exists());
             assert_eq!(
                 records[0].readiness_attempts.last().unwrap()["status"],
                 "ready"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_honors_a_declared_deadline_longer_than_the_legacy_grace() {
+        with_isolated_home(|_| {
+            let mut service = fixture(free_port());
+            service.port = None;
+            service.socket_handoff = false;
+            service.readiness = None;
+            service.cleanup_deadline_ms = 3_000;
+            service.command = vec![
+                "python3".to_string(),
+                "-u".to_string(),
+                "-c".to_string(),
+                "import signal,time; signal.signal(signal.SIGTERM, lambda *_: time.sleep(2.1)); print('ready', flush=True); signal.pause()".to_string(),
+            ];
+            let services =
+                ManagedServices::start(&[service], "extended-cleanup").expect("start service");
+            let log_path = services.records()[0].log_path.clone().expect("service log");
+            for _ in 0..100 {
+                if std::fs::read_to_string(&log_path).is_ok_and(|log| log.contains("ready")) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                std::fs::read_to_string(&log_path).is_ok_and(|log| log.contains("ready")),
+                "service did not install its SIGTERM handler"
+            );
+            let started = Instant::now();
+            let records = services.cleanup("test");
+
+            assert!(started.elapsed() >= Duration::from_secs(2));
+            assert_eq!(records[0].requested_cleanup_deadline_ms, Some(3_000));
+            assert_eq!(records[0].cleanup_outcome.as_deref(), Some("graceful"));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_runs_multiple_service_grace_periods_concurrently() {
+        with_isolated_home(|_| {
+            let mut first = fixture(free_port());
+            first.port = None;
+            first.socket_handoff = false;
+            first.readiness = None;
+            first.cleanup_deadline_ms = 3_000;
+            first.command = vec![
+                "python3".to_string(),
+                "-u".to_string(),
+                "-c".to_string(),
+                "import signal,time; signal.signal(signal.SIGTERM, lambda *_: time.sleep(2.1)); print('ready', flush=True); signal.pause()".to_string(),
+            ];
+            let mut second = first.clone();
+            second.id = "second".to_string();
+            let services = ManagedServices::start(&[first, second], "concurrent-cleanup")
+                .expect("start services");
+            for record in services.records() {
+                let log_path = record.log_path.expect("service log");
+                for _ in 0..100 {
+                    if std::fs::read_to_string(&log_path).is_ok_and(|log| log.contains("ready")) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                assert!(std::fs::read_to_string(&log_path).is_ok_and(|log| log.contains("ready")));
+            }
+            let started = Instant::now();
+            let records = services.cleanup("test");
+
+            assert!(started.elapsed() < Duration::from_secs(4));
+            assert_eq!(records.len(), 2);
+            assert!(records.iter().all(|record| {
+                record.cleanup_outcome.as_deref() == Some("graceful")
+                    && record.cleanup.as_deref() == Some("cleaned_up:test")
+            }));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_force_terminates_a_service_that_exceeds_its_deadline() {
+        with_isolated_home(|_| {
+            let mut service = fixture(free_port());
+            service.port = None;
+            service.socket_handoff = false;
+            service.readiness = None;
+            service.cleanup_deadline_ms = 100;
+            service.command = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "trap '' TERM; while :; do sleep 1; done".to_string(),
+            ];
+            let services =
+                ManagedServices::start(&[service], "forced-cleanup").expect("start service");
+            thread::sleep(Duration::from_millis(50));
+            let started = Instant::now();
+            let records = services.cleanup("test");
+
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert_eq!(records[0].requested_cleanup_deadline_ms, Some(100));
+            assert_eq!(
+                records[0].cleanup_outcome.as_deref(),
+                Some("deadline_escalation_forced")
             );
         });
     }
@@ -1128,6 +1405,15 @@ mod tests {
                 Err(error) => error,
             };
             assert!(error.contains("requires HTTP readiness"));
+
+            let mut zero_deadline = fixture(free_port());
+            zero_deadline.cleanup_deadline_ms = 0;
+            assert!(ManagedServices::start(&[zero_deadline], "zero-deadline").is_err());
+
+            let mut excessive_deadline = fixture(free_port());
+            excessive_deadline.cleanup_deadline_ms =
+                AgentTaskManagedService::MAX_CLEANUP_DEADLINE_MS + 1;
+            assert!(ManagedServices::start(&[excessive_deadline], "excessive-deadline").is_err());
         });
     }
 
@@ -1148,6 +1434,97 @@ mod tests {
         let path = service_worker_request_path(run_id).expect("worker request path");
         write_json_atomically(&path, &request).expect("write worker request");
         path
+    }
+
+    fn persisted_record(
+        id: &str,
+        requested_cleanup_deadline_ms: Option<u64>,
+        provenance_deadline: Value,
+    ) -> AgentTaskManagedServiceRecord {
+        serde_json::from_value(json!({
+            "id": id,
+            "state": "ready",
+            "launch_token": "fixture",
+            "local_url": null,
+            "public_url": null,
+            "log_path": null,
+            "pid": null,
+            "cleanup": null,
+            "requested_cleanup_deadline_ms": requested_cleanup_deadline_ms,
+            "provenance": { "run_id": "persisted-fixture", "cleanup_deadline_ms": provenance_deadline }
+        }))
+        .expect("persisted service record")
+    }
+
+    #[test]
+    fn worker_cleanup_wait_budget_uses_the_longest_deadline_not_the_service_count() {
+        let records = vec![
+            persisted_record("first", Some(4_000), json!(4_000)),
+            persisted_record("second", Some(3_000), json!(3_000)),
+        ];
+        assert_eq!(
+            worker_cleanup_wait_budget(&records).expect("valid cleanup budget"),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn stale_reconcile_fails_closed_on_a_corrupt_persisted_deadline() {
+        with_isolated_home(|_| {
+            let run_id = "corrupt-cleanup-deadline";
+            let directory = homeboy_core::paths::homeboy_data()
+                .expect("home")
+                .join("agent-task-runs")
+                .join(run_id)
+                .join("services");
+            std::fs::create_dir_all(&directory).expect("service ledger directory");
+            let mut record = persisted_record("corrupt", Some(0), json!(2_000));
+            record.provenance["run_id"] = json!(run_id);
+            persist_record(run_id, &record).expect("persist corrupt record");
+
+            let records = reconcile_run_services(run_id, "test").expect("reconcile ledger");
+            assert_eq!(records[0].state, "failed");
+            assert_eq!(
+                records[0].cleanup_outcome.as_deref(),
+                Some("failed_invalid_cleanup_deadline")
+            );
+        });
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn stale_reconcile_records_ownership_mismatch_as_skipped_failure() {
+        with_isolated_home(|_| {
+            let run_id = "ownership-mismatch";
+            let directory = homeboy_core::paths::homeboy_data()
+                .expect("home")
+                .join("agent-task-runs")
+                .join(run_id)
+                .join("services");
+            std::fs::create_dir_all(&directory).expect("service ledger directory");
+            let mut record = persisted_record("mismatch", Some(100), json!(100));
+            record.provenance["run_id"] = json!(run_id);
+            record.pid = Some(std::process::id());
+            #[cfg(target_os = "linux")]
+            {
+                record.process_identity = Some(ProcessStartIdentity::Linux { starttime_ticks: 0 });
+            }
+            #[cfg(target_os = "macos")]
+            {
+                record.process_identity = Some(ProcessStartIdentity::Macos {
+                    start_seconds: 0,
+                    start_microseconds: 0,
+                });
+            }
+            persist_record(run_id, &record).expect("persist mismatched record");
+
+            let records = reconcile_run_services(run_id, "test").expect("reconcile ledger");
+            assert_eq!(records[0].state, "failed");
+            assert_eq!(
+                records[0].cleanup_outcome.as_deref(),
+                Some("skipped_ownership_mismatch")
+            );
+        });
     }
 
     fn wait_for_worker_state(run_id: &str, expected: &str) -> AgentTaskServiceWorkerState {
@@ -1256,6 +1633,7 @@ mod tests {
                 port_env: None,
                 socket_handoff: false,
                 readiness: None,
+                cleanup_deadline_ms: AgentTaskManagedService::DEFAULT_CLEANUP_DEADLINE_MS,
                 public_url: None,
                 browser_origin_probe: None,
                 lifecycle: AgentTaskManagedServiceLifecycle::Plan,
@@ -1282,6 +1660,49 @@ mod tests {
             assert!(
                 !homeboy_core::process::isolated_process_group_is_running(group)
                     .expect("inspect process group")
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_reconcile_uses_the_persisted_cleanup_deadline_for_escalation() {
+        with_isolated_home(|_| {
+            let mut service = fixture(free_port());
+            service.id = "stale-forced".to_string();
+            service.port = None;
+            service.socket_handoff = false;
+            service.readiness = None;
+            service.cleanup_deadline_ms = 100;
+            service.command = vec![
+                "python3".to_string(),
+                "-u".to_string(),
+                "-c".to_string(),
+                "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); signal.pause()".to_string(),
+            ];
+            let services =
+                ManagedServices::start(&[service], "stale-forced-cleanup").expect("start service");
+            let log_path = services.records()[0].log_path.clone().expect("service log");
+            let ready = (0..100).any(|_| {
+                if std::fs::read_to_string(&log_path).is_ok_and(|log| log.contains("ready")) {
+                    true
+                } else {
+                    thread::sleep(Duration::from_millis(10));
+                    false
+                }
+            });
+            if !ready {
+                services.cleanup("fixture_readiness_failure");
+                panic!("service did not install its SIGTERM-ignore handler");
+            }
+            std::mem::forget(services);
+
+            let records = reconcile_run_services("stale-forced-cleanup", "stale_controller")
+                .expect("reconcile persisted service ledger");
+            assert_eq!(records[0].requested_cleanup_deadline_ms, Some(100));
+            assert_eq!(
+                records[0].cleanup_outcome.as_deref(),
+                Some("deadline_escalation_forced")
             );
         });
     }

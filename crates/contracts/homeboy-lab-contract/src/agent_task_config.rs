@@ -26,6 +26,10 @@ fn default_managed_service_host() -> String {
     "127.0.0.1".to_string()
 }
 
+fn default_managed_service_cleanup_deadline_ms() -> u64 {
+    AgentTaskManagedService::DEFAULT_CLEANUP_DEADLINE_MS
+}
+
 /// A generic process owned by an agent-task plan. Values in `env` are durable
 /// configuration; `secret_env` names inherited environment variables without
 /// serializing their values into a plan or run record.
@@ -64,6 +68,11 @@ pub struct AgentTaskManagedService {
     pub socket_handoff: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readiness: Option<AgentTaskManagedServiceReadiness>,
+    /// Maximum grace period after SIGTERM before Homeboy force-terminates this
+    /// service's owned process tree. Omitted v1 declarations retain the
+    /// historical two-second grace period.
+    #[serde(default = "default_managed_service_cleanup_deadline_ms")]
+    pub cleanup_deadline_ms: u64,
     /// An externally provisioned reviewer URL. Homeboy treats this as a
     /// reference and never assumes a particular tunnel or preview provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,6 +99,19 @@ pub struct AgentTaskManagedServiceBrowserOriginProbe {
 
 impl AgentTaskManagedService {
     pub const VERSION: u32 = 1;
+    pub const DEFAULT_CLEANUP_DEADLINE_MS: u64 = 2_000;
+    pub const MAX_CLEANUP_DEADLINE_MS: u64 = 60_000;
+
+    pub fn validate_cleanup_deadline(&self) -> std::result::Result<(), String> {
+        if self.cleanup_deadline_ms == 0 || self.cleanup_deadline_ms > Self::MAX_CLEANUP_DEADLINE_MS
+        {
+            return Err(format!(
+                "managed service cleanup_deadline_ms must be between 1 and {} ms",
+                Self::MAX_CLEANUP_DEADLINE_MS
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -137,6 +159,10 @@ mod managed_service_contract_tests {
         .expect("service contract");
         assert_eq!(service.version, AgentTaskManagedService::VERSION);
         assert_eq!(service.host, "127.0.0.1");
+        assert_eq!(
+            service.cleanup_deadline_ms,
+            AgentTaskManagedService::DEFAULT_CLEANUP_DEADLINE_MS
+        );
         assert!(service.socket_handoff);
         assert_eq!(
             service.browser_origin_probe.as_ref().unwrap().provider,
@@ -153,6 +179,28 @@ mod managed_service_contract_tests {
             serialized["browser_origin_probe"]["provider"],
             "fixture-browser"
         );
+        assert_eq!(
+            serialized["cleanup_deadline_ms"],
+            AgentTaskManagedService::DEFAULT_CLEANUP_DEADLINE_MS
+        );
+    }
+
+    #[test]
+    fn cleanup_deadline_round_trips_and_rejects_unbounded_values() {
+        let mut service: AgentTaskManagedService = serde_json::from_value(serde_json::json!({
+            "id": "fixture", "command": ["fixture"], "cleanup_deadline_ms": 3_000
+        }))
+        .expect("service contract");
+        assert_eq!(
+            serde_json::to_value(&service).expect("serialize")["cleanup_deadline_ms"],
+            3_000
+        );
+        assert!(service.validate_cleanup_deadline().is_ok());
+
+        service.cleanup_deadline_ms = 0;
+        assert!(service.validate_cleanup_deadline().is_err());
+        service.cleanup_deadline_ms = AgentTaskManagedService::MAX_CLEANUP_DEADLINE_MS + 1;
+        assert!(service.validate_cleanup_deadline().is_err());
     }
 }
 

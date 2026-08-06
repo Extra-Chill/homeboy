@@ -166,6 +166,15 @@ mod plan {
             self.homeboy_plan = self.to_homeboy_plan();
         }
 
+        /// Validate the portable managed-service declarations before an
+        /// execution host or Lab handoff can admit the plan.
+        pub fn validate_managed_services(&self) -> Result<(), String> {
+            for service in &self.services {
+                service.validate_cleanup_deadline()?;
+            }
+            Ok(())
+        }
+
         pub fn canonicalize(mut self) -> Self {
             for task in &mut self.tasks {
                 if task.limits.timeout_ms.is_none() {
@@ -788,6 +797,7 @@ mod managed_service_plan_tests {
             port_env: None,
             socket_handoff: false,
             readiness: None,
+            cleanup_deadline_ms: AgentTaskManagedService::DEFAULT_CLEANUP_DEADLINE_MS,
             public_url: Some("https://preview.example.test".to_string()),
             browser_origin_probe: None,
             lifecycle: AgentTaskManagedServiceLifecycle::Plan,
@@ -815,6 +825,7 @@ mod managed_service_plan_tests {
             port_env: None,
             socket_handoff: false,
             readiness: None,
+            cleanup_deadline_ms: AgentTaskManagedService::DEFAULT_CLEANUP_DEADLINE_MS,
             public_url: None,
             browser_origin_probe: None,
             lifecycle: AgentTaskManagedServiceLifecycle::Plan,
