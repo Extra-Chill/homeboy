@@ -110,7 +110,8 @@ impl Commands {
             // probe answers before any workload workspace is built (#9763).
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command: agent_task::AgentTaskCommand::Providers(_),
-            }) => LabCommandContract::runner_resident(AGENT_TASK_PROVIDERS_LAB_LABEL),
+            }) => LabCommandContract::runner_resident(AGENT_TASK_PROVIDERS_LAB_LABEL)
+                .preserve_result_payload(),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {

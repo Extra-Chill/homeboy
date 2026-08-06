@@ -23,6 +23,7 @@ fn providers_output_includes_core_capability_contract() {
         // An absent `--backend` leaves the presentation unscoped (#9654).
         assert_eq!(value["scope"]["filtered"], false);
         assert!(value["scope"]["backend"].is_null());
+        assert!(value["providers"].is_array());
         assert_eq!(
             value["capability_contract"]["schema"],
             AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA
@@ -89,6 +90,7 @@ fn providers_output_declares_the_scope_it_observed() {
         // callers that already parse this output.
         assert_eq!(value["schema"], "homeboy/agent-task-providers/v1");
         assert_eq!(value["scope"]["filtered"], false);
+        assert!(value["providers"].is_array());
     });
 }
 

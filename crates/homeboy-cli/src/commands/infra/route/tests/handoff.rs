@@ -532,6 +532,7 @@ fn agent_task_providers_supports_explicit_runner_discovery() {
     assert!(lab_runner_supports_contract_label(command.hot_label));
     assert!(command.is_portable());
     assert!(!command.routing_policy.default_lab_offload);
+    assert!(command.routing_policy.preserve_result_payload);
     assert!(!command.routing_policy.requires_extension_parity);
     assert!(command.required_extensions.is_empty());
     assert!(!command.routing_policy.infer_source_path_tools);
