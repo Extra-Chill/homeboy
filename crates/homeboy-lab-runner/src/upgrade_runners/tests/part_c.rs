@@ -389,7 +389,7 @@ fn source_drift_recovery_retains_selected_immutable_revision() {
 fn snapshot_recovery_selects_the_verified_materialized_binary() {
     let commands = runner_recovery_commands(
         "lab",
-        "/home/user/Developer/_homeboy_binaries/homeboy-stale/target/release/homeboy",
+        "/home/user/Developer/_homeboy_binaries/homeboy-v0-331-0/target/release/homeboy",
         Some(&"identity mismatch".to_string()),
         Some("0.228.4"),
         Some("0.228.5"),
@@ -403,6 +403,9 @@ fn snapshot_recovery_selects_the_verified_materialized_binary() {
         commands[0],
         "homeboy runner refresh-homeboy lab --select /home/user/Developer/_lab_workspaces/snapshot/target/release/homeboy --reconnect"
     );
+    assert!(!commands
+        .iter()
+        .any(|command| command.contains("homeboy upgrade --force --upgrade-runner")));
 }
 
 #[test]
