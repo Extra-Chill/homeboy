@@ -323,8 +323,55 @@ fn release_ci_disables_homeboy_update_checks() {
 #[test]
 fn release_concurrency_scopes_recovery_runs_to_the_requested_tag() {
     assert!(release_workflow().contains(
-        "concurrency:\n  group: release-${{ inputs.release_tag || github.ref }}\n  cancel-in-progress: false"
+        "concurrency:\n  group: release-${{ inputs.release_tag || github.run_id }}\n  cancel-in-progress: false"
     ));
+}
+
+/// A push release run must never be QUEUED behind another one (#11749).
+///
+/// `cancel-in-progress: false` protects a run that is already executing. It
+/// does not protect a run that is waiting: GitHub keeps at most one *pending*
+/// run per concurrency group and cancels the previously pending one whenever a
+/// newer run is queued. With every push on main sharing
+/// `release-refs/heads/main`, and merges arriving faster than a ~35-minute
+/// release finishes, the pending slot was displaced continuously — 27 of the
+/// last 30 Release runs on 2026-08-06 ended `cancelled` having dispatched
+/// **zero** jobs, so none of their guards could fire and releases published
+/// with partial platform assets.
+///
+/// The branch-shaped group is therefore the bug, and pinning its absence is the
+/// point of this test. Correctness comes from the `check` job's supersession
+/// test and tag idempotency, not from the concurrency queue.
+#[test]
+fn release_push_runs_are_never_queued_behind_another_release() {
+    let workflow = release_workflow();
+
+    assert!(
+        workflow.contains("group: release-${{ inputs.release_tag || github.run_id }}"),
+        "a push release must get a concurrency group of its own so nothing can displace it"
+    );
+    assert!(
+        !workflow.contains("group: release-${{ inputs.release_tag || github.ref }}"),
+        "a branch-shaped concurrency group makes every push run queue behind the last one, \
+         where a newer push cancels it before it dispatches a single job (#11749)"
+    );
+
+    // Recovery keeps serializing per TAG: two runs repairing the same release
+    // must not race on its assets.
+    assert!(
+        workflow.contains("inputs.release_tag ||"),
+        "a recovery dispatch must still be scoped to the tag it repairs"
+    );
+
+    // Per-run concurrency is only affordable if a superseded run is cheap, so
+    // the expensive dry run must be skipped once supersession is proven.
+    let check = job_section(workflow, "check");
+    let dry_run = release_step_block(check, "name: Dry-run release check");
+    assert!(
+        dry_run.contains("steps.attach.outputs.superseded != 'true'"),
+        "a run already proven superseded must not spend ~12 minutes re-deriving that \
+         answer through the dry run; got:\n{dry_run}"
+    );
 }
 
 #[test]
@@ -333,7 +380,7 @@ fn release_is_a_direct_non_cancellable_rolling_main_pipeline() {
 
     assert!(workflow.contains("push:\n    branches: [main]"));
     assert!(workflow.contains(
-        "concurrency:\n  group: release-${{ inputs.release_tag || github.ref }}\n  cancel-in-progress: false"
+        "concurrency:\n  group: release-${{ inputs.release_tag || github.run_id }}\n  cancel-in-progress: false"
     ));
     assert!(!workflow.contains("workflow_run:"));
     assert!(!workflow.contains("release-qualification:"));
@@ -1787,5 +1834,303 @@ fn release_check_skips_a_superseded_push_but_still_fails_an_unmeasured_one() {
     assert_ne!(
         code, 0,
         "release-output-missing is unmeasured even when superseded: {out}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #11749 — a release either carries its complete declared asset set or it is
+// not published.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn release_integrity_workflow() -> &'static str {
+    include_str!("../.github/workflows/release-integrity.yml")
+}
+
+/// The exact published inventory of `v0.332.0` — the last healthy release.
+const HEALTHY_RELEASE_ASSETS: &[&str] = &[
+    "dist-manifest.json",
+    "homeboy-aarch64-apple-darwin.tar.xz",
+    "homeboy-aarch64-apple-darwin.tar.xz.sha256",
+    "homeboy-aarch64-unknown-linux-gnu.tar.xz",
+    "homeboy-aarch64-unknown-linux-gnu.tar.xz.sha256",
+    "homeboy-x86_64-apple-darwin.tar.xz",
+    "homeboy-x86_64-apple-darwin.tar.xz.sha256",
+    "homeboy-x86_64-unknown-linux-gnu.tar.xz",
+    "homeboy-x86_64-unknown-linux-gnu.tar.xz.sha256",
+    "homeboy.rb",
+    "sha256.sum",
+    "source.tar.gz",
+    "source.tar.gz.sha256",
+];
+
+/// The exact published inventory of `v0.333.0` — 7 assets, no Linux binary, no
+/// `dist-manifest.json`, plus a raw `homeboy` binary CI never produces. This is
+/// the artifact `homeboy upgrade` 404s against.
+const BROKEN_RELEASE_ASSETS: &[&str] = &[
+    "homeboy",
+    "homeboy-aarch64-apple-darwin.tar.xz",
+    "homeboy-aarch64-apple-darwin.tar.xz.sha256",
+    "homeboy.rb",
+    "sha256.sum",
+    "source.tar.gz",
+    "source.tar.gz.sha256",
+];
+
+fn release_inventory(names: &[&str]) -> String {
+    let assets = names
+        .iter()
+        .map(|name| format!("{{\"name\":\"{name}\",\"state\":\"uploaded\",\"size\":1024}}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{\"isDraft\":false,\"assets\":[{assets}]}}")
+}
+
+/// Drive the asset contract the way both callers do, through a pre-fetched
+/// inventory so no network or `gh` is involved.
+fn asset_contract(inventory: &str, require_announce_assets: &str) -> (i32, String) {
+    let output = std::process::Command::new("bash")
+        .arg(".github/release-asset-completeness.sh")
+        .env("RELEASE_TAG", "v9.9.9")
+        .env("RELEASE_INVENTORY_JSON", inventory)
+        .env("REQUIRE_ANNOUNCE_ASSETS", require_announce_assets)
+        // Never let a test append to the surrounding job's real step output.
+        .env_remove("GITHUB_OUTPUT")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("release asset completeness script should run");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (output.status.code().unwrap_or(-1), combined)
+}
+
+fn declared_dist_targets() -> Vec<String> {
+    let line = dist_workspace_manifest()
+        .lines()
+        .find(|line| line.trim_start().starts_with("targets"))
+        .expect("dist-workspace.toml must declare targets");
+
+    line.split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect()
+}
+
+/// The whole point, stated as behaviour: the inventory that shipped as
+/// `v0.333.0` must be rejected, and the inventory that shipped as `v0.332.0`
+/// must be accepted.
+#[test]
+fn asset_contract_accepts_a_complete_release_and_rejects_the_one_that_shipped_broken() {
+    let (code, out) = asset_contract(&release_inventory(HEALTHY_RELEASE_ASSETS), "true");
+    assert_eq!(
+        code, 0,
+        "the last healthy release inventory must satisfy the contract: {out}"
+    );
+
+    let (code, out) = asset_contract(&release_inventory(BROKEN_RELEASE_ASSETS), "true");
+    assert_ne!(
+        code, 0,
+        "a release with no Linux binary must not satisfy the contract: {out}"
+    );
+    assert!(
+        out.contains("homeboy-x86_64-unknown-linux-gnu.tar.xz"),
+        "the failure must name the missing platform archive, not just a count: {out}"
+    );
+    assert!(
+        out.contains("dist-manifest.json"),
+        "`dist-manifest.json` is absent on exactly the broken releases and must be \
+         part of the published contract: {out}"
+    );
+}
+
+/// The required set is DERIVED from `dist-workspace.toml`, not transcribed
+/// beside it. Adding a target must widen the contract automatically; a
+/// hardcoded list would leave the new platform silently un-gated.
+#[test]
+fn asset_contract_covers_every_target_the_repo_declares() {
+    let targets = declared_dist_targets();
+    assert!(
+        targets.len() >= 2,
+        "expected a real multi-platform target list, got {targets:?}"
+    );
+
+    for target in &targets {
+        let archive = format!("homeboy-{target}.tar.xz");
+        let reduced: Vec<&str> = HEALTHY_RELEASE_ASSETS
+            .iter()
+            .copied()
+            .filter(|name| *name != archive.as_str())
+            .collect();
+
+        let (code, out) = asset_contract(&release_inventory(&reduced), "true");
+        assert_ne!(
+            code, 0,
+            "dropping {archive} must fail the contract for declared target {target}: {out}"
+        );
+        assert!(
+            out.contains(archive.as_str()),
+            "the failure must name {archive}: {out}"
+        );
+    }
+}
+
+/// An asset that is present but unusable is not present. GitHub reports both
+/// states in the same inventory, and a zero-byte or still-uploading archive
+/// serves a broken download just as surely as a missing one.
+#[test]
+fn asset_contract_rejects_present_but_unusable_assets() {
+    let inventory = release_inventory(HEALTHY_RELEASE_ASSETS).replace(
+        "{\"name\":\"homeboy-x86_64-unknown-linux-gnu.tar.xz\",\"state\":\"uploaded\",\"size\":1024}",
+        "{\"name\":\"homeboy-x86_64-unknown-linux-gnu.tar.xz\",\"state\":\"uploaded\",\"size\":0}",
+    );
+
+    let (code, out) = asset_contract(&inventory, "true");
+    assert_ne!(code, 0, "a zero-byte platform archive must fail: {out}");
+    assert!(
+        out.contains("homeboy-x86_64-unknown-linux-gnu.tar.xz"),
+        "{out}"
+    );
+}
+
+/// This gate decides whether a release becomes reachable, so every unknown must
+/// land on "do not publish". An inventory that cannot be read is not evidence
+/// of completeness.
+#[test]
+fn asset_contract_fails_closed_on_an_unreadable_inventory() {
+    for inventory in ["", "not json", "{}", "{\"assets\":null}"] {
+        let (code, out) = asset_contract(inventory, "true");
+        assert_ne!(
+            code, 0,
+            "an unreadable inventory ({inventory:?}) must fail closed: {out}"
+        );
+    }
+}
+
+/// The pre-publication caller runs before cargo-dist announces, so
+/// `dist-manifest.json` is not yet attached. That relaxation must apply to that
+/// asset alone — the platform matrix is still fully required.
+#[test]
+fn asset_contract_pre_publication_still_requires_every_platform_archive() {
+    let without_manifest: Vec<&str> = HEALTHY_RELEASE_ASSETS
+        .iter()
+        .copied()
+        .filter(|name| *name != "dist-manifest.json")
+        .collect();
+
+    let (code, out) = asset_contract(&release_inventory(&without_manifest), "false");
+    assert_eq!(
+        code, 0,
+        "an announce-time asset must not block the pre-publication gate: {out}"
+    );
+
+    let (code, out) = asset_contract(&release_inventory(BROKEN_RELEASE_ASSETS), "false");
+    assert_ne!(
+        code, 0,
+        "the pre-publication gate must still reject a missing platform matrix: {out}"
+    );
+    assert!(
+        out.contains("homeboy-x86_64-unknown-linux-gnu.tar.xz"),
+        "{out}"
+    );
+}
+
+/// #8687's guard is `verify-published`, and it runs AFTER `host` has already
+/// published. Detect-then-revert is compensation, and compensation only works
+/// if the compensating job runs — the runs that ship incomplete releases are
+/// precisely the runs that never get there.
+///
+/// So the contract must also be a PRECONDITION of publication, evaluated
+/// immediately before the finalizer that flips the draft flag. This is the
+/// existing guard moved upstream of the act it guards, not a second guard
+/// beside it: `verify-published` is deliberately left intact below.
+#[test]
+fn publication_is_gated_on_the_declared_asset_set_before_it_happens() {
+    let workflow = release_workflow();
+    let host = job_section(workflow, "host");
+
+    let gate = release_step_block(host, "name: Gate publication on the declared asset set");
+    assert!(
+        gate.contains("release-asset-completeness.sh"),
+        "the gate must evaluate the shared asset contract; got:\n{gate}"
+    );
+    assert!(
+        gate.contains("REQUIRE_ANNOUNCE_ASSETS: 'false'"),
+        "the pre-publication gate runs before announce attaches dist-manifest.json; got:\n{gate}"
+    );
+
+    let gate_at = host
+        .find("name: Gate publication on the declared asset set")
+        .expect("publication gate must exist");
+    let publish_at = host
+        .find("name: Finish Homeboy release pipeline at tag")
+        .expect("finalizer must exist");
+    assert!(
+        gate_at < publish_at,
+        "the asset contract must be checked BEFORE the finalizer publishes, otherwise it \
+         is detection after the fact — which is exactly what #8687 shipped and what let \
+         v0.323.1 and v0.333.0 stay live and incomplete"
+    );
+
+    // Moving the check upstream must not remove the containment that catches a
+    // release which somehow reaches `published` anyway.
+    assert!(
+        workflow.contains("verify-published:"),
+        "the post-publication containment guard must be retained, not replaced"
+    );
+}
+
+/// The reason #8687's guard did not fire for `v0.333.0` is not that its logic
+/// was wrong — it is that nothing ran it. 27 of the last 30 Release runs
+/// dispatched zero jobs, and `v0.333.0`'s own inventory (a raw macOS binary CI
+/// never builds, one darwin tarball, no `dist-manifest.json`) is the signature
+/// of a release published outside the pipeline entirely.
+///
+/// `on: release` fires on the RELEASE OBJECT, so it covers every path into
+/// `latest` including the ones `release.yml` never sees.
+#[test]
+fn release_integrity_sweeper_guards_publications_the_pipeline_never_made() {
+    let workflow = release_integrity_workflow();
+
+    assert!(
+        workflow.contains("  release:\n") && workflow.contains("types: [published, released]"),
+        "the sweeper must trigger on the release object so it covers publications this \
+         workflow never performed"
+    );
+    assert!(
+        !workflow.contains("edited]") && !workflow.contains(", edited"),
+        "auditing on `edited` would inspect a release mid-upload and could re-draft a \
+         healthy one; a guard must not be able to break what it guards"
+    );
+    assert!(
+        workflow.contains("cron:"),
+        "a scheduled backstop must cover a missed release event"
+    );
+    assert!(
+        !workflow.contains("push:"),
+        "the sweeper must stay off the merge path"
+    );
+
+    assert!(
+        workflow.contains("release-asset-completeness.sh"),
+        "the sweeper must evaluate the same shared contract as the publication gate"
+    );
+    assert!(
+        workflow.contains("contents: write") && workflow.contains("--draft=true"),
+        "detecting a broken published release without containing it is what #8687 was \
+         reopened over"
+    );
+    assert!(
+        workflow.contains("SETTLE_ATTEMPTS"),
+        "a single observation could catch a healthy release a few seconds early, and the \
+         remedy here is to un-publish it -- the inventory must be re-checked before it is \
+         condemned"
+    );
+    assert!(
+        workflow.contains("could not be returned to draft"),
+        "a failed un-publish must escalate with the manual command, never pass silently"
     );
 }

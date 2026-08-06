@@ -360,6 +360,41 @@ const GATE_LAYER_SITES: &[GateLayerSite] = &[
                needs a fixture git repo plus a `gh` stub, which is why there is no fixture yet.",
     },
     GateLayerSite {
+        file: ".github/release-asset-completeness.sh",
+        decision: "exit 0",
+        basis: MeasurementBasis::PerUnitEvaluation,
+        renders_skip: false,
+        fixture: Some(
+            "asset_contract_accepts_a_complete_release_and_rejects_the_one_that_shipped_broken",
+        ),
+        note: "#11749. The green here means `every declared release asset is present, uploaded \
+               and non-empty`, and it gates publication, so an empty population would be the \
+               whole bug: a contract derived from nothing passes everything. Both populations \
+               are independently established and neither may be empty. The required set is \
+               derived from `dist-workspace.toml`'s own `targets`, and an absent file or an \
+               empty target list is a hard `exit 1` rather than a vacuous pass -- that is the \
+               `EmptyPopulation` hole closed by construction. The observed set is GitHub's asset \
+               inventory, which is likewise refused when it is unreadable, absent, or has no \
+               `.assets` array. Each required asset is then matched individually, so the \
+               aggregate green exists only if every unit was checked against a population proven \
+               non-empty.",
+    },
+    GateLayerSite {
+        file: ".github/release-asset-completeness.sh",
+        decision: "exit 1",
+        basis: MeasurementBasis::Projection,
+        renders_skip: false,
+        fixture: Some("asset_contract_fails_closed_on_an_unreadable_inventory"),
+        note: "#11749, the refusal path: a missing asset, an underivable contract, or an \
+               unreadable inventory. A non-zero exit cannot manufacture a pass, so it carries no \
+               measurement obligation of its own; it is registered because the scan keys on every \
+               exit in a gate script and an unregistered one is indistinguishable from an \
+               unexamined one. It is fixtured anyway, because the direction that matters for this \
+               gate is that UNKNOWN lands here rather than on `exit 0` -- publication proceeding \
+               on an inventory nobody could read is precisely how v0.333.0 shipped without a \
+               Linux binary.",
+    },
+    GateLayerSite {
         file: ".github/release-quality-policy.sh",
         decision: "exit \"${failed}\"",
         basis: MeasurementBasis::SharedPredicate,
