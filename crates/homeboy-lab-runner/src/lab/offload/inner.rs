@@ -1409,7 +1409,10 @@ pub(crate) fn run_lab_offload_inner(
         .session
         .as_ref()
         .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
-        && runner_status.stale_daemon.is_none()
+        // An unverified reverse session is an availability warning rather than
+        // a freshness fence. Only a typed blocking verdict can suppress this
+        // direct-SSH identity comparison.
+        && runner_status.admission_blocking_stale_daemon().is_none()
     {
         let session = runner_status
             .session
