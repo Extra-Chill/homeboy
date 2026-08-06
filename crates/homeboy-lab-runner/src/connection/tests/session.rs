@@ -1981,6 +1981,112 @@ fn status_marks_connected_reverse_active_jobs_unavailable_without_broker_url() {
 }
 
 #[test]
+fn local_typed_job_timeout_records_runner_attributed_partial_status() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("address");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("request");
+        let mut request = [0; 1024];
+        let _ = stream.read(&mut request).expect("read request");
+        std::thread::sleep(Duration::from_millis(100));
+    });
+    let mut session = direct_ssh_session("lease-live");
+    session.local_url = Some(format!("http://{address}"));
+    let client = Client::builder()
+        .timeout(Duration::from_millis(10))
+        .build()
+        .expect("client");
+    crate::readonly_probe::clear_degradations();
+
+    assert!(
+        runner_jobs_with_client("homeboy-lab", &session, &client, Duration::from_millis(10))
+            .is_err()
+    );
+
+    server.join().expect("server");
+    let degradations = crate::readonly_probe::take_degradations();
+    assert_eq!(degradations.len(), 1);
+    assert_eq!(degradations[0].probe, "runner_typed_jobs");
+    assert_eq!(degradations[0].runner_id.as_deref(), Some("homeboy-lab"));
+    assert_eq!(
+        degradations[0].reason_code,
+        crate::readonly_probe::REASON_PROBE_TIMEOUT
+    );
+}
+
+#[test]
+fn broker_typed_job_timeout_records_runner_attributed_partial_status() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("address");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("request");
+        let mut request = [0; 1024];
+        let _ = stream.read(&mut request).expect("read request");
+        std::thread::sleep(Duration::from_millis(100));
+    });
+    let mut session = reverse_controller_session();
+    session.broker_url = Some(format!("http://{address}"));
+    let client = Client::builder()
+        .timeout(Duration::from_millis(10))
+        .build()
+        .expect("client");
+    crate::readonly_probe::clear_degradations();
+
+    assert!(
+        runner_jobs_with_client("homeboy-lab", &session, &client, Duration::from_millis(10))
+            .is_err()
+    );
+
+    server.join().expect("server");
+    let degradations = crate::readonly_probe::take_degradations();
+    assert_eq!(degradations.len(), 1);
+    assert_eq!(degradations[0].probe, "runner_typed_jobs");
+    assert_eq!(degradations[0].runner_id.as_deref(), Some("homeboy-lab"));
+    assert_eq!(
+        degradations[0].reason_code,
+        crate::readonly_probe::REASON_PROBE_TIMEOUT
+    );
+}
+
+#[test]
+fn broker_typed_job_body_timeout_records_runner_attributed_partial_status() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("address");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("request");
+        let mut request = [0; 1024];
+        let _ = stream.read(&mut request).expect("read request");
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 128\r\nConnection: close\r\n\r\n")
+            .expect("headers");
+        stream.flush().expect("flush headers");
+        std::thread::sleep(Duration::from_millis(1100));
+    });
+    let mut session = reverse_controller_session();
+    session.broker_url = Some(format!("http://{address}"));
+    let client = Client::builder()
+        .timeout(Duration::from_secs(1))
+        .build()
+        .expect("client");
+    crate::readonly_probe::clear_degradations();
+
+    assert!(
+        runner_jobs_with_client("homeboy-lab", &session, &client, Duration::from_secs(1)).is_err()
+    );
+
+    server.join().expect("server");
+    let degradations = crate::readonly_probe::take_degradations();
+    assert_eq!(degradations.len(), 1);
+    assert_eq!(degradations[0].probe, "runner_typed_jobs");
+    assert_eq!(degradations[0].runner_id.as_deref(), Some("homeboy-lab"));
+    assert_eq!(
+        degradations[0].reason_code,
+        crate::readonly_probe::REASON_PROBE_TIMEOUT
+    );
+    assert_eq!(degradations[0].timeout_seconds, 1);
+}
+
+#[test]
 fn child_run_matching_accepts_durable_run_id_or_command_reference() {
     let run = sample_run_summary("run-child-1");
     let by_durable_id = sample_active_job(Some("run-child-1"), "homeboy test wpcom");

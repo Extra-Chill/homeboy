@@ -221,7 +221,7 @@ impl GhPrLandClient {
 
 impl PrLandClient for GhPrLandClient {
     fn view_pr(&mut self, _repo: &str, number: u64) -> Result<PrView> {
-        let raw = self.gh.run(&vec![
+        let raw = self.gh.run(&[
             "pr".to_string(),
             "view".to_string(),
             number.to_string(),

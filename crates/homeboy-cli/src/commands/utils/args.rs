@@ -183,9 +183,7 @@ fn top_level_runner_exec_index(args: &[String]) -> Option<usize> {
         let flag = flags.iter().find(|flag| {
             arg == &flag.flag || (flag.takes_value && arg.strip_prefix(&flag.flag) == Some("="))
         });
-        let Some(flag) = flag else {
-            return None;
-        };
+        let flag = flag?;
         index += usize::from(flag.takes_value && arg == &flag.flag) + 1;
     }
 

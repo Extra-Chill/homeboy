@@ -304,21 +304,21 @@ pub fn attach_component_paths_report(
     const SUMMARY_LIMIT: usize = 8;
     let summary: Vec<_> = items
         .iter()
-        .filter_map(|item| match item.status {
-            BatchComponentAttachmentItemStatus::Attached => Some(format!("attached {}", item.path)),
-            BatchComponentAttachmentItemStatus::Skipped => Some(format!(
+        .map(|item| match item.status {
+            BatchComponentAttachmentItemStatus::Attached => format!("attached {}", item.path),
+            BatchComponentAttachmentItemStatus::Skipped => format!(
                 "skipped {}: {}",
                 item.path,
                 item.skip_reason.as_deref().unwrap_or("skipped")
-            )),
-            BatchComponentAttachmentItemStatus::Failed => Some(format!(
+            ),
+            BatchComponentAttachmentItemStatus::Failed => format!(
                 "failed {} [{}]",
                 item.path,
                 item.error
                     .as_ref()
                     .map(|error| error.code.as_str())
                     .unwrap_or("unknown")
-            )),
+            ),
         })
         .take(SUMMARY_LIMIT)
         .collect();

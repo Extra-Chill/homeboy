@@ -35,7 +35,7 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
             disk_budget,
         });
 
-    Ok((RunsOutput::Evidence(report), 0))
+    Ok((RunsOutput::Evidence(Box::new(report)), 0))
 }
 
 #[cfg(test)]
@@ -213,6 +213,9 @@ mod tests {
                 .expect("record url");
 
             let (output, _) = evidence(&run.id).expect("evidence");
+            let serialized = serde_json::to_value(&output).expect("serialize evidence output");
+            assert_eq!(serialized["variant"], "evidence");
+            assert_eq!(serialized["payload"]["command"], "runs.evidence");
             let RunsOutput::Evidence(output) = output else {
                 panic!("expected evidence output");
             };

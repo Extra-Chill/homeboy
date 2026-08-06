@@ -21,6 +21,7 @@ use super::super::status::{
     runner_followups, runner_followups_with_admission, runner_status_operator_commands,
     selected_admission_summary,
 };
+use super::super::types::RunnerConnectionOutput;
 use crate::cli_surface::Cli;
 
 #[test]
@@ -144,6 +145,12 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
     assert!(serialized.contains("homeboy runner job reconcile homeboy-lab"));
     assert!(serialized.contains("homeboy runner job artifacts homeboy-lab job-123 <artifact-id>"));
     assert!(!serialized.contains("curl -fsS"));
+
+    let serialized_connection =
+        serde_json::to_value(RunnerConnectionOutput::Status(Box::new(report.clone())))
+            .expect("serialize boxed status connection");
+    assert_eq!(serialized_connection["action"], "status");
+    assert_eq!(serialized_connection["runner_id"], "homeboy-lab");
 
     let mut orphan = report.active_runner_jobs[0].clone();
     orphan.job_id = "orphaned-child-run-run-123".to_string();

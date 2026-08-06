@@ -290,7 +290,7 @@ fn apply_collapse_edits(root: &Path, edits: &[CollapseEdit]) -> Result<(), Error
         let mut lines: Vec<String> = content.split('\n').map(|s| s.to_string()).collect();
 
         // Bottom-up so splices don't shift not-yet-applied ranges.
-        file_edits.sort_by(|a, b| b.start_line.cmp(&a.start_line));
+        file_edits.sort_by_key(|edit| std::cmp::Reverse(edit.start_line));
 
         for edit in file_edits {
             // 1-indexed inclusive → 0-indexed slice range.

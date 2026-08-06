@@ -1443,6 +1443,7 @@ pub(super) fn fuzz_runner_contract(config: Option<&FuzzConfig>) -> FuzzRunnerCon
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_fuzz_extension_script(
     ctx: &execution_context::ExecutionContext,
     args: &FuzzRunArgs,
@@ -1710,7 +1711,7 @@ pub(super) fn build_fuzz_execution_request(
         metadata
             .get("sampling")
             .cloned()
-            .unwrap_or_else(|| serde_json::Value::Null),
+            .unwrap_or(serde_json::Value::Null),
     )
     .map_err(|error| {
         homeboy::core::Error::validation_invalid_argument(

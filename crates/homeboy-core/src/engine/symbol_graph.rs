@@ -530,7 +530,7 @@ fn apply_rewrites(rewrites: &[ImportRewrite], root: &Path) {
 
         // Apply rewrites in reverse line order to avoid index shifting
         let mut sorted_rewrites: Vec<&&ImportRewrite> = file_rewrites.iter().collect();
-        sorted_rewrites.sort_by(|a, b| b.line.cmp(&a.line));
+        sorted_rewrites.sort_by_key(|rewrite| std::cmp::Reverse(rewrite.line));
 
         for rewrite in sorted_rewrites {
             let idx = rewrite.line.saturating_sub(1);

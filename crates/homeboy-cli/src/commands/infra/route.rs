@@ -249,20 +249,30 @@ pub fn route_after_parse_with_provenance(
         return Ok(Some(exit_code));
     }
 
-    let run_handoff = if lab_command.is_some() && inferred_runner_id.is_some() {
+    // Split-placement coordinators (cook, fanout) above own their own runner
+    // selection: they stay controller-local by contract and hand only their
+    // child provider attempts to a runner. Everything below is the *generic*
+    // Lab route, and it may only consume a policy-selected default runner when
+    // the command's own contract authorizes an automatic offload.
+    //
+    // Without this gate a default Lab runner was attached to every command that
+    // merely *had* a Lab contract, baked into the canonical placement decision
+    // as `selected: lab`, and then dispatched — which is how read-only
+    // lifecycle commands ended up querying a machine that does not own their
+    // durable record (#11597, #11599) and how an explicitly local run acquired
+    // a Lab handoff it could not later recover (#11600).
+    let route_runner_id = generic_route_runner_id(cli, lab_command.as_ref(), &inferred_runner_id);
+    let run_handoff = if lab_command.is_some() && route_runner_id.is_some() {
         materialize_agent_task_run_handoff(cli, &normalized_args)?
     } else {
         None
     };
-    let retry_handoff = if lab_command.is_some() && inferred_runner_id.is_some() {
+    let retry_handoff = if lab_command.is_some() && route_runner_id.is_some() {
         materialize_agent_task_retry_handoff(cli, &normalized_args)?
     } else {
         None
     };
-    stage_retry_lab_handoff_before_preacceptance(
-        retry_handoff.as_ref(),
-        inferred_runner_id.as_deref(),
-    )?;
+    stage_retry_lab_handoff_before_preacceptance(retry_handoff.as_ref(), route_runner_id)?;
     let normalized_args = run_handoff
         .as_ref()
         .map(|handoff| handoff.args.as_slice())
@@ -302,7 +312,7 @@ pub fn route_after_parse_with_provenance(
     } else {
         lab_command
     };
-    let cook_plan = if lab_command.is_some() && inferred_runner_id.is_some() {
+    let cook_plan = if lab_command.is_some() && route_runner_id.is_some() {
         materialize_agent_task_cook_plan(cli, provenance)?
     } else {
         None
@@ -310,12 +320,12 @@ pub fn route_after_parse_with_provenance(
     let normalized_args =
         inject_agent_task_cook_attempt_plan(&normalized_args, cook_plan.as_ref())?;
     let needs_generic_detached_handoff = lab_command.is_some()
-        && inferred_runner_id.is_some()
+        && route_runner_id.is_some()
         && cli.detach_after_handoff
         && run_handoff.is_none()
         && retry_handoff.is_none()
         && cook_plan.is_none();
-    let observer = lab_dispatch_observer(cli, &normalized_args, inferred_runner_id.as_deref());
+    let observer = lab_dispatch_observer(cli, &normalized_args, route_runner_id);
 
     let capture_mutation_patch = cli.command.lab_offload_captures_mutation_patch();
     let mutation_flag = cli.command.lab_offload_mutation_flag();
@@ -335,7 +345,7 @@ pub fn route_after_parse_with_provenance(
         lab_route_source_path_args(&cli.command, normalized_args, capture_mutation_patch);
     let routed_args = rewritten_args.as_deref().unwrap_or(normalized_args);
     let generic_detached_source_path = needs_generic_detached_handoff
-        .then(|| source_path_for_generic_detached_lab_handoff(&normalized_args))
+        .then(|| source_path_for_generic_detached_lab_handoff(normalized_args))
         .transpose()?;
     // Resolve this once on the controller. The decision records the same source
     // worktree that will be snapshotted, never an ambient identity inferred by a
@@ -363,7 +373,7 @@ pub fn route_after_parse_with_provenance(
         .unwrap_or("command");
     let placement_decision = placement_decision(
         cli,
-        inferred_runner_id.as_deref(),
+        route_runner_id,
         placement_task,
         Some(&routing_source_path),
     )?;
@@ -457,7 +467,7 @@ pub fn route_after_parse_with_provenance(
             reuse_compatible_snapshot: retry_handoff.is_some(),
             job_overrides,
         },
-        inferred_runner_id.as_deref(),
+        route_runner_id,
         observer,
     )
     .map_err(|error| match retry_handoff.as_ref() {
@@ -500,6 +510,34 @@ pub fn route_after_parse_with_provenance(
             Ok(Some(output.exit_code))
         }
     }
+}
+
+/// The runner the *generic* Lab route may use, given what the command's
+/// contract actually authorizes.
+///
+/// An operator-pinned `--runner` always passes: pinning names the runner
+/// directly and is its own authority. A policy-selected default runner has to
+/// earn its place through
+/// [`lab_routing::authorizes_policy_lab_runner`], which is the same predicate
+/// the offload executor applies — so the canonical placement decision this
+/// controller writes and the dispatch the executor performs can never disagree
+/// about whether a command was entitled to leave this machine.
+fn generic_route_runner_id<'a>(
+    cli: &Cli,
+    lab_command: Option<&runners::LabOffloadCommand>,
+    inferred_runner_id: &'a Option<String>,
+) -> Option<&'a str> {
+    let runner_id = inferred_runner_id.as_deref()?;
+    if cli.runner.is_some() {
+        return Some(runner_id);
+    }
+    let command = lab_command?;
+    lab_routing::authorizes_policy_lab_runner(
+        &command.command,
+        cli.placement,
+        lab_routing::captured_pressure_severity().as_deref(),
+    )
+    .then_some(runner_id)
 }
 
 fn placement_decision(
@@ -822,7 +860,7 @@ fn run_split_placement_fanout(
                 ),
         }) if args.run_plan => {
             crate::commands::agent_task::fanout::cook_batch_with_attempt_dispatcher(
-                args.clone(),
+                *args.clone(),
                 &attempt_dispatcher,
             )?
         }
@@ -1033,7 +1071,7 @@ fn run_split_placement_cook(
     };
     let (value, exit_code) =
         crate::commands::agent_task::run::run_cook_with_executor_and_dispatcher_with_progress(
-            controller,
+            *controller,
             homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
             Some(dispatcher),
             Some(&progress),
@@ -1128,7 +1166,7 @@ pub(crate) fn reconstruct_cook_attempt_dispatcher(
             recipe
                 .get("detach_after_handoff")
                 .cloned()
-                .unwrap_or_else(|| serde_json::json!(false)),
+                .unwrap_or(serde_json::json!(false)),
         )?,
         source_path: decode_cook_dispatch_field("source_path", value("source_path")?)?,
         job_overrides: runners::LabJobOverrides {
@@ -1718,7 +1756,7 @@ fn materialize_agent_task_cook_plan(
     else {
         return Ok(None);
     };
-    let cook = crate::commands::agent_task::run::resolve_cook_destination(cook.clone())?;
+    let cook = crate::commands::agent_task::run::resolve_cook_destination(*cook.clone())?;
     crate::commands::agent_task::run::validate_cook_request_with_provenance(&cook, provenance)?;
     let provision = crate::commands::agent_task::run::provision_cook_destination(&cook)?;
     let mut plan = crate::commands::agent_task::run::compile_cook_plan(&cook, provision)?;
@@ -3025,7 +3063,7 @@ fn agent_task_fanout_cook_batch_dispatch_id(
             .issues
             .first()
             .and_then(|issue| issue.split_once("/issues/").map(|(_, number)| number))
-            .and_then(|number| number.split(|c| matches!(c, '/' | '?' | '#')).next())
+            .and_then(|number| number.split(['/', '?', '#']).next())
             .filter(|value| !value.is_empty())
             .unwrap_or("batch");
         format!(

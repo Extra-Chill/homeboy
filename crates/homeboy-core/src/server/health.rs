@@ -15,22 +15,17 @@ const PROJECT_HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 // Types
 // ============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ServerHealthState {
     Healthy,
     Unhealthy,
+    #[default]
     NotChecked,
 }
 
 impl ServerHealthState {
     pub fn is_healthy(self) -> bool {
         self == Self::Healthy
-    }
-}
-
-impl Default for ServerHealthState {
-    fn default() -> Self {
-        Self::NotChecked
     }
 }
 

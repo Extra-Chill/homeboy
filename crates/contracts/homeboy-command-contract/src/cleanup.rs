@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Args, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleanupArgs {
     /// Apply cleanup across the selected categories. Omit for inventory dry-run output.
+    /// Use the global `--placement local` to execute synchronously on this controller;
+    /// the default submits a durable asynchronous controller job.
     #[arg(long)]
     pub apply: bool,
 
@@ -23,6 +25,17 @@ pub struct CleanupArgs {
     /// Exclude these cleanup categories. Comma-separated or repeatable.
     #[arg(long, value_enum, value_delimiter = ',')]
     pub exclude: Vec<CleanupCategoryArg>,
+
+    /// Also reap `runner-downloads` cache directories that carry no download
+    /// intent marker. Untagged caches are treated as operator-owned by default,
+    /// so every one written before intent tagging existed is otherwise retained
+    /// forever. The fixed age floor, the running-run veto, and the never-reap
+    /// rule for operator pulls all still apply.
+    // `#[serde(default)]` because `CleanupArgs` is the durable job request: a
+    // checkpoint written by a binary that predates this flag must still resume.
+    #[serde(default)]
+    #[arg(long)]
+    pub include_untagged: bool,
 
     /// Override the configured terminal-run retention window for this invocation.
     #[arg(long, value_name = "DAYS")]
@@ -252,6 +265,51 @@ mod tests {
             ]
         );
         assert_eq!(parsed.cleanup.exclude, vec![CleanupCategoryArg::RuntimeTmp]);
+    }
+
+    #[test]
+    fn include_untagged_is_an_explicit_opt_in_that_defaults_off() {
+        // #11128. The flag widens the `runner-downloads` delete predicate to
+        // cover caches written before intent tagging existed, so its absence
+        // has to keep meaning exactly what it meant before it existed.
+        let parsed =
+            CleanupParserTest::parse_from(["cleanup", "--include", "runner-downloads", "--apply"]);
+        assert!(!parsed.cleanup.include_untagged);
+
+        let parsed = CleanupParserTest::parse_from([
+            "cleanup",
+            "--include",
+            "runner-downloads",
+            "--include-untagged",
+            "--apply",
+        ]);
+        assert!(parsed.cleanup.include_untagged);
+
+        // It is its own flag, not a `--include` category value: widening a
+        // predicate and selecting a category are different questions.
+        assert_eq!(
+            parsed.cleanup.include,
+            vec![CleanupCategoryArg::RunnerDownloads]
+        );
+
+        // Durable cleanup jobs round-trip `CleanupArgs` as their request, and a
+        // checkpoint written before this flag existed must still resume.
+        //
+        // `kebab-case` is the clap `ValueEnum` spelling; serde carries the
+        // variant names verbatim, so a persisted checkpoint reads `RunnerDownloads`.
+        let legacy = serde_json::json!({
+            "apply": true,
+            "include": ["RunnerDownloads"],
+            "exclude": [],
+            "older_than_days": null,
+            "runtime_tmp_managed_older_than_days": null,
+            "limit": null,
+            "full": false,
+            "cursor": null,
+        });
+        let resumed: CleanupArgs =
+            serde_json::from_value(legacy).expect("resume a pre-flag checkpoint");
+        assert!(!resumed.include_untagged);
     }
 
     #[test]

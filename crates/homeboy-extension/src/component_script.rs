@@ -168,40 +168,47 @@ pub fn run_component_scripts_with_run_dir(
 ) -> Result<ComponentScriptOutput> {
     run_component_scripts_with_run_dir_and_timeout(
         component,
-        capability,
-        source_path,
-        run_dir,
-        passthrough,
-        extra_env,
-        script_args,
-        None,
+        ComponentScriptRunRequest {
+            capability,
+            source_path,
+            run_dir,
+            passthrough,
+            extra_env,
+            script_args,
+            timeout: None,
+        },
     )
+}
+
+pub(crate) struct ComponentScriptRunRequest<'a> {
+    pub capability: ExtensionCapability,
+    pub source_path: &'a Path,
+    pub run_dir: &'a RunDir,
+    pub passthrough: bool,
+    pub extra_env: &'a [(String, String)],
+    pub script_args: &'a [String],
+    pub timeout: Option<Duration>,
 }
 
 pub(crate) fn run_component_scripts_with_run_dir_and_timeout(
     component: &Component,
-    capability: ExtensionCapability,
-    source_path: &Path,
-    run_dir: &RunDir,
-    passthrough: bool,
-    extra_env: &[(String, String)],
-    script_args: &[String],
-    timeout: Option<Duration>,
+    request: ComponentScriptRunRequest<'_>,
 ) -> Result<ComponentScriptOutput> {
-    let mut env = run_dir.legacy_env_vars();
-    let invocation = InvocationGuard::acquire(run_dir, &InvocationRequirements::default())?;
+    let mut env = request.run_dir.legacy_env_vars();
+    let invocation = InvocationGuard::acquire(request.run_dir, &InvocationRequirements::default())?;
     env.extend(invocation.env_vars());
-    env.extend(extra_env.iter().cloned());
+    env.extend(request.extra_env.iter().cloned());
     let mut output = run_component_scripts_with_env_and_timeout(
         component,
-        capability,
-        source_path,
-        passthrough,
+        request.capability,
+        request.source_path,
+        request.passthrough,
         &env,
-        script_args,
-        timeout,
+        request.script_args,
+        request.timeout,
     )?;
-    output.extension_phase_timings = super::runner::read_extension_phase_timings(run_dir.path())?;
+    output.extension_phase_timings =
+        super::runner::read_extension_phase_timings(request.run_dir.path())?;
     Ok(output)
 }
 

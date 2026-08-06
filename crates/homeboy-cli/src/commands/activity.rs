@@ -64,8 +64,8 @@ pub struct ActivityWatchArgs {
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum ActivityOutput {
-    Report(ActivityReportOutput),
-    Watch(ActivityWatchOutput),
+    Report(Box<ActivityReportOutput>),
+    Watch(Box<ActivityWatchOutput>),
 }
 
 #[derive(Serialize)]
@@ -192,7 +192,7 @@ fn list(args: ActivityListArgs) -> CmdResult<ActivityOutput> {
     let report = activity::activity_report(scope, args.limit)?;
     let actionable = actionable_for_activity_report(&report);
     Ok((
-        ActivityOutput::Report(ActivityReportOutput { report, actionable }),
+        ActivityOutput::Report(Box::new(ActivityReportOutput { report, actionable })),
         0,
     ))
 }
@@ -201,7 +201,7 @@ fn show(id: &str) -> CmdResult<ActivityOutput> {
     let report = activity::show_activity(id)?;
     let actionable = actionable_for_activity_report(&report);
     Ok((
-        ActivityOutput::Report(ActivityReportOutput { report, actionable }),
+        ActivityOutput::Report(Box::new(ActivityReportOutput { report, actionable })),
         0,
     ))
 }
@@ -276,7 +276,7 @@ fn watch_output(
         .collect();
     let actionable = actionable_for_activity_item(&item);
     (
-        ActivityOutput::Watch(ActivityWatchOutput {
+        ActivityOutput::Watch(Box::new(ActivityWatchOutput {
             schema: activity::ACTIVITY_REPORT_SCHEMA,
             command: "activity.watch",
             id: args.id,
@@ -289,7 +289,7 @@ fn watch_output(
             next_actions,
             actionable,
             notify,
-        }),
+        })),
         exit_code,
     )
 }

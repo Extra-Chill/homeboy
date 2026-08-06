@@ -89,6 +89,7 @@ pub use homeboy_engine_primitives::test_path::is_test_path;
 pub use report::{AuditCommandOutput, AuditMeasurement};
 pub use run::{run_main_audit_workflow, AuditRunWorkflowArgs, AuditRunWorkflowResult};
 
+pub(crate) use engine::AuditExecution;
 pub use entry::{
     audit_component, audit_path, audit_path_scoped, audit_path_with_id,
     source_policy_findings_for_path,

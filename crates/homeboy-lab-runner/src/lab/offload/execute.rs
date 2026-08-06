@@ -25,11 +25,26 @@ pub(crate) fn record_synced_remapped_workspace_entry(
 
 pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadOutcome> {
     let placement = request.placement_decision.requested;
-    let explicit_runner = request
-        .placement_decision
-        .runner
-        .as_ref()
-        .map(|runner| runner.runner_id.as_str());
+    // A *pinned* runner is a caller's authority to leave this machine. A
+    // *policy-selected* default runner is not — it is only a preference, and
+    // the contract still decides whether an automatic offload may happen.
+    //
+    // Reading this straight off `placement_decision.runner` erased that
+    // distinction, because the canonical decision carries the policy-selected
+    // default too. Every guard below then behaved as if the operator had typed
+    // `--runner`, so controller-owned read-only commands silently relocated to
+    // the default Lab runner and could not find their own durable record
+    // (#11597, #11599).
+    let pinned_runner = request.explicit_runner.or_else(|| {
+        request
+            .placement_decision
+            .runner
+            .as_ref()
+            .filter(|runner| {
+                runner.source == homeboy_lab_runner_contract::RunnerSelectionSource::Explicit
+            })
+            .map(|runner| runner.runner_id.as_str())
+    });
     let allow_local_fallback = request.placement_decision.permits_local_fallback();
     if request.placement_decision.selected
         == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local
@@ -68,7 +83,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     }
     if should_skip_managed_runner_placement(
         placement,
-        explicit_runner,
+        pinned_runner,
         homeboy_core::resource_policy_context::is_managed_runner_placement_context(),
     ) {
         record_local_outcome(&request)?;
@@ -95,7 +110,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     };
     let mut plan = base_lab_plan(request.command.as_ref());
     let Some(mut contract) = request.command.clone() else {
-        if let Some(runner_id) = explicit_runner {
+        if let Some(runner_id) = pinned_runner {
             if is_build_command(request.normalized_args) {
                 return Err(unsupported_build_lab_error("runner", Some(runner_id)));
             }
@@ -124,7 +139,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     if let homeboy_core::lab_contract::LabCommandPortability::LocalOnly(reason) =
         contract.portability
     {
-        if let Some(runner_id) = explicit_runner {
+        if let Some(runner_id) = pinned_runner {
             let message = format!(
                 "--runner is unavailable for this local-only resource-pressure command. {reason}"
             );
@@ -159,7 +174,12 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         contract.routing_policy.default_lab_offload = true;
     }
 
-    if explicit_runner.is_none()
+    // Restores the pre-#11332 contract guard: without a pinned runner, a
+    // contract that declares no automatic Lab offload stays on the controller.
+    // This is what keeps `agent-task status/logs/diagnose/evidence` and
+    // `agent-task providers` resolving against the machine that owns their
+    // durable record (#11597, #11599).
+    if pinned_runner.is_none()
         && !contract.routing_policy.default_lab_offload
         && !placement.requests_lab()
     {
@@ -423,6 +443,14 @@ pub(crate) fn record_local_outcome(request: &LabOffloadRequest<'_>) -> Result<()
         return Ok(());
     };
     let run_id = target.agent_task_run_id();
+    // A record with no canonical decision predates this contract (or was
+    // written by a submission path that never authored one). The decision this
+    // route is holding is the authoritative one for the execution being
+    // verified, so adopt it rather than dead-ending recovery (#11600).
+    homeboy_agents::agent_task_lifecycle::normalize_missing_execution_placement_decision(
+        run_id,
+        &request.placement_decision,
+    )?;
     let outcome = request
         .placement_decision
         .outcome(

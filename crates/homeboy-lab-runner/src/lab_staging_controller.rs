@@ -314,20 +314,15 @@ struct LabHandoffHomeboyIdentity {
 
 /// Compatibility is declared by the durable handoff protocol, rather than
 /// inferred from a product name or a particular runner implementation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum RuntimeSetCompatibility {
     /// A record persisted before runtime-set compatibility was declared.
+    #[default]
     UnknownLegacy,
     Exact,
     CompatiblePatchDrift,
     WireOrLifecycleIncompatible,
-}
-
-impl Default for RuntimeSetCompatibility {
-    fn default() -> Self {
-        Self::UnknownLegacy
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3057,11 +3052,15 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         let mut public_env = request.recipe.job_override_env.clone();
         public_env.extend(runtime_env);
         public_env.extend(crate::lab_env::build_lab_offload_env(&lab_metadata));
-        let secret_handoff = crate::lab::secrets::build_lab_secret_env_handoff_plan(
+        let mut secret_handoff = crate::lab::secrets::build_lab_secret_env_handoff_plan(
             &request.recipe.command.secret_env_sources,
             &request.recipe.normalized_args,
             public_env,
         )?;
+        crate::lab::secrets::merge_managed_service_secret_env(
+            &mut secret_handoff,
+            Some(&request.durable_agent_task_plan),
+        );
         let mut env = secret_handoff.env_delta.clone();
         env.insert(
             "HOMEBOY_RUNNER_PLACEMENT_RESOLVED".to_string(),
@@ -3072,6 +3071,20 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             request.recipe.runner_id.clone(),
         );
         let runner_status = Self::status_for_recipe_transport(request)?;
+        let runner = crate::load(&request.recipe.runner_id)?;
+        crate::lab::secrets::preflight_lab_secret_env_handoff(
+            &request.recipe.runner_id,
+            Some(&runner),
+            &env,
+            &secret_handoff,
+        )?;
+        crate::lab::secrets::preflight_agent_task_runner_secret_env_plan(
+            &request.recipe.runner_id,
+            &runner,
+            &request.recipe.normalized_args,
+            &env,
+            &secret_handoff.secret_env_plan,
+        )?;
         let session = runner_status.session.as_ref().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "runner",
@@ -3719,25 +3732,22 @@ impl LabStagingDispatchDriver {
         } else {
             adapter.execute(&request, checkpoint, token, job.clone())
         };
-        let checkpoint = result.map_err(|error| {
-            if !job.is_cancelled() {
-                if homeboy_agents::agent_task_lifecycle::record_pre_execution_failure(
+        let checkpoint = result.inspect_err(|error| {
+            if !job.is_cancelled()
+                && homeboy_agents::agent_task_lifecycle::record_pre_execution_failure(
                     &request.recipe.run_id,
                     &request.durable_agent_task_plan,
                     "lab_staging_controller",
-                    &error,
+                    error,
                 )
                 .is_ok()
-                {
-                    let _ =
-                        homeboy_agents::agent_task_lifecycle::record_lab_staging_controller_failure(
-                            &request.recipe.run_id,
-                            &format!("{:?}", expected_identity.phase),
-                            &job.job_id(),
-                        );
-                }
+            {
+                let _ = homeboy_agents::agent_task_lifecycle::record_lab_staging_controller_failure(
+                    &request.recipe.run_id,
+                    &format!("{:?}", expected_identity.phase),
+                    &job.job_id(),
+                );
             }
-            error
         })?;
         checkpoint.validate()?;
         let checkpoint =
@@ -3748,12 +3758,12 @@ impl LabStagingDispatchDriver {
                 Some("serialize Lab staging checkpoint".to_string()),
             )
         })?)?;
-        Ok(serde_json::to_value(checkpoint).map_err(|error| {
+        serde_json::to_value(checkpoint).map_err(|error| {
             Error::internal_json(
                 error.to_string(),
                 Some("serialize Lab staging result".to_string()),
             )
-        })?)
+        })
     }
 }
 

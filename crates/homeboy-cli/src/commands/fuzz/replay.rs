@@ -722,6 +722,7 @@ fn run_replay_artifact_rank(artifact: &ArtifactRecord) -> u8 {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod replay_artifact_source_tests {
     use super::*;
     use homeboy::core::observation::NewRunRecord;

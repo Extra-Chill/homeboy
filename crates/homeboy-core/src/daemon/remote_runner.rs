@@ -622,9 +622,11 @@ fn claim(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) ->
         request.project_id.as_deref(),
         request.lease_ms.unwrap_or(30_000),
         concurrency_limit,
-        request.execution_protocol.as_ref(),
-        request.workspace_claim_protocol.as_ref(),
-        request.workspace_owner_lease_protocol.as_ref(),
+        crate::api_jobs::RemoteRunnerClaimProtocols {
+            execution: request.execution_protocol.as_ref(),
+            workspace_claim: request.workspace_claim_protocol.as_ref(),
+            workspace_owner_lease: request.workspace_owner_lease_protocol.as_ref(),
+        },
     )?;
     Ok(json!({
         "command": "api.runner.jobs.claim",

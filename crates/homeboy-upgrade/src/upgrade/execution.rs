@@ -60,6 +60,19 @@ pub(crate) struct ActiveBinaryInfo {
     pub build_identity: Option<String>,
 }
 
+type UpgradeExecutionResult = Result<(bool, Option<String>, Option<String>, Option<String>)>;
+
+struct SourceSwapVerification<'a> {
+    method: InstallMethod,
+    success: bool,
+    new_version: Option<&'a str>,
+    new_build_identity: Option<&'a str>,
+    source_workspace: Option<&'a Path>,
+    built_binary: Option<&'a Path>,
+    replacement_target: Option<&'a Path>,
+    built_binary_identity: Option<&'a str>,
+}
+
 /// Bound a captured stream to a retained-byte cap, keeping the trailing bytes
 /// (the most relevant tail for a failure message) and returning the retained
 /// text plus truncation metadata. Mirrors the `bound_captured_stream` pattern
@@ -101,7 +114,7 @@ pub(crate) fn execute_upgrade(
     force: bool,
     previous_build_identity: Option<&str>,
     selected_binary_version: Option<&str>,
-) -> Result<(bool, Option<String>, Option<String>, Option<String>)> {
+) -> UpgradeExecutionResult {
     let defaults = defaults::load_defaults();
     // The binary installer replaces `command -v homeboy`. Capture that path
     // before its shell runs so verification proves the intended PATH target was
@@ -287,7 +300,7 @@ fn complete_source_upgrade(
     force: bool,
     previous_build_identity: Option<&str>,
     source_revision: Option<String>,
-) -> Result<(bool, Option<String>, Option<String>, Option<String>)> {
+) -> UpgradeExecutionResult {
     let replacement_target = replacement_target.ok_or_else(|| {
         Error::internal_unexpected("active binary path unavailable for source upgrade install")
     })?;
@@ -314,16 +327,16 @@ fn complete_source_upgrade(
         std::thread::sleep,
     );
 
-    if let Some(error) = source_swap_failure(
+    if let Some(error) = source_swap_failure(SourceSwapVerification {
         method,
         success,
-        new_version.as_deref(),
-        new_build_identity.as_deref(),
-        Some(&workspace_root),
-        Some(&built_binary),
-        Some(replacement_target),
-        previous_build_identity,
-    ) {
+        new_version: new_version.as_deref(),
+        new_build_identity: new_build_identity.as_deref(),
+        source_workspace: Some(&workspace_root),
+        built_binary: Some(&built_binary),
+        replacement_target: Some(replacement_target),
+        built_binary_identity: previous_build_identity,
+    }) {
         return Err(error);
     }
 
@@ -403,30 +416,22 @@ fn terminate_upgrade_child(child: &mut std::process::Child) {
 ///
 /// Returns `None` for every other case (verified swap, or a non-source method
 /// where a soft unverified result is reported by the caller).
-fn source_swap_failure(
-    method: InstallMethod,
-    success: bool,
-    new_version: Option<&str>,
-    new_build_identity: Option<&str>,
-    source_workspace: Option<&Path>,
-    built_binary: Option<&Path>,
-    replacement_target: Option<&Path>,
-    built_binary_identity: Option<&str>,
-) -> Option<Error> {
-    if method != InstallMethod::Source || success {
+fn source_swap_failure(verification: SourceSwapVerification<'_>) -> Option<Error> {
+    if verification.method != InstallMethod::Source || verification.success {
         return None;
     }
 
-    let observed = new_build_identity
-        .or(new_version)
+    let observed = verification
+        .new_build_identity
+        .or(verification.new_version)
         .unwrap_or("an unverifiable version");
 
     let diagnostics = source_swap_failure_diagnostics(
-        source_workspace,
-        built_binary,
-        replacement_target,
-        built_binary_identity,
-        new_build_identity,
+        verification.source_workspace,
+        verification.built_binary,
+        verification.replacement_target,
+        verification.built_binary_identity,
+        verification.new_build_identity,
     );
     let mut error = Error::internal_unexpected(format!(
         "source upgrade command exited successfully but the active binary was not replaced (still {observed})"
@@ -803,7 +808,7 @@ where
 
     for attempt in 0..attempts {
         let active_binary = read_active();
-        if active_binary.as_ref().is_some_and(|info| verified(info)) {
+        if active_binary.as_ref().is_some_and(&mut verified) {
             return (true, active_binary);
         }
 

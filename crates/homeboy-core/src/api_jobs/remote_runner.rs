@@ -44,9 +44,16 @@ pub struct RunnerJobProjectionCancelRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum RemoteRunnerSubmissionLookup {
-    Accepted { job: Job },
+    Accepted { job: Box<Job> },
     Expired { job_id: Uuid },
     Absent,
+}
+
+/// Protocol capabilities advertised by a remote runner before it claims work.
+pub struct RemoteRunnerClaimProtocols<'a> {
+    pub execution: Option<&'a crate::runner_job_execution_context::RunnerJobExecutionProtocol>,
+    pub workspace_claim: Option<&'a crate::workspace_claim::WorkspaceClaimProtocol>,
+    pub workspace_owner_lease: Option<&'a crate::workspace_claim::WorkspaceOwnerLeaseProtocol>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -659,7 +666,7 @@ impl JobStore {
         if let Some(submission) = inner.submission_keys.get(submission_key) {
             if let Some(stored) = inner.jobs.get(&submission.job_id) {
                 return RemoteRunnerSubmissionLookup::Accepted {
-                    job: stored.job.clone(),
+                    job: Box::new(stored.job.clone()),
                 };
             }
         }
@@ -923,9 +930,13 @@ impl JobStore {
             project_id,
             lease_ms,
             concurrency_limit,
-            execution_protocol,
-            Some(&crate::workspace_claim::WorkspaceClaimProtocol::current()),
-            Some(&crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current()),
+            RemoteRunnerClaimProtocols {
+                execution: execution_protocol,
+                workspace_claim: Some(&crate::workspace_claim::WorkspaceClaimProtocol::current()),
+                workspace_owner_lease: Some(
+                    &crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current(),
+                ),
+            },
         )
     }
 
@@ -937,14 +948,13 @@ impl JobStore {
         project_id: Option<&str>,
         lease_ms: u64,
         concurrency_limit: Option<usize>,
-        execution_protocol: Option<
-            &crate::runner_job_execution_context::RunnerJobExecutionProtocol,
-        >,
-        workspace_claim_protocol: Option<&crate::workspace_claim::WorkspaceClaimProtocol>,
-        workspace_owner_lease_protocol: Option<
-            &crate::workspace_claim::WorkspaceOwnerLeaseProtocol,
-        >,
+        protocols: RemoteRunnerClaimProtocols<'_>,
     ) -> Result<Option<RemoteRunnerJobClaim>> {
+        let RemoteRunnerClaimProtocols {
+            execution: execution_protocol,
+            workspace_claim: workspace_claim_protocol,
+            workspace_owner_lease: workspace_owner_lease_protocol,
+        } = protocols;
         if runner_id.trim().is_empty() {
             return Err(Error::validation_invalid_argument(
                 "runner_id",
@@ -1085,8 +1095,7 @@ impl JobStore {
         };
         let execution_protocol = execution_context
             .as_ref()
-            .map(|_| execution_protocol.cloned())
-            .flatten();
+            .and_then(|_| execution_protocol.cloned());
         let workspace_claim_protocol = request
             .requires_workspace_claim_protocol()
             .then(crate::workspace_claim::WorkspaceClaimProtocol::current);

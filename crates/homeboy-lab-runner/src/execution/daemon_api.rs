@@ -103,12 +103,22 @@ pub fn daemon_api_get(runner_id: &str, path: &str) -> Result<Value> {
 /// Query one known direct-daemon generation without re-resolving ownership.
 /// Generation reconciliation uses this only after a job lookup returned 404.
 pub(crate) fn daemon_api_get_for_session(session: &RunnerSession, path: &str) -> Result<Value> {
+    daemon_api_get_for_session_with_timeout(session, path, Duration::from_secs(10))
+}
+
+/// Query a known daemon generation under the caller's remaining wall-clock
+/// budget rather than allocating a fresh per-request timeout.
+pub(crate) fn daemon_api_get_for_session_with_timeout(
+    session: &RunnerSession,
+    path: &str,
+    timeout: Duration,
+) -> Result<Value> {
     let local_url = session.local_url.as_deref().ok_or_else(|| {
         Error::internal_unexpected("known daemon generation has no direct local endpoint")
     })?;
     let client = Client::builder()
         .no_proxy()
-        .timeout(Duration::from_secs(10))
+        .timeout(timeout)
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build daemon HTTP client: {err}")))?;
     daemon_get(&client, local_url, path)

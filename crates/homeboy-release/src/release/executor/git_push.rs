@@ -41,7 +41,7 @@ pub(crate) fn run_git_push(
             branch
         );
     }
-    let output = push_release_branch(component, component_id, &branch)?;
+    let output = push_release_branch(component, component_id, branch)?;
     let data = serde_json::to_value(&output)
         .map_err(|e| Error::internal_json(e.to_string(), Some("git push output".to_string())))?;
 
@@ -55,7 +55,7 @@ pub(crate) fn run_git_push(
     // behind. Attempt a clean, non-force recovery: fetch, rebase the release
     // commit onto the advanced remote head, and re-push the branch.
     if is_non_fast_forward_rejection(&output.stderr) {
-        match recover_advanced_remote_push(component, component_id, &branch, release_tag) {
+        match recover_advanced_remote_push(component, component_id, branch, release_tag) {
             Ok(Some(recovered)) => {
                 let AdvancedRemoteRecovery { push, advance } = recovered;
                 let recovered_data = serde_json::to_value(&push).map_err(|e| {
@@ -65,7 +65,7 @@ pub(crate) fn run_git_push(
                 // the published release contents (issue #6141). Skip the warning
                 // for no-op recoveries (already reconciled / spurious rejection).
                 if !advance.is_noop() {
-                    advance.warn(&branch);
+                    advance.warn(branch);
                 }
                 homeboy_core::log_status!(
                     "release",
@@ -102,7 +102,7 @@ pub(crate) fn run_git_push(
             "git.push",
             Some(data),
             Some(error),
-            non_fast_forward_recovery_hints(component_id, &branch),
+            non_fast_forward_recovery_hints(component_id, branch),
         ));
     }
 

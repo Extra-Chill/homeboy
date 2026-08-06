@@ -555,7 +555,7 @@ pub fn discover_casing(root: &Path, term: &str, config: &ScanConfig) -> Vec<(Str
     }
 
     let mut result: Vec<(String, usize)> = casing_counts.into_iter().collect();
-    result.sort_by(|a, b| b.1.cmp(&a.1)); // Most frequent first
+    result.sort_by_key(|entry| std::cmp::Reverse(entry.1)); // Most frequent first
     result
 }
 

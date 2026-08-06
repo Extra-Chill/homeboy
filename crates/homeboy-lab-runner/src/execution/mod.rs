@@ -82,6 +82,7 @@ use policy::{preflight_remote_argv, remote_execution_preflight};
 use broker::*;
 use daemon::*;
 pub(crate) use daemon_api::daemon_api_get_for_session;
+pub(crate) use daemon_api::daemon_api_get_for_session_with_timeout;
 use daemon_api::*;
 use failure::*;
 use handoff::*;
@@ -123,9 +124,11 @@ pub(crate) use daemon_api::daemon_api_post_for_session;
 pub use failure::runner_exec_failure_error;
 pub use handoff::{runner_job_cancel, runner_job_cancel_projection};
 pub use recovery::{
-    reconcile_terminal_runner_exec_runs,
+    finish_scheduled_terminal_runner_exec_recovery,
+    record_scheduled_terminal_runner_exec_recovery_child_spawn_failure,
     record_scheduled_terminal_runner_exec_recovery_spawn_failure,
-    run_scheduled_terminal_runner_exec_recovery, schedule_terminal_runner_exec_recovery,
+    run_scheduled_terminal_runner_exec_recovery, run_scheduled_terminal_runner_exec_recovery_child,
+    schedule_terminal_runner_exec_recovery, RunnerExecRecoveryChildSchedule,
 };
 
 /// Retire a completed direct daemon generation only after controller-owned
@@ -382,6 +385,10 @@ pub struct RunnerExecOutput {
     pub diagnostics: Option<RunnerExecDiagnostics>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "RunnerExecutionRecord preserves separately typed compatibility fields from every transport."
+)]
 fn runner_execution_record_for_output(
     runner: &Runner,
     transport: &str,

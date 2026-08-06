@@ -113,6 +113,17 @@ pub enum TraceMetricGuardrailPolicy {
     PercentDelta { max_percent: f64 },
 }
 
+pub(super) struct TraceCompareRequest<'a> {
+    pub(super) before_path: &'a Path,
+    pub(super) before: TraceAggregateInput,
+    pub(super) after_path: &'a Path,
+    pub(super) after: TraceAggregateInput,
+    pub(super) focus_span_ids: &'a [String],
+    pub(super) regression_threshold_percent: f64,
+    pub(super) regression_min_delta_ms: u64,
+    pub(super) metric_guardrail_specs: &'a [TraceMetricGuardrailSpec],
+}
+
 #[derive(Deserialize)]
 pub(super) struct TraceOverlayInput {
     pub(super) path: String,
@@ -141,16 +152,16 @@ pub(super) fn run_compare(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
     let after_json = read_trace_aggregate_json(&after_path)?;
     let before = parse_trace_aggregate_for_path(&before_json, &before_path)?;
     let after = parse_trace_aggregate_for_path(&after_json, &after_path)?;
-    let output = compare_trace_aggregates_with_focus(
-        &before_path,
+    let output = compare_trace_aggregates_with_focus(TraceCompareRequest {
+        before_path: &before_path,
         before,
-        &after_path,
+        after_path: &after_path,
         after,
-        &args.focus_spans,
-        args.regression_threshold,
-        args.regression_min_delta_ms,
-        &args.metric_guardrails,
-    );
+        focus_span_ids: &args.focus_spans,
+        regression_threshold_percent: args.regression_threshold,
+        regression_min_delta_ms: args.regression_min_delta_ms,
+        metric_guardrail_specs: &args.metric_guardrails,
+    });
     let exit_code = if output.focus_status.as_deref() == Some("fail")
         || output.guardrail_status.as_deref() == Some("fail")
         || output.metric_guardrail_status.as_deref() == Some("fail")
@@ -175,7 +186,7 @@ pub(super) fn run_compare(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
             compare: &output,
         })?;
     }
-    Ok((TraceCommandOutput::Compare(output), exit_code))
+    Ok((TraceCommandOutput::Compare(Box::new(output)), exit_code))
 }
 
 fn required_compare_path_arg<T>(value: Option<T>, field: &'static str) -> homeboy::core::Result<T> {
@@ -228,28 +239,32 @@ pub(super) fn compare_trace_aggregates(
     after_path: &Path,
     after: TraceAggregateInput,
 ) -> extension_trace::TraceCompareOutput {
-    compare_trace_aggregates_with_focus(
+    compare_trace_aggregates_with_focus(TraceCompareRequest {
         before_path,
         before,
         after_path,
         after,
-        &[],
-        extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-        extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
-        &[],
-    )
+        focus_span_ids: &[],
+        regression_threshold_percent:
+            extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+        regression_min_delta_ms: extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+        metric_guardrail_specs: &[],
+    })
 }
 
 pub(super) fn compare_trace_aggregates_with_focus(
-    before_path: &Path,
-    before: TraceAggregateInput,
-    after_path: &Path,
-    after: TraceAggregateInput,
-    focus_span_ids: &[String],
-    regression_threshold_percent: f64,
-    regression_min_delta_ms: u64,
-    metric_guardrail_specs: &[TraceMetricGuardrailSpec],
+    request: TraceCompareRequest<'_>,
 ) -> extension_trace::TraceCompareOutput {
+    let TraceCompareRequest {
+        before_path,
+        before,
+        after_path,
+        after,
+        focus_span_ids,
+        regression_threshold_percent,
+        regression_min_delta_ms,
+        metric_guardrail_specs,
+    } = request;
     let before_spans = before
         .spans
         .into_iter()

@@ -137,7 +137,7 @@ pub(crate) enum ProfileCommand {
 pub enum AuthOutput {
     Login(LoginResult),
     Set(SetResult),
-    Get(GetResult),
+    Get(Box<GetResult>),
     Remove(RemoveResult),
     Logout(LogoutResult),
     Status(AuthStatus),
@@ -248,7 +248,7 @@ fn run_set(project_id: &str, variable: &str, value: Option<String>) -> CmdResult
 
 fn run_get(project_id: &str, variable: &str, redacted: bool) -> CmdResult<AuthOutput> {
     let result = auth::get(project_id, variable, redacted)?;
-    Ok((AuthOutput::Get(result), 0))
+    Ok((AuthOutput::Get(Box::new(result)), 0))
 }
 
 fn run_remove(project_id: &str, variable: &str) -> CmdResult<AuthOutput> {

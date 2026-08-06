@@ -165,7 +165,7 @@ pub(crate) fn materialize_inline_agent_task_json_specs_in_args<T>(
         "agent-task-tasks.json",
         "agent_task_tasks_remapped",
         "lab.sync_remapped_agent_task_tasks",
-        |spec| sync_inline_json(spec),
+        &mut sync_inline_json,
     )?;
     let (args, plan_entry) = materialize_inline_json_option(
         &args,
@@ -174,7 +174,7 @@ pub(crate) fn materialize_inline_agent_task_json_specs_in_args<T>(
         "agent-task-plan.json",
         "agent_task_plan_remapped",
         "lab.sync_remapped_agent_task_plan",
-        |spec| sync_inline_json(spec),
+        &mut sync_inline_json,
     )?;
     let (args, attempt_plan_entry) = materialize_inline_json_option(
         &args,
@@ -183,7 +183,7 @@ pub(crate) fn materialize_inline_agent_task_json_specs_in_args<T>(
         "agent-task-attempt-plan.json",
         "agent_task_attempt_plan_remapped",
         "lab.sync_remapped_agent_task_attempt_plan",
-        |spec| sync_inline_json(spec),
+        sync_inline_json,
     )?;
 
     let workspace_entries = task_entry

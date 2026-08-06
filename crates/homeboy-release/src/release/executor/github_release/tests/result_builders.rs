@@ -6,6 +6,7 @@ use super::super::gh_cli::{gh_failure_diagnostic, GhCommandOutput};
 use super::super::{
     create_failed_result, not_created_result, published_existing_draft_result,
     published_release_url, unfinished_release_result, upload_failed_result, upload_success_result,
+    UploadFailedResultRequest,
 };
 use super::{data_bool, data_str, test_body, test_repair, test_repo};
 
@@ -105,13 +106,15 @@ fn upload_failed_result_is_failed_but_records_release_exists() {
     let result = upload_failed_result(
         "v0.10.6",
         &test_repo(),
-        String::new(),
-        "could not upload asset".to_string(),
-        Some(1),
-        false,
-        1,
-        test_repair(),
-        &[],
+        UploadFailedResultRequest {
+            stdout: String::new(),
+            stderr: "could not upload asset".to_string(),
+            exit_code: Some(1),
+            timed_out: false,
+            artifact_count: 1,
+            repair: test_repair(),
+            diagnostics: &[],
+        },
     );
 
     assert_eq!(result.status, ReleaseStepStatus::Failed);
@@ -134,13 +137,15 @@ fn upload_timeout_is_classified_and_preserves_empty_stderr() {
     let result = upload_failed_result(
         "v0.10.6",
         &test_repo(),
-        String::new(),
-        String::new(),
-        Some(124),
-        true,
-        1,
-        test_repair(),
-        &[],
+        UploadFailedResultRequest {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(124),
+            timed_out: true,
+            artifact_count: 1,
+            repair: test_repair(),
+            diagnostics: &[],
+        },
     );
     assert_eq!(data_bool(&result, "timed_out"), Some(true));
     assert_eq!(
@@ -159,16 +164,18 @@ fn upload_failed_result_sanitizes_persisted_output() {
     let result = upload_failed_result(
         "v0.10.6",
         &test_repo(),
-        format!(
-            "https://user:password@example.test/file?token=secret {}",
-            "x".repeat(5000)
-        ),
-        "Authorization: Bearer secret".to_string(),
-        Some(1),
-        false,
-        1,
-        test_repair(),
-        &[],
+        UploadFailedResultRequest {
+            stdout: format!(
+                "https://user:password@example.test/file?token=secret {}",
+                "x".repeat(5000)
+            ),
+            stderr: "Authorization: Bearer secret".to_string(),
+            exit_code: Some(1),
+            timed_out: false,
+            artifact_count: 1,
+            repair: test_repair(),
+            diagnostics: &[],
+        },
     );
     let data = result.data.as_ref().expect("failed result data");
     let stdout = data["stdout"].as_str().expect("sanitized stdout");

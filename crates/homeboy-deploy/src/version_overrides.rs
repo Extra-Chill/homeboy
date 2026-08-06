@@ -575,7 +575,7 @@ pub(super) fn deploy_with_override(
     // until after this step so extension verifiers can compare installed files
     // against the exact uploaded payload.
     if let Some(v) = verification {
-        if let Some(observation) = observation.as_deref_mut() {
+        if let Some(observation) = observation {
             observation.phase("verify", true)?;
         }
         if let Some(ref verify_cmd_template) = v.verify_command {

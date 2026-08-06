@@ -200,9 +200,7 @@ impl<E> RollingGenerations<E> {
             .retain(|id, _| retained_run_ids.contains(id));
         self.artifact_owners
             .retain(|id, _| retained_artifact_ids.contains(id));
-        let released =
-            runs_before != self.run_owners.len() || artifacts_before != self.artifact_owners.len();
-        released
+        runs_before != self.run_owners.len() || artifacts_before != self.artifact_owners.len()
     }
 
     pub fn endpoint_owner(

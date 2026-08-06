@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use homeboy_core::daemon::runner_exec_driver::{
     DaemonExecOutput, ExecCancellationProbe, ExecChildStarted, ExecProgressSink,
-    PreparedDaemonExec, RunnerExecDriver, RunnerExecPrepareRequest,
+    PreparedDaemonExec, PreparedDaemonExecRequest, RunnerExecDriver, RunnerExecPrepareRequest,
 };
 use homeboy_core::error::Result;
 use homeboy_core::runner_job_execution_context::RunnerJobExecutionContext;
@@ -86,25 +86,25 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
             require_paths: request.require_paths,
             validate_require_paths_on_host: request.validate_require_paths_on_host,
         })?;
-        Ok(PreparedDaemonExec::new(
-            plan.runner.id.clone(),
-            plan.cwd.clone(),
-            plan.command.clone(),
-            plan.env.clone(),
-            plan.secret_env_names.clone(),
-            plan.source_snapshot.clone(),
-            plan.require_paths.clone(),
-            plan.runner.settings.concurrency_limit,
-            plan.runner.settings.heartbeat_only_stall.clone(),
+        Ok(PreparedDaemonExec::new(PreparedDaemonExecRequest {
+            runner_id: plan.runner.id.clone(),
+            cwd: plan.cwd.clone(),
+            command: plan.command.clone(),
+            env: plan.env.clone(),
+            secret_env_names: plan.secret_env_names.clone(),
+            source_snapshot: plan.source_snapshot.clone(),
+            require_paths: plan.require_paths.clone(),
+            concurrency_limit: plan.runner.settings.concurrency_limit,
+            heartbeat_only_stall: plan.runner.settings.heartbeat_only_stall.clone(),
             // This is a durable declaration, not provider output. The provider
             // itself is resolved only after the authenticated context arrives
             // at `execute`.
-            serde_json::json!({ "providers": request.extension_env_providers.clone() }),
-            Arc::new(DaemonPreparedPlan {
+            extension_env_provenance: serde_json::json!({ "providers": request.extension_env_providers.clone() }),
+            plan_token: Arc::new(DaemonPreparedPlan {
                 plan,
                 extension_env_providers: request.extension_env_providers,
             }),
-        ))
+        }))
     }
 
     fn execute(
@@ -171,10 +171,9 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
             )
         })?;
 
-        let mut is_cancelled = is_cancelled;
         let output = execute_runner_process_until_cancelled_with_progress(
             &plan,
-            || is_cancelled(),
+            is_cancelled,
             progress_sink,
             require_child_identity_acknowledgement,
             child_started,

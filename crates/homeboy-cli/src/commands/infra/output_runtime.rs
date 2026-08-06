@@ -467,6 +467,7 @@ pub fn run_command(
     requested_output_file: Option<&str>,
     identity: &CommandIdentity,
     provenance: CommandArgumentProvenance,
+    placement: crate::cli_surface::Placement,
 ) -> i32 {
     let output_file = command_runtime_output_file(&command, requested_output_file);
     let plan = command.response_plan(spec, output_file.is_some());
@@ -476,8 +477,15 @@ pub fn run_command(
         crate::commands::raw_output::CommandRunPreparation::Handled(exit_code) => return exit_code,
         crate::commands::raw_output::CommandRunPreparation::Json(command) => {
             return output_service.emit_run(
-                run_json(*command, spec, plan.output_file, output_file, &provenance)
-                    .with_identity(identity),
+                run_json(
+                    *command,
+                    spec,
+                    plan.output_file,
+                    output_file,
+                    &provenance,
+                    placement,
+                )
+                .with_identity(identity),
                 plan.output_file,
             );
         }
@@ -545,6 +553,7 @@ pub fn run_json(
     mode: CommandOutputFileMode,
     output_file: Option<&str>,
     provenance: &CommandArgumentProvenance,
+    placement: crate::cli_surface::Placement,
 ) -> CommandRun {
     match (mode, command) {
         (CommandOutputFileMode::TraceJsonSummaryArtifact, Commands::Trace(args)) => {
@@ -562,9 +571,13 @@ pub fn run_json(
                 output_file_already_written: false,
             }
         }
-        (_, command) => {
-            crate::commands::json_output::run_command_output(command, spec, output_file, provenance)
-        }
+        (_, command) => crate::commands::json_output::run_command_output(
+            command,
+            spec,
+            output_file,
+            provenance,
+            placement,
+        ),
     }
 }
 

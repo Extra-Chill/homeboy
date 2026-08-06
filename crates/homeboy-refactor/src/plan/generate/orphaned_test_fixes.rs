@@ -220,9 +220,7 @@ fn find_test_function_range(content: &str, fn_name: &str) -> Option<(usize, usiz
     let mut found_open = false;
     let mut raw_string_close: Option<String> = None;
 
-    for i in decl_idx..lines.len() {
-        let line = lines[i];
-
+    for (i, line) in lines.iter().copied().enumerate().skip(decl_idx) {
         // If we're inside a raw string, skip until we find the close pattern.
         if let Some(ref close_pattern) = raw_string_close {
             if line.contains(close_pattern.as_str()) {

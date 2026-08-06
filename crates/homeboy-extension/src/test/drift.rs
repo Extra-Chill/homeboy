@@ -519,7 +519,7 @@ pub fn declares_test_function(contents: &str) -> bool {
         };
         let head = attr
             .trim_start()
-            .split(|c| c == '(' || c == ']' || c == ',')
+            .split(['(', ']', ','])
             .next()
             .unwrap_or("")
             .trim();
@@ -585,7 +585,7 @@ fn is_docs_or_config_path(path: &str) -> bool {
     DOC_CONFIG_SUFFIXES
         .iter()
         .any(|suffix| file_name.ends_with(suffix))
-        || DOC_CONFIG_NAMES.iter().any(|name| file_name == *name)
+        || DOC_CONFIG_NAMES.contains(&file_name)
         || lower.starts_with("docs/")
         || lower.contains("/docs/")
         || lower.starts_with(".github/")
@@ -1460,7 +1460,7 @@ mod workspace_layout_tests {
     /// those files as source; otherwise a change to any member crate is
     /// invisible to drift detection AND to the `#8340` fail-closed guard, so the
     /// gate reports green without running that crate's tests.
-
+    ///
     /// The regression that motivated this: `76c8c99a8` changed
     /// `crates/homeboy-lab-runner/src/lab/offload/hydration.rs` and broke two
     /// `#[cfg(test)] mod tests` cases inside that very crate. Drift only maps a

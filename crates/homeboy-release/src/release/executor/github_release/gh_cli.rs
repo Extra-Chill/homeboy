@@ -1658,7 +1658,7 @@ fn parse_github_request_id(value: &str) -> Option<String> {
                     .map(char::len_utf8)
                     .sum::<usize>();
             let end = value[start..]
-                .find(|character: char| matches!(character, '\n' | '\r' | ' ' | '"' | ','))
+                .find(['\n', '\r', ' ', '"', ','])
                 .map(|offset| start + offset)
                 .unwrap_or(value.len());
             if start < end {
@@ -3136,7 +3136,7 @@ mod tests {
         };
         for digest in [Some("sha256:not-a-digest"), Some("sha512:abcd")] {
             let error = reconcile_release_publications_with(
-                &[publication.clone()],
+                std::slice::from_ref(&publication),
                 &[remote_asset(
                     &publication.target_name,
                     publication.size,
@@ -3151,7 +3151,7 @@ mod tests {
         }
 
         let error = reconcile_release_publications_with(
-            &[publication.clone()],
+            std::slice::from_ref(&publication),
             &[remote_asset(
                 &publication.target_name,
                 publication.size,
@@ -3199,7 +3199,7 @@ mod tests {
         };
         let mut downloads = 0;
         let (uploads, existing) = reconcile_release_publications_with(
-            &[publication.clone()],
+            std::slice::from_ref(&publication),
             &[remote_asset("component.zip", 15, None)],
             &mut |_, _| {
                 downloads += 1;
@@ -3242,7 +3242,7 @@ mod tests {
             source_path: "component.zip".to_string(),
         };
         let missing_digest = reconcile_release_publications_with(
-            &[publication.clone()],
+            std::slice::from_ref(&publication),
             &[remote_asset("component.zip", 15, None)],
             &mut |_, _| Ok((15, "b".repeat(64))),
         )

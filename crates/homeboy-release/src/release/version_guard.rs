@@ -236,7 +236,7 @@ mod tests {
 
         assert!(detect_manual_release_owned_mutations(
             &component,
-            &[mutation.clone()],
+            std::slice::from_ref(&mutation),
             Some(&authorized)
         )
         .is_empty());

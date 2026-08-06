@@ -44,7 +44,7 @@ fn remove(source: &str) -> CmdResult<RigCommandOutput> {
     Ok((
         RigCommandOutput::Sources(RigSourcesOutput {
             command: "rig.sources.remove",
-            report: RigSourcesReport::Remove(rig::remove_source(source)?),
+            report: RigSourcesReport::Remove(Box::new(rig::remove_source(source)?)),
         }),
         0,
     ))

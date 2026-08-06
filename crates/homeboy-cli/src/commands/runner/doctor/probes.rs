@@ -858,13 +858,10 @@ pub(super) fn managed_runner_source_state_check(
         ));
     }
 
-    let Some(git_ref) = contract
+    let git_ref = contract
         .git_ref
         .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return None;
-    };
+        .filter(|value| !value.trim().is_empty())?;
     let branch = branch.unwrap_or("").trim();
     if branch != git_ref {
         return Some(checks::warning_with_details(

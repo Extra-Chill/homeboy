@@ -1020,19 +1020,22 @@ mod tests {
             );
             assert!(run_dir.exists());
 
-            let (inventory, _) =
-                crate::commands::cleanup::run(crate::commands::cleanup::CleanupArgs {
+            let (inventory, _) = crate::commands::cleanup::run(
+                crate::commands::cleanup::CleanupArgs {
                     apply: false,
                     include: vec![crate::commands::cleanup::CleanupCategoryArg::RunnerDownloads],
                     exclude: Vec::new(),
+                    include_untagged: false,
                     older_than_days: None,
                     runtime_tmp_managed_older_than_days: None,
                     limit: None,
                     full: false,
                     cursor: None,
                     command: None,
-                })
-                .expect("canonical cleanup inventory");
+                },
+                crate::cli_surface::Placement::Auto,
+            )
+            .expect("canonical cleanup inventory");
             assert_eq!(inventory["category_count"], 1);
             assert_eq!(inventory["categories"][0]["category"], dry.cleanup_category);
             assert_eq!(

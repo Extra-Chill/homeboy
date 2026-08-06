@@ -3,6 +3,8 @@ use crate::project::{self, Project};
 
 use super::Server;
 
+type ResolvedServerContext = (String, Option<String>, String, Server, Option<String>);
+
 /// Arguments for SSH context resolution
 #[derive(Default)]
 pub struct SshResolveArgs {
@@ -65,10 +67,7 @@ pub fn resolve_context(args: &SshResolveArgs) -> Result<SshResolveResult> {
     })
 }
 
-#[allow(clippy::type_complexity)]
-fn resolve_internal(
-    args: &SshResolveArgs,
-) -> Result<(String, Option<String>, String, Server, Option<String>)> {
+fn resolve_internal(args: &SshResolveArgs) -> Result<ResolvedServerContext> {
     // --project flag: force project resolution
     if let Some(project_id) = &args.project {
         let project = project::load(project_id)?;
@@ -100,9 +99,7 @@ fn resolve_internal(
     ))
 }
 
-fn resolve_project_context(
-    project: Project,
-) -> Result<(String, Option<String>, String, Server, Option<String>)> {
+fn resolve_project_context(project: Project) -> Result<ResolvedServerContext> {
     let base_path = project.base_path.clone();
     let (server_id, server) = resolve_from_project(&project)?;
     Ok((

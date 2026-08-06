@@ -13,7 +13,7 @@ pub enum RawExecution {
 pub enum CommandRunPreparation {
     Handled(i32),
     Json(Box<Commands>),
-    Raw(CommandRun),
+    Raw(Box<CommandRun>),
 }
 
 pub fn prepare_command_run(command: Commands, mode: CommandResponseMode) -> CommandRunPreparation {
@@ -28,7 +28,7 @@ pub fn prepare_command_run(command: Commands, mode: CommandResponseMode) -> Comm
         CommandResponseMode::Raw(raw_mode) => {
             let raw_run = run(command, raw_mode)
                 .expect("markdown and plain-text modes should return raw output");
-            CommandRunPreparation::Raw(raw_run)
+            CommandRunPreparation::Raw(Box::new(raw_run))
         }
     }
 }

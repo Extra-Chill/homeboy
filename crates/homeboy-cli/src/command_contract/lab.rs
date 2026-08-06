@@ -43,6 +43,18 @@ fn scope_lab_cli_arguments_at_path(
         lab_args.iter().fold(command, |command, arg| {
             command.arg(arg.clone().global(false).hide(false))
         })
+    } else if path.iter().map(String::as_str).eq(["cleanup"]) {
+        // Cleanup is controller-owned, not Lab-portable. It still honors the
+        // shared explicit-local execution primitive for bounded synchronous apply.
+        command.arg(
+            lab_args
+                .iter()
+                .find(|arg| arg.get_id() == "placement")
+                .expect("global placement argument")
+                .clone()
+                .global(false)
+                .hide(false),
+        )
     } else {
         command
     };

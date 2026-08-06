@@ -15,13 +15,13 @@ use super::CmdResult;
 #[derive(Debug, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RunnerWorkspaceOutput {
-    List(RunnerWorkspaceListOutput),
-    Snapshots(RunnerWorkspaceSnapshotsOutput),
-    Sync(RunnerWorkspaceSyncOutput),
-    Update(RunnerWorkspaceUpdateOutput),
-    Pull(RunnerWorkspacePullOutput),
-    Apply(RunnerWorkspaceApplyOutput),
-    Prune(RunnerWorkspacePruneOutput),
+    List(Box<RunnerWorkspaceListOutput>),
+    Snapshots(Box<RunnerWorkspaceSnapshotsOutput>),
+    Sync(Box<RunnerWorkspaceSyncOutput>),
+    Update(Box<RunnerWorkspaceUpdateOutput>),
+    Pull(Box<RunnerWorkspacePullOutput>),
+    Apply(Box<RunnerWorkspaceApplyOutput>),
+    Prune(Box<RunnerWorkspacePruneOutput>),
 }
 
 #[derive(Subcommand)]
@@ -175,8 +175,9 @@ pub(super) enum RunnerWorkspaceSyncModeArg {
 pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceOutput> {
     match command {
         RunnerWorkspaceCommand::List { runner_id, limit } => {
-            runner::list_workspaces(&runner_id, limit)
-                .map(|(output, exit_code)| (RunnerWorkspaceOutput::List(output), exit_code))
+            runner::list_workspaces(&runner_id, limit).map(|(output, exit_code)| {
+                (RunnerWorkspaceOutput::List(Box::new(output)), exit_code)
+            })
         }
         RunnerWorkspaceCommand::Snapshots {
             runner_id,
@@ -195,20 +196,27 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
                 limit,
             },
         )
-        .map(|(output, exit_code)| (RunnerWorkspaceOutput::Snapshots(output), exit_code)),
+        .map(|(output, exit_code)| {
+            (
+                RunnerWorkspaceOutput::Snapshots(Box::new(output)),
+                exit_code,
+            )
+        }),
         RunnerWorkspaceCommand::Sync {
             runner_id,
             path,
             mode,
             allow_dirty_lab_workspace,
         } => sync(&runner_id, path, mode, allow_dirty_lab_workspace)
-            .map(|(output, exit_code)| (RunnerWorkspaceOutput::Sync(output), exit_code)),
+            .map(|(output, exit_code)| (RunnerWorkspaceOutput::Sync(Box::new(output)), exit_code)),
         RunnerWorkspaceCommand::Update {
             runner_id,
             path,
             lease,
         } => runner::update_workspace(&runner_id, RunnerWorkspaceUpdateOptions { path, lease })
-            .map(|(output, exit_code)| (RunnerWorkspaceOutput::Update(output), exit_code)),
+            .map(|(output, exit_code)| {
+                (RunnerWorkspaceOutput::Update(Box::new(output)), exit_code)
+            }),
         RunnerWorkspaceCommand::Pull {
             runner_id,
             remote_path,
@@ -224,11 +232,11 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
                 dry_run,
             },
         )
-        .map(|(output, exit_code)| (RunnerWorkspaceOutput::Pull(output), exit_code)),
-        RunnerWorkspaceCommand::Apply { input, force } => {
-            runner::apply_workspace_patch(runner::RunnerWorkspaceApplyOptions { input, force })
-                .map(|(output, exit_code)| (RunnerWorkspaceOutput::Apply(output), exit_code))
-        }
+        .map(|(output, exit_code)| (RunnerWorkspaceOutput::Pull(Box::new(output)), exit_code)),
+        RunnerWorkspaceCommand::Apply { input, force } => runner::apply_workspace_patch(
+            runner::RunnerWorkspaceApplyOptions { input, force },
+        )
+        .map(|(output, exit_code)| (RunnerWorkspaceOutput::Apply(Box::new(output)), exit_code)),
         RunnerWorkspaceCommand::Prune {
             runner_id,
             mutation,
@@ -255,7 +263,7 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
                 max_wall_time_seconds,
             },
         )
-        .map(|(output, exit_code)| (RunnerWorkspaceOutput::Prune(output), exit_code)),
+        .map(|(output, exit_code)| (RunnerWorkspaceOutput::Prune(Box::new(output)), exit_code)),
     }
 }
 

@@ -97,7 +97,7 @@ pub struct SecretEnvPlanDiagnosticError {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub undeclared_inherited_secret_env: Vec<String>,
     pub message: String,
-    pub diagnostics: SecretEnvPlanDiagnostics,
+    pub diagnostics: Box<SecretEnvPlanDiagnostics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -200,8 +200,10 @@ pub struct SecretEnvHandoffEntry {
 
 pub struct SecretEnvValueProvider<'a> {
     source: String,
-    resolve: Box<dyn FnMut(&str) -> Option<String> + 'a>,
+    resolve: SecretEnvValueResolver<'a>,
 }
+
+type SecretEnvValueResolver<'a> = Box<dyn FnMut(&str) -> Option<String> + 'a>;
 
 impl<'a> SecretEnvValueProvider<'a> {
     pub fn new(
@@ -581,7 +583,7 @@ impl SecretEnvPlan {
                 ),
                 missing_required_secret_env,
                 undeclared_inherited_secret_env: Vec::new(),
-                diagnostics,
+                diagnostics: Box::new(diagnostics),
             })
         }
     }
@@ -614,7 +616,7 @@ impl SecretEnvPlan {
 
         let mut diagnostics = self
             .diagnose(self.status.clone())
-            .unwrap_or_else(|error| error.diagnostics);
+            .unwrap_or_else(|error| *error.diagnostics);
         diagnostics.inherited_env = inherited_env;
 
         if undeclared.is_empty() {
@@ -624,7 +626,7 @@ impl SecretEnvPlan {
                 message: format!("undeclared inherited secret env: {}", undeclared.join(", ")),
                 missing_required_secret_env: Vec::new(),
                 undeclared_inherited_secret_env: undeclared,
-                diagnostics,
+                diagnostics: Box::new(diagnostics),
             })
         }
     }
@@ -833,7 +835,7 @@ impl SecretEnvMaterializedHandoff {
         let status = normalize_status(status);
         let diagnostics = plan
             .diagnose(status.clone())
-            .unwrap_or_else(|error| error.diagnostics);
+            .unwrap_or_else(|error| *error.diagnostics);
         let missing_secret_env_names = diagnostics
             .status
             .iter()

@@ -15,7 +15,10 @@
 //!    a running cook, and unlike a process sample it is true regardless of what
 //!    the provider claims to be doing.
 //! 2. **The provider's current shell command and its age**, sampled from the
-//!    process tree.
+//!    process tree. Identity is the hard part: the sample is only useful if it
+//!    names a process the *provider* is running, and #11598 shipped one that
+//!    named Homeboy's own cook controller instead. A command that cannot be
+//!    attributed to the provider is reported as unavailable, never guessed.
 //!
 //! Both are diagnostics, so both fail soft: an unreadable worktree or an
 //! unavailable `ps` yields an absent field, never an error that can stop a
@@ -28,7 +31,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use super::process_activity::{self, DescendantActivity};
+use super::process_activity::{self, DescendantActivity, ProviderActivitySample};
 
 /// A single sample of what a running Cook's provider is doing.
 ///
@@ -46,10 +49,22 @@ pub struct CookProviderActivity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commits_written: Option<usize>,
     /// The provider's current command line, truncated.
+    ///
+    /// Only ever a process the provider is running. Homeboy's own orchestration
+    /// — the cook controller, a nested local cook, a gate, a CLI call the agent
+    /// made as a tool — is never reported here: #11598 shipped a heartbeat that
+    /// named the cook's own `agent-task cook` command for twenty minutes while
+    /// zero files were written, which reads as authoritative and is worse than
+    /// saying nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command_pid: Option<u32>,
+    /// Why no provider command is reported, when the process tree was sampled
+    /// and nothing in it qualified. Never set alongside `command`, and never
+    /// set when no sample was taken at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_unavailable: Option<String>,
     /// How long that command has been running.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command_elapsed_seconds: Option<u64>,
@@ -92,6 +107,11 @@ impl CookProviderActivity {
                 Some(seconds) => format!("{} in `{command}`", format_duration(seconds)),
                 None => format!("running `{command}`"),
             });
+        } else if let Some(reason) = self.command_unavailable.as_deref() {
+            // Stated as an absence, not dressed up as an observation. The edit
+            // count above it is the reliable signal and has to survive a
+            // process sample that found nothing (#11598).
+            parts.push(format!("provider command unavailable: {reason}"));
         }
         if let Some(seconds) = self.elapsed_seconds {
             parts.push(format!("{} elapsed", format_duration(seconds)));
@@ -152,16 +172,27 @@ impl CookActivityProbe {
                 .as_deref()
                 .and_then(|base| commits_since(root, base));
         }
-        if let Some(process) = process_activity::descendant_activity(owner_pid) {
-            let DescendantActivity {
-                pid,
-                elapsed_seconds,
-                command,
-                ..
-            } = process;
+        // Process sampling runs after the worktree signals and only ever adds
+        // fields: the edit count is the signal an operator acts on, and a
+        // process table that yields nothing must narrow the sample rather than
+        // suppress it.
+        let ProviderActivitySample {
+            activity: provider_process,
+            unavailable,
+            ..
+        } = process_activity::descendant_activity(owner_pid);
+        if let Some(DescendantActivity {
+            pid,
+            elapsed_seconds,
+            command,
+            ..
+        }) = provider_process
+        {
             activity.command = Some(command);
             activity.command_pid = Some(pid);
             activity.command_elapsed_seconds = Some(elapsed_seconds);
+        } else if let Some(unavailable) = unavailable {
+            activity.command_unavailable = Some(unavailable.reason().to_string());
         }
         activity
     }
@@ -260,6 +291,45 @@ mod tests {
     }
 
     #[test]
+    fn an_unavailable_command_narrows_the_summary_instead_of_suppressing_the_edit_count() {
+        // The regression in #11598 was a heartbeat that named Homeboy's own
+        // cook process. Reporting nothing is correct; reporting nothing must
+        // not also cost the operator the one signal that is always reliable.
+        let activity = CookProviderActivity {
+            files_changed: Some(0),
+            command_unavailable: Some(
+                "only homeboy's own processes observed under the cook".into(),
+            ),
+            elapsed_seconds: Some(1_216),
+            ..Default::default()
+        };
+
+        let summary = activity.summary_line().expect("activity renders");
+
+        assert!(summary.starts_with("no files written yet"));
+        assert!(summary.contains("provider command unavailable"));
+        assert!(summary.contains("20m16s elapsed"));
+        assert!(!summary.contains('`'));
+    }
+
+    #[test]
+    fn an_observed_command_wins_over_an_unavailability_note() {
+        // The two are mutually exclusive by construction; the renderer must not
+        // print both if a caller ever sets both.
+        let activity = CookProviderActivity {
+            command: Some("cargo test -q".to_string()),
+            command_elapsed_seconds: Some(60),
+            command_unavailable: Some("no provider process observed under the cook".into()),
+            ..Default::default()
+        };
+
+        let summary = activity.summary_line().expect("activity renders");
+
+        assert!(summary.contains("1m00s in `cargo test -q`"));
+        assert!(!summary.contains("unavailable"));
+    }
+
+    #[test]
     fn committed_work_is_not_reported_as_no_progress() {
         // A provider that committed leaves a clean tree. Reporting that as
         // "no files written yet" would send the operator to kill a working cook.
@@ -336,6 +406,7 @@ mod tests {
             commits_written: Some(1),
             command: Some("cargo test".to_string()),
             command_pid: Some(4242),
+            command_unavailable: None,
             command_elapsed_seconds: Some(12),
             elapsed_seconds: Some(30),
         };

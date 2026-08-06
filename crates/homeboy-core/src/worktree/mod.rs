@@ -91,14 +91,12 @@ pub fn persist_terminal_workspace_authority(
             ));
         }
         match &record.terminal_workspace_authority {
-            Some(existing) if existing != &proof => {
-                return Err(Error::validation_invalid_argument(
-                    "terminal_workspace_authority",
-                    "terminal workspace authority proof conflicts with immutable manifest evidence",
-                    Some(id.to_string()),
-                    None,
-                ))
-            }
+            Some(existing) if existing != &proof => Err(Error::validation_invalid_argument(
+                "terminal_workspace_authority",
+                "terminal workspace authority proof conflicts with immutable manifest evidence",
+                Some(id.to_string()),
+                None,
+            )),
             Some(_) => Ok(()),
             None => {
                 record.terminal_workspace_authority = Some(proof);
@@ -373,6 +371,7 @@ fn open_task_worktree_registry_lock() -> Result<std::fs::File> {
     })?;
     OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(parent.join("task-worktrees.lock"))

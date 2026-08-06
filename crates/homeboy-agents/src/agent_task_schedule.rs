@@ -786,8 +786,10 @@ mod managed_service_plan_tests {
             host: "127.0.0.1".to_string(),
             port: Some(3000),
             port_env: None,
+            socket_handoff: false,
             readiness: None,
             public_url: Some("https://preview.example.test".to_string()),
+            browser_origin_probe: None,
             lifecycle: AgentTaskManagedServiceLifecycle::Plan,
             target: None,
         });
@@ -811,8 +813,10 @@ mod managed_service_plan_tests {
             host: "127.0.0.1".to_string(),
             port: Some(3000),
             port_env: None,
+            socket_handoff: false,
             readiness: None,
             public_url: None,
+            browser_origin_probe: None,
             lifecycle: AgentTaskManagedServiceLifecycle::Plan,
             target: None,
         });

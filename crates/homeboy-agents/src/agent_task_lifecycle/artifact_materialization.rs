@@ -1,6 +1,6 @@
 use homeboy_engine_primitives::content_hash;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
@@ -263,7 +263,7 @@ fn unavailable(artifact: &AgentTaskArtifact, reason: &str) -> Error {
     )
 }
 
-fn io_error(path: &PathBuf) -> impl FnOnce(std::io::Error) -> Error + '_ {
+fn io_error(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
     move |error| {
         Error::internal_io(
             error.to_string(),

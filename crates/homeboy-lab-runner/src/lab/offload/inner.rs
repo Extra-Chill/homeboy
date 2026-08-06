@@ -756,7 +756,7 @@ pub(crate) fn exec_lab_context(
                                 )],
                             ))
                         } else {
-                            record_local_outcome(&request)?;
+                            record_local_outcome(request)?;
                             Ok(LabOffloadOutcome::RunLocal {
                                 metadata: Some(lab_offload_metadata_with_workspace_mapping(
                                     &context.plan,
@@ -821,6 +821,13 @@ pub(crate) fn exec_lab_context(
         PlanStep::builder("lab.exec", "lab.exec", PlanStepStatus::Success).build(),
     );
     if let Some(run_id) = context.agent_task_run_id.as_deref() {
+        // This route's decision is the authoritative one for the execution
+        // being verified. Adopt it when the record carries none, or carries
+        // only a submission-derived placeholder (#11600).
+        agent_task_lifecycle::normalize_missing_execution_placement_decision(
+            run_id,
+            &request.placement_decision,
+        )?;
         let outcome = request
             .placement_decision
             .outcome(
@@ -1178,11 +1185,11 @@ pub(crate) fn run_lab_offload_inner(
     // Detached commands without an agent-task argv shape receive their durable
     // plan and identity from routing. Admit the controller job before capacity
     // checks or remote preparation so caller loss cannot orphan staging.
-    if request.detach_after_handoff
-        && request.durable_agent_task_plan.is_some()
-        && request.durable_run_id.is_some()
-    {
-        let run_id = request.durable_run_id.expect("checked durable run id");
+    if let (true, Some(durable_plan), Some(run_id)) = (
+        request.detach_after_handoff,
+        request.durable_agent_task_plan,
+        request.durable_run_id,
+    ) {
         emit_durable_run_id_before_execution(
             run_id,
             runner_id,
@@ -1198,14 +1205,12 @@ pub(crate) fn run_lab_offload_inner(
             Ok(controller_job_id) => controller_job_id,
             Err(error) => {
                 if error.retryable != Some(true) {
-                    if let Some(durable_plan) = request.durable_agent_task_plan {
-                        let _ = agent_task_lifecycle::record_pre_execution_failure(
-                            run_id,
-                            durable_plan,
-                            "lab_staging_submission",
-                            &error,
-                        );
-                    }
+                    let _ = agent_task_lifecycle::record_pre_execution_failure(
+                        run_id,
+                        durable_plan,
+                        "lab_staging_submission",
+                        &error,
+                    );
                 }
                 return Err(with_agent_task_retry_hint(
                     error,
@@ -1531,7 +1536,7 @@ pub(crate) fn run_lab_offload_inner(
     )?;
     // Public preflight constructs the same typed routed command before entering
     // this compiler, so no admission requirement can diverge at this boundary.
-    let mut admission_plan = crate::lab_selection::compile_lab_admission_plan(
+    let mut admission_plan = crate::lab_selection::compile_execution_lab_admission_plan(
         &contract,
         &source_path,
         &command_prefix.required_tools,
@@ -1815,10 +1820,11 @@ pub(crate) fn run_lab_offload_inner(
     // The safe default deletes every known terminal result. The explicit debug
     // profile keeps failures only through the registered runner TTL lifecycle.
     // Detached and uncertain in-flight work explicitly relinquishes ownership.
-    let cleanup_policy = request
-        .preserve_workspace_on_failure
-        .then_some(WorkspaceCleanupPolicy::PreserveOnFailure)
-        .unwrap_or(WorkspaceCleanupPolicy::DeleteAlways);
+    let cleanup_policy = if request.preserve_workspace_on_failure {
+        WorkspaceCleanupPolicy::PreserveOnFailure
+    } else {
+        WorkspaceCleanupPolicy::DeleteAlways
+    };
     let mut workspace_resource_lifecycle = synced.resource_lifecycle.clone();
     if request.preserve_workspace_on_failure {
         workspace_resource_lifecycle.cleanup_policy =
@@ -2023,11 +2029,12 @@ pub(crate) fn run_lab_offload_inner(
         serde_json::to_value(&runtime_generation).unwrap_or(serde_json::json!(null));
     lab_metadata["runtime_evidence"] =
         serde_json::to_value(&runtime_evidence).unwrap_or(serde_json::json!(null));
-    let secret_env_handoff = build_lab_secret_env_handoff_plan(
-        &contract.secret_env_sources,
+    let mut secret_env_handoff = build_lab_secret_env_handoff_plan(
+        contract.secret_env_sources,
         &changed_since_preflight.args,
         env_delta,
     )?;
+    merge_managed_service_secret_env(&mut secret_env_handoff, request.durable_agent_task_plan);
     lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
     let mut lab_runner_workload = build_lab_runner_workload_for_dispatched_command(
         LabRunnerWorkloadBuildInput {

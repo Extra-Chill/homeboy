@@ -262,15 +262,14 @@ fn test_phase_failure(
         };
     }
 
-    let category = if has_findings {
-        PhaseFailureCategory::Findings
-    } else if exit_code != 0 && counts.map(|counts| counts.total == 0).unwrap_or(false) {
-        PhaseFailureCategory::Findings
-    } else if exit_code != 0 && counts.map(|counts| counts.failed == 0).unwrap_or(false) {
-        PhaseFailureCategory::Infrastructure
-    } else {
-        phase_failure_category_from_exit_code(exit_code)
-    };
+    let category =
+        if has_findings || (exit_code != 0 && counts.is_some_and(|counts| counts.total == 0)) {
+            PhaseFailureCategory::Findings
+        } else if exit_code != 0 && counts.map(|counts| counts.failed == 0).unwrap_or(false) {
+            PhaseFailureCategory::Infrastructure
+        } else {
+            phase_failure_category_from_exit_code(exit_code)
+        };
     PhaseFailure {
         phase: VerificationPhase::Test,
         summary: match category {

@@ -44,7 +44,11 @@ pub fn logs_with_raw(run_id: &str, include_raw: bool) -> Result<AgentTaskRunLog>
         schema: schemas::RUN_LOG.to_string(),
         run_id,
         events,
-        raw_events: include_raw.then_some(raw_events).unwrap_or_default(),
+        raw_events: if include_raw {
+            raw_events
+        } else {
+            Default::default()
+        },
     })
 }
 

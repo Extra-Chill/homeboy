@@ -113,7 +113,7 @@ pub(crate) fn generate_fallback_signature(
     MethodSignature {
         name: method_name.to_string(),
         signature,
-        language: language.clone(),
+        language: *language,
         body: None,
     }
 }

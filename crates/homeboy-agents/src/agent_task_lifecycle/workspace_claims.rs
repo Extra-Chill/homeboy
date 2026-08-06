@@ -34,7 +34,7 @@ fn commit_budget_ms(now_ms: u64, claims: impl Iterator<Item = u64>) -> u64 {
 /// to present durable evidence without treating an uncertain probe as terminal.
 #[derive(Debug, Clone)]
 pub enum TerminalWorkspaceAuthorityResolution {
-    Proven(TerminalWorkspaceAuthorityProof),
+    Proven(Box<TerminalWorkspaceAuthorityProof>),
     Refused {
         reason: String,
         observations: Vec<TerminalWorkspaceAuthorityObservation>,
@@ -62,7 +62,9 @@ pub fn resolve_terminal_workspace_authority(
             && proof.authority_set == authority_set
             && proof.authority_set_fingerprint == authority_set_fingerprint(&authority_set)
         {
-            return Ok(TerminalWorkspaceAuthorityResolution::Proven(proof.clone()));
+            return Ok(TerminalWorkspaceAuthorityResolution::Proven(Box::new(
+                proof.clone(),
+            )));
         }
         return Ok(TerminalWorkspaceAuthorityResolution::Refused {
             reason:
@@ -203,7 +205,7 @@ pub fn resolve_terminal_workspace_authority(
             observations,
         });
     }
-    Ok(TerminalWorkspaceAuthorityResolution::Proven(
+    Ok(TerminalWorkspaceAuthorityResolution::Proven(Box::new(
         TerminalWorkspaceAuthorityProof {
             schema: TERMINAL_WORKSPACE_AUTHORITY_SCHEMA.into(),
             capability: TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY.into(),
@@ -221,7 +223,7 @@ pub fn resolve_terminal_workspace_authority(
             observations,
             issued_evidence: vec![format!("controller-run:{run_id}")],
         },
-    ))
+    )))
 }
 
 fn configured_terminal_authorities() -> std::result::Result<Vec<String>, String> {
@@ -489,7 +491,7 @@ impl CompositeWorkspaceClaimAcquisitionGuard {
         }
         CompositeWorkspaceClaimAcquisitionFailure {
             primary,
-            cleanup: (!rollback_failures.is_empty()).then(|| CompositeWorkspaceClaim {
+            cleanup: (!rollback_failures.is_empty()).then_some(CompositeWorkspaceClaim {
                 workspace: self.workspace,
                 generation: self.generation,
                 commit_deadline: self.acquired_at,
@@ -502,6 +504,10 @@ impl CompositeWorkspaceClaimAcquisitionGuard {
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "failure retains all acquired authority receipts for deterministic rollback"
+)]
 pub fn acquire_composite_workspace_claim(
     workspace: WorkspaceIdentity,
     generation: u64,
@@ -585,6 +591,10 @@ pub fn acquire_composite_workspace_claim(
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "failure retains all acquired authority receipts for deterministic rollback"
+)]
 fn acquire_composite_workspace_claim_unrecovered(
     workspace: WorkspaceIdentity,
     generation: u64,
@@ -1165,7 +1175,7 @@ fn composite_error(message: &str, failures: Vec<String>) -> Error {
         "workspace_claim_composite",
         message,
         None,
-        (!failures.is_empty()).then(|| failures),
+        (!failures.is_empty()).then_some(failures),
     )
 }
 
