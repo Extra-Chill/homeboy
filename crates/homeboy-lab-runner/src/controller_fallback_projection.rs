@@ -66,7 +66,8 @@ pub struct RunnerTerminalEvidence {
 pub struct ControllerMissionProjection {
     pub mission_id: String,
     pub runner_id: String,
-    pub runner_staging_id: String,
+    #[serde(alias = "runner_staging_id")]
+    pub runner_job_id: String,
     pub terminal_outcome: String,
     pub artifacts: RunnerStagingArtifacts,
     pub finalization_owner: String,
@@ -199,7 +200,7 @@ impl ControllerFallbackProjectionStore {
         let projection = ControllerMissionProjection {
             mission_id: mission_id.to_string(),
             runner_id: receipt.runner_receipt.handoff.runner_id.clone(),
-            runner_staging_id: receipt.runner_receipt.handoff.runner_job_id.clone(),
+            runner_job_id: receipt.runner_receipt.handoff.runner_job_id.clone(),
             terminal_outcome: evidence.outcome,
             artifacts: evidence.artifacts,
             finalization_owner: "controller".to_string(),
@@ -338,6 +339,16 @@ mod tests {
                 .expect("source artifact descriptor")
                 .artifact_id,
             "source-package-1"
+        );
+        assert_eq!(
+            projected
+                .artifacts
+                .source_artifact
+                .as_ref()
+                .expect("source artifact descriptor")
+                .package
+                .format,
+            "homeboy/source-package-json/v1"
         );
         assert_eq!(projected.terminal_outcome, "staged");
         assert_eq!(projected.finalization_owner, "controller");

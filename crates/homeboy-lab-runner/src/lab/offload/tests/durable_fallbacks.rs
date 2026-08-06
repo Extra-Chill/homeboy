@@ -19,7 +19,7 @@ fn deferred_staging_emits_only_durable_run_commands() {
                 schema: "homeboy/direct-lab-handoff-receipt/v1".to_string(),
                 run_id: "run-1".to_string(),
                 runner_id: "runner-1".to_string(),
-                runner_job_id: "staging-run-1".to_string(),
+                runner_job_id: "00000000-0000-0000-0000-000000000001".to_string(),
                 idempotency_key: "run-1".to_string(),
                 controller_identity: "controller-1".to_string(),
                 acceptance_state: "accepted".to_string(),
@@ -44,12 +44,16 @@ fn deferred_staging_emits_only_durable_run_commands() {
         controller_projection: "deferred".to_string(),
     };
     let output = detached_staging_submission_output(
-        crate::lab_staging_controller::DetachedStagingSubmission::Deferred(receipt),
+        crate::lab_staging_controller::DetachedStagingSubmission::Deferred(receipt.clone()),
         "run-1",
     );
 
     assert_eq!(output["status"], "staged");
-    assert_eq!(output["runner_staging_id"], "staging-run-1");
+    assert_eq!(
+        output["runner_job_id"],
+        "00000000-0000-0000-0000-000000000001"
+    );
+    assert!(output.get("runner_staging_id").is_none());
     assert!(output.get("controller_job_id").is_none());
     assert!(output["retrieval_commands"].get("controller_job").is_none());
     assert_eq!(
@@ -60,6 +64,13 @@ fn deferred_staging_emits_only_durable_run_commands() {
         output["retrieval_commands"]["logs"],
         "homeboy agent-task logs run-1"
     );
+    let source = receipt
+        .runner_receipt
+        .artifacts
+        .source_artifact
+        .expect("source artifact descriptor");
+    assert_eq!(source.package.extraction_root, "workspace");
+    assert_eq!(source.package.entries[0].path, "source.bin");
 }
 
 #[test]

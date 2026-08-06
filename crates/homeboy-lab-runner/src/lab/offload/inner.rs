@@ -2296,7 +2296,7 @@ pub(crate) fn detached_staging_submission_output(
         }
         crate::lab_staging_controller::DetachedStagingSubmission::Deferred(receipt) => {
             output["status"] = serde_json::json!("staged");
-            output["runner_staging_id"] =
+            output["runner_job_id"] =
                 serde_json::json!(receipt.runner_receipt.handoff.runner_job_id);
             output["controller_projection"] = serde_json::json!(receipt.controller_projection);
         }
