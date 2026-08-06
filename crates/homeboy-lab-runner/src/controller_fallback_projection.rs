@@ -330,6 +330,15 @@ mod tests {
         assert_eq!(projected.len(), 1);
         let projected = &projected[0];
         assert_eq!(projected.artifacts, receipt.runner_receipt.artifacts);
+        assert_eq!(
+            projected
+                .artifacts
+                .source_artifact
+                .as_ref()
+                .expect("source artifact descriptor")
+                .artifact_id,
+            "source-package-1"
+        );
         assert_eq!(projected.terminal_outcome, "staged");
         assert_eq!(projected.finalization_owner, "controller");
         assert_eq!(

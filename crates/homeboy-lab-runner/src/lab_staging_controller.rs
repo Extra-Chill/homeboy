@@ -27,6 +27,7 @@ use homeboy_core::{Error, Result};
 use crate::direct_lab_handoff::DirectLabHandoffEnvelope;
 use crate::runner_staging_operation::{
     RemoteRunnerStagingEnvelope, RunnerMaterializationAuthority, SealedSourceAuthority,
+    SourceArtifactTransfer,
 };
 use crate::{LabOffloadCommand, LabOffloadRequest};
 
@@ -1114,6 +1115,8 @@ fn submit_deferred_runner_staging(
         )
     })?;
     let digest = format!("sha256:{}", content_hash::sha256_hex(&sealed_payload));
+    let source_artifact =
+        SourceArtifactTransfer::from_bytes(format!("source-{run_id}"), &sealed_payload);
     let handoff = DirectLabHandoffEnvelope::new(
         homeboy_product_identity::build_identity().display,
         recipe,
@@ -1132,6 +1135,7 @@ fn submit_deferred_runner_staging(
                     ))
                 })?,
             ),
+            source_artifact: Some(source_artifact),
         },
     )?;
     let mut transport =

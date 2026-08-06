@@ -32,6 +32,13 @@ fn deferred_staging_emits_only_durable_run_commands() {
                 lifecycle_id: "staging-run-1".to_string(),
                 source_artifact_id: "source-1".to_string(),
                 workspace_artifact_id: "workspace-1".to_string(),
+                source_artifact: Some(
+                    crate::runner_staging_operation::SourceArtifactTransfer::from_bytes(
+                        "source-run-1",
+                        b"sealed source package",
+                    )
+                    .descriptor(),
+                ),
             },
         },
         controller_projection: "deferred".to_string(),
