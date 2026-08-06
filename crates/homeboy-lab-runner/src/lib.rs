@@ -281,7 +281,8 @@ pub use homeboy_refresh::{
     plan_homeboy_binary_refresh, refresh_homeboy_binary, runner_dev_sync,
     HomeboyBinaryRefreshFailure, HomeboyBinaryRefreshMode, HomeboyBinaryRefreshOptions,
     HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan, HomeboyRefreshPhase,
-    RunnerDevSyncExtensionProvenance, RunnerDevSyncOptions, RunnerDevSyncOutput, RunnerDevSyncPlan,
+    HomeboyRefreshReadiness, HomeboyRefreshReadinessState, RunnerDevSyncExtensionProvenance,
+    RunnerDevSyncOptions, RunnerDevSyncOutput, RunnerDevSyncPlan,
 };
 pub use job_preparation::register as register_runner_job_preparation_provider;
 pub use lab::{
