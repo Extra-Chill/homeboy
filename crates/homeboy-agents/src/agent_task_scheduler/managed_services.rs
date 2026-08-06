@@ -1678,12 +1678,23 @@ mod tests {
                 "python3".to_string(),
                 "-u".to_string(),
                 "-c".to_string(),
-                "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); signal.pause()"
-                    .to_string(),
+                "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); signal.pause()".to_string(),
             ];
             let services =
                 ManagedServices::start(&[service], "stale-forced-cleanup").expect("start service");
-            thread::sleep(Duration::from_millis(50));
+            let log_path = services.records()[0].log_path.clone().expect("service log");
+            let ready = (0..100).any(|_| {
+                if std::fs::read_to_string(&log_path).is_ok_and(|log| log.contains("ready")) {
+                    true
+                } else {
+                    thread::sleep(Duration::from_millis(10));
+                    false
+                }
+            });
+            if !ready {
+                services.cleanup("fixture_readiness_failure");
+                panic!("service did not install its SIGTERM-ignore handler");
+            }
             std::mem::forget(services);
 
             let records = reconcile_run_services("stale-forced-cleanup", "stale_controller")
