@@ -1026,7 +1026,10 @@ fn terminate_linux_scope_members_with_grace(scope: &str, grace: Duration) -> Res
     signal_pids(&survivors, libc::SIGKILL)?;
     if !wait_for_linux_scope_exit(scope, SIGKILL_REAP_GRACE)? {
         let survivors = linux_scope_pids(scope)?;
-        return ensure_sigkill_reaped("owned process scope", 0, &survivors);
+        // Errors when anything outlived SIGKILL; returns Ok once the scope is
+        // empty. Either way this path did escalate, so the caller is told the
+        // grace period was not enough.
+        ensure_sigkill_reaped("owned process scope", 0, &survivors)?;
     }
     Ok(true)
 }
