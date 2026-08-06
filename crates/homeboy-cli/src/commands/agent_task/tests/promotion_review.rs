@@ -466,8 +466,12 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                         tasks_json: None,
                         provider_config: None,
                         client_context: None,
-                        attempts: Some(1),
-                        same_provider_retries: Some(0),
+                        // `max_attempts: 2` below needs a budget that can fund two
+                        // provider-backed attempts and one same-provider remediation,
+                        // or `validate_effective_cook_budget` rejects at preflight and
+                        // the wrong-schema behaviour under test is never reached.
+                        attempts: Some(2),
+                        same_provider_retries: Some(1),
                         provider_rotations: Some(0),
                         queue_only: false,
                         timeout_ms: None,
