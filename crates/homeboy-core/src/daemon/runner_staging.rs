@@ -2,11 +2,14 @@
 
 use serde_json::Value;
 
+use crate::api_jobs::JobStore;
 use crate::error::Result;
 
 pub trait RunnerStagingProvider: Send + Sync {
     fn capabilities(&self, runner_id: &str) -> Result<Vec<String>>;
-    fn stage(&self, request: Value) -> Result<Value>;
+    /// The daemon-owned queue is passed through this narrow boundary so staging
+    /// admits the real execution job instead of inventing a second executor.
+    fn stage(&self, request: Value, jobs: &JobStore) -> Result<Value>;
 }
 
 struct NoopProvider;
@@ -16,7 +19,7 @@ impl RunnerStagingProvider for NoopProvider {
         Ok(Vec::new())
     }
 
-    fn stage(&self, _request: Value) -> Result<Value> {
+    fn stage(&self, _request: Value, _jobs: &JobStore) -> Result<Value> {
         Err(crate::Error::validation_invalid_argument(
             "runner_capabilities",
             "runner does not support sealed staging",

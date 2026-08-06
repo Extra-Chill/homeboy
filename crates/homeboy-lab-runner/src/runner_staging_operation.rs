@@ -8,6 +8,7 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 
 use homeboy_core::{Error, Result};
 
@@ -21,6 +22,25 @@ pub const SEALED_SOURCE_AUTHORITY_SCHEMA: &str = "homeboy/sealed-source-authorit
 pub const SOURCE_ARTIFACT_TRANSFER_SCHEMA: &str = "homeboy/runner-source-artifact-transfer/v1";
 pub const RUNNER_SOURCE_ARTIFACT_SCHEMA: &str = "homeboy/runner-source-artifact/v1";
 pub const MAX_SOURCE_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
+pub const MAX_SOURCE_PACKAGE_ENTRIES: usize = 1024;
+pub const MAX_SOURCE_PACKAGE_FILE_BYTES: u64 = 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePackageEntry {
+    pub path: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePackageManifest {
+    pub schema: String,
+    pub format: String,
+    pub extraction_root: String,
+    pub entries: Vec<SourcePackageEntry>,
+}
 
 /// Bounded package bytes transferred exactly once during staging. The receipt
 /// carries only [`RunnerSourceArtifact`], never these potentially large bytes.
@@ -32,16 +52,32 @@ pub struct SourceArtifactTransfer {
     pub sha256: String,
     pub size_bytes: u64,
     pub content_base64: String,
+    pub package: SourcePackageManifest,
 }
 
 impl SourceArtifactTransfer {
     pub fn from_bytes(artifact_id: impl Into<String>, bytes: &[u8]) -> Self {
+        let package = serde_json::to_vec(&BTreeMap::from([(
+            "source.bin",
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+        )]))
+        .expect("package");
         Self {
             schema: SOURCE_ARTIFACT_TRANSFER_SCHEMA.to_string(),
             artifact_id: artifact_id.into(),
-            sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
-            size_bytes: bytes.len() as u64,
-            content_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            sha256: format!("sha256:{:x}", Sha256::digest(&package)),
+            size_bytes: package.len() as u64,
+            content_base64: base64::engine::general_purpose::STANDARD.encode(package),
+            package: SourcePackageManifest {
+                schema: "homeboy/source-package-manifest/v1".into(),
+                format: "homeboy/source-package-json/v1".into(),
+                extraction_root: "workspace".into(),
+                entries: vec![SourcePackageEntry {
+                    path: "source.bin".into(),
+                    sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+                    size_bytes: bytes.len() as u64,
+                }],
+            },
         }
     }
 
@@ -80,6 +116,7 @@ impl SourceArtifactTransfer {
                 None,
             ));
         }
+        self.package.validate(&bytes)?;
         Ok(bytes)
     }
 
@@ -89,6 +126,7 @@ impl SourceArtifactTransfer {
             artifact_id: self.artifact_id.clone(),
             sha256: self.sha256.clone(),
             size_bytes: self.size_bytes,
+            package: self.package.clone(),
         }
     }
 }
@@ -101,6 +139,7 @@ pub struct RunnerSourceArtifact {
     pub artifact_id: String,
     pub sha256: String,
     pub size_bytes: u64,
+    pub package: SourcePackageManifest,
 }
 
 impl RunnerSourceArtifact {
@@ -118,6 +157,101 @@ impl RunnerSourceArtifact {
                 Some(self.artifact_id.clone()),
                 None,
             ));
+        }
+        self.package.validate_shape()
+    }
+}
+
+impl SourcePackageManifest {
+    fn validate_shape(&self) -> Result<()> {
+        if self.schema != "homeboy/source-package-manifest/v1"
+            || self.format != "homeboy/source-package-json/v1"
+            || self.extraction_root != "workspace"
+            || self.entries.is_empty()
+            || self.entries.len() > MAX_SOURCE_PACKAGE_ENTRIES
+        {
+            return Err(Error::validation_invalid_argument(
+                "source_package",
+                "invalid source package manifest",
+                None,
+                None,
+            ));
+        }
+        let mut paths = BTreeSet::new();
+        let mut total = 0u64;
+        for entry in &self.entries {
+            if entry.path.is_empty()
+                || entry.path.starts_with('/')
+                || entry.path.contains('\\')
+                || entry
+                    .path
+                    .split('/')
+                    .any(|part| part == "." || part == "..")
+                || !paths.insert(&entry.path)
+                || !entry.sha256.starts_with("sha256:")
+                || entry.size_bytes > MAX_SOURCE_PACKAGE_FILE_BYTES
+            {
+                return Err(Error::validation_invalid_argument(
+                    "source_package",
+                    "unsafe, duplicate, or oversized source package path",
+                    Some(entry.path.clone()),
+                    None,
+                ));
+            }
+            total = total.saturating_add(entry.size_bytes);
+        }
+        if total > MAX_SOURCE_ARTIFACT_BYTES {
+            return Err(Error::validation_invalid_argument(
+                "source_package",
+                "source package exceeds total size bound",
+                None,
+                None,
+            ));
+        }
+        Ok(())
+    }
+    fn validate(&self, bytes: &[u8]) -> Result<()> {
+        self.validate_shape()?;
+        let files: BTreeMap<String, String> = serde_json::from_slice(bytes).map_err(|error| {
+            Error::validation_invalid_argument("source_package", error.to_string(), None, None)
+        })?;
+        if files.len() != self.entries.len() {
+            return Err(Error::validation_invalid_argument(
+                "source_package",
+                "source package entries do not match manifest",
+                None,
+                None,
+            ));
+        }
+        for entry in &self.entries {
+            let encoded = files.get(&entry.path).ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "source_package",
+                    "source package entry is missing",
+                    Some(entry.path.clone()),
+                    None,
+                )
+            })?;
+            let content = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| {
+                    Error::validation_invalid_argument(
+                        "source_package",
+                        error.to_string(),
+                        Some(entry.path.clone()),
+                        None,
+                    )
+                })?;
+            if content.len() as u64 != entry.size_bytes
+                || format!("sha256:{:x}", Sha256::digest(&content)) != entry.sha256
+            {
+                return Err(Error::validation_invalid_argument(
+                    "source_package",
+                    "source package entry does not match manifest",
+                    Some(entry.path.clone()),
+                    None,
+                ));
+            }
         }
         Ok(())
     }

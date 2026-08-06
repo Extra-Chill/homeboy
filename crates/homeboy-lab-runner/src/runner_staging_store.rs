@@ -10,6 +10,7 @@ use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,9 +21,8 @@ use homeboy_core::{Error, Result};
 use crate::direct_lab_handoff::DirectLabHandoffReceipt;
 use crate::runner_staging_operation::{
     RemoteRunnerStagingEnvelope, RemoteRunnerStagingReceipt, RemoteRunnerStagingTransport,
-    RunnerSourceArtifact, RunnerStagingArtifacts, SourceArtifactTransfer,
-    REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY, REMOTE_RUNNER_STAGING_CAPABILITY,
-    REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA,
+    RunnerSourceArtifact, RunnerStagingArtifacts, REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY,
+    REMOTE_RUNNER_STAGING_CAPABILITY, REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA,
 };
 use crate::{broker_submit_token_for_runner, RunnerSession, RunnerTunnelMode};
 
@@ -65,6 +65,62 @@ pub fn read_staged_source_artifact(
         ));
     }
     Ok(bytes)
+}
+
+/// Materialize a verified package beneath the manifest-declared `workspace`
+/// root. Validated relative entries are the only paths joined to `destination`.
+pub fn extract_staged_source_artifact(
+    store_path: impl AsRef<Path>,
+    artifact: &RunnerSourceArtifact,
+    destination: impl AsRef<Path>,
+) -> Result<PathBuf> {
+    let package = read_staged_source_artifact(store_path, artifact)?;
+    let files: BTreeMap<String, String> = serde_json::from_slice(&package).map_err(|error| {
+        Error::validation_invalid_argument("source_package", error.to_string(), None, None)
+    })?;
+    let root = destination.as_ref().join(&artifact.package.extraction_root);
+    fs::create_dir_all(&root)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
+    for entry in &artifact.package.entries {
+        let encoded = files.get(&entry.path).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "source_package",
+                "source package entry is missing",
+                Some(entry.path.clone()),
+                None,
+            )
+        })?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "source_package",
+                    error.to_string(),
+                    Some(entry.path.clone()),
+                    None,
+                )
+            })?;
+        if bytes.len() as u64 != entry.size_bytes
+            || format!("sha256:{:x}", Sha256::digest(&bytes)) != entry.sha256
+        {
+            return Err(Error::validation_invalid_argument(
+                "source_package",
+                "source package entry does not match manifest",
+                Some(entry.path.clone()),
+                None,
+            ));
+        }
+        let path = root.join(&entry.path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(parent.display().to_string()))
+            })?;
+        }
+        fs::write(&path, bytes).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?;
+    }
+    Ok(root)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +191,15 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
         &mut self,
         envelope: &RemoteRunnerStagingEnvelope,
     ) -> Result<RemoteRunnerStagingReceipt> {
+        self.stage_durable_with_job_id(envelope, format!("staging-{}", envelope.handoff.run_id))
+    }
+
+    pub fn stage_durable_with_job_id(
+        &mut self,
+        envelope: &RemoteRunnerStagingEnvelope,
+        runner_job_id: impl Into<String>,
+    ) -> Result<RemoteRunnerStagingReceipt> {
+        let runner_job_id = runner_job_id.into();
         envelope.validate()?;
         if envelope.handoff.runner_id != self.runner_id {
             return Err(Error::validation_invalid_argument(
@@ -173,10 +238,7 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
         let artifacts = self.materializer.materialize(envelope)?;
         let receipt = RemoteRunnerStagingReceipt {
             schema: REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA.to_string(),
-            handoff: DirectLabHandoffReceipt::accepted(
-                &envelope.handoff,
-                format!("staging-{}", envelope.handoff.run_id),
-            ),
+            handoff: DirectLabHandoffReceipt::accepted(&envelope.handoff, runner_job_id),
             artifacts: RunnerStagingArtifacts {
                 source_artifact: Some(source_artifact),
                 ..artifacts
@@ -662,7 +724,11 @@ impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionS
         ])
     }
 
-    fn stage(&self, request: serde_json::Value) -> Result<serde_json::Value> {
+    fn stage(
+        &self,
+        request: serde_json::Value,
+        jobs: &homeboy_core::api_jobs::JobStore,
+    ) -> Result<serde_json::Value> {
         let request: RemoteRunnerStagingRequest =
             serde_json::from_value(request).map_err(|error| {
                 Error::validation_invalid_argument(
@@ -694,7 +760,41 @@ impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionS
             compatible: true,
             store,
         };
-        let receipt = transport.stage_durable(&request.envelope)?;
+        let source_artifact = request
+            .envelope
+            .materialization
+            .source_artifact
+            .as_ref()
+            .expect("validated source artifact")
+            .descriptor();
+        let job =
+            jobs.submit_remote_runner_job(homeboy_core::api_jobs::RemoteRunnerJobRequest {
+                runner_id: request.envelope.handoff.runner_id.clone(),
+                project_id: None,
+                operation: "runner_staged_execution".to_string(),
+                command: request.envelope.handoff.recipe.normalized_args.clone(),
+                cwd: None,
+                env: std::collections::HashMap::new(),
+                secret_env_names: Vec::new(),
+                secret_env_plan: Default::default(),
+                env_materialization: None,
+                capture_patch: request.envelope.handoff.recipe.capture_patch,
+                source_snapshot: None,
+                path_materialization_plan: None,
+                require_paths: Vec::new(),
+                extension_env_providers: Vec::new(),
+                lab_runner_workload: None,
+                lifecycle: None,
+                workspace_claim_binding: None,
+                workspace_owner_lease: None,
+                metadata: Some(serde_json::json!({
+                    "submission_key": request.envelope.handoff.idempotency_key,
+                    "staged_source_artifact": source_artifact,
+                })),
+            })?;
+        let receipt = transport
+            .store
+            .stage_durable_with_job_id(&request.envelope, job.id.to_string())?;
         Ok(serde_json::json!({ "receipt": receipt }))
     }
 }
@@ -846,8 +946,10 @@ mod tests {
         let mut initial = transport(&path);
         let receipt = initial.stage_durable(&request).expect("stage");
         let source = receipt.artifacts.source_artifact.expect("source artifact");
+        let extracted = extract_staged_source_artifact(&path, &source, temp.path().join("extract"))
+            .expect("extract");
         assert_eq!(
-            initial.store.read_source_artifact(&source).expect("source"),
+            fs::read(extracted.join("source.bin")).expect("source"),
             b"source package"
         );
         fs::write(
@@ -889,7 +991,10 @@ mod tests {
 
     #[test]
     fn source_transfer_rejects_declared_size_above_bound() {
-        let mut source = SourceArtifactTransfer::from_bytes("source-package-1", b"source package");
+        let mut source = crate::runner_staging_operation::SourceArtifactTransfer::from_bytes(
+            "source-package-1",
+            b"source package",
+        );
         source.size_bytes = crate::runner_staging_operation::MAX_SOURCE_ARTIFACT_BYTES + 1;
         let error = source.decode_verified().expect_err("size bound");
         assert_eq!(
@@ -933,7 +1038,7 @@ mod tests {
                     .materialization
                     .source_artifact
                     .as_ref()
-                    .map(SourceArtifactTransfer::descriptor),
+                    .map(crate::runner_staging_operation::SourceArtifactTransfer::descriptor),
             },
         };
         let seen = Arc::new(Mutex::new(Vec::new()));

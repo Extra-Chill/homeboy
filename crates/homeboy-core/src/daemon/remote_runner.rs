@@ -157,7 +157,7 @@ pub(in crate::daemon) fn route(
             Ok(body) => daemon_endpoint_response("runner.staging.capabilities", body),
             Err(err) => auth_or_bad_request(err),
         },
-        ("POST", "/runner/staging") => match stage(body, auth) {
+        ("POST", "/runner/staging") => match stage(body, job_store, auth) {
             Ok(body) => daemon_endpoint_response("runner.staging.submit", body),
             Err(err) => auth_or_bad_request(err),
         },
@@ -276,11 +276,11 @@ fn staging_capabilities(body: Option<Value>, auth: &BrokerAuthContext) -> Result
     }))
 }
 
-fn stage(body: Option<Value>, auth: &BrokerAuthContext) -> Result<Value> {
+fn stage(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) -> Result<Value> {
     let runner_id = staging_runner_id(&body)?;
     auth.authorize(BrokerScope::Submit, Some(&runner_id))?;
     crate::daemon::runner_staging::with_provider(|provider| {
-        provider.stage(body.unwrap_or(Value::Null))
+        provider.stage(body.unwrap_or(Value::Null), job_store)
     })
 }
 
