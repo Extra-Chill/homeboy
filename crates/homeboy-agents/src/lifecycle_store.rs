@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +23,10 @@ use homeboy_core::{build_identity, paths, Error, ErrorCode, Result};
 static FAIL_NEXT_RECORD_WRITE: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 static INTERRUPT_AFTER_TERMINAL_COMMIT: AtomicBool = AtomicBool::new(false);
+
+/// A crashed notifier cannot release its provisional claim. A bounded lease
+/// keeps that crash window from permanently suppressing a detached resume.
+const COOK_NOTIFICATION_CLAIM_LEASE: Duration = Duration::from_secs(5 * 60);
 
 pub(super) fn write_plan(run_id: &str, plan: &AgentTaskPlan) -> Result<PathBuf> {
     homeboy_core::config::with_config_lock(|| {
@@ -414,7 +419,34 @@ pub(super) fn cook_index_exists(cook_id: &str) -> Result<bool> {
 /// because it is keyed on a `runs` row and a Cook id is an alias with no row
 /// of its own.
 pub(super) fn claim_cook_notification(cook_id: &str, marker: &Value) -> Result<bool> {
-    let path = cook_index_path(&sanitize_run_id(cook_id))?.with_file_name("notification.json");
+    let delivered_path =
+        cook_index_path(&sanitize_run_id(cook_id))?.with_file_name("notification.json");
+    if delivered_path.exists() {
+        return Ok(false);
+    }
+    let path = delivered_path.with_file_name("notification-claim.json");
+    if path.exists() {
+        let stale = fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .and_then(|modified| modified.elapsed().map_err(std::io::Error::other))
+            .map(|age| age >= COOK_NOTIFICATION_CLAIM_LEASE)
+            // An unreadable claim is not proof of delivery; leave it eligible
+            // for the normal create-new race rather than making it permanent.
+            .unwrap_or(true);
+        if !stale {
+            return Ok(false);
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(path.display().to_string()),
+                ));
+            }
+        }
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             Error::internal_io(error.to_string(), Some(parent.display().to_string()))
@@ -441,6 +473,45 @@ pub(super) fn claim_cook_notification(cook_id: &str, marker: &Value) -> Result<b
             Some(path.display().to_string()),
         )),
     }
+}
+
+/// Commit a successful notification claim. Only a confirmed transport delivery
+/// becomes the durable exactly-once marker.
+pub(super) fn confirm_cook_notification(cook_id: &str, marker: &Value) -> Result<()> {
+    let delivered_path =
+        cook_index_path(&sanitize_run_id(cook_id))?.with_file_name("notification.json");
+    write_private_json(&delivered_path, marker)
+}
+
+/// Release a provisional claim after a non-delivery so a later terminal
+/// observer can retry it.
+pub(super) fn release_cook_notification_claim(cook_id: &str) -> Result<()> {
+    let path =
+        cook_index_path(&sanitize_run_id(cook_id))?.with_file_name("notification-claim.json");
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some(path.display().to_string()),
+        )),
+    }
+}
+
+/// Persist the latest bounded, secret-safe terminal notification outcome.
+pub(super) fn write_cook_notification_outcome(cook_id: &str, outcome: &Value) -> Result<()> {
+    let path =
+        cook_index_path(&sanitize_run_id(cook_id))?.with_file_name("notification-outcome.json");
+    write_private_json(&path, outcome)
+}
+
+pub(super) fn read_cook_notification_outcome(cook_id: &str) -> Result<Option<Value>> {
+    let path =
+        cook_index_path(&sanitize_run_id(cook_id))?.with_file_name("notification-outcome.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    read_json(&path).map(Some)
 }
 
 pub(super) fn update_cook_index(

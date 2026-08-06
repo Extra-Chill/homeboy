@@ -25,7 +25,8 @@ use homeboy_core::notification_payload::{
     NotifyAction, NotifyEventKind, NotifyLink, NotifyPayload, NotifySubject,
 };
 use homeboy_core::notification_route::{self, NotificationRoute};
-use homeboy_core::notify::{self, NotifyEvent};
+use homeboy_core::notify::{self, NotifyDelivery, NotifyEvent, NotifyOutcome};
+use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 
 use crate::agent_task_service::AgentTaskCookReport;
@@ -75,6 +76,66 @@ fn deliver(event: NotifyEvent, run_id: &str) {
     }
     // A notification is observability, never a cook failure mode.
     let _ = notify::dispatch(&event.with_route(route.as_ref()));
+}
+
+fn terminal_outcome(cook_id: &str, explicit_route: bool, outcome: &NotifyOutcome) -> Value {
+    let (transport, error_class) = match &outcome.delivery {
+        NotifyDelivery::NotConfigured => (None, Some("not_configured")),
+        NotifyDelivery::Transport {
+            transport_id,
+            exit_code,
+            ..
+        } => (
+            Some(transport_id.clone()),
+            (!outcome.delivered).then_some(if exit_code.is_some() {
+                "transport_rejected"
+            } else {
+                "transport_spawn_failed"
+            }),
+        ),
+    };
+    json!({
+        "schema": "homeboy/cook-notification-delivery/v1",
+        "cook_id": cook_id,
+        "event_id": "terminal",
+        "event_kind": outcome.event_kind,
+        "transport": transport,
+        "route_classification": if explicit_route { "explicit" } else { "default" },
+        "status": if outcome.delivered { "delivered" } else if matches!(outcome.delivery, NotifyDelivery::NotConfigured) { "not_configured" } else { "failed" },
+        "error_class": error_class,
+        "transport_result": safe_transport_result(outcome.result.as_ref()),
+    })
+}
+
+/// Transport output belongs to the transport, and may contain credentials or a
+/// raw destination. Retain only generic operational fields needed for retry.
+fn safe_transport_result(result: Option<&Value>) -> Option<Value> {
+    const KEYS: &[&str] = &[
+        "schema",
+        "status",
+        "attempts",
+        "delivery_mode",
+        "route_kind",
+        "retryable",
+        "truncated",
+    ];
+    let object = result?.as_object()?;
+    let mut safe = Map::new();
+    for key in KEYS {
+        let Some(value) = object.get(*key) else {
+            continue;
+        };
+        match value {
+            Value::Bool(_) | Value::Number(_) => {
+                safe.insert((*key).to_string(), value.clone());
+            }
+            Value::String(value) if value.len() <= 128 => {
+                safe.insert((*key).to_string(), Value::String(value.clone()));
+            }
+            _ => {}
+        }
+    }
+    (!safe.is_empty()).then(|| Value::Object(safe))
 }
 
 fn cook_subject(cook_id: &str, run_id: &str, component: Option<&str>) -> NotifySubject {
@@ -292,20 +353,33 @@ pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str
         .filter(|run_id| !run_id.trim().is_empty())
         .unwrap_or_else(|| report.cook_id.clone());
     let payload = terminal_payload(report, component, exit_code);
-    deliver(
-        NotifyEvent::lifecycle(payload.kind, &report.cook_id, &report.status)
-            .with_title(format!(
-                "cook {} — {}",
-                if succeeded {
-                    "succeeded"
-                } else {
-                    "needs attention"
-                },
-                report.cook_id
-            ))
-            .with_payload(payload),
-        &route_run_id,
+    let event = NotifyEvent::lifecycle(payload.kind, &report.cook_id, &report.status)
+        .with_title(format!(
+            "cook {} — {}",
+            if succeeded {
+                "succeeded"
+            } else {
+                "needs attention"
+            },
+            report.cook_id
+        ))
+        .with_payload(payload);
+    let route = effective_route(&route_run_id);
+    let outcome = notify::dispatch(&event.clone().with_route(route.as_ref()));
+    let persisted = terminal_outcome(&report.cook_id, route.is_some(), &outcome);
+    let _ = crate::agent_task_lifecycle::record_cook_terminal_notification_outcome(
+        &report.cook_id,
+        persisted,
     );
+    if outcome.delivered {
+        let _ = crate::agent_task_lifecycle::confirm_cook_terminal_notification(
+            &report.cook_id,
+            COOK_TERMINAL_DELIVERED_BY,
+        );
+    } else {
+        let _ =
+            crate::agent_task_lifecycle::release_cook_terminal_notification_claim(&report.cook_id);
+    }
 }
 
 #[cfg(test)]
@@ -519,6 +593,120 @@ mod tests {
         crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("durable run");
         crate::agent_task_lifecycle::persist_notification_route(run_id, &route(destination))
             .expect("persist route");
+    }
+
+    fn install_transport(id: &str, command: Vec<&str>) {
+        let mut manifest: homeboy_extension_contract::ExtensionManifest =
+            serde_json::from_value(serde_json::json!({
+                "name": "Test transport",
+                "version": "1.0.0",
+                "notification_transports": [{
+                    "schema": homeboy_extension_contract::notification_transport_config::NOTIFICATION_TRANSPORT_SCHEMA,
+                    "id": id,
+                    "command": command,
+                }]
+            }))
+            .expect("manifest");
+        manifest.id = "cook-notify-test".to_string();
+        homeboy_core::extension_store::save_manifest(&manifest).expect("install transport");
+    }
+
+    fn set_default_transport(id: &str) {
+        homeboy_core::defaults::save_config(&homeboy_core::defaults::HomeboyConfig {
+            notifications: homeboy_core::defaults::NotificationConfig {
+                default_transport: Some(id.to_string()),
+            },
+            ..Default::default()
+        })
+        .expect("configure transport");
+    }
+
+    fn latest_delivery(cook_id: &str) -> Value {
+        crate::agent_task_lifecycle::cook_terminal_notification_outcome(cook_id)
+            .expect("read outcome")
+            .expect("outcome")
+    }
+
+    #[test]
+    fn terminal_delivery_records_success_and_confirms_the_once_marker() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            install_transport("test.cook", vec!["true"]);
+            set_default_transport("test.cook");
+
+            cook_terminal(&report("succeeded", None), None, 0);
+            let delivery = latest_delivery("cook-abc");
+            assert_eq!(delivery["status"], "delivered");
+            assert_eq!(delivery["transport"], "test.cook");
+            assert_eq!(delivery["route_classification"], "default");
+            assert!(
+                !crate::agent_task_lifecycle::claim_cook_terminal_notification("cook-abc", "test")
+                    .unwrap()
+            );
+        });
+    }
+
+    #[test]
+    fn non_delivery_is_recorded_and_leaves_terminal_delivery_eligible() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            cook_terminal(&report("durable_failure", None), None, 1);
+            let delivery = latest_delivery("cook-abc");
+            assert_eq!(delivery["status"], "not_configured");
+            assert_eq!(delivery["error_class"], "not_configured");
+            assert!(
+                crate::agent_task_lifecycle::claim_cook_terminal_notification("cook-abc", "test")
+                    .unwrap()
+            );
+            crate::agent_task_lifecycle::release_cook_terminal_notification_claim("cook-abc")
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn transport_rejection_and_spawn_failure_are_classified_without_transport_output() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            install_transport("test.reject", vec!["false"]);
+            set_default_transport("test.reject");
+            cook_terminal(&report("durable_failure", None), None, 1);
+            let rejected = latest_delivery("cook-abc");
+            assert_eq!(rejected["status"], "failed");
+            assert_eq!(rejected["error_class"], "transport_rejected");
+            assert!(
+                crate::agent_task_lifecycle::claim_cook_terminal_notification("cook-abc", "test")
+                    .unwrap()
+            );
+            crate::agent_task_lifecycle::release_cook_terminal_notification_claim("cook-abc")
+                .unwrap();
+
+            install_transport(
+                "test.spawn",
+                vec!["/definitely/not/a/notification-transport"],
+            );
+            set_default_transport("test.spawn");
+            let mut spawn = report("durable_failure", None);
+            spawn.cook_id = "cook-spawn".to_string();
+            cook_terminal(&spawn, None, 1);
+            let spawned = latest_delivery("cook-spawn");
+            assert_eq!(spawned["error_class"], "transport_spawn_failed");
+        });
+    }
+
+    #[test]
+    fn resumed_terminal_delivery_uses_the_durable_route_and_stays_deduplicated() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            install_transport("extension", vec!["true"]);
+            seed_run_with_route("cook-resumed-attempt-1-aaaa", "secret-destination");
+            let mut resumed = report("succeeded", None);
+            resumed.cook_id = "cook-resumed".to_string();
+            resumed.latest_run_id = Some("cook-resumed-attempt-1-aaaa".to_string());
+
+            cook_terminal(&resumed, None, 0);
+            cook_terminal(&resumed, None, 0);
+
+            let delivery = latest_delivery("cook-resumed");
+            assert_eq!(delivery["status"], "delivered");
+            assert_eq!(delivery["route_classification"], "explicit");
+            assert!(!delivery.to_string().contains("secret-destination"));
+        });
     }
 
     #[test]
