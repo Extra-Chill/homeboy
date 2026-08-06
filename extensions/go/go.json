@@ -102,8 +102,5 @@
         "template": "- `{name}` — `{source_file}` (line {line})"
       }
     }
-  },
-  "docs": [
-    "extensions/go.md"
-  ]
+  }
 }

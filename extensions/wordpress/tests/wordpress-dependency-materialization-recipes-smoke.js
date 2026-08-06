@@ -42,7 +42,9 @@ assert.deepEqual(Object.keys(WORDPRESS_REQUIRED_OUTPUT_DECLARATIONS.declaration_
 ]);
 assert.equal(WORDPRESS_REQUIRED_OUTPUT_DECLARATIONS.examples[0].path, 'vendor/autoload.php');
 assert.equal(WORDPRESS_REQUIRED_OUTPUT_DECLARATIONS.examples[1].kind, 'glob');
+// The manifest copy of the recipes is consumed by
+// wordpress-artifact-cleanup-declarations-smoke.js, which cross-checks it
+// against the live `artifact_cleanup` declarations, so the two must agree.
 assert.deepEqual(wordpressManifest.dependency_materialization_recipes, WORDPRESS_DEPENDENCY_MATERIALIZATION_RECIPES);
-assert.deepEqual(wordpressManifest.required_output_declarations, WORDPRESS_REQUIRED_OUTPUT_DECLARATIONS);
 
 console.log('wordpress dependency materialization recipes smoke passed');

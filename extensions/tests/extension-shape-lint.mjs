@@ -282,7 +282,7 @@ function validateExtension(extensionId) {
     fail(`${extensionId}: provides.capabilities is retired and read by nothing — remove it`);
   }
 
-  for (const retired of ['validate', 'contract']) {
+  for (const retired of ['validate', 'contract', 'crossref']) {
     if (manifest.scripts?.[retired] !== undefined) {
       fail(`${extensionId}: scripts.${retired} is retired and read by nothing — remove it`);
     }

@@ -209,36 +209,9 @@
       }
     ]
   },
-  "required_output_declarations": {
-    "schema": "homeboy-extension-wordpress/required-output-declarations/v1",
-    "declaration_shape": {
-      "id": "string",
-      "kind": "file|directory|glob",
-      "path": "component-relative path or glob",
-      "producer": "dependency-materialization|build|runtime-prepare",
-      "required": "boolean"
-    },
-    "examples": [
-      {
-        "id": "built-php-autoloader",
-        "kind": "file",
-        "path": "vendor/autoload.php",
-        "producer": "dependency-materialization",
-        "required": true
-      },
-      {
-        "id": "built-js-assets",
-        "kind": "glob",
-        "path": "build/**/*",
-        "producer": "build",
-        "required": true
-      }
-    ]
-  },
   "scripts": {
     "fingerprint": "scripts/fingerprint.sh",
     "refactor": "scripts/refactor.py",
-    "crossref": "scripts/test/crossref.php",
     "format": "scripts/format.sh"
   },
   "deps": {
@@ -1131,10 +1104,6 @@
       "WP_CODEBOX_BIN",
       "WP_CODEBOX_FUZZ_WORKLOAD_ROOT"
     ]
-  },
-  "testing": {
-    "backend": "wp-codebox",
-      "description": "WordPress PHPUnit tests run through WP Codebox against real WordPress. PHP smoke files selected by changed-file routing use the component's homeboy-test-manifest.json environment declaration: standalone-php files run directly with PHP and wordpress files run through wordpress.run-php. Undeclared PHP smokes default to WordPress."
   },
   "ci": {
     "profiles": {

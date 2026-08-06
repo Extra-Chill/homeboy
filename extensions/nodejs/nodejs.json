@@ -114,14 +114,6 @@
     },
     "default_pinned_files": ["package.json", "tsconfig.json", ".npmrc", ".env.example"]
   },
-  "component_type": {
-    "version_targets": [
-      {
-        "file": "package.json",
-        "pattern": "\"version\":\\s*\"([0-9.]+)\""
-      }
-    ]
-  },
   "settings": [
     {
       "id": "access",

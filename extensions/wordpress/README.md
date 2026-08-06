@@ -23,7 +23,6 @@ extension scripts for these verbs:
 | `audit` | Detector rules over PHP for lifecycle / role tagging | `scripts/audit/setup-references.sh` + rules in `wordpress.json` |
 | `fingerprint` | File-shape fingerprinting for change detection | `scripts/fingerprint.sh` |
 | `refactor` | Auto-fix pass (PHPCBF + custom fixers) | `scripts/refactor.py` |
-| `crossref` | Cross-reference analysis across sources/tests | `scripts/test/crossref.php` |
 | `format` | Post-write formatting | `scripts/format.sh` |
 
 It also declares a WordPress platform integration in `wordpress.json`:

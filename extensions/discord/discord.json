@@ -5,7 +5,6 @@
   "icon": "message.circle",
   "description": "Outbound Discord run-completion notification delivery for Homeboy",
   "author": "Extra Chill",
-  "homeboy_version_target": ">=0.281.20",
   "provides": {
     "file_extensions": ["mjs"]
   },
