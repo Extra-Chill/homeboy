@@ -27,6 +27,7 @@ pub(super) fn write_plan(run_id: &str, plan: &AgentTaskPlan) -> Result<PathBuf> 
     homeboy_core::config::with_config_lock(|| {
         let mut plan = plan.clone();
         migrate_execution_budget(&mut plan)?;
+        validate_managed_services(&plan)?;
         let path = run_dir(run_id)?.join("plan.json");
         write_private_json(&path, &plan)?;
         Ok(path)
@@ -36,6 +37,7 @@ pub(super) fn write_plan(run_id: &str, plan: &AgentTaskPlan) -> Result<PathBuf> 
 pub(super) fn read_plan_path(path: &str) -> Result<AgentTaskPlan> {
     let plan = read_json(&PathBuf::from(path))?;
     validate_execution_budget(&plan)?;
+    validate_managed_services(&plan)?;
     Ok(plan)
 }
 
@@ -52,6 +54,7 @@ pub(super) fn read_controller_plan(run_id: &str) -> Result<AgentTaskPlan> {
         )
     })?;
     validate_execution_budget(&plan)?;
+    validate_managed_services(&plan)?;
     Ok(plan)
 }
 
@@ -86,6 +89,20 @@ fn validate_execution_budget(plan: &AgentTaskPlan) -> Result<()> {
             None,
         )),
     }
+}
+
+fn validate_managed_services(plan: &AgentTaskPlan) -> Result<()> {
+    for service in &plan.services {
+        service.validate_cleanup_deadline().map_err(|message| {
+            Error::validation_invalid_argument(
+                "services.cleanup_deadline_ms",
+                message,
+                Some(service.cleanup_deadline_ms.to_string()),
+                None,
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn migrate_execution_budget(plan: &mut AgentTaskPlan) -> Result<bool> {

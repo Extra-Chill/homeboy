@@ -135,6 +135,31 @@ impl ProcessContainment {
             }
         }
     }
+
+    /// Gracefully stop this containment boundary, escalating only when its
+    /// members survive `grace`. The boolean reports whether force termination
+    /// was required, so durable callers can distinguish cleanup outcomes.
+    pub fn cleanup_with_grace(&self, grace: Duration, leader_has_exited: bool) -> Result<bool> {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = leader_has_exited;
+            return terminate_linux_scope_members_with_grace(&self.scope, grace);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            if !leader_has_exited {
+                let pid = self.leader_pid.ok_or_else(|| {
+                    Error::internal_unexpected("process containment was not attached to a child")
+                })?;
+                return terminate_process_tree_with_grace(pid, grace)
+                    .map(|termination| termination.signal == "SIGKILL");
+            }
+            let group = self.process_group_id.ok_or_else(|| {
+                Error::internal_unexpected("process containment was not attached to a child")
+            })?;
+            terminate_isolated_process_group_with_grace(group, grace)
+        }
+    }
 }
 
 /// Generic process step shape shared by command/runner adapters.
@@ -781,6 +806,61 @@ pub fn terminate_isolated_process_group(owner_pid: u32) -> Result<()> {
     }
 }
 
+/// Gracefully stop an isolated process group, returning whether SIGKILL was
+/// required after the supplied grace period.
+pub fn terminate_isolated_process_group_with_grace(
+    owner_pid: u32,
+    grace: Duration,
+) -> Result<bool> {
+    if owner_pid == 0 || owner_pid > i32::MAX as u32 {
+        return Err(Error::validation_invalid_argument(
+            "pid",
+            "isolated process-group leader PID is invalid",
+            Some(owner_pid.to_string()),
+            None,
+        ));
+    }
+    #[cfg(unix)]
+    {
+        unsafe {
+            if libc::kill(-(owner_pid as libc::pid_t), libc::SIGTERM) != 0
+                && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+            {
+                return Err(Error::internal_unexpected(format!(
+                    "terminate isolated process group {owner_pid}: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+        }
+        if wait_for_isolated_process_group_exit(owner_pid, grace)
+            .map_err(Error::internal_unexpected)?
+        {
+            return Ok(false);
+        }
+        unsafe {
+            if libc::kill(-(owner_pid as libc::pid_t), libc::SIGKILL) != 0
+                && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+            {
+                return Err(Error::internal_unexpected(format!(
+                    "force-terminate isolated process group {owner_pid}: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+        }
+        Ok(true)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = grace;
+        Err(Error::validation_invalid_argument(
+            "pid",
+            "isolated process-group termination is unsupported on this platform",
+            None,
+            None,
+        ))
+    }
+}
+
 /// Construct the Windows-native tree termination command without coupling
 /// callers to a platform-specific shell or product workflow.
 pub fn windows_taskkill_process_tree_step(pid: u32) -> ProcessStep {
@@ -928,6 +1008,33 @@ fn terminate_linux_scope_members(
     }
 }
 
+#[cfg(target_os = "linux")]
+fn terminate_linux_scope_members_with_grace(scope: &str, grace: Duration) -> Result<bool> {
+    let targets = linux_scope_pids(scope)?;
+    signal_pids(&targets, libc::SIGTERM)?;
+    if wait_for_linux_scope_exit(scope, grace)? {
+        return Ok(false);
+    }
+    let survivors = linux_scope_pids(scope)?;
+    signal_pids(&survivors, libc::SIGKILL)?;
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_linux_scope_exit(scope: &str, grace: Duration) -> Result<bool> {
+    let deadline = Instant::now() + grace;
+    loop {
+        if linux_scope_pids(scope)?.is_empty() {
+            return Ok(true);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(10).min(deadline.saturating_duration_since(now)));
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessTreeTermination {
     pub owner_pid: u32,
@@ -952,6 +1059,8 @@ pub struct ProcessTreeTermination {
 /// giving providers a chance to flush/cleanup on a graceful terminate.
 #[cfg(unix)]
 const SIGTERM_GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
+#[cfg(not(unix))]
+const SIGTERM_GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
 #[cfg(unix)]
 const SIGTERM_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 /// How long to wait after SIGKILL for the kernel to actually tear the targets
@@ -963,6 +1072,15 @@ const SIGTERM_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_mil
 const SIGKILL_REAP_GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
 
 pub fn terminate_process_tree(owner_pid: u32) -> Result<ProcessTreeTermination> {
+    terminate_process_tree_with_grace(owner_pid, SIGTERM_GRACE)
+}
+
+/// Terminate an owned process tree with a caller-selected, bounded SIGTERM
+/// grace period before escalation to SIGKILL.
+pub fn terminate_process_tree_with_grace(
+    owner_pid: u32,
+    grace: Duration,
+) -> Result<ProcessTreeTermination> {
     if owner_pid > i32::MAX as u32 {
         return Err(Error::validation_invalid_argument(
             "pid",
@@ -989,7 +1107,7 @@ pub fn terminate_process_tree(owner_pid: u32) -> Result<ProcessTreeTermination> 
         // Phase 2: wait out a short grace period, then SIGKILL any survivors so a
         // provider that ignores SIGTERM (or is wedged) cannot keep the run alive.
         let mut killed_pids = Vec::new();
-        let survivors_after_term = wait_for_exit(&targets, SIGTERM_GRACE);
+        let survivors_after_term = wait_for_exit_with_owner_reap(&targets, owner_pid, grace);
         if !survivors_after_term.is_empty() {
             signal_pids(&survivors_after_term, libc::SIGKILL)?;
             killed_pids = survivors_after_term;
@@ -999,7 +1117,7 @@ pub fn terminate_process_tree(owner_pid: u32) -> Result<ProcessTreeTermination> 
         // running for a moment after the call returns. Poll briefly for the
         // tree to actually exit before snapshotting survivors so we don't
         // misreport processes that are merely mid-teardown.
-        let surviving_pids = wait_for_exit(&targets, SIGKILL_REAP_GRACE);
+        let surviving_pids = wait_for_exit_with_owner_reap(&targets, owner_pid, SIGKILL_REAP_GRACE);
 
         let signal = if killed_pids.is_empty() {
             "SIGTERM"
@@ -1085,6 +1203,33 @@ fn wait_for_exit(pids: &[u32], grace: std::time::Duration) -> Vec<u32> {
             .iter()
             .copied()
             .filter(|pid| pid_is_running(*pid))
+            .collect();
+        let now = std::time::Instant::now();
+        if survivors.is_empty() || now >= deadline {
+            return survivors;
+        }
+        std::thread::sleep(SIGTERM_POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_exit_with_owner_reap(
+    pids: &[u32],
+    owner_pid: u32,
+    grace: std::time::Duration,
+) -> Vec<u32> {
+    let deadline = std::time::Instant::now() + grace;
+    loop {
+        let survivors: Vec<u32> = pids
+            .iter()
+            .copied()
+            .filter(|pid| {
+                if *pid == owner_pid {
+                    process_is_running_after_sigterm(*pid)
+                } else {
+                    pid_is_running(*pid)
+                }
+            })
             .collect();
         let now = std::time::Instant::now();
         if survivors.is_empty() || now >= deadline {
