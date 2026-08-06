@@ -54,6 +54,9 @@ function process_file( $filepath ) {
 		// strip_tags(...) → wp_strip_all_tags(...)
 		// Match standalone strip_tags calls, not inside wp_strip_all_tags already.
 		if ( preg_match( '/\bstrip_tags\s*\(/', $line ) && false === strpos( $line, 'wp_strip_all_tags' ) ) {
+			if ( fixer_line_has_phpcs_ignore( $lines, $idx ) || strip_tags_is_guarded_fallback( $lines, $idx ) ) {
+				continue;
+			}
 			$line    = preg_replace( '/\bstrip_tags\s*\(\s*/', 'wp_strip_all_tags( ', $line );
 			$fixes++;
 			$changed = true;
@@ -65,10 +68,7 @@ function process_file( $filepath ) {
 		// Skip if already using wp_delete_file.
 		if ( preg_match( '/\bunlink\s*\(/', $line ) && false === strpos( $line, 'wp_delete_file' ) ) {
 			// Skip lines already suppressed with phpcs:ignore.
-			if ( false !== strpos( $line, 'phpcs:ignore' ) ) {
-				continue;
-			}
-			if ( $idx > 0 && false !== strpos( $lines[ $idx - 1 ], 'phpcs:ignore' ) ) {
+			if ( fixer_line_has_phpcs_ignore( $lines, $idx ) ) {
 				continue;
 			}
 
@@ -85,4 +85,21 @@ function process_file( $filepath ) {
 	}
 
 	return $fixes;
+}
+
+/**
+ * Preserve fallback implementations guarded by wp_strip_all_tags availability.
+ */
+function strip_tags_is_guarded_fallback( $lines, $line_index ) {
+	for ( $i = $line_index - 1; $i >= 0; $i-- ) {
+		if ( preg_match( '/\bfunction\b/', $lines[ $i ] ) ) {
+			break;
+		}
+
+		if ( preg_match( '/\bfunction_exists\s*\(\s*[\'\"]wp_strip_all_tags[\'\"]\s*\)/', $lines[ $i ] ) ) {
+			return true;
+		}
+	}
+
+	return false;
 }

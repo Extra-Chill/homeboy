@@ -989,7 +989,7 @@ function is_override_method($tokens, $func_info) {
  * Determine if a parameter can be safely removed.
  *
  * Criteria:
- * - Method must be private (or have no external callers).
+ * - Method must be private.
  * - The param must be the LAST parameter (removing non-last params changes call semantics).
  * - We can find all call sites.
  */
@@ -1036,34 +1036,9 @@ function can_remove_param($tokens, $func_info, $param_name, $filepath, $scan_roo
         return $result;
     }
 
-    // Standalone functions (no class) — find callers across codebase.
-    if ($func_info['visibility'] === null) {
-        $class_name = find_enclosing_class($tokens, $func_info['func_token']);
-        if ($class_name === null) {
-            // It's a standalone function — scan codebase for callers.
-            $call_sites = find_call_sites_in_codebase($func_info['name'], $scan_root, $filepath);
-            $result['call_sites'] = $call_sites;
-            $result['removable']  = true;
-            return $result;
-        }
-    }
-
-    // Public/protected methods with zero callers across codebase are safe to trim.
-    if (in_array($func_info['visibility'], ['public', 'protected'], true)) {
-        $call_sites = find_call_sites_in_codebase($func_info['name'], $scan_root, $filepath);
-        if (empty($call_sites)) {
-            $result['removable'] = true;
-            return $result;
-        }
-        // Has callers — still removable if it's the last param and callers
-        // don't pass it (param has a default value).
-        $has_default = param_has_default($tokens, $func_info, $param_name);
-        if ($has_default) {
-            $result['call_sites'] = $call_sites;
-            $result['removable']  = true;
-            return $result;
-        }
-    }
+    // Global and non-private methods may be invoked by plugin consumers, hooks,
+    // reflection, or dynamically constructed callbacks that static scans cannot
+    // prove complete. Preserve their public contract and insert a noop instead.
 
     return $result;
 }

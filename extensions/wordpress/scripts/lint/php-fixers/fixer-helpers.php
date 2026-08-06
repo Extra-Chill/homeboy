@@ -67,6 +67,39 @@ function fixer_path_is_excluded($path) {
 }
 
 /**
+ * Check whether a fixer target is explicitly suppressed for PHPCS.
+ *
+ * @param array $lines Source lines.
+ * @param int   $line_index Zero-based target line index.
+ * @return bool True when the target or its preceding line has a suppression.
+ */
+function fixer_line_has_phpcs_ignore(array $lines, $line_index) {
+    foreach ([$line_index - 1, $line_index] as $index) {
+        if (isset($lines[$index]) && strpos($lines[$index], 'phpcs:ignore') !== false) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Check whether any line in a code region explicitly suppresses PHPCS.
+ *
+ * @param array $lines Source lines.
+ * @return bool True when the region contains a suppression.
+ */
+function fixer_lines_have_phpcs_ignore(array $lines) {
+    foreach ($lines as $line) {
+        if (strpos($line, 'phpcs:ignore') !== false) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
  * Detect pure-PHP test harness files that don't bootstrap WordPress.
  *
  * Smoke tests (`tests/*-smoke.php`, `tests/smoke-*.php`) and PHPUnit test classes

@@ -60,6 +60,12 @@ function process_file( $filepath ) {
 	while ( $i < $count ) {
 		$line    = $lines[ $i ];
 		$trimmed = trim( $line );
+		$is_suppressed = fixer_line_has_phpcs_ignore( $lines, $i );
+		if ( $is_suppressed ) {
+			$new_lines[] = $line;
+			$i++;
+			continue;
+		}
 
 		// Pattern 1: catch with captured variable — `catch ( \Exception $var ) {`
 		if ( preg_match( '/\}\s*catch\s*\(\s*\\\\?[\w\\\\]+\s+(\$\w+)\s*\)\s*\{/', $trimmed, $m ) ) {
@@ -81,7 +87,7 @@ function process_file( $filepath ) {
 				}
 			}
 
-			if ( ! body_has_code( $body_lines ) ) {
+			if ( ! $is_suppressed && ! fixer_lines_have_phpcs_ignore( $body_lines ) && ! body_has_code( $body_lines ) ) {
 				// Detect indent from the catch line.
 				preg_match( '/^(\s*)/', $lines[ $catch_start - 1 ], $indent_match );
 				$catch_indent = $indent_match[1];
@@ -117,13 +123,12 @@ function process_file( $filepath ) {
 		if ( preg_match( '/(\}\s*catch\s*\(\s*\\\\?[\w\\\\]+)\s*\)\s*\{/', $trimmed, $m )
 			&& ! preg_match( '/\$\w+/', $trimmed )
 		) {
-			// Rewrite catch line to add $e variable.
+			// Keep the original line until the body has been checked for suppressions.
 			$rewritten = preg_replace(
 				'/(\}\s*catch\s*\(\s*\\\\?[\w\\\\]+)\s*(\)\s*\{)/',
 				'$1 $e $2',
 				$line
 			);
-			$new_lines[] = $rewritten;
 			$i++;
 
 			$body_lines  = array();
@@ -140,7 +145,8 @@ function process_file( $filepath ) {
 				}
 			}
 
-			if ( ! body_has_code( $body_lines ) ) {
+			if ( ! $is_suppressed && ! fixer_lines_have_phpcs_ignore( $body_lines ) && ! body_has_code( $body_lines ) ) {
+				$new_lines[] = $rewritten;
 				preg_match( '/^(\s*)/', $lines[ $catch_start - 1 ], $indent_match );
 				$catch_indent = $indent_match[1];
 				$body_indent  = $catch_indent . "\t";
@@ -154,6 +160,7 @@ function process_file( $filepath ) {
 				$new_lines[] = "{$body_indent}unset( \$e );\n";
 				$fixes++;
 			} else {
+				$new_lines[] = $line;
 				foreach ( $body_lines as $body_line ) {
 					$new_lines[] = $body_line;
 				}
