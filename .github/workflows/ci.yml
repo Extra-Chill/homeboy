@@ -170,6 +170,16 @@ jobs:
     uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2
     with:
       commands: review test
+      # `review test` defaults to running the extension's pre-test lint, which
+      # for Rust is a full `cargo clippy` over the workspace. The `Lint` job in
+      # the homeboy-fast matrix above already runs `review lint`, so every shard
+      # was repeating work that is covered once, costing roughly three minutes
+      # each across all `test-shards`.
+      #
+      # This matches the umbrella `review` command, which sets `skip_lint: true`
+      # when building its test stage for the same reason, and matches
+      # release.yml, which already passes `--skip-lint` here.
+      args: --skip-lint
       expected-commands: review audit,review lint,review test
       component: homeboy
       source: .
