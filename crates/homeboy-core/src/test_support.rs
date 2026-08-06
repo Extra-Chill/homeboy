@@ -14,6 +14,8 @@ use tempfile::TempDir;
 
 use crate::api_jobs::{Job, JobEventKind, JobStore, RemoteRunnerJobRequest, RemoteRunnerJobResult};
 
+const TEST_DAEMON_NAMESPACE_ENV: &str = "HOMEBOY_TEST_DAEMON_NAMESPACE";
+
 static SHARED_EMPTY_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
 static SHARED_COMMITTED_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
 static SHARED_CONTROLLER_RUNTIME_FIXTURE: OnceLock<TempDir> = OnceLock::new();
@@ -119,6 +121,12 @@ impl HermeticTestContext {
             .env("HOME", self.home())
             .env("XDG_CONFIG_HOME", self.root().join(".config"))
             .env("XDG_DATA_HOME", self.root().join("data"))
+            // These explicit overrides take precedence over HOME/XDG. Always
+            // replace inherited operator roots so daemon discovery and runner
+            // source leases remain inside this test namespace.
+            .env(crate::paths::HOMEBOY_DATA_DIR_ENV, self.data_dir())
+            .env(crate::paths::DAEMON_STATE_DIR_ENV, self.daemon_dir())
+            .env(TEST_DAEMON_NAMESPACE_ENV, self.daemon_dir())
             .env("HOMEBOY_ARTIFACT_ROOT", self.artifact_dir())
             .env("HOMEBOY_RUNTIME_TMPDIR", self.runtime_dir())
             .env("TMPDIR", self.temp_dir())
@@ -405,6 +413,9 @@ fn process_tree_snapshot(_root: u32) -> String {
 pub struct HomeGuard {
     prior: Option<String>,
     prior_xdg_data_home: Option<String>,
+    prior_data_dir: Option<String>,
+    prior_daemon_state_dir: Option<String>,
+    prior_daemon_namespace: Option<String>,
     prior_artifact_root: Option<String>,
     prior_runtime_tmpdir: Option<String>,
     prior_invocation_runtime: Option<String>,
@@ -489,6 +500,9 @@ impl HomeGuard {
         reset_cached_test_state();
         let prior = std::env::var("HOME").ok();
         let prior_xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
+        let prior_data_dir = std::env::var(crate::paths::HOMEBOY_DATA_DIR_ENV).ok();
+        let prior_daemon_state_dir = std::env::var(crate::paths::DAEMON_STATE_DIR_ENV).ok();
+        let prior_daemon_namespace = std::env::var(TEST_DAEMON_NAMESPACE_ENV).ok();
         let prior_artifact_root = std::env::var("HOMEBOY_ARTIFACT_ROOT").ok();
         let prior_runtime_tmpdir = std::env::var("HOMEBOY_RUNTIME_TMPDIR").ok();
         let prior_invocation_runtime =
@@ -518,6 +532,9 @@ impl HomeGuard {
         // Preserve the legacy in-process defaults while the subprocess context
         // uses explicit paths. These tests exercise fallback path resolution.
         std::env::set_var("XDG_DATA_HOME", context.home().join(".local").join("share"));
+        std::env::set_var(crate::paths::HOMEBOY_DATA_DIR_ENV, context.data_dir());
+        std::env::set_var(crate::paths::DAEMON_STATE_DIR_ENV, context.daemon_dir());
+        std::env::set_var(TEST_DAEMON_NAMESPACE_ENV, context.daemon_dir());
         std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
         std::env::set_var("HOMEBOY_NO_UPDATE_CHECK", "1");
         std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", context.runtime_dir());
@@ -547,6 +564,9 @@ impl HomeGuard {
         Self {
             prior,
             prior_xdg_data_home,
+            prior_data_dir,
+            prior_daemon_state_dir,
+            prior_daemon_namespace,
             prior_artifact_root,
             prior_runtime_tmpdir,
             prior_invocation_runtime,
@@ -881,6 +901,18 @@ impl Drop for HomeGuard {
         match &self.prior_xdg_data_home {
             Some(value) => std::env::set_var("XDG_DATA_HOME", value),
             None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+        match &self.prior_data_dir {
+            Some(value) => std::env::set_var(crate::paths::HOMEBOY_DATA_DIR_ENV, value),
+            None => std::env::remove_var(crate::paths::HOMEBOY_DATA_DIR_ENV),
+        }
+        match &self.prior_daemon_state_dir {
+            Some(value) => std::env::set_var(crate::paths::DAEMON_STATE_DIR_ENV, value),
+            None => std::env::remove_var(crate::paths::DAEMON_STATE_DIR_ENV),
+        }
+        match &self.prior_daemon_namespace {
+            Some(value) => std::env::set_var(TEST_DAEMON_NAMESPACE_ENV, value),
+            None => std::env::remove_var(TEST_DAEMON_NAMESPACE_ENV),
         }
         match &self.prior_artifact_root {
             Some(value) => std::env::set_var("HOMEBOY_ARTIFACT_ROOT", value),
@@ -1768,6 +1800,32 @@ mod tests {
             assert_eq!(command_env(&command, source), Some(None));
             assert_eq!(command_env(&command, lab), Some(None));
         }
+    }
+
+    #[test]
+    fn hermetic_commands_replace_inherited_daemon_and_data_roots() {
+        let _lock = env_lock();
+        let data = crate::paths::HOMEBOY_DATA_DIR_ENV;
+        let daemon = crate::paths::DAEMON_STATE_DIR_ENV;
+        let _restore = EnvRestore::capture(&[data, daemon, TEST_DAEMON_NAMESPACE_ENV]);
+        std::env::set_var(data, "/operator/homeboy-data");
+        std::env::set_var(daemon, "/operator/homeboy-daemon");
+
+        let context = HermeticTestContext::new();
+        let command = context.command(TestBinary::CurrentTest);
+
+        assert_eq!(
+            command_env(&command, data),
+            Some(Some(context.data_dir().into_os_string()))
+        );
+        assert_eq!(
+            command_env(&command, daemon),
+            Some(Some(context.daemon_dir().into_os_string()))
+        );
+        assert_eq!(
+            command_env(&command, TEST_DAEMON_NAMESPACE_ENV),
+            Some(Some(context.daemon_dir().into_os_string()))
+        );
     }
 
     #[test]
