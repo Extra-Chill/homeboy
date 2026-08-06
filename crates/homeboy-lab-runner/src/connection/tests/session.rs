@@ -1809,6 +1809,7 @@ fn disconnect_removes_existing_session_file() {
             local_url: Some("http://127.0.0.1:49153".to_string()),
             tunnel_pid: None,
             tunnel_process_start_identity: None,
+            proxy_forward: None,
             remote_daemon_pid: None,
             remote_daemon_lease_id: None,
             homeboy_version: "test".to_string(),

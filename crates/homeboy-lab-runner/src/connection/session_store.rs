@@ -37,6 +37,11 @@ fn session_is_live_with_probe(
             return false;
         }
     }
+    if let Some(proxy_forward) = &session.proxy_forward {
+        if !homeboy_core::process::pid_is_running(proxy_forward.tunnel_pid) {
+            return false;
+        }
+    }
     if session.local_url.is_none() || session.local_port.is_none() {
         return false;
     }
@@ -657,6 +662,7 @@ mod tests {
             local_url: None,
             tunnel_pid: None,
             tunnel_process_start_identity: None,
+            proxy_forward: None,
             remote_daemon_pid: Some(42),
             remote_daemon_lease_id: Some(lease_id.to_string()),
             homeboy_version: "test".to_string(),

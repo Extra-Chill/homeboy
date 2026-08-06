@@ -27,7 +27,7 @@ mod session_enums {
     // build/persist sessions without a core -> runner edge. Re-exported so
     // runner-internal call sites resolve unchanged.
     pub use homeboy_lab_runner_contract::{
-        RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerTunnelMode,
+        RunnerProxyForward, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerTunnelMode,
         RunnerTunnelProcessStartIdentity,
     };
 
