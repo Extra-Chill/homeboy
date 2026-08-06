@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.32.8] - 2026-08-06
+
+### Fixed
+- reconcile nested ignored nextest events
+
 ## [1.32.7] - 2026-08-05
 
 ### Fixed
