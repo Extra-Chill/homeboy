@@ -1,0 +1,156 @@
+# Release integrity sweeper — the asset-completeness guard that cannot be
+# bypassed by the release pipeline failing to run.
+#
+# WHY A SEPARATE WORKFLOW (#11749)
+#
+# `release.yml` already gates publication on the declared asset set, and
+# `verify-published` already re-drafts an incomplete release. Both live INSIDE
+# `release.yml`, which means both are unreachable whenever `release.yml` is not
+# the thing that published. On 2026-08-06 that was the actual situation:
+# v0.333.0 was published at 17:15:59Z with 7 of 13 assets and no Linux binary,
+# while 27 of the last 30 Release runs had dispatched ZERO jobs. Its inventory —
+# a raw macOS `homeboy` binary that CI never produces, one darwin tarball, no
+# `dist-manifest.json` — is the signature of a release published outside CI
+# entirely.
+#
+# `on: release` fires on the RELEASE OBJECT, not on the pipeline. It runs when a
+# human publishes from a laptop, when `gh release edit --draft=false` flips a
+# stranded draft, and when a recovery dispatch finishes — every path into
+# `latest`, including the ones `release.yml` never sees. The schedule is the
+# backstop for the case where even the release event is missed.
+#
+# This workflow is deliberately off the merge path: it triggers on release
+# events and a timer, never on `push`, so it cannot slow merges down.
+
+name: Release Integrity
+
+on:
+  release:
+    # `published` and `released` only. NOT `edited`: cargo-dist edits the
+    # release object repeatedly while uploading assets, and auditing a release
+    # mid-upload would let this workflow re-draft a perfectly healthy release
+    # that simply had not finished yet. A guard that can break the thing it
+    # guards is worse than the hole it closes.
+    types: [published, released]
+  schedule:
+    # Hourly. `latest` is what `homeboy upgrade` resolves, so the window in
+    # which a broken release can strand every controller is bounded by this.
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to audit (defaults to the latest release)'
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+# Per-tag, so a sweep never queues behind another sweep of a different release
+# and can never be displaced while it holds a broken release open. This is the
+# same displacement failure `release.yml`'s concurrency group had (#11749).
+concurrency:
+  group: release-integrity-${{ github.event.release.tag_name || inputs.release_tag || 'latest' }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Audit published release assets
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      # The default branch, not the tag: the audited tag may predate this
+      # contract, and the question being asked is whether the release the
+      # project ships TODAY is usable on every platform it declares today.
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Resolve the release under audit
+        id: target
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -uo pipefail
+          TAG="${EVENT_TAG:-${INPUT_TAG:-}}"
+
+          if [ -z "${TAG}" ]; then
+            TAG="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName --jq '.tagName' 2>/dev/null || true)"
+          fi
+
+          if [ -z "${TAG}" ]; then
+            echo "::error::Could not resolve a release to audit. An unresolvable target is UNKNOWN, not healthy."
+            exit 1
+          fi
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "::notice::Auditing release ${TAG}"
+
+      # Re-check before condemning. Whether cargo-dist attaches every asset
+      # strictly before it flips the draft flag is not a documented ordering,
+      # and `release: published` fires the instant that flag flips. A single
+      # observation could therefore catch a healthy release a few seconds
+      # early — and this workflow's remedy is to un-publish it, so a false
+      # positive here breaks a good release rather than merely reporting one.
+      #
+      # Settling for a few minutes makes the guard robust to any attach order
+      # while keeping the exposure window on a genuinely broken release to
+      # minutes. The scheduled sweep passes on the first attempt, so the cost
+      # is paid only by releases that actually look incomplete.
+      - name: Check the declared asset set
+        id: contract
+        continue-on-error: true
+        env:
+          RELEASE_TAG: ${{ steps.target.outputs.tag }}
+          SETTLE_ATTEMPTS: '5'
+          SETTLE_SECONDS: '60'
+        run: |
+          set -uo pipefail
+          attempt=1
+          while true; do
+            if bash .github/release-asset-completeness.sh; then
+              exit 0
+            fi
+            if [ "${attempt}" -ge "${SETTLE_ATTEMPTS}" ]; then
+              echo "::error::Release ${RELEASE_TAG} still fails the declared asset contract after ${attempt} observations over $(( (attempt - 1) * SETTLE_SECONDS ))s. This is a settled inventory, not an upload in flight."
+              exit 1
+            fi
+            echo "::notice::Attempt ${attempt}/${SETTLE_ATTEMPTS}: inventory incomplete; assets may still be uploading. Re-checking in ${SETTLE_SECONDS}s."
+            attempt=$(( attempt + 1 ))
+            sleep "${SETTLE_SECONDS}"
+          done
+
+      # Detecting a broken published release without containing it is what
+      # #8687 was reopened over. A release missing platform assets serves 404s
+      # for the platforms it dropped and, while it is `latest`, breaks
+      # `homeboy upgrade` for every controller on those platforms.
+      #
+      # Returning it to draft is reversible and non-destructive: the tag, the
+      # body and every uploaded asset are retained. Only the draft flag flips,
+      # which is what makes it unreachable to consumers until a recovery run
+      # completes it.
+      - name: Contain an incomplete published release
+        if: steps.contract.outcome == 'failure'
+        env:
+          RELEASE_TAG: ${{ steps.target.outputs.tag }}
+        run: |
+          set -uo pipefail
+
+          if ! gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft > state.json; then
+            echo "::error::Release ${RELEASE_TAG} failed the asset contract and its state could not be read. Un-publish it by hand before any consumer resolves it: gh release edit ${RELEASE_TAG} --draft=true --repo ${GITHUB_REPOSITORY}"
+            exit 1
+          fi
+
+          if [ "$(jq -r '.isDraft' state.json)" = "true" ]; then
+            echo "::notice::Release ${RELEASE_TAG} is incomplete but is already a draft, so no consumer can resolve it. Complete it with a workflow_dispatch Release run using release_tag=${RELEASE_TAG}."
+            exit 1
+          fi
+
+          if gh release edit "${RELEASE_TAG}" --draft=true --repo "${GITHUB_REPOSITORY}"; then
+            echo "::error::Release ${RELEASE_TAG} was returned to DRAFT because it was published without every declared platform asset. Its tag and uploaded assets are retained. Complete it with a workflow_dispatch Release run using release_tag=${RELEASE_TAG}, which republishes once the asset set verifies."
+          else
+            echo "::error::Release ${RELEASE_TAG} is published and incomplete, and could not be returned to draft. Un-publish it by hand before any consumer resolves it: gh release edit ${RELEASE_TAG} --draft=true --repo ${GITHUB_REPOSITORY}"
+          fi
+          exit 1
