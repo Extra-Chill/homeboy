@@ -667,8 +667,9 @@ pub struct RunnerAdmissionSummary {
     /// an owner may also be visible in the current daemon's live process view.
     pub retained_durable_job_count: usize,
     /// Retained draining counters without identities. They trigger
-    /// reconciliation guidance but do not fence a healthy validated admission
-    /// owner because they cannot be deduplicated safely with known jobs.
+    /// reconciliation guidance and keep rotation pending, but do not fence a
+    /// healthy validated admission owner because they cannot be deduplicated
+    /// safely with known jobs.
     pub unresolved_retained_projection_count: usize,
     /// Bounded durable identities from authoritative old generations that block
     /// admission until they drain or reconcile.
@@ -780,7 +781,9 @@ impl RunnerStatusReport {
     }
 
     /// Project the supplied live report and generation observations without
-    /// reading or mutating any external state.
+    /// reading or mutating any external state. Authoritative old-generation
+    /// activity fences admission; every retained old-generation count keeps
+    /// rotation pending and recommends reconciliation.
     pub fn admission_summary_with_generations(
         &self,
         generations: &[RunnerDaemonGenerationStatus],
@@ -823,6 +826,10 @@ impl RunnerStatusReport {
                     && generation.active_job_count > 0
             })
             .map(|generation| generation.generation.clone());
+        let unresolved_generation = generations
+            .iter()
+            .find(|generation| !generation.admission_owner && generation.active_job_count > 0)
+            .map(|generation| generation.generation.clone());
         let admission_blocking_job_ids = blocking_generation
             .as_deref()
             .and_then(|generation| owners.iter().find(|owner| owner.generation == generation))
@@ -838,7 +845,7 @@ impl RunnerStatusReport {
             && self.rotation_evidence_is_unambiguous()
             && active_jobs_available
             && self.active_job_count == 0
-            && blocking_generation.is_none();
+            && unresolved_generation.is_none();
         let daemon_build_identity = self
             .session
             .as_ref()
@@ -847,12 +854,9 @@ impl RunnerStatusReport {
         let next_action = self
             .admission_action()
             .or_else(|| {
-                blocking_generation
+                unresolved_generation
                     .as_ref()
                     .map(|_| reconcile_action(&self.runner_id))
-            })
-            .or_else(|| {
-                (!unresolved_generation_ids.is_empty()).then(|| reconcile_action(&self.runner_id))
             })
             .map(|action| action.render_command());
 
@@ -1393,6 +1397,7 @@ mod status_serialization_tests {
     fn admission_summary_keeps_unresolved_draining_generation_work_visible() {
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
+        report.daemon_freshness = Some(fresh_daemon_freshness());
         report.active_job_count = 2;
         let generations = vec![
             RunnerDaemonGenerationStatus {
@@ -1431,7 +1436,10 @@ mod status_serialization_tests {
 
         assert_eq!(summary.active_job_count, 2);
         assert_eq!(summary.blocking_generation.as_deref(), Some("lease-active"));
-        assert!(!summary.accepting_jobs);
+        assert!(
+            !summary.accepting_jobs,
+            "authoritative draining work must fence a healthy admission owner"
+        );
         assert!(!summary.safe_to_rotate);
         assert_eq!(
             summary.next_action.as_deref(),
@@ -1467,6 +1475,7 @@ mod status_serialization_tests {
         assert_eq!(summary.unresolved_retained_projection_count, 3);
         assert_eq!(summary.unresolved_generation_ids, ["lease-old"]);
         assert!(summary.accepting_jobs);
+        assert!(!summary.safe_to_rotate);
         assert_eq!(
             summary.next_action.as_deref(),
             Some("homeboy runner reconcile homeboy-lab")
