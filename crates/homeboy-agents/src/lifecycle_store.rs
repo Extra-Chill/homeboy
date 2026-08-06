@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +23,10 @@ use homeboy_core::{build_identity, paths, Error, ErrorCode, Result};
 static FAIL_NEXT_RECORD_WRITE: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 static INTERRUPT_AFTER_TERMINAL_COMMIT: AtomicBool = AtomicBool::new(false);
+
+/// A crashed notifier cannot release its provisional claim. A bounded lease
+/// keeps that crash window from permanently suppressing a detached resume.
+const COOK_NOTIFICATION_CLAIM_LEASE: Duration = Duration::from_secs(5 * 60);
 
 pub(super) fn write_plan(run_id: &str, plan: &AgentTaskPlan) -> Result<PathBuf> {
     homeboy_core::config::with_config_lock(|| {
@@ -420,6 +425,28 @@ pub(super) fn claim_cook_notification(cook_id: &str, marker: &Value) -> Result<b
         return Ok(false);
     }
     let path = delivered_path.with_file_name("notification-claim.json");
+    if path.exists() {
+        let stale = fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .and_then(|modified| modified.elapsed().map_err(std::io::Error::other))
+            .map(|age| age >= COOK_NOTIFICATION_CLAIM_LEASE)
+            // An unreadable claim is not proof of delivery; leave it eligible
+            // for the normal create-new race rather than making it permanent.
+            .unwrap_or(true);
+        if !stale {
+            return Ok(false);
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(path.display().to_string()),
+                ));
+            }
+        }
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             Error::internal_io(error.to_string(), Some(parent.display().to_string()))
