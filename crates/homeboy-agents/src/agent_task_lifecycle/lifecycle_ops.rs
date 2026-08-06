@@ -314,6 +314,96 @@ pub fn submit_plan(
     })
 }
 
+/// Build the canonical decision for a run this controller is about to execute
+/// itself. Identity is read off the plan's own workspace so the durable record
+/// names the same checkout the run operates on.
+fn controller_local_placement_decision(
+    plan: &AgentTaskPlan,
+) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
+    let workspace_root = plan
+        .tasks
+        .first()
+        .and_then(|task| task.workspace.root.as_deref());
+    // `local_override` is the preflight record of an operator's explicit
+    // `--placement local`. Carrying it here is what gives a locally-created run
+    // an authorized owner rather than a merely-default one.
+    let requested = if homeboy_core::resource_policy_context::captured_context()
+        .is_some_and(|context| context.local_override)
+    {
+        homeboy_lab_runner_contract::Placement::Local
+    } else {
+        homeboy_lab_runner_contract::Placement::Auto
+    };
+    homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+        homeboy_lab_runner_contract::CONTROLLER_LOCAL_SUBMISSION_POLICY_ID,
+        "v1",
+        homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+            repository: workspace_root
+                .and_then(|root| std::path::Path::new(root).file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "controller-local".to_string()),
+            workspace: workspace_root
+                .map(str::to_string)
+                .unwrap_or_else(|| "controller-local".to_string()),
+            task: plan
+                .tasks
+                .first()
+                .map(|task| task.task_id.clone())
+                .unwrap_or_else(|| plan.plan_id.clone()),
+            candidate: None,
+            base: None,
+        },
+        requested,
+    )
+}
+
+/// Adopt a canonical placement decision for a durable run that has none.
+///
+/// Records written before placement decisions were canonical — and records
+/// written by submission paths that never authored one — carry a null
+/// `execution_placement_decision`. That is not a contradiction to fail closed
+/// on; it is missing evidence, and the routing decision the caller is holding
+/// *is* the authoritative one for the execution about to be verified. Adopting
+/// it (and saying so, under `execution_placement_normalized`) is what lets an
+/// older local run be diagnosed and retried instead of dead-ending (#11600).
+///
+/// Never overwrites a routed decision. A submission stamp is superseded,
+/// because it was authored in the absence of routing precisely so this moment
+/// would have something to supersede.
+pub fn normalize_missing_execution_placement_decision(
+    run_id: &str,
+    decision: &homeboy_lab_runner_contract::ExecutionPlacementDecision,
+) -> Result<bool> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let persisted =
+        serde_json::from_value::<homeboy_lab_runner_contract::ExecutionPlacementDecision>(
+            record.metadata["execution_placement_decision"].clone(),
+        )
+        .ok();
+    let reason = match persisted {
+        Some(persisted) if persisted.decision_id == decision.decision_id => return Ok(false),
+        Some(persisted) if persisted.is_submission_stamp() => {
+            "durable run carried a submission-derived placement decision"
+        }
+        Some(_) => return Ok(false),
+        None => "durable run had no canonical placement decision",
+    };
+    record.metadata["execution_placement_decision"] =
+        serde_json::to_value(decision).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize normalized placement decision".to_string()),
+            )
+        })?;
+    record.metadata["execution_placement_normalized"] = json!({
+        "at": now_timestamp(),
+        "reason": reason,
+        "adopted_decision_id": decision.decision_id,
+    });
+    store::write_record(&record)?;
+    Ok(true)
+}
+
 /// Append a provider-verified placement outcome to the durable run without
 /// re-evaluating policy. A mismatched decision id is a stale/replayed attempt
 /// and fails closed.
@@ -423,6 +513,136 @@ mod execution_placement_tests {
                 status.metadata["execution_placement_outcome"]["decision_id"],
                 decision().decision_id
             );
+        });
+    }
+
+    #[test]
+    fn a_plan_without_a_routing_decision_persists_a_canonical_local_one() {
+        // The originating defect in #11600: an explicitly local Cook submitted
+        // a plan that had never been routed anywhere, so nothing wrote a
+        // canonical decision and `execution_placement_decision` stayed null.
+        // Retry then could not decode the owner of the run it was recovering.
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let plan = super::super::tests::test_plan();
+            let record = submit_plan_with_runtime_admission(&plan, Some("local-run"), |_| {
+                Ok(json!({ "runtime": "test" }))
+            })
+            .expect("submit plan");
+
+            let decision: homeboy_lab_runner_contract::ExecutionPlacementDecision =
+                serde_json::from_value(record.metadata["execution_placement_decision"].clone())
+                    .expect("a controller-local run records a decodable canonical decision");
+            assert_eq!(decision.selected, EffectiveExecutionPlacement::Local);
+            assert!(decision.runner.is_none());
+            assert!(decision.permits_local_execution());
+
+            // The whole point of recording it: the local outcome now verifies.
+            record_execution_placement_outcome(
+                "local-run",
+                decision
+                    .outcome(EffectiveExecutionPlacement::Local, None)
+                    .expect("a controller-local decision authorizes a local outcome"),
+            )
+            .expect("record verified local outcome");
+        });
+    }
+
+    #[test]
+    fn a_null_decision_is_normalized_to_the_routing_decision_that_verified_it() {
+        // Records written before the canonical decision existed carry a null.
+        // That is missing evidence, not a contradiction — adopting the routing
+        // decision in hand (and saying so) is what makes an older local run
+        // recoverable instead of a dead end (#11600).
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let plan = super::super::tests::test_plan();
+            submit_plan_with_runtime_admission(&plan, Some("legacy-run"), |_| Ok(json!({})))
+                .expect("submit plan");
+            let mut record = store::read_record("legacy-run").expect("read record");
+            record.metadata["execution_placement_decision"] = Value::Null;
+            store::write_record(&record).expect("write legacy record");
+
+            let routed = homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+                "lab-route-contract",
+                "v1",
+                ExecutionPlacementIdentity {
+                    repository: "homeboy".to_string(),
+                    workspace: "/workspace/homeboy".to_string(),
+                    task: "legacy-task".to_string(),
+                    candidate: None,
+                    base: None,
+                },
+                Placement::Local,
+            );
+
+            assert!(
+                normalize_missing_execution_placement_decision("legacy-run", &routed)
+                    .expect("normalize legacy record"),
+                "a null decision is adopted"
+            );
+            assert!(
+                !normalize_missing_execution_placement_decision("legacy-run", &routed)
+                    .expect("normalize is idempotent"),
+                "an already-canonical decision is never overwritten"
+            );
+
+            let record = store::read_record("legacy-run").expect("read normalized record");
+            assert_eq!(
+                record.metadata["execution_placement_decision"]["decision_id"],
+                json!(routed.decision_id)
+            );
+            assert_eq!(
+                record.metadata["execution_placement_normalized"]["adopted_decision_id"],
+                json!(routed.decision_id)
+            );
+            record_execution_placement_outcome(
+                "legacy-run",
+                routed
+                    .outcome(EffectiveExecutionPlacement::Local, None)
+                    .expect("local outcome"),
+            )
+            .expect("a normalized record accepts its verified local outcome");
+        });
+    }
+
+    #[test]
+    fn a_submission_stamp_is_superseded_by_the_routing_decision_that_verified_it() {
+        // The stamp exists so a purely local run has an owner. It is derived,
+        // not routed, so when routing later produces its own decision for the
+        // same run the routed one wins — otherwise the stamp would collide with
+        // the outcome it was introduced to make recordable.
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let plan = super::super::tests::test_plan();
+            submit_plan_with_runtime_admission(&plan, Some("stamped-run"), |_| Ok(json!({})))
+                .expect("submit plan");
+            let stamped = store::read_record("stamped-run").expect("read record");
+            assert_eq!(
+                stamped.metadata["execution_placement_decision"]["policy_id"],
+                json!(homeboy_lab_runner_contract::CONTROLLER_LOCAL_SUBMISSION_POLICY_ID)
+            );
+
+            let routed = homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+                "lab-route-contract",
+                "v1",
+                ExecutionPlacementIdentity {
+                    repository: "homeboy".to_string(),
+                    workspace: "/workspace/homeboy".to_string(),
+                    task: "routed-task".to_string(),
+                    candidate: None,
+                    base: None,
+                },
+                Placement::Local,
+            );
+            assert!(
+                normalize_missing_execution_placement_decision("stamped-run", &routed)
+                    .expect("supersede the submission stamp")
+            );
+            record_execution_placement_outcome(
+                "stamped-run",
+                routed
+                    .outcome(EffectiveExecutionPlacement::Local, None)
+                    .expect("local outcome"),
+            )
+            .expect("the routed decision now owns the record");
         });
     }
 
@@ -565,8 +785,27 @@ where
     // The plan is the immutable cross-process carrier. Project the identical
     // decision onto the run record so status, finalization, and PR evidence do
     // not infer placement from ambient runner metadata.
-    if let Some(decision) = plan.metadata.get("execution_placement_decision") {
-        metadata["execution_placement_decision"] = decision.clone();
+    match plan.metadata.get("execution_placement_decision") {
+        Some(decision) if !decision.is_null() => {
+            metadata["execution_placement_decision"] = decision.clone();
+        }
+        // A plan that carries no routing decision was not routed anywhere: this
+        // controller is submitting a run it is about to execute itself. That is
+        // a placement, and it has to be *recorded* rather than inferred later.
+        //
+        // Leaving it null is what made an explicitly local Cook unrecoverable —
+        // retry decodes the originating record's canonical decision, and there
+        // was nothing there to decode (#11600).
+        //
+        // A submission carrying `execution_runner_id` is a runner-side
+        // projection of a decision the controller already owns; it is not this
+        // process's to author.
+        _ if execution_runner_id.is_none() => {
+            metadata["execution_placement_decision"] =
+                serde_json::to_value(controller_local_placement_decision(plan))
+                    .expect("controller-local placement decision is serializable");
+        }
+        _ => {}
     }
     // A replacement decision is only reviewable after it reaches the durable
     // run record. Keep its invalidation evidence alongside the decision rather
