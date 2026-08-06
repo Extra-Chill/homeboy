@@ -30,7 +30,7 @@ fn first_connect_routes_to_idempotent_ensure_start_when_no_daemon_exists() {
 }
 
 #[test]
-fn unresolved_generation_fence_allows_reattach_but_rejects_new_admission() {
+fn active_generation_fence_allows_reattach_but_rejects_new_admission() {
     let fence = crate::generation_store::AdmissionFence {
         generation: "lease-active".to_string(),
         active_job_count: 2,
@@ -50,7 +50,7 @@ fn unresolved_generation_fence_allows_reattach_but_rejects_new_admission() {
         Some(&fence),
         "homeboy-lab",
     )
-    .expect_err("two unresolved jobs block a new generation");
+    .expect_err("two active jobs block a new generation");
     assert!(error.contains("generation `lease-active`"));
     assert!(error.contains("2 unresolved active job(s)"));
     assert!(error.contains("homeboy runner reconcile homeboy-lab"));

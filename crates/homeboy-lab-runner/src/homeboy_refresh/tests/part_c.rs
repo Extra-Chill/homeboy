@@ -92,6 +92,7 @@ fn refresh_readiness_reports_active_draining_generation_with_its_exact_owner() {
             generation("lease-old", false, 1),
             generation("lease-new", true, 0),
         ],
+        &[],
     );
 
     assert_eq!(readiness.state, HomeboyRefreshReadinessState::Draining);
@@ -111,6 +112,7 @@ fn refresh_readiness_blocks_a_post_refresh_binary_hash_mismatch() {
             Some(DaemonStaleReasonCode::BinaryHashMismatch),
         )),
         &[generation("lease-new", true, 0)],
+        &[],
     );
 
     assert_eq!(readiness.state, HomeboyRefreshReadinessState::Blocked);
@@ -129,6 +131,7 @@ fn refresh_readiness_certifies_immediate_admission_only_when_ready() {
         "homeboy-lab",
         &readiness_report(freshness(true, None)),
         &[generation("lease-new", true, 0)],
+        &[],
     );
 
     assert_eq!(readiness.state, HomeboyRefreshReadinessState::Ready);
@@ -148,6 +151,7 @@ fn incomplete_readiness_does_not_rewrite_daemon_refresh_compatibility_facts() {
             generation("lease-old", false, 1),
             generation("lease-new", true, 0),
         ],
+        &[],
     );
 
     assert_eq!(readiness.state, HomeboyRefreshReadinessState::Draining);

@@ -1604,16 +1604,14 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
         freshness.active_jobs = active_jobs;
     }
     let selected_active_job_count = direct_daemon_active_jobs.unwrap_or(active_jobs.len());
-    // A connected admission daemon is not the only generation that can own
-    // mutable work. Keep the full status headline consistent with the
-    // admission summary by retaining unresolved draining ownership too.
-    let unresolved_generation_jobs =
+    // This is strictly the selected daemon's live count. The admission summary
+    // separately reports durable ownership and unidentified retained counters.
+    let active_job_count = selected_active_job_count;
+    let authoritative_generation_count =
         super::generation_store::status_projection(runner_id, session.as_ref())?
             .into_iter()
-            .filter(|generation| !generation.admission_owner)
-            .map(|generation| generation.active_job_count)
-            .sum::<usize>();
-    let active_job_count = selected_active_job_count + unresolved_generation_jobs;
+            .find(|generation| generation.admission_owner)
+            .and_then(|generation| generation.observed_active_job_count);
     let active_job_error = match (active_job_error, direct_daemon_active_jobs) {
         (Some(error), _) => Some(error),
         (None, Some(authoritative_count)) if authoritative_count != active_jobs.len() => {
@@ -1622,6 +1620,15 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
                 message: format!(
                     "direct daemon freshness reports {authoritative_count} active job(s), but /jobs exposed {} typed runner job(s); freshness is authoritative and terminal-only reconciliation found no durable terminal handoffs",
                     active_jobs.len()
+                ),
+            })
+        }
+        (None, _) if authoritative_generation_count.is_some_and(|count| count != active_job_count) => {
+            Some(RunnerActiveJobError {
+                code: "active_job_count_inconsistent".to_string(),
+                message: format!(
+                    "selected daemon reports {active_job_count} active job(s), but its authoritative generation ledger reports {}",
+                    authoritative_generation_count.expect("guarded by is_some_and")
                 ),
             })
         }
