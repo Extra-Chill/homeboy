@@ -294,7 +294,7 @@ Close a runner tunnel and remove its persisted session state
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--local-recovery` | flag | Remove only this controller's matching local tunnel/session state without contacting the remote runner |
+| `--local-recovery` | flag | Retire only this controller's matching local tunnel/session state after a read-only SSH probe proves zero active jobs; it never stops the remote daemon |
 
 ## `homeboy runner refresh-homeboy`
 
@@ -375,7 +375,7 @@ Execute a command on a configured runner. Use `homeboy runner exec [HOMEBOY_OPTI
 | `--cwd` | `<CWD>` | Remote/current working directory. SSH runners require this to be inside the runner workspace root unless the runner has a default workspace_root |
 | `--sync-workspace` | `<SYNC_WORKSPACE>` | Snapshot a local worktree to the runner first and execute from the materialized remote path |
 | `--project` | `<PROJECT>` | Project ID used for runner trust policy checks |
-| `--ssh` | flag | Allow diagnostic-only SSH command execution when no daemon session is connected |
+| `--ssh` | flag | Allow diagnostic-only SSH command execution when the daemon is disconnected or non-fresh; it never uses or rotates daemon admission |
 | `--capture-patch` | flag | Capture the file delta produced by the remote command as a patch artifact |
 | `--require-path` | `<REQUIRE_PATHS>` | Runner-side path that must exist before executing the command. Repeat for multiple paths |
 | `--script-file` | `<SCRIPT_FILE>` | Read a shell script from this path and execute it on the runner with bash. Use `-` to read the script from stdin; stdin must contain at least one byte. Whitespace-only scripts are executed verbatim |

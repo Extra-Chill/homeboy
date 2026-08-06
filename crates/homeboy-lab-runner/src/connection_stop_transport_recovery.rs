@@ -22,13 +22,28 @@ pub(crate) fn disconnect_with_force(
     disconnect_with_session(runner_id, None, force)
 }
 
-/// Recover the controller-owned side of a wedged tunnel without observing or
-/// mutating the remote daemon. Remote jobs intentionally remain ambiguous.
+/// Retire controller-owned state only after a read-only SSH status probe proves
+/// the remote daemon has no active jobs. The remote daemon is never stopped.
 pub(crate) fn disconnect_local_recovery(runner_id: &str) -> Result<RunnerDisconnectReport> {
     let session = read_session(runner_id)?;
     let session_path = session_path(runner_id)?.display().to_string();
     if let Some(session) = session.as_ref() {
         if session.mode == RunnerTunnelMode::DirectSsh {
+            let status = probe_authoritative_daemon_status(runner_id)?;
+            if !local_recovery_zero_jobs_proven(&status) {
+                return Err(Error::validation_invalid_argument(
+                    "local_recovery",
+                    format!(
+                        "runner `{runner_id}` local recovery requires an authoritative zero active-job count; controller state was retained"
+                    ),
+                    Some(runner_id.to_string()),
+                    Some(vec![format!(
+                        "Inspect `homeboy runner status {}` and drain or recover active jobs before retrying `homeboy runner disconnect {} --local-recovery`.",
+                        shell::quote_arg(runner_id),
+                        shell::quote_arg(runner_id),
+                    )]),
+                ));
+            }
             terminate_tunnel_if_owned(session);
         }
         let removed = remove_session_if_matches(runner_id, session)?;
@@ -59,6 +74,12 @@ pub(crate) fn disconnect_local_recovery(runner_id: &str) -> Result<RunnerDisconn
         session: None,
         session_path,
     })
+}
+
+fn local_recovery_zero_jobs_proven(status: &remote_daemon::RemoteDaemonStatus) -> bool {
+    status.active_jobs == 0
+        && status.reachable
+        && status.work_evidence == remote_daemon::RemoteDaemonWorkEvidence::AuthoritativelyIdle
 }
 
 fn partial_disconnect_report(
@@ -974,26 +995,17 @@ mod tests {
     }
 
     #[test]
-    fn local_recovery_removes_only_the_controller_session_without_remote_access() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut session = direct_ssh_session("lease-wedged");
-            session.tunnel_pid = None;
-            write_session(&session).expect("record controller session");
-            write_ownership(&session).expect("record ownership");
+    fn local_recovery_requires_an_authoritative_idle_job_probe() {
+        let mut idle = remote_daemon_status(true, 0, "lease-wedged", 4242, None);
+        idle.work_evidence = remote_daemon::RemoteDaemonWorkEvidence::AuthoritativelyIdle;
+        assert!(local_recovery_zero_jobs_proven(&idle));
 
-            let report = disconnect_local_recovery("homeboy-lab").expect("local recovery");
+        idle.work_evidence = remote_daemon::RemoteDaemonWorkEvidence::Unknown;
+        assert!(!local_recovery_zero_jobs_proven(&idle));
 
-            assert!(report.disconnected);
-            assert!(report.partial);
-            assert!(report
-                .remote_error
-                .expect("ambiguity is explicit")
-                .contains("not contacted"));
-            assert!(read_session("homeboy-lab").expect("read session").is_none());
-            assert!(read_ownership("homeboy-lab")
-                .expect("read ownership")
-                .is_none());
-        });
+        idle.work_evidence = remote_daemon::RemoteDaemonWorkEvidence::AuthoritativelyIdle;
+        idle.active_jobs = 1;
+        assert!(!local_recovery_zero_jobs_proven(&idle));
     }
 
     #[test]
