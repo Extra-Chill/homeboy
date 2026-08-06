@@ -24,6 +24,32 @@ use super::super::status::{
 use super::super::types::RunnerConnectionOutput;
 use crate::cli_surface::Cli;
 
+fn runner_session_fixture() -> RunnerSession {
+    RunnerSession {
+        runner_id: String::new(),
+        mode: RunnerTunnelMode::DirectSsh,
+        role: runner::RunnerSessionRole::Controller,
+        server_id: None,
+        controller_id: None,
+        broker_url: None,
+        remote_daemon_address: None,
+        local_port: None,
+        local_url: None,
+        tunnel_pid: None,
+        tunnel_process_start_identity: None,
+        proxy_forward: None,
+        remote_daemon_pid: None,
+        remote_daemon_lease_id: None,
+        homeboy_version: String::new(),
+        homeboy_build_identity: None,
+        connected_at: String::new(),
+        worker_identity: None,
+        worker_pid: None,
+        last_seen_at: None,
+        leaseless_recovery_evidence: None,
+    }
+}
+
 #[test]
 fn runner_job_event_format_includes_sequence_kind_message_and_data() {
     let event = JobEvent {
@@ -69,6 +95,7 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
             worker_pid: None,
             last_seen_at: Some("2026-06-19T00:00:01Z".to_string()),
             leaseless_recovery_evidence: None,
+            ..runner_session_fixture()
         }),
         stale_daemon: None,
         daemon_freshness: None,
@@ -199,6 +226,7 @@ fn direct_runner_status_exposes_the_explicit_generation_reconcile_command() {
             worker_pid: None,
             last_seen_at: None,
             leaseless_recovery_evidence: None,
+            ..runner_session_fixture()
         }),
         stale_daemon: None,
         daemon_freshness: None,
@@ -250,6 +278,7 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
             worker_pid: None,
             last_seen_at: None,
             leaseless_recovery_evidence: None,
+            ..runner_session_fixture()
         }),
         stale_daemon: None,
         daemon_freshness: Some(DaemonFreshnessReport {
@@ -733,6 +762,7 @@ fn runner_status_artifact_diagnostics_surface_controller_runner_checks_and_drift
             worker_pid: None,
             last_seen_at: Some("2026-06-19T00:00:01Z".to_string()),
             leaseless_recovery_evidence: None,
+            ..runner_session_fixture()
         }),
         stale_daemon: None,
         daemon_freshness: None,
@@ -797,6 +827,7 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
             worker_pid: None,
             last_seen_at: None,
             leaseless_recovery_evidence: None,
+            ..runner_session_fixture()
         }),
         stale_daemon: None,
         daemon_freshness: None,
@@ -864,6 +895,7 @@ fn compact_status_names_runner_version_skew_when_the_controller_is_dirty() {
             worker_pid: None,
             last_seen_at: None,
             leaseless_recovery_evidence: None,
+            ..runner_session_fixture()
         }),
         stale_daemon: Some(
             homeboy::runner::runners::RunnerStaleDaemonWarning::new(
