@@ -664,7 +664,12 @@ runs:
         RELEASE_FROM_ARTIFACTS: ${{ inputs.release-from-artifacts }}
         HOMEBOY_VERIFY_GITHUB_RELEASE: ${{ inputs.release-verify-github-release }}
         COMPONENT_NAME: ${{ inputs.component }}
-      run: bash ${{ github.action_path }}/scripts/release/run-release.sh
+        HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
+        HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS: ${{ inputs.cleanup-timeout-seconds }}
+        HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF: true
+        HOMEBOY_ACTION_PHASE_HEARTBEAT_SECONDS: ${{ inputs.phase-heartbeat-seconds }}
+        HOMEBOY_ACTION_PHASE_BUDGET_SECONDS: ${{ inputs.phase-budget-seconds }}
+      run: bash ${{ github.action_path }}/scripts/release/run-release-with-liveness.sh
 
     # ── Phase 7b: Operations (fleet/deploy) ──
     # Runs after quality gates and release — the primary use case is

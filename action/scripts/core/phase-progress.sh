@@ -19,6 +19,7 @@ phase_owner() {
     preparation|changed_scope_resolution) printf 'action context setup\n' ;;
     dependency_build_setup) printf 'action dependency/build setup\n' ;;
     command_execution) printf 'Homeboy command runner\n' ;;
+    release_planning|release_execution) printf 'Homeboy release subsystem\n' ;;
     finding_reconciliation) printf 'action result reconciliation\n' ;;
     artifact_publication) printf 'action artifact publication\n' ;;
     cleanup) printf 'action cleanup\n' ;;
@@ -30,7 +31,10 @@ phase_reproduction_command() {
   if [ -n "${GITHUB_RUN_ID:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
     printf 'gh run view %s --repo %s --log\n' "${GITHUB_RUN_ID}" "${GITHUB_REPOSITORY}"
   else
-    printf 'bash scripts/core/run-homeboy-commands.sh\n'
+    case "$1" in
+      release_planning|release_execution) printf 'bash scripts/release/run-release-with-liveness.sh\n' ;;
+      *) printf 'bash scripts/core/run-homeboy-commands.sh\n' ;;
+    esac
   fi
 }
 
@@ -47,7 +51,7 @@ phase_append() {
   local file owner reproduction
   file="$(phase_progress_file)"
   owner="$(phase_owner "${phase}")"
-  reproduction="$(phase_reproduction_command)"
+  reproduction="$(phase_reproduction_command "${phase}")"
   mkdir -p "$(dirname "${file}")"
   jq -cn \
     --arg schema 'homeboy/action-phase-progress-event/v1' \

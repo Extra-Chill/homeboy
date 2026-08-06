@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_RELEASE="${ROOT_DIR}/scripts/release/run-release.sh"
+RUN_RELEASE_WITH_LIVENESS="${ROOT_DIR}/scripts/release/run-release-with-liveness.sh"
 
 assert_contains() {
   local needle="$1"
@@ -120,6 +121,10 @@ if [ "$1" != "--output" ]; then
   exit 2
 fi
 
+if [ -n "${HOMEBOY_MOCK_DELAY:-}" ]; then
+  sleep "${HOMEBOY_MOCK_DELAY}"
+fi
+
 output_file="$2"
 shift 2
 if [ "$1" != "release" ]; then
@@ -168,6 +173,11 @@ JSON
 JSON
     exit 1
     ;;
+  liveness-timeout)
+    sleep 30 &
+    echo $! > "${HOMEBOY_CHILD_PID_FILE}"
+    wait
+    ;;
   *)
     echo "unknown HOMEBOY_MOCK_SCENARIO=${HOMEBOY_MOCK_SCENARIO}" >&2
     exit 2
@@ -212,6 +222,38 @@ run_wrapper() {
   MOCK_RELEASE_BRANCH_SHA="${MOCK_RELEASE_BRANCH_SHA:-}" \
   GH_TOKEN="${GH_TOKEN:-}" \
   bash "${RUN_RELEASE}"
+}
+
+run_liveness_wrapper() {
+  PATH="${BIN_DIR}:${PATH}" \
+  GITHUB_OUTPUT="${OUTPUT_FILE}" \
+  GITHUB_WORKSPACE="${WORKSPACE}" \
+  GITHUB_REPOSITORY="Extra-Chill/homeboy-action" \
+  HOMEBOY_ARGS_FILE="${HOMEBOY_ARGS_FILE}" \
+  HOMEBOY_AUTH_FILE="${HOMEBOY_AUTH_FILE}" \
+  HOMEBOY_MOCK_SCENARIO="${HOMEBOY_MOCK_SCENARIO}" \
+  HOMEBOY_MOCK_DELAY="${HOMEBOY_MOCK_DELAY:-}" \
+  HOMEBOY_CHILD_PID_FILE="${HOMEBOY_CHILD_PID_FILE:-}" \
+  HOMEBOY_SUPPORTS_CONFIRM_FLAG="${HOMEBOY_SUPPORTS_CONFIRM_FLAG:-true}" \
+  MOCK_RELEASE_DRAFT_STATE="${MOCK_RELEASE_DRAFT_STATE:-false}" \
+  MOCK_GIT_LOG="${MOCK_GIT_LOG}" \
+  RELEASE_DRY_RUN="${RELEASE_DRY_RUN:-false}" \
+  RELEASE_SKIP_PUBLISH="${RELEASE_SKIP_PUBLISH:-false}" \
+  RELEASE_SKIP_GITHUB_RELEASE="${RELEASE_SKIP_GITHUB_RELEASE:-false}" \
+  RELEASE_HEAD="${RELEASE_HEAD:-false}" \
+  RELEASE_FROM_ARTIFACTS="${RELEASE_FROM_ARTIFACTS:-}" \
+  MOCK_BRANCH="${MOCK_BRANCH:-main}" \
+  MOCK_HEAD_SHA="${MOCK_HEAD_SHA:-}" \
+  MOCK_RELEASE_BRANCH_SHA="${MOCK_RELEASE_BRANCH_SHA:-}" \
+  GH_TOKEN="${GH_TOKEN:-}" \
+  HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS="${HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS:-10}" \
+  HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS="${HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS:-1}" \
+  HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF=false \
+  HOMEBOY_ACTION_PHASE_HEARTBEAT_SECONDS="${HOMEBOY_ACTION_PHASE_HEARTBEAT_SECONDS:-1}" \
+  HOMEBOY_ACTION_PHASE_BUDGET_SECONDS="${HOMEBOY_ACTION_PHASE_BUDGET_SECONDS:-1}" \
+  HOMEBOY_ACTION_PHASE_PROGRESS_FILE="${TEST_DIR}/phases.jsonl" \
+  RUNNER_TEMP="${TEST_DIR}" \
+  bash "${RUN_RELEASE_WITH_LIVENESS}"
 }
 
 assert_no_git_pull() {
@@ -477,5 +519,58 @@ run_wrapper >/dev/null 2>&1
 assert_contains '--head' "$(cat "${HOMEBOY_ARGS_FILE}")" "release-head still finishes an already-tagged HEAD without a resolvable branch"
 assert_output_line 'released=true' "${OUTPUT_FILE}" "release-head is unaffected by branch resolution"
 unset RELEASE_HEAD MOCK_BRANCH MOCK_HEAD_SHA MOCK_RELEASE_BRANCH_SHA
+
+# Release planning and execution must use the shared liveness boundary rather
+# than calling run-release.sh directly. These mocks never publish or mutate git.
+setup_fixture
+HOMEBOY_MOCK_SCENARIO="released"
+RELEASE_DRY_RUN="true"
+HOMEBOY_MOCK_DELAY=2
+GH_TOKEN="secret123"
+PLANNING_OUTPUT="$(run_liveness_wrapper 2>&1)"
+if ! jq -e 'select(.phase == "release_planning" and .event == "completed" and .status == "completed" and .owner == "Homeboy release subsystem")' "${TEST_DIR}/phases.jsonl" >/dev/null; then
+  printf 'FAIL: dry-run release did not select the release_planning phase\n'
+  exit 1
+fi
+assert_contains 'phase heartbeat::release_planning running' "${PLANNING_OUTPUT}" "release planning emits periodic heartbeat evidence"
+assert_contains 'phase budget exceeded::release_planning exceeded its 1s budget; owner: Homeboy release subsystem' "${PLANNING_OUTPUT}" "release planning emits an owning budget warning"
+assert_contains 'Retained homeboy release planning log' "${PLANNING_OUTPUT}" "release planning prints bounded retained logs"
+assert_output_line 'released=false' "${OUTPUT_FILE}" "liveness wrapper preserves dry-run release output"
+assert_output_line 'release-tag=v2.1.0' "${OUTPUT_FILE}" "liveness wrapper preserves planned tag output"
+unset RELEASE_DRY_RUN HOMEBOY_MOCK_DELAY
+
+setup_fixture
+HOMEBOY_MOCK_SCENARIO="released"
+GH_TOKEN="secret123"
+EXECUTION_OUTPUT="$(run_liveness_wrapper 2>&1)"
+if ! jq -e 'select(.phase == "release_execution" and .event == "completed" and .status == "completed" and .owner == "Homeboy release subsystem")' "${TEST_DIR}/phases.jsonl" >/dev/null; then
+  printf 'FAIL: real release did not select the release_execution phase\n'
+  exit 1
+fi
+assert_contains '--apply' "$(cat "${HOMEBOY_ARGS_FILE}")" "release execution retains real-release selection without publishing in the mock"
+assert_not_contains '--dry-run' "$(cat "${HOMEBOY_ARGS_FILE}")" "release execution does not plan-only in the mock"
+assert_output_line 'released=true' "${OUTPUT_FILE}" "liveness wrapper preserves real-release output"
+
+setup_fixture
+HOMEBOY_MOCK_SCENARIO="liveness-timeout"
+HOMEBOY_CHILD_PID_FILE="${TEST_DIR}/release-child.pid"
+HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS=3
+GH_TOKEN="secret123"
+set +e
+TIMEOUT_OUTPUT="$(run_liveness_wrapper 2>&1)"
+TIMEOUT_EXIT=$?
+set -e
+if [ "${TIMEOUT_EXIT}" -ne 124 ]; then
+  printf 'FAIL: release timeout exits 124, got %s\n%s\n' "${TIMEOUT_EXIT}" "${TIMEOUT_OUTPUT}"
+  exit 1
+fi
+release_child_pid="$(<"${HOMEBOY_CHILD_PID_FILE}")"
+if kill -0 "${release_child_pid}" 2>/dev/null; then
+  printf 'FAIL: release timeout leaves descendant process %s alive\n' "${release_child_pid}"
+  exit 1
+fi
+assert_contains 'homeboy release execution exceeded its 3s execution timeout' "${TIMEOUT_OUTPUT}" "release timeout has standard timeout classification"
+assert_contains 'Retained homeboy release execution log' "${TIMEOUT_OUTPUT}" "release timeout prints retained logs after cleanup"
+printf 'PASS: release liveness timeout cleans descendants without mutation\n'
 
 printf 'All run-release wrapper checks passed.\n'
