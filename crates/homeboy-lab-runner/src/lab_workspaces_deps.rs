@@ -1,8 +1,8 @@
-//! Source-built CLI dependency discovery and bootstrap for lab workspaces.
+//! Source-built CLI dependency discovery for lab workspaces.
 //!
 //! Collects candidate workspace paths from provider configs and component
-//! contracts, resolves source-built CLI dependencies by parsing bare module
-//! imports, and bootstraps their production dependencies on the runner.
+//! contracts, and resolves source-built CLI dependencies by parsing bare module
+//! imports so an un-syncable dependency fails preflight instead of the runner.
 //!
 //! Split out of `lab_workspaces.rs` to keep the workspace-mapping entry points
 //! separate from the dependency-discovery internals.
@@ -16,10 +16,8 @@ use homeboy_core::{Error, Result};
 use super::lab_workspaces::{
     ExtraLabWorkspace, LAB_EXTRA_WORKSPACES_ENV, LAB_EXTRA_WORKSPACES_JSON_ENV,
 };
+use super::preflight_remote_argv_path_translation;
 use super::workspace::git_output;
-use super::{
-    exec, preflight_remote_argv_path_translation, RunnerCapabilityPreflight, RunnerExecOptions,
-};
 
 pub(super) fn provider_config_candidate_paths(value: &serde_json::Value) -> Vec<String> {
     let mut paths = Vec::new();
@@ -42,16 +40,12 @@ pub(super) fn add_candidate_extra_workspace(
 ) -> Result<()> {
     let expanded = shellexpand::tilde(candidate).to_string();
     let path = Path::new(&expanded);
-    let (workspace_path, snapshot_includes, bootstrap_node_dependencies) = if path.is_dir() {
-        (containing_checkout_or_dir(path)?, Vec::new(), false)
+    let (workspace_path, snapshot_includes) = if path.is_dir() {
+        (containing_checkout_or_dir(path)?, Vec::new())
     } else if path.is_file() {
         let workspace_path = containing_checkout_or_parent(path)?;
         let snapshot_includes = provider_config_file_snapshot_includes(&workspace_path, path);
-        (
-            workspace_path,
-            snapshot_includes,
-            is_node_cli_file(path) && source_cli_workspace_has_package_lock(path),
-        )
+        (workspace_path, snapshot_includes)
     } else {
         return Ok(());
     };
@@ -73,7 +67,6 @@ pub(super) fn add_candidate_extra_workspace(
                     existing.snapshot_includes.push(include);
                 }
             }
-            existing.bootstrap_node_dependencies |= bootstrap_node_dependencies;
         }
         return Ok(());
     }
@@ -81,8 +74,6 @@ pub(super) fn add_candidate_extra_workspace(
         role: role.to_string(),
         path: canon,
         snapshot_includes,
-        bootstrap_node_dependencies,
-        bootstrap_command: None,
         allow_dirty_lab_workspace: false,
         source_provenance: None,
     });
@@ -282,8 +273,6 @@ pub(super) fn accepted_extra_lab_workspaces() -> Result<Vec<ExtraLabWorkspace>> 
                 role: "extra".to_string(),
                 path: canonical_existing_dir(&path, "extra_workspace")?,
                 snapshot_includes: Vec::new(),
-                bootstrap_node_dependencies: false,
-                bootstrap_command: None,
                 allow_dirty_lab_workspace: false,
                 source_provenance: None,
             })
@@ -324,8 +313,6 @@ pub(super) fn discovered_validation_dependency_workspaces(
                 role: "dependency".to_string(),
                 path,
                 snapshot_includes: Vec::new(),
-                bootstrap_node_dependencies: false,
-                bootstrap_command: None,
                 allow_dirty_lab_workspace: false,
                 source_provenance: None,
             });
@@ -399,28 +386,6 @@ pub(super) fn provider_config_file_snapshot_includes(
     vec![parent.clone(), format!("{parent}/**")]
 }
 
-pub(super) fn source_cli_workspace_has_package_lock(file_path: &Path) -> bool {
-    containing_checkout_or_parent(file_path)
-        .ok()
-        .is_some_and(|workspace| workspace.join("package-lock.json").is_file())
-}
-
-/// Capability-parity contract for the runner-side source-CLI dependency
-/// bootstrap. The clean dependency install is executed by an external command,
-/// so the runner must expose the declared commands before remote dispatch.
-pub(super) fn source_cli_bootstrap_capability_preflight() -> RunnerCapabilityPreflight {
-    RunnerCapabilityPreflight {
-        required_toolchain_probes: Vec::new(),
-        command: "lab.source_cli_bootstrap".to_string(),
-        required_tools: Vec::new(),
-        required_commands: Vec::new(),
-        required_tool_capabilities: Vec::new(),
-        required_components: Vec::new(),
-        required_env: Vec::new(),
-        timeout: None,
-    }
-}
-
 /// Path-translation preflight for a runtime-overlay install step. The overlay
 /// artifact has already been synced to a runner-side remote path and the opaque
 /// install command runs with the resolved remote workdir as cwd. Assert that no
@@ -441,53 +406,4 @@ pub(super) fn preflight_runtime_overlay_install_argv(
         local_path,
         remote_workdir,
     )
-}
-
-pub(super) fn bootstrap_source_cli_dependencies(
-    runner_id: &str,
-    command: &[String],
-    local_path: &str,
-    remote_path: &str,
-) -> Result<()> {
-    if command.is_empty() {
-        return Ok(());
-    }
-
-    // Path-translation preflight: the source-built CLI workspace has already been
-    // synced to a runner-side remote path; the dependency install runs with the
-    // remote workspace as cwd. Assert that no controller-local workspace path
-    // survived un-translated into the dispatched argv before handing it to the
-    // remote runner, so a missed remap fails loudly here instead of installing
-    // against a non-existent local path (#5422).
-    preflight_remote_argv_path_translation(
-        "Lab source-CLI dependency bootstrap",
-        runner_id,
-        command,
-        Path::new(local_path),
-        remote_path,
-    )?;
-
-    let (output, exit_code) = exec(
-        runner_id,
-        // Validate remote capability parity before dispatch. Concrete command
-        // requirements are supplied declaratively by the workspace provider.
-        RunnerExecOptions::raw_command(command.to_vec())
-            .with_cwd(remote_path)
-            .with_capability_preflight(source_cli_bootstrap_capability_preflight()),
-    )?;
-    if exit_code == 0 {
-        return Ok(());
-    }
-
-    Err(Error::validation_invalid_argument(
-        "provider_config",
-        format!(
-            "Lab offload could not install production dependencies for source-built CLI workspace `{remote_path}`"
-        ),
-        Some(remote_path.to_string()),
-        Some(vec![
-            format!("dependency install stderr: {}", output.stderr.trim()),
-            "Build or package the CLI as a self-contained artifact, or make the source-built workspace installable on the runner.".to_string(),
-        ]),
-    ))
 }

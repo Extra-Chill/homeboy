@@ -42,7 +42,6 @@ fn parses_artifact_only_overlay_without_install_step() {
     assert_eq!(overlay.workspace.snapshot_includes, vec!["cli".to_string()]);
     assert!(overlay.install.is_none());
     assert!(overlay.expose_remote_path_env.is_none());
-    assert!(!overlay.workspace.bootstrap_node_dependencies);
 }
 
 #[test]
