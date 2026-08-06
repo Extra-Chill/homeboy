@@ -150,6 +150,9 @@ for name in names:
     # This is the libtest-json-plus terminal event shape emitted by nextest.
     runtime_name = "malformed" if mode == "malformed" else f"{package}::{binary}${name}"
     print(json.dumps({"type": "test", "name": runtime_name, "event": event, "exec_time": 0.001}))
+    if mode == "string-event" and name == "unit::alpha":
+        # Released nextest output can interleave a JSON string with terminal events.
+        print(json.dumps("nextest progress"))
     if mode == "duplicate-terminal" and name == "unit::alpha":
         print(json.dumps({"type": "test", "name": runtime_name, "event": event, "exec_time": 0.001}))
 if mode in {"terminal-outside-ok", "terminal-outside-failed", "terminal-outside-ignored"}:
@@ -716,6 +719,27 @@ assert_nextest_event_rejected() {
 
 assert_nextest_event_rejected duplicate-terminal 'nextest emitted an unexpected or duplicate test identity'
 assert_nextest_event_rejected missing-terminal 'nextest executed membership does not match the shard manifest'
+
+# A non-object JSON record is diagnostic-only. Planned terminal IDs remain the
+# authority for membership and counts.
+HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
+HOMEBOY_SKIP_LINT=1 \
+HOMEBOY_RUST_TEST_RUNNER=nextest \
+HOMEBOY_NEXTEST_MODE=string-event \
+HOMEBOY_TEST_SHARD_MANIFEST="$WORK_DIR/nextest-manifest.json" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WORK_DIR/write-test-results.sh" \
+HOMEBOY_TEST_RESULTS_FILE="$WORK_DIR/string-event-results.json" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$WORK_DIR/runner-prelude.sh" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$WORK_DIR/command-capture.sh" \
+PATH="$BIN_DIR:$PATH" \
+bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/string-event.out"
+python3 - "$WORK_DIR/string-event-results.json" <<'PY'
+import json
+import sys
+
+assert json.load(open(sys.argv[1])) == {"total": 5, "passed": 4, "failed": 0, "skipped": 1, "partial": "rust-shard"}
+PY
 
 # An ignored helper outside the immutable manifest did not execute. It must not
 # be reconciled or counted, while the planned ignored test still counts once.

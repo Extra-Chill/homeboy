@@ -456,6 +456,8 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
         event = json.loads(line)
     except json.JSONDecodeError:
         continue
+    if not isinstance(event, dict):
+        continue
     if event.get("type") != "test":
         continue
     status = event.get("event")
