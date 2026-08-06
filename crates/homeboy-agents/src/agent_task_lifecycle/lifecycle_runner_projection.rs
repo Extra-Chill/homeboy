@@ -373,6 +373,14 @@ fn record_verified_lab_placement_outcome(record: &mut AgentTaskRunRecord) -> Res
                 None,
             )
         })?;
+    // A submission stamp is a placeholder authored in the absence of routing.
+    // Reconciliation holds no routing decision of its own, so it has nothing to
+    // supersede the stamp with — and verifying a Lab result against a
+    // placeholder that says "local" would manufacture a contradiction out of
+    // missing evidence. Skip exactly as this did before the stamp existed.
+    if decision.is_submission_stamp() {
+        return Ok(());
+    }
     let runner_id = record.runner_id().map(str::to_string).ok_or_else(|| {
         Error::validation_invalid_argument(
             "execution_placement_outcome",

@@ -87,6 +87,59 @@ pub fn compatibility_placement_decision(
     )
 }
 
+/// Does `contract` authorize routing this command to a *policy-selected*
+/// default Lab runner?
+///
+/// This is the single definition of "may an automatic offload happen here",
+/// and it exists because the answer has to be identical in two places: the
+/// controller, which decides whether a policy-selected runner enters the
+/// canonical [`homeboy_lab_runner_contract::ExecutionPlacementDecision`], and
+/// the offload executor, which decides whether to dispatch. When those two
+/// disagreed, a controller-owned read-only command (`agent-task providers`,
+/// `status`, `logs`, `diagnose`) acquired a default runner it was never
+/// entitled to and ran against a machine that does not own its durable record
+/// (#11597, #11599).
+///
+/// An operator-pinned `--runner` is a *different* authority and never passes
+/// through here: pinning names the runner directly.
+pub fn authorizes_policy_lab_runner(
+    contract: &LabCommandContract,
+    placement: homeboy_lab_runner_contract::Placement,
+    pressure_severity: Option<&str>,
+) -> bool {
+    // An explicit `--placement lab`/`lab-or-local` is the operator's request,
+    // not policy's inference. Keep the runner so the command's own contract
+    // answers — either by dispatching, or by explaining its local-only reason
+    // — instead of a generic "no ready runner".
+    if placement.requests_lab() {
+        return true;
+    }
+    // `--placement local` is an explicit ownership statement. A run created
+    // locally must stay locally owned for its whole lifecycle (#11600).
+    if placement == homeboy_lab_runner_contract::Placement::Local {
+        return false;
+    }
+    if !contract.is_portable() {
+        return false;
+    }
+    if contract.routing_policy.default_lab_offload {
+        return true;
+    }
+    // Pressure-driven promotion mirrors the executor exactly: runner-resident
+    // reads are exempt, because relocating a read changes what its answer means
+    // (#9763).
+    placement == homeboy_lab_runner_contract::Placement::Auto
+        && contract.source_path_mode != LabSourcePathMode::RunnerResident
+        && pressure_severity
+            .is_some_and(|severity| contract.routing_policy.should_pressure_offload(severity))
+}
+
+/// The captured controller pressure severity, when this process took a
+/// resource-policy snapshot at preflight.
+pub fn captured_pressure_severity() -> Option<String> {
+    crate::resource_policy_context::captured_context().map(|context| context.severity)
+}
+
 /// Phase tag used for Lab trace dispatch observation metadata payloads. Kept in
 /// core so the routing service owns the observation envelope shape rather than
 /// the CLI adapter.
@@ -1104,6 +1157,117 @@ mod tests {
         assert!(matches!(
             outcome,
             crate::lab_offload::LabOffloadOutcome::RunLocal { .. }
+        ));
+    }
+
+    /// A read-only lifecycle/discovery contract: `runner_resident`, no
+    /// automatic offload. This is the shape shared by `agent-task providers`
+    /// and by `agent-task status/logs/diagnose/evidence`.
+    fn runner_resident_read_contract() -> LabCommandContract {
+        LabCommandContract::runner_resident_read_polling("agent-task status")
+    }
+
+    #[test]
+    fn a_runner_resident_read_never_authorizes_a_policy_selected_runner() {
+        // Controller and runner differ in extensions, runtime defaults,
+        // secrets, provider readiness — and, decisively, in which durable run
+        // records they own. Relocating a read changes what its answer means, so
+        // no severity and no default runner may promote it (#9763, #11597,
+        // #11599).
+        let contract = runner_resident_read_contract();
+        for severity in [None, Some("ok"), Some("warm"), Some("hot")] {
+            assert!(
+                !authorizes_policy_lab_runner(
+                    &contract,
+                    homeboy_lab_runner_contract::Placement::Auto,
+                    severity,
+                ),
+                "severity {severity:?} must not relocate a runner-resident read",
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_local_placement_never_authorizes_a_policy_selected_runner() {
+        // `--placement local` is an ownership statement about the whole
+        // lifecycle of whatever it creates, not a hint (#11600).
+        for contract in [
+            runner_resident_read_contract(),
+            LabCommandContract::portable(
+                "agent-task run",
+                None,
+                false,
+                crate::lab_contract::LAB_NO_EXTRA_CAPABILITIES,
+            ),
+        ] {
+            assert!(!authorizes_policy_lab_runner(
+                &contract,
+                homeboy_lab_runner_contract::Placement::Local,
+                Some("hot"),
+            ));
+        }
+    }
+
+    #[test]
+    fn an_explicit_lab_request_always_authorizes_the_selected_runner() {
+        // The operator asked. Keep the runner so the command's own contract
+        // answers — dispatching, or explaining its local-only reason — rather
+        // than a generic "no ready runner".
+        for placement in [
+            homeboy_lab_runner_contract::Placement::Lab,
+            homeboy_lab_runner_contract::Placement::LabOrLocal,
+        ] {
+            assert!(authorizes_policy_lab_runner(
+                &runner_resident_read_contract(),
+                placement,
+                None,
+            ));
+            assert!(authorizes_policy_lab_runner(
+                &LabCommandContract::local_only("agent-task cook", "controller-owned coordinator"),
+                placement,
+                None,
+            ));
+        }
+    }
+
+    #[test]
+    fn a_default_offload_contract_still_authorizes_its_policy_runner() {
+        assert!(authorizes_policy_lab_runner(
+            &LabCommandContract::portable(
+                "agent-task run",
+                None,
+                false,
+                crate::lab_contract::LAB_NO_EXTRA_CAPABILITIES,
+            ),
+            homeboy_lab_runner_contract::Placement::Auto,
+            None,
+        ));
+    }
+
+    #[test]
+    fn pressure_promotion_still_reaches_a_non_runner_resident_contract() {
+        // `explicit_runner_simple` declines automatic offload but is not a
+        // runner-resident read, so a loaded controller may still promote it.
+        // Losing this would have traded one regression for another.
+        let contract = LabCommandContract::explicit_runner_simple("runtime refresh");
+        assert!(!authorizes_policy_lab_runner(
+            &contract,
+            homeboy_lab_runner_contract::Placement::Auto,
+            Some("ok"),
+        ));
+        assert!(authorizes_policy_lab_runner(
+            &contract,
+            homeboy_lab_runner_contract::Placement::Auto,
+            Some("warm"),
+        ));
+    }
+
+    #[test]
+    fn a_local_only_contract_is_never_relocated_by_policy() {
+        assert!(!authorizes_policy_lab_runner(
+            &LabCommandContract::local_only("agent-task cook", "controller-owned coordinator"),
+            homeboy_lab_runner_contract::Placement::Auto,
+            Some("hot"),
         ));
     }
 

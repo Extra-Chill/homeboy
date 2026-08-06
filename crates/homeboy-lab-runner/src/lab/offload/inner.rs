@@ -821,6 +821,13 @@ pub(crate) fn exec_lab_context(
         PlanStep::builder("lab.exec", "lab.exec", PlanStepStatus::Success).build(),
     );
     if let Some(run_id) = context.agent_task_run_id.as_deref() {
+        // This route's decision is the authoritative one for the execution
+        // being verified. Adopt it when the record carries none, or carries
+        // only a submission-derived placeholder (#11600).
+        agent_task_lifecycle::normalize_missing_execution_placement_decision(
+            run_id,
+            &request.placement_decision,
+        )?;
         let outcome = request
             .placement_decision
             .outcome(
