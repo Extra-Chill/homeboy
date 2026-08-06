@@ -105,18 +105,21 @@ impl ExecutorArtifactRootIdentity {
                 None,
             ));
         }
+        // Device/inode identity is the Unix expression of "same directory".
+        // Windows has no equivalent pair; its volume serial + file ID check
+        // below carries the same meaning, so this branch stays Unix-only in
+        // full — attribute and consumer together.
         #[cfg(unix)]
-        let res = {
+        {
             use std::os::unix::fs::MetadataExt;
-            current.dev() != self.device || current.ino() != self.inode
-        };
-        if res {
-            return Err(Error::validation_invalid_argument(
-                "artifacts_path",
-                "Homeboy executor artifact root changed during provider execution",
-                Some(self.path.display().to_string()),
-                None,
-            ));
+            if current.dev() != self.device || current.ino() != self.inode {
+                return Err(Error::validation_invalid_argument(
+                    "artifacts_path",
+                    "Homeboy executor artifact root changed during provider execution",
+                    Some(self.path.display().to_string()),
+                    None,
+                ));
+            }
         }
         #[cfg(windows)]
         {
