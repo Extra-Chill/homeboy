@@ -265,7 +265,7 @@ impl ObservationStore {
         })?;
         let rows = execute_with_retry("claim runner recovery source", || {
             self.connection.execute(
-                "UPDATE runs SET metadata_json = json_set(metadata_json, '$.runner_exec_source_lease', json(?1)) WHERE id = ?2 AND status = 'running' AND json_extract(metadata_json, '$.runner_job_id') = ?3 AND (json_extract(metadata_json, '$.runner_exec_source_lease.expires_at_ms') IS NULL OR CAST(json_extract(metadata_json, '$.runner_exec_source_lease.expires_at_ms') AS INTEGER) < ?4)",
+                "UPDATE runs SET metadata_json = json_set(metadata_json, '$.runner_exec_source_lease', json(?1)) WHERE id = ?2 AND status = 'running' AND COALESCE(json_extract(metadata_json, '$.runner_job_id'), json_extract(metadata_json, '$.agent_task_run.metadata.runner_job_id')) = ?3 AND (json_extract(metadata_json, '$.runner_exec_source_lease.expires_at_ms') IS NULL OR CAST(json_extract(metadata_json, '$.runner_exec_source_lease.expires_at_ms') AS INTEGER) < ?4)",
                 params![claim, run_id, runner_job_id, chrono::Utc::now().timestamp_millis()],
             )
         })?;
@@ -286,7 +286,7 @@ impl ObservationStore {
         let finished_at = chrono::Utc::now().to_rfc3339();
         let rows = execute_with_retry("fail claimed runner recovery source", || {
             self.connection.execute(
-                "UPDATE runs SET finished_at = ?1, status = 'fail', metadata_json = ?2 WHERE id = ?3 AND status = 'running' AND json_extract(metadata_json, '$.runner_job_id') = ?4 AND json_extract(metadata_json, '$.runner_exec_source_lease.source_token') = ?5",
+                "UPDATE runs SET finished_at = ?1, status = 'fail', metadata_json = ?2 WHERE id = ?3 AND status = 'running' AND COALESCE(json_extract(metadata_json, '$.runner_job_id'), json_extract(metadata_json, '$.agent_task_run.metadata.runner_job_id')) = ?4 AND json_extract(metadata_json, '$.runner_exec_source_lease.source_token') = ?5",
                 params![finished_at, metadata_json, run_id, runner_job_id, child_token],
             )
         })?;
@@ -1078,6 +1078,43 @@ impl ObservationStore {
 mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
+
+    #[test]
+    fn lifecycle_runner_job_identity_can_be_claimed_as_a_recovery_source() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run_id = "lifecycle-runner-source";
+            store
+                .start_run_with_id(
+                    NewRunRecord::builder("agent-task")
+                        .metadata(serde_json::json!({
+                            "agent_task_run": {
+                                "metadata": { "runner_job_id": "daemon-job" }
+                            }
+                        }))
+                        .build(),
+                    run_id.to_string(),
+                )
+                .expect("lifecycle observation run");
+
+            assert!(store
+                .claim_running_runner_exec_recovery_source(
+                    run_id,
+                    "foreground",
+                    "token",
+                    "daemon-job",
+                )
+                .expect("claim lifecycle source"));
+            assert!(store
+                .fail_running_runner_exec_recovery_source(
+                    run_id,
+                    "token",
+                    "daemon-job",
+                    serde_json::json!({ "terminal": "fixture" }),
+                )
+                .expect("terminalize lifecycle source"));
+        });
+    }
 
     /// Seed rows with explicit ids and timestamps so the canonical
     /// `started_at DESC, id DESC` order is deterministic rather than dependent

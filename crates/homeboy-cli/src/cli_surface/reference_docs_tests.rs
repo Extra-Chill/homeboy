@@ -4,23 +4,20 @@
 //! for the same reason as `global_flag_surface_tests`: that file sits a handful
 //! of lines under the audit's 1500-line `god_file` threshold.
 //!
-//! The generated tree under `docs/reference/cli/` is **not** gated in CI. Byte
-//! currency between the checked-in pages, the serialized contract, and the live
-//! clap tree used to be enforced by `homeboy / CLI Reference Docs` and
-//! `homeboy / CLI Reference Runtime Parity`; both were removed deliberately
-//! because a docs regeneration step is not worth blocking merges over. Refresh
-//! the tree on demand with:
+//! The generated reference and command index are gated against the live Clap
+//! tree. Refresh them with:
 //!
 //! ```text
 //! cargo run -p homeboy-cli --bin generate-cli-reference
 //! ```
 
 use super::reference_docs::{
-    commands_without_description, documented_subcommands, generated_reference_docs,
-    write_cli_reference, WRITE_ENV,
+    commands_without_description, documented_subcommands, generated_command_index,
+    generated_reference_docs, live_generated_reference_docs, write_cli_reference, WRITE_ENV,
 };
 use super::Cli;
 use clap::CommandFactory;
+use homeboy_command_contract::cli_reference::CliReference;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
@@ -65,6 +62,29 @@ fn generated_reference_covers_every_visible_top_level_command() {
             .cloned()
             .collect::<BTreeSet<_>>(),
         expected
+    );
+}
+
+/// The checked-in reference contract and command index are generated from the
+/// same live Clap tree. Keeping this as an ordinary test makes a new command
+/// fail in CI before it can drift into `self doctor`.
+#[test]
+fn generated_command_docs_match_the_live_clap_tree() {
+    assert_eq!(
+        generated_reference_docs(),
+        live_generated_reference_docs(),
+        "docs/reference/cli/command-surface.json is stale; run cargo run -p homeboy-cli --bin generate-cli-reference"
+    );
+    assert_eq!(
+        CliReference::new(live_generated_reference_docs()),
+        homeboy_command_contract::cli_reference::checked_in_cli_reference(),
+        "the checked-in CLI reference contract is stale; run cargo run -p homeboy-cli --bin generate-cli-reference"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace_root().join("docs/commands/commands-index.md"))
+            .expect("read generated command index"),
+        generated_command_index(),
+        "docs/commands/commands-index.md is stale; run cargo run -p homeboy-cli --bin generate-cli-reference"
     );
 }
 
