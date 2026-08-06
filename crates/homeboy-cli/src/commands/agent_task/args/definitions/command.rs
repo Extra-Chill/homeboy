@@ -63,8 +63,8 @@ pub enum AgentTaskCommand {
     /// WAIT POLICY: Cook always persists a durable run id before materialization,
     /// so a returned command is not by itself proof of a completed cook.
     ///
-    /// `--wait` observes until the lifecycle is terminal and returns the terminal
-    /// Cook report. This is the default when neither flag is passed.
+    /// By default Cook observes until the lifecycle is terminal and returns the
+    /// terminal Cook report.
     ///
     /// `--detach-after-handoff` returns once the run is durably accepted. Its
     /// result describes a submission, not an outcome. It is honored on every
@@ -72,9 +72,9 @@ pub enum AgentTaskCommand {
     /// session, so it survives a client that is interrupted or times out.
     ///
     /// Do not infer the wait policy from client interactivity. An orchestration
-    /// client that needs one predictable contract should pass the flag rather than
-    /// rely on the default, and read the terminal outcome from
-    /// `agent-task status <run-id>` in either case.
+    /// client that needs the detached contract should pass
+    /// `--detach-after-handoff` rather than rely on the default, and read the
+    /// terminal outcome from `agent-task status <run-id>` in either case.
     Cook(Box<AgentTaskCookArgs>),
     /// Continue a detached Cook from its durable Cook ID or provider attempt ID.
     /// The persisted recipe supplies the original prompt, transport, gates,

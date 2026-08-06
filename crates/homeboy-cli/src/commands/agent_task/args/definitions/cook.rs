@@ -392,28 +392,6 @@ mod tests {
     }
 
     #[test]
-    fn lab_wait_and_detach_are_explicit_and_mutually_exclusive() {
-        let result = crate::cli_surface::Cli::try_parse_from([
-            "homeboy",
-            "--wait",
-            "--detach-after-handoff",
-            "agent-task",
-            "cook",
-            "--to-worktree",
-            "repo@branch",
-            "--verify",
-            "true",
-            "--prompt",
-            "test",
-        ]);
-        let error = match result {
-            Ok(_) => panic!("wait and detach must conflict"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("cannot be used with"));
-    }
-
-    #[test]
     fn cook_accepts_issue_backed_destination_derivation_and_explicit_override() {
         let derived = crate::cli_surface::Cli::try_parse_from([
             "homeboy",

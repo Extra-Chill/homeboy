@@ -458,8 +458,9 @@ expected to outlive the local shell. Homeboy returns after the runner daemon
 accepts the job and prints follow/cancel commands instead of waiting for remote
 provider completion.
 
-Lab Cook has two explicit observation modes. Submit and return when an
-interruptible client should hand the provider attempt to the Lab controller:
+Lab Cook has two observation modes: waiting by default, and detaching on
+request. Submit and return when an interruptible client should hand the provider
+attempt to the Lab controller:
 
 ```bash
 homeboy --runner homeboy-lab --detach-after-handoff agent-task cook \
@@ -469,14 +470,14 @@ homeboy --runner homeboy-lab --detach-after-handoff agent-task cook \
 Wait for the completed Cook when the caller owns a synchronous workflow:
 
 ```bash
-homeboy --runner homeboy-lab --wait agent-task cook \
+homeboy --runner homeboy-lab agent-task cook \
   --to-worktree homeboy@fix-issue-6453 --verify 'cargo test --lib' --prompt @task.txt
 ```
 
-`--wait` is the compatibility default for existing scripts. A future migration to
-submit-by-default can therefore update callers mechanically; new interruptible
-clients should specify `--detach-after-handoff`. Both modes print bounded phase
-heartbeats with the durable run id. Reconnect and retrieve durable state with:
+Waiting is the default, so a synchronous caller passes no observation flag at
+all; interruptible clients specify `--detach-after-handoff`. Both modes print
+bounded phase heartbeats with the durable run id. Reconnect and retrieve durable
+state with:
 
 ```bash
 homeboy agent-task status <run-id>
