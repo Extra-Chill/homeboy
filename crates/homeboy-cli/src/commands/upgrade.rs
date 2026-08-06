@@ -51,11 +51,21 @@ pub struct UpgradeArgs {
     /// Homeboy source checkout to use with --method source
     #[arg(long, value_name = "PATH")]
     pub source_path: Option<PathBuf>,
+
+    /// Pin the published release tag to install instead of the newest installable release
+    #[arg(long = "version", value_name = "TAG", conflicts_with = "check")]
+    pub pin_version: Option<String>,
 }
 
 pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
     if args.check {
         let result = upgrade::check_for_updates()?;
+        // A check that quietly withholds an update because the newest release
+        // has no asset for this platform is indistinguishable from "you are
+        // current". Say which release was passed over and why (#11750).
+        if let Some(notice) = result.notice.as_deref() {
+            homeboy::log_status!("upgrade", "{}", notice);
+        }
         let json = serde_json::to_value(result)
             .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
         return Ok((json, 0));
@@ -90,6 +100,7 @@ pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
         args.runner_only,
         &args.runners,
         args.source_path.as_deref(),
+        args.pin_version.as_deref(),
     )?;
     let json = serde_json::to_value(&result)
         .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;

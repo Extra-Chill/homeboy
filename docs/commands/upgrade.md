@@ -30,6 +30,19 @@ Runner sync uses this contract:
 - `--upgrade-runner`: Select configured runners to converge with the controller upgrade. Repeat to target multiple runners.
 - `--runner-only`: With `--upgrade-runner`, preserve the controller and refresh only the selected runners. The response explicitly reports this partial scope and the exact controller-plus-runner convergence command.
 - `--method`: Override install method detection (`homebrew|cargo|source|binary`).
+- `--version <TAG>`: Pin the published release to install (`v0.332.0` or `0.332.0`). Binary installs only, and it implies `--force` at the release gate so a deliberate downgrade is not discarded as "already at latest".
+
+## Release selection for binary installs
+
+Binary installs download a release asset named `homeboy-<target triple>.tar.xz`, plus its `.sha256` sidecar. A release published without this platform's pair cannot be installed here, so `upgrade` does not simply resolve the newest tag:
+
+- **`--check` verifies an installable artifact**, not just a newer version string. `latest_version` is the newest release carrying an artifact for the running target, and `update_available` is keyed off it. A release this platform cannot install is never reported as available.
+- **Selection falls back** to the newest release that does have this target's asset, and says so: `v0.333.0 has no x86_64-unknown-linux-gnu asset; upgrading to v0.332.0 instead.`
+- **`--version <TAG>` pins deliberately.** A pin to a release with no asset for this target is refused before any binary mutation, naming the asset it looked for and the releases that would work.
+- **The target triple is detected honestly.** An OS/architecture pair Homeboy publishes no assets for is reported as undetermined; asset availability is then explicitly *not verified* rather than guessed.
+- **A 404 names the resolved asset URL and the target triple** it looked for, so diagnosing a missing asset does not require listing release assets by hand.
+
+The installer honors `HOMEBOY_UPGRADE_RELEASE_TAG` to download from a specific tag instead of `releases/latest/download`; `upgrade` sets it from the release it selected.
 
 ## Installation Method Detection
 
@@ -74,6 +87,12 @@ Force reinstall:
 homeboy upgrade --force
 ```
 
+Pin a specific published release (binary installs):
+
+```sh
+homeboy upgrade --version v0.332.0
+```
+
 Upgrade only a specific runner after the local upgrade:
 
 ```sh
@@ -94,9 +113,13 @@ homeboy upgrade --skip-runners
 
 - `command`: `upgrade.check`
 - `current_version`: Current installed version
-- `latest_version`: Latest GitHub Release version (may be null if network fails)
-- `update_available`: Boolean indicating if an update is available
+- `latest_version`: The release an upgrade would install. For asset-installed methods this is the newest release carrying an artifact for `target`. Null when the network check failed, or when no published release ships this target's artifact
+- `update_available`: Boolean indicating if an installable update is available
 - `install_method`: Detected installation method (`homebrew`, `cargo`, `source`, or `unknown`)
+- `target`: Running target triple. Omitted when the OS/architecture pair could not be identified, which means asset availability was *not verified*
+- `newest_version`: Newest published release, whatever its asset inventory. Equal to `latest_version` on a healthy release train
+- `uninstallable_versions`: Releases newer than `latest_version` passed over for want of a `target` asset, newest first
+- `notice`: Plain-language explanation when `latest_version` is not the newest release, when nothing installable was found, or when the target could not be determined
 
 `homeboy upgrade` data payload:
 
