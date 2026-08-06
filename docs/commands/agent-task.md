@@ -388,6 +388,9 @@ and PR finalization defaults. The command accepts issue URLs directly, derives
 the batch-cook plan, queues DMC worktree creation from `origin/main`, and returns
 one structured status envelope with the generated plan plus resume commands.
 
+Every child needs at least one deterministic gate after shared and profile gates
+resolve; this is checked before any worktree is created.
+
 ```bash
 homeboy agent-task fanout cook-batch \
   --repo homeboy \
@@ -397,6 +400,34 @@ homeboy agent-task fanout cook-batch \
   https://github.com/Extra-Chill/homeboy/issues/6453 \
   https://github.com/Extra-Chill/homeboy/issues/6454
 ```
+
+For mixed stacks, keep shared gates on `--verify` and assign named additions or
+replacements with one JSON declaration. `--verification-profiles` accepts inline
+JSON or `@file.json`. An assignment selector is an exact issue URL, GitHub issue
+key (`OWNER/REPO#NUMBER`), or generated task selector (`issue-NUMBER`). Every
+assignment must match one child; unmatched selectors return the typed
+`selector_unmatched` validation error before worktree creation.
+
+```json
+{
+  "profiles": {
+    "php": { "mode": "append", "verify": ["composer audit --format=json"] },
+    "node": { "mode": "replace", "verify": ["npm audit --omit=dev"] },
+    "rust": { "verify": ["cargo fmt --check", "cargo test -p homeboy-cli"] }
+  },
+  "assignments": [
+    { "selector": "Extra-Chill/homeboy#6453", "profile": "php" },
+    { "selector": "issue-6454", "profile": "node" },
+    { "selector": "https://github.com/Extra-Chill/homeboy/issues/6455", "profile": "rust" }
+  ]
+}
+```
+
+`append` is the default mode and adds profile gates after shared gates; `replace`
+uses only that profile's gates. The generated dry-run `plan.cooks` and
+`preflight.deterministic_gates` show every child's effective profile and exact
+commands. Those command arrays are persisted with each cook recipe and carried
+unchanged to Lab provider handoff.
 
 Add `--dry-run` to inspect the derived branch/worktree names and batch-cook spec
 without creating worktrees. Add `--run-plan` after reviewing provider readiness

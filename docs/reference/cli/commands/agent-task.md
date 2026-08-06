@@ -665,7 +665,7 @@ homeboy agent-task fanout cook-batch [OPTIONS] <ISSUE_URL>...
 
 Cook a wave of independent tasks, one child cook per issue.
 
-Requires at least one deterministic gate: pass `--verify` or `--private-verify`. The gate is not optional — a child cook that cannot verify its work cannot promote it (#9838).
+Every child requires a deterministic gate from shared --verify/ --private-verify inputs or --verification-profiles. A child that cannot verify its work cannot promote it (#9838).
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -702,6 +702,7 @@ Requires at least one deterministic gate: pass `--verify` or `--private-verify`.
 | `--gate-extension-input` | `<JSON>` | Explicit extension input as a JSON object with `id` and absolute `source`. Only selected inputs are copied into isolated HOME |
 | `--isolate-gate-home` | `<ISOLATE_GATE_HOME>` | Run gates with an isolated `$HOME` so gate side effects do not touch the operator's home directory (default true) Values: `true`, `false`. |
 | `--isolate-gate-xdg` | `<ISOLATE_GATE_XDG>` | Run gates with isolated XDG base directories so gate side effects do not touch the operator's config/cache/data dirs (default true) Values: `true`, `false`. |
+| `--verification-profiles` | `<JSON>` | JSON verification profile declaration, inline or @file.json. Profiles append to or replace shared --verify/--private-verify gates per issue |
 | `--dry-run` | flag | _no help text_ |
 | `--run-plan` | flag | _no help text_ |
 
