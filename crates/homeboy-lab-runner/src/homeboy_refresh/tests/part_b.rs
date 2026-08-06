@@ -984,6 +984,40 @@ fn refresh_rotation_predicate_preserves_owned_generations_without_changing_force
 }
 
 #[test]
+fn same_revision_rebuild_rotates_active_daemon_to_a_distinct_byte_generation() {
+    let revision = "homeboy 1.0.0+same-revision";
+    let old_hash = "a".repeat(64);
+    let rebuilt_hash = "b".repeat(64);
+    let old_generation = refreshed_generation_key(revision, Some(old_hash));
+    let rebuilt_generation = refreshed_generation_key(revision, Some(rebuilt_hash));
+    assert_ne!(old_generation, rebuilt_generation);
+
+    let mut generations = crate::RollingGenerations::new(old_generation.clone(), "old-daemon");
+    generations.admit_job("active-job");
+    assert_eq!(
+        generations.begin(rebuilt_generation.clone(), "rebuilt-daemon"),
+        crate::RollingStart::Start
+    );
+    assert!(generations.activate(&rebuilt_generation));
+    assert_eq!(generations.admission_owner, rebuilt_generation);
+    assert_eq!(
+        generations.job_owner("active-job"),
+        Some(old_generation.as_str())
+    );
+}
+
+#[test]
+fn materialized_refresh_requires_an_immutable_binary_hash_and_path() {
+    let plan = ssh_bootstrap_plan();
+    let error = refreshed_binary_path(
+        &plan,
+        "HOMEBOY_REFRESH_SOURCE_SHA=abc123\n{\"data\":{\"git_commit\":\"abc123\"}}",
+    )
+    .expect_err("materialized refresh must bind the selected path to its bytes");
+    assert!(error.message.contains("immutable binary path"));
+}
+
+#[test]
 fn concurrent_runner_config_edit_survives_ssh_bootstrap_promotion() {
     test_support::with_isolated_home(|_| {
         crate::create(r#"{"id":"lab-local","kind":"local","homeboy_path":"/old","env":{"OLD":"1"},"resources":{"dev_sync":{"old":true}}}"#, false).expect("runner");
