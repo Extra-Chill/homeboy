@@ -72,6 +72,51 @@ fn helper_path_resolves_by_filename_and_env_var() {
 }
 
 #[test]
+fn command_capture_survives_invocation_tmpdir_disappearance() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let tmp_dir = dir.path().join("tmp");
+    let artifact_dir = dir.path().join("artifacts");
+    let result_file = dir.path().join("result");
+    let helper_file = dir.path().join("command-capture.sh");
+    std::fs::create_dir_all(&tmp_dir).expect("tmp dir");
+    std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+    std::fs::write(&helper_file, assets::COMMAND_CAPTURE_SH).expect("command capture helper");
+
+    let status = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(
+            r#"
+set -euo pipefail
+source "$COMMAND_CAPTURE_HELPER"
+homeboy_run_step_capture captured_path captured_exit "capture" -- \
+    bash -c 'rm -f "$TMPDIR"/homeboy-command.*; printf captured'
+printf '%s\n' "$captured_exit" > "$RESULT_FILE"
+cat "$captured_path" >> "$RESULT_FILE"
+homeboy_cleanup_step_capture "$captured_path"
+"#,
+        )
+        .env("COMMAND_CAPTURE_HELPER", &helper_file)
+        .env("HOMEBOY_INVOCATION_ARTIFACT_DIR", &artifact_dir)
+        .env("TMPDIR", &tmp_dir)
+        .env("RESULT_FILE", &result_file)
+        .status()
+        .expect("run command capture helper");
+
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read_to_string(&result_file).expect("capture result"),
+        "0\ncaptured"
+    );
+    assert_eq!(
+        std::fs::read_dir(&artifact_dir)
+            .expect("artifact dir")
+            .count(),
+        0,
+        "explicit capture cleanup should remove the artifact"
+    );
+}
+
+#[test]
 fn declared_helper_is_content_addressed_and_reports_provenance() {
     with_isolated_home(|_| {
         let requirement = RuntimeHelperRequirement {

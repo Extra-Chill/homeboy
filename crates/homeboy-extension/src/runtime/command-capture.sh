@@ -19,7 +19,11 @@ homeboy_run_step_capture() {
     fi
 
     local output_file
-    output_file="$(mktemp "${TMPDIR:-/tmp}/homeboy-command.XXXXXX")"
+    local capture_root="${HOMEBOY_INVOCATION_ARTIFACT_DIR:-${HOMEBOY_CACHE_DIR:-${TMPDIR:-/tmp}}}"
+    if [ ! -d "$capture_root" ] || [ ! -w "$capture_root" ]; then
+        capture_root="${TMPDIR:-/tmp}"
+    fi
+    output_file="$(mktemp "${capture_root%/}/homeboy-command.XXXXXX")"
 
     set +e
     "$@" 2>&1 | tee "$output_file"
