@@ -191,6 +191,69 @@ deliberate and stated here rather than papered over; closing it requires the
 runtime to route its shell tool through the dispatch command Homeboy already
 hands it in `HOMEBOY_AGENT_TOOL_DISPATCH_COMMAND`.
 
+### Supervision policy: how much a provider session may consume
+
+The command policy bounds *what* an agent may run. It cannot see an agent that
+stays entirely inside its permitted commands and still grows to nine gigabytes
+across forty child processes, and neither can an execution budget that counts
+attempts. Homeboy used to learn the cost of a session only after the process
+boundary closed.
+
+`agent_task.supervision_policy` is the resource half. It is host config, and it
+is opt-in: with nothing declared, a cook behaves exactly as it did before.
+
+```bash
+homeboy config set /agent_task/supervision_policy '{
+  "budgets": [
+    { "metric": "rss_mib", "limit": 6144, "action": "warn" },
+    { "metric": "rss_mib", "limit": 10240, "action": "stop",
+      "reason": "15Gi box with four agents on it" },
+    { "metric": "no_progress_seconds", "limit": 1800, "action": "stop" }
+  ],
+  "backends": {
+    "bench": []
+  },
+  "reason": "shared host"
+}' --json
+```
+
+**Metrics** are things any host can observe about any provider, so supervision
+stays runtime-neutral:
+
+| Metric | Meaning |
+|---|---|
+| `elapsed_seconds` | Wall-clock time since provider execution began. |
+| `rss_mib` | Resident memory across the provider's whole process tree. Summing double-counts shared pages, so it is an upper bound. |
+| `child_processes` | Processes observed under the cook. |
+| `no_progress_seconds` | Time since the destination worktree last changed. This is the stall detector: a cook burning memory while writing files is working, one that has written nothing for twenty minutes is not. |
+
+**The ladder** is `warn` → `nudge` → `stop`. Several budgets on one metric are
+how you say "tell me at 6 GiB, stop it at 10". A breach is announced once and
+again only when it climbs a rung, so the heartbeat channel stays worth reading.
+A `stop` terminates the provider's process tree (SIGTERM, then SIGKILL for
+survivors) and leaves the controller alive to record why.
+
+`nudge` currently records and surfaces an escalation between `warn` and `stop`;
+it does **not** yet inject feedback into the running session, because Homeboy
+has no channel into a live provider's reasoning (#7451, #7530).
+
+A `backends` entry **replaces** the global budgets for that backend rather than
+extending them — unlike the command policy, where extension is the safe default.
+An empty list opts a backend out entirely.
+
+**Unobserved is never zero.** Every metric is optional at the sample, and an
+absent metric never breaches a budget. A host with no `ps` has no memory or
+process reading; a cook with no destination worktree has no progress reading.
+Reporting those as `0` would make every budget fire immediately on exactly the
+hosts that can least afford a spurious kill.
+
+**Evidence.** Each heartbeat appends to `cook_resource_timeline` (a rolling
+window of samples) and every decision appends to `cook_supervision_events`,
+which also records whether an ordered termination actually succeeded. The two
+are separate arrays so an hour of quiet samples cannot evict the decision that
+explains a stop. `agent-task status` projects both under
+`liveness.supervision`.
+
 | Subcommand | Purpose |
 |---|---|
 | `cook` | Run one workspace task through the patch-artifact handoff workflow. |

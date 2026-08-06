@@ -3126,6 +3126,7 @@ fn liveness_summary(record: &Value, run_id: &str, candidate_state: CandidateStat
             "local_owner": local_provider_ownership,
         },
         "provider_activity": provider_activity_summary(metadata),
+        "supervision": supervision_summary(metadata),
         "stale_reason": metadata.get("stale_running_reason"),
         "runner_queue": metadata.get("runner_queue"),
         "next_action": if terminal && candidate_recoverable {
@@ -3176,6 +3177,40 @@ fn provider_activity_summary(metadata: &Value) -> Value {
         }
     }
     summary
+}
+
+/// Project the durable resource timeline and supervision decisions into the
+/// status summary.
+///
+/// The decisions are reported in full and the timeline is not: a run reaches a
+/// handful of decisions and hundreds of samples, and a status summary that
+/// inlined the whole timeline would bury the one fact a reader came for. The
+/// latest sample plus a count is enough to say "this is holding nine gigabytes
+/// and has been sampled forty times"; the full timeline stays in the run record
+/// for anyone who wants the curve.
+///
+/// Absent when nothing was recorded, so a run from before supervision existed
+/// does not acquire a misleading empty report.
+fn supervision_summary(metadata: &Value) -> Value {
+    let timeline = metadata
+        .get("cook_resource_timeline")
+        .and_then(Value::as_array);
+    let events = metadata
+        .get("cook_supervision_events")
+        .and_then(Value::as_array);
+    if timeline.is_none() && events.is_none() {
+        return Value::Null;
+    }
+    json!({
+        "resource_samples": timeline.map_or(0, |timeline| timeline.len()),
+        "latest_resource_sample": timeline.and_then(|timeline| timeline.last()).cloned(),
+        "events": events.cloned().unwrap_or_default(),
+        "stopped_by_policy": events.is_some_and(|events| {
+            events
+                .iter()
+                .any(|event| event.get("kind").and_then(Value::as_str) == Some("stop_executed"))
+        }),
+    })
 }
 
 /// Project the durable `provider_executions` metadata into a compact list of the
@@ -4233,6 +4268,50 @@ mod tests {
         );
 
         assert!(summary["liveness"]["provider_activity"].is_null());
+        // A run recorded before supervision existed must not acquire an empty
+        // supervision report that reads as "supervised, nothing to say".
+        assert!(summary["liveness"]["supervision"].is_null());
+    }
+
+    #[test]
+    fn compact_status_reports_why_a_run_was_stopped_by_policy() {
+        // #7015: the resource cost of a session used to be discoverable only by
+        // having watched it. The decision that ended a run has to survive in the
+        // status envelope, and it must not be buried under the sample stream.
+        let summary = compact_status_summary(
+            &json!({
+                "run_id": "agent-task-supervised",
+                "state": "failed",
+                "tasks": [],
+                "metadata": {
+                    "cook_resource_timeline": [
+                        { "at": "2026-08-06T00:00:00Z", "attempt": 1,
+                          "sample": { "rss_mib": 4096, "child_processes": 12 } },
+                        { "at": "2026-08-06T00:00:15Z", "attempt": 1,
+                          "sample": { "rss_mib": 10_500, "child_processes": 41 } }
+                    ],
+                    "cook_supervision_events": [
+                        { "kind": "budget_breached", "attempt": 1, "decision": {
+                            "metric": "rss_mib", "action": "stop",
+                            "limit": 10_240, "observed": 10_500,
+                            "reason": "15Gi box", "remediation": "narrow the task"
+                        }},
+                        { "kind": "stop_executed", "attempt": 1,
+                          "outcome": { "status": "terminated", "signal": "SIGTERM" } }
+                    ]
+                }
+            }),
+            "agent-task-supervised",
+        );
+
+        let supervision = &summary["liveness"]["supervision"];
+        assert_eq!(supervision["resource_samples"], 2);
+        assert_eq!(
+            supervision["latest_resource_sample"]["sample"]["rss_mib"],
+            10_500
+        );
+        assert_eq!(supervision["events"][0]["decision"]["action"], "stop");
+        assert_eq!(supervision["stopped_by_policy"], true);
     }
 
     #[test]

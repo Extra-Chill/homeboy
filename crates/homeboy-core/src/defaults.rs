@@ -606,6 +606,23 @@ pub struct AgentTaskConfig {
     /// (`homeboy/agent-command-policy/v1`) when building a plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_policy: Option<serde_json::Value>,
+    /// Host-level resource budgets every long-running provider session on this
+    /// machine is supervised against, settable via
+    /// `homeboy config set /agent_task/supervision_policy <json> --json`
+    /// (#7015).
+    ///
+    /// The command policy above bounds *what* an agent may run; this bounds
+    /// *how much it may consume while running it*. Neither substitutes for the
+    /// other — an agent can stay entirely inside its permitted commands and
+    /// still grow to nine gigabytes across forty child processes, which is what
+    /// Homeboy previously learned only after the process boundary closed.
+    ///
+    /// Carried opaquely as JSON for the same reason as `rotation` and
+    /// `command_policy`: core config does not depend on the agent-task
+    /// subsystem. The agent-task layer deserializes it into
+    /// `AgentSupervisionPolicy` (`homeboy/agent-supervision-policy/v1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervision_policy: Option<serde_json::Value>,
     /// Optional independent acceptance authority. The command receives a typed
     /// request on stdin and returns a signed verdict on stdout.
     #[serde(default, skip_serializing_if = "Option::is_none")]

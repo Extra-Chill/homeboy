@@ -42,6 +42,13 @@ pub use super::agent_task::{
 };
 
 pub use super::agent_task::{
+    highest_supervision_action, AgentSupervisionAction, AgentSupervisionBudget,
+    AgentSupervisionDecision, AgentSupervisionMetric, AgentSupervisionPolicy,
+    AgentSupervisionSample, AGENT_SUPERVISION_POLICY_SCHEMA, DEFAULT_SUPERVISION_REASON,
+    SUPERVISION_STOP_REMEDIATION, SUPERVISION_WARNING_REMEDIATION,
+};
+
+pub use super::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskExecutionHandle,
     AgentTaskExecutionHandleKind, AgentTaskExecutionState, AgentTaskExecutor,
     AgentTaskExecutorCapabilities, AgentTaskFailureClassification, AgentTaskFollowUp,
@@ -459,19 +466,20 @@ pub mod service {
         reconcile_terminal_artifact_projection, reconstruct_adoption_options_with_dispatcher,
         reconstruct_options_with_dispatcher, record_replacement_gate_proof, recover_cook_pr,
         recover_terminal_transport_proxy_evidence, register_promotion_job_driver,
-        resolve_cook_continuation_run_id, resume, resume_cook, resume_cook_batch, retry, run_cook,
-        run_cook_batch, run_cook_with_durable_observer, run_loaded_plan, run_next,
-        run_next_with_cook_dispatcher, run_status, run_submitted, run_submitted_with_timeout,
-        run_terminal_cook_continuation, source_worktree_path, status, submit_plan_spec,
-        terminal_review_form_continuation_is_eligible, terminal_transport_recovery_required,
-        validate_initial_recipe_compatibility, validate_recipe_attempt_record,
-        AgentTaskCandidateAdoptionOptions, AgentTaskCookAttemptReport,
-        AgentTaskCookBatchCellReport, AgentTaskCookBatchOptions, AgentTaskCookBatchReport,
-        AgentTaskCookReport, AgentTaskCookServiceOptions, AgentTaskDiscoveryCommands,
-        AgentTaskDiscoveryCounts, AgentTaskDiscoveryFilter, AgentTaskDiscoveryReport,
-        AgentTaskDiscoveryRun, AgentTaskHydratedEvidence, AgentTaskPromotionJob,
-        AgentTaskPromotionJobDriver, AgentTaskPromotionJobPhase, AgentTaskPromotionRequest,
-        AgentTaskRetryServiceResult, AgentTaskRunResult, CookActivityProbe, CookProgressEvent,
-        CookProviderActivity, AGENT_TASK_PROMOTION_JOB_TYPE, AGENT_TASK_PROMOTION_JOB_VERSION,
+        resolve_cook_continuation_run_id, resolve_supervision_policy, resume, resume_cook,
+        resume_cook_batch, retry, run_cook, run_cook_batch, run_cook_with_durable_observer,
+        run_loaded_plan, run_next, run_next_with_cook_dispatcher, run_status, run_submitted,
+        run_submitted_with_timeout, run_terminal_cook_continuation, source_worktree_path, status,
+        submit_plan_spec, terminal_review_form_continuation_is_eligible,
+        terminal_transport_recovery_required, validate_initial_recipe_compatibility,
+        validate_recipe_attempt_record, AgentTaskCandidateAdoptionOptions,
+        AgentTaskCookAttemptReport, AgentTaskCookBatchCellReport, AgentTaskCookBatchOptions,
+        AgentTaskCookBatchReport, AgentTaskCookReport, AgentTaskCookServiceOptions,
+        AgentTaskDiscoveryCommands, AgentTaskDiscoveryCounts, AgentTaskDiscoveryFilter,
+        AgentTaskDiscoveryReport, AgentTaskDiscoveryRun, AgentTaskHydratedEvidence,
+        AgentTaskPromotionJob, AgentTaskPromotionJobDriver, AgentTaskPromotionJobPhase,
+        AgentTaskPromotionRequest, AgentTaskRetryServiceResult, AgentTaskRunResult,
+        CookActivityProbe, CookProgressEvent, CookProviderActivity, CookSupervisionTick,
+        CookSupervisor, AGENT_TASK_PROMOTION_JOB_TYPE, AGENT_TASK_PROMOTION_JOB_VERSION,
     };
 }
