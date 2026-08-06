@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
+// Only the `#[cfg(test)]`-gated hotspot-set comparison below consumes this. See #11791.
+#[cfg(test)]
 use super::FuzzHotspotSet;
 
 const CONVERGENCE_TOP_WINDOW: usize = 3;
@@ -73,6 +75,10 @@ pub struct FuzzHotspotCohortDelta {
     pub run_count_delta: i64,
 }
 
+/// Test-only. Hotspot-set comparison has no production caller; the live
+/// cohort path is `fuzz_hotspot_cohorts`. Gated rather than deleted so the
+/// surviving tests keep documenting the contract. See #11791.
+#[cfg(test)]
 pub(crate) fn compare_fuzz_hotspot_sets(
     baseline: &FuzzHotspotSet,
     candidate: &FuzzHotspotSet,
@@ -197,6 +203,8 @@ pub fn compare_fuzz_hotspot_cohorts(
     }
 }
 
+/// Test-only helper for `compare_fuzz_hotspot_sets`. See #11791.
+#[cfg(test)]
 fn cohort_items_from_hotspot_set(set: &FuzzHotspotSet) -> Vec<FuzzHotspotCohortItem> {
     set.items
         .iter()
