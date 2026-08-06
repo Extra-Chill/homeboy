@@ -100,6 +100,34 @@ thread_local! {
     // Direct reentrancy is deliberately capability-based. A matching PID alone
     // is not ownership evidence because PIDs are reusable after a restart.
     static LOCAL_LEASE_CAPABILITIES: RefCell<Vec<SubprocessLeaseCapability>> = const { RefCell::new(Vec::new()) };
+    // A primary owner can grant a nested in-process operation authority for one
+    // distinct target without exposing that authority to unrelated operations.
+    static LOCAL_LEASE_DELEGATIONS: RefCell<Vec<LocalLeaseDelegation>> = const { RefCell::new(Vec::new()) };
+}
+
+#[derive(Debug, Clone)]
+struct LocalLeaseDelegation {
+    capability: SubprocessLeaseCapability,
+    target: String,
+}
+
+struct LocalLeaseDelegationGuard(Vec<LocalLeaseDelegation>);
+
+impl Drop for LocalLeaseDelegationGuard {
+    fn drop(&mut self) {
+        LOCAL_LEASE_DELEGATIONS.with(|delegations| {
+            let mut delegations = delegations.borrow_mut();
+            for expected in self.0.iter().rev() {
+                if let Some(index) = delegations.iter().rposition(|delegation| {
+                    delegation.target == expected.target
+                        && delegation.capability.owner_pid == expected.capability.owner_pid
+                        && delegation.capability.capability == expected.capability.capability
+                }) {
+                    delegations.remove(index);
+                }
+            }
+        });
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -450,6 +478,53 @@ where
 }
 
 impl RuntimePromotionLease {
+    /// Run one nested local operation against a distinct target under this
+    /// lease. The authority is thread-local and scoped to `operation`.
+    pub fn with_local_targets<T>(
+        &self,
+        targets: &[String],
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.assert_generation()?;
+        let capability = SubprocessLeaseCapability {
+            owner_pid: self.owner_pid,
+            owner_linux_starttime_ticks: crate::process::linux_process_starttime_ticks(
+                self.owner_pid,
+            )
+            .ok()
+            .flatten(),
+            owner_process_start_identity: crate::process::process_start_identity(self.owner_pid)
+                .ok()
+                .flatten(),
+            target: self.target.clone(),
+            generation: self.generation.clone(),
+            capability: self.capability.clone(),
+        };
+        let delegations = targets
+            .iter()
+            .map(|target| LocalLeaseDelegation {
+                capability: capability.clone(),
+                target: target.clone(),
+            })
+            .collect::<Vec<_>>();
+        LOCAL_LEASE_DELEGATIONS.with(|active| active.borrow_mut().extend(delegations.clone()));
+        let _delegation = LocalLeaseDelegationGuard(delegations);
+        let result = operation();
+        self.assert_generation()?;
+        result
+    }
+
+    /// Run one nested local operation against a distinct target under this
+    /// lease. The authority is thread-local and scoped to `operation`.
+    pub fn with_local_target<T>(
+        &self,
+        target: impl Into<String>,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let target = target.into();
+        self.with_local_targets(&[target], operation)
+    }
+
     /// Explicitly authorize one Homeboy subprocess to join this transaction.
     /// Callers must use this immediately before spawning the participating
     /// Homeboy command rather than relying on unrelated runtime environment.
@@ -742,15 +817,22 @@ fn authorizes_local_reentrancy(
     target: &str,
     generation: &str,
 ) -> bool {
+    let owns_held_lease = |capability: &SubprocessLeaseCapability| {
+        capability.owner_pid == held.pid
+            && capability.owner_linux_starttime_ticks == held.linux_starttime_ticks
+            && capability.owner_process_start_identity == held.process_start_identity
+            && capability.target == held.target
+            && capability.generation == held.generation
+            && capability.capability == held.capability
+    };
     LOCAL_LEASE_CAPABILITIES.with(|capabilities| {
         capabilities.borrow().iter().any(|capability| {
-            capability.owner_pid == held.pid
-                && capability.owner_linux_starttime_ticks == held.linux_starttime_ticks
-                && capability.owner_process_start_identity == held.process_start_identity
-                && capability.target == held.target
-                && capability.generation == held.generation
-                && capability.capability == held.capability
-                && target == held.target
+            owns_held_lease(capability) && target == held.target && generation == held.generation
+        })
+    }) || LOCAL_LEASE_DELEGATIONS.with(|delegations| {
+        delegations.borrow().iter().any(|delegation| {
+            owns_held_lease(&delegation.capability)
+                && delegation.target == target
                 && generation == held.generation
         })
     })
@@ -1523,6 +1605,26 @@ mod tests {
             ]);
             lease.authorize_subprocess(&mut child);
             assert!(child.status().expect("run authorized child").success());
+        });
+    }
+
+    #[test]
+    fn controller_lease_delegates_only_selected_runner_targets() {
+        crate::test_support::with_isolated_home(|_| {
+            let lease = acquire("controller upgrade", "active controller")
+                .expect("controller owns promotion lease");
+            assert!(acquire("runner daemon disconnect", "lab").is_err());
+
+            lease
+                .with_local_target("lab", || {
+                    acquire("runner daemon disconnect", "lab")?;
+                    acquire("runner daemon reconnect", "lab")?;
+                    assert!(acquire("runner daemon reconnect", "other").is_err());
+                    Ok(())
+                })
+                .expect("selected runner can reenter controller promotion");
+
+            assert!(acquire("runner daemon reconnect", "lab").is_err());
         });
     }
 

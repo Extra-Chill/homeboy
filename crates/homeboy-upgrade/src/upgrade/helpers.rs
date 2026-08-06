@@ -269,6 +269,7 @@ pub fn run_upgrade_with_method(
                         None,
                         runner_targets,
                         &extensions_updated,
+                        Some(&promotion_lease),
                     )
                 })?
             };
@@ -405,6 +406,7 @@ pub fn run_upgrade_with_method(
                 new_build_identity.as_deref(),
                 runner_targets,
                 &extensions_updated,
+                Some(&promotion_lease),
             )
         })?
     } else {
@@ -780,6 +782,7 @@ fn run_targeted_runner_upgrade(
             Some(&previous_build_identity),
             runner_targets,
             &installed_extension_catalog(),
+            None,
         )
     })?;
 

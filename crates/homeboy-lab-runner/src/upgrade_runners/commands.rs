@@ -44,6 +44,14 @@ pub fn reconnect_runner_daemon(runner_id: &str) -> Result<(String, Option<String
     let (report, exit_code) = runner::connect(runner_id)?;
     if exit_code == 0 && report.connected {
         let homeboy_version = report.homeboy_version;
+        crate::homeboy_refresh::probe_reconnected_admission_readiness(
+            runner_id,
+            report
+                .homeboy_build_identity
+                .as_deref()
+                .or(homeboy_version.as_deref())
+                .unwrap_or("the upgraded runner"),
+        )?;
         return Ok((
             format!(
                 "connected runner daemon restarted after upgrade; session reports {}",

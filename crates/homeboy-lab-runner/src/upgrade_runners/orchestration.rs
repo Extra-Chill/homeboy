@@ -79,6 +79,7 @@ pub fn upgrade_configured_runners(
     source_path: Option<&Path>,
     runner_targets: &[String],
     extension_updates: &[ExtensionUpgradeEntry],
+    promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
 ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)> {
     let runners = runner_upgrade_targets(runner_targets)?;
     if runners.is_empty() {
@@ -90,17 +91,33 @@ pub fn upgrade_configured_runners(
         "Updating {} configured runner(s)...",
         runners.len()
     );
-    Ok(upgrade_runners_with_executor(
-        &runners,
-        force,
-        method_override,
-        source_path,
-        extension_updates,
-        runner::exec,
-        runner::status,
-    ))
+    let upgrade = || {
+        Ok(upgrade_runners_with_executor(
+            &runners,
+            force,
+            method_override,
+            source_path,
+            extension_updates,
+            runner::exec,
+            runner::status,
+        ))
+    };
+    match promotion_lease {
+        Some(lease) => lease.with_local_targets(
+            &runners
+                .iter()
+                .map(|runner| runner.id.clone())
+                .collect::<Vec<_>>(),
+            upgrade,
+        ),
+        None => upgrade(),
+    }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The runner-upgrade provider preserves its explicit controller identity and promotion authority inputs."
+)]
 pub fn upgrade_configured_runners_with_explicit_source_path(
     force: bool,
     method_override: Option<InstallMethod>,
@@ -109,6 +126,7 @@ pub fn upgrade_configured_runners_with_explicit_source_path(
     expected_controller_identity: Option<&str>,
     runner_targets: &[String],
     extension_updates: &[ExtensionUpgradeEntry],
+    promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
 ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)> {
     if !explicit_source_path {
         return upgrade_configured_runners(
@@ -117,6 +135,7 @@ pub fn upgrade_configured_runners_with_explicit_source_path(
             source_path,
             runner_targets,
             extension_updates,
+            promotion_lease,
         );
     }
 
@@ -130,19 +149,31 @@ pub fn upgrade_configured_runners_with_explicit_source_path(
         "Updating {} configured runner(s)...",
         runners.len()
     );
-    Ok(
-        upgrade_runners_with_executor_and_source_materializer_with_expected_controller_identity(
-            &runners,
-            force,
-            method_override,
-            source_path,
-            extension_updates,
-            runner::exec,
-            runner::status,
-            materialize_explicit_runner_source_path,
-            expected_controller_identity,
+    let upgrade = || {
+        Ok(
+            upgrade_runners_with_executor_and_source_materializer_with_expected_controller_identity(
+                &runners,
+                force,
+                method_override,
+                source_path,
+                extension_updates,
+                runner::exec,
+                runner::status,
+                materialize_explicit_runner_source_path,
+                expected_controller_identity,
+            ),
+        )
+    };
+    match promotion_lease {
+        Some(lease) => lease.with_local_targets(
+            &runners
+                .iter()
+                .map(|runner| runner.id.clone())
+                .collect::<Vec<_>>(),
+            upgrade,
         ),
-    )
+        None => upgrade(),
+    }
 }
 
 pub fn runner_upgrade_targets(runner_targets: &[String]) -> Result<Vec<Runner>> {

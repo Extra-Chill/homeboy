@@ -39,6 +39,7 @@ pub trait RunnerUpgradeProvider: Send + Sync {
         expected_controller_identity: Option<&str>,
         runner_targets: &[String],
         extension_updates: &[ExtensionUpgradeEntry],
+        promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
     ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)>;
 
     /// A short build-identity string for a source checkout (commit + dirty
@@ -70,6 +71,7 @@ impl RunnerUpgradeProvider for NoopRunnerUpgradeProvider {
         _expected_controller_identity: Option<&str>,
         _runner_targets: &[String],
         _extension_updates: &[ExtensionUpgradeEntry],
+        _promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
     ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)> {
         Ok((Vec::new(), Vec::new()))
     }
