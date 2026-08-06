@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.38] - 2026-08-06
+
+### Fixed
+- make autofixers contract-safe [AI: OpenAI GPT-5.6 Sol via OpenCode]
+
 ## [3.34.37] - 2026-08-05
 
 ### Fixed
