@@ -1,10 +1,13 @@
 //! Durable controller fallback and later projection for sealed runner staging.
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::PathBuf;
 
+use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
 
 use homeboy_core::{Error, Result};
 
@@ -129,6 +132,7 @@ impl ControllerFallbackProjectionStore {
             submit_remote_runner_staging(transport, envelope)?,
         );
         receipt.validate_for(envelope)?;
+        let _lock = self.lock()?;
         let mut state = self.load()?;
         if let Some(existing) = state.receipts.get(&receipt.mission_id) {
             if existing != &receipt {
@@ -211,6 +215,7 @@ impl ControllerFallbackProjectionStore {
                 None,
             ));
         }
+        let _lock = self.lock()?;
         let mut state = self.load()?;
         let receipt = state.receipts.get(mission_id).ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -273,25 +278,73 @@ impl ControllerFallbackProjectionStore {
                 )
             })?;
         }
-        let temporary = self.path.with_extension("tmp");
         let bytes = serde_json::to_vec(state).map_err(|error| {
             Error::internal_json(
                 error.to_string(),
                 Some("serialize controller fallback projection".to_string()),
             )
         })?;
-        fs::write(&temporary, bytes).map_err(|error| {
+        let parent = self.path.parent().expect("ledger path has parent");
+        let mut temporary = NamedTempFile::new_in(parent).map_err(|error| {
             Error::internal_io(
                 error.to_string(),
-                Some(format!("write {}", temporary.display())),
+                Some(format!("create ledger temporary in {}", parent.display())),
             )
         })?;
-        fs::rename(&temporary, &self.path).map_err(|error| {
+        temporary.write_all(&bytes).map_err(|error| {
             Error::internal_io(
                 error.to_string(),
+                Some("write controller fallback projection".to_string()),
+            )
+        })?;
+        temporary.as_file().sync_all().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("sync controller fallback projection".to_string()),
+            )
+        })?;
+        temporary.persist(&self.path).map_err(|error| {
+            Error::internal_io(
+                error.error.to_string(),
                 Some(format!("publish {}", self.path.display())),
             )
-        })
+        })?;
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("sync {}", parent.display())),
+                )
+            })
+    }
+
+    fn lock(&self) -> Result<File> {
+        let parent = self.path.parent().expect("ledger path has parent");
+        fs::create_dir_all(parent).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("create {}", parent.display())),
+            )
+        })?;
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(self.path.with_extension("lock"))
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("open controller fallback lock".to_string()),
+                )
+            })?;
+        file.lock_exclusive().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("lock controller fallback ledger".to_string()),
+            )
+        })?;
+        Ok(file)
     }
 }
 
