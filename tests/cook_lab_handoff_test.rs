@@ -237,7 +237,7 @@ fn cook_detaches_local_placement_instead_of_rejecting_it() {
     }
 }
 
-/// Piped stdio is not permission to turn an explicit local wait into a durable
+/// Piped stdio is not permission to turn a default local wait into a durable
 /// handoff. This target fails during foreground resolution, which makes the
 /// assertion bounded while proving the launcher did not emit a detach envelope.
 #[test]
@@ -245,7 +245,6 @@ fn non_tty_local_wait_stays_foreground() {
     let output = homeboy(&[
         "--placement",
         "local",
-        "--wait",
         "agent-task",
         "cook",
         "--prompt",
@@ -260,11 +259,11 @@ fn non_tty_local_wait_stays_foreground() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         !stdout.contains("homeboy/agent-task-cook-local-detach-handoff/v1"),
-        "explicit --wait must not return a detach handoff: {stdout}"
+        "a default local wait must not return a detach handoff: {stdout}"
     );
     assert!(
         !stdout.contains("\"status\": \"in_flight\""),
-        "explicit --wait must not return an in-flight Cook report: {stdout}"
+        "a default local wait must not return an in-flight Cook report: {stdout}"
     );
 }
 
@@ -372,30 +371,6 @@ fn detached_cook_admission_is_bounded_with_a_hundred_unavailable_recovery_record
 }
 
 #[test]
-fn non_tty_client_must_choose_one_lab_observation_mode() {
-    // Command::output supplies pipes, matching an interruptible bridge client
-    // rather than an interactive terminal. Reject ambiguity before any worktree
-    // or provider work can begin.
-    let output = homeboy(&[
-        "--wait",
-        "--detach-after-handoff",
-        "agent-task",
-        "cook",
-        "--prompt",
-        "implement the fix",
-        "--to-worktree",
-        "missing@worktree",
-        "--verify",
-        "true",
-    ]);
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("cannot be used with"), "{stderr}");
-    assert!(!stderr.contains("worktree provider"), "{stderr}");
-}
-
-#[test]
 fn cook_rejects_queue_only_before_worktree_resolution() {
     let output = homeboy(&[
         "agent-task",
@@ -439,5 +414,4 @@ fn cook_help_does_not_advertise_queue_only() {
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(!help.contains("\n      --queue-only\n"));
     assert!(help.contains("--detach-after-handoff"), "{help}");
-    assert!(help.contains("--wait"), "{help}");
 }
