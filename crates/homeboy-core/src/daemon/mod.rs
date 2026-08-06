@@ -1135,6 +1135,7 @@ where
     reconcile_pending_workspace_owner_releases();
     reconcile_terminal_workspace_owner_leases(&job_store);
     recover_controller_jobs(&job_store);
+    crate::schedule::ensure_automatic_retention_schedule()?;
     let _ = daemon_runtime_snapshot();
     let loopback_bind = local_addr.ip().is_loopback();
 
