@@ -35,27 +35,44 @@ fn root_package_version(manifest: &Path) -> String {
         .expect("root Cargo.toml [package] must contain a version")
 }
 
+/// Declare a `rerun-if-changed` dependency only when the path exists.
+///
+/// Cargo treats a declared `rerun-if-changed` path that is *missing* as a
+/// permanent dirty signal: the build script re-runs on every single cargo
+/// invocation, and every crate that depends on this one rebuilds with it.
+/// Because `homeboy-paths` and `homeboy-core` both depend on
+/// `homeboy-product-identity`, one missing path rebuilds all 29 workspace
+/// crates every time -- while third-party dependencies stay `Fresh`.
+///
+/// Git paths are conditional by nature (`packed-refs` exists only after a
+/// repack, a notes ref exists only once notes are fetched), so every git path
+/// below must go through this helper rather than `println!` directly.
+fn rerun_if_changed_when_present(path: &Path) {
+    if path.exists() {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+}
+
 fn emit_git_identity(root: &Path) {
     let git_dir = resolve_git_dir(root).unwrap_or_else(|| root.join(".git"));
     let common_dir = git_common_dir(root, &git_dir).unwrap_or_else(|| git_dir.clone());
-    println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
-    println!("cargo:rerun-if-changed={}", git_dir.join("index").display());
-    println!(
-        "cargo:rerun-if-changed={}",
-        common_dir.join("refs/notes/homeboy-snapshot").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        common_dir.join("packed-refs").display()
-    );
+    rerun_if_changed_when_present(&git_dir.join("HEAD"));
+    rerun_if_changed_when_present(&common_dir.join("packed-refs"));
     if let Ok(head) = fs::read_to_string(git_dir.join("HEAD")) {
         if let Some(reference) = head.trim().strip_prefix("ref: ") {
-            println!(
-                "cargo:rerun-if-changed={}",
-                git_dir.join(reference).display()
-            );
+            rerun_if_changed_when_present(&git_dir.join(reference));
         }
     }
+
+    // `.git/index` is deliberately NOT declared. This build script runs
+    // `git status --porcelain` below, which refreshes the index stat cache and
+    // rewrites `.git/index` -- so declaring it makes the script dirty its own
+    // input and re-run forever, exactly like a missing path would.
+    //
+    // The cost is that `HOMEBOY_PRODUCT_GIT_DIRTY` is only recomputed when
+    // HEAD or a ref moves, not when the worktree becomes dirty. That is the
+    // correct trade: a provenance stamp must never rebuild the workspace
+    // because someone touched a file.
 
     if let Some(provenance) = synthetic_snapshot_provenance(root) {
         println!(
