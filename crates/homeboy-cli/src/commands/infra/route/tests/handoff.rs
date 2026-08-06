@@ -569,6 +569,80 @@ fn unscoped_provider_discovery_does_not_offload() {
 }
 
 #[test]
+fn default_placement_provider_discovery_stays_local_despite_connected_default_runner() {
+    // Exercise the same compiled default-placement provenance as the CLI
+    // runtime. A captured hot decision with a connected default runner is the
+    // generic route state that previously bypassed the provider contract.
+    crate::test_support::with_isolated_home(|_| {
+        homeboy::core::resource_policy_context::reset_captured_context_for_test();
+        homeboy::core::resource_policy_context::capture_context(
+            homeboy::core::resource_policy_context::ResourcePolicyContext {
+                command: "agent-task providers".to_string(),
+                severity: "hot".to_string(),
+                local_override: false,
+                warned: true,
+                message: None,
+                runner_selection:
+                    homeboy::core::resource_policy_context::ResourcePolicyRunnerSelection {
+                        runner_id: Some("homeboy-lab".to_string()),
+                        available_runner_ids: vec!["homeboy-lab".to_string()],
+                        readiness_state: "connected_ready".to_string(),
+                        readiness_reasons: Vec::new(),
+                        remediation_commands: Vec::new(),
+                        reason: "default_lab_runner".to_string(),
+                    },
+                host: homeboy::core::resource_policy_context::ResourcePolicyHostSnapshot {
+                    load_severity: "hot".to_string(),
+                    load_one: None,
+                    load_five: None,
+                    load_fifteen: None,
+                    cpu_count: 1,
+                    memory_severity: None,
+                    memory_used_percent: None,
+                    memory_available_mb: None,
+                    memory_total_mb: None,
+                    relevant_process_count: 0,
+                    process_severity: "ok".to_string(),
+                    active_rig_lease_count: 0,
+                    rig_lease_severity: "ok".to_string(),
+                    rig_lease_concurrency_limit: None,
+                },
+            },
+        );
+        let matches = Cli::command_with_scoped_lab_args()
+            .try_get_matches_from(["homeboy", "agent-task", "providers"])
+            .expect("bare provider discovery parses");
+        let (compiled, _) = Cli::compile_registered_arg_matches(&matches)
+            .expect("provider discovery compiles with provenance");
+
+        assert_eq!(
+            compiled.provenance.source("placement"),
+            Some(crate::cli_surface::ArgumentSource::Default)
+        );
+        assert_eq!(compiled.value.runner, None);
+        assert_eq!(
+            compiled.value.placement,
+            crate::cli_surface::Placement::Auto
+        );
+        assert_eq!(
+            route_after_parse_with_provenance(
+                &compiled.value,
+                &[
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "providers".to_string()
+                ],
+                None,
+                Some(&compiled.provenance),
+            )
+            .expect("unscoped discovery must not select the default runner"),
+            None
+        );
+        homeboy::core::resource_policy_context::reset_captured_context_for_test();
+    });
+}
+
+#[test]
 fn agent_task_controller_run_from_spec_supports_lab_placement_runner_routing() {
     let cli = Cli::parse_from([
         "homeboy",

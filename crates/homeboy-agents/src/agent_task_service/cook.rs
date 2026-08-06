@@ -2362,6 +2362,32 @@ where
         validate_cook_workspace(&options)?;
     }
     validate_cook_candidate_group(&options.initial_plan)?;
+    // Reserve the source tree's projected copy before the scheduler creates its
+    // controller scratch lease or detached workspace. This includes dependency
+    // trees (for example node_modules and vendor), whose inode demand can be
+    // decisive even when their byte footprint is small.
+    let _materialization_capacity = options
+        .source_worktree_path
+        .as_deref()
+        .map(std::path::Path::new)
+        .or_else(|| {
+            options
+                .initial_plan
+                .tasks
+                .first()
+                .and_then(|task| task.workspace.root.as_deref())
+                .map(std::path::Path::new)
+        })
+        .map(|workspace| {
+            let demand = homeboy_core::capacity::demand_for_tree(workspace)?;
+            homeboy_core::capacity::reserve_projected_capacity(
+                &homeboy_core::paths::controller_scratch_store()?,
+                "Cook controller scratch and workspace materialization",
+                demand,
+                homeboy_core::capacity::CapacityReserve::configured(),
+            )
+        })
+        .transpose()?;
     materialize_initial_cook_attempt(&options)?;
     record_active_cook_worktree_warning(&options)?;
     // Durable identity now exists and resolves through the Cook alias. Publish

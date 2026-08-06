@@ -97,6 +97,23 @@ pub fn route_after_parse_with_provenance(
         return Ok(None);
     }
 
+    // Provider discovery without an explicit runner or Lab placement describes
+    // this controller's extensions, runtime defaults, and credential readiness.
+    // Keep that scope before generic routing can consume a previously captured
+    // default-runner pressure decision.
+    if unscoped_provider_discovery_is_controller_local(cli) {
+        return Ok(None);
+    }
+
+    // Lifecycle records are durable at their controller owner. Resolve that
+    // ownership before default-runner selection: forwarding a controller-local
+    // read to an otherwise healthy Lab runner changes a successful lookup into
+    // "record not found". An explicitly runner-resident record is absent here
+    // and continues through normal runner routing.
+    if controller_owns_agent_task_lifecycle_command(cli)? {
+        return Ok(None);
+    }
+
     // This is a command safety boundary, not an offload fallback decision.
     // Reject before resolving any source workspace so explicit local execution
     // cannot be obscured by unrelated route-materialization failures.
@@ -3118,6 +3135,40 @@ fn lab_offload_command(
     Ok(Some(lab_routing::lab_offload_command_from_route_contract(
         route_contract,
     )))
+}
+
+fn unscoped_provider_discovery_is_controller_local(cli: &Cli) -> bool {
+    matches!(
+        (&cli.command, cli.runner.as_deref(), cli.placement),
+        (
+            Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+                command: crate::commands::agent_task::AgentTaskCommand::Providers(_),
+            }),
+            None,
+            homeboy::cli_surface::Placement::Auto,
+        )
+    )
+}
+
+fn controller_owns_agent_task_lifecycle_command(cli: &Cli) -> homeboy::core::Result<bool> {
+    use crate::commands::agent_task::AgentTaskCommand;
+
+    let Commands::AgentTask(agent_task) = &cli.command else {
+        return Ok(false);
+    };
+    let run_id = match &agent_task.command {
+        AgentTaskCommand::Status(args) => Some(&args.run_id),
+        AgentTaskCommand::Logs(args) => Some(&args.run_id),
+        AgentTaskCommand::Evidence(args) => Some(&args.run_id),
+        AgentTaskCommand::Diagnose(args) => Some(&args.run_id),
+        AgentTaskCommand::Review(args) => Some(&args.run_id),
+        AgentTaskCommand::Retry(args) => Some(&args.run_id),
+        _ => None,
+    };
+    run_id
+        .map(|run_id| agent_task_lifecycle::run_record_exists_resolved(run_id))
+        .transpose()
+        .map(|present| present.unwrap_or(false))
 }
 
 fn lab_offload_command_for_materialized_args(

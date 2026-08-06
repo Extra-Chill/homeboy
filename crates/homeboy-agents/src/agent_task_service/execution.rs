@@ -388,7 +388,7 @@ pub fn retry(
     run: bool,
     force: bool,
 ) -> Result<AgentTaskRetryServiceResult> {
-    let source = agent_task_lifecycle::status(run_id)?;
+    let source = agent_task_lifecycle::normalize_local_execution_placement(run_id)?;
     let cook_retry = retryable_cook_attempt(&source)?;
     let record = match cook_retry {
         Some(cook_retry) => {

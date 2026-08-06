@@ -449,6 +449,39 @@ pub fn record_execution_placement_outcome(
     store::write_record(&record)
 }
 
+/// Restore an explicit plan placement decision onto a legacy run record.
+///
+/// Placement is opt-in policy evidence. A controller-local plan without a
+/// decision must remain unclassified rather than acquiring a synthetic local
+/// contract that could contradict later runner evidence.
+pub fn normalize_local_execution_placement(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    if record
+        .metadata
+        .get("execution_placement_decision")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Ok(record);
+    }
+    let plan = load_plan(&record.run_id)?;
+    let Some(decision) = plan
+        .metadata
+        .get("execution_placement_decision")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(record);
+    };
+    record
+        .ensure_metadata_object()
+        .insert("execution_placement_decision".to_string(), decision.clone());
+    record.ensure_metadata_object().insert(
+        "execution_placement_normalization".to_string(),
+        json!({ "source": "controller_plan", "reason": "legacy_or_null_record_decision" }),
+    );
+    store::write_record(&record)?;
+    Ok(record)
+}
+
 #[cfg(test)]
 mod execution_placement_tests {
     use super::*;
@@ -663,6 +696,44 @@ mod execution_placement_tests {
             )
             .expect_err("reject contradictory outcome");
             assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        });
+    }
+
+    #[test]
+    fn normalization_only_projects_an_explicit_plan_decision() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let plan = super::super::tests::test_plan();
+            let record =
+                submit_plan_with_runtime_admission(&plan, Some("placement-run"), |_| Ok(json!({})))
+                    .expect("submit plan");
+
+            let normalized = normalize_local_execution_placement(&record.run_id)
+                .expect("unclassified controller plan remains unchanged");
+            assert!(normalized
+                .metadata
+                .get("execution_placement_decision")
+                .is_none());
+            assert_eq!(load_plan(&record.run_id).expect("durable plan"), plan);
+
+            let mut plan = plan;
+            plan.metadata = json!({ "execution_placement_decision": decision() });
+            let record =
+                submit_plan_with_runtime_admission(&plan, Some("placement-projection-run"), |_| {
+                    Ok(json!({}))
+                })
+                .expect("submit plan with placement decision");
+            let mut legacy_record = store::read_record(&record.run_id).expect("durable record");
+            legacy_record
+                .ensure_metadata_object()
+                .remove("execution_placement_decision");
+            store::write_record(&legacy_record).expect("remove legacy record projection");
+
+            let normalized = normalize_local_execution_placement(&record.run_id)
+                .expect("explicit plan decision is restored");
+            assert_eq!(
+                normalized.metadata["execution_placement_decision"]["decision_id"],
+                decision().decision_id
+            );
         });
     }
 }

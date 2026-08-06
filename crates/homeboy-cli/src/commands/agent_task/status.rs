@@ -1170,7 +1170,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         .map(causal_chain_from_aggregate)
         .unwrap_or_default();
     let retry = retry_replay_action(&record);
-    let next_commands = diagnose_next_commands(run_id, retry.action.as_ref());
+    let next_commands = diagnose_next_commands(&record, retry.action.as_ref());
 
     let mut value = json!({
         "schema": "homeboy/agent-task-diagnose/v1",
@@ -3846,11 +3846,19 @@ fn plan_has_retry_materialization_identity(plan: &AgentTaskPlan) -> bool {
         })
 }
 
-fn diagnose_next_commands(run_id: &str, retry_action: Option<&CommandNextAction>) -> Vec<String> {
+fn diagnose_next_commands(
+    record: &AgentTaskRunRecord,
+    retry_action: Option<&CommandNextAction>,
+) -> Vec<String> {
+    let owner = record
+        .runner_id()
+        .map(|runner| format!("--runner {runner}"))
+        .unwrap_or_else(|| "--placement local".to_string());
+    let run_id = &record.run_id;
     let mut commands = vec![
-        format!("homeboy agent-task status {run_id} --full"),
-        format!("homeboy agent-task artifacts {run_id}"),
-        format!("homeboy agent-task review {run_id}"),
+        format!("homeboy {owner} agent-task status {run_id} --full"),
+        format!("homeboy {owner} agent-task artifacts {run_id}"),
+        format!("homeboy {owner} agent-task review {run_id}"),
     ];
     commands.extend(retry_action.map(|action| action.command.clone()));
     commands
@@ -3910,6 +3918,26 @@ mod tests {
             action.action.as_ref().unwrap().evidence.as_ref().unwrap()["owner"]["placement"],
             "local"
         );
+    }
+
+    #[test]
+    fn diagnose_commands_preserve_the_controller_owner_placement() {
+        let record: AgentTaskRunRecord = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-run/v1",
+            "run_id": "controller-run",
+            "plan_id": "plan",
+            "state": "failed",
+            "submitted_at": "2026-08-05T00:00:00Z",
+            "plan_path": "plan.json",
+            "metadata": {}
+        }))
+        .expect("minimal durable record");
+
+        let commands = diagnose_next_commands(&record, None);
+
+        assert!(commands
+            .iter()
+            .all(|command| command.starts_with("homeboy --placement local agent-task")));
     }
 
     #[test]
