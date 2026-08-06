@@ -1566,6 +1566,113 @@ pub fn record_cook_observer_event(
     record.ok_or_else(|| Error::internal_unexpected("Cook observer event record was unchanged"))
 }
 
+/// Entries retained in the durable resource timeline.
+///
+/// At the fifteen-second heartbeat interval this is a rolling hour. A timeline
+/// is only useful if it survives the run that produced it, and an unbounded one
+/// would not: a long cook would grow its run record without limit, and the
+/// record is rewritten on every heartbeat.
+const MAX_COOK_RESOURCE_SAMPLES: usize = 240;
+
+/// Supervision events retained. Decisions are announced on escalation only, so
+/// a run reaches a handful of these, not hundreds.
+const MAX_COOK_SUPERVISION_EVENTS: usize = 32;
+
+/// Persist one supervision tick: the resource observation, plus any decision
+/// the policy reached on it.
+///
+/// The two land in different places on purpose. The **timeline** is a rolling
+/// window of what the run cost, which answers "was this expensive?" and is
+/// naturally lossy at the head. The **events** are the decisions Homeboy took,
+/// which answer "why was this stopped?" and must not be evicted by a long tail
+/// of routine samples. Collapsing them into one array would let an hour of
+/// quiet heartbeats push the stop decision out of the evidence that exists to
+/// explain the stop (#7015).
+pub fn record_cook_supervision(
+    run_id: &str,
+    attempt: u32,
+    sample: Option<Value>,
+    decisions: Vec<Value>,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        let now = now_timestamp();
+        let metadata = record.ensure_metadata_object();
+        if let Some(sample) = sample {
+            let timeline = metadata
+                .entry("cook_resource_timeline".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+            let timeline = timeline
+                .as_array_mut()
+                .expect("cook resource timeline is an array");
+            timeline.push(json!({
+                "at": now,
+                "attempt": attempt,
+                "sample": sample,
+            }));
+            if timeline.len() > MAX_COOK_RESOURCE_SAMPLES {
+                timeline.drain(..timeline.len() - MAX_COOK_RESOURCE_SAMPLES);
+            }
+        }
+        if !decisions.is_empty() {
+            let events = metadata
+                .entry("cook_supervision_events".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+            let events = events
+                .as_array_mut()
+                .expect("cook supervision events are an array");
+            for decision in &decisions {
+                events.push(json!({
+                    "kind": "budget_breached",
+                    "at": now,
+                    "attempt": attempt,
+                    "decision": decision,
+                }));
+            }
+            if events.len() > MAX_COOK_SUPERVISION_EVENTS {
+                events.drain(..events.len() - MAX_COOK_SUPERVISION_EVENTS);
+            }
+        }
+        true
+    })?;
+    record.ok_or_else(|| Error::internal_unexpected("Cook supervision record was unchanged"))
+}
+
+/// Persist the outcome of a supervision-ordered termination.
+///
+/// Recorded separately from the decision that ordered it because the two can
+/// disagree: a policy can order a stop that the host then fails to carry out
+/// (a pid that survives SIGKILL, a non-Unix host with no process-tree
+/// cancellation at all). Evidence that shows only the order would let a reader
+/// conclude a run was stopped when it was not.
+pub fn record_cook_supervision_stop(
+    run_id: &str,
+    attempt: u32,
+    outcome: Value,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        let metadata = record.ensure_metadata_object();
+        let events = metadata
+            .entry("cook_supervision_events".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        let events = events
+            .as_array_mut()
+            .expect("cook supervision events are an array");
+        events.push(json!({
+            "kind": "stop_executed",
+            "at": now_timestamp(),
+            "attempt": attempt,
+            "outcome": outcome,
+        }));
+        if events.len() > MAX_COOK_SUPERVISION_EVENTS {
+            events.drain(..events.len() - MAX_COOK_SUPERVISION_EVENTS);
+        }
+        true
+    })?;
+    record.ok_or_else(|| Error::internal_unexpected("Cook supervision stop was unchanged"))
+}
+
 /// Bind the Cook's authoritative command result to its terminal progress
 /// record. Provider and gate state alone cannot establish whether publication
 /// completed, so readers use this positive completion fact rather than a list

@@ -198,6 +198,103 @@ fn cook_progress_carries_provider_activity_and_survives_a_failed_probe() {
 }
 
 #[test]
+fn a_supervision_stop_survives_an_hour_of_routine_resource_samples() {
+    // #7015: the point of the evidence is to answer "why was this stopped?"
+    // after the fact. If the decision shared an array with the sample stream, a
+    // long run would evict the answer with the noise.
+    with_isolated_home(|_| {
+        let run_id = "cook-supervision-evidence";
+        submit_plan(&test_plan(), Some(run_id)).expect("submit run");
+
+        let stopped = record_cook_supervision(
+            run_id,
+            1,
+            Some(json!({ "rss_mib": 10_500, "child_processes": 41 })),
+            vec![json!({
+                "metric": "rss_mib",
+                "action": "stop",
+                "limit": 10_240,
+                "observed": 10_500
+            })],
+        )
+        .expect("record the breach");
+        assert_eq!(
+            stopped.metadata["cook_supervision_events"][0]["decision"]["action"],
+            "stop"
+        );
+
+        let executed = record_cook_supervision_stop(
+            run_id,
+            1,
+            json!({ "status": "terminated", "signal": "SIGTERM" }),
+        )
+        .expect("record the termination outcome");
+        assert_eq!(
+            executed.metadata["cook_supervision_events"][1]["kind"],
+            "stop_executed"
+        );
+
+        // Enough routine heartbeats to overrun the bounded timeline window.
+        let mut record = executed;
+        for beat in 0..300 {
+            record =
+                record_cook_supervision(run_id, 1, Some(json!({ "rss_mib": beat })), Vec::new())
+                    .expect("record a routine sample");
+        }
+
+        let timeline = record.metadata["cook_resource_timeline"]
+            .as_array()
+            .expect("timeline is an array");
+        assert_eq!(
+            timeline.len(),
+            240,
+            "the timeline is a bounded rolling window"
+        );
+        assert_eq!(
+            timeline.last().expect("newest sample")["sample"]["rss_mib"],
+            299,
+            "the window keeps the most recent samples"
+        );
+
+        let events = record.metadata["cook_supervision_events"]
+            .as_array()
+            .expect("events are an array");
+        assert_eq!(
+            events.len(),
+            2,
+            "routine samples never displace a supervision decision"
+        );
+        assert_eq!(events[1]["kind"], "stop_executed");
+    });
+}
+
+#[test]
+fn a_termination_the_host_could_not_carry_out_is_recorded_as_a_failure() {
+    // A policy can order a stop that the host then fails to execute. Evidence
+    // that showed only the order would let a reader conclude a run was stopped
+    // when it is still running.
+    with_isolated_home(|_| {
+        let run_id = "cook-supervision-failed-stop";
+        submit_plan(&test_plan(), Some(run_id)).expect("submit run");
+
+        let record = record_cook_supervision_stop(
+            run_id,
+            1,
+            json!({
+                "status": "termination_failed",
+                "error": "process-tree cancellation is only supported on Unix hosts"
+            }),
+        )
+        .expect("record the failed termination");
+
+        assert_eq!(
+            record.metadata["cook_supervision_events"][0]["outcome"]["status"],
+            "termination_failed"
+        );
+    });
+}
+
+#[test]
 fn provider_run_result_reads_declared_output_alias() {
     let role_aliases: AgentTaskProviderRoleAliases = serde_json::from_value(json!({
         "outputs": {

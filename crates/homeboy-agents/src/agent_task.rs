@@ -19,6 +19,7 @@ mod policy;
 mod request;
 mod runtime_tools;
 mod schema;
+mod supervision_policy;
 
 #[cfg(test)]
 mod tests;
@@ -73,4 +74,10 @@ pub use schema::{
     AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_MATRIX_AGGREGATE_SCHEMA, AGENT_TASK_MATRIX_PLAN_SCHEMA,
     AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
     AGENT_TOOL_POLICY_SCHEMA, AGENT_TOOL_REQUEST_SCHEMA, AGENT_TOOL_RESULT_SCHEMA,
+};
+pub use supervision_policy::{
+    highest_supervision_action, AgentSupervisionAction, AgentSupervisionBudget,
+    AgentSupervisionDecision, AgentSupervisionMetric, AgentSupervisionPolicy,
+    AgentSupervisionSample, AGENT_SUPERVISION_POLICY_SCHEMA, DEFAULT_SUPERVISION_REASON,
+    SUPERVISION_STOP_REMEDIATION, SUPERVISION_WARNING_REMEDIATION,
 };

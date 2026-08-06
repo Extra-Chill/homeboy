@@ -79,6 +79,26 @@ pub struct CookProviderActivity {
     /// current activity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub elapsed_seconds: Option<u64>,
+    /// Resident memory held by the selected provider command alone, in MiB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rss_mib: Option<u64>,
+    /// Resident memory summed across every process under the cook, in MiB.
+    ///
+    /// This is the number that matters to a host: a provider holding 300 MiB
+    /// while four linkers hold two gigabytes each is not a light run. Summing
+    /// double-counts shared pages, so it is an upper bound — the safe side for
+    /// a supervision budget, and the number an operator watching a box run out
+    /// of memory is already reasoning about.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tree_rss_mib: Option<u64>,
+    /// Processes observed under the cook, Homeboy's own included.
+    ///
+    /// Set whenever the process table was read at all, including when no
+    /// process in it could be attributed to the provider — "we looked, there
+    /// are nineteen processes, none of them is the provider" is a coherent and
+    /// useful statement. Absent only when no sample was taken.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_processes: Option<usize>,
 }
 
 impl CookProviderActivity {
@@ -120,6 +140,16 @@ impl CookProviderActivity {
             // process sample that found nothing (#11598).
             parts.push(format!("provider command unavailable: {reason}"));
         }
+        // Cost reads next to progress on purpose: "no files written yet" and
+        // "9216 MiB across 41 processes" are the same sentence in an operator's
+        // head, and splitting them is why the cost of a run was only ever
+        // discovered afterwards (#7015).
+        if let Some(rss) = self.tree_rss_mib.or(self.rss_mib) {
+            parts.push(format!("{rss} MiB RSS"));
+        }
+        if let Some(children) = self.child_processes {
+            parts.push(format!("{children} process(es)"));
+        }
         if let Some(seconds) = self.elapsed_seconds {
             parts.push(format!("{} elapsed", format_duration(seconds)));
         }
@@ -130,6 +160,16 @@ impl CookProviderActivity {
     pub fn to_record_value(&self) -> Option<Value> {
         (!self.is_empty()).then(|| serde_json::to_value(self).unwrap_or(Value::Null))
     }
+}
+
+/// Convert a `ps` KiB reading to the MiB a supervision budget is written in.
+///
+/// Rounds down, so a budget is never breached by a rounding artefact. The
+/// resolution loss is irrelevant at the scale budgets are set at, and erring
+/// toward "under the limit" is the correct direction for something that can
+/// terminate a run.
+fn kib_to_mib(kib: u64) -> u64 {
+    kib / 1_024
 }
 
 /// Render seconds the way an operator reads them off a stalled cook.
@@ -185,12 +225,23 @@ impl CookActivityProbe {
         // suppress it.
         let ProviderActivitySample {
             activity: provider_process,
+            descendant_count,
+            tree_rss_kib,
             unavailable,
-            ..
         } = process_activity::descendant_activity(owner_pid);
+        // A tree whose provider could not be identified was still counted and
+        // still weighed. Resource facts therefore attach to *any* successful
+        // read of the process table, not only to one that produced a command;
+        // a sample that was never taken (no `ps`, non-Unix host) leaves them
+        // absent rather than reporting an empty machine.
+        if provider_process.is_some() || unavailable.is_some() {
+            activity.child_processes = Some(descendant_count);
+        }
+        activity.tree_rss_mib = tree_rss_kib.map(kib_to_mib);
         if let Some(DescendantActivity {
             pid,
             elapsed_seconds,
+            rss_kib,
             command,
             source,
             activity_type,
@@ -200,6 +251,7 @@ impl CookActivityProbe {
             activity.command = Some(command);
             activity.command_pid = Some(pid);
             activity.command_elapsed_seconds = Some(elapsed_seconds);
+            activity.rss_mib = rss_kib.map(kib_to_mib);
             activity.activity_source = Some(source.to_string());
             activity.activity_type = Some(activity_type.to_string());
         } else if let Some(unavailable) = unavailable {
@@ -361,6 +413,74 @@ mod tests {
     }
 
     #[test]
+    fn resource_cost_reads_alongside_progress_in_the_summary_line() {
+        // The #7015 dogfood shape: an expensive run whose cost was only visible
+        // after it ended. It has to be one line, next to the edit count.
+        let activity = CookProviderActivity {
+            files_changed: Some(0),
+            command: Some("cargo build".to_string()),
+            command_elapsed_seconds: Some(372),
+            tree_rss_mib: Some(9_216),
+            rss_mib: Some(310),
+            child_processes: Some(41),
+            elapsed_seconds: Some(400),
+            ..Default::default()
+        };
+
+        let summary = activity.summary_line().expect("activity renders");
+
+        assert!(summary.starts_with("no files written yet"));
+        // The tree figure wins: one process holding 310 MiB inside a tree
+        // holding nine gigabytes is not the number that matters.
+        assert!(summary.contains("9216 MiB RSS"));
+        assert!(!summary.contains("310 MiB"));
+        assert!(summary.contains("41 process(es)"));
+        assert!(summary.contains("6m40s elapsed"));
+    }
+
+    #[test]
+    fn a_sample_without_a_tree_reading_falls_back_to_the_command_footprint() {
+        let activity = CookProviderActivity {
+            rss_mib: Some(310),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            activity.summary_line().as_deref(),
+            Some("310 MiB RSS"),
+            "a partial reading is still worth reporting"
+        );
+    }
+
+    #[test]
+    fn unmeasured_resources_are_absent_rather_than_reported_as_zero() {
+        // A non-Unix host, or one whose `ps` failed, must not render as a
+        // machine with no memory and no processes.
+        let activity = CookProviderActivity {
+            files_changed: Some(2),
+            elapsed_seconds: Some(30),
+            ..Default::default()
+        };
+
+        let summary = activity.summary_line().expect("activity renders");
+
+        assert!(!summary.contains("MiB"));
+        assert!(!summary.contains("process(es)"));
+        assert_eq!(activity.child_processes, None);
+        assert_eq!(activity.tree_rss_mib, None);
+    }
+
+    #[test]
+    fn kib_readings_round_down_into_the_unit_budgets_are_written_in() {
+        // Rounding down keeps a rounding artefact from crossing a threshold
+        // that can terminate a run.
+        assert_eq!(kib_to_mib(0), 0);
+        assert_eq!(kib_to_mib(1_023), 0);
+        assert_eq!(kib_to_mib(1_024), 1);
+        assert_eq!(kib_to_mib(9_437_183), 9_215);
+    }
+
+    #[test]
     fn an_empty_sample_renders_nothing_rather_than_an_empty_line() {
         let activity = CookProviderActivity::default();
 
@@ -427,6 +547,9 @@ mod tests {
             command_unavailable: None,
             command_elapsed_seconds: Some(12),
             elapsed_seconds: Some(30),
+            rss_mib: Some(512),
+            tree_rss_mib: Some(2_048),
+            child_processes: Some(7),
         };
 
         let value = activity.to_record_value().expect("non-empty activity");
