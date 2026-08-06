@@ -39,7 +39,19 @@ pub(crate) fn resolve_runtime_tools(
                 failure_classification: AgentTaskFailureClassification::CapabilityMissing,
             });
         }
-        let readiness_command = std::iter::once(tool.command[0].as_str())
+        let executable = resolve_executable_candidate(&tool.command[0]).ok_or_else(|| {
+            RuntimeToolResolutionError {
+                class: "agent_task.runtime_tool_executable_missing",
+                message: format!(
+                    "runtime tool '{}' executable '{}' is unavailable on this execution host",
+                    tool.id, tool.command[0]
+                ),
+                data: json!({ "tool": tool.id, "command": tool.command, "readiness": "executable_missing" }),
+                failure_classification: AgentTaskFailureClassification::CapabilityMissing,
+            }
+        })?;
+        let readiness_command = std::iter::once(executable.as_str())
+            .chain(tool.command.iter().skip(1).map(String::as_str))
             .chain(tool.readiness.version_command.iter().map(String::as_str))
             .collect::<Vec<_>>()
             .join(" ");
@@ -56,17 +68,6 @@ pub(crate) fn resolve_runtime_tools(
                 failure_classification: AgentTaskFailureClassification::InvalidInput,
             });
         }
-        let executable = resolve_executable_candidate(&tool.command[0]).ok_or_else(|| {
-            RuntimeToolResolutionError {
-                class: "agent_task.runtime_tool_executable_missing",
-                message: format!(
-                    "runtime tool '{}' executable '{}' is unavailable on this execution host",
-                    tool.id, tool.command[0]
-                ),
-                data: json!({ "tool": tool.id, "command": tool.command, "readiness": "executable_missing" }),
-                failure_classification: AgentTaskFailureClassification::CapabilityMissing,
-            }
-        })?;
         let version = probe_version(tool, &executable)?;
         let capability_probe =
             probe_capabilities(tool, &executable, &request.request.policy.tools)?;
@@ -165,6 +166,7 @@ fn probe_capabilities(
         return Ok(None);
     };
     let command = std::iter::once(executable)
+        .chain(tool.command.iter().skip(1).map(String::as_str))
         .chain(probe.argv.iter().map(String::as_str))
         .collect::<Vec<_>>()
         .join(" ");
@@ -178,9 +180,11 @@ fn probe_capabilities(
     }
     let mut command = Command::new(executable);
     command
+        .args(tool.command.iter().skip(1))
         .args(&probe.argv)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    apply_probe_environment(&mut command, tool);
     let mut containment = AgentTaskProcessContainment::prepare(&mut command).map_err(|error| {
         RuntimeToolResolutionError {
             class: "agent_task.runtime_tool_capability_probe_failed",
@@ -258,9 +262,11 @@ fn probe_version(
     }
     let mut command = Command::new(executable);
     command
+        .args(tool.command.iter().skip(1))
         .args(&tool.readiness.version_command)
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    apply_probe_environment(&mut command, tool);
     let mut containment = AgentTaskProcessContainment::prepare(&mut command).map_err(|error| {
         RuntimeToolResolutionError {
             class: "agent_task.runtime_tool_readiness_failed",
@@ -329,6 +335,10 @@ fn probe_version(
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
         }
     }
+}
+
+fn apply_probe_environment(command: &mut Command, tool: &AgentTaskRuntimeTool) {
+    command.env_clear().envs(&tool.env);
 }
 
 fn valid_identifier(value: &str) -> bool {
