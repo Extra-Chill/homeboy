@@ -442,13 +442,13 @@ import sys
 
 limit = 150
 lines = open(sys.argv[1]).read().splitlines()
-assert len(lines) == 5, lines
+assert len(lines) == 4, lines
 selected = []
 for line in lines:
     filter_value = line.split(" -E ", 1)[1]
     assert len(filter_value.encode()) <= limit, filter_value
     selected.extend(re.findall(r"test\(=([^)]+)\)", filter_value))
-assert selected == ["member::member_works", "unit::alpha", "unit::beta", "unit::ignored", "api::works"], selected
+assert selected == ["member::member_works", "unit::alpha", "unit::beta", "api::works"], selected
 assert len(selected) == len(set(selected)), selected
 assert json.load(open(sys.argv[2])) == {"total": 5, "passed": 4, "failed": 0, "skipped": 1, "partial": "rust-shard"}
 PY
@@ -482,7 +482,7 @@ import sys
 lines = open(sys.argv[1]).read().splitlines()
 selected = [name for line in lines for name in re.findall(r"test\(=([^)]+)\)", line)]
 assert int(sys.argv[3]) != 0, sys.argv[3]
-assert selected == ["member::member_works", "unit::alpha", "unit::beta", "unit::ignored", "api::works"], selected
+assert selected == ["member::member_works", "unit::alpha", "unit::beta", "api::works"], selected
 assert len(selected) == len(set(selected)), selected
 assert json.load(open(sys.argv[2])) == {"total": 5, "passed": 3, "failed": 1, "skipped": 1, "partial": "rust-shard"}
 PY
@@ -681,8 +681,8 @@ PATH="$BIN_DIR:$PATH" \
 bash "$EXTENSION_DIR/scripts/test-runner.sh" > "$WORK_DIR/nextest-malformed.out" 2>&1
 MALFORMED_EXIT=$?
 set -e
-if [ "$MALFORMED_EXIT" -eq 0 ] || ! grep -q 'nextest emitted a malformed test identity' "$WORK_DIR/nextest-malformed.out"; then
-  printf 'Expected malformed nextest event identity to fail closed\n' >&2
+if [ "$MALFORMED_EXIT" -eq 0 ] || ! grep -q 'nextest executed membership does not match the shard manifest' "$WORK_DIR/nextest-malformed.out"; then
+  printf 'Expected malformed planned terminal stream to fail closed\n' >&2
   exit 1
 fi
 python3 - "$WORK_DIR/nextest-malformed-results.json" <<'PY'
@@ -714,8 +714,6 @@ assert_nextest_event_rejected() {
   fi
 }
 
-assert_nextest_event_rejected terminal-outside-ok 'nextest emitted an unexpected test identity'
-assert_nextest_event_rejected terminal-outside-failed 'nextest emitted an unexpected test identity'
 assert_nextest_event_rejected duplicate-terminal 'nextest emitted an unexpected or duplicate test identity'
 assert_nextest_event_rejected missing-terminal 'nextest executed membership does not match the shard manifest'
 

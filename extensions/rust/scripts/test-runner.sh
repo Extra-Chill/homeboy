@@ -357,6 +357,18 @@ if actual != expected:
 PY
 }
 
+rust_nextest_execution_data() {
+    python3 - "$1" "$2" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:]
+data = json.load(open(source, encoding="utf-8"))
+data["selected"] = [item for item in data["selected"] if item.get("expected_outcome", "executed") == "executed"]
+json.dump(data, open(target, "w"), separators=(",", ":"))
+PY
+}
+
 rust_validate_nextest_membership() {
     local list_file="$1" shard_file="$2"
     python3 - "$list_file" "$shard_file" <<'PY'
@@ -364,15 +376,23 @@ import json
 import sys
 
 listed = json.load(open(sys.argv[1], encoding="utf-8"))
-expected = {item["id"] for item in json.load(open(sys.argv[2], encoding="utf-8"))["selected"]}
-actual = set()
+expected = [item["id"] for item in json.load(open(sys.argv[2], encoding="utf-8"))["selected"]]
+if len(expected) != len(set(expected)):
+    raise SystemExit("Rust test shard error: nextest preflight contains duplicate planned identities")
+actual = []
 for suite in listed.get("rust-suites", {}).values():
+    if not all(isinstance(suite.get(key), str) and suite[key] for key in ("package-name", "kind", "binary-name")):
+        raise SystemExit("Rust test shard error: nextest preflight emitted a malformed suite identity")
     for name, testcase in suite.get("testcases", {}).items():
+        if not isinstance(name, str) or not isinstance(testcase, dict):
+            raise SystemExit("Rust test shard error: nextest preflight emitted a malformed testcase identity")
         if testcase.get("filter-match", {}).get("status") == "matches":
-            actual.add(f'{suite["package-name"]}::{suite["kind"]}::{suite["binary-name"]}::{name}')
-if actual != expected:
-    missing = sorted(expected - actual)
-    extra = sorted(actual - expected)
+            actual.append(f'{suite["package-name"]}::{suite["kind"]}::{suite["binary-name"]}::{name}')
+if len(actual) != len(set(actual)):
+    raise SystemExit("Rust test shard error: nextest preflight emitted duplicate runnable identities")
+if set(actual) != set(expected):
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
     raise SystemExit(f"Rust test shard error: nextest exact filter membership mismatch (missing={missing[:1]}, extra={extra[:1]})")
 PY
 }
@@ -441,14 +461,14 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     status = event.get("event")
     if status not in {"ok", "passed", "failed", "fail", "ignored", "skipped"}:
         continue
-    emitted = emitted_identity(event.get("name"))
+    try:
+        emitted = emitted_identity(event.get("name"))
+    except SystemExit:
+        # Child processes inherit libtest JSON. Scheduler preflight, not their
+        # diagnostics, is the authority for shard membership.
+        continue
     if emitted not in planned_by_emitted:
-        # Nested libtest helpers can report an ignored/skipped terminal event
-        # even though the shard selected only their parent test. They did not
-        # execute, so they are neither membership evidence nor result counts.
-        if status in {"ignored", "skipped"}:
-            continue
-        raise SystemExit(f"Rust test shard error: nextest emitted an unexpected test identity: {event.get('name')}")
+        continue
     if planned_by_emitted[emitted] in actual:
         raise SystemExit(f"Rust test shard error: nextest emitted an unexpected or duplicate test identity: {event.get('name')}")
     actual.add(planned_by_emitted[emitted])
@@ -684,7 +704,7 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_TEST_INVENTORY_FILE:-}${HOMEB
     SHARD_TOTAL="$(jq '.selected | length' "$SHARD_DATA")"
     SHARD_PASSED=0
     SHARD_FAILED=0
-    SHARD_SKIPPED=0
+    SHARD_SKIPPED="$(jq '[.selected[] | select(.expected_outcome == "skipped")] | length' "$SHARD_DATA")"
     if [ "$SELECTED_RUNNER" = "nextest" ]; then
         if ! NEXTEST_MAX_BYTES="$(rust_nextest_filter_max_bytes)"; then
             SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
@@ -692,35 +712,50 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_TEST_INVENTORY_FILE:-}${HOMEB
             rm -f "$SHARD_DATA"
             exit 1
         fi
+        NEXTEST_EXECUTION_DATA="$(mktemp)"
+        rust_nextest_execution_data "$SHARD_DATA" "$NEXTEST_EXECUTION_DATA"
+        NEXTEST_RUNNABLE_TOTAL="$(jq '.selected | length' "$NEXTEST_EXECUTION_DATA")"
         NEXTEST_BATCH_DIR="$(mktemp -d)"
-        if ! rust_nextest_batches "$SHARD_DATA" "$NEXTEST_MAX_BYTES" "$NEXTEST_BATCH_DIR" || ! rust_validate_nextest_batches "$SHARD_DATA" "$NEXTEST_BATCH_DIR"; then
+        if [ "$NEXTEST_RUNNABLE_TOTAL" -gt 0 ] && { ! rust_nextest_batches "$NEXTEST_EXECUTION_DATA" "$NEXTEST_MAX_BYTES" "$NEXTEST_BATCH_DIR" || ! rust_validate_nextest_batches "$NEXTEST_EXECUTION_DATA" "$NEXTEST_BATCH_DIR"; }; then
             SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
             rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
             rm -rf "$NEXTEST_BATCH_DIR"
+            rm -f "$NEXTEST_EXECUTION_DATA"
             rm -f "$SHARD_DATA"
             exit 1
         fi
-        # Validate every planned filter before any test batch can execute.
+        # Capture filter argv values once. Preflight and execution consume the
+        # same shell-owned bytes, never a mutable filter file.
+        declare -A NEXTEST_FILTERS NEXTEST_FILTER_DIGESTS
         for NEXTEST_BATCH in "$NEXTEST_BATCH_DIR"/*.json; do
+            [ -f "$NEXTEST_BATCH" ] || continue
             NEXTEST_FILTER="$(rust_nextest_filter "$NEXTEST_BATCH")"
+            NEXTEST_FILTERS["$NEXTEST_BATCH"]="$NEXTEST_FILTER"
+            NEXTEST_FILTER_DIGESTS["$NEXTEST_BATCH"]="$(printf '%s' "$NEXTEST_FILTER" | shasum -a 256 | cut -d ' ' -f 1)"
             NEXTEST_LIST_JSON="$(mktemp)"
-            homeboy_run_step_capture NEXTEST_LIST_OUTPUT NEXTEST_LIST_EXIT "cargo nextest list" -- rust_capture_stdout "$NEXTEST_LIST_JSON" cargo nextest list --workspace --run-ignored all --message-format json -E "$NEXTEST_FILTER" || true
+            homeboy_run_step_capture NEXTEST_LIST_OUTPUT NEXTEST_LIST_EXIT "cargo nextest list" -- rust_capture_stdout "$NEXTEST_LIST_JSON" cargo nextest list --workspace --message-format json -E "$NEXTEST_FILTER" || true
             if [ "$NEXTEST_LIST_EXIT" -ne 0 ] || ! rust_validate_nextest_membership "$NEXTEST_LIST_JSON" "$NEXTEST_BATCH"; then
                 SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
                 rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
                 homeboy_cleanup_step_capture "$NEXTEST_LIST_OUTPUT"
                 homeboy_cleanup_step_capture "$NEXTEST_LIST_JSON"
                 rm -rf "$NEXTEST_BATCH_DIR"
+                rm -f "$NEXTEST_EXECUTION_DATA"
                 rm -f "$SHARD_DATA"
                 exit 1
             fi
             homeboy_cleanup_step_capture "$NEXTEST_LIST_OUTPUT"
             homeboy_cleanup_step_capture "$NEXTEST_LIST_JSON"
         done
-        echo "Replaying Rust nextest shard: ${SHARD_TOTAL} exact identities in $(printf '%s\n' "$NEXTEST_BATCH_DIR"/*.json | wc -l | tr -d ' ') batches"
+        echo "Replaying Rust nextest shard: ${NEXTEST_RUNNABLE_TOTAL} runnable identities and ${SHARD_SKIPPED} planned skipped identities"
         SHARD_EXIT=0
         for NEXTEST_BATCH in "$NEXTEST_BATCH_DIR"/*.json; do
-            NEXTEST_FILTER="$(rust_nextest_filter "$NEXTEST_BATCH")"
+            [ -f "$NEXTEST_BATCH" ] || continue
+            NEXTEST_FILTER="${NEXTEST_FILTERS[$NEXTEST_BATCH]}"
+            if [ "$(printf '%s' "$NEXTEST_FILTER" | shasum -a 256 | cut -d ' ' -f 1)" != "${NEXTEST_FILTER_DIGESTS[$NEXTEST_BATCH]}" ]; then
+                echo "Rust test shard error: nextest filter changed after preflight." >&2
+                exit 1
+            fi
             homeboy_run_step_capture SHARD_OUTPUT NEXTEST_BATCH_EXIT "cargo nextest run" -- env NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run --manifest-path "${PROJECT_PATH}/Cargo.toml" --workspace --test-threads 1 --no-fail-fast --no-tests fail --message-format libtest-json-plus --message-format-version 0.1 -E "$NEXTEST_FILTER" || true
             if ! NEXTEST_COUNTS="$(rust_nextest_counts "$SHARD_OUTPUT" "$NEXTEST_BATCH")"; then
                 SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
@@ -738,6 +773,7 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_TEST_INVENTORY_FILE:-}${HOMEB
             rm -f "$SHARD_OUTPUT"
         done
         rm -rf "$NEXTEST_BATCH_DIR"
+        rm -f "$NEXTEST_EXECUTION_DATA"
     else
         while IFS=$'\t' read -r package target target_kind name; do
             case "$target_kind" in
