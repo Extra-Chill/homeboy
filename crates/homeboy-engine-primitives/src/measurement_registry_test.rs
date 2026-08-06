@@ -157,15 +157,14 @@ const VERDICT_SITES: &[VerdictSite] = &[
     },
     VerdictSite {
         file: "crates/homeboy-cli/src/commands/fuzz/report.rs",
-        basis: MeasurementBasis::Unguarded,
-        note: "gate_status returns \"passed\" when `gates.iter().all(..)` holds, and `all` on an \
-               empty slice is true -- a campaign that evaluated no gates renders passed having \
-               measured nothing. This is the invariant, not an exception to it. Left as a debt \
-               marker rather than changed here because the fix is a behaviour change to fuzz \
-               reporting and belongs with an owner who can say what an empty gate set should \
-               mean. Blast radius: the `fuzz` command's rendered gate status only; it feeds no \
-               release or merge gate. It became visible when production_lines stopped \
-               truncating at a #[cfg(test)] import.",
+        basis: MeasurementBasis::EmptyPopulation,
+        note: "gate_status refuses to aggregate a pass over an empty gate set. The population is \
+               established independently of the campaign, by fuzz_gate_profile_contract, and the \
+               `measurement` profile declares no gates at all -- so the empty case is routine, \
+               not defensive, and every measurement-profile run used to render `passed` having \
+               evaluated nothing (#11645). Zero gates now reports `not_gated`, which is neither \
+               a pass nor a failure; the command's exit code is decided separately and already \
+               declines to fail that profile.",
     },
     VerdictSite {
         file: "crates/homeboy-cli/src/commands/trace/guardrails.rs",

@@ -270,3 +270,27 @@ fn select_workload_rejects_empty_fuzz_selection() {
         .iter()
         .any(|hint| hint.message.contains("fuzz list")));
 }
+
+/// An empty gate set must not report a pass (#11645).
+///
+/// `all` on an empty slice is `true`, so the obvious implementation greens a run
+/// that evaluated nothing. This is not hypothetical: the `measurement` gate
+/// profile declares no gates, so every run using it took that branch.
+#[test]
+fn an_empty_gate_set_is_not_a_pass() {
+    assert_eq!(gate_status(&[]), "not_gated");
+}
+
+/// The empty-set guard must not swallow real verdicts.
+#[test]
+fn a_gate_set_still_reports_pass_and_fail() {
+    let gate = |status: &str| super::super::types_extra::FuzzGateEvaluation {
+        gate_id: "no-open-findings".to_string(),
+        status: status.to_string(),
+        metric: "open_findings".to_string(),
+        observed: 0.0,
+        expected: 0.0,
+    };
+    assert_eq!(gate_status(&[gate("passed")]), "passed");
+    assert_eq!(gate_status(&[gate("passed"), gate("failed")]), "failed");
+}

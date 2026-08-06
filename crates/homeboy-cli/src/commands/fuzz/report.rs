@@ -797,7 +797,26 @@ fn open_finding_count(campaign: &FuzzCampaign) -> usize {
         .count()
 }
 
+/// Aggregate verdict over an evaluated gate set.
+///
+/// An empty set is not a pass. `all` on an empty slice is `true`, so reporting
+/// `"passed"` would claim every gate held for a run that evaluated none — the
+/// shape #10685 exists to prevent, and #11645 found here.
+///
+/// This is a routine state rather than a defensive branch: the `measurement`
+/// gate profile declares no gates at all
+/// (`fuzz_gate_profile_contract` returns `(vec![], vec![])`), so every
+/// measurement-profile run reached this function with an empty slice and
+/// rendered `passed` having evaluated nothing.
+///
+/// `"not_gated"` keeps that distinguishable from a real pass without pretending
+/// it is a failure — nothing gates on this value, and the command's own exit
+/// code is decided separately and already declines to fail the measurement
+/// profile.
 pub(super) fn gate_status(gates: &[FuzzGateEvaluation]) -> String {
+    if gates.is_empty() {
+        return "not_gated".to_string();
+    }
     if gates.iter().all(|gate| gate.status == "passed") {
         "passed".to_string()
     } else {
