@@ -308,7 +308,9 @@ process.stdin.on('end', () => {
 
 #[test]
 fn provider_adapter_receives_and_consumes_resolved_stdio_runtime_tool() {
-    let tool = script("process.stdout.write(process.env.FIXTURE_MODE + ':ping'); process.exit(0);");
+    let tool = script(
+        "if (process.env.FIXTURE_MODE !== 'isolated') process.exit(17); if (process.argv[2] !== undefined && (process.env.PROBE_HOME !== 'declared' || process.env.PATH !== undefined || process.env.HOME !== undefined)) process.exit(19); if (process.argv[2] === '--version') { process.stdout.write('fixture 1.0'); process.exit(0); } if (process.argv[2] === '--capability-probe') process.exit(0); if (process.argv[2] !== undefined) process.exit(18); process.stdout.write(process.env.FIXTURE_MODE + ':ping'); process.exit(0);",
+    );
     let provider_script = script(
         r#"const { spawnSync } = require('child_process');
 process.stdin.once('data', input => {
@@ -324,9 +326,10 @@ process.stdin.once('data', input => {
     request.runtime_tools = vec![serde_json::from_value(json!({
         "id": "fixture.mcp",
         "command": ["node", tool],
-        "env": { "FIXTURE_MODE": "isolated" },
+        "env": { "FIXTURE_MODE": "isolated", "PROBE_HOME": "declared" },
+        "secret_env": ["HOME"],
         "required_capabilities": ["browser"],
-        "readiness": { "capability_probe": { "argv": [] } }
+        "readiness": { "version_command": ["--version"], "capability_probe": { "argv": ["--capability-probe"] } }
     }))
     .expect("runtime tool")];
     request.policy.tools.tools.insert(
@@ -365,6 +368,10 @@ process.stdin.once('data', input => {
     assert_eq!(
         outcome.metadata["resolved_runtime_tools"][0]["capability_probe"]["status"],
         "succeeded"
+    );
+    assert_eq!(
+        outcome.metadata["resolved_runtime_tools"][0]["version"],
+        "fixture 1.0"
     );
     assert_eq!(
         outcome.metadata["capability_evidence"]["tool_contributed"][0]["capabilities"][0],
@@ -480,7 +487,7 @@ fn runtime_tool_readiness_obeys_the_command_policy() {
     );
     request.policy.tools.commands = serde_json::from_value(json!({
         "mode": "deny_list",
-        "deny": [{ "pattern": "node --version" }]
+        "deny": [{ "pattern": "*node * --version" }]
     }))
     .expect("command policy");
 
@@ -488,6 +495,52 @@ fn runtime_tool_readiness_obeys_the_command_policy() {
         request,
         AgentTaskExecutionContext {
             plan_id: "runtime-tool-policy-plan".to_string(),
+            run_id: None,
+            attempt: 1,
+            cancellation: Default::default(),
+        },
+    );
+
+    assert_eq!(
+        outcome.diagnostics[0].class,
+        "agent_task.runtime_tool_command_denied"
+    );
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::InvalidInput)
+    );
+}
+
+#[test]
+fn runtime_tool_capability_probe_obeys_the_command_policy() {
+    let script = script("process.exit(0);");
+    let (mut request, provider) =
+        request("runtime-tool-capability-policy", format!("node {script}"));
+    request.runtime_tools = vec![serde_json::from_value(json!({
+        "id": "fixture.mcp",
+        "command": ["node", script],
+        "required_capabilities": ["fixture"],
+        "readiness": { "capability_probe": { "argv": ["--capability-probe"] } }
+    }))
+    .expect("runtime tool")];
+    request.policy.tools.tools.insert(
+        "fixture.mcp".to_string(),
+        crate::agent_task::AgentToolPolicyRule {
+            execution_location: crate::agent_task::AgentToolExecutionLocation::Runner,
+            timeout_ms: None,
+            reason: None,
+        },
+    );
+    request.policy.tools.commands = serde_json::from_value(json!({
+        "mode": "deny_list",
+        "deny": [{ "pattern": "*node * --capability-probe" }]
+    }))
+    .expect("command policy");
+
+    let outcome = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]).execute(
+        request,
+        AgentTaskExecutionContext {
+            plan_id: "runtime-tool-capability-policy-plan".to_string(),
             run_id: None,
             attempt: 1,
             cancellation: Default::default(),
