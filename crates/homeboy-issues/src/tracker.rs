@@ -1,7 +1,7 @@
 //! Issue-tracker abstraction.
 //!
 //! [`Tracker`] is the I/O seam: list issues, create / update / close them.
-//! [`reconcile`](super::reconcile::reconcile) is generic over this trait
+//! [`reconcile`](super::reconcile) is generic over this trait
 //! through the [`apply_plan`](super::apply::apply_plan) executor — it never
 //! sees a `gh` shell command directly. This is what unlocks future GitLab,
 //! Linear, or local-file trackers without touching the decision logic.

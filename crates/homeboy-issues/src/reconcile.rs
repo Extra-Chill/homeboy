@@ -1,8 +1,9 @@
 //! The pure reconcile decision function.
 //!
 //! See homeboy issue #1551 for the full behavior contract. The decision
-//! table is encoded in [`reconcile_group`]; [`reconcile`] applies it across
-//! every input group and gathers the resulting actions into a single plan.
+//! table is encoded in `reconcile_with_scope`, which [`reconcile_measured`]
+//! applies across every input group, gathering the resulting actions into a
+//! single plan.
 
 use std::collections::BTreeMap;
 
@@ -19,7 +20,7 @@ use super::plan::{
 /// fetches them with `state=all` so closed-not_planned is visible).
 ///
 /// Pure: no I/O, no clock, no randomness. Same inputs → same plan.
-pub fn reconcile(
+pub(crate) fn reconcile(
     groups: &[IssueGroup],
     existing: &[TrackedIssue],
     config: &ReconcileConfig,
@@ -34,7 +35,7 @@ pub fn reconcile(
 /// whose category disappeared from the latest command output, including the
 /// all-green case where the group list is empty. The explicit scope tells the
 /// reconciler which existing tracker issues belong to the current command run.
-pub fn reconcile_scoped(
+pub(crate) fn reconcile_scoped(
     groups: &[IssueGroup],
     existing: &[TrackedIssue],
     config: &ReconcileConfig,
