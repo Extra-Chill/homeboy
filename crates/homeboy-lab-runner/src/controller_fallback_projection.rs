@@ -4,6 +4,9 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::{mpsc, Arc};
+use std::thread;
+use std::time::Duration;
 
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
@@ -17,6 +20,8 @@ use crate::runner_staging_operation::{
 };
 
 const STORE_SCHEMA: &str = "homeboy/controller-fallback-projection/v1";
+const STARTUP_RECONCILIATION_BATCH_SIZE: usize = 8;
+const REMOTE_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Controller-visible durable receipt for a runner-owned admission.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -82,6 +87,8 @@ struct State {
     schema: String,
     receipts: BTreeMap<String, DeferredControllerReceipt>,
     projections: BTreeMap<String, ControllerMissionProjection>,
+    #[serde(default)]
+    reconciliation: BTreeMap<String, ReconciliationObservation>,
 }
 
 impl Default for State {
@@ -90,8 +97,17 @@ impl Default for State {
             schema: STORE_SCHEMA.to_string(),
             receipts: BTreeMap::new(),
             projections: BTreeMap::new(),
+            reconciliation: BTreeMap::new(),
         }
     }
+}
+
+/// Durable status for work intentionally left for a later bounded pass.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReconciliationObservation {
+    pub state: String,
+    pub detail: String,
 }
 
 /// File-backed controller receipt/projection ledger. Runner admission is
@@ -158,42 +174,106 @@ impl ControllerFallbackProjectionStore {
     pub fn reconcile_after_controller_restart_with<Snapshot, Finalize>(
         &self,
         limit: usize,
-        mut snapshot: Snapshot,
-        mut finalize: Finalize,
+        snapshot: Snapshot,
+        finalize: Finalize,
     ) -> Result<Vec<ControllerMissionProjection>>
     where
-        Snapshot: FnMut(&str, &str) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot>,
-        Finalize: FnMut(&str, &homeboy_core::api_jobs::RunnerJobLogSnapshot) -> Result<bool>,
+        Snapshot: Fn(&str, &str) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot>
+            + Send
+            + Sync
+            + 'static,
+        Finalize: Fn(&str, &homeboy_core::api_jobs::RunnerJobLogSnapshot) -> Result<bool>,
+    {
+        self.reconcile_after_controller_restart_with_timeout(
+            limit,
+            REMOTE_STATUS_TIMEOUT,
+            snapshot,
+            finalize,
+        )
+    }
+
+    fn reconcile_after_controller_restart_with_timeout<Snapshot, Finalize>(
+        &self,
+        limit: usize,
+        timeout: Duration,
+        snapshot: Snapshot,
+        finalize: Finalize,
+    ) -> Result<Vec<ControllerMissionProjection>>
+    where
+        Snapshot: Fn(&str, &str) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot>
+            + Send
+            + Sync
+            + 'static,
+        Finalize: Fn(&str, &homeboy_core::api_jobs::RunnerJobLogSnapshot) -> Result<bool>,
     {
         let state = self.load()?;
-        state
+        let receipts = state
             .receipts
             .iter()
             .filter(|(mission_id, _)| !state.projections.contains_key(*mission_id))
             .take(limit)
-            .filter_map(|(mission_id, receipt)| {
-                let snapshot = snapshot(
-                    &receipt.runner_receipt.handoff.runner_id,
-                    &receipt.runner_receipt.handoff.runner_job_id,
-                )
-                .ok()?;
-                snapshot
-                    .job
-                    .status
-                    .is_terminal()
-                    .then_some((mission_id, receipt, snapshot))
-            })
-            .map(|(mission_id, receipt, snapshot)| {
-                finalize(mission_id, &snapshot)?;
-                self.project_terminal_evidence(
-                    mission_id,
-                    RunnerTerminalEvidence {
-                        outcome: snapshot.job.status.daemon_status_label().to_string(),
-                        artifacts: receipt.runner_receipt.artifacts.clone(),
+            .map(|(mission_id, receipt)| (mission_id.clone(), receipt.clone()))
+            .collect::<Vec<_>>();
+        let snapshot = Arc::new(snapshot);
+        let mut projections = Vec::new();
+
+        for (mission_id, receipt) in receipts {
+            let result = remote_snapshot_with_timeout(
+                Arc::clone(&snapshot),
+                receipt.runner_receipt.handoff.runner_id.clone(),
+                receipt.runner_receipt.handoff.runner_job_id.clone(),
+                timeout,
+            );
+            let snapshot = match result {
+                Ok(snapshot) if snapshot.job.status.is_terminal() => snapshot,
+                Ok(snapshot) => {
+                    self.record_observation(
+                        &mission_id,
+                        "pending",
+                        format!(
+                            "runner job remains {}",
+                            snapshot.job.status.daemon_status_label()
+                        ),
+                    )?;
+                    continue;
+                }
+                Err(error) => {
+                    self.record_observation(&mission_id, "retryable", error.message)?;
+                    continue;
+                }
+            };
+
+            // The ledger lock serializes contenders before they enter lifecycle CAS.
+            // A restart or concurrent controller can then replay the same evidence safely.
+            let _lock = self.lock()?;
+            let mut state = self.load()?;
+            if state.projections.contains_key(&mission_id) {
+                continue;
+            }
+            if let Err(error) = finalize(&mission_id, &snapshot) {
+                state.reconciliation.insert(
+                    mission_id.clone(),
+                    ReconciliationObservation {
+                        state: "retryable".to_string(),
+                        detail: error.message,
                     },
-                )
-            })
-            .collect()
+                );
+                self.persist(&state)?;
+                continue;
+            }
+            let projection = self.project_terminal_evidence_in_state(
+                &mut state,
+                &mission_id,
+                RunnerTerminalEvidence {
+                    outcome: snapshot.job.status.daemon_status_label().to_string(),
+                    artifacts: receipt.runner_receipt.artifacts,
+                },
+            )?;
+            state.reconciliation.remove(&mission_id);
+            self.persist(&state)?;
+            projections.push(projection);
+        }
+        Ok(projections)
     }
 
     /// Projects explicit runner terminal evidence and fails closed if later
@@ -217,6 +297,18 @@ impl ControllerFallbackProjectionStore {
         }
         let _lock = self.lock()?;
         let mut state = self.load()?;
+        let projection =
+            self.project_terminal_evidence_in_state(&mut state, mission_id, evidence)?;
+        self.persist(&state)?;
+        Ok(projection)
+    }
+
+    fn project_terminal_evidence_in_state(
+        &self,
+        state: &mut State,
+        mission_id: &str,
+        evidence: RunnerTerminalEvidence,
+    ) -> Result<ControllerMissionProjection> {
         let receipt = state.receipts.get(mission_id).ok_or_else(|| {
             Error::validation_invalid_argument(
                 "mission_id",
@@ -247,8 +339,28 @@ impl ControllerFallbackProjectionStore {
         state
             .projections
             .insert(mission_id.to_string(), projection.clone());
-        self.persist(&state)?;
         Ok(projection)
+    }
+
+    fn record_observation(&self, mission_id: &str, state: &str, detail: String) -> Result<()> {
+        let _lock = self.lock()?;
+        let mut ledger = self.load()?;
+        if !ledger.projections.contains_key(mission_id) {
+            ledger.reconciliation.insert(
+                mission_id.to_string(),
+                ReconciliationObservation {
+                    state: state.to_string(),
+                    detail,
+                },
+            );
+            self.persist(&ledger)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn observation(&self, mission_id: &str) -> Result<Option<ReconciliationObservation>> {
+        Ok(self.load()?.reconciliation.get(mission_id).cloned())
     }
 
     fn load(&self) -> Result<State> {
@@ -353,24 +465,81 @@ impl ControllerFallbackProjectionStore {
 pub fn reconcile_on_controller_startup() -> Result<usize> {
     Ok(ControllerFallbackProjectionStore::open_default()?
         .reconcile_after_controller_restart_with(
-            8,
+            STARTUP_RECONCILIATION_BATCH_SIZE,
             crate::runner_job_log_snapshot,
             homeboy_agents::agent_task_lifecycle::project_terminal_runner_result,
         )?
         .len())
 }
 
+fn remote_snapshot_with_timeout<Snapshot>(
+    snapshot: Arc<Snapshot>,
+    runner_id: String,
+    job_id: String,
+    timeout: Duration,
+) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot>
+where
+    Snapshot: Fn(&str, &str) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot>
+        + Send
+        + Sync
+        + 'static,
+{
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let _ = sender.send(snapshot(&runner_id, &job_id));
+    });
+    receiver.recv_timeout(timeout).map_err(|error| {
+        Error::internal_unexpected(format!(
+            "runner status query timed out after {}ms: {error}",
+            timeout.as_millis()
+        ))
+    })?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::runner_staging_operation::tests_support::{envelope, Transport};
+    use homeboy_core::api_jobs::{Job, JobStatus, RunnerJobLogSnapshot};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
+    use std::time::Instant;
     use tempfile::tempdir;
+    use uuid::Uuid;
 
     fn store() -> ControllerFallbackProjectionStore {
         ControllerFallbackProjectionStore::open(
             tempdir().expect("temp").keep().join("controller.json"),
         )
         .expect("store")
+    }
+
+    fn snapshot(status: JobStatus) -> RunnerJobLogSnapshot {
+        RunnerJobLogSnapshot {
+            job: Job {
+                id: Uuid::new_v4(),
+                operation: "staged-agent-task".to_string(),
+                status,
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                started_at_ms: None,
+                finished_at_ms: None,
+                event_count: 0,
+                source_snapshot: None,
+                path_materialization_plan: None,
+                stale_reason: None,
+                daemon_lease_id: None,
+                target_runner_id: None,
+                target_project_id: None,
+                claim_id: None,
+                claimed_by_runner_id: None,
+                claimed_at_ms: None,
+                claim_expires_at_ms: None,
+                artifacts: Vec::new(),
+                runner_job_projection: None,
+            },
+            events: Vec::new(),
+        }
     }
 
     #[test]
@@ -446,5 +615,142 @@ mod tests {
                 },
             )
             .is_err());
+    }
+
+    #[test]
+    fn startup_reconciliation_returns_before_a_blocked_remote_query() {
+        let store = store();
+        let envelope = envelope();
+        let mut runner = Transport::compatible();
+        let receipt = store
+            .submit_detached(&mut runner, &envelope)
+            .expect("admit deferred receipt");
+        let started = Instant::now();
+
+        let projected = store
+            .reconcile_after_controller_restart_with_timeout(
+                8,
+                Duration::from_millis(20),
+                |_, _| {
+                    thread::sleep(Duration::from_secs(1));
+                    Ok(snapshot(JobStatus::Succeeded))
+                },
+                |_, _| Ok(true),
+            )
+            .expect("bounded reconciliation");
+
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(projected.is_empty());
+        assert_eq!(
+            store.observation(&receipt.mission_id).expect("observation"),
+            Some(ReconciliationObservation {
+                state: "retryable".to_string(),
+                detail: "runner status query timed out after 20ms: timed out waiting on channel"
+                    .to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn nonterminal_runner_status_stays_pending_for_the_next_bounded_pass() {
+        let store = store();
+        let mut runner = Transport::compatible();
+        let receipt = store
+            .submit_detached(&mut runner, &envelope())
+            .expect("admit deferred receipt");
+
+        let projected = store
+            .reconcile_after_controller_restart_with(
+                8,
+                |_, _| Ok(snapshot(JobStatus::Running)),
+                |_, _| panic!("nonterminal status must not enter lifecycle finalization"),
+            )
+            .expect("nonterminal reconciliation");
+
+        assert!(projected.is_empty());
+        assert_eq!(
+            store.observation(&receipt.mission_id).expect("observation"),
+            Some(ReconciliationObservation {
+                state: "pending".to_string(),
+                detail: "runner job remains running".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn terminal_success_and_failure_project_the_staged_artifacts() {
+        for (status, outcome) in [
+            (JobStatus::Succeeded, "succeeded"),
+            (JobStatus::Failed, "failed"),
+        ] {
+            let store = store();
+            let envelope = envelope();
+            let mut runner = Transport::compatible();
+            let receipt = store
+                .submit_detached(&mut runner, &envelope)
+                .expect("admit deferred receipt");
+            let projected = store
+                .reconcile_after_controller_restart_with(
+                    8,
+                    move |_, _| Ok(snapshot(status)),
+                    |_, _| Ok(true),
+                )
+                .expect("terminal reconciliation");
+
+            assert_eq!(projected.len(), 1);
+            assert_eq!(projected[0].terminal_outcome, outcome);
+            assert_eq!(projected[0].artifacts, receipt.runner_receipt.artifacts);
+        }
+    }
+
+    #[test]
+    fn concurrent_reconcilers_enter_lifecycle_finalization_once_and_replay_after_restart() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("controller.json");
+        let store = ControllerFallbackProjectionStore::open(&path).expect("store");
+        let mut runner = Transport::compatible();
+        store
+            .submit_detached(&mut runner, &envelope())
+            .expect("admit deferred receipt");
+        let barrier = Arc::new(Barrier::new(2));
+        let finalizations = Arc::new(AtomicUsize::new(0));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            let finalizations = Arc::clone(&finalizations);
+            workers.push(thread::spawn(move || {
+                ControllerFallbackProjectionStore::open(path)
+                    .expect("concurrent store")
+                    .reconcile_after_controller_restart_with(
+                        8,
+                        move |_, _| {
+                            barrier.wait();
+                            Ok(snapshot(JobStatus::Succeeded))
+                        },
+                        move |_, _| {
+                            finalizations.fetch_add(1, Ordering::SeqCst);
+                            Ok(true)
+                        },
+                    )
+            }));
+        }
+        for worker in workers {
+            worker
+                .join()
+                .expect("worker join")
+                .expect("worker reconcile");
+        }
+        assert_eq!(finalizations.load(Ordering::SeqCst), 1);
+
+        let replay = ControllerFallbackProjectionStore::open(path)
+            .expect("restarted store")
+            .reconcile_after_controller_restart_with(
+                8,
+                |_, _| Ok(snapshot(JobStatus::Succeeded)),
+                |_, _| panic!("terminal lifecycle CAS must not be re-entered after restart"),
+            )
+            .expect("restart replay");
+        assert!(replay.is_empty());
     }
 }

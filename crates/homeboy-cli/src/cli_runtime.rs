@@ -25,6 +25,7 @@ use homeboy_upgrade::upgrade;
 
 const COOK_PINNED_RUNTIME_ENV: &str = "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME";
 const RUNNER_EXEC_RECOVERY_OWNER_ENV: &str = "HOMEBOY_RUNNER_EXEC_RECOVERY_OWNER";
+const CONTROLLER_FALLBACK_RECONCILIATION_ENV: &str = "HOMEBOY_CONTROLLER_FALLBACK_RECONCILIATION";
 
 pub struct CliRuntime {
     extension_discovery: OnceLock<ExtensionCliDiscovery>,
@@ -358,6 +359,15 @@ impl CliRuntime {
         }
 
         register_startup_providers_before_reconcile();
+        if std::env::var_os(CONTROLLER_FALLBACK_RECONCILIATION_ENV).is_some() {
+            let config = crate::core::defaults::load_config();
+            if register_startup_providers_after_reconcile(&config.agent_task).is_err() {
+                return std::process::ExitCode::from(2);
+            }
+            let _ =
+                crate::runner::controller_fallback_projection::reconcile_on_controller_startup();
+            return std::process::ExitCode::SUCCESS;
+        }
         if let Some(owner_id) = std::env::var_os(RUNNER_EXEC_RECOVERY_OWNER_ENV) {
             let _ = crate::runner::run_scheduled_terminal_runner_exec_recovery(
                 &owner_id.to_string_lossy(),
@@ -369,14 +379,9 @@ impl CliRuntime {
             eprintln!("error: {error}");
             return std::process::ExitCode::from(2);
         }
-        // Runner-owned fallback staging may outlive the controller process. Its
-        // receipt ledger is replay-safe and finalizes staging exactly once.
-        if let Err(error) =
-            crate::runner::controller_fallback_projection::reconcile_on_controller_startup()
-        {
-            eprintln!("error: {error}");
-            return std::process::ExitCode::from(2);
-        }
+        // Runner-owned fallback staging may outlive the controller process. A
+        // detached bounded pass keeps command startup independent of remote I/O.
+        schedule_controller_fallback_reconciliation();
         // Deferred records outlive their worker. Startup restarts the singleton
         // so expired claims recover without another deferral request.
         if command_capability == CommandCapability::Mutation
@@ -720,6 +725,20 @@ fn schedule_runner_exec_recovery() {
             &error,
         );
     }
+}
+
+fn schedule_controller_fallback_reconciliation() {
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let mut command = ProcessCommand::new(executable);
+    command
+        .env(CONTROLLER_FALLBACK_RECONCILIATION_ENV, "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    crate::core::process::detach_from_caller_session(&mut command);
+    let _ = command.spawn();
 }
 
 /// A cook has no durable run record until controller admission. Re-exec before
