@@ -34,6 +34,7 @@ impl LabOffloadProvider for RunnerLabOffload {
                 )
             })?;
         if let Some(plan) = durable_agent_task_plan.as_mut() {
+            validate_runner_plan(plan)?;
             if !plan.metadata.is_object() {
                 plan.metadata = serde_json::json!({ "legacy_metadata": plan.metadata });
             }
@@ -70,6 +71,58 @@ impl LabOffloadProvider for RunnerLabOffload {
             reuse_compatible_snapshot: request.reuse_compatible_snapshot,
             job_overrides: request.job_overrides,
         })
+    }
+}
+
+fn validate_runner_plan(plan: &homeboy_agents::agent_task_scheduler::AgentTaskPlan) -> Result<()> {
+    plan.validate_managed_services().map_err(|message| {
+        homeboy_core::error::Error::validation_invalid_argument(
+            "services.cleanup_deadline_ms",
+            message,
+            None,
+            None,
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use homeboy_agents::agent_task_scheduler::{
+        AgentTaskManagedService, AgentTaskManagedServiceLifecycle, AgentTaskPlan,
+    };
+
+    #[test]
+    fn runner_rejects_an_invalid_opaque_plan_before_execution() {
+        let mut plan = AgentTaskPlan::new("invalid-runner-plan", Vec::new());
+        plan.services.push(AgentTaskManagedService {
+            version: AgentTaskManagedService::VERSION,
+            id: "invalid".to_string(),
+            command: vec!["fixture".to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            env_allowlist: Vec::new(),
+            secret_env: Vec::new(),
+            secret_env_plan: None,
+            host: "127.0.0.1".to_string(),
+            port: None,
+            port_env: None,
+            socket_handoff: false,
+            readiness: None,
+            cleanup_deadline_ms: 0,
+            public_url: None,
+            browser_origin_probe: None,
+            lifecycle: AgentTaskManagedServiceLifecycle::Plan,
+            target: None,
+        });
+
+        let error = validate_runner_plan(&plan).expect_err("invalid opaque plan");
+        assert_eq!(
+            error.code,
+            homeboy_core::error::ErrorCode::ValidationInvalidArgument
+        );
     }
 }
 

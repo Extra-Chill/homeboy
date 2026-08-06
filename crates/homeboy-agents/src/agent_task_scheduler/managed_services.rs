@@ -327,13 +327,35 @@ impl AgentTaskServiceSupervisor {
     }
 
     pub(super) fn cleanup(mut self, reason: &str) -> Vec<AgentTaskManagedServiceRecord> {
-        for service in &mut self.services {
-            let exited = service.child.try_wait().ok().flatten().is_some();
-            let cleanup = service.containment.cleanup_with_grace(
-                Duration::from_millis(service.spec.cleanup_deadline_ms),
-                exited,
-            );
-            let _ = service.child.wait();
+        // Each containment boundary is independent. Terminate them together so
+        // total cleanup is bounded by the longest declared grace period, then
+        // persist ordered results here to avoid ledger write races.
+        let cleanups = thread::scope(|scope| {
+            self.services
+                .iter_mut()
+                .map(|service| {
+                    scope.spawn(move || {
+                        let exited = service.child.try_wait().ok().flatten().is_some();
+                        let cleanup = service.containment.cleanup_with_grace(
+                            Duration::from_millis(service.spec.cleanup_deadline_ms),
+                            exited,
+                        );
+                        let _ = service.child.wait();
+                        cleanup
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| {
+                    handle.join().unwrap_or_else(|_| {
+                        Err(homeboy_core::Error::internal_unexpected(
+                            "managed service cleanup worker panicked",
+                        ))
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        for (service, cleanup) in self.services.iter_mut().zip(cleanups) {
             service.record.state = "stopped".to_string();
             service.record.cleanup_outcome = Some(match &cleanup {
                 Ok(false) => "graceful".to_string(),
@@ -548,14 +570,13 @@ impl ManagedServices {
 fn worker_cleanup_wait_budget(
     records: &[AgentTaskManagedServiceRecord],
 ) -> Result<Duration, String> {
-    let cleanup_ms = records.iter().try_fold(0_u64, |total, record| {
-        requested_cleanup_deadline(record).and_then(|deadline| {
-            total.checked_add(deadline).ok_or_else(|| {
-                "managed service cleanup deadlines exceed the supported worker wait budget"
-                    .to_string()
-            })
-        })
-    })?;
+    let cleanup_ms = records
+        .iter()
+        .map(requested_cleanup_deadline)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .max()
+        .unwrap_or(0);
     Ok(Duration::from_millis(cleanup_ms).saturating_add(WORKER_CLEANUP_COORDINATION_MARGIN))
 }
 
@@ -1261,6 +1282,47 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn cleanup_runs_multiple_service_grace_periods_concurrently() {
+        with_isolated_home(|_| {
+            let mut first = fixture(free_port());
+            first.port = None;
+            first.socket_handoff = false;
+            first.readiness = None;
+            first.cleanup_deadline_ms = 3_000;
+            first.command = vec![
+                "python3".to_string(),
+                "-u".to_string(),
+                "-c".to_string(),
+                "import signal,time; signal.signal(signal.SIGTERM, lambda *_: time.sleep(2.1)); print('ready', flush=True); signal.pause()".to_string(),
+            ];
+            let mut second = first.clone();
+            second.id = "second".to_string();
+            let services = ManagedServices::start(&[first, second], "concurrent-cleanup")
+                .expect("start services");
+            for record in services.records() {
+                let log_path = record.log_path.expect("service log");
+                for _ in 0..100 {
+                    if std::fs::read_to_string(&log_path).is_ok_and(|log| log.contains("ready")) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                assert!(std::fs::read_to_string(&log_path).is_ok_and(|log| log.contains("ready")));
+            }
+            let started = Instant::now();
+            let records = services.cleanup("test");
+
+            assert!(started.elapsed() < Duration::from_secs(4));
+            assert_eq!(records.len(), 2);
+            assert!(records.iter().all(|record| {
+                record.cleanup_outcome.as_deref() == Some("graceful")
+                    && record.cleanup.as_deref() == Some("cleaned_up:test")
+            }));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn cleanup_force_terminates_a_service_that_exceeds_its_deadline() {
         with_isolated_home(|_| {
             let mut service = fixture(free_port());
@@ -1395,14 +1457,14 @@ mod tests {
     }
 
     #[test]
-    fn worker_cleanup_wait_budget_covers_ordered_deadlines_beyond_six_seconds() {
+    fn worker_cleanup_wait_budget_uses_the_longest_deadline_not_the_service_count() {
         let records = vec![
             persisted_record("first", Some(4_000), json!(4_000)),
             persisted_record("second", Some(3_000), json!(3_000)),
         ];
         assert_eq!(
             worker_cleanup_wait_budget(&records).expect("valid cleanup budget"),
-            Duration::from_secs(8)
+            Duration::from_secs(5)
         );
     }
 
