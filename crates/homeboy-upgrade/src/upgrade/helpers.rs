@@ -250,7 +250,7 @@ pub fn run_upgrade_with_method(
                         force,
                         runner_method_override,
                         source_upgrade_path.as_deref(),
-                        source_path.is_some(),
+                        source_upgrade_path.is_some(),
                         None,
                         runner_targets,
                         &extensions_updated,
@@ -334,7 +334,9 @@ pub fn run_upgrade_with_method(
             provider.preflight_configured_runners_for_upgrade(
                 runner_method_override,
                 source_upgrade_path.as_deref(),
-                source_path.is_some(),
+                // A resolved source workspace is the controller-selected build
+                // input, even when it was inferred from the source install.
+                source_upgrade_path.is_some(),
                 runner_targets,
             )
         })?
@@ -388,7 +390,7 @@ pub fn run_upgrade_with_method(
                 force,
                 runner_method_override,
                 source_upgrade_path.as_deref(),
-                source_path.is_some(),
+                source_upgrade_path.is_some(),
                 new_build_identity.as_deref(),
                 runner_targets,
                 &extensions_updated,
