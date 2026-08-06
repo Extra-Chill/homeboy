@@ -44,7 +44,9 @@ fn deferred_staging_emits_only_durable_run_commands() {
         controller_projection: "deferred".to_string(),
     };
     let output = detached_staging_submission_output(
-        crate::lab_staging_controller::DetachedStagingSubmission::Deferred(receipt.clone()),
+        crate::lab_staging_controller::DetachedStagingSubmission::Deferred(Box::new(
+            receipt.clone(),
+        )),
         "run-1",
     );
 

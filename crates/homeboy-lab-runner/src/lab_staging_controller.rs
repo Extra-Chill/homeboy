@@ -1003,7 +1003,7 @@ where
                 request,
                 daemon_error,
             )
-            .map(DetachedStagingSubmission::Deferred);
+            .map(|receipt| DetachedStagingSubmission::Deferred(Box::new(receipt)));
         }
     };
     let recipe = persist_lab_staging_recipe_for_transport(
@@ -1078,7 +1078,7 @@ where
 /// staging. They have separate status and reconciliation authorities.
 pub(crate) enum DetachedStagingSubmission {
     Controller { job_id: String },
-    Deferred(crate::controller_fallback_projection::DeferredControllerReceipt),
+    Deferred(Box<crate::controller_fallback_projection::DeferredControllerReceipt>),
 }
 
 /// Explicit detached fallback after local controller admission has failed. The

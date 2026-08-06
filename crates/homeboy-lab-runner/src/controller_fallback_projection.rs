@@ -443,6 +443,9 @@ impl ControllerFallbackProjectionStore {
             .create(true)
             .read(true)
             .write(true)
+            // This separate lock file protects read-modify-write ledger updates;
+            // ledger state itself is atomically replaced by `persist`.
+            .truncate(false)
             .open(self.path.with_extension("lock"))
             .map_err(|error| {
                 Error::internal_io(
