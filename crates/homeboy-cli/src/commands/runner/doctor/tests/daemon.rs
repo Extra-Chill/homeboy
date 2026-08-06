@@ -29,6 +29,7 @@ fn healthy_session_health_probe_is_observational() {
         local_url: Some(format!("http://{addr}")),
         tunnel_pid: Some(1234),
         tunnel_process_start_identity: None,
+        proxy_forward: None,
         remote_daemon_pid: Some(4242),
         remote_daemon_lease_id: Some("lease-doctor".to_string()),
         homeboy_version: "test".to_string(),
