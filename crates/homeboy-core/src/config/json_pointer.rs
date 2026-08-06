@@ -29,6 +29,36 @@ pub fn remove_json_pointer(root: &mut Value, pointer: &str) -> Result<()> {
     remove_child(parent, &token)
 }
 
+/// Look up a value at a JSON pointer without creating intermediate objects.
+///
+/// `None` means the pointer is well-formed but does not exist in `root`.
+pub fn get_json_pointer<'a>(root: &'a Value, pointer: &str) -> Result<Option<&'a Value>> {
+    let pointer = normalize_pointer(pointer)?;
+    if pointer.is_empty() {
+        return Ok(Some(root));
+    }
+
+    let mut current = root;
+    for token in pointer.split('/').skip(1).map(unescape_token) {
+        current = match current {
+            Value::Object(map) => match map.get(&token) {
+                Some(value) => value,
+                None => return Ok(None),
+            },
+            Value::Array(array) => match token.parse::<usize>() {
+                Ok(index) => match array.get(index) {
+                    Some(value) => value,
+                    None => return Ok(None),
+                },
+                Err(_) => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+    }
+
+    Ok(Some(current))
+}
+
 /// Navigate to the value at a JSON pointer without creating intermediate objects.
 /// Returns an error if any segment along the path is missing.
 fn navigate_pointer<'a>(root: &'a mut Value, pointer: &str) -> Result<&'a mut Value> {

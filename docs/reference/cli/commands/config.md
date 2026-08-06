@@ -31,10 +31,14 @@ Manage global Homeboy configuration
 ## `homeboy config show`
 
 ```sh
-homeboy config show [OPTIONS]
+homeboy config show [OPTIONS] [POINTER]
 ```
 
 Display configuration (merged defaults + file)
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `[POINTER]` | no | JSON pointer path to read (e.g., /notifications/default_transport) |
 
 | Option | Value | Description |
 | --- | --- | --- |
