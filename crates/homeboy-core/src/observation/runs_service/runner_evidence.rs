@@ -24,6 +24,23 @@ pub struct RunnerConnectionInfo {
     pub connected: bool,
     pub stale_runner_jobs: Vec<StaleRunnerJobInfo>,
     pub active_jobs: Vec<crate::api_jobs::ActiveRunnerJobSummary>,
+    /// Whether `active_jobs` is a complete answer for this runner.
+    ///
+    /// An empty `active_jobs` is ambiguous on its own: it means either "this
+    /// runner has no active work" or "this runner did not answer". A federating
+    /// reader (`homeboy activity`) must be able to tell those apart so a runner
+    /// outage becomes a *partial* result naming the runner rather than a
+    /// silently-empty one.
+    ///
+    /// `true` — the runner answered; `active_jobs` is authoritative (possibly
+    /// empty). `false` — no answer: either the runner had no connected session
+    /// (never queried, no network performed) or the bounded typed-job probe
+    /// timed out or errored. `connected` distinguishes those two cases, and
+    /// [`Self::active_jobs_error`] carries the probe failure when there was one.
+    pub active_jobs_available: bool,
+    /// The probe failure, when a connected runner did not return its active-job
+    /// view. `None` when the runner answered, or when it was never queried.
+    pub active_jobs_error: Option<String>,
 }
 
 /// A stale runner job, slimmed to the fields `runs_service` reconciles. Field
@@ -353,6 +370,8 @@ mod tests {
                     connected: true,
                     active_jobs: Vec::new(),
                     stale_runner_jobs: Vec::new(),
+                    active_jobs_available: true,
+                    active_jobs_error: None,
                 }]
             }
             fn daemon_api_get(&self, _: &str, _: &str) -> Result<Value> {
@@ -411,6 +430,8 @@ mod tests {
                     connected: true,
                     active_jobs: Vec::new(),
                     stale_runner_jobs: Vec::new(),
+                    active_jobs_available: true,
+                    active_jobs_error: None,
                 }]
             }
             fn daemon_api_get(&self, _: &str, _: &str) -> Result<Value> {
@@ -460,6 +481,8 @@ mod tests {
                     connected: true,
                     active_jobs: Vec::new(),
                     stale_runner_jobs: Vec::new(),
+                    active_jobs_available: true,
+                    active_jobs_error: None,
                 }]
             }
             fn daemon_api_get(&self, _: &str, _: &str) -> Result<Value> {

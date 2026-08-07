@@ -161,8 +161,9 @@ pub use run_lookup::*;
 pub use runner_downloads::*;
 pub use runner_evidence::with_runner_evidence;
 pub use runner_evidence::{
-    mirrored_runner_job_identities, register_runner_evidence_provider, RemoteArtifactDownloadInfo,
-    RunnerConnectionInfo, RunnerEvidenceProvider, StaleRunnerJobInfo,
+    has_runner_evidence_provider, mirrored_runner_job_identities,
+    register_runner_evidence_provider, RemoteArtifactDownloadInfo, RunnerConnectionInfo,
+    RunnerEvidenceProvider, StaleRunnerJobInfo,
 };
 
 /// Safe, bounded retention of terminal observation rows, registered local

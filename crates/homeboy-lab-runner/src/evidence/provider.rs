@@ -57,6 +57,12 @@ impl RunnerEvidenceProvider for RunnerEvidence {
             .map(|report| RunnerConnectionInfo {
                 runner_id: report.runner_id,
                 connected: report.connected,
+                active_jobs_available: report.active_job_state
+                    == crate::RunnerActiveJobState::Available,
+                active_jobs_error: report
+                    .active_job_error
+                    .as_ref()
+                    .map(|error| format!("{} ({})", error.message, error.code)),
                 active_jobs: report.active_jobs,
                 stale_runner_jobs: report
                     .stale_runner_jobs
@@ -85,6 +91,16 @@ impl RunnerEvidenceProvider for RunnerEvidence {
             .map(|snapshot| RunnerConnectionInfo {
                 runner_id: snapshot.runner_id,
                 connected: snapshot.connected,
+                // A connected runner whose typed-job probe timed out reports
+                // `Unavailable` with an empty `active_jobs`. Carrying that
+                // distinction is what lets `homeboy activity` return a partial
+                // answer naming the runner instead of a silently-empty one.
+                active_jobs_available: snapshot.active_job_state
+                    == crate::RunnerActiveJobState::Available,
+                active_jobs_error: snapshot
+                    .active_job_error
+                    .as_ref()
+                    .map(|error| format!("{} ({})", error.message, error.code)),
                 active_jobs: snapshot.active_jobs,
                 stale_runner_jobs: Vec::new(),
             })

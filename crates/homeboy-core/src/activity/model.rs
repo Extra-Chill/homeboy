@@ -124,12 +124,72 @@ pub struct ActivityCounts {
     pub unknown: usize,
 }
 
+/// One runner consulted while federating runner-resident activity.
+///
+/// A run offloaded to a Lab runner is recorded *on that runner* until it
+/// reports back, so a controller-local read cannot see it. This records what
+/// the federation actually asked, per runner, so an empty answer is never
+/// confused with an unasked question (#W3-15).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivityRunnerSource {
+    pub runner_id: String,
+    /// Whether the controller holds a connected session for this runner.
+    pub connected: bool,
+    /// Whether this runner's active-job view was actually read. `false` for a
+    /// runner with no connected session — nothing was asked and no network was
+    /// performed, which is not a failure.
+    pub queried: bool,
+    /// Runner-resident items federated into this report from this runner.
+    pub items: usize,
+    /// Why a connected runner did not answer. Present only when `connected` is
+    /// `true` and `queried` is `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// How the runner-resident activity source behaved for one report.
+///
+/// This is the accountability record for the federation: whether it ran, which
+/// runners it consulted, and whether any connected runner failed to answer. A
+/// runner outage degrades this to `partial` — it never fails the command.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivityRunnerFederation {
+    /// Whether runner federation was attempted at all. `false` when the caller
+    /// opted out, or when no runner layer is registered in this process.
+    pub enabled: bool,
+    /// `true` when at least one *connected* runner did not return its
+    /// active-job view, so runner-resident work may be missing from this report.
+    pub partial: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runners: Vec<ActivityRunnerSource>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivityReport {
     pub schema: &'static str,
     pub command: &'static str,
     pub counts: ActivityCounts,
     pub items: Vec<ActivityItem>,
+    /// Whether this surface reconciled while reading.
+    ///
+    /// `activity` is a deliberately **non**-reconciling read model, so this is
+    /// always `false` here — while `agent-task status` is "a reconciling read
+    /// that writes" and `runs watch` reconciles on purpose. The two surfaces can
+    /// therefore legitimately report different states for the same run at the
+    /// same instant, *and calling one changes what the other returns*. Emitting
+    /// the flag lets a consumer tell which kind of answer it is holding instead
+    /// of inferring it from the command name (#W3-15).
+    #[serde(default)]
+    pub reconciled: bool,
+    /// `true` when at least one activity source could not be fully read, so
+    /// this report is partial rather than complete. Never an error: every
+    /// source that did answer is still returned.
+    #[serde(default)]
+    pub partial: bool,
+    /// Per-runner accounting for the runner-resident source, so a `partial`
+    /// report names what it could not reach.
+    #[serde(default)]
+    pub runner_federation: ActivityRunnerFederation,
     /// Agent-task record-health summary, carried as JSON so core does not depend
     /// on the agent-task health type. Supplied by the agent-task activity
     /// provider (null when the agent-task subsystem is absent).

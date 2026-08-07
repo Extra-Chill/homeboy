@@ -4,7 +4,8 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy::core::activity::{
-    self, ActivityEvidenceRef, ActivityItem, ActivityReport, ActivityScope, ActivityState,
+    self, ActivityEvidenceRef, ActivityItem, ActivityOptions, ActivityReport, ActivityScope,
+    ActivityState,
 };
 use homeboy::core::notification_payload::{
     NotifyAction, NotifyAttachment, NotifyEventKind, NotifyPayload, NotifySubject,
@@ -44,6 +45,15 @@ pub struct ActivityListArgs {
     /// Include older completed records instead of active + recent.
     #[arg(long)]
     all: bool,
+    /// Skip connected Lab runners and report only controller-local records.
+    ///
+    /// Runner federation is on by default because a freshly-offloaded run's
+    /// durable record lives on the runner, so a controller-local answer silently
+    /// omits it. The remote query is bounded by the shared read-only probe
+    /// deadline and a runner that does not answer only marks the result
+    /// `partial` — but a latency-sensitive caller can opt out here.
+    #[arg(long = "no-runners")]
+    no_runners: bool,
 }
 
 #[derive(Args, Clone)]
@@ -107,6 +117,7 @@ pub fn run(args: ActivityArgs) -> CmdResult<ActivityOutput> {
         .unwrap_or(ActivityCommand::List(ActivityListArgs {
             limit: 20,
             all: false,
+            no_runners: false,
         })) {
         ActivityCommand::List(args) => list(args),
         ActivityCommand::Show { id } => show(&id),
@@ -128,6 +139,10 @@ pub fn render_activity_summary(payload: &serde_json::Value) -> Option<String> {
         counts.get("failed")?.as_u64()?,
         counts.get("stale")?.as_u64()?,
     ));
+    // A partial answer that renders identically to a complete one is worse than
+    // no answer: the operator reads "nothing is running" when the truth is
+    // "a runner did not answer". Name the runners that were unreachable.
+    lines.extend(unreachable_runner_lines(report));
     if items.is_empty() {
         lines.push("No active or recent Homeboy activity.".to_string());
         return Some(format!("{}\n", lines.join("\n")));
@@ -183,13 +198,48 @@ pub fn render_activity_summary(payload: &serde_json::Value) -> Option<String> {
     Some(format!("{}\n", lines.join("\n")))
 }
 
+/// Render the "this answer is incomplete" lines for a report, naming each
+/// connected runner that failed to return its work.
+fn unreachable_runner_lines(report: &serde_json::Value) -> Vec<String> {
+    if report.get("partial").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Vec::new();
+    }
+    let mut lines = vec![
+        "partial: one or more sources did not answer; work may be missing from this list."
+            .to_string(),
+    ];
+    let runners = report
+        .pointer("/runner_federation/runners")
+        .and_then(serde_json::Value::as_array);
+    for runner in runners.into_iter().flatten() {
+        if runner.get("queried").and_then(serde_json::Value::as_bool) != Some(false)
+            || runner.get("connected").and_then(serde_json::Value::as_bool) != Some(true)
+        {
+            continue;
+        }
+        let id = runner
+            .get("runner_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("-");
+        let reason = runner
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("did not answer");
+        lines.push(format!("  unreachable runner: {id}: {reason}"));
+    }
+    lines
+}
+
 fn list(args: ActivityListArgs) -> CmdResult<ActivityOutput> {
     let scope = if args.all {
         ActivityScope::All
     } else {
         ActivityScope::ActiveRecent
     };
-    let report = activity::activity_report(scope, args.limit)?;
+    let options = ActivityOptions {
+        federate_runners: !args.no_runners && ActivityOptions::default().federate_runners,
+    };
+    let report = activity::activity_report_with(scope, args.limit, options)?;
     let actionable = actionable_for_activity_report(&report);
     Ok((
         ActivityOutput::Report(Box::new(ActivityReportOutput { report, actionable })),
@@ -655,6 +705,7 @@ mod tests {
             list(ActivityListArgs {
                 limit: 1,
                 all: false,
+                no_runners: true,
             })
             .expect("list activity");
             show(&run.id).expect("show activity");
@@ -668,6 +719,7 @@ mod tests {
             list(ActivityListArgs {
                 limit: 1,
                 all: false,
+                no_runners: true,
             })
             .expect("repeat list activity");
 

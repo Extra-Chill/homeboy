@@ -842,11 +842,10 @@ fn discovery_lists_durable_runs_with_operator_commands() {
         assert_eq!(report.record_health.conflicting, 0);
         assert!(!report.truncated);
         assert!(report.limit.is_none());
-        assert!(report
-            .lab_discovery
-            .runner_scoped_command
-            .contains("--runner"));
-        assert!(report.lab_discovery.fallback_command.contains("runs list"));
+        // The prose apology this replaced told operators to go run a second,
+        // runner-scoped command themselves. Discovery now points at the surface
+        // that federates runner-resident records instead (#W3-15).
+        assert!(report.federated_command.contains("homeboy activity"));
         assert_eq!(run.run_id, "run-discovery-list");
         assert_eq!(run.state, AgentTaskRunState::Queued);
         assert_eq!(run.repo.as_deref(), Some("homeboy"));
