@@ -1074,7 +1074,7 @@ fn batch_artifacts(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
 fn run_batch_cook_fanout(args: AgentTaskFanoutRunPlanArgs) -> CmdResult<Value> {
     let mut plan = load_batch_cook_fanout_plan(&args.input)?;
     plan.apply_ai_tool_override(args.ai_tool.as_deref());
-    plan.apply_max_concurrency_override(args.max_concurrency);
+    plan.apply_max_concurrency_override(args.max_concurrency.map(|value| value as usize));
     plan.apply_max_duration_override(args.max_duration);
     if let Some(record_run_id) = args.record_run_id {
         plan.rekey(record_run_id);
@@ -1090,7 +1090,7 @@ pub(crate) fn run_batch_cook_fanout_with_attempt_dispatcher(
 ) -> CmdResult<Value> {
     let mut plan = load_batch_cook_fanout_plan(&args.input)?;
     plan.apply_ai_tool_override(args.ai_tool.as_deref());
-    plan.apply_max_concurrency_override(args.max_concurrency);
+    plan.apply_max_concurrency_override(args.max_concurrency.map(|value| value as usize));
     plan.apply_max_duration_override(args.max_duration);
     if let Some(record_run_id) = args.record_run_id {
         plan.rekey(record_run_id);
@@ -2236,7 +2236,7 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
         schema: batch_cook_fanout_plan_schema(),
         fanout_id,
         cooks,
-        max_concurrency: args.max_concurrency,
+        max_concurrency: args.max_concurrency.map(|value| value as usize),
         max_duration_seconds: args.max_duration,
         metadata: serde_json::json!({
             "source": "agent-task fanout cook-batch",

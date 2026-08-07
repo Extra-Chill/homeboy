@@ -93,10 +93,10 @@ pub struct AgentTaskFanoutCookBatchArgs {
     /// it are reported as `concurrency` in the batch result.
     #[arg(
         long = "max-concurrency",
-        value_parser = clap::value_parser!(usize).range(1..),
+        value_parser = clap::value_parser!(u32).range(1..),
         value_name = "N"
     )]
-    pub max_concurrency: Option<usize>,
+    pub max_concurrency: Option<u32>,
     /// Wall-clock budget, in seconds, for the whole batch — every child, every
     /// attempt, and every gate.
     ///
@@ -177,10 +177,10 @@ pub struct AgentTaskFanoutRunPlanArgs {
     /// `fanout cook-batch --max-concurrency`.
     #[arg(
         long = "max-concurrency",
-        value_parser = clap::value_parser!(usize).range(1..),
+        value_parser = clap::value_parser!(u32).range(1..),
         value_name = "N"
     )]
-    pub max_concurrency: Option<usize>,
+    pub max_concurrency: Option<u32>,
     /// Wall-clock budget, in seconds, for the whole batch. See
     /// `fanout cook-batch --max-duration`.
     #[arg(
