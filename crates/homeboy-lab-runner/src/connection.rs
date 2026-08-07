@@ -305,10 +305,9 @@ pub(crate) fn rotate_daemon_generation(
         };
     if let Some(expected_binary_sha256) = candidate_binary_sha256 {
         let freshness = daemon_http_freshness(runner_id, &local_url, "", candidate_identity);
-        let hash_matches = freshness.as_ref().is_ok_and(|report| {
-            report.fresh && report.binary_hash.as_deref() == Some(expected_binary_sha256)
-        });
-        if !hash_matches {
+        if let Err(error) =
+            verify_candidate_daemon_freshness(runner_id, expected_binary_sha256, freshness)
+        {
             if let Some(lease_id) = daemon.lease_id.as_deref() {
                 let command = format!(
                     "{} daemon stop --force --lease-id {}",
@@ -320,18 +319,11 @@ pub(crate) fn rotate_daemon_generation(
             if let Some(pid) = tunnel_pid {
                 terminate_pid(pid);
             }
-            return Err(Error::validation_invalid_argument(
-                "reconnect",
-                freshness.err().map_or_else(
-                    || {
-                        "candidate daemon did not report the validated binary SHA-256 as fresh"
-                            .to_string()
-                    },
-                    |error| format!("candidate daemon freshness verification failed: {error}"),
-                ),
-                Some(runner_id.to_string()),
-                None,
-            ));
+            // The candidate was never activated. Remove any retained entry for
+            // this generation just as the preceding startup-validation path
+            // does, leaving the current admission owner untouched.
+            let _ = super::generation_store::rollback_candidate(runner_id, &current, &generation);
+            return Err(error);
         }
     }
     let candidate = RunnerSession {
@@ -386,6 +378,39 @@ pub(crate) fn rotate_daemon_generation(
         return Err(error);
     }
     Ok(())
+}
+
+/// Candidate startup is admitted only when the daemon's own freshness report
+/// proves it is serving the exact immutable binary selected by refresh.
+fn verify_candidate_daemon_freshness(
+    runner_id: &str,
+    expected_binary_sha256: &str,
+    freshness: std::result::Result<DaemonFreshnessReport, String>,
+) -> Result<()> {
+    match freshness {
+        Ok(report)
+            if report.fresh && report.binary_hash.as_deref() == Some(expected_binary_sha256) =>
+        {
+            Ok(())
+        }
+        Ok(report) => Err(Error::validation_invalid_argument(
+            "reconnect",
+            format!(
+                "candidate daemon freshness did not match the immutable binary SHA-256 (expected {expected_binary_sha256}, observed {}, fresh={}, stale_reason_code={:?})",
+                report.binary_hash.as_deref().unwrap_or("<missing>"),
+                report.fresh,
+                report.stale_reason_code,
+            ),
+            Some(runner_id.to_string()),
+            None,
+        )),
+        Err(error) => Err(Error::validation_invalid_argument(
+            "reconnect",
+            format!("candidate daemon freshness verification failed: {error}"),
+            Some(runner_id.to_string()),
+            None,
+        )),
+    }
 }
 
 fn rollback_rotated_candidate(
