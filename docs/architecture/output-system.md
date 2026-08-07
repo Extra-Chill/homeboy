@@ -70,6 +70,12 @@ Success:
 }
 ```
 
+For `homeboy agent-task status`, `status` and `success` describe whether the
+read completed. The inspected run's lifecycle value is exposed separately as
+`subject_state` (for example `queued`, `running`, `failed`, or `succeeded`).
+Status reads exit zero even when the subject needs action; use
+`--strict-subject-exit` to preserve the legacy nonzero exit behavior.
+
 Failure:
 
 ```json
@@ -92,6 +98,8 @@ Notes:
 - `next_actions`, `refs`, `artifacts`, and `evidence` are populated only from
   typed command-output metadata. The envelope does not infer them from incidental
   payload keys such as `run_id`, `hints`, or `artifact_path`.
+- `subject_state` is currently emitted only by `agent-task status`; it is
+  omitted for unrelated payloads that happen to contain a `state` field.
 
 ## Actionable result metadata
 

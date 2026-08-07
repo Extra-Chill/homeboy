@@ -1082,6 +1082,15 @@ where
         if let Some(claims) = existing.metadata.get("cook_operation_claims") {
             record.metadata["cook_operation_claims"] = claims.clone();
         }
+        // Cook reports `provider_start` before a local executor or Lab runner
+        // re-submits its materialized plan. That submission refreshes plan-owned
+        // fields but must not erase the durable lifecycle boundary that says
+        // provider work has started.
+        for key in ["cook_id", "cook_attempt", "cook_progress"] {
+            if let Some(value) = existing.metadata.get(key) {
+                record.metadata[key] = value.clone();
+            }
+        }
         // A runner re-submitting a retry must not erase the predecessor identity
         // that makes the reservation discoverable through the indexed lookup.
         for key in [

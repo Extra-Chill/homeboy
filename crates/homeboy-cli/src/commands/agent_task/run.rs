@@ -24,8 +24,8 @@ use homeboy::core::worktree_providers::{
 use super::super::agent_task_dispatch::DispatchArgs;
 use super::super::CmdResult;
 use super::args::{
-    AgentTaskCookArgs, CookContinueArgs, PromotionProviderArgs, RetryArgs, RunArgs, RunPlanArgs,
-    StatusArgs, SubmitArgs,
+    AgentTaskCookArgs, CookContinueArgs, LifecycleReadArgs, PromotionProviderArgs, RetryArgs,
+    RunArgs, RunPlanArgs, SubmitArgs,
 };
 
 const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
@@ -1534,7 +1534,8 @@ pub(super) fn submit(args: SubmitArgs) -> CmdResult<Value> {
     Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
 }
 
-pub(super) fn resume(args: StatusArgs) -> CmdResult<Value> {
+pub(super) fn resume(args: impl Into<LifecycleReadArgs>) -> CmdResult<Value> {
+    let args = args.into();
     run_resume_with_executor_and_bridge(
         args.run_id,
         args.bridge,

@@ -19,9 +19,10 @@ use super::super::super::tool::AgentTaskToolArgs;
 use super::cook::{AgentTaskCookArgs, AgentTaskLoopArgs, PromotionProviderArgs};
 use super::fanout::AgentTaskFanoutArgs;
 use super::lifecycle::{
-    AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs, LogsArgs,
-    PromoteArgs, RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs,
-    RunArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs,
+    AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs,
+    LifecycleReadArgs, LogsArgs, PromoteArgs, RecordReplacementGateProofArgs,
+    ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs, RunArgs, RunPlanArgs, RuntimeRecoverArgs,
+    RuntimeValidateArgs, StatusArgs, SubmitArgs,
 };
 
 pub use super::super::auth::{
@@ -117,7 +118,7 @@ pub enum AgentTaskCommand {
     /// `--raw` additionally emits transport frames for diagnostics.
     Logs(LogsArgs),
     /// List artifacts and evidence refs recorded for a completed run.
-    Artifacts(StatusArgs),
+    Artifacts(LifecycleReadArgs),
     /// Discover or attach selected outputs retained in a terminal Lab Cook workspace.
     RetainedArtifacts(RetainedArtifactsArgs),
     /// Retrieve selected durable evidence recorded for a run.
@@ -142,7 +143,7 @@ pub enum AgentTaskCommand {
     /// Mark a queued or stale-running durable run as cancelled.
     Cancel(CancelArgs),
     /// Resume a queued or stale-running durable run.
-    Resume(StatusArgs),
+    Resume(LifecycleReadArgs),
     /// Submit a fresh durable run from an existing run's plan.
     Retry(RetryArgs),
     /// Cook, submit, and inspect batches of independent tasks.

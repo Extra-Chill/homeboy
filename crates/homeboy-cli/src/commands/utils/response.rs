@@ -26,6 +26,10 @@ pub struct CommandResultEnvelope<T: Serialize> {
     pub success: bool,
     pub exit_code: i32,
     pub status: String,
+    /// Lifecycle state of the command's subject, distinct from this envelope's
+    /// query/execution result (`success` and `status`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<CommandRunRef>,
     #[serde(default, skip_serializing_if = "CommandResultRefs::is_empty")]
@@ -338,6 +342,7 @@ impl<T: Serialize> CommandResultEnvelope<T> {
             success: true,
             exit_code: 0,
             status: "succeeded".to_string(),
+            subject_state: None,
             run: None,
             refs: CommandResultRefs::default(),
             summary: None,
@@ -368,6 +373,7 @@ impl CommandResultEnvelope<()> {
             success: false,
             exit_code,
             status: status_for_result(None, exit_code),
+            subject_state: None,
             run: None,
             refs: CommandResultRefs::default(),
             summary: Some(err.message.clone()),
@@ -592,6 +598,7 @@ impl CommandResultEnvelope<()> {
             success: self.success,
             exit_code: self.exit_code,
             status: self.status,
+            subject_state: self.subject_state,
             run: self.run,
             refs: self.refs,
             summary: self.summary,
@@ -660,6 +667,14 @@ fn envelope_for_data(
         success,
         exit_code,
         status: status_for_result(Some(&data), exit_code),
+        subject_state: (identity.command == "agent-task"
+            && identity.operation.as_deref() == Some("status"))
+        .then(|| {
+            data.get("state")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .flatten(),
         run,
         refs,
         summary,
@@ -1381,6 +1396,41 @@ mod tests {
             assert_eq!(value["command"], "agent-task", "{failure}");
             assert_eq!(value["operation"], "cook", "{failure}");
         }
+    }
+
+    #[test]
+    fn agent_task_subject_state_is_distinct_from_successful_status_query() {
+        for subject_state in ["queued", "running", "failed", "succeeded"] {
+            let response = cli_response_for_json_result_for_identity(
+                &Ok(json!({
+                    "schema": "homeboy/agent-task-status-summary/v1",
+                    "run_id": "run-1",
+                    "state": subject_state,
+                })),
+                0,
+                &CommandIdentity::with_operation("agent-task", "status"),
+                None,
+            );
+            let value = serde_json::to_value(response).expect("serialize response");
+
+            assert_eq!(value["success"], true, "{subject_state}");
+            assert_eq!(value["status"], "succeeded", "{subject_state}");
+            assert_eq!(value["subject_state"], subject_state, "{subject_state}");
+            assert_eq!(value["data"]["state"], subject_state, "{subject_state}");
+        }
+    }
+
+    #[test]
+    fn arbitrary_payload_state_does_not_become_an_envelope_subject_state() {
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(json!({ "state": "running" })),
+            0,
+            &CommandIdentity::with_operation("agent-task", "cook"),
+            None,
+        );
+
+        let value = serde_json::to_value(response).expect("serialize response");
+        assert!(value.get("subject_state").is_none());
     }
 
     fn release_failure_payload(step_id: &str, step_type: &str) -> Value {
