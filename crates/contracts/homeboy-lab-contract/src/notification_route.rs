@@ -110,6 +110,39 @@ pub fn from_cli_or_env(
     }
 }
 
+/// The environment pairs that carry a route across a process boundary.
+///
+/// This is the producer half of [`from_cli_or_env`]. Both variables were read
+/// from the start but nothing ever wrote them, so a route reached a child only
+/// when the child's argv happened to preserve it — which is why cook needed a
+/// durable-record fallback (#11115). That fallback stays; this is the direct
+/// path for the offloaded case it was invented for.
+///
+/// Emitted together or not at all. [`from_cli_or_env`] rejects a half-set pair
+/// as a hard validation error, so a producer that set only one variable would
+/// make every child fail to start.
+///
+/// # Credential safety
+///
+/// The propagated value is the transport-owned destination, documented as an
+/// opaque non-secret value and rejected by [`NotificationRoute::validate`] if it
+/// carries credential syntax. It is the same string `notify::dispatch` already
+/// passes to a transport as a `--route` argv element, and on Linux argv is the
+/// *more* exposed channel of the two (`/proc/<pid>/cmdline` is world-readable;
+/// `/proc/<pid>/environ` is readable only by the process owner). Propagating it
+/// through the environment therefore adds no exposure the delivery path did not
+/// already have.
+pub fn child_env(route: Option<&NotificationRoute>) -> Vec<(&'static str, String)> {
+    route
+        .map(|route| {
+            vec![
+                (NOTIFICATION_TRANSPORT_ENV, route.transport.clone()),
+                (NOTIFICATION_ROUTE_ENV, route.route.clone()),
+            ]
+        })
+        .unwrap_or_default()
+}
+
 fn contains_credential_syntax(route: &str) -> bool {
     let lowercase = route.to_ascii_lowercase();
     lowercase.contains("authorization=")
@@ -227,6 +260,89 @@ mod tests {
             .join()
             .unwrap();
         assert!(observed.is_none());
+    }
+
+    #[test]
+    fn child_env_carries_a_bound_route_as_both_variables() {
+        let route = NotificationRoute::new("extension", "opaque/thread 42").expect("route");
+        assert_eq!(
+            child_env(Some(&route)),
+            vec![
+                (NOTIFICATION_TRANSPORT_ENV, "extension".to_string()),
+                (NOTIFICATION_ROUTE_ENV, "opaque/thread 42".to_string()),
+            ]
+        );
+    }
+
+    /// A half-set pair is a hard error in `from_cli_or_env`, so an absent route
+    /// must leave both variables alone rather than emit one of them.
+    #[test]
+    fn child_env_without_a_route_sets_neither_variable() {
+        assert!(child_env(None).is_empty());
+    }
+
+    /// The producer and consumer halves are the same mechanism: what
+    /// `child_env` writes is exactly what a child's `from_cli_or_env` reads.
+    #[test]
+    fn child_env_round_trips_through_the_environment_reader() {
+        let _lock = env_lock().lock().unwrap();
+        let old_transport = std::env::var(NOTIFICATION_TRANSPORT_ENV).ok();
+        let old_route = std::env::var(NOTIFICATION_ROUTE_ENV).ok();
+        let route = NotificationRoute::new("extension", "opaque-destination").expect("route");
+        for (name, value) in child_env(Some(&route)) {
+            std::env::set_var(name, value);
+        }
+        assert_eq!(from_cli_or_env(None, None).unwrap(), Some(route));
+        match old_transport {
+            Some(value) => std::env::set_var(NOTIFICATION_TRANSPORT_ENV, value),
+            None => std::env::remove_var(NOTIFICATION_TRANSPORT_ENV),
+        }
+        match old_route {
+            Some(value) => std::env::set_var(NOTIFICATION_ROUTE_ENV, value),
+            None => std::env::remove_var(NOTIFICATION_ROUTE_ENV),
+        }
+    }
+
+    /// Precedence: explicit argv outranks a conflicting propagated environment.
+    #[test]
+    fn propagated_environment_loses_to_explicit_argv() {
+        let _lock = env_lock().lock().unwrap();
+        let old_transport = std::env::var(NOTIFICATION_TRANSPORT_ENV).ok();
+        let old_route = std::env::var(NOTIFICATION_ROUTE_ENV).ok();
+        let propagated =
+            NotificationRoute::new("propagated.transport", "propagated-route").expect("route");
+        for (name, value) in child_env(Some(&propagated)) {
+            std::env::set_var(name, value);
+        }
+        let resolved = from_cli_or_env(Some("argv.transport"), Some("argv-route"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.transport, "argv.transport");
+        assert_eq!(resolved.route, "argv-route");
+        match old_transport {
+            Some(value) => std::env::set_var(NOTIFICATION_TRANSPORT_ENV, value),
+            None => std::env::remove_var(NOTIFICATION_TRANSPORT_ENV),
+        }
+        match old_route {
+            Some(value) => std::env::set_var(NOTIFICATION_ROUTE_ENV, value),
+            None => std::env::remove_var(NOTIFICATION_ROUTE_ENV),
+        }
+    }
+
+    /// The credential-syntax guard applies to anything that could be
+    /// propagated, so a secret-bearing destination can never reach a child env.
+    #[test]
+    fn credential_bearing_routes_cannot_be_propagated() {
+        for destination in [
+            "https://example.invalid/hook?token=secret",
+            "https://user:pass@example.invalid/hook",
+            "channel?authorization=Bearer%20abc",
+        ] {
+            assert!(
+                NotificationRoute::new("extension", destination).is_err(),
+                "{destination} must be rejected before it can reach a child environment"
+            );
+        }
     }
 
     #[test]

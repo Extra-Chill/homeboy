@@ -64,6 +64,26 @@ fn should_deliver(kind: NotifyEventKind, has_explicit_route: bool) -> bool {
 /// In-process thread hops are still covered by
 /// `notification_route::capture`/`bind`; the thread-local deliberately wins so
 /// an explicitly bound route is never overridden by durable metadata.
+///
+/// # Precedence
+///
+/// Resolution is ordered most-explicit first, and this function implements only
+/// the last two steps because the first two are already collapsed into the
+/// thread-local before any command runs:
+///
+/// 1. **Explicit argv** — `--notification-transport` / `--notification-route`.
+/// 2. **Propagated environment** — `HOMEBOY_NOTIFICATION_TRANSPORT` /
+///    `HOMEBOY_NOTIFICATION_ROUTE`, written onto child processes by
+///    `notification_route::child_env` and read back by
+///    `notification_route::from_cli_or_env`. Steps 1 and 2 are resolved once at
+///    process entry, where argv wins, and the winner is bound as the
+///    thread-local this function reads.
+/// 3. **Durable record** — the route persisted on the run, below.
+///
+/// The durable fallback is not made redundant by environment propagation. It
+/// covers resumption paths that inherit neither argv nor environment from the
+/// launching process — `cook --continue`, controller adoption, a claimed
+/// continuation — so both remain load-bearing.
 fn effective_route(run_id: &str) -> Option<NotificationRoute> {
     notification_route::current()
         .or_else(|| crate::agent_task_lifecycle::durable_notification_route(run_id))
