@@ -179,17 +179,19 @@ fn hydrate_lab_workspace_dependencies_with_policy(
             remote_path,
         ));
     }
-    if let Some(package) =
-        super::dependency_package::prepare(std::path::Path::new(local_path), &plan)?
-    {
-        restore_controller_dependency_package(runner_id, remote_path, &package)?;
-        return Ok(LabWorkspaceHydrationOutput {
-            schema: HYDRATION_SCHEMA,
-            status: "restored_controller_cache",
-            workspace: remote_path.to_string(),
-            steps: Vec::new(),
-            cache_source: Some("controller_package".to_string()),
-        });
+    if offline_only {
+        if let Some(package) =
+            super::dependency_package::prepare(std::path::Path::new(local_path), &plan)?
+        {
+            restore_controller_dependency_package(runner_id, remote_path, &package)?;
+            return Ok(LabWorkspaceHydrationOutput {
+                schema: HYDRATION_SCHEMA,
+                status: "restored_controller_cache",
+                workspace: remote_path.to_string(),
+                steps: Vec::new(),
+                cache_source: Some("controller_package".to_string()),
+            });
+        }
     }
     if offline_only {
         return Err(Error::validation_invalid_argument(
