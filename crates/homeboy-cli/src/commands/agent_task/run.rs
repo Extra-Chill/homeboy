@@ -1521,12 +1521,19 @@ where
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
     )?;
     let Some(aggregate) = result.value else {
-        return Ok((serde_json::json!({ "claimed": false }), 0));
+        return Ok((
+            serde_json::json!({ "claimed": false, "queue_skips": result.skipped }),
+            0,
+        ));
     };
-    Ok((
-        aggregate_value_with_failure_reasons(&aggregate),
-        result.exit_code,
-    ))
+    let mut value = aggregate_value_with_failure_reasons(&aggregate);
+    if let Value::Object(object) = &mut value {
+        object.insert(
+            "queue_skips".to_string(),
+            serde_json::to_value(result.skipped).unwrap_or(Value::Null),
+        );
+    }
+    Ok((value, result.exit_code))
 }
 
 pub(super) fn submit(args: SubmitArgs) -> CmdResult<Value> {
