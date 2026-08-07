@@ -15,6 +15,10 @@ use crate::agent_task_scheduler::{
 use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::io::{BufRead, BufReader};
+#[cfg(unix)]
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 #[test]
@@ -1941,6 +1945,7 @@ fn mark_running_reclaims_stale_running_record() {
     });
 }
 
+#[cfg(unix)]
 #[test]
 fn cancel_run_signals_live_running_record() {
     with_isolated_home(|_| {
@@ -1948,18 +1953,48 @@ fn cancel_run_signals_live_running_record() {
         submit_plan(&plan, Some("run-cancel-live")).expect("submitted");
         mark_running("run-cancel-live").expect("marked running");
 
+        // The test binary cannot be a cancellation target: process cleanup
+        // correctly excludes the current PID. Use a separate owner with a
+        // descendant that ignores SIGTERM, proving the SIGKILL path reaps both.
+        let mut child = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "trap '' TERM; (trap '' TERM; exec sleep 30) & echo $!; wait",
+            ])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn live owned process tree");
+        let stdout = child.stdout.take().expect("child stdout");
+        let mut stdout = BufReader::new(stdout);
+        let mut descendant_pid = String::new();
+        stdout
+            .read_line(&mut descendant_pid)
+            .expect("read descendant pid");
+        let descendant_pid: u32 = descendant_pid.trim().parse().expect("descendant pid");
+        let owner_pid = child.id();
+        let mut running = store::read_record("run-cancel-live").expect("running record");
+        running.metadata["runner_pid"] = json!(owner_pid);
+        store::write_record(&running).expect("persist owned process identity");
+
         let cancelled = cancel_run("run-cancel-live", None).expect("live run cancelled");
 
         assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
         assert_eq!(cancelled.tasks[0].state, AgentTaskState::Cancelled);
         assert_eq!(
             cancelled.metadata["live_cancellation"]["owner_pid"],
-            json!(std::process::id())
+            json!(owner_pid)
         );
         assert_eq!(
             cancelled.metadata["live_cancellation"]["signal"],
-            json!("SIGTERM")
+            json!("SIGKILL")
         );
+        assert!(cancelled.metadata["live_cancellation"]["killed_pids"]
+            .as_array()
+            .expect("SIGKILL targets")
+            .iter()
+            .any(|pid| pid == &json!(descendant_pid)));
+        assert!(!homeboy_core::process::pid_is_running(owner_pid));
+        assert!(!homeboy_core::process::pid_is_running(descendant_pid));
     });
 }
 
