@@ -3,7 +3,7 @@ use homeboy_core::error::{Error, Result};
 use homeboy_extension as extension;
 use homeboy_extension::{self, ExtensionManifest};
 
-use super::types::ReleaseOptions;
+use super::types::{ReleaseOptions, ReleaseReadinessProvenance};
 
 /// Load a component with portable config fallback when path_override is set.
 /// In CI environments, the component may not be registered — only homeboy.json exists.
@@ -26,6 +26,24 @@ pub(super) fn resolve_extensions(component: &Component) -> Result<Vec<ExtensionM
         }
     }
     Ok(extensions)
+}
+
+/// Capture configuration and resolved extension revisions before portable work.
+pub fn readiness_provenance(component: &Component) -> Result<ReleaseReadinessProvenance> {
+    let mut provenance = ReleaseReadinessProvenance::default();
+    for dependency in &component.dependency_stack {
+        if let Some(revision) = &dependency.update {
+            provenance
+                .dependencies
+                .insert(dependency.package.clone(), revision.clone());
+        }
+    }
+    for extension in resolve_extensions(component)? {
+        provenance
+            .extensions
+            .insert(extension.id, extension.version);
+    }
+    Ok(provenance)
 }
 
 #[cfg(test)]

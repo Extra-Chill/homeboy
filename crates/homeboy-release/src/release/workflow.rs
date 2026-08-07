@@ -91,6 +91,16 @@ pub fn run_command_with_workspace(
             .evidence_refs
             .push(format!("operation://{owner_run_ref}"));
     }
+    let readiness = input.readiness.clone();
+    let (mut output, exit_code) = run_command_with_workspace_inner(input, recovery_owner_run_ref)?;
+    output.result.readiness = readiness;
+    Ok((output, exit_code))
+}
+
+fn run_command_with_workspace_inner(
+    input: ReleaseCommandInput,
+    recovery_owner_run_ref: Option<&str>,
+) -> Result<(ReleaseWorkspaceCommandResult, i32)> {
     let execution = release_execution_plan(&input);
 
     if input.recover {
@@ -290,6 +300,7 @@ pub fn run_command_with_workspace(
                         deployment: None,
                         continuation_command: None,
                         release_summary: release_summary_for_skipped_plan(),
+                        readiness: None,
                     },
                     workspace: None,
                 },
@@ -318,6 +329,7 @@ pub fn run_command_with_workspace(
                         deployment: None,
                         continuation_command: None,
                         release_summary,
+                        readiness: None,
                     },
                     workspace: None,
                 },
@@ -356,6 +368,7 @@ pub fn run_command_with_workspace(
                     deployment,
                     continuation_command: None,
                     release_summary: release_summary_for_skipped_plan(),
+                    readiness: None,
                 },
                 workspace: None,
             },
@@ -433,6 +446,7 @@ pub fn run_command_with_workspace(
                 deployment,
                 continuation_command: None,
                 release_summary,
+                readiness: None,
             },
             workspace,
         },
@@ -511,6 +525,7 @@ fn prepared_tag_publish_recovery_decision(
             release_summary: vec![format!(
                 "Prepared tag {tag} exists at HEAD; GitHub Release is missing and should be published"
             )],
+            readiness: None,
         }),
         Some(true) | None => None,
     }

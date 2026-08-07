@@ -1,6 +1,6 @@
 use serde::ser::Error as SerializeError;
 use serde::{Deserialize, Serialize, Serializer};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use homeboy_core::is_zero_u32;
 use homeboy_core::phase_timing::PhaseTimingReport;
@@ -505,8 +505,38 @@ pub struct ReleaseReadinessEnvelope {
     pub placement: ReleasePreflightPlacement,
     pub runner_id: Option<String>,
     pub evidence_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "ReleaseReadinessProvenance::is_empty")]
+    pub provenance: ReleaseReadinessProvenance,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub gate_results: Vec<serde_json::Value>,
+    pub gate_results: Vec<ReleaseReadinessGateResult>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseReadinessProvenance {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dependencies: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extensions: BTreeMap<String, String>,
+}
+
+impl ReleaseReadinessProvenance {
+    pub fn is_empty(value: &Self) -> bool {
+        value.dependencies.is_empty() && value.extensions.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseReadinessGateResult {
+    pub gate: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -676,6 +706,8 @@ pub struct ReleaseCommandResult {
     pub continuation_command: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub release_summary: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<ReleaseReadinessEnvelope>,
 }
 
 /// Result of a batch release across multiple components.
@@ -831,7 +863,15 @@ mod tests {
             },
             runner_id: Some("homeboy-lab".to_string()),
             evidence_refs: vec!["runner-artifact://homeboy-lab/release/lint.json".to_string()],
-            gate_results: vec![serde_json::json!({ "gate": "lint", "status": "passed" })],
+            provenance: ReleaseReadinessProvenance::default(),
+            gate_results: vec![ReleaseReadinessGateResult {
+                gate: "lint".to_string(),
+                status: "passed".to_string(),
+                reason: None,
+                source_sha: None,
+                runner_id: Some("homeboy-lab".to_string()),
+                evidence_refs: Vec::new(),
+            }],
         };
 
         let value = serde_json::to_value(envelope).expect("serialize readiness envelope");

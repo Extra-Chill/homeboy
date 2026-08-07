@@ -1,5 +1,5 @@
 use clap::{Args, Subcommand, ValueEnum};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::process::Command;
 use std::{fs, path::Path};
 
@@ -10,7 +10,7 @@ use homeboy_release::release::{
     self, ArtifactSourceAuthorityManifest, BatchReleaseResult, ReleaseCommandInput,
     ReleaseCommandResult, ReleaseExecutionPlan, ReleasePackageResult, ReleasePhase,
     ReleasePipelineOptions, ReleasePreflightPlacement, ReleasePreflightPlacementPolicy,
-    ReleasePreflightSourceIdentity, ReleaseReadinessEnvelope,
+    ReleasePreflightSourceIdentity, ReleaseReadinessEnvelope, ReleaseReadinessGateResult,
 };
 
 use super::utils::args::DryRunArgs;
@@ -443,6 +443,167 @@ fn run_portable_preflight(
     component_id: &str,
     skipped: &[String],
 ) -> homeboy::core::Result<Option<ReleaseReadinessEnvelope>> {
+    run_portable_preflight_with(&CliPortableStageDispatcher, args, component_id, skipped)
+}
+
+struct PortableStageRequest<'a> {
+    gate: &'a str,
+    component_id: &'a str,
+    path: &'a str,
+    requested_runner_id: Option<&'a str>,
+    placement: ReleasePreflightPlacementArg,
+}
+
+#[derive(Debug, Clone)]
+struct PortableStageChildResult {
+    passed: bool,
+    runner_id: Option<String>,
+    evidence_refs: Vec<String>,
+}
+
+trait PortableStageDispatcher {
+    fn dispatch(
+        &self,
+        request: PortableStageRequest<'_>,
+    ) -> homeboy::core::Result<PortableStageChildResult>;
+}
+
+struct CliPortableStageDispatcher;
+
+impl PortableStageDispatcher for CliPortableStageDispatcher {
+    fn dispatch(
+        &self,
+        request: PortableStageRequest<'_>,
+    ) -> homeboy::core::Result<PortableStageChildResult> {
+        let executable = std::env::current_exe().map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some("release preflight executable".to_string()),
+            )
+        })?;
+        let mut command = Command::new(executable);
+        if let Some(runner_id) = request.requested_runner_id {
+            command.args(["--runner", runner_id]);
+        } else if matches!(request.placement, ReleasePreflightPlacementArg::Lab) {
+            command.args(["--placement", "lab"]);
+        }
+        command.args([
+            "review",
+            request.gate,
+            request.component_id,
+            "--path",
+            request.path,
+        ]);
+        let output = command.output().map_err(|error| {
+            homeboy::core::Error::internal_io(
+                format!("start portable release {} preflight: {error}", request.gate),
+                Some(request.path.to_string()),
+            )
+        })?;
+        let envelope: PortableReviewChildEnvelope = serde_json::from_slice(&output.stdout)
+            .map_err(|error| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "release.preflight",
+                    format!(
+                        "portable {} preflight returned no stable command-result JSON: {error}",
+                        request.gate
+                    ),
+                    Some(String::from_utf8_lossy(&output.stderr).to_string()),
+                    None,
+                )
+            })?;
+        Ok(envelope.project(output.status.success()))
+    }
+}
+
+/// Stable subset of a child command-result envelope consumed by release.
+/// Release deliberately retains only durable references and resolved placement,
+/// never an opaque copy of child JSON.
+#[derive(Deserialize)]
+struct PortableReviewChildEnvelope {
+    #[serde(default)]
+    success: bool,
+    #[serde(default)]
+    run: Option<PortableChildRunRef>,
+    #[serde(default)]
+    refs: PortableChildRefs,
+    #[serde(default)]
+    artifacts: Vec<PortableChildArtifactRef>,
+    #[serde(default)]
+    evidence: Vec<PortableChildArtifactRef>,
+    #[serde(default)]
+    data: Option<PortableReviewChildData>,
+}
+
+#[derive(Default, Deserialize)]
+struct PortableChildRefs {
+    #[serde(default)]
+    runs: Vec<PortableChildRunRef>,
+}
+
+#[derive(Deserialize)]
+struct PortableChildRunRef {
+    id: String,
+    #[serde(default)]
+    location: Option<String>,
+}
+#[derive(Deserialize)]
+struct PortableChildArtifactRef {
+    uri: String,
+}
+#[derive(Default, Deserialize)]
+struct PortableReviewChildData {
+    #[serde(default)]
+    execution_provenance: Option<PortableExecutionProvenance>,
+}
+#[derive(Deserialize)]
+struct PortableExecutionProvenance {
+    resolved_execution: PortableResolvedExecution,
+}
+#[derive(Deserialize)]
+struct PortableResolvedExecution {
+    #[serde(default)]
+    runner_id: Option<String>,
+}
+
+impl PortableReviewChildEnvelope {
+    fn project(self, process_passed: bool) -> PortableStageChildResult {
+        let mut evidence_refs = self
+            .evidence
+            .into_iter()
+            .map(|reference| reference.uri)
+            .collect::<Vec<_>>();
+        evidence_refs.extend(self.artifacts.into_iter().map(|reference| reference.uri));
+        if let Some(run) = self.run.as_ref() {
+            evidence_refs.push(format!("run://{}", run.id));
+        }
+        evidence_refs.extend(
+            self.refs
+                .runs
+                .into_iter()
+                .map(|run| format!("run://{}", run.id)),
+        );
+        evidence_refs.sort();
+        evidence_refs.dedup();
+        let runner_id = self
+            .data
+            .and_then(|data| data.execution_provenance)
+            .and_then(|provenance| provenance.resolved_execution.runner_id)
+            .or_else(|| self.run.and_then(|run| run.location));
+        PortableStageChildResult {
+            passed: process_passed && self.success,
+            runner_id,
+            evidence_refs,
+        }
+    }
+}
+
+fn run_portable_preflight_with(
+    dispatcher: &dyn PortableStageDispatcher,
+    args: &ReleaseExecuteArgs,
+    component_id: &str,
+    skipped: &[String],
+) -> homeboy::core::Result<Option<ReleaseReadinessEnvelope>> {
     let runner_id = args.preflight_runner.as_deref();
     if runner_id.is_none() && !matches!(args.preflight_placement, ReleasePreflightPlacementArg::Lab)
     {
@@ -450,65 +611,50 @@ fn run_portable_preflight(
     }
     let component = component::resolve_effective(Some(component_id), args.path.as_deref(), None)?;
     let commit = homeboy::core::git::get_head_commit(&component.local_path)?;
-    let executable = std::env::current_exe().map_err(|error| {
-        homeboy::core::Error::internal_io(
-            error.to_string(),
-            Some("release preflight executable".to_string()),
-        )
-    })?;
     let mut gate_results = Vec::new();
+    let mut evidence_refs = Vec::new();
+    let mut resolved_runner_id = None;
     for gate in ["audit", "lint", "test"] {
         if skipped.iter().any(|skip| skip == gate) {
-            gate_results.push(
-                serde_json::json!({ "gate": gate, "status": "skipped", "reason": "--skip-checks" }),
-            );
+            gate_results.push(ReleaseReadinessGateResult {
+                gate: gate.to_string(),
+                status: "skipped".to_string(),
+                reason: Some("--skip-checks".to_string()),
+                source_sha: Some(commit.clone()),
+                runner_id: None,
+                evidence_refs: Vec::new(),
+            });
             continue;
         }
-        let mut command = Command::new(&executable);
-        if let Some(runner_id) = runner_id {
-            command.args(["--runner", runner_id]);
-        } else {
-            command.args(["--placement", "lab"]);
-        }
-        command.args([
-            "review",
+        let child = dispatcher.dispatch(PortableStageRequest {
             gate,
             component_id,
-            "--path",
-            &component.local_path,
-        ]);
-        let output = command.output().map_err(|error| {
-            homeboy::core::Error::internal_io(
-                format!("start portable release {gate} preflight: {error}"),
-                Some(component.local_path.clone()),
-            )
+            path: &component.local_path,
+            requested_runner_id: runner_id,
+            placement: args.preflight_placement,
         })?;
-        let result = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
-            serde_json::json!({
-                "gate": gate,
-                "stdout": String::from_utf8_lossy(&output.stdout),
-                "stderr": String::from_utf8_lossy(&output.stderr),
-            })
+        resolved_runner_id = child.runner_id.clone().or(resolved_runner_id);
+        evidence_refs.extend(child.evidence_refs.iter().cloned());
+        gate_results.push(ReleaseReadinessGateResult {
+            gate: gate.to_string(),
+            status: if child.passed { "passed" } else { "failed" }.to_string(),
+            reason: None,
+            source_sha: Some(commit.clone()),
+            runner_id: child.runner_id,
+            evidence_refs: child.evidence_refs,
         });
-        gate_results.push(serde_json::json!({
-            "gate": gate,
-            "status": if output.status.success() { "passed" } else { "failed" },
-            "command": command.get_args().map(|arg| arg.to_string_lossy()).collect::<Vec<_>>(),
-            "source_sha": commit,
-            "runner_id": runner_id,
-            "exit_code": output.status.code(),
-            "result": result,
-        }));
     }
     // Package preflight owns release-specific lockfile and local-dependency
     // guards. No portable review command exposes that contract yet, so retain
     // the explicit controller placement while other gates still offload.
-    gate_results.push(serde_json::json!({
-        "gate": "package_preflight",
-        "status": "local_only",
-        "reason": "release package guards have no portable command contract",
-        "source_sha": commit,
-    }));
+    gate_results.push(ReleaseReadinessGateResult {
+        gate: "package_preflight".to_string(),
+        status: "local_only".to_string(),
+        reason: Some("release package guards have no portable command contract".to_string()),
+        source_sha: Some(commit.clone()),
+        runner_id: None,
+        evidence_refs: Vec::new(),
+    });
     let placement = ReleasePreflightPlacement {
         policy: if runner_id.is_some()
             || matches!(args.preflight_placement, ReleasePreflightPlacementArg::Lab)
@@ -517,13 +663,16 @@ fn run_portable_preflight(
         } else {
             ReleasePreflightPlacementPolicy::Local
         },
-        runner_id: runner_id.map(str::to_string),
+        runner_id: resolved_runner_id
+            .clone()
+            .or_else(|| runner_id.map(str::to_string)),
     };
     Ok(Some(ReleaseReadinessEnvelope {
         source: ReleasePreflightSourceIdentity { commit },
         placement,
-        runner_id: runner_id.map(str::to_string),
-        evidence_refs: Vec::new(),
+        runner_id: resolved_runner_id.or_else(|| runner_id.map(str::to_string)),
+        evidence_refs,
+        provenance: release::readiness_provenance(&component)?,
         gate_results,
     }))
 }
@@ -1501,6 +1650,7 @@ jobs:
             deployment: None,
             continuation_command: Some(continuation.clone()),
             release_summary: vec!["Git state recovered; publication is incomplete".to_string()],
+            readiness: None,
         };
         let output = ReleaseOutput {
             variant: "single",
@@ -1521,5 +1671,29 @@ jobs:
         assert!(!value["success"].as_bool().expect("success boolean"));
         assert_eq!(value["data"]["result"]["status"], "git_recovered");
         assert_eq!(value["next_actions"][0]["command"], continuation);
+    }
+
+    #[test]
+    fn portable_child_projection_retains_remote_runner_and_durable_evidence() {
+        let child: PortableReviewChildEnvelope = serde_json::from_value(serde_json::json!({
+            "success": true,
+            "run": { "id": "review-run-7", "location": "lab-runner-7" },
+            "refs": { "runs": [{ "id": "review-run-7" }] },
+            "evidence": [{ "uri": "runner-artifact://lab-runner-7/review.json" }],
+            "data": { "execution_provenance": { "resolved_execution": { "runner_id": "lab-runner-7" } } }
+        }))
+        .expect("stable child result");
+
+        let projected = child.project(true);
+
+        assert!(projected.passed);
+        assert_eq!(projected.runner_id.as_deref(), Some("lab-runner-7"));
+        assert_eq!(
+            projected.evidence_refs,
+            vec![
+                "run://review-run-7".to_string(),
+                "runner-artifact://lab-runner-7/review.json".to_string(),
+            ]
+        );
     }
 }

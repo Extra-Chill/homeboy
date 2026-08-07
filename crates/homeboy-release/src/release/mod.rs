@@ -59,6 +59,7 @@ pub use containment::{
     ContainmentAssessment, ContainmentStatus, ContainsQuery, GapStatus, ReleaseContainsReport,
     ReleaseGapAssessment, ReleaseGapReport,
 };
+pub use context::readiness_provenance;
 pub use executor::artifacts::{
     write_artifact_source_authority_manifest, ArtifactSourceAuthorityManifest,
 };
@@ -70,9 +71,10 @@ pub use types::{
     ReleaseCommandInput, ReleaseCommandResult, ReleaseDeploymentResult, ReleaseDeploymentSummary,
     ReleaseExecutionPlan, ReleaseOptions, ReleasePhase, ReleasePipelineOptions, ReleasePlan,
     ReleasePreflightPlacement, ReleasePreflightPlacementPolicy, ReleasePreflightSourceIdentity,
-    ReleaseProjectDeployResult, ReleaseReadinessEnvelope, ReleaseRollbackEvidence, ReleaseRun,
-    ReleaseRunResult, ReleaseRunSummary, ReleaseSemverCommit, ReleaseSemverRecommendation,
-    ReleaseStepResult, ReleaseStepStatus, ReleaseWorkspaceCommandResult, ReleaseWorkspaceOutput,
+    ReleaseProjectDeployResult, ReleaseReadinessEnvelope, ReleaseReadinessGateResult,
+    ReleaseReadinessProvenance, ReleaseRollbackEvidence, ReleaseRun, ReleaseRunResult,
+    ReleaseRunSummary, ReleaseSemverCommit, ReleaseSemverRecommendation, ReleaseStepResult,
+    ReleaseStepStatus, ReleaseWorkspaceCommandResult, ReleaseWorkspaceOutput,
 };
 pub use utils::{extract_latest_notes, parse_release_artifacts};
 pub use workflow::{

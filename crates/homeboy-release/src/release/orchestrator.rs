@@ -143,15 +143,8 @@ fn run_with_plan_inner(
         let failed = readiness
             .gate_results
             .iter()
-            .filter_map(|gate| {
-                (gate.get("status").and_then(serde_json::Value::as_str) == Some("failed")).then(
-                    || {
-                        gate.get("gate")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("unknown")
-                    },
-                )
-            })
+            .filter(|gate| gate.status == "failed")
+            .map(|gate| gate.gate.as_str())
             .collect::<Vec<_>>();
         if !failed.is_empty() {
             return Err(Error::validation_invalid_argument(
