@@ -676,6 +676,90 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
 }
 
 #[test]
+fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
+    test_support::with_isolated_home(|_| {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let binary = fixture.path().join("homeboy");
+        let commit = homeboy_product_identity::build_identity()
+            .git_commit
+            .unwrap_or_else(|| "exact-remote-sha".to_string());
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{{\"data\":{{\"git_commit\":\"{commit}\",\"git_dirty\":false}}}}'\n"
+            ),
+        )
+        .expect("write selected binary");
+        assert!(Command::new("chmod")
+            .args(["0755", binary.to_str().expect("binary path")])
+            .status()
+            .expect("make selected binary executable")
+            .success());
+        crate::create(
+            r#"{"id":"lab-local","kind":"local","homeboy_path":"/old/homeboy"}"#,
+            false,
+        )
+        .expect("runner");
+
+        let (output, exit_code) = refresh_homeboy_binary(HomeboyBinaryRefreshOptions {
+            runner_id: "lab-local".to_string(),
+            mode: HomeboyBinaryRefreshMode::Select {
+                binary_path: binary.display().to_string(),
+            },
+            source: None,
+            git_ref: None,
+            target_dir: None,
+            reconnect: true,
+            force: false,
+            allow_downgrade: true,
+            dry_run: false,
+        })
+        .expect("blocked connect is a structured refresh result");
+
+        assert_eq!(exit_code, 1);
+        assert_eq!(output.updated_fields, ["homeboy_path"]);
+        assert_eq!(output.selected_binary_path, binary.display().to_string());
+        assert!(!output.daemon_refreshed);
+        assert!(output.reconnect_required);
+        assert_eq!(
+            output
+                .phase_summary
+                .iter()
+                .map(|phase| (phase.name, phase.status))
+                .collect::<Vec<_>>(),
+            vec![
+                ("select", "succeeded"),
+                ("identity_verification", "succeeded"),
+                ("bootstrap_promotion", "succeeded"),
+                ("configuration_promotion", "succeeded"),
+                ("reconnect_transport", "succeeded"),
+                ("daemon_identity_verification", "succeeded"),
+                ("admission_readiness", "failed"),
+            ]
+        );
+        let readiness = output.readiness.expect("blocked readiness");
+        assert_eq!(readiness.state, HomeboyRefreshReadinessState::Blocked);
+        assert_eq!(
+            readiness.continuation.as_deref(),
+            Some("homeboy runner refresh-homeboy lab-local --reconnect")
+        );
+        assert_eq!(
+            output.followup_commands,
+            ["homeboy runner refresh-homeboy lab-local --reconnect"]
+        );
+        assert!(output.bootstrap_provenance.is_some());
+        assert_eq!(
+            crate::load("lab-local")
+                .expect("reload controller registry")
+                .settings
+                .homeboy_path
+                .as_deref(),
+            binary.to_str()
+        );
+    });
+}
+
+#[test]
 fn select_without_source_rejects_implicit_downgrade_before_selection_or_reconnect() {
     test_support::with_isolated_home(|_| {
         let controller_commit = homeboy_product_identity::build_identity()

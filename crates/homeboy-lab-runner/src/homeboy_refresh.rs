@@ -674,9 +674,9 @@ pub fn refresh_homeboy_binary(
     phase_summary.push(refresh_phase("identity_verification", true, 0));
     phase_summary.push(refresh_phase("bootstrap_promotion", true, 0));
     phase_summary.push(refresh_phase("configuration_promotion", true, 0));
-    let identity = bootstrap.identity;
-    let updated_fields = bootstrap.updated_fields;
-    let rollback = bootstrap.rollback;
+    let identity = bootstrap.identity.clone();
+    let updated_fields = bootstrap.updated_fields.clone();
+    let rollback = bootstrap.rollback.clone();
 
     // Re-read the session after selection as well. The pre-materialization
     // record is not safe to use for a reconnect after a queued promotion.
@@ -849,50 +849,41 @@ pub fn refresh_homeboy_binary(
         ) {
             Ok(result) => result,
             Err(error) => {
-                return rollback_refresh_connect_error_with(
-                    error,
-                    || {
-                        restore_runner_homeboy_path_if_selected(
-                            &plan.runner_id,
-                            &selected_binary_path,
-                            previous_homeboy_path.as_deref(),
-                        )
-                        .map(|_| ())
+                let readiness = blocked_refresh_readiness(&plan);
+                phase_summary.push(refresh_phase("reconnect_transport", true, 1));
+                return Ok((
+                    HomeboyBinaryRefreshOutput {
+                        variant: "refresh_homeboy",
+                        command: "runner.refresh_homeboy",
+                        runner_id: plan.runner_id.clone(),
+                        dry_run: false,
+                        plan: plan.clone(),
+                        identity: Some(identity.clone()),
+                        updated_fields: updated_fields.clone(),
+                        phase_summary,
+                        daemon_refreshed: false,
+                        interrupted_job_ids,
+                        selected_binary_path: selected_binary_path.clone(),
+                        reconnect_required: true,
+                        followup_commands: readiness.continuation.clone().into_iter().collect(),
+                        readiness: Some(readiness),
+                        reconnect_deferred: None,
+                        failure: Some(refresh_verification_failure(
+                            &plan,
+                            exec_output.clone(),
+                            error.message,
+                        )),
+                        bootstrap_provenance: Some(refresh_bootstrap_provenance(
+                            disconnected_ssh,
+                            &plan,
+                            &bootstrap,
+                            &identity,
+                            &updated_fields,
+                        )),
+                        rollback: rollback.clone(),
                     },
-                    || {
-                        let (report, exit_code) = connect_with_orphan_adoption(
-                            &plan.runner_id,
-                            None,
-                            &[],
-                            false,
-                            None,
-                            None,
-                            None,
-                        )?;
-                        if exit_code != 0 || !report.connected {
-                            return Err(Error::validation_invalid_argument(
-                                "reconnect",
-                                report.failure_message.unwrap_or_else(|| {
-                                    "rollback reconnect did not persist an active daemon session".to_string()
-                                }),
-                                Some(plan.runner_id.clone()),
-                                None,
-                            ));
-                        }
-                        Ok(())
-                    },
-                )
-                .map_err(|error| {
-                    let error = durable_refresh_partial_error_if_needed(
-                        error,
-                        &plan.runner_id,
-                        previous_homeboy_path.as_deref(),
-                        options.force,
-                    );
-                    let mut phases = phase_summary.clone();
-                    phases.push(refresh_phase("reconnect_transport", true, 1));
-                    refresh_error_with_phase_summary(error, &phases)
-                });
+                    1,
+                ));
             }
         };
         let daemon_identity_verification = (connect_exit_code == 0)
@@ -906,18 +897,6 @@ pub fn refresh_homeboy_binary(
             } else {
                 connect_exit_code
             };
-            if let Err(rollback_error) = rollback_refreshed_daemon(
-                &plan.runner_id,
-                previous_homeboy_path.as_deref(),
-                options.force,
-            ) {
-                return Err(reconnect_rollback_error(
-                    &report,
-                    rollback_error,
-                    previous_homeboy_path.as_deref(),
-                    options.force,
-                ));
-            }
             phase_summary.push(refresh_phase(
                 "reconnect_transport",
                 true,
@@ -931,15 +910,18 @@ pub fn refresh_homeboy_binary(
                     runner_id: plan.runner_id.clone(),
                     dry_run: false,
                     plan: plan.clone(),
-                    identity: Some(identity),
-                    updated_fields: Vec::new(),
+                    identity: Some(identity.clone()),
+                    updated_fields: updated_fields.clone(),
                     phase_summary,
                     daemon_refreshed: false,
                     interrupted_job_ids,
                     selected_binary_path: selected_binary_path.clone(),
                     reconnect_required: true,
-                    followup_commands: plan.followup_commands.clone(),
-                    readiness: Some(failed_refresh_readiness(&plan)),
+                    followup_commands: blocked_refresh_readiness(&plan)
+                        .continuation
+                        .into_iter()
+                        .collect(),
+                    readiness: Some(blocked_refresh_readiness(&plan)),
                     reconnect_deferred: None,
                     failure: Some(refresh_reconnect_failure(
                         &plan,
@@ -947,7 +929,13 @@ pub fn refresh_homeboy_binary(
                         &report,
                         daemon_identity_verification.err().as_deref(),
                     )),
-                    bootstrap_provenance: None,
+                    bootstrap_provenance: Some(refresh_bootstrap_provenance(
+                        disconnected_ssh,
+                        &plan,
+                        &bootstrap,
+                        &identity,
+                        &updated_fields,
+                    )),
                     rollback: rollback.clone(),
                 },
                 reconnect_exit_code,
@@ -969,18 +957,6 @@ pub fn refresh_homeboy_binary(
                 probe_reconnected_admission_readiness(&plan.runner_id, identity_commit)
             {
                 daemon_refreshed = false;
-                if let Err(rollback_error) = rollback_refreshed_daemon(
-                    &plan.runner_id,
-                    previous_homeboy_path.as_deref(),
-                    options.force,
-                ) {
-                    return Err(reconnect_rollback_error(
-                        &report,
-                        rollback_error,
-                        previous_homeboy_path.as_deref(),
-                        options.force,
-                    ));
-                }
                 phase_summary.push(refresh_phase("reconnect_transport", true, 0));
                 phase_summary.push(refresh_phase("daemon_identity_verification", true, 0));
                 phase_summary.push(refresh_phase("admission_readiness", true, 1));
@@ -991,15 +967,18 @@ pub fn refresh_homeboy_binary(
                         runner_id: plan.runner_id.clone(),
                         dry_run: false,
                         plan: plan.clone(),
-                        identity: Some(identity),
-                        updated_fields: Vec::new(),
+                        identity: Some(identity.clone()),
+                        updated_fields: updated_fields.clone(),
                         phase_summary,
                         daemon_refreshed: false,
                         interrupted_job_ids,
                         selected_binary_path: selected_binary_path.clone(),
                         reconnect_required: true,
-                        followup_commands: plan.followup_commands.clone(),
-                        readiness: Some(failed_refresh_readiness(&plan)),
+                        followup_commands: blocked_refresh_readiness(&plan)
+                            .continuation
+                            .into_iter()
+                            .collect(),
+                        readiness: Some(blocked_refresh_readiness(&plan)),
                         reconnect_deferred: None,
                         failure: Some(refresh_reconnect_failure(
                             &plan,
@@ -1007,7 +986,13 @@ pub fn refresh_homeboy_binary(
                             &report,
                             Some(readiness_error.message.as_str()),
                         )),
-                        bootstrap_provenance: None,
+                        bootstrap_provenance: Some(refresh_bootstrap_provenance(
+                            disconnected_ssh,
+                            &plan,
+                            &bootstrap,
+                            &identity,
+                            &updated_fields,
+                        )),
                         rollback: rollback.clone(),
                     },
                     1,
@@ -1122,6 +1107,46 @@ fn failed_refresh_readiness(plan: &HomeboyBinaryRefreshPlan) -> HomeboyRefreshRe
             "homeboy runner refresh-homeboy {} --reconnect",
             shell_arg(&plan.runner_id)
         )),
+    }
+}
+
+fn blocked_refresh_readiness(plan: &HomeboyBinaryRefreshPlan) -> HomeboyRefreshReadiness {
+    HomeboyRefreshReadiness {
+        state: HomeboyRefreshReadinessState::Blocked,
+        accepting_jobs: false,
+        daemon_fresh: false,
+        owners: Vec::new(),
+        continuation: Some(format!(
+            "homeboy runner refresh-homeboy {} --reconnect",
+            shell_arg(&plan.runner_id)
+        )),
+    }
+}
+
+fn refresh_bootstrap_provenance(
+    disconnected_ssh: bool,
+    plan: &HomeboyBinaryRefreshPlan,
+    bootstrap: &SshBootstrapPromotion,
+    identity: &Value,
+    updated_fields: &[String],
+) -> HomeboyBootstrapProvenance {
+    HomeboyBootstrapProvenance {
+        transport: if disconnected_ssh {
+            "ssh_bootstrap"
+        } else {
+            "daemon"
+        },
+        requested_ref: plan.git_ref.clone(),
+        resolved_source_sha: bootstrap.source_sha.clone(),
+        binary_commit: identity
+            .get("data")
+            .unwrap_or(identity)
+            .get("git_commit")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        binary_identity: identity.clone(),
+        timeout_ms: disconnected_ssh.then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT.as_millis()),
+        config_fields_changed: updated_fields.to_vec(),
     }
 }
 
