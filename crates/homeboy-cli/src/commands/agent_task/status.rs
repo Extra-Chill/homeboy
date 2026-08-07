@@ -1234,32 +1234,31 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let aggregate = completed_run_aggregate(run_id).transpose()?;
     let mut hydrated_evidence = Vec::new();
     let mut total_hydrated_evidence = 0;
-    let mut nested_reasons = Vec::new();
+    let mut nested_reasons = aggregate
+        .as_ref()
+        .map(aggregate_failure_diagnostics)
+        .unwrap_or_default();
+    let mut diagnostic_truncations = Vec::new();
+    let mut diagnostic_budget = DiagnosticCollectionBudget::default();
 
     if let Some(aggregate) = aggregate.as_ref() {
         for outcome in &aggregate.outcomes {
             for evidence in &outcome.evidence_refs {
                 total_hydrated_evidence += 1;
-                if !args.full && hydrated_evidence.len() >= OutputBudget::COLLECTION.max_items {
-                    continue;
+                if let Some(truncation) = collect_hydrated_evidence_diagnostics(
+                    &outcome.task_id,
+                    evidence,
+                    &mut nested_reasons,
+                    &mut diagnostic_budget,
+                ) {
+                    diagnostic_truncations.push(truncation);
                 }
-                if let Some(summary) =
-                    agent_task_service::hydrate_evidence_summary(&outcome.task_id, evidence)
-                {
-                    collect_nested_diagnostics(
-                        &outcome.task_id,
-                        summary.get("summary").unwrap_or(&Value::Null),
-                        "hydrated_evidence",
-                        &mut nested_reasons,
-                    );
-                    collect_process_stream_diagnostics(
-                        &outcome.task_id,
-                        summary
-                            .pointer("/summary/process_streams")
-                            .unwrap_or(&Value::Null),
-                        &mut nested_reasons,
-                    );
-                    hydrated_evidence.push(summary);
+                if args.full || hydrated_evidence.len() < OutputBudget::COLLECTION.max_items {
+                    if let Some(summary) =
+                        agent_task_service::hydrate_evidence_summary(&outcome.task_id, evidence)
+                    {
+                        hydrated_evidence.push(summary);
+                    }
                 }
             }
         }
@@ -1269,12 +1268,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let root_cause = ranked_reasons
         .first()
         .cloned()
-        .map(collected_diagnostic_value)
-        .or_else(|| {
-            aggregate
-                .as_ref()
-                .and_then(|aggregate| failure_reasons_from_aggregate(aggregate).into_iter().next())
-        });
+        .map(collected_diagnostic_value);
     let diagnostic_chain = ranked_reasons
         .into_iter()
         .take(FAILURE_REASON_LIMIT)
@@ -1302,6 +1296,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         "missing_artifacts": missing_artifacts.clone(),
         "hydrated_evidence": hydrated_evidence,
         "hydrated_evidence_total": total_hydrated_evidence,
+        "diagnostic_collection": diagnostic_collection_projection(&diagnostic_truncations),
         "continuation_admission": record.metadata.get("cook_continuation_admission"),
         "retry_replay": retry.projection(),
         "next_commands": next_commands,
@@ -2481,11 +2476,11 @@ fn enrich_with_diagnostic_summary(value: &mut Value, run_id: &str) -> homeboy::c
     let Some(aggregate) = completed_run_aggregate(run_id).transpose()? else {
         return Ok(());
     };
-    if let Some(summary) = diagnostic_summary_from_aggregate(&aggregate)
-        .or_else(|| diagnostic_summary_from_evidence(&aggregate))
-    {
+    let (summary, truncations) = diagnostic_summary(&aggregate);
+    if let Some(summary) = summary {
         value["diagnostic_summary"] = summary;
     }
+    value["diagnostic_collection"] = diagnostic_collection_projection(&truncations);
     let failure_reasons = failure_reasons_from_aggregate(&aggregate);
     if !failure_reasons.is_empty() {
         value["failure_reasons"] = Value::Array(failure_reasons);
@@ -2495,29 +2490,128 @@ fn enrich_with_diagnostic_summary(value: &mut Value, run_id: &str) -> homeboy::c
     Ok(())
 }
 
-/// Executor evidence can carry the only typed diagnostic for a provider
-/// failure. Surface the same bounded root cause as `diagnose` without exposing
-/// the evidence payload itself in `status`.
-fn diagnostic_summary_from_evidence(aggregate: &AgentTaskAggregate) -> Option<Value> {
-    let mut diagnostics = Vec::new();
+/// Rank aggregate and executor evidence together before selecting the compact
+/// status root cause. Neither source is a fallback: either can contain the
+/// actionable diagnostic that explains a generic provider observation.
+fn diagnostic_summary(aggregate: &AgentTaskAggregate) -> (Option<Value>, Vec<Value>) {
+    let mut diagnostics = aggregate_failure_diagnostics(aggregate);
+    let truncations = collect_aggregate_evidence_diagnostics(aggregate, &mut diagnostics);
+    let summary = ranked_diagnostics(diagnostics)
+        .into_iter()
+        .map(collected_diagnostic_value)
+        .next();
+    (summary, truncations)
+}
+
+fn collect_aggregate_evidence_diagnostics(
+    aggregate: &AgentTaskAggregate,
+    diagnostics: &mut Vec<CollectedDiagnostic>,
+) -> Vec<Value> {
+    let mut truncations = Vec::new();
+    let mut budget = DiagnosticCollectionBudget::default();
     for outcome in &aggregate.outcomes {
         for evidence in &outcome.evidence_refs {
-            if let Some(summary) =
-                agent_task_service::hydrate_evidence_summary(&outcome.task_id, evidence)
-            {
-                collect_nested_diagnostics(
-                    &outcome.task_id,
-                    summary.get("summary").unwrap_or(&Value::Null),
-                    "hydrated_evidence",
-                    &mut diagnostics,
-                );
+            if let Some(truncation) = collect_hydrated_evidence_diagnostics(
+                &outcome.task_id,
+                evidence,
+                diagnostics,
+                &mut budget,
+            ) {
+                truncations.push(truncation);
             }
         }
     }
-    ranked_diagnostics(diagnostics)
-        .into_iter()
-        .map(collected_diagnostic_value)
-        .next()
+    truncations
+}
+
+fn collect_hydrated_evidence_diagnostics(
+    task_id: &str,
+    evidence: &AgentTaskEvidenceRef,
+    diagnostics: &mut Vec<CollectedDiagnostic>,
+    budget: &mut DiagnosticCollectionBudget,
+) -> Option<Value> {
+    if budget.evidence_refs >= DIAGNOSTIC_EVIDENCE_REF_LIMIT {
+        return Some(budget.truncation(task_id, evidence, "evidence_refs"));
+    }
+    budget.evidence_refs += 1;
+    let Some(value) = agent_task_service_direct::hydrate_evidence_diagnostics(evidence) else {
+        return None;
+    };
+    let count = value
+        .pointer("/usage/diagnostic_count")
+        .and_then(Value::as_u64)
+        .unwrap_or_default() as usize;
+    let bytes = value
+        .pointer("/usage/diagnostic_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or_default() as usize;
+    if budget.diagnostics.saturating_add(count) > DIAGNOSTIC_COLLECTION_COUNT_LIMIT {
+        return Some(budget.truncation(task_id, evidence, "diagnostic_count"));
+    }
+    if budget.bytes.saturating_add(bytes) > DIAGNOSTIC_COLLECTION_BYTE_LIMIT {
+        return Some(budget.truncation(task_id, evidence, "diagnostic_bytes"));
+    }
+    budget.diagnostics += count;
+    budget.bytes += bytes;
+    collect_nested_diagnostics(
+        task_id,
+        &json!({ "diagnostics": value.get("diagnostics") }),
+        "hydrated_evidence",
+        diagnostics,
+    );
+    collect_process_stream_diagnostics(
+        task_id,
+        value.get("process_streams").unwrap_or(&Value::Null),
+        diagnostics,
+    );
+    (value
+        .pointer("/truncation/truncated")
+        .and_then(Value::as_bool)
+        == Some(true))
+    .then(|| {
+        json!({
+            "task_id": bounded_diagnostic_value(&Value::String(task_id.to_string())),
+            "kind": bounded_diagnostic_value(&Value::String(evidence.kind.clone())),
+            "uri": bounded_diagnostic_value(&Value::String(evidence.uri.clone())),
+            "truncation": value.get("truncation"),
+        })
+    })
+}
+
+const DIAGNOSTIC_EVIDENCE_REF_LIMIT: usize = 64;
+const DIAGNOSTIC_COLLECTION_COUNT_LIMIT: usize = 256;
+const DIAGNOSTIC_COLLECTION_BYTE_LIMIT: usize = 256 * 1024;
+
+#[derive(Default)]
+struct DiagnosticCollectionBudget {
+    evidence_refs: usize,
+    diagnostics: usize,
+    bytes: usize,
+}
+
+impl DiagnosticCollectionBudget {
+    fn truncation(&self, task_id: &str, evidence: &AgentTaskEvidenceRef, reason: &str) -> Value {
+        json!({
+            "task_id": bounded_diagnostic_value(&Value::String(task_id.to_string())),
+            "kind": bounded_diagnostic_value(&Value::String(evidence.kind.clone())),
+            "uri": bounded_diagnostic_value(&Value::String(evidence.uri.clone())),
+            "truncation": {
+                "truncated": true,
+                "reason": reason,
+                "evidence_ref_limit": DIAGNOSTIC_EVIDENCE_REF_LIMIT,
+                "diagnostic_count_limit": DIAGNOSTIC_COLLECTION_COUNT_LIMIT,
+                "diagnostic_byte_limit": DIAGNOSTIC_COLLECTION_BYTE_LIMIT,
+            },
+        })
+    }
+}
+
+fn diagnostic_collection_projection(truncations: &[Value]) -> Value {
+    json!({
+        "truncated_evidence": truncations.len(),
+        "truncations": truncations.iter().take(COMPACT_REF_LIMIT).collect::<Vec<_>>(),
+        "truncations_omitted": truncations.len().saturating_sub(COMPACT_REF_LIMIT),
+    })
 }
 
 pub(crate) fn completed_run_aggregate(
@@ -2531,7 +2625,10 @@ pub(crate) fn completed_run_aggregate(
 }
 
 pub(crate) fn diagnostic_summary_from_aggregate(aggregate: &AgentTaskAggregate) -> Option<Value> {
-    failure_reasons_from_aggregate(aggregate).into_iter().next()
+    ranked_diagnostics(aggregate_failure_diagnostics(aggregate))
+        .into_iter()
+        .map(collected_diagnostic_value)
+        .next()
 }
 
 /// Project terminal execution facts into stable machine-readable states. These
@@ -2655,7 +2752,22 @@ const FAILURE_REASON_LIMIT: usize = 8;
 /// first. The full nested JSON is left untouched; this only ADDS a surfaced
 /// summary so operators see WHY a run failed without hand-digging.
 pub(crate) fn failure_reasons_from_aggregate(aggregate: &AgentTaskAggregate) -> Vec<Value> {
-    let mut collected: Vec<CollectedDiagnostic> = Vec::new();
+    ranked_diagnostics(aggregate_failure_diagnostics(aggregate))
+        .into_iter()
+        .take(FAILURE_REASON_LIMIT)
+        .map(|item| {
+            json!({
+                "task_id": item.task_id,
+                "class": item.class,
+                "message": item.message,
+                "source": item.source,
+            })
+        })
+        .collect()
+}
+
+fn aggregate_failure_diagnostics(aggregate: &AgentTaskAggregate) -> Vec<CollectedDiagnostic> {
+    let mut collected = Vec::new();
 
     // Failure reasons only describe failed outcomes. Scanning successful
     // outcomes incorrectly promoted provider success diagnostics (including
@@ -2678,6 +2790,7 @@ pub(crate) fn failure_reasons_from_aggregate(aggregate: &AgentTaskAggregate) -> 
                 class: diagnostic.class.clone(),
                 message: diagnostic.message.clone(),
                 source: "diagnostics".to_string(),
+                data: diagnostic.data.clone(),
             });
         }
         collect_nested_diagnostics(
@@ -2694,32 +2807,33 @@ pub(crate) fn failure_reasons_from_aggregate(aggregate: &AgentTaskAggregate) -> 
         );
     }
 
-    ranked_diagnostics(collected)
-        .into_iter()
-        .take(FAILURE_REASON_LIMIT)
-        .map(|item| {
-            json!({
-                "task_id": item.task_id,
-                "class": item.class,
-                "message": item.message,
-                "source": item.source,
-            })
-        })
-        .collect()
+    collected
 }
 
 fn ranked_diagnostics(collected: Vec<CollectedDiagnostic>) -> Vec<CollectedDiagnostic> {
     // Dedupe by (class, message) keeping the first occurrence, then order the
     // most actionable root-cause diagnostics first.
-    let mut seen = std::collections::HashSet::new();
     let mut deduped: Vec<CollectedDiagnostic> = Vec::new();
     for item in collected {
         let trimmed = item.message.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let key = (item.class.to_ascii_lowercase(), trimmed.to_string());
-        if !seen.insert(key) {
+        let key = (
+            item.task_id.clone(),
+            item.class.to_ascii_lowercase(),
+            trimmed.to_string(),
+            item.source.clone(),
+        );
+        if let Some(existing) = deduped.iter_mut().find(|existing| {
+            (
+                existing.task_id.clone(),
+                existing.class.to_ascii_lowercase(),
+                existing.message.trim().to_string(),
+                existing.source.clone(),
+            ) == key
+        }) {
+            merge_diagnostic_data(&mut existing.data, item.data);
             continue;
         }
         deduped.push(item);
@@ -2729,21 +2843,57 @@ fn ranked_diagnostics(collected: Vec<CollectedDiagnostic>) -> Vec<CollectedDiagn
     deduped
 }
 
+fn merge_diagnostic_data(existing: &mut Value, incoming: Value) {
+    match (existing, incoming) {
+        (Value::Object(existing), Value::Object(incoming)) => {
+            for (key, value) in incoming {
+                let current = existing.entry(key).or_insert(Value::Null);
+                if current.is_null() || diagnostic_data_size(&value) > diagnostic_data_size(current)
+                {
+                    *current = value;
+                }
+            }
+        }
+        (current, incoming)
+            if current.is_null()
+                || diagnostic_data_size(&incoming) > diagnostic_data_size(current) =>
+        {
+            *current = incoming;
+        }
+        _ => {}
+    }
+}
+
+fn diagnostic_data_size(value: &Value) -> usize {
+    serde_json::to_vec(value).map_or(0, |value| value.len())
+}
+
 #[derive(Clone)]
 struct CollectedDiagnostic {
     task_id: String,
     class: String,
     message: String,
     source: String,
+    data: Value,
 }
 
-/// Lower number = higher priority. Actionable root-cause classes
-/// (validation/fatal/registration/missing-path) are surfaced before generic or
-/// transient noise so the first reason an operator sees is the one worth acting
-/// on.
+/// Lower number = higher priority. Explicit provider-contract failures must
+/// precede an otherwise successful provider-process observation: the latter
+/// describes the wrapper, not why the task failed.
 fn diagnostic_priority(item: &CollectedDiagnostic) -> (u8, u8) {
+    let class = item.class.to_ascii_lowercase();
     let text = format!("{} {}", item.class, item.message).to_ascii_lowercase();
-    let priority = if text.contains("provider_malformed_json")
+    let priority = if is_policy_denial(&class, &text) {
+        0
+    } else if is_required_output_diagnostic(&class) {
+        1
+    } else if is_provider_contract_diagnostic(&class) {
+        2
+    } else if is_successful_process_exit(&text) {
+        // A successful provider process can be useful context, but it cannot
+        // explain why the task failed.
+        10
+    } else if text.contains("provider_malformed_json")
         || text.contains("malformed executor")
         || text.contains("outcome-normalization")
     {
@@ -2802,6 +2952,7 @@ fn collect_process_stream_diagnostics(
                 class: "provider.process_stream".to_string(),
                 message: excerpt.to_string(),
                 source: "hydrated_process_stream".to_string(),
+                data: Value::Null,
             });
         }
     }
@@ -2838,6 +2989,7 @@ fn collect_nested_diagnostics(
                             class,
                             message,
                             source: source.to_string(),
+                            data: item.get("data").cloned().unwrap_or(Value::Null),
                         });
                     }
                 }
@@ -3850,13 +4002,88 @@ fn evidence_is_test(kind: &str, uri: &str) -> bool {
 
 fn collected_diagnostic_value(item: CollectedDiagnostic) -> Value {
     let owner = diagnostic_owner(&item.class, &item.source);
-    json!({
+    let mut value = json!({
         "task_id": item.task_id,
         "class": item.class,
-        "message": item.message,
+        "message": bounded_diagnostic_value(&Value::String(item.message)),
         "source": item.source,
         "owner": owner,
-    })
+    });
+    if let Some(details) = policy_denial_details(&item.data) {
+        value["details"] = details;
+    }
+    value
+}
+
+fn is_successful_process_exit(text: &str) -> bool {
+    text.contains("exit status 0")
+        || text.contains("exited with status 0")
+        || text.contains("exit_code: 0")
+        || text.contains("exit_code=0")
+}
+
+fn is_policy_denial(class: &str, text: &str) -> bool {
+    class.contains("policy_denied")
+        || class.contains("command_denied")
+        || text.contains("policy denied")
+        || text.contains("tool denied")
+}
+
+fn is_required_output_diagnostic(class: &str) -> bool {
+    class.contains("required_output_missing")
+}
+
+fn is_provider_contract_diagnostic(class: &str) -> bool {
+    class.contains("provider_outcome_contract_violation")
+        || class.contains("outcome_contract_violation")
+}
+
+/// Preserve only the stable, actionable denial fields. Provider diagnostic data
+/// may contain arbitrary command output, which does not belong in a root cause.
+fn policy_denial_details(data: &Value) -> Option<Value> {
+    let fields = [
+        "tool",
+        "permission",
+        "path",
+        "requested_path",
+        "canonical_path",
+        "allowed_path",
+        "workspace_path",
+        "matched_pattern",
+        "policy_mode",
+        "reason",
+    ];
+    let details = fields.into_iter().filter_map(|field| {
+        data.get(field)
+            .filter(|value| !value.is_null())
+            .map(|value| (field.to_string(), bounded_diagnostic_value(value)))
+    });
+    let details = serde_json::Map::from_iter(details);
+    (!details.is_empty()).then(|| Value::Object(details))
+}
+
+fn bounded_diagnostic_value(value: &Value) -> Value {
+    match value {
+        Value::String(text) if text.chars().count() > COMPACT_TEXT_LIMIT => {
+            let prefix: String = text.chars().take(COMPACT_TEXT_LIMIT).collect();
+            Value::String(format!("{prefix}..."))
+        }
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .take(COMPACT_REF_LIMIT)
+                .map(bounded_diagnostic_value)
+                .collect(),
+        ),
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .take(COMPACT_REF_LIMIT)
+                .map(|(key, value)| (key.clone(), bounded_diagnostic_value(value)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
 }
 
 fn diagnostic_owner(class: &str, source: &str) -> &'static str {
@@ -4113,6 +4340,173 @@ fn diagnose_next_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn actionable_diagnostics_outrank_a_successful_provider_process_exit() {
+        let diagnostics = ranked_diagnostics(vec![
+            CollectedDiagnostic {
+                task_id: "cook".to_string(),
+                class: "provider.process_exit".to_string(),
+                message: "OpenCode CLI exited with status 0".to_string(),
+                source: "diagnostics".to_string(),
+                data: Value::Null,
+            },
+            CollectedDiagnostic {
+                task_id: "cook".to_string(),
+                class: "agent_task.provider_outcome_contract_violation".to_string(),
+                message: "Provider result violates the required output contract.".to_string(),
+                source: "diagnostics".to_string(),
+                data: Value::Null,
+            },
+            CollectedDiagnostic {
+                task_id: "cook".to_string(),
+                class: "agent_task.required_output_missing".to_string(),
+                message: "Required output review_form was not produced.".to_string(),
+                source: "diagnostics".to_string(),
+                data: Value::Null,
+            },
+            CollectedDiagnostic {
+                task_id: "cook".to_string(),
+                class: "agent_tool.command_denied".to_string(),
+                message: "Tool 'grep' was denied by the external-directory permission policy."
+                    .to_string(),
+                source: "diagnostics".to_string(),
+                data: json!({
+                    "tool": "grep",
+                    "permission": "external_directory_read",
+                    "requested_path": "/Users/chubes/Developer/homeboy",
+                    "canonical_path": "/Users/chubes/Developer/homeboy@fix-11827"
+                }),
+            },
+        ]);
+
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.class.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "agent_tool.command_denied",
+                "agent_task.required_output_missing",
+                "agent_task.provider_outcome_contract_violation",
+                "provider.process_exit",
+            ]
+        );
+        assert_eq!(
+            collected_diagnostic_value(diagnostics[0].clone())["details"]["canonical_path"],
+            "/Users/chubes/Developer/homeboy@fix-11827"
+        );
+    }
+
+    #[test]
+    fn duplicate_diagnostics_merge_richer_denial_data() {
+        let diagnostics = ranked_diagnostics(vec![
+            CollectedDiagnostic {
+                task_id: "cook".to_string(),
+                class: "agent_tool.command_denied".to_string(),
+                message: "grep was denied".to_string(),
+                source: "diagnostics".to_string(),
+                data: json!({ "tool": "grep" }),
+            },
+            CollectedDiagnostic {
+                task_id: "cook".to_string(),
+                class: "agent_tool.command_denied".to_string(),
+                message: "grep was denied".to_string(),
+                source: "diagnostics".to_string(),
+                data: json!({
+                    "permission": "external_directory_read",
+                    "canonical_path": "/worktree/homeboy@fix-11827"
+                }),
+            },
+        ]);
+
+        assert_eq!(diagnostics.len(), 1);
+        let value = collected_diagnostic_value(diagnostics[0].clone());
+        assert_eq!(value["details"]["tool"], "grep");
+        assert_eq!(value["details"]["permission"], "external_directory_read");
+        assert_eq!(
+            value["details"]["canonical_path"],
+            "/worktree/homeboy@fix-11827"
+        );
+    }
+
+    #[test]
+    fn duplicate_diagnostics_from_different_tasks_remain_distinct() {
+        let diagnostics = ranked_diagnostics(vec![
+            CollectedDiagnostic {
+                task_id: "task-a".to_string(),
+                class: "agent_tool.command_denied".to_string(),
+                message: "grep was denied".to_string(),
+                source: "diagnostics".to_string(),
+                data: json!({ "tool": "grep" }),
+            },
+            CollectedDiagnostic {
+                task_id: "task-b".to_string(),
+                class: "agent_tool.command_denied".to_string(),
+                message: "grep was denied".to_string(),
+                source: "diagnostics".to_string(),
+                data: json!({ "canonical_path": "/other-worktree" }),
+            },
+        ]);
+
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].task_id, "task-a");
+        assert_eq!(diagnostics[1].task_id, "task-b");
+    }
+
+    #[test]
+    fn evidence_diagnostic_collection_stops_at_the_global_ref_budget() {
+        let directory = tempfile::tempdir().expect("evidence directory");
+        let mut diagnostics = Vec::new();
+        let mut budget = DiagnosticCollectionBudget::default();
+        let mut truncations = Vec::new();
+
+        for index in 0..=DIAGNOSTIC_EVIDENCE_REF_LIMIT {
+            let path = directory.path().join(format!("evidence-{index}.json"));
+            std::fs::write(
+                &path,
+                json!({ "diagnostics": [{ "class": "provider", "message": format!("failure-{index}") }] }).to_string(),
+            )
+            .expect("write evidence");
+            let evidence = AgentTaskEvidenceRef {
+                kind: "executor-result".to_string(),
+                uri: format!("file://{}", path.display()),
+                label: None,
+            };
+            if let Some(truncation) = collect_hydrated_evidence_diagnostics(
+                "cook",
+                &evidence,
+                &mut diagnostics,
+                &mut budget,
+            ) {
+                truncations.push(truncation);
+            }
+        }
+
+        assert_eq!(diagnostics.len(), DIAGNOSTIC_EVIDENCE_REF_LIMIT);
+        assert_eq!(truncations.len(), 1);
+        assert_eq!(truncations[0]["truncation"]["reason"], "evidence_refs");
+    }
+
+    #[test]
+    fn policy_denial_details_are_bounded_for_default_status() {
+        let value = collected_diagnostic_value(CollectedDiagnostic {
+            task_id: "cook".to_string(),
+            class: "agent_tool.command_denied".to_string(),
+            message: "denied".to_string(),
+            source: "diagnostics".to_string(),
+            data: json!({ "canonical_path": "x".repeat(COMPACT_TEXT_LIMIT + 1) }),
+        });
+
+        assert_eq!(
+            value["details"]["canonical_path"]
+                .as_str()
+                .expect("bounded path")
+                .chars()
+                .count(),
+            COMPACT_TEXT_LIMIT + 3
+        );
+    }
 
     #[test]
     fn discovery_actionable_metadata_is_bounded_and_continues_active_pages() {

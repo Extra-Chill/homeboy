@@ -599,6 +599,51 @@ pub fn hydrate_evidence_summary(task_id: &str, evidence: &AgentTaskEvidenceRef) 
     }))
 }
 
+const EVIDENCE_DIAGNOSTIC_MAX_BYTES: usize = 64 * 1024;
+const EVIDENCE_DIAGNOSTIC_MAX_COUNT: usize = 64;
+const EVIDENCE_DIAGNOSTIC_MAX_DEPTH: usize = 16;
+
+/// Read bounded, redacted diagnostics and process streams for root-cause
+/// ranking. The compact evidence summary deliberately previews only three
+/// diagnostics, so callers must use this reader before presentation bounds.
+pub fn hydrate_evidence_diagnostics(evidence: &AgentTaskEvidenceRef) -> Option<Value> {
+    let path = evidence.uri.strip_prefix("file://")?;
+    if !path.ends_with(".json") {
+        return None;
+    }
+    let file = fs::File::open(path).ok()?;
+    let mut raw = Vec::with_capacity(EVIDENCE_DIAGNOSTIC_MAX_BYTES + 1);
+    file.take((EVIDENCE_DIAGNOSTIC_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut raw)
+        .ok()?;
+    if raw.len() > EVIDENCE_DIAGNOSTIC_MAX_BYTES {
+        return Some(json!({
+            "diagnostics": [],
+            "process_streams": [],
+            "truncation": {
+                "truncated": true,
+                "reason": "evidence_bytes",
+                "limit_bytes": EVIDENCE_DIAGNOSTIC_MAX_BYTES,
+            },
+        }));
+    }
+    let raw = String::from_utf8(raw).ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
+    let redacted = RedactionPolicy::default().redact_json(&value);
+    let mut diagnostics = Vec::new();
+    let mut budget = DiagnosticBudget::default();
+    collect_diagnostics(&redacted, &mut diagnostics, 0, &mut budget);
+    Some(json!({
+        "diagnostics": diagnostics,
+        "process_streams": process_stream_summaries(&redacted, Path::new(path).parent()),
+        "usage": {
+            "diagnostic_count": budget.count,
+            "diagnostic_bytes": budget.bytes,
+        },
+        "truncation": budget.projection(),
+    }))
+}
+
 fn evidence_json_summary(value: &Value, stream_root: Option<&Path>) -> Value {
     json!({
         "status": find_string_field(value, &["status", "state"]),
@@ -619,7 +664,7 @@ fn evidence_json_summary(value: &Value, stream_root: Option<&Path>) -> Value {
 fn process_stream_summaries(value: &Value, stream_root: Option<&Path>) -> Value {
     const LIMIT: usize = 600;
     let mut streams = Vec::new();
-    collect_process_stream_summaries(value, &mut streams, LIMIT, stream_root);
+    collect_process_stream_summaries(value, &mut streams, LIMIT, stream_root, 0);
     Value::Array(streams)
 }
 
@@ -628,8 +673,9 @@ fn collect_process_stream_summaries(
     streams: &mut Vec<Value>,
     limit: usize,
     stream_root: Option<&Path>,
+    depth: usize,
 ) {
-    if streams.len() >= 2 {
+    if streams.len() >= 2 || depth > EVIDENCE_DIAGNOSTIC_MAX_DEPTH {
         return;
     }
     match value {
@@ -665,12 +711,12 @@ fn collect_process_stream_summaries(
                 }
             }
             for nested in map.values() {
-                collect_process_stream_summaries(nested, streams, limit, stream_root);
+                collect_process_stream_summaries(nested, streams, limit, stream_root, depth + 1);
             }
         }
         Value::Array(items) => {
             for nested in items {
-                collect_process_stream_summaries(nested, streams, limit, stream_root);
+                collect_process_stream_summaries(nested, streams, limit, stream_root, depth + 1);
             }
         }
         _ => {}
@@ -811,6 +857,70 @@ fn first_diagnostics(value: &Value) -> Value {
     }
 }
 
+#[derive(Default)]
+struct DiagnosticBudget {
+    bytes: usize,
+    count: usize,
+    count_truncated: bool,
+    bytes_truncated: bool,
+    depth_truncated: bool,
+}
+
+impl DiagnosticBudget {
+    fn projection(&self) -> Value {
+        json!({
+            "truncated": self.count_truncated || self.bytes_truncated || self.depth_truncated,
+            "count_limit": EVIDENCE_DIAGNOSTIC_MAX_COUNT,
+            "byte_limit": EVIDENCE_DIAGNOSTIC_MAX_BYTES,
+            "depth_limit": EVIDENCE_DIAGNOSTIC_MAX_DEPTH,
+            "count_truncated": self.count_truncated,
+            "bytes_truncated": self.bytes_truncated,
+            "depth_truncated": self.depth_truncated,
+        })
+    }
+}
+
+fn collect_diagnostics(
+    value: &Value,
+    diagnostics: &mut Vec<Value>,
+    depth: usize,
+    budget: &mut DiagnosticBudget,
+) {
+    if depth > EVIDENCE_DIAGNOSTIC_MAX_DEPTH {
+        budget.depth_truncated = true;
+        return;
+    }
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::Array(items)) = map.get("diagnostics") {
+                for item in items {
+                    if diagnostics.len() >= EVIDENCE_DIAGNOSTIC_MAX_COUNT {
+                        budget.count_truncated = true;
+                        return;
+                    }
+                    let bytes = serde_json::to_vec(item).map_or(0, |bytes| bytes.len());
+                    if budget.bytes.saturating_add(bytes) > EVIDENCE_DIAGNOSTIC_MAX_BYTES {
+                        budget.bytes_truncated = true;
+                        return;
+                    }
+                    budget.bytes += bytes;
+                    budget.count += 1;
+                    diagnostics.push(item.clone());
+                }
+            }
+            for nested in map.values() {
+                collect_diagnostics(nested, diagnostics, depth + 1, budget);
+            }
+        }
+        Value::Array(items) => {
+            for nested in items {
+                collect_diagnostics(nested, diagnostics, depth + 1, budget);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn excerpt(text: &str) -> String {
     excerpt_with_limit(text, 600)
 }
@@ -830,6 +940,44 @@ mod tests {
     use super::*;
     use homeboy_error::ErrorCode;
     use std::io::{Error as IoError, ErrorKind};
+
+    #[test]
+    fn diagnostic_collection_reports_count_and_depth_truncation() {
+        let diagnostics = (0..=EVIDENCE_DIAGNOSTIC_MAX_COUNT)
+            .map(|index| json!({ "class": "provider", "message": format!("failure-{index}") }))
+            .collect::<Vec<_>>();
+        let mut budget = DiagnosticBudget::default();
+        let mut collected = Vec::new();
+        collect_diagnostics(
+            &json!({ "diagnostics": diagnostics }),
+            &mut collected,
+            0,
+            &mut budget,
+        );
+
+        assert_eq!(collected.len(), EVIDENCE_DIAGNOSTIC_MAX_COUNT);
+        assert_eq!(budget.projection()["count_truncated"], true);
+
+        let mut nested = json!({ "diagnostics": [] });
+        for _ in 0..=EVIDENCE_DIAGNOSTIC_MAX_DEPTH {
+            nested = json!({ "nested": nested });
+        }
+        let mut depth_budget = DiagnosticBudget::default();
+        collect_diagnostics(&nested, &mut Vec::new(), 0, &mut depth_budget);
+        assert_eq!(depth_budget.projection()["depth_truncated"], true);
+
+        let mut byte_budget = DiagnosticBudget::default();
+        collect_diagnostics(
+            &json!({ "diagnostics": [{
+                "class": "provider",
+                "message": "x".repeat(EVIDENCE_DIAGNOSTIC_MAX_BYTES)
+            }] }),
+            &mut Vec::new(),
+            0,
+            &mut byte_budget,
+        );
+        assert_eq!(byte_budget.projection()["bytes_truncated"], true);
+    }
 
     #[test]
     fn agent_task_evidence_url_requires_supported_run_section_shape() {
