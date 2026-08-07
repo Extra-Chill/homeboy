@@ -1151,8 +1151,8 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher(
         )
     })?;
     record_terminal_batch_admission_failures(&plan, &result.value)?;
+    notify_batch_wave_complete(&plan.fanout_id, &result.value, result.exit_code);
     let result = batch_cook_result(&plan, result, &concurrency);
-    notify_batch_wave_complete(&plan.fanout_id, &result.0);
     Ok(result)
 }
 
@@ -1189,8 +1189,8 @@ where
         )
     })?;
     record_terminal_batch_admission_failures(&plan, &result.value)?;
+    notify_batch_wave_complete(&plan.fanout_id, &result.value, result.exit_code);
     let result = batch_cook_result(&plan, result, &concurrency);
-    notify_batch_wave_complete(&plan.fanout_id, &result.0);
     Ok(result)
 }
 
@@ -1250,9 +1250,16 @@ where
 /// detached launcher passes it explicitly through `notification_route::child_env`,
 /// so `notification_route::current()` is correct at this point in both the
 /// attached and the detached coordinator.
-fn notify_batch_wave_complete(_fanout_id: &str, _result: &Value) {
-    // Intentionally empty. See the doc comment above for the required emitter
-    // signature and the payload already available at this call site.
+fn notify_batch_wave_complete(
+    fanout_id: &str,
+    report: &agent_task_service::AgentTaskCookBatchReport,
+    exit_code: i32,
+) {
+    // `fanout_id` rather than `report.batch_id`: the once-claim must be stable
+    // across `fanout resume`, which reuses the fanout id and mints a new batch
+    // record. Portfolio counts are `None` here -- `ready`/`blocked`/`merged` are
+    // the supervisor's view, and a plain cook batch has no portfolio.
+    homeboy::agents::agent_task_notify::batch_terminal(report, fanout_id, None, None, exit_code);
 }
 
 /// Recipes are the durable restart boundary. Persist blocked dependents before
