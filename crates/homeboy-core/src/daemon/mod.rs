@@ -32,6 +32,7 @@ mod completion_tracker;
 mod control;
 pub mod controller_job_driver;
 mod daemon_lease;
+pub mod orchestration;
 mod patch_capture;
 pub mod recovery_actions;
 mod remote_runner;
@@ -1142,10 +1143,12 @@ where
     let (local_shutdown_tx, local_shutdown_rx) = mpsc::channel();
     let (completion_shutdown_tx, completion_shutdown_rx) = mpsc::channel();
     let (schedule_shutdown_tx, schedule_shutdown_rx) = mpsc::channel();
+    let (orchestration_shutdown_tx, orchestration_shutdown_rx) = mpsc::channel();
     let local_child_reconciler =
         spawn_local_child_reservation_reconciler(job_store.clone(), local_shutdown_rx);
     let completion_notifier = spawn_completion_notifier(completion_shutdown_rx);
     let schedule_ticker = spawn_schedule_ticker(schedule_shutdown_rx);
+    let orchestration_reconciler = spawn_orchestration_reconciler(orchestration_shutdown_rx);
 
     let mut accepted = 0;
     let mut serve_result = Ok(());
@@ -1172,9 +1175,11 @@ where
     let _ = local_shutdown_tx.send(());
     let _ = completion_shutdown_tx.send(());
     let _ = schedule_shutdown_tx.send(());
+    let _ = orchestration_shutdown_tx.send(());
     let _ = local_child_reconciler.join();
     let _ = completion_notifier.join();
     let _ = schedule_ticker.join();
+    let _ = orchestration_reconciler.join();
     serve_result.map(|()| state)
 }
 
@@ -1246,6 +1251,81 @@ fn schedule_tick_loop(interval: std::time::Duration, shutdown: mpsc::Receiver<()
     }
 }
 
+/// Environment variable overriding how often the daemon reconciles orphaned
+/// agent-task orchestration state, in seconds. Defaults to
+/// [`ORCHESTRATION_TICK_DEFAULT_INTERVAL_SECS`].
+///
+/// This is a *recovery* cadence, not a progress one. Both mechanisms it drives
+/// only act on records that durable state already proves are stuck — an
+/// orphaned `running` run whose owner died, a controller wait whose subject is
+/// already terminal — so polling faster only shortens the window in which a
+/// stuck record stays stuck. It is deliberately slower than the five-second
+/// completion tick because each pass reads every active run and every parked
+/// controller.
+const ORCHESTRATION_TICK_INTERVAL_ENV: &str = "HOMEBOY_DAEMON_ORCHESTRATION_TICK_SECS";
+const ORCHESTRATION_TICK_DEFAULT_INTERVAL_SECS: u64 = 60;
+
+/// Setting the tick interval to zero disables daemon-driven orchestration
+/// recovery, for operators who would rather drive
+/// `homeboy agent-task active --reconcile --apply` and
+/// `homeboy agent-task controller resume` themselves. Matches the schedule
+/// ticker's convention.
+fn orchestration_tick_interval() -> Option<std::time::Duration> {
+    parse_orchestration_tick_interval(
+        std::env::var(ORCHESTRATION_TICK_INTERVAL_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Interval parsing, split from the environment read so it can be tested
+/// without mutating process-wide state under parallel tests.
+fn parse_orchestration_tick_interval(configured: Option<&str>) -> Option<std::time::Duration> {
+    let seconds = configured
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(ORCHESTRATION_TICK_DEFAULT_INTERVAL_SECS);
+    (seconds > 0).then(|| std::time::Duration::from_secs(seconds))
+}
+
+/// Drive the orchestration mechanisms that previously only advanced when a
+/// human typed a command.
+///
+/// `reconcile_stale_active_runs` had exactly two callers — `cleanup` and
+/// `agent-task active --reconcile --apply` — so a detached cook whose owner
+/// died stayed `running` forever. Controller waits had none at all.
+fn spawn_orchestration_reconciler(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let Some(interval) = orchestration_tick_interval() else {
+            // Disabled: still consume the shutdown signal so the join at
+            // teardown returns promptly.
+            let _ = shutdown.recv();
+            return;
+        };
+        orchestration_tick_loop(interval, shutdown)
+    })
+}
+
+/// One pass per mechanism, per interval.
+///
+/// The two mechanisms are isolated from each other and from the loop: a
+/// reconcile that panics costs one pass, not the tick and not the daemon.
+/// Overlap is impossible by construction — the sleep happens after both
+/// passes return, exactly as the schedule ticker does it — and across
+/// processes the daemon owner lock already guarantees a single ticker.
+fn orchestration_tick_loop(interval: std::time::Duration, shutdown: mpsc::Receiver<()>) {
+    loop {
+        isolated_tick(|| {
+            let _ = orchestration::reconcile_stale_active_runs();
+        });
+        isolated_tick(|| {
+            let _ = orchestration::reconcile_controller_waits();
+        });
+        if shutdown.recv_timeout(interval).is_ok() {
+            return;
+        }
+    }
+}
+
 /// Reclaim capacity even when no controller polls the daemon after a failed
 /// handoff. The store owns the fail-closed child-identity check.
 fn spawn_local_child_reservation_reconciler(
@@ -1285,85 +1365,127 @@ fn spawn_completion_notifier(shutdown: mpsc::Receiver<()>) -> std::thread::JoinH
     })
 }
 
-/// Poll the observation store for in-flight runs and notify on completion.
+/// Run one tick body with every failure contained, including a panic.
+///
+/// The daemon is long-lived and shared: a panic inside one mechanism's pass
+/// must not end that mechanism's loop, and must not stop the other mechanisms
+/// that share the thread. Catching here — rather than letting the panic unwind
+/// out of the thread closure — is the difference between "one pass was lost"
+/// and "this tick is silently dead until the daemon restarts".
+///
+/// `AssertUnwindSafe` is deliberate. Every tick body's state is either
+/// re-derived from durable storage on the next pass or is a completion tracker
+/// whose worst case after a panic is re-observing a run that the exactly-once
+/// marker then dedupes. There is no invariant here that a partially-executed
+/// pass can corrupt.
+fn isolated_tick(body: impl FnOnce()) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+}
+
+/// Poll the observation store for in-flight runs and notify on completion, and
+/// drain the durable notification outbox.
 ///
 /// Each pass refreshes mirrored runner evidence for currently-running records
 /// (so offloaded runs advance to their terminal state locally), re-reads the
 /// running set, and pings for any run that left it since the previous pass.
+///
+/// The outbox drain shares this loop because it shares its cadence: the first
+/// backoff step is exactly this interval, so a notification whose inline
+/// attempt failed is retried on the very next tick. The two mechanisms are
+/// individually isolated — an outbox drain that panics does not stop
+/// completion notification, and vice versa.
 fn completion_notify_loop(interval: std::time::Duration, shutdown: mpsc::Receiver<()>) {
-    use crate::observation::ObservationStore;
-
     let mut tracker = completion_tracker::CompletionTracker::default();
     loop {
-        if let Ok(store) = ObservationStore::open_initialized() {
-            let running = list_running_run_ids(&store);
-            for run_id in &running {
-                crate::observation::runs_service::refresh_mirrored_daemon_evidence_best_effort(
-                    run_id,
-                );
-            }
-            let running_after = list_running_run_ids(&store);
-            // Departure from the running set is only a *candidate* completion.
-            // Confirm terminality against the record itself before reporting:
-            // marking delivery is irreversible, so a run wrongly reported here
-            // would consume its exactly-once marker while still in flight and
-            // silence its real completion on every path.
-            let mut terminal_runs: HashMap<String, crate::observation::RunRecord> = HashMap::new();
-            let completed = tracker.observe(running_after, |run_id| match store.get_run(run_id) {
-                Ok(Some(run)) => {
-                    match crate::observation::RunStatus::from_label(&run.status) {
-                        Some(status) if status.is_terminal() => {
-                            terminal_runs.insert(run_id.to_string(), run);
-                            completion_tracker::RunTerminality::Terminal
-                        }
-                        // Still running, or a status label Homeboy does not
-                        // own: keep watching rather than guessing terminality.
-                        _ => completion_tracker::RunTerminality::Unresolved,
-                    }
-                }
-                Ok(None) => completion_tracker::RunTerminality::Vanished,
-                // A transient store error is not evidence of completion.
-                Err(_) => completion_tracker::RunTerminality::Unresolved,
-            });
-            for completed_id in completed {
-                let already_delivered = store
-                    .is_notification_delivered(&completed_id)
-                    .unwrap_or(false);
-                if already_delivered {
-                    continue;
-                }
-                // Loaded by the terminality resolver above; no second read.
-                let run = terminal_runs.remove(&completed_id);
-                let status = run
-                    .as_ref()
-                    .map(|run| run.status.as_str())
-                    .unwrap_or("unknown");
-                let route = run.as_ref().and_then(|run| {
-                    crate::notification_route::NotificationRoute::from_metadata(&run.metadata_json)
-                });
-                let won_race = store
-                    .mark_notification_delivered(&completed_id, "controller")
-                    .unwrap_or(false);
-                if !won_race {
-                    continue;
-                }
-                let mut event = crate::notify::NotifyEvent::run_completed_with_route(
-                    &completed_id,
-                    status,
-                    route.as_ref(),
-                );
-                // The completed record is already loaded above; carry its
-                // component, command, and evidence handles instead of
-                // re-deriving prose from the id and status alone.
-                if let Some(run) = run.as_ref() {
-                    event = event.with_payload(crate::notify::run_completed_payload(run));
-                }
-                let _ = crate::notify::dispatch(&event);
-            }
-        }
+        isolated_tick(|| completion_notify_pass(&mut tracker));
+        isolated_tick(|| {
+            let _ = crate::notify_outbox::drain(chrono::Utc::now());
+        });
         if shutdown.recv_timeout(interval).is_ok() {
             return;
         }
+    }
+}
+
+/// One completion-notification pass.
+fn completion_notify_pass(tracker: &mut completion_tracker::CompletionTracker) {
+    use crate::observation::ObservationStore;
+
+    let Ok(store) = ObservationStore::open_initialized() else {
+        return;
+    };
+    let running = list_running_run_ids(&store);
+    for run_id in &running {
+        crate::observation::runs_service::refresh_mirrored_daemon_evidence_best_effort(run_id);
+    }
+    let running_after = list_running_run_ids(&store);
+    // Departure from the running set is only a *candidate* completion.
+    // Confirm terminality against the record itself before reporting:
+    // marking delivery is irreversible, so a run wrongly reported here
+    // would consume its exactly-once marker while still in flight and
+    // silence its real completion on every path.
+    let mut terminal_runs: HashMap<String, crate::observation::RunRecord> = HashMap::new();
+    let completed = tracker.observe(running_after, |run_id| match store.get_run(run_id) {
+        Ok(Some(run)) => {
+            match crate::observation::RunStatus::from_label(&run.status) {
+                Some(status) if status.is_terminal() => {
+                    terminal_runs.insert(run_id.to_string(), run);
+                    completion_tracker::RunTerminality::Terminal
+                }
+                // Still running, or a status label Homeboy does not
+                // own: keep watching rather than guessing terminality.
+                _ => completion_tracker::RunTerminality::Unresolved,
+            }
+        }
+        Ok(None) => completion_tracker::RunTerminality::Vanished,
+        // A transient store error is not evidence of completion.
+        Err(_) => completion_tracker::RunTerminality::Unresolved,
+    });
+    for completed_id in completed {
+        let already_delivered = store
+            .is_notification_delivered(&completed_id)
+            .unwrap_or(false);
+        if already_delivered {
+            continue;
+        }
+        // Loaded by the terminality resolver above; no second read.
+        let run = terminal_runs.remove(&completed_id);
+        let status = run
+            .as_ref()
+            .map(|run| run.status.as_str())
+            .unwrap_or("unknown");
+        let route = run.as_ref().and_then(|run| {
+            crate::notification_route::NotificationRoute::from_metadata(&run.metadata_json)
+        });
+        let won_race = store
+            .mark_notification_delivered(&completed_id, "controller")
+            .unwrap_or(false);
+        if !won_race {
+            continue;
+        }
+        let mut event = crate::notify::NotifyEvent::run_completed_with_route(
+            &completed_id,
+            status,
+            route.as_ref(),
+        );
+        // The completed record is already loaded above; carry its
+        // component, command, and evidence handles instead of
+        // re-deriving prose from the id and status alone.
+        if let Some(run) = run.as_ref() {
+            event = event.with_payload(crate::notify::run_completed_payload(run));
+        }
+        // Outbox-backed: a transport outage no longer destroys the
+        // completion of a detached run. The exactly-once marker above
+        // is already consumed and is carried into the entry so the
+        // outbox settles it rather than re-claiming it.
+        let _ = crate::notify_outbox::dispatch_with_outbox(
+            &event,
+            Some(crate::notify_outbox::NotifyOnceMarker::new(
+                "run",
+                &completed_id,
+                "controller",
+            )),
+        );
     }
 }
 
@@ -3720,6 +3842,65 @@ mod tests {
                 start.elapsed()
             );
         });
+    }
+
+    /// The orchestration tick follows the schedule ticker's conventions:
+    /// env override, unparseable falls back to the default, zero disables.
+    #[test]
+    fn orchestration_tick_interval_defaults_and_can_be_disabled() {
+        assert_eq!(
+            super::parse_orchestration_tick_interval(None),
+            Some(Duration::from_secs(
+                super::ORCHESTRATION_TICK_DEFAULT_INTERVAL_SECS
+            ))
+        );
+        assert_eq!(
+            super::parse_orchestration_tick_interval(Some(" 15 ")),
+            Some(Duration::from_secs(15))
+        );
+        assert_eq!(
+            super::parse_orchestration_tick_interval(Some("0")),
+            None,
+            "zero disables daemon-driven orchestration recovery"
+        );
+        assert_eq!(
+            super::parse_orchestration_tick_interval(Some("nonsense")),
+            Some(Duration::from_secs(
+                super::ORCHESTRATION_TICK_DEFAULT_INTERVAL_SECS
+            )),
+            "an unparseable value falls back to the default rather than disabling"
+        );
+    }
+
+    #[test]
+    fn orchestration_tick_loop_exits_promptly_on_shutdown() {
+        crate::test_support::with_isolated_home(|_| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let handle = std::thread::spawn(move || {
+                super::orchestration_tick_loop(Duration::from_secs(300), rx);
+            });
+
+            std::thread::sleep(Duration::from_millis(50));
+            tx.send(()).expect("send shutdown");
+
+            let start = Instant::now();
+            handle.join().expect("ticker thread joins");
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "shutdown must not wait out the poll interval, took {:?}",
+                start.elapsed()
+            );
+        });
+    }
+
+    /// The daemon is long-lived and shared: one mechanism panicking must cost
+    /// one pass, not the tick and not the process.
+    #[test]
+    fn a_panicking_tick_body_is_contained() {
+        let mut ran_after = false;
+        super::isolated_tick(|| panic!("tick body exploded"));
+        super::isolated_tick(|| ran_after = true);
+        assert!(ran_after, "a later pass must still run");
     }
 
     #[test]

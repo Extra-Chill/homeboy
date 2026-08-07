@@ -42,7 +42,9 @@ pub mod agent_task_lifecycle;
 pub mod agent_task_loop_controller;
 pub mod agent_task_loop_definition;
 pub mod agent_task_loop_runner_policy;
-mod agent_task_notify;
+// Public so the fanout and controller command adapters can emit wave-terminal
+// and controller lifecycle notifications. Cook's own emitters stay internal.
+pub mod agent_task_notify;
 mod agent_task_process_containment;
 #[allow(
     dead_code,

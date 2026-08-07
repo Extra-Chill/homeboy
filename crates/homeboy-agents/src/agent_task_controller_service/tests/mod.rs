@@ -282,6 +282,7 @@ mod resume_tests;
 mod run_command_workflow_tests;
 mod run_gates_tests;
 mod run_next_fan_out_tests;
+mod wait_reconcile_tests;
 
 // ---- shared plan/spec fixtures and assertion helpers ----
 
