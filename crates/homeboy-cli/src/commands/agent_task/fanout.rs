@@ -1362,11 +1362,15 @@ fn batch_cook_result(
         .iter()
         .zip(&plan.cooks)
         .map(|(cell, cook)| {
+            // A child with no Cook report is the case that most needs
+            // structure: its `error` envelope is the only thing the caller
+            // gets, so it is passed through whole rather than rendered.
             let cell_result = cell
                 .result
                 .as_ref()
                 .map(|result| serde_json::to_value(result).unwrap_or(Value::Null))
                 .unwrap_or_else(|| serde_json::json!({ "error": cell.error }));
+            let lifecycle = cell.lifecycle();
             serde_json::json!({
                 "cook_id": cook.cook_id,
                 "run_id": cook.run_id(),
@@ -1374,6 +1378,12 @@ fn batch_cook_result(
                 "head": cook.head,
                 "workspace_materialization": cook.workspace_materialization,
                 "exit_code": cell.exit_code,
+                // The closed-vocabulary classification, so a caller reading
+                // this envelope out of a file or an HTTP response can decide
+                // completion and retry without a process exit code.
+                "lifecycle_status": lifecycle.lifecycle_status,
+                "terminal": lifecycle.terminal,
+                "retryable": lifecycle.retryable,
                 "result": cell_result,
             })
         })
@@ -4269,7 +4279,11 @@ fi
                         status: "failed".to_string(),
                         exit_code: 1,
                         result: None,
-                        error: Some("controller admission failed".to_string()),
+                        error: Some(agent_task_service::AgentTaskCookCellError::declared(
+                            "agent_task.controller_admission_denied",
+                            "controller admission failed",
+                            false,
+                        )),
                     },
                 ],
             },

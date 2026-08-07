@@ -1137,6 +1137,91 @@ pub struct AgentTaskCookBatchOptions {
     pub max_concurrency: usize,
 }
 
+/// A batch child's failure, kept structured across the coordinator boundary.
+///
+/// # Why this is not a `String`
+///
+/// A `homeboy` [`Error`] carries `code`, `retryable`, `details` (including the
+/// offending `field` for validation failures), and `hints`. The Cook's own
+/// failure path already uses all of it to build an
+/// [`AgentTaskCookFailureContext`] with typed `legal_actions` and
+/// `next_actions`. At the batch boundary every one of those collapsed into
+/// `error.to_string()` — so a child that failed *before* creating a durable
+/// record handed the orchestrator prose and nothing to act on, which is
+/// precisely the case where there is no durable record to go and read instead.
+///
+/// `message` is the same string the field used to hold, so a renderer that
+/// printed `error` now prints `error.message` and shows the same text.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentTaskCookCellError {
+    /// The stable `homeboy` error code, e.g. `validation.invalid_argument`.
+    /// This is the field a machine consumer branches on.
+    pub code: String,
+    /// Human-readable rendering — exactly what `error` used to carry.
+    pub message: String,
+    /// Whether the failure classified itself as retryable.
+    ///
+    /// `None` means the constructor did not classify it, which is materially
+    /// different from "classified as not retryable" and is preserved as such
+    /// rather than being flattened to `false`.
+    pub retryable: Option<bool>,
+    /// The argument or configuration key at fault, when the error named one.
+    /// Lifted out of `details` because it is the field an orchestrator routes
+    /// on; `details` still carries it too.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// The error's structured evidence, verbatim.
+    #[serde(skip_serializing_if = "Value::is_null")]
+    pub details: Value,
+    /// Operator-facing remediation the error already carried.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
+}
+
+impl AgentTaskCookCellError {
+    /// Project a `homeboy` [`Error`] without losing its structure.
+    pub fn from_error(error: &Error) -> Self {
+        Self {
+            code: error.code.as_str().to_string(),
+            message: error.message.clone(),
+            retryable: error.retryable,
+            field: error
+                .details
+                .get("field")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            details: error.details.clone(),
+            hints: error
+                .hints
+                .iter()
+                .map(|hint| hint.message.clone())
+                .collect(),
+        }
+    }
+
+    /// A failure the coordinator itself declares, with no underlying [`Error`]
+    /// to project.
+    ///
+    /// The code is explicit rather than defaulted so a call site cannot
+    /// silently emit an uninformative one.
+    pub fn declared(code: &str, message: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.into(),
+            retryable: Some(retryable),
+            field: None,
+            details: Value::Null,
+            hints: Vec::new(),
+        }
+    }
+}
+
+impl From<&Error> for AgentTaskCookCellError {
+    fn from(error: &Error) -> Self {
+        Self::from_error(error)
+    }
+}
+
 /// One child's outcome inside a batch.
 ///
 /// `Serialize` is hand-written for the same reason as [`AgentTaskCookReport`]:
@@ -1150,7 +1235,11 @@ pub struct AgentTaskCookBatchCellReport {
     pub status: String,
     pub exit_code: i32,
     pub result: Option<AgentTaskCookReport>,
-    pub error: Option<String>,
+    /// Structured failure for a child that produced no `result`.
+    ///
+    /// Wire change, not an addition: this was a bare string and is now an
+    /// object. `error.message` carries that former string verbatim.
+    pub error: Option<AgentTaskCookCellError>,
 }
 
 impl AgentTaskCookBatchCellReport {
@@ -1182,7 +1271,7 @@ impl serde::Serialize for AgentTaskCookBatchCellReport {
             #[serde(skip_serializing_if = "Option::is_none")]
             result: Option<&'a AgentTaskCookReport>,
             #[serde(skip_serializing_if = "Option::is_none")]
-            error: Option<&'a String>,
+            error: Option<&'a AgentTaskCookCellError>,
             lifecycle_status: RunLifecycleStatus,
             terminal: bool,
             retryable: bool,
@@ -1477,6 +1566,92 @@ mod run_lifecycle_projection_tests {
     }
 }
 
+/// The batch boundary must not stringify a structured failure.
+#[cfg(test)]
+mod cell_error_envelope_tests {
+    use super::*;
+
+    #[test]
+    fn the_envelope_preserves_code_retryability_field_and_hints() {
+        let error = Error::validation_invalid_argument(
+            "batch_id",
+            "fanout batch has no child runs to resume",
+            Some("batch-9525".to_string()),
+            None,
+        )
+        .with_retryable(false)
+        .with_hint("Run `homeboy agent-task fanout status batch-9525`.");
+        let expected_message = error.message.clone();
+
+        let envelope = AgentTaskCookCellError::from_error(&error);
+
+        assert_eq!(envelope.code, "validation.invalid_argument");
+        assert_eq!(envelope.retryable, Some(false));
+        assert_eq!(envelope.field.as_deref(), Some("batch_id"));
+        assert_eq!(
+            envelope.hints,
+            vec!["Run `homeboy agent-task fanout status batch-9525`.".to_string()]
+        );
+        assert_eq!(
+            envelope.message, expected_message,
+            "the human-readable rendering must survive verbatim so existing renderers do not go blank"
+        );
+        assert_eq!(envelope.details["id"], "batch-9525");
+    }
+
+    /// An unclassified error must not be reported as "not retryable" — that is
+    /// a claim the constructor never made.
+    #[test]
+    fn an_unclassified_error_reports_unknown_retryability_rather_than_false() {
+        let envelope =
+            AgentTaskCookCellError::from_error(&Error::internal_unexpected("coordinator panicked"));
+
+        assert_eq!(envelope.retryable, None);
+        assert_eq!(envelope.code, "internal.unexpected");
+    }
+
+    #[test]
+    fn the_envelope_serializes_with_the_message_a_string_error_used_to_carry() {
+        let cell = AgentTaskCookBatchCellReport {
+            cook_id: "cook-1".to_string(),
+            initial_run_id: "cook-1-attempt-1".to_string(),
+            status: "failed".to_string(),
+            exit_code: 1,
+            result: None,
+            error: Some(AgentTaskCookCellError::from_error(
+                &Error::invalid_argument("cook_id", "cook has no durable recipe"),
+            )),
+        };
+
+        let value = serde_json::to_value(&cell).expect("serialize");
+
+        assert_eq!(value["error"]["code"], "validation.invalid_argument");
+        assert_eq!(value["error"]["field"], "cook_id");
+        assert!(value["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("cook has no durable recipe"));
+        // Unchanged: the fields every existing caller already branches on.
+        assert_eq!(value["status"], "failed");
+        assert_eq!(value["exit_code"], 1);
+    }
+
+    /// A coordinator-declared failure still has to name a code, so it is
+    /// routable rather than just readable.
+    #[test]
+    fn a_declared_failure_carries_a_code_and_an_explicit_retryability() {
+        let envelope = AgentTaskCookCellError::declared(
+            "agent_task.batch_cancelled",
+            "batch cancelled before this child was started",
+            false,
+        );
+
+        assert_eq!(envelope.code, "agent_task.batch_cancelled");
+        assert_eq!(envelope.retryable, Some(false));
+        assert!(envelope.field.is_none());
+    }
+}
+
 /// Resolves a generic dispatch command once, before a typed cook is scheduled.
 /// Callers compile workflow policy into the command and cook options; this
 /// routine owns the shared dispatch compilation boundary.
@@ -1671,13 +1846,18 @@ where
                                         result: Some(result.value),
                                         error: None,
                                     },
+                                    // The child failed before it could produce
+                                    // a Cook report, so this envelope is the
+                                    // only thing the orchestrator gets. It
+                                    // keeps the error's code, retryability,
+                                    // and hints rather than stringifying them.
                                     Err(error) => AgentTaskCookBatchCellReport {
                                         cook_id: cook.cook_id.clone(),
                                         initial_run_id: cook.initial_run_id.clone(),
                                         status: "failed".to_string(),
                                         exit_code: 1,
                                         result: None,
-                                        error: Some(error.to_string()),
+                                        error: Some(AgentTaskCookCellError::from_error(&error)),
                                     },
                                 };
                                 // Published as each child terminalizes rather
@@ -1758,7 +1938,13 @@ fn claim_disposition(
             status: CookStatus::Cancelled.as_str().to_string(),
             exit_code: 1,
             result: None,
-            error: Some("batch cancelled before this child was started".to_string()),
+            // Not retryable as-is: the coordinator's cancellation stands until
+            // an operator starts a new batch.
+            error: Some(AgentTaskCookCellError::declared(
+                "agent_task.batch_cancelled",
+                "batch cancelled before this child was started",
+                false,
+            )),
         });
     }
     ClaimDisposition::Run
@@ -1925,7 +2111,7 @@ where
                 status: "failed".to_string(),
                 exit_code: 1,
                 result: None,
-                error: Some(error.to_string()),
+                error: Some(AgentTaskCookCellError::from_error(&error)),
             },
         };
         // Persist each child's finalization outcome as it is harvested so a
@@ -2107,11 +2293,22 @@ where
     )
 }
 
+/// The durable checkpoint an owner outside this process reads.
+///
+/// `error` follows [`AgentTaskCookBatchCellReport::error`] and is therefore now
+/// an object rather than a string; `error.message` carries the text the field
+/// used to hold. `status` and `exit_code` are unchanged, and
+/// `lifecycle_status`/`terminal`/`retryable` are added so an owner reading only
+/// this checkpoint can classify the child without loading its report.
 fn child_finalization_value(cell: &AgentTaskCookBatchCellReport) -> Value {
+    let lifecycle = cell.lifecycle();
     serde_json::json!({
         "resumed_at": chrono::Utc::now().to_rfc3339(),
         "exit_code": cell.exit_code,
         "status": cell.status,
+        "lifecycle_status": lifecycle.lifecycle_status,
+        "terminal": lifecycle.terminal,
+        "retryable": lifecycle.retryable,
         "error": cell.error,
     })
 }
