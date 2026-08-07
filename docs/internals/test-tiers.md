@@ -70,7 +70,7 @@ shared lock.
 
 `cargo nextest` runs one process per test, so process-global environment changes
 cannot leak into another test in the same process. The PR Test gate uses the
-generic inventory contract from `homeboy-extensions` and four deterministic
+generic inventory contract from `homeboy-extensions` and 16 deterministic
 shards from `homeboy-action@v2`. Each shard validates exact inventory membership,
 runs serially, and publishes structured counts before the single required
 `homeboy / Test` verdict is reconciled.
@@ -83,7 +83,7 @@ unsharded nextest output is not yet a measured Homeboy result, so local and
 release gates remain on serialized Cargo.
 
 The first full sharded run is the acceptance evidence for #11399. It must show
-complete inventory coverage, four terminal shard results, and one reconciled
+complete inventory coverage, 16 terminal shard results, and one reconciled
 Test verdict inside the existing 1500-second per-shard budget.
 
 ## Hermetic CLI Fixtures

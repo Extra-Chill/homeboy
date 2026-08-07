@@ -189,7 +189,7 @@ fn required_gate_policy_is_complete_and_emitted_by_every_pr_ci_run() {
     assert!(test_gate.contains("      scope: auto"));
     assert!(test_gate.contains("      differential-gating: 'false'"));
     assert!(test_gate.contains("      baseline-commands: none"));
-    assert!(test_gate.contains("      test-shards: '4'"));
+    assert!(test_gate.contains("      test-shards: '16'"));
     assert!(test_gate.contains("      execution-timeout-seconds: '1800'"));
     assert!(test_gate.contains("      test-timeout-seconds: '1500'"));
     assert!(
