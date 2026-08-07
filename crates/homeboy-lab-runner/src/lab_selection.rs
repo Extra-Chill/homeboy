@@ -457,7 +457,7 @@ fn placement_readiness_from_status_with_catalog(
     let availability = RunnerAvailability::from_status_parts(
         request.runner_id.clone(),
         status.connected,
-        status.stale_daemon.is_some(),
+        status.admission_blocking_stale_daemon().is_some(),
         status.active_jobs.len(),
         &status.active_job_state,
         capacity,
@@ -535,7 +535,7 @@ fn placement_readiness_from_status_with_catalog(
             },
             PlacementReadinessPredicate {
                 id: "daemon_fresh".to_string(),
-                satisfied: status.stale_daemon.is_none(),
+                satisfied: status.admission_blocking_stale_daemon().is_none(),
             },
             PlacementReadinessPredicate {
                 id: "active_jobs_authoritative".to_string(),
@@ -748,14 +748,23 @@ fn preflight_lab_runner_availability_with(
     selection: &LabRunnerSelection,
     status_fn: impl Fn(&str) -> Result<RunnerStatusReport>,
 ) -> Result<(RunnerAvailability, RunnerStatusReport)> {
+    let capacity = load(&selection.runner_id)?.settings.concurrency_limit;
+    preflight_lab_runner_availability_from_status(selection, status_fn, capacity)
+}
+
+fn preflight_lab_runner_availability_from_status(
+    selection: &LabRunnerSelection,
+    status_fn: impl Fn(&str) -> Result<RunnerStatusReport>,
+    capacity: Option<usize>,
+) -> Result<(RunnerAvailability, RunnerStatusReport)> {
     let status = status_fn(&selection.runner_id)?;
     let availability = RunnerAvailability::from_status_parts(
         selection.runner_id.clone(),
         status.connected,
-        status.stale_daemon.is_some(),
+        status.admission_blocking_stale_daemon().is_some(),
         status.active_jobs.len(),
         &status.active_job_state,
-        load(&selection.runner_id)?.settings.concurrency_limit,
+        capacity,
     );
     Ok((availability, status))
 }
@@ -1251,7 +1260,7 @@ fn connected_runner_not_ready_reason(
     runner_id: &str,
     status: &RunnerStatusReport,
 ) -> Option<String> {
-    if let Some(warning) = status.stale_daemon.as_ref() {
+    if let Some(warning) = status.admission_blocking_stale_daemon() {
         let restart = daemon_repair_command(runner_id, status);
         if !warning.stale_runtime_paths.is_empty() || !warning.changed_runtime_paths.is_empty() {
             return Some(format!(
@@ -2178,6 +2187,107 @@ mod placement_readiness_tests {
         );
         assert_eq!(result.state, PlacementReadinessState::Blocked);
         assert!(!result.recovery_actions.is_empty());
+    }
+
+    #[test]
+    fn placement_readiness_accepts_reverse_runner_with_unavailable_verification() {
+        let mut observed = status();
+        observed.stale_daemon = Some(RunnerStaleDaemonWarning::verification_unavailable(
+            "lab",
+            "homeboy 0.0.0".to_string(),
+            Some("homeboy 0.0.0+test".to_string()),
+            "reverse_runner_identity_unavailable",
+            "reverse runner identity cannot be verified".to_string(),
+        ));
+
+        let result = decide(
+            &request(),
+            &observed,
+            Some(1),
+            RunnerTunnelMode::Reverse,
+            super::super::LabRunnerGateDecision::Eligible,
+        );
+
+        assert_eq!(result.state, PlacementReadinessState::Ready);
+        assert!(result
+            .predicates
+            .iter()
+            .any(|predicate| predicate.id == "daemon_fresh" && predicate.satisfied));
+    }
+
+    #[test]
+    fn placement_readiness_rejects_reverse_runner_with_compared_mismatch() {
+        let mut observed = status();
+        observed.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+            "lab",
+            "homeboy 0.0.0".to_string(),
+            "homeboy 0.0.1".to_string(),
+            Some("homeboy 0.0.0+old".to_string()),
+            Some("homeboy 0.0.1+new".to_string()),
+        ));
+
+        let result = decide(
+            &request(),
+            &observed,
+            Some(1),
+            RunnerTunnelMode::Reverse,
+            super::super::LabRunnerGateDecision::Eligible,
+        );
+
+        assert_eq!(result.state, PlacementReadinessState::Blocked);
+    }
+
+    #[test]
+    fn preflight_accepts_reverse_runner_with_unavailable_verification() {
+        let selection = LabRunnerSelection {
+            runner_id: "lab".to_string(),
+            source: LabRunnerSelectionSource::Explicit,
+            mode: RunnerTunnelMode::Reverse,
+        };
+        let mut observed = status();
+        observed.stale_daemon = Some(RunnerStaleDaemonWarning::verification_unavailable(
+            "lab",
+            "homeboy 0.0.0".to_string(),
+            Some("homeboy 0.0.0+test".to_string()),
+            "reverse_runner_identity_unavailable",
+            "reverse runner identity cannot be verified".to_string(),
+        ));
+
+        let (availability, _) = preflight_lab_runner_availability_from_status(
+            &selection,
+            |_| Ok(observed.clone()),
+            Some(1),
+        )
+        .expect("preflight");
+
+        assert!(availability.accepts_jobs);
+    }
+
+    #[test]
+    fn preflight_rejects_reverse_runner_with_compared_mismatch() {
+        let selection = LabRunnerSelection {
+            runner_id: "lab".to_string(),
+            source: LabRunnerSelectionSource::Explicit,
+            mode: RunnerTunnelMode::Reverse,
+        };
+        let mut observed = status();
+        observed.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+            "lab",
+            "homeboy 0.0.0".to_string(),
+            "homeboy 0.0.1".to_string(),
+            Some("homeboy 0.0.0+old".to_string()),
+            Some("homeboy 0.0.1+new".to_string()),
+        ));
+
+        let (availability, _) = preflight_lab_runner_availability_from_status(
+            &selection,
+            |_| Ok(observed.clone()),
+            Some(1),
+        )
+        .expect("preflight");
+
+        assert!(!availability.accepts_jobs);
+        assert_eq!(availability.reasons, ["stale_daemon"]);
     }
 
     #[test]

@@ -175,6 +175,88 @@ fn lab_runner_preparation_uses_already_connected_runner() {
 }
 
 #[test]
+fn lab_runner_preparation_accepts_explicit_connected_reverse_runner_with_unavailable_verification()
+{
+    let selection = LabRunnerSelection {
+        runner_id: "lab".to_string(),
+        source: LabRunnerSelectionSource::Explicit,
+        mode: RunnerTunnelMode::Reverse,
+    };
+
+    let prepared = prepare_lab_runner_for_offload_with(
+        &selection,
+        |runner_id| {
+            Ok(connected_reverse_status(
+                runner_id,
+                Some(RunnerStaleDaemonWarning::verification_unavailable(
+                    runner_id,
+                    "homeboy 0.0.0".to_string(),
+                    Some("homeboy 0.0.0+test".to_string()),
+                    "reverse_runner_identity_unavailable",
+                    "reverse runner identity cannot be verified".to_string(),
+                )),
+            ))
+        },
+        |_| panic!("connected reverse runner should not reconnect"),
+    )
+    .expect("prepared");
+
+    assert_eq!(prepared, LabRunnerPreparation::Ready);
+}
+
+#[test]
+fn lab_runner_preparation_accepts_default_connected_reverse_runner_with_unavailable_verification() {
+    let selection = LabRunnerSelection {
+        runner_id: "lab".to_string(),
+        source: LabRunnerSelectionSource::Default,
+        mode: RunnerTunnelMode::Reverse,
+    };
+
+    let prepared = prepare_lab_runner_for_offload_with(
+        &selection,
+        |runner_id| {
+            Ok(connected_reverse_status(
+                runner_id,
+                Some(RunnerStaleDaemonWarning::verification_unavailable(
+                    runner_id,
+                    "homeboy 0.0.0".to_string(),
+                    Some("homeboy 0.0.0+test".to_string()),
+                    "reverse_runner_identity_unavailable",
+                    "reverse runner identity cannot be verified".to_string(),
+                )),
+            ))
+        },
+        |_| panic!("connected reverse runner should not reconnect"),
+    )
+    .expect("prepared");
+
+    assert_eq!(prepared, LabRunnerPreparation::Ready);
+}
+
+#[test]
+fn lab_runner_preparation_blocks_connected_reverse_runner_with_compared_mismatch() {
+    let selection = LabRunnerSelection {
+        runner_id: "lab".to_string(),
+        source: LabRunnerSelectionSource::Explicit,
+        mode: RunnerTunnelMode::Reverse,
+    };
+
+    let error = prepare_lab_runner_for_offload_with(
+        &selection,
+        |runner_id| {
+            Ok(connected_reverse_status(
+                runner_id,
+                Some(stale_daemon_warning(runner_id)),
+            ))
+        },
+        |_| panic!("stale reverse runner should not reconnect"),
+    )
+    .expect_err("compared daemon mismatch should remain blocked");
+
+    assert!(error.message.contains("daemon is stale"));
+}
+
+#[test]
 fn lab_runner_preparation_falls_back_for_stale_default_daemon_version_without_reconnecting() {
     let selection = LabRunnerSelection {
         runner_id: "lab".to_string(),
@@ -784,6 +866,52 @@ fn connected_direct_session(
         worker_pid: None,
         last_seen_at: None,
         leaseless_recovery_evidence: None,
+    }
+}
+
+fn connected_reverse_status(
+    runner_id: &str,
+    stale_daemon: Option<RunnerStaleDaemonWarning>,
+) -> RunnerStatusReport {
+    RunnerStatusReport {
+        runner_id: runner_id.to_string(),
+        connected: true,
+        state: super::super::RunnerSessionState::Connected,
+        session: Some(super::super::RunnerSession {
+            runner_id: runner_id.to_string(),
+            mode: RunnerTunnelMode::Reverse,
+            role: super::super::RunnerSessionRole::Controller,
+            server_id: None,
+            controller_id: Some("controller".to_string()),
+            broker_url: Some("http://127.0.0.1:9876".to_string()),
+            remote_daemon_address: None,
+            local_port: None,
+            local_url: None,
+            tunnel_pid: None,
+            tunnel_process_start_identity: None,
+            proxy_forward: None,
+            remote_daemon_pid: None,
+            remote_daemon_lease_id: None,
+            homeboy_version: "homeboy 0.0.0".to_string(),
+            homeboy_build_identity: Some("homeboy 0.0.0+test".to_string()),
+            connected_at: "2026-06-03T00:00:00Z".to_string(),
+            worker_identity: Some("worker-1".to_string()),
+            worker_pid: Some(1234),
+            last_seen_at: Some(chrono::Utc::now().to_rfc3339()),
+            leaseless_recovery_evidence: None,
+        }),
+        stale_daemon,
+        daemon_freshness: None,
+        active_jobs: Vec::new(),
+        active_runner_jobs: Vec::new(),
+        active_job_count: 0,
+        stale_runner_jobs: Vec::new(),
+        stale_runner_job_count: 0,
+        active_job_state: RunnerActiveJobState::Available,
+        active_job_source: None,
+        active_job_error: None,
+        active_job_recovery_evidence: None,
+        session_path: "/tmp/lab.json".to_string(),
     }
 }
 

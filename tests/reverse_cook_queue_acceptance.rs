@@ -190,6 +190,8 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
         "HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY",
         homeboy_core::build_identity::current().display,
     );
+    let runtime_identity = std::env::var("HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY")
+        .expect("fixture controller runtime identity");
     // The daemon, submitting CLI, and detached worker all pin the same
     // immutable controller binary while retaining independent mutable state.
     std::env::set_var(
@@ -230,11 +232,19 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
     let ssh = context.root().join("ssh");
     std::fs::write(
         &ssh,
-        "#!/bin/sh\nfor argument do command=$argument; done\ncase \"$command\" in\n  p=*'df -Pk'*) printf '%s\\n' '10485760 5242880' ;;\n  *) exec /bin/sh -c \"$command\" ;;\nesac\n",
+        "#!/bin/sh\nfor argument do command=$argument; done\ncase \"$command\" in\n  *'self identity'*) identity=\"${HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY:?}\"; version=\"${identity#homeboy }\"; version=\"${version%%+*}\"; printf '{\"version\":\"%s\",\"display\":\"%s\"}\\n' \"$version\" \"$identity\" ;;\n  *'daemon status'*) printf '%s\\n' '{\"success\":true,\"data\":{\"running\":false,\"fresh\":true,\"reachable\":true,\"active_jobs\":0}}' ;;\n  *'df -Pk'*) printf '%s\\n' 'fixture-device 5242880 1048576' ;;\n  *) exec /bin/sh -c \"$command\" ;;\nesac\n",
     )
     .expect("write capability probe SSH shim");
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755))
         .expect("make capability probe SSH shim executable");
+    let setsid = context.root().join("setsid");
+    std::fs::write(
+        &setsid,
+        "#!/usr/bin/env perl\nuse POSIX qw(setsid);\nsetsid() or die \"setsid: $!\\n\";\nexec @ARGV or die \"exec: $!\\n\";\n",
+    )
+    .expect("write setsid shim");
+    std::fs::set_permissions(&setsid, std::fs::Permissions::from_mode(0o755))
+        .expect("make setsid shim executable");
     let path = format!(
         "{}:{}",
         context.root().display(),
@@ -319,7 +329,7 @@ fn pinned_runner_route_persists_the_verified_lab_outcome_through_detached_cook_l
             "remote_daemon_pid": daemon_pid,
             "remote_daemon_lease_id": daemon_lease_id,
             "homeboy_version": env!("CARGO_PKG_VERSION"),
-            "homeboy_build_identity": null,
+            "homeboy_build_identity": runtime_identity,
             "connected_at": "2026-01-01T00:00:00Z",
             "worker_identity": "fixture-worker",
             "worker_pid": 1,
