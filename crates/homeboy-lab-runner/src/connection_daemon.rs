@@ -593,7 +593,7 @@ fn daemon_version_identity_mismatch(
                 response_body_excerpt(raw_body)
             )
         })?;
-    if !versions_match(&running_version, expected_version) {
+    if !expected_version.trim().is_empty() && !versions_match(&running_version, expected_version) {
         return Ok(Some(format!(
             "version {running_version} != configured runner version {expected_version}"
         )));
@@ -677,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn freshness_reads_the_hash_bearing_health_contract() {
+    fn freshness_allows_an_unspecified_version_with_matching_identity_and_hash() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
         let expected_hash = "a".repeat(64);
@@ -712,13 +712,35 @@ mod tests {
         let report = daemon_http_freshness(
             "homeboy-lab",
             &format!("http://{address}"),
-            "test",
+            "",
             "homeboy test+candidate",
         )
         .expect("freshness report");
         assert!(report.fresh);
         assert_eq!(report.binary_hash.as_deref(), Some(expected_hash.as_str()));
         server.join().expect("server");
+    }
+
+    #[test]
+    fn freshness_rejects_a_nonempty_wrong_expected_version() {
+        let body = serde_json::json!({
+            "version": "test",
+            "build_identity": { "display": "homeboy test+candidate" },
+            "lease": { "lease_id": "lease-candidate" },
+        });
+
+        let mismatch = daemon_version_identity_mismatch(
+            &body,
+            "fixture body",
+            "wrong-version",
+            "homeboy test+candidate",
+        )
+        .expect("version mismatch result");
+
+        assert_eq!(
+            mismatch.as_deref(),
+            Some("version test != configured runner version wrong-version")
+        );
     }
 
     #[test]
