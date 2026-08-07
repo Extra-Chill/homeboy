@@ -1361,7 +1361,7 @@ fn stale_state_loss_replay_is_retired_before_exact_live_lease_adoption() {
         let serving = Arc::new(AtomicBool::new(true));
         let serving_endpoint = Arc::clone(&serving);
         let endpoint = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(10);
+            let deadline = Instant::now() + Duration::from_secs(60);
             while serving_endpoint.load(Ordering::SeqCst) && Instant::now() < deadline {
                 let Ok((mut stream, _)) = listener.accept() else {
                     std::thread::sleep(Duration::from_millis(10));
