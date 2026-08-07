@@ -444,6 +444,12 @@ impl CliRuntime {
         }
 
         let matches = self.parse_matches(normalized.clone());
+        // Global-arg conflicts are only enforced by clap when the flags follow
+        // the subcommand, so this must be checked explicitly (#11826).
+        if let Err(error) = crate::cli_surface::reject_conflicting_placement_selection(&matches) {
+            eprintln!("{error}");
+            return std::process::ExitCode::from(2);
+        }
         self.run_matches(matches, normalized)
     }
 
