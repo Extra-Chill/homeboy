@@ -863,6 +863,9 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
     let execution = args.execution_plan(skip_checks);
     validate_apply_boundary(&execution)?;
     let component_ids = resolve_component_ids(&args, &args.components)?;
+    if args.package_only {
+        validate_package_only_intent(&args, &component_ids)?;
+    }
     if component_ids.len() > 1
         && (args.preflight_runner.is_some()
             || matches!(args.preflight_placement, ReleasePreflightPlacementArg::Lab))
@@ -895,12 +898,18 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
             .as_ref()
             .is_some_and(|value| !release::readiness_is_valid(value))
         {
-            return Err(homeboy::core::Error::validation_invalid_argument(
-                "release.preflight",
-                "Portable release preflight has invalid selected gate evidence",
-                None,
-                None,
-            ));
+            let input = ReleaseCommandInput {
+                component_id: component_ids[0].clone(),
+                path_override: args.path.clone(),
+                readiness,
+                ..Default::default()
+            };
+            return match release::run_command_with_workspace(input, args.owner_run_ref.as_deref()) {
+                Ok(_) => Err(homeboy::core::Error::internal_unexpected(
+                    "invalid readiness unexpectedly passed",
+                )),
+                Err(error) => Err(error),
+            };
         }
         return run_package_only(args, &component_ids, readiness.as_ref());
     }
@@ -1102,6 +1111,7 @@ fn run_package_only(
     component_ids: &[String],
     readiness: Option<&ReleaseReadinessEnvelope>,
 ) -> CmdResult<ReleaseCommandOutput> {
+    validate_package_only_intent(&args, component_ids)?;
     if component_ids.len() != 1 {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "components",
@@ -1168,6 +1178,54 @@ fn run_package_only(
         })),
         0,
     ))
+}
+
+fn validate_package_only_intent(
+    args: &ReleaseExecuteArgs,
+    component_ids: &[String],
+) -> homeboy::core::Result<()> {
+    if component_ids.len() != 1 {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "components",
+            "--package-only supports exactly one component",
+            None,
+            None,
+        ));
+    }
+    if args.project.is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "project",
+            "--package-only does not support --project",
+            args.project.clone(),
+            None,
+        ));
+    }
+    validate_package_only_args(args)?;
+    if args.from_artifacts.is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument("from-artifacts", "--from-artifacts is for --head publish recovery; --package-only regenerates artifacts instead", args.from_artifacts.clone(), None));
+    }
+    if args.dry_run_args.dry_run {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "dry-run",
+            "--package-only writes release artifacts and does not support --dry-run",
+            None,
+            None,
+        ));
+    }
+    if args.bump.is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "bump",
+            "--package-only packages an existing tag and cannot be combined with --bump",
+            args.bump.clone(),
+            None,
+        ));
+    }
+    if args.tag.is_none() {
+        return Err(homeboy::core::Error::validation_missing_argument(vec![
+            "--tag <existing-release-tag>".to_string(),
+        ]));
+    }
+    Ok(())
 }
 
 fn validate_package_only_args(args: &ReleaseExecuteArgs) -> homeboy::core::Result<()> {

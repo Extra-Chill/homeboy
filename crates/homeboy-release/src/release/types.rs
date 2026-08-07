@@ -536,6 +536,11 @@ pub fn readiness_is_valid(readiness: &ReleaseReadinessEnvelope) -> bool {
             .all(|gate| match gate.status.as_str() {
                 "passed" => {
                     gate.source_sha.as_deref() == Some(readiness.source.commit.as_str())
+                        && gate
+                            .runner_id
+                            .as_deref()
+                            .is_some_and(|runner| !runner.is_empty())
+                        && !gate.evidence_refs.is_empty()
                         && gate.provenance.as_ref().is_some_and(|provenance| {
                             !ReleaseReadinessProvenance::is_empty(provenance)
                         })
