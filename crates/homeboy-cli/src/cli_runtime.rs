@@ -234,6 +234,10 @@ pub fn register_startup_providers_after_reconcile(
     // core only owns the generic daemon lifecycle.
     crate::runner::register_lab_staging_controller_driver();
     crate::agents::agent_task_service::register_promotion_job_driver();
+    // A locally-placed detached Cook is a daemon-owned durable job: the daemon
+    // owns its record, checkpointing, cancellation and HTTP inspection, while
+    // the launcher-spawned child keeps the operator's execution environment.
+    crate::agents::agent_task_service::register_cook_job_driver();
     crate::commands::cleanup::register_cleanup_job_driver();
     // The configured acceptance verifier is the one registration that is
     // conditional: `register_acceptance_verifier_from_config` is a no-op when
