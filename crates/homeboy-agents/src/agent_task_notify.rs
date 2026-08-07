@@ -30,13 +30,23 @@ use homeboy_core::notify_outbox::{self, NotifyOnceMarker, NotifyOutboxDispositio
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 
-use crate::agent_task_service::AgentTaskCookReport;
+use crate::agent_task_loop_controller::AgentTaskLoopControllerState;
+use crate::agent_task_service::{AgentTaskCookBatchReport, AgentTaskCookReport};
 
 /// Generic subject class for every cook lifecycle notification.
 const COOK_SUBJECT_KIND: &str = "agent_task_cook";
 
+/// Generic subject class for a wave of cooks (a fanout or a cook batch).
+const BATCH_SUBJECT_KIND: &str = "agent_task_cook_batch";
+
+/// Generic subject class for a durable loop controller.
+const CONTROLLER_SUBJECT_KIND: &str = "agent_task_controller";
+
 /// Attribution recorded on the cook-level exactly-once marker.
 const COOK_TERMINAL_DELIVERED_BY: &str = "cook-controller";
+
+/// Attribution recorded on the batch-level exactly-once marker.
+const BATCH_TERMINAL_DELIVERED_BY: &str = "cook-batch";
 
 /// Whether a cook lifecycle event is delivered.
 ///
@@ -451,6 +461,417 @@ pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str
                 &report.cook_id,
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch / wave terminal (W3-5)
+// ---------------------------------------------------------------------------
+
+/// Whole-portfolio counts a fanout supervisor computes but a plain cook batch
+/// report does not carry.
+///
+/// `blocked` is the number the operator actually asks about — a child held on
+/// a dependency is neither green nor broken, and reporting it as a failure is
+/// the reason "10 unrelated cook messages" was never a usable wave summary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BatchPortfolioCounts {
+    pub ready: usize,
+    pub blocked: usize,
+    pub merged: usize,
+}
+
+/// Resolve the destination for a wave.
+///
+/// A batch has no durable run of its own, so resolution walks outwards: the
+/// live thread-local (a fanout runs in the operator's own process), then the
+/// wave's own durable metadata if it has any, then the first child that
+/// recorded a route. Without the last step a wave resumed in a new process —
+/// `fanout resume`, a supervisor advance — would silently fall back to the
+/// ambient default transport instead of the thread that asked for the work.
+fn batch_route(subject_id: &str, report: &AgentTaskCookBatchReport) -> Option<NotificationRoute> {
+    notification_route::current()
+        .or_else(|| crate::agent_task_lifecycle::durable_notification_route(subject_id))
+        .or_else(|| {
+            report.cooks.iter().find_map(|cell| {
+                crate::agent_task_lifecycle::durable_notification_route(&cell.initial_run_id)
+            })
+        })
+}
+
+/// Build the wave-terminal payload. Separated from delivery so its content is
+/// assertable without spawning a transport.
+fn batch_terminal_payload(
+    report: &AgentTaskCookBatchReport,
+    subject_id: &str,
+    component: Option<&str>,
+    portfolio: Option<BatchPortfolioCounts>,
+    exit_code: i32,
+) -> NotifyPayload {
+    // Attention is not the exit code alone. A wave can exit zero with children
+    // that failed, and "wave done" with nothing else said is exactly the
+    // silence this emitter exists to remove.
+    let needs_attention =
+        exit_code != 0 || report.failed > 0 || report.cancelled > 0 || report.timed_out > 0;
+    let kind = if needs_attention {
+        NotifyEventKind::NeedsAttention
+    } else {
+        NotifyEventKind::Completed
+    };
+
+    let mut subject = NotifySubject::new(BATCH_SUBJECT_KIND, subject_id);
+    subject.component = component.map(str::to_string);
+    if subject_id != report.batch_id {
+        // The wave is addressed by its fanout id; the batch it ran is its
+        // parent record, not a separate subject.
+        subject.parent_id = Some(report.batch_id.clone());
+    }
+
+    let mut payload = NotifyPayload::new(kind, subject)
+        .with_fact("Status", report.status.clone())
+        .with_fact("Children", report.total.to_string())
+        .with_fact("Succeeded", report.succeeded.to_string())
+        .with_fact("Failed", report.failed.to_string());
+    if report.cancelled > 0 {
+        payload = payload.with_fact("Cancelled", report.cancelled.to_string());
+    }
+    if report.timed_out > 0 {
+        payload = payload.with_fact("Timed out", report.timed_out.to_string());
+    }
+    if report.queued > 0 || report.running > 0 {
+        payload = payload.with_fact(
+            "Still in flight",
+            format!("{} queued, {} running", report.queued, report.running),
+        );
+    }
+    if let Some(portfolio) = portfolio {
+        payload = payload
+            .with_fact("Ready", portfolio.ready.to_string())
+            .with_fact("Blocked", portfolio.blocked.to_string())
+            .with_fact("Merged", portfolio.merged.to_string());
+    }
+
+    // Name the children that need a decision. A wave summary whose failures
+    // are anonymous still costs the operator a second command.
+    let attention: Vec<&str> = report
+        .cooks
+        .iter()
+        .filter(|cell| cell.exit_code != 0)
+        .map(|cell| cell.cook_id.as_str())
+        .take(10)
+        .collect();
+    if !attention.is_empty() {
+        payload = payload.with_fact("Needs attention", attention.join(", "));
+    }
+
+    payload
+        .with_action(
+            NotifyAction::new(
+                "status",
+                format!("homeboy agent-task fanout status {subject_id}"),
+            )
+            .with_kind("show"),
+        )
+        .with_action(
+            NotifyAction::new(
+                "resume",
+                format!("homeboy agent-task fanout resume {subject_id}"),
+            )
+            .with_kind("repair"),
+        )
+}
+
+/// A wave of cooks reached a terminal outcome.
+///
+/// This is the notification a ten-child fanout never sent: previously the
+/// destination received ten unrelated cook messages and was never told the
+/// wave was done, how many were green, how many needed attention, or how many
+/// were blocked — even though the batch report already computed every one of
+/// those totals.
+///
+/// `subject_id` is the operator-facing wave identity: a fanout id when the
+/// batch ran under one, otherwise `report.batch_id`. `portfolio` carries the
+/// whole-portfolio `ready`/`blocked`/`merged` counts a fanout supervisor
+/// computes; pass `None` for a plain cook batch, which has no portfolio.
+///
+/// Delivered at most once per wave, through the same cook-notification claim
+/// the per-cook terminal event uses — that claim is keyed on an arbitrary id,
+/// so a wave gets its own without a second mechanism.
+pub fn batch_terminal(
+    report: &AgentTaskCookBatchReport,
+    subject_id: &str,
+    component: Option<&str>,
+    portfolio: Option<BatchPortfolioCounts>,
+    exit_code: i32,
+) {
+    // Claim before building the payload, exactly as `cook_terminal` does: a
+    // duplicated wave summary is worse than a missing one, and a failed claim
+    // is treated the same as a lost one.
+    let claimed = crate::agent_task_lifecycle::claim_cook_terminal_notification(
+        subject_id,
+        BATCH_TERMINAL_DELIVERED_BY,
+    )
+    .unwrap_or(false);
+    if !claimed {
+        return;
+    }
+    let payload = batch_terminal_payload(report, subject_id, component, portfolio, exit_code);
+    let needs_attention = payload.kind == NotifyEventKind::NeedsAttention;
+    let event = NotifyEvent::lifecycle(payload.kind, subject_id, &report.status)
+        .with_title(format!(
+            "wave {} — {} of {} green{}",
+            if needs_attention {
+                "needs attention"
+            } else {
+                "done"
+            },
+            report.succeeded,
+            report.total,
+            portfolio
+                .filter(|portfolio| portfolio.blocked > 0)
+                .map(|portfolio| format!(", {} blocked", portfolio.blocked))
+                .unwrap_or_default(),
+        ))
+        .with_payload(payload);
+    let route = batch_route(subject_id, report);
+    let dispatch = notify_outbox::dispatch_with_outbox(
+        &event.with_route(route.as_ref()),
+        Some(NotifyOnceMarker::new(
+            BATCH_SUBJECT_KIND,
+            subject_id,
+            BATCH_TERMINAL_DELIVERED_BY,
+        )),
+    );
+    let persisted = terminal_outcome(
+        subject_id,
+        route.is_some(),
+        &dispatch.outcome,
+        &dispatch.disposition,
+    );
+    let _ = crate::agent_task_lifecycle::record_cook_terminal_notification_outcome(
+        subject_id, persisted,
+    );
+    match dispatch.disposition {
+        NotifyOutboxDisposition::Delivered | NotifyOutboxDisposition::Queued { .. } => {
+            let _ = crate::agent_task_lifecycle::confirm_cook_terminal_notification(
+                subject_id,
+                BATCH_TERMINAL_DELIVERED_BY,
+            );
+        }
+        NotifyOutboxDisposition::Dropped => {
+            let _ =
+                crate::agent_task_lifecycle::release_cook_terminal_notification_claim(subject_id);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Controller lifecycle (W3-5)
+// ---------------------------------------------------------------------------
+
+/// One open wait, flattened for the notification payload.
+#[derive(Debug, Clone)]
+pub struct ControllerWaitSummary {
+    pub wait_key: String,
+    pub event_type: String,
+    pub external_ref: Option<String>,
+}
+
+fn controller_subject(loop_id: &str, phase: Option<&str>) -> NotifySubject {
+    let mut subject = NotifySubject::new(CONTROLLER_SUBJECT_KIND, loop_id);
+    subject.phase = phase.map(str::to_string).filter(|phase| !phase.is_empty());
+    subject
+}
+
+fn controller_actions(payload: NotifyPayload, loop_id: &str) -> NotifyPayload {
+    payload
+        .with_action(
+            NotifyAction::new(
+                "status",
+                format!("homeboy agent-task controller status {loop_id}"),
+            )
+            .with_kind("show"),
+        )
+        .with_action(
+            NotifyAction::new(
+                "resume",
+                format!("homeboy agent-task controller resume {loop_id}"),
+            )
+            .with_kind("repair"),
+        )
+}
+
+/// Deliver a controller event, resolving its destination from durable state.
+///
+/// A controller is not a run, so it has no thread-local route of its own once
+/// the daemon is the producer. `notification_route::current()` still wins when
+/// an operator drove the transition from their own process.
+fn deliver_controller(event: NotifyEvent, loop_id: &str) {
+    let route = notification_route::current()
+        .or_else(|| crate::agent_task_lifecycle::durable_notification_route(loop_id));
+    if !should_deliver(event.kind, route.is_some()) {
+        return;
+    }
+    let _ = notify_outbox::dispatch_with_outbox(&event.with_route(route.as_ref()), None);
+}
+
+fn controller_state_payload(
+    loop_id: &str,
+    phase: Option<&str>,
+    from: AgentTaskLoopControllerState,
+    to: AgentTaskLoopControllerState,
+    reason: Option<&str>,
+    open_waits: usize,
+) -> NotifyPayload {
+    // A controller that reached a state it cannot leave on its own needs a
+    // human. Everything else is progress.
+    let kind = match to {
+        AgentTaskLoopControllerState::HumanReady
+        | AgentTaskLoopControllerState::Escalated
+        | AgentTaskLoopControllerState::Failed
+        | AgentTaskLoopControllerState::Abandoned => NotifyEventKind::NeedsAttention,
+        AgentTaskLoopControllerState::Completed => NotifyEventKind::Completed,
+        AgentTaskLoopControllerState::Running | AgentTaskLoopControllerState::Waiting => {
+            NotifyEventKind::Progress
+        }
+    };
+    controller_actions(
+        NotifyPayload::new(kind, controller_subject(loop_id, phase))
+            .with_fact("State", controller_state_label(to))
+            .with_fact("Previous state", controller_state_label(from))
+            .with_optional_fact("Reason", reason.map(str::to_string))
+            .with_fact("Open waits", open_waits.to_string()),
+        loop_id,
+    )
+}
+
+/// The controller changed durable state.
+pub fn controller_state_changed(
+    loop_id: &str,
+    phase: Option<&str>,
+    from: AgentTaskLoopControllerState,
+    to: AgentTaskLoopControllerState,
+    reason: Option<&str>,
+    open_waits: usize,
+) {
+    if from == to {
+        return;
+    }
+    let payload = controller_state_payload(loop_id, phase, from, to, reason, open_waits);
+    deliver_controller(
+        NotifyEvent::lifecycle(payload.kind, loop_id, controller_state_label(to))
+            .with_title(format!(
+                "controller {loop_id} — {}",
+                controller_state_label(to)
+            ))
+            .with_payload(payload),
+        loop_id,
+    );
+}
+
+fn controller_waiting_payload(
+    loop_id: &str,
+    phase: Option<&str>,
+    waits: &[ControllerWaitSummary],
+) -> NotifyPayload {
+    let mut payload = NotifyPayload::new(
+        NotifyEventKind::Progress,
+        controller_subject(loop_id, phase),
+    )
+    .with_fact("State", "waiting")
+    .with_fact("Open waits", waits.len().to_string());
+    for wait in waits.iter().take(6) {
+        payload = payload.with_fact(
+            format!("Waiting on {}", wait.wait_key),
+            match &wait.external_ref {
+                Some(reference) => format!("{} ({reference})", wait.event_type),
+                None => wait.event_type.clone(),
+            },
+        );
+    }
+    controller_actions(payload, loop_id)
+}
+
+/// The controller parked in `Waiting` with open waits.
+///
+/// `Waiting` used to emit nothing at all, so an orchestrator had no signal
+/// that its controller had stalled: `resume` returns `idle` and exits, and
+/// nothing polls. This is that signal. It is `Progress`, so an ambient default
+/// transport does not start receiving it — only an explicitly routed
+/// controller gets the full arc.
+pub fn controller_waiting(loop_id: &str, phase: Option<&str>, waits: &[ControllerWaitSummary]) {
+    if waits.is_empty() {
+        return;
+    }
+    let payload = controller_waiting_payload(loop_id, phase, waits);
+    deliver_controller(
+        NotifyEvent::lifecycle(NotifyEventKind::Progress, loop_id, "waiting")
+            .with_title(format!(
+                "controller {loop_id} — waiting on {} event(s)",
+                waits.len()
+            ))
+            .with_payload(payload),
+        loop_id,
+    );
+}
+
+fn controller_action_failed_payload(
+    loop_id: &str,
+    phase: Option<&str>,
+    action_id: &str,
+    action_kind: &str,
+    reason: &str,
+) -> NotifyPayload {
+    controller_actions(
+        NotifyPayload::new(
+            NotifyEventKind::NeedsAttention,
+            controller_subject(loop_id, phase),
+        )
+        .with_fact("Action", action_id)
+        .with_fact("Action kind", action_kind)
+        .with_fact("Reason", reason),
+        loop_id,
+    )
+    .with_action(
+        NotifyAction::new(
+            "diagnose",
+            format!("homeboy agent-task controller diagnose {loop_id}"),
+        )
+        .with_kind("repair"),
+    )
+}
+
+/// A controller action failed and the loop stopped.
+pub fn controller_action_failed(
+    loop_id: &str,
+    phase: Option<&str>,
+    action_id: &str,
+    action_kind: &str,
+    reason: &str,
+) {
+    let payload = controller_action_failed_payload(loop_id, phase, action_id, action_kind, reason);
+    deliver_controller(
+        NotifyEvent::lifecycle(NotifyEventKind::NeedsAttention, loop_id, "action_failed")
+            .with_title(format!("controller {loop_id} — action {action_id} failed"))
+            .with_payload(payload),
+        loop_id,
+    );
+}
+
+/// Stable snake_case labels for the controller state vocabulary.
+///
+/// The enum's `Debug` rendering is not a contract; these labels are what a
+/// destination reads, so they are written once here rather than derived from
+/// formatting at each emission site.
+fn controller_state_label(state: AgentTaskLoopControllerState) -> &'static str {
+    match state {
+        AgentTaskLoopControllerState::Running => "running",
+        AgentTaskLoopControllerState::Waiting => "waiting",
+        AgentTaskLoopControllerState::HumanReady => "human_ready",
+        AgentTaskLoopControllerState::Completed => "completed",
+        AgentTaskLoopControllerState::Abandoned => "abandoned",
+        AgentTaskLoopControllerState::Escalated => "escalated",
+        AgentTaskLoopControllerState::Failed => "failed",
     }
 }
 
@@ -890,6 +1311,269 @@ mod tests {
             assert!(claim("cook-other"));
             // An empty id is never claimable, so it can never suppress a real one.
             assert!(!claim(""));
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // W3-5 emitters
+    // -----------------------------------------------------------------------
+
+    fn batch_cell(
+        cook_id: &str,
+        exit_code: i32,
+    ) -> crate::agent_task_service::AgentTaskCookBatchCellReport {
+        crate::agent_task_service::AgentTaskCookBatchCellReport {
+            cook_id: cook_id.to_string(),
+            initial_run_id: format!("{cook_id}-attempt-1-aaaa"),
+            status: if exit_code == 0 {
+                "succeeded".to_string()
+            } else {
+                "durable_failure".to_string()
+            },
+            exit_code,
+            result: None,
+            error: None,
+        }
+    }
+
+    fn batch_report(succeeded: usize, failed: usize) -> AgentTaskCookBatchReport {
+        let mut cooks = Vec::new();
+        for index in 0..succeeded {
+            cooks.push(batch_cell(&format!("cook-green-{index}"), 0));
+        }
+        for index in 0..failed {
+            cooks.push(batch_cell(&format!("cook-red-{index}"), 1));
+        }
+        AgentTaskCookBatchReport {
+            schema: "homeboy/agent-task-cook-batch/v1",
+            batch_id: "batch-1".to_string(),
+            status: if failed == 0 {
+                "succeeded".to_string()
+            } else {
+                "partial_failure".to_string()
+            },
+            total: succeeded + failed,
+            queued: 0,
+            running: 0,
+            succeeded,
+            failed,
+            cancelled: 0,
+            timed_out: 0,
+            cooks,
+        }
+    }
+
+    #[test]
+    fn a_wave_summary_answers_how_many_are_green_broken_and_blocked() {
+        // The gap W3-5 names: ten children produced ten unrelated cook
+        // messages and never a wave summary, even though every total below was
+        // already computed.
+        let report = batch_report(7, 2);
+        let payload = batch_terminal_payload(
+            &report,
+            "fanout-wave",
+            Some("homeboy"),
+            Some(BatchPortfolioCounts {
+                ready: 7,
+                blocked: 1,
+                merged: 4,
+            }),
+            1,
+        );
+        assert_eq!(payload.kind, NotifyEventKind::NeedsAttention);
+        let body = payload.render_body();
+        assert!(body.contains("Children: 9"), "{body}");
+        assert!(body.contains("Succeeded: 7"), "{body}");
+        assert!(body.contains("Failed: 2"), "{body}");
+        assert!(body.contains("Blocked: 1"), "{body}");
+        assert!(body.contains("Merged: 4"), "{body}");
+        // The failures are named, so the summary does not cost a second command.
+        assert!(body.contains("cook-red-0"), "{body}");
+        assert!(
+            body.contains("homeboy agent-task fanout status fanout-wave"),
+            "{body}"
+        );
+        let subject = payload.subject.clone().expect("subject");
+        assert_eq!(subject.id, "fanout-wave");
+        assert_eq!(subject.parent_id.as_deref(), Some("batch-1"));
+    }
+
+    #[test]
+    fn a_clean_wave_is_completed_not_needs_attention() {
+        let payload = batch_terminal_payload(&batch_report(3, 0), "batch-1", None, None, 0);
+        assert_eq!(payload.kind, NotifyEventKind::Completed);
+        // Addressed by its own batch id: no parent to point at.
+        assert!(payload.subject.clone().unwrap().parent_id.is_none());
+    }
+
+    #[test]
+    fn a_wave_that_exits_zero_with_failed_children_still_needs_attention() {
+        // Exit code alone is not the signal. A wave can succeed as an
+        // operation while leaving children that a human has to look at.
+        let payload = batch_terminal_payload(&batch_report(8, 2), "fanout-wave", None, None, 0);
+        assert_eq!(payload.kind, NotifyEventKind::NeedsAttention);
+    }
+
+    #[test]
+    fn the_wave_terminal_event_is_claimed_once_per_wave() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            install_transport("test.wave", vec!["true"]);
+            set_default_transport("test.wave");
+            let report = batch_report(2, 0);
+
+            batch_terminal(&report, "fanout-once", None, None, 0);
+            batch_terminal(&report, "fanout-once", None, None, 0);
+
+            assert_eq!(latest_delivery("fanout-once")["status"], "delivered");
+            assert!(
+                !crate::agent_task_lifecycle::claim_cook_terminal_notification(
+                    "fanout-once",
+                    "test"
+                )
+                .unwrap()
+            );
+        });
+    }
+
+    #[test]
+    fn a_wave_recovers_its_route_from_a_child_when_it_has_none_of_its_own() {
+        // `fanout resume` and a supervisor advance both run in a process that
+        // never accepted `--notification-route`. Without the child fallback the
+        // wave summary would land on the ambient default transport instead of
+        // the thread that asked for the work.
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut report = batch_report(1, 0);
+            report.cooks[0].initial_run_id = "cook-wave-attempt-1-aaaa".to_string();
+            seed_run_with_route("cook-wave-attempt-1-aaaa", "wave-thread");
+
+            assert!(notification_route::current().is_none());
+            assert_eq!(
+                batch_route("fanout-routeless", &report),
+                Some(route("wave-thread"))
+            );
+        });
+    }
+
+    #[test]
+    fn a_waiting_controller_says_what_it_is_waiting_on() {
+        // `Waiting` emitted nothing at all, so an orchestrator had no signal
+        // its controller had stalled.
+        let payload = controller_waiting_payload(
+            "loop-1",
+            Some("review"),
+            &[ControllerWaitSummary {
+                wait_key: "controller:child:terminal".to_string(),
+                event_type: "controller.terminal".to_string(),
+                external_ref: Some("child-loop".to_string()),
+            }],
+        );
+        assert_eq!(payload.kind, NotifyEventKind::Progress);
+        let body = payload.render_body();
+        assert!(body.contains("controller.terminal (child-loop)"), "{body}");
+        assert!(
+            body.contains("homeboy agent-task controller resume loop-1"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn a_controller_reaching_a_state_it_cannot_leave_needs_attention() {
+        let escalated = controller_state_payload(
+            "loop-1",
+            None,
+            AgentTaskLoopControllerState::Waiting,
+            AgentTaskLoopControllerState::Escalated,
+            Some("wait timed out"),
+            0,
+        );
+        assert_eq!(escalated.kind, NotifyEventKind::NeedsAttention);
+        assert!(escalated.render_body().contains("wait timed out"));
+
+        let resumed = controller_state_payload(
+            "loop-1",
+            None,
+            AgentTaskLoopControllerState::Waiting,
+            AgentTaskLoopControllerState::Running,
+            None,
+            0,
+        );
+        assert_eq!(resumed.kind, NotifyEventKind::Progress);
+
+        let done = controller_state_payload(
+            "loop-1",
+            None,
+            AgentTaskLoopControllerState::Running,
+            AgentTaskLoopControllerState::Completed,
+            None,
+            0,
+        );
+        assert_eq!(done.kind, NotifyEventKind::Completed);
+    }
+
+    #[test]
+    fn a_controller_state_change_to_the_same_state_emits_nothing() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            // A transport that always fails, so a delivered event is visible as
+            // a queued outbox entry and a suppressed one is visible as silence.
+            install_transport("test.noop", vec!["false"]);
+            set_default_transport("test.noop");
+
+            controller_state_changed(
+                "loop-noop",
+                None,
+                AgentTaskLoopControllerState::Waiting,
+                AgentTaskLoopControllerState::Waiting,
+                None,
+                1,
+            );
+            assert!(
+                homeboy_core::notify_outbox::pending_entries().is_empty(),
+                "a no-op transition must not emit",
+            );
+
+            // A real transition to a state the controller cannot leave does.
+            controller_state_changed(
+                "loop-noop",
+                None,
+                AgentTaskLoopControllerState::Waiting,
+                AgentTaskLoopControllerState::Escalated,
+                Some("wait timed out"),
+                0,
+            );
+            assert_eq!(homeboy_core::notify_outbox::pending_entries().len(), 1);
+        });
+    }
+
+    #[test]
+    fn controller_progress_does_not_reach_an_ambient_default_transport() {
+        // Same noise contract as cook: an operator who configured a default
+        // transport asked for outcomes, not per-wait progress.
+        assert!(!should_deliver(NotifyEventKind::Progress, false));
+        assert!(should_deliver(NotifyEventKind::NeedsAttention, false));
+    }
+
+    #[test]
+    fn controller_emission_is_inert_without_a_configured_transport() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            controller_state_changed(
+                "loop-1",
+                Some("review"),
+                AgentTaskLoopControllerState::Running,
+                AgentTaskLoopControllerState::Escalated,
+                Some("stalled"),
+                2,
+            );
+            controller_waiting(
+                "loop-1",
+                None,
+                &[ControllerWaitSummary {
+                    wait_key: "w".to_string(),
+                    event_type: "controller.terminal".to_string(),
+                    external_ref: None,
+                }],
+            );
+            controller_action_failed("loop-1", None, "action-1", "run_gates", "gate failed");
+            batch_terminal(&batch_report(1, 1), "fanout-inert", None, None, 1);
         });
     }
 }
