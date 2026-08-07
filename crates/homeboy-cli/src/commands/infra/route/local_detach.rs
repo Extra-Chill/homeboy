@@ -95,6 +95,8 @@ pub(super) fn intercept_local_detached_cook(
     normalized_args: &[String],
     output_file: Option<&str>,
     runner_side: bool,
+    provider_placement: Option<&str>,
+    provider_runner_id: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
     if !is_detached_cook(cli) {
         return Ok(None);
@@ -175,9 +177,6 @@ pub(super) fn intercept_local_detached_cook(
     // materialize an attempt after cancellation.
     if handoff_parent.state.is_terminal() {
         terminate_and_reap_detached_child(&mut child);
-    }
-    if handoff_parent.state.is_terminal() {
-        terminate_and_reap_detached_child(&mut child);
         return Err(Error::validation_invalid_argument(
             "detach-after-handoff",
             "detached Cook became terminal before durable controller ownership could be established",
@@ -212,8 +211,24 @@ pub(super) fn intercept_local_detached_cook(
         &handoff,
         &controller_job,
         cli.placement,
+        provider_placement.unwrap_or("local"),
+        provider_runner_id,
     );
-    let stdout = finalize_handoff_envelope(&envelope, output_file)?;
+    let stdout = match finalize_handoff_envelope(&envelope, output_file) {
+        Ok(stdout) => stdout,
+        Err(error) => {
+            terminate_and_reap_detached_child(&mut child);
+            let _ = controller_client.cancel(
+                controller_job.job_id(),
+                "detached Cook handoff output could not be written",
+            );
+            let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent(
+                &cook_id,
+                "detached Cook handoff output could not be written",
+            );
+            return Err(error);
+        }
+    };
     println!("{stdout}");
     Ok(Some(0))
 }
@@ -243,6 +258,12 @@ enum ControllerJobHandoff {
 }
 
 impl ControllerJobHandoff {
+    fn job_id(&self) -> &str {
+        match self {
+            Self::Owned { job_id } => job_id,
+        }
+    }
+
     fn projection(&self) -> Value {
         match self {
             Self::Owned { job_id } => json!({ "state": "owned", "job_id": job_id }),
@@ -570,12 +591,16 @@ fn handoff_envelope(
     handoff: &DetachedCookHandoff,
     controller_job: &ControllerJobHandoff,
     requested_placement: homeboy::cli_surface::Placement,
+    provider_placement: &str,
+    provider_runner_id: Option<&str>,
 ) -> Value {
     json!({
         "schema": HANDOFF_SCHEMA,
-        "placement": "controller_local",
+        "placement": "local",
         "effective_placement": "controller_local",
-        "provider_placement": placement_name(requested_placement),
+        "requested_placement": placement_name(requested_placement),
+        "provider_placement": provider_placement,
+        "provider_runner_id": provider_runner_id,
         "detached": true,
         "cook_id": cook_id,
         "run_id": handoff.run_id,
@@ -688,7 +713,7 @@ mod tests {
     fn a_runner_owned_execution_still_refuses_to_detach() {
         let (cli, normalized) = cook_cli(&["--placement", "local", "--detach-after-handoff"]);
 
-        let error = intercept_local_detached_cook(&cli, &normalized, None, true)
+        let error = intercept_local_detached_cook(&cli, &normalized, None, true, None, None)
             .expect_err("a runner-owned execution cannot detach");
 
         assert!(
@@ -715,7 +740,7 @@ mod tests {
 
             assert!(!is_detached_cook(&cli), "{extra:?}");
             assert_eq!(
-                intercept_local_detached_cook(&cli, &normalized, None, false)
+                intercept_local_detached_cook(&cli, &normalized, None, false, Some("local"), None,)
                     .expect("no interception"),
                 None,
                 "{extra:?}"
@@ -954,11 +979,14 @@ mod tests {
                 job_id: "3f2b1c00-0000-4000-8000-000000000001".to_string(),
             },
             homeboy::cli_surface::Placement::Local,
+            "local",
+            None,
         );
 
         assert_eq!(envelope["schema"], HANDOFF_SCHEMA);
-        assert_eq!(envelope["placement"], "controller_local");
+        assert_eq!(envelope["placement"], "local");
         assert_eq!(envelope["effective_placement"], "controller_local");
+        assert_eq!(envelope["requested_placement"], "local");
         assert_eq!(envelope["provider_placement"], "local");
         assert_eq!(envelope["detached"], true);
         assert_eq!(envelope["cook_id"], "cook-11476");
@@ -1006,6 +1034,8 @@ mod tests {
                     job_id: "job-unproven".to_string(),
                 },
                 homeboy::cli_surface::Placement::Auto,
+                "lab",
+                Some("runner-a"),
             );
 
             assert_eq!(envelope["handoff"]["state"], expected);
@@ -1032,6 +1062,8 @@ mod tests {
                 job_id: "job-owned".to_string(),
             },
             homeboy::cli_surface::Placement::Lab,
+            "lab",
+            Some("runner-a"),
         );
 
         // Every pre-existing field survives unchanged.
@@ -1051,6 +1083,7 @@ mod tests {
         assert_eq!(envelope["output_file_owner"], "handoff_launcher");
         assert_eq!(envelope["controller_job"]["state"], "owned");
         assert_eq!(envelope["controller_job"]["job_id"], "job-owned");
+        assert_eq!(envelope["provider_runner_id"], "runner-a");
     }
 
     #[test]

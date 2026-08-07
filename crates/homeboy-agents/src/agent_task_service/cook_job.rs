@@ -397,6 +397,12 @@ impl AgentTaskCookJob {
     /// existing `exited_before_handoff` honesty.
     fn observe_terminal(&mut self, run_id: Option<String>) -> Result<Value> {
         let run_id = run_id.or_else(|| latest_run_id(&self.request.cook_id));
+        if run_id.is_none() {
+            agent_task_lifecycle::fail_detached_cook_handoff_parent(
+                &self.request.cook_id,
+                "detached Cook exited before materializing its first attempt",
+            )?;
+        }
         let observed = run_id
             .as_deref()
             .or(Some(self.request.cook_id.as_str()))
@@ -651,14 +657,27 @@ mod tests {
     #[test]
     fn an_unfinished_cook_terminalizes_as_failed() {
         with_isolated_home(|_| {
-            let mut job = AgentTaskCookJob::parse(request_of("cook-never-submitted", 4242))
-                .expect("parse request");
+            let cook_id = "cook-never-submitted";
+            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist handoff parent");
+            let mut job =
+                AgentTaskCookJob::parse(request_of(cook_id, 4242)).expect("parse request");
             job.phase = AgentTaskCookJobPhase::Supervising;
 
             let result = job.observe_terminal(None).expect("observe terminal");
 
             assert_eq!(job.phase, AgentTaskCookJobPhase::Completed);
             assert_eq!(result["terminal_state"], "failed");
+            let parent = agent_task_lifecycle::exact_record(cook_id)
+                .expect("read terminalized handoff parent");
+            assert_eq!(
+                parent.state,
+                agent_task_lifecycle::AgentTaskRunState::Failed
+            );
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["state"],
+                "exited_before_handoff"
+            );
         });
     }
 
