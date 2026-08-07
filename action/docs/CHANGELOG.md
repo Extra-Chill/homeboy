@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.11] - 2026-08-07
+
+### Fixed
+- surface observation terminal diagnostics
+
 ## [2.11.10] - 2026-08-07
 
 ### Fixed
