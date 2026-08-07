@@ -68,29 +68,42 @@ fn federate(
         runners: Vec::with_capacity(statuses.len()),
     };
     for report in statuses {
-        let queried = report.connected && report.active_jobs_available;
+        let RunnerConnectionInfo {
+            runner_id,
+            connected,
+            active_jobs,
+            active_jobs_available,
+            active_jobs_error,
+            stale_runner_jobs: _,
+        } = report;
+
+        let queried = connected && active_jobs_available;
         // A connected runner that did not answer is the whole reason this
         // accounting exists: its empty `active_jobs` means "unknown", not "idle".
-        let unanswered = report.connected && !report.active_jobs_available;
+        let unanswered = connected && !active_jobs_available;
         federation.partial |= unanswered;
-        let items = if queried { report.active_jobs.len() } else { 0 };
+
+        let error = unanswered.then(|| {
+            active_jobs_error.unwrap_or_else(|| {
+                "runner is connected but its bounded active-job probe did not answer; \
+                 runner-resident work may be missing from this report"
+                    .to_string()
+            })
+        });
+
+        let items = if queried { active_jobs.len() } else { 0 };
         if queried {
-            for job in report.active_jobs {
+            for job in active_jobs {
                 collector.insert(item_from_active_runner_job(job));
             }
         }
+
         federation.runners.push(ActivityRunnerSource {
-            runner_id: report.runner_id,
-            connected: report.connected,
+            runner_id,
+            connected,
             queried,
             items,
-            error: unanswered.then(|| {
-                report.active_jobs_error.unwrap_or_else(|| {
-                    "runner is connected but its bounded active-job probe did not answer; \
-                     runner-resident work may be missing from this report"
-                        .to_string()
-                })
-            }),
+            error,
         });
     }
     federation
