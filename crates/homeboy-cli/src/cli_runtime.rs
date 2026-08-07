@@ -103,10 +103,9 @@ fn startup_fast_path_output(args: &[String]) -> Option<StartupFastPathOutput> {
         StartupFastPath::Version => {
             StartupFastPathOutput::Version(upgrade::current_build_version())
         }
-        StartupFastPath::Identity => StartupFastPathOutput::Identity(
-            serde_json::to_value(homeboy::core::build_identity::current())
-                .expect("build identity serializes"),
-        ),
+        StartupFastPath::Identity => {
+            StartupFastPathOutput::Identity(crate::commands::self_cmd::identity_report())
+        }
     })
 }
 
@@ -1194,7 +1193,9 @@ fn startup_fast_path(args: &[String]) -> Option<StartupFastPath> {
             Some(StartupFastPath::Help)
         }
         [_, flag] if flag == "--version" || flag == "-V" => Some(StartupFastPath::Version),
-        [_, command, subcommand] if command == "self" && subcommand == "identity" => {
+        [_, command, subcommand]
+            if command == "self" && matches!(subcommand.as_str(), "identity" | "inspect") =>
+        {
             Some(StartupFastPath::Identity)
         }
         _ => None,
