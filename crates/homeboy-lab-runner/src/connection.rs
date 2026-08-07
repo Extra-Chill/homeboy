@@ -64,6 +64,7 @@ struct CliEnvelope {
     success: bool,
     data: Option<Value>,
     error: Option<Value>,
+    diagnostics: Option<Value>,
 }
 
 struct RemoteDaemonConnectOptions<'a> {
@@ -800,6 +801,11 @@ fn connect_with_orphan_adoption_and_live_lease(
                 REMOTE_LEASELESS_RECOVERY_TIMEOUT,
             );
             if !recovery.success {
+                if is_terminal_state_loss_refusal(&recovery) {
+                    super::generation_store::retire_rejected_state_loss_replacement(
+                        runner_id, &recovery,
+                    )?;
+                }
                 return Ok(failed_connect(
                     runner_id,
                     session_path,
@@ -1487,6 +1493,25 @@ fn state_loss_recovery_failure_message(output: &homeboy_core::server::CommandOut
     } else {
         command_failure_message("remote exact state-loss recovery failed", output)
     }
+}
+
+fn is_terminal_state_loss_refusal(output: &homeboy_core::server::CommandOutput) -> bool {
+    if output.timed_out {
+        return false;
+    }
+    let Ok(envelope) = parse_envelope(&output.stdout) else {
+        return false;
+    };
+    if envelope.success {
+        return false;
+    }
+    let code = envelope
+        .diagnostics
+        .as_ref()
+        .and_then(|diagnostics| diagnostics.get("code"))
+        .or_else(|| envelope.error.as_ref().and_then(|error| error.get("code")))
+        .and_then(Value::as_str);
+    matches!(code, Some(code) if code.starts_with("validation.") || code.starts_with("policy."))
 }
 
 fn remote_state_loss_recovery_command(
