@@ -1809,9 +1809,12 @@ pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
     if report.connected {
         reconcile_session_metadata_with_observed_daemon(&runner, &mut report.session, true)?;
     }
-    // Terminal-job settlement was formerly coupled to status. Keep it under
-    // this explicit lifecycle owner so status remains safe to parallelize.
-    reconcile_terminal_jobs(runner_id)?;
+    // Terminal-job settlement needs a live session transport. Generation
+    // reconciliation below can instead inspect a disconnected SSH runner, so
+    // do not let the terminal-job preflight block its advertised recovery path.
+    if report.connected {
+        reconcile_terminal_jobs(runner_id)?;
+    }
     if let Ok(Some((_, _, client))) = remote_daemon::resolve_ssh_runner(&runner) {
         super::generation_store::reconcile_with_ssh(runner_id, report.session.as_ref(), &client)?;
     } else {
