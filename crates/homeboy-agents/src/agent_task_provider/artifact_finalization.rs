@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::agent_task::{AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskOutcome};
+use crate::agent_task::{
+    AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskExecutorRequest, AgentTaskOutcome,
+    AgentTaskOutcomeStatus, AGENT_TASK_ARTIFACT_SCHEMA,
+};
 use homeboy_core::{Error, Result};
 
 /// Identity captured after Homeboy creates the executor root and before the
@@ -210,6 +213,206 @@ pub(crate) fn finalize_provider_file_artifacts(
         }
         Ok(())
     }
+}
+
+/// Preserves declared regular files from an attested Cook attempt workspace when
+/// a provider fails before it can serialize its own outcome. Sources remain
+/// provider-owned only until they are copied into the executor root; the normal
+/// finalizer then moves the copied bytes into Homeboy-owned storage.
+pub(crate) fn retain_failed_workspace_artifacts(
+    outcome: &mut AgentTaskOutcome,
+    request: &AgentTaskExecutorRequest,
+) -> Result<()> {
+    if matches!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
+    ) || !outcome.artifacts.is_empty()
+    {
+        return Ok(());
+    }
+    request.artifacts_root_identity.verify()?;
+    let Some(workspace) = request.request.workspace.root.as_deref() else {
+        return Ok(());
+    };
+    let Some(attestation) = request
+        .request
+        .metadata
+        .get("cook_attempt_workspace_identity")
+    else {
+        return Ok(());
+    };
+    let workspace = Path::new(workspace);
+    if !crate::agent_task_workspace_identity::workspace_matches_attestation(workspace, attestation)
+    {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            "Cook attempt workspace no longer matches its identity attestation",
+            Some(workspace.display().to_string()),
+            None,
+        ));
+    }
+    let workspace = workspace.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "canonicalize Cook attempt workspace {}",
+                workspace.display()
+            )),
+        )
+    })?;
+
+    for declaration in request.request.canonical_artifact_declarations() {
+        let Some(path) = declaration.path else {
+            continue;
+        };
+        let declared = Path::new(&path);
+        let candidate = if declared.is_absolute() {
+            declared.to_path_buf()
+        } else {
+            workspace.join(declared)
+        };
+        if declared
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+            || (declared.is_absolute() && !candidate.starts_with(&workspace))
+        {
+            retain_failure_diagnostic(outcome, &path, "path is outside the attempt workspace");
+            continue;
+        }
+        let Ok(metadata) = fs::symlink_metadata(&candidate) else {
+            continue;
+        };
+        if is_link_or_reparse_point(&metadata) || !metadata.is_file() {
+            retain_failure_diagnostic(outcome, &path, "path is not a regular file");
+            continue;
+        }
+        if reject_symlink_path_components(&workspace, &candidate).is_err() {
+            retain_failure_diagnostic(outcome, &path, "path traverses a symlink");
+            continue;
+        }
+        let Ok(canonical) = candidate.canonicalize() else {
+            retain_failure_diagnostic(outcome, &path, "path could not be canonicalized");
+            continue;
+        };
+        if !canonical.starts_with(&workspace) {
+            retain_failure_diagnostic(
+                outcome,
+                &path,
+                "path resolves outside the attempt workspace",
+            );
+            continue;
+        }
+
+        let mut input = match open_regular_file_no_follow(&candidate) {
+            Ok(input) => input,
+            Err(_) => {
+                retain_failure_diagnostic(
+                    outcome,
+                    &path,
+                    "path could not be opened as a regular file",
+                );
+                continue;
+            }
+        };
+        if !opened_file_matches_path(&input, &canonical) {
+            retain_failure_diagnostic(
+                outcome,
+                &path,
+                "opened file no longer matches its canonical path",
+            );
+            continue;
+        }
+        let token = declaration_token(&declaration.name);
+        let extension = canonical
+            .extension()
+            .filter(|extension| !extension.is_empty())
+            .map(|extension| format!(".{}", extension.to_string_lossy()))
+            .unwrap_or_default();
+        let staged_name = format!("recovered-{token}-{}{extension}", uuid::Uuid::new_v4());
+        let staged = request.artifacts_path.join(&staged_name);
+        let mut output = File::create(&staged).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "stage recovered workspace artifact {}",
+                    staged.display()
+                )),
+            )
+        })?;
+        std::io::copy(&mut input, &mut output).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("copy recovered workspace artifact".to_string()),
+            )
+        })?;
+        output.sync_all().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("sync recovered workspace artifact".to_string()),
+            )
+        })?;
+        outcome.artifacts.push(AgentTaskArtifact {
+            schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: format!("recovered-{token}"),
+            kind: declaration
+                .artifact_type
+                .filter(|kind| validate_token("artifact.kind", kind).is_ok())
+                .unwrap_or_else(|| "declared_artifact".to_string()),
+            name: Some(declaration.name),
+            path: Some(staged_name),
+            metadata: json!({ "recovered_from": "attested_attempt_workspace" }),
+            ..Default::default()
+        });
+    }
+    if !crate::agent_task_workspace_identity::workspace_matches_attestation(&workspace, attestation)
+    {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            "Cook attempt workspace changed while recovering declared artifacts",
+            Some(workspace.display().to_string()),
+            None,
+        ));
+    }
+    finalize_provider_file_artifacts(outcome, &request.artifacts_root_identity)
+}
+
+fn declaration_token(name: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(name.as_bytes());
+    format!("{:x}", hash.finalize())
+}
+
+fn retain_failure_diagnostic(outcome: &mut AgentTaskOutcome, path: &str, reason: &str) {
+    outcome.diagnostics.push(AgentTaskDiagnostic {
+        class: "agent_task.failed_workspace_artifact_rejected".to_string(),
+        message: format!("declared failed-attempt artifact '{path}' was not retained: {reason}"),
+        data: json!({ "path": path, "reason": reason }),
+    });
+}
+
+#[cfg(unix)]
+fn opened_file_matches_path(file: &File, canonical: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(opened) = file.metadata() else {
+        return false;
+    };
+    let Ok(current) = fs::metadata(canonical) else {
+        return false;
+    };
+    opened.is_file()
+        && current.is_file()
+        && opened.dev() == current.dev()
+        && opened.ino() == current.ino()
+}
+
+#[cfg(windows)]
+fn opened_file_matches_path(file: &File, canonical: &Path) -> bool {
+    windows_file_identity(file).ok() == windows_file_identity_from_path(canonical, false).ok()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn opened_file_matches_path(_file: &File, _canonical: &Path) -> bool {
+    false
 }
 
 fn staged_file(

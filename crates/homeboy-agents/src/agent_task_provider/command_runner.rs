@@ -1,4 +1,6 @@
-use super::artifact_finalization::finalize_provider_file_artifacts;
+use super::artifact_finalization::{
+    finalize_provider_file_artifacts, retain_failed_workspace_artifacts,
+};
 use super::outcome_normalization::{
     normalize_homeboy_local_artifact_sizes, normalize_provider_outcome_roles,
     push_unique_diagnostic,
@@ -321,6 +323,15 @@ pub(super) fn run_materialized_provider_command_once(
         &mut containment_report,
     );
     containment_report.annotate(&mut outcome);
+    if let Err(error) = retain_failed_workspace_artifacts(&mut outcome, request) {
+        push_unique_diagnostic(
+            &mut outcome.diagnostics,
+            "agent_task.failed_workspace_artifact_retention_failed".to_string(),
+            "Homeboy could not retain declared artifacts from the failed attempt workspace"
+                .to_string(),
+            json!({ "details": error.message }),
+        );
+    }
     outcome
 }
 
