@@ -49,6 +49,7 @@ pub fn record_bench_observation_artifacts(
         run_dir.step_file(run_dir::files::RESOURCE_SUMMARY),
     );
     record_memory_timeline_artifacts(observation, run_dir);
+    record_failure_artifacts(observation, workflow, run_dir);
 
     let Some(results) = workflow.results.as_ref() else {
         return true;
@@ -58,6 +59,76 @@ pub fn record_bench_observation_artifacts(
         &results.budget_findings,
     ));
     all_bench_artifacts_are_promoted(results)
+}
+
+/// Persist diagnostics emitted by failed nested workloads before their temporary
+/// invocation directories are removed. The artifact roots are generic runner
+/// output, not workload-specific paths.
+fn record_failure_artifacts(
+    observation: &ActiveObservation,
+    workflow: &BenchRunWorkflowResult,
+    run_dir: &RunDir,
+) {
+    let Some(failure) = workflow.failure.as_ref() else {
+        return;
+    };
+
+    let stderr_path = run_dir.step_file("bench-failure-stderr.txt");
+    if fs::write(&stderr_path, &failure.stderr_tail).is_ok() {
+        let _ = observation.store().record_artifact_with_metadata(
+            observation.run_id(),
+            "bench_failure_stderr",
+            &stderr_path,
+            serde_json::json!({
+                "failure_diagnostic": true,
+                "failure_diagnostic_rank": 0,
+                "source": "bench",
+            }),
+        );
+    }
+
+    for root in [
+        run_dir.path().join("artifacts"),
+        run_dir.path().join("invocations"),
+    ] {
+        record_failure_artifact_tree(observation, &root);
+    }
+}
+
+fn record_failure_artifact_tree(observation: &ActiveObservation, path: &Path) {
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            record_failure_artifact_tree(observation, &path);
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let diagnostic = name.contains("diagnostic") || name.contains("failure");
+        let _ = observation.store().record_artifact_with_metadata(
+            observation.run_id(),
+            if diagnostic {
+                "bench_failure_diagnostic"
+            } else {
+                "bench_failure_artifact"
+            },
+            &path,
+            serde_json::json!({
+                "failure_diagnostic": diagnostic,
+                "failure_diagnostic_rank": diagnostic.then(|| path.components().count()).unwrap_or_default(),
+                "source": "bench_nested_workload",
+                "original_path": path,
+            }),
+        );
+    }
 }
 
 fn all_bench_artifacts_are_promoted(results: &BenchResults) -> bool {
