@@ -16,7 +16,7 @@ use crate::agent_task_process_containment::{
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES: usize = 16 * 1024;
 const REDACTED_VALUE: &str = "[redacted]";
@@ -560,22 +560,27 @@ fn run_materialized_provider_command_once_contained(
         );
     }
 
+    let started = Instant::now();
     let stdout_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let stderr_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let last_progress: Arc<AtomicU64> = Arc::new(AtomicU64::new(now_unix_ms()));
+    // Progress and the wall timeout must share a monotonic clock. A system-clock
+    // adjustment must never turn a stale provider into a live one.
+    let last_progress_ms: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
 
     let stdout_reader = child.stdout.take().map(|stdout| {
         spawn_output_reader(
             stdout,
             Arc::clone(&stdout_buffer),
-            Arc::clone(&last_progress),
+            Arc::clone(&last_progress_ms),
+            started,
         )
     });
     let stderr_reader = child.stderr.take().map(|stderr| {
         spawn_output_reader(
             stderr,
             Arc::clone(&stderr_buffer),
-            Arc::clone(&last_progress),
+            Arc::clone(&last_progress_ms),
+            started,
         )
     });
 
@@ -583,7 +588,6 @@ fn run_materialized_provider_command_once_contained(
         let _ = Write::write_all(&mut stdin, &input);
     }
 
-    let started = Instant::now();
     let liveness_timeout = request
         .limits
         .liveness_timeout_ms
@@ -597,9 +601,9 @@ fn run_materialized_provider_command_once_contained(
                     break (None, false, true);
                 }
                 if let Some(liveness) = liveness_timeout {
-                    let progress_age = Duration::from_millis(
-                        now_unix_ms().saturating_sub(last_progress.load(Ordering::SeqCst)),
-                    );
+                    let progress_age = started.elapsed().saturating_sub(Duration::from_millis(
+                        last_progress_ms.load(Ordering::SeqCst),
+                    ));
                     if progress_age >= liveness {
                         break (None, true, false);
                     }
@@ -648,8 +652,14 @@ fn run_materialized_provider_command_once_contained(
     let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
 
     if killed_for_liveness {
-        let (status, classification, message) =
-            classify_stall_or_rate_limit(&stdout, &stderr, &provider.id, requested_timeout_ms);
+        let (status, classification, message) = classify_stall_or_rate_limit(
+            &stdout,
+            &stderr,
+            &provider.id,
+            liveness_timeout
+                .expect("liveness kill requires a configured liveness deadline")
+                .as_millis(),
+        );
         return failure_outcome(
             request,
             status,
@@ -659,6 +669,7 @@ fn run_materialized_provider_command_once_contained(
             json!({
                 "provider": provider.id,
                 "command": command,
+                "deadline": "liveness",
                 "timeout_ms": requested_timeout_ms,
                 "process_timeout_ms": process_timeout.as_millis(),
                 "liveness_timeout_ms": request.limits.liveness_timeout_ms,
@@ -685,7 +696,14 @@ fn run_materialized_provider_command_once_contained(
                 "provider '{}' exceeded timeout_ms={}",
                 provider.id, requested_timeout_ms
             ),
-            json!({ "provider": provider.id, "command": command, "timeout_ms": requested_timeout_ms, "process_timeout_ms": process_timeout.as_millis() }),
+            json!({
+                "provider": provider.id,
+                "command": command,
+                "deadline": "wall_clock",
+                "timeout_ms": requested_timeout_ms,
+                "process_timeout_ms": process_timeout.as_millis(),
+                "liveness_timeout_ms": request.limits.liveness_timeout_ms,
+            }),
         );
     }
     let Some(status) = status else {
@@ -1102,7 +1120,8 @@ fn now_unix_ms() -> u64 {
 fn spawn_output_reader<R>(
     mut reader: R,
     buffer: Arc<Mutex<Vec<u8>>>,
-    last_progress: Arc<AtomicU64>,
+    last_progress_ms: Arc<AtomicU64>,
+    started: Instant,
 ) -> std::thread::JoinHandle<()>
 where
     R: Read + Send + 'static,
@@ -1114,7 +1133,10 @@ where
                 break;
             }
             buffer.lock().expect("output buffer").extend(&chunk[..read]);
-            last_progress.store(now_unix_ms(), Ordering::SeqCst);
+            last_progress_ms.store(
+                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                Ordering::SeqCst,
+            );
         }
     })
 }
@@ -1123,7 +1145,7 @@ fn classify_stall_or_rate_limit(
     stdout: &str,
     stderr: &str,
     provider_id: &str,
-    requested_timeout_ms: u64,
+    liveness_timeout_ms: u128,
 ) -> (
     AgentTaskOutcomeStatus,
     AgentTaskFailureClassification,
@@ -1141,7 +1163,7 @@ fn classify_stall_or_rate_limit(
         AgentTaskOutcomeStatus::ProviderError,
         AgentTaskFailureClassification::Stalled,
         format!(
-            "provider '{provider_id}' produced no stdout/stderr progress before timeout_ms={requested_timeout_ms}"
+            "provider '{provider_id}' produced no stdout/stderr progress before liveness_timeout_ms={liveness_timeout_ms}"
         ),
     )
 }
@@ -1745,12 +1767,11 @@ pub fn run_provider_readiness_invocation(
     }
 
     let stdout_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let last_progress = Arc::new(AtomicU64::new(now_unix_ms()));
-    let stdout_reader = child
-        .stdout
-        .take()
-        .map(|stdout| spawn_output_reader(stdout, Arc::clone(&stdout_buffer), last_progress));
+    let last_progress = Arc::new(AtomicU64::new(0));
     let started = Instant::now();
+    let stdout_reader = child.stdout.take().map(|stdout| {
+        spawn_output_reader(stdout, Arc::clone(&stdout_buffer), last_progress, started)
+    });
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,

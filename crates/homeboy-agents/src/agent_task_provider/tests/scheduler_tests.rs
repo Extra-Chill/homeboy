@@ -746,6 +746,54 @@ fn stalled_provider_is_killed_and_rotates_to_configured_fallback() {
 }
 
 #[test]
+fn silent_provider_hits_liveness_deadline_before_wall_timeout() {
+    let command = format!("node {}", script("setInterval(() => {}, 1_000);"));
+    let (mut request, provider) = request("task-liveness-silent", command);
+    request.limits.timeout_ms = Some(500);
+    request.limits.liveness_timeout_ms = Some(50);
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::Stalled)
+    );
+    assert_eq!(
+        outcome.diagnostics[0].class,
+        "agent_task.provider_liveness_timeout"
+    );
+    assert_eq!(outcome.diagnostics[0].data["deadline"], json!("liveness"));
+    assert_eq!(
+        outcome.diagnostics[0].data["liveness_timeout_ms"],
+        json!(50)
+    );
+    assert_eq!(outcome.diagnostics[0].data["timeout_ms"], json!(500));
+}
+
+#[test]
+fn parent_visible_progress_keeps_provider_alive_until_wall_deadline() {
+    let command = format!(
+        "node {}",
+        script("setInterval(() => process.stderr.write('.'), 10);")
+    );
+    let (mut request, provider) = request("task-liveness-progress", command);
+    request.limits.timeout_ms = Some(500);
+    request.limits.liveness_timeout_ms = Some(300);
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Timeout);
+    assert_eq!(outcome.diagnostics[0].class, "agent_task.provider_timeout");
+    assert_eq!(outcome.diagnostics[0].data["deadline"], json!("wall_clock"));
+    assert_eq!(
+        outcome.diagnostics[0].data["liveness_timeout_ms"],
+        json!(300)
+    );
+    assert_eq!(outcome.diagnostics[0].data["timeout_ms"], json!(500));
+}
+
+#[test]
 fn provider_can_return_timeout_payload_during_wrapper_grace() {
     let command = format!(
         "node {}",
