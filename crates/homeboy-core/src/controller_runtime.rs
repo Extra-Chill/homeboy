@@ -42,53 +42,74 @@ const ADMISSION_QUEUE_FILE: &str = "admission-queue.json";
 const ADMISSION_QUEUE_LOCK_FILE: &str = "admission-queue.lock";
 const ADMISSION_OWNER_SCHEMA: &str = "homeboy/controller-admission-owner/v1";
 const ADMISSION_QUEUE_SCHEMA: &str = "homeboy/controller-admission-queue/v1";
-const ADMISSION_QUEUE_POLL: Duration = Duration::from_millis(250);
-const ADMISSION_QUEUE_LEASE: Duration = Duration::from_secs(30);
-const ADMISSION_QUEUE_HEARTBEAT: Duration = Duration::from_secs(5);
-const ADMISSION_QUEUE_WAIT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-/// How long an uncoordinated admission caller queues before reporting
-/// contention. Queued cook submissions use [`ADMISSION_QUEUE_WAIT_TIMEOUT`];
-/// this bound covers callers that hold no durable request identity.
-const ADMISSION_BUSY_WAIT: Duration = Duration::from_secs(30);
-
-fn admission_queue_lease() -> Duration {
-    test_admission_duration(
-        "HOMEBOY_TEST_CONTROLLER_ADMISSION_LEASE_MS",
-        ADMISSION_QUEUE_LEASE,
-    )
+/// Resolved admission timings for one wait.
+///
+/// Loaded once per operation and then carried, rather than re-read per poll:
+/// `load_config` clones the entire product config, which is not something the
+/// inner loop of the global admission lock should do on every iteration.
+///
+/// These were previously hardcoded constants whose only override was gated
+/// behind `cfg(any(test, feature = "test-support"))`, so a release binary could
+/// not tune them at all. They now come from
+/// [`crate::defaults::ControllerAdmissionConfig`], with identical defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AdmissionTimings {
+    poll: Duration,
+    lease: Duration,
+    heartbeat: Duration,
+    wait_timeout: Duration,
+    busy_wait: Duration,
 }
 
-fn admission_queue_heartbeat() -> Duration {
-    test_admission_duration(
-        "HOMEBOY_TEST_CONTROLLER_ADMISSION_HEARTBEAT_MS",
-        ADMISSION_QUEUE_HEARTBEAT,
-    )
+impl AdmissionTimings {
+    fn load() -> Self {
+        Self::sanitized(&crate::defaults::load_config().controller_admission)
+    }
+
+    /// Project config onto timings that cannot strand the queue.
+    ///
+    /// Config is sanitized rather than rejected because every detached cook
+    /// passes through this lock: an implausible value must degrade to a safe
+    /// timing, not fail the whole orchestrator closed.
+    ///
+    /// The clamp chain establishes `floor <= poll <= heartbeat <= lease / 2`.
+    /// Each link is load-bearing:
+    ///
+    /// * A zero interval would spin on the durable queue file rather than wait.
+    /// * A waiter renews its lease on the heartbeat and is reclaimed as crashed
+    ///   once the lease expires, so `heartbeat >= lease` would evict *live*
+    ///   waiters from their own queue slots — silently destroying FIFO order on
+    ///   a lock whose entire purpose is FIFO order. Renewing at least twice per
+    ///   lease keeps one slow queue write from expiring a live waiter.
+    /// * The loop can only heartbeat when it wakes, so a sleep longer than the
+    ///   heartbeat would let a waiter sleep through its own renewal deadline.
+    fn sanitized(config: &crate::defaults::ControllerAdmissionConfig) -> Self {
+        let floor = crate::defaults::MIN_ADMISSION_INTERVAL_MS;
+        let lease = config.queue_lease_ms.max(floor);
+        let heartbeat = config
+            .queue_heartbeat_ms
+            .clamp(floor, (lease / 2).max(floor));
+        let poll = config.queue_poll_ms.clamp(floor, heartbeat);
+        Self {
+            poll: Duration::from_millis(poll),
+            lease: Duration::from_millis(lease),
+            heartbeat: Duration::from_millis(heartbeat),
+            wait_timeout: Duration::from_millis(config.queue_wait_timeout_ms),
+            busy_wait: Duration::from_millis(config.busy_wait_ms),
+        }
+    }
+}
+
+fn admission_queue_lease() -> Duration {
+    AdmissionTimings::load().lease
 }
 
 fn admission_queue_wait_timeout() -> Duration {
-    test_admission_duration(
-        "HOMEBOY_TEST_CONTROLLER_ADMISSION_WAIT_TIMEOUT_MS",
-        ADMISSION_QUEUE_WAIT_TIMEOUT,
-    )
+    AdmissionTimings::load().wait_timeout
 }
 
 fn admission_busy_wait() -> Duration {
-    test_admission_duration(
-        "HOMEBOY_TEST_CONTROLLER_ADMISSION_BUSY_WAIT_MS",
-        ADMISSION_BUSY_WAIT,
-    )
-}
-
-fn test_admission_duration(_name: &str, default: Duration) -> Duration {
-    #[cfg(any(test, feature = "test-support"))]
-    if let Some(duration) = std::env::var(_name)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_millis)
-    {
-        return duration;
-    }
-    default
+    AdmissionTimings::load().busy_wait
 }
 static ADMISSION_LOCK_PROCESS_GUARDS: OnceLock<Mutex<BTreeMap<PathBuf, &'static Mutex<()>>>> =
     OnceLock::new();
@@ -1149,6 +1170,7 @@ fn acquire_admission_lock(path: &Path) -> Result<AdmissionLock> {
 
 fn acquire_admission_lock_bounded(path: &Path, wait: Duration) -> Result<AdmissionLock> {
     let request_id = format!("controller-{}", Uuid::new_v4());
+    let timings = AdmissionTimings::load();
     let started = std::time::Instant::now();
     loop {
         match acquire_admission_lock_for(path, &request_id) {
@@ -1157,7 +1179,7 @@ fn acquire_admission_lock_bounded(path: &Path, wait: Duration) -> Result<Admissi
                 if started.elapsed() >= wait {
                     return Err(error);
                 }
-                std::thread::sleep(ADMISSION_QUEUE_POLL.min(wait));
+                std::thread::sleep(timings.poll.min(wait));
             }
             Err(error) => return Err(error),
         }
@@ -1444,6 +1466,7 @@ fn acquire_queued_admission_lock_with_timeout(
     wait_timeout: Duration,
     cancellation_requested: &impl Fn() -> Result<bool>,
 ) -> Result<AdmissionLock> {
+    let timings = AdmissionTimings::load();
     let started = std::time::Instant::now();
     let mut last_heartbeat = std::time::Instant::now();
     loop {
@@ -1470,7 +1493,7 @@ fn acquire_queued_admission_lock_with_timeout(
             error.details["request_id"] = json!(request_id);
             return Err(error);
         }
-        if last_heartbeat.elapsed() >= admission_queue_heartbeat() {
+        if last_heartbeat.elapsed() >= timings.heartbeat {
             heartbeat_admission_waiter(path, request_id)?;
             last_heartbeat = std::time::Instant::now();
         }
@@ -1489,7 +1512,7 @@ fn acquire_queued_admission_lock_with_timeout(
                 Err(error) => return Err(error),
             }
         }
-        std::thread::sleep(ADMISSION_QUEUE_POLL);
+        std::thread::sleep(timings.poll);
     }
 }
 
@@ -3070,6 +3093,87 @@ mod tests {
             );
             drop(first);
         });
+    }
+
+    /// Config must reproduce the historical hardcoded constants exactly, so
+    /// making these tunable cannot move behaviour out of the box.
+    #[test]
+    fn admission_timings_default_to_the_historical_constants() {
+        let timings =
+            AdmissionTimings::sanitized(&crate::defaults::ControllerAdmissionConfig::default());
+
+        assert_eq!(timings.poll, Duration::from_millis(250));
+        assert_eq!(timings.lease, Duration::from_secs(30));
+        assert_eq!(timings.heartbeat, Duration::from_secs(5));
+        assert_eq!(timings.wait_timeout, Duration::from_secs(10 * 60));
+        assert_eq!(timings.busy_wait, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn admission_timings_are_config_driven() {
+        crate::test_support::with_isolated_home(|_| {
+            crate::defaults::save_config(&crate::defaults::HomeboyConfig {
+                controller_admission: crate::defaults::ControllerAdmissionConfig {
+                    queue_poll_ms: 40,
+                    queue_lease_ms: 4_000,
+                    queue_heartbeat_ms: 800,
+                    queue_wait_timeout_ms: 90_000,
+                    busy_wait_ms: 7_000,
+                },
+                ..crate::defaults::HomeboyConfig::default()
+            })
+            .expect("save admission config");
+
+            let timings = AdmissionTimings::load();
+            assert_eq!(timings.poll, Duration::from_millis(40));
+            assert_eq!(timings.lease, Duration::from_millis(4_000));
+            assert_eq!(timings.heartbeat, Duration::from_millis(800));
+            assert_eq!(timings.wait_timeout, Duration::from_millis(90_000));
+            assert_eq!(timings.busy_wait, Duration::from_millis(7_000));
+
+            // The accessors used outside the wait loop read the same config.
+            assert_eq!(admission_queue_lease(), Duration::from_millis(4_000));
+            assert_eq!(
+                admission_queue_wait_timeout(),
+                Duration::from_millis(90_000)
+            );
+            assert_eq!(admission_busy_wait(), Duration::from_millis(7_000));
+        });
+    }
+
+    /// A heartbeat that cannot outrun its own lease lets the queue reclaim live
+    /// waiters, which is exactly how FIFO order is silently lost. Config is
+    /// sanitized rather than rejected because this lock gates every cook.
+    #[test]
+    fn admission_timings_sanitize_config_that_would_strand_waiters() {
+        let floor = Duration::from_millis(crate::defaults::MIN_ADMISSION_INTERVAL_MS);
+
+        let stranding = AdmissionTimings::sanitized(&crate::defaults::ControllerAdmissionConfig {
+            queue_poll_ms: 0,
+            queue_lease_ms: 1_000,
+            queue_heartbeat_ms: 5_000,
+            ..crate::defaults::ControllerAdmissionConfig::default()
+        });
+        assert!(
+            stranding.heartbeat <= stranding.lease / 2,
+            "heartbeat {:?} must renew at least twice per lease {:?}",
+            stranding.heartbeat,
+            stranding.lease
+        );
+        assert!(stranding.poll >= floor);
+        assert!(stranding.poll <= stranding.heartbeat);
+
+        let zeroed = AdmissionTimings::sanitized(&crate::defaults::ControllerAdmissionConfig {
+            queue_poll_ms: 0,
+            queue_lease_ms: 0,
+            queue_heartbeat_ms: 0,
+            queue_wait_timeout_ms: 0,
+            busy_wait_ms: 0,
+        });
+        assert!(zeroed.poll >= floor, "a zero poll would spin, not wait");
+        assert!(zeroed.heartbeat >= floor);
+        assert!(zeroed.lease >= floor);
+        assert!(zeroed.poll <= zeroed.heartbeat);
     }
 
     #[test]

@@ -92,6 +92,11 @@ pub struct HomeboyConfig {
     #[serde(default)]
     pub retention: RetentionConfig,
 
+    /// Timings for the global controller-generation admission queue that every
+    /// detached cook submission passes through.
+    #[serde(default)]
+    pub controller_admission: ControllerAdmissionConfig,
+
     /// Optional dedicated root for reconstructable shared Cargo build output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cargo_target_root: Option<String>,
@@ -170,6 +175,7 @@ impl Default for HomeboyConfig {
             settings: HashMap::new(),
             release_gate: ReleaseGateConfig::default(),
             retention: RetentionConfig::default(),
+            controller_admission: ControllerAdmissionConfig::default(),
             cargo_target_root: None,
             artifact_root: None,
             artifact_origin: ArtifactOriginConfig::default(),
@@ -318,6 +324,82 @@ fn default_reconstructable_artifact_reserve_bytes() -> u64 {
 
 fn default_automatic_retention_max_run_seconds() -> u64 {
     60
+}
+
+/// Timings for the global controller-generation admission queue.
+///
+/// Every detached cook passes through this queue, so these are the knobs that
+/// decide how a submission wave behaves under contention. They were previously
+/// hardcoded constants with a `test-support`-gated environment override, which
+/// left them literally unconfigurable in a release binary. Defaults reproduce
+/// the historical constants exactly.
+///
+/// Values are sanitized on read rather than rejected: this is the lock every
+/// orchestration submission depends on, so an implausible config must degrade
+/// to a safe timing, not take the orchestrator down. See
+/// `controller_runtime::AdmissionTimings::load`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControllerAdmissionConfig {
+    /// Initial interval between durable queue observations while waiting.
+    #[serde(default = "default_admission_queue_poll_ms")]
+    pub queue_poll_ms: u64,
+
+    /// Lifetime granted to a queue entry by each heartbeat. A waiter that stops
+    /// renewing within this window is reclaimed as crashed.
+    #[serde(default = "default_admission_queue_lease_ms")]
+    pub queue_lease_ms: u64,
+
+    /// How often a waiting request renews its lease.
+    #[serde(default = "default_admission_queue_heartbeat_ms")]
+    pub queue_heartbeat_ms: u64,
+
+    /// Total time a queued request waits before failing with actionable
+    /// contention evidence. Raise this for submission waves larger than the
+    /// admission lock can drain in the default window.
+    #[serde(default = "default_admission_queue_wait_timeout_ms")]
+    pub queue_wait_timeout_ms: u64,
+
+    /// How long an uncoordinated caller (cleanup, generation activation, pin
+    /// migration) queues before reporting contention. These callers hold no
+    /// durable request identity and so cannot join the FIFO queue.
+    #[serde(default = "default_admission_busy_wait_ms")]
+    pub busy_wait_ms: u64,
+}
+
+/// Floor applied to every admission interval. A zero interval would turn the
+/// wait into an unthrottled spin against the durable queue file.
+pub const MIN_ADMISSION_INTERVAL_MS: u64 = 1;
+
+impl Default for ControllerAdmissionConfig {
+    fn default() -> Self {
+        Self {
+            queue_poll_ms: default_admission_queue_poll_ms(),
+            queue_lease_ms: default_admission_queue_lease_ms(),
+            queue_heartbeat_ms: default_admission_queue_heartbeat_ms(),
+            queue_wait_timeout_ms: default_admission_queue_wait_timeout_ms(),
+            busy_wait_ms: default_admission_busy_wait_ms(),
+        }
+    }
+}
+
+fn default_admission_queue_poll_ms() -> u64 {
+    250
+}
+
+fn default_admission_queue_lease_ms() -> u64 {
+    30_000
+}
+
+fn default_admission_queue_heartbeat_ms() -> u64 {
+    5_000
+}
+
+fn default_admission_queue_wait_timeout_ms() -> u64 {
+    10 * 60 * 1_000
+}
+
+fn default_admission_busy_wait_ms() -> u64 {
+    30_000
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
