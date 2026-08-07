@@ -1522,5 +1522,33 @@ mod tests {
 mod global_flag_surface_tests;
 
 pub mod reference_docs;
+/// Reject `--runner` combined with an explicit `--placement`.
+///
+/// Both carry `conflicts_with`, but clap only enforces that when they are
+/// supplied *after* the subcommand. Given at the root — `homeboy --placement
+/// local --runner lab agent-task cook …` — the conflict silently does not fire,
+/// so a contradictory invocation parsed cleanly and resolved to some placement
+/// nobody asked for. `--runner` implies Lab, so pairing it with `--placement
+/// local` is not a preference, it is two different answers to one question.
+///
+/// `placement` carries a default, so presence is not enough to detect: this
+/// keys on argument provenance and fires only when both were actually typed.
+pub fn reject_conflicting_placement_selection(
+    matches: &clap::ArgMatches,
+) -> Result<(), clap::Error> {
+    use crate::cli_surface::argument_provenance::{ArgumentSource, CommandArgumentProvenance};
+
+    let provenance = CommandArgumentProvenance::from_matches(matches);
+    let typed = |name: &str| provenance.source(name) == Some(ArgumentSource::CommandLine);
+
+    if typed("placement") && typed("runner") {
+        return Err(clap::Error::raw(
+            clap::error::ErrorKind::ArgumentConflict,
+            "the argument '--placement <PLACEMENT>' cannot be used with '--runner <RUNNER_ID>'\n\n             '--runner' already selects Lab placement by pinning a runner. Use one or the other.\n",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod reference_docs_tests;
