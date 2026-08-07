@@ -61,10 +61,23 @@ fn join_remote_path_allows_absolute_paths_without_base() {
 #[test]
 fn artifact_root_defaults_under_homeboy_data() {
     with_isolated_home(|home| {
-        assert_eq!(
-            artifact_root().expect("artifact root"),
-            home.path().join(".local/share/homeboy/artifacts")
-        );
+        // `with_isolated_home` sets `HOMEBOY_DATA_DIR` to `<home>/data`, and
+        // `homeboy_data()` checks it *before* the XDG fallback -- so the
+        // default this test exists to pin is unreachable until the override is
+        // cleared. Clear it explicitly, matching
+        // `homeboy_data_honors_explicit_durable_directory` below, which sets
+        // and removes the same variable.
+        let restore = std::env::var(HOMEBOY_DATA_DIR_ENV).ok();
+        std::env::remove_var(HOMEBOY_DATA_DIR_ENV);
+
+        let resolved = artifact_root().expect("artifact root");
+
+        match restore {
+            Some(value) => std::env::set_var(HOMEBOY_DATA_DIR_ENV, value),
+            None => std::env::remove_var(HOMEBOY_DATA_DIR_ENV),
+        }
+
+        assert_eq!(resolved, home.path().join(".local/share/homeboy/artifacts"));
     });
 }
 
