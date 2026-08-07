@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.11.10] - 2026-08-07
+
+### Fixed
+- fail a candidate Test shard that reports terminal failure
+- bound release liveness
+
 ## [2.11.9] - 2026-08-05
 
 ### Changed
