@@ -96,7 +96,8 @@ pub struct AgentTaskFanoutPortfolioObservation {
     pub findings: Vec<AgentTaskFanoutReviewFinding>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentTaskFanoutTrackerState {
     Open,
     Closed,
@@ -104,7 +105,8 @@ pub enum AgentTaskFanoutTrackerState {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentTaskFanoutProviderState {
     #[default]
     Pending,
@@ -113,7 +115,8 @@ pub enum AgentTaskFanoutProviderState {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentTaskFanoutWorktreeState {
     #[default]
     Clean,
@@ -136,7 +139,8 @@ pub struct AgentTaskFanoutCandidateState {
     pub can_recreate: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentTaskFanoutEvidenceState {
     #[default]
     Missing,
@@ -146,7 +150,12 @@ pub enum AgentTaskFanoutEvidenceState {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Serialized snake_case, not via `Debug`. `OpenChecksPassing` is the wire
+/// string `open_checks_passing`; before #11821 the `Debug`-lowercasing
+/// projection shipped `opencheckspassing`, which was neither snake_case nor
+/// stable across a Rust-side variant rename.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentTaskFanoutPrState {
     #[default]
     Missing,
@@ -203,15 +212,15 @@ pub struct AgentTaskFanoutPortfolioStatus {
 pub struct AgentTaskFanoutPortfolioChildStatus {
     pub child_id: String,
     pub tracker_ref: String,
-    pub tracker: String,
+    pub tracker: AgentTaskFanoutTrackerState,
     pub source_sha: Option<String>,
     pub base_sha: Option<String>,
     pub head_sha: Option<String>,
-    pub provider: String,
-    pub worktree: String,
-    pub gates: String,
-    pub acceptance: String,
-    pub pr: String,
+    pub provider: AgentTaskFanoutProviderState,
+    pub worktree: AgentTaskFanoutWorktreeState,
+    pub gates: AgentTaskFanoutEvidenceState,
+    pub acceptance: AgentTaskFanoutEvidenceState,
+    pub pr: AgentTaskFanoutPrState,
     pub blocker: Option<AgentTaskFanoutPortfolioBlocker>,
     pub next_action: AgentTaskFanoutPortfolioAction,
     pub drill_down_ref: String,
@@ -335,15 +344,15 @@ impl AgentTaskFanoutPortfolio {
                 AgentTaskFanoutPortfolioChildStatus {
                     child_id: id.clone(),
                     tracker_ref: child.tracker_ref.clone(),
-                    tracker: format!("{:?}", observation.tracker).to_lowercase(),
+                    tracker: observation.tracker,
                     source_sha: child.source_sha.clone(),
                     base_sha: child.base_sha.clone(),
                     head_sha: child.head_sha.clone(),
-                    provider: format!("{:?}", observation.provider).to_lowercase(),
-                    worktree: format!("{:?}", observation.worktree).to_lowercase(),
-                    gates: format!("{:?}", observation.gates).to_lowercase(),
-                    acceptance: format!("{:?}", observation.acceptance).to_lowercase(),
-                    pr: format!("{:?}", observation.pr).to_lowercase(),
+                    provider: observation.provider,
+                    worktree: observation.worktree,
+                    gates: observation.gates,
+                    acceptance: observation.acceptance,
+                    pr: observation.pr,
                     blocker: child.blocker.clone(),
                     next_action: child
                         .next_action
@@ -1065,5 +1074,104 @@ mod tests {
                 "adapter_observe_failed"
             );
         });
+    }
+
+    /// The status projection is a wire contract, not a `Debug` dump. Every
+    /// observation enum must serialize as snake_case so a Rust-side variant
+    /// rename cannot silently change the emitted string.
+    #[test]
+    fn observation_states_serialize_as_snake_case_strings() {
+        fn wire<T: Serialize>(value: T) -> String {
+            serde_json::to_value(value)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .into()
+        }
+
+        assert_eq!(wire(AgentTaskFanoutTrackerState::Open), "open");
+        assert_eq!(wire(AgentTaskFanoutTrackerState::Closed), "closed");
+        assert_eq!(wire(AgentTaskFanoutTrackerState::Unknown), "unknown");
+
+        assert_eq!(wire(AgentTaskFanoutProviderState::Pending), "pending");
+        assert_eq!(wire(AgentTaskFanoutProviderState::Running), "running");
+        assert_eq!(wire(AgentTaskFanoutProviderState::Succeeded), "succeeded");
+        assert_eq!(wire(AgentTaskFanoutProviderState::Failed), "failed");
+
+        assert_eq!(wire(AgentTaskFanoutWorktreeState::Clean), "clean");
+        assert_eq!(wire(AgentTaskFanoutWorktreeState::Dirty), "dirty");
+        assert_eq!(wire(AgentTaskFanoutWorktreeState::Conflicted), "conflicted");
+        assert_eq!(wire(AgentTaskFanoutWorktreeState::Missing), "missing");
+
+        assert_eq!(wire(AgentTaskFanoutEvidenceState::Missing), "missing");
+        assert_eq!(wire(AgentTaskFanoutEvidenceState::Current), "current");
+        assert_eq!(wire(AgentTaskFanoutEvidenceState::Failed), "failed");
+        assert_eq!(wire(AgentTaskFanoutEvidenceState::Rejected), "rejected");
+        assert_eq!(wire(AgentTaskFanoutEvidenceState::Unknown), "unknown");
+
+        assert_eq!(wire(AgentTaskFanoutPrState::Missing), "missing");
+        assert_eq!(
+            wire(AgentTaskFanoutPrState::OpenChecksPending),
+            "open_checks_pending"
+        );
+        assert_eq!(
+            wire(AgentTaskFanoutPrState::OpenChecksFailed),
+            "open_checks_failed"
+        );
+        // The regression this contract exists for: the former
+        // `format!("{:?}", ..).to_lowercase()` projection emitted
+        // `opencheckspassing`.
+        assert_eq!(
+            wire(AgentTaskFanoutPrState::OpenChecksPassing),
+            "open_checks_passing"
+        );
+        assert_eq!(wire(AgentTaskFanoutPrState::Merged), "merged");
+        assert_eq!(wire(AgentTaskFanoutPrState::Unknown), "unknown");
+    }
+
+    /// The multi-word PR states are the only variants whose wire string the
+    /// typed projection changed, so they are pinned round-trip in both
+    /// directions rather than serialize-only.
+    #[test]
+    fn pr_state_round_trips_through_its_snake_case_wire_string() {
+        for state in [
+            AgentTaskFanoutPrState::Missing,
+            AgentTaskFanoutPrState::OpenChecksPending,
+            AgentTaskFanoutPrState::OpenChecksFailed,
+            AgentTaskFanoutPrState::OpenChecksPassing,
+            AgentTaskFanoutPrState::Merged,
+            AgentTaskFanoutPrState::Unknown,
+        ] {
+            let encoded = serde_json::to_string(&state).unwrap();
+            let decoded: AgentTaskFanoutPrState = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(decoded, state);
+        }
+        assert_eq!(
+            serde_json::from_str::<AgentTaskFanoutPrState>("\"open_checks_passing\"").unwrap(),
+            AgentTaskFanoutPrState::OpenChecksPassing
+        );
+    }
+
+    /// The status projection carries typed states, so a serialized child row
+    /// exposes them as snake_case strings rather than `Debug` output.
+    #[test]
+    fn child_status_rows_serialize_observation_states_as_snake_case() {
+        let mut portfolio = AgentTaskFanoutPortfolio::new("typed-status", [child("child")]);
+        let mut state = observation("child");
+        state.pr = AgentTaskFanoutPrState::OpenChecksPassing;
+        let status = portfolio.reconcile([state], &IndependentFanoutDependencies);
+
+        assert_eq!(
+            status.children[0].pr,
+            AgentTaskFanoutPrState::OpenChecksPassing
+        );
+        let encoded = serde_json::to_value(&status).unwrap();
+        let row = &encoded["children"][0];
+        assert_eq!(row["pr"], "open_checks_passing");
+        assert_eq!(row["tracker"], "open");
+        assert_eq!(row["provider"], "succeeded");
+        assert_eq!(row["worktree"], "clean");
+        assert_eq!(row["gates"], "current");
+        assert_eq!(row["acceptance"], "current");
     }
 }
