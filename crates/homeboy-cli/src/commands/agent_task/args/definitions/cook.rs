@@ -479,11 +479,16 @@ pub struct AgentTaskCookArgs {
     #[command(flatten)]
     pub gates: VerifyGateArgs,
     /// Maximum Cook attempts before giving up. Each attempt re-runs the agent
-    /// and gates; a later attempt can recover from a transient failure. Set
-    /// --max-provider-executions to at least this value and
-    /// --max-same-provider-retries to at least one less so gate and required
-    /// review-form remediation remain possible (default 3).
-    #[arg(long = "max-attempts", default_value_t = 3, value_name = "N")]
+    /// and gates; a later attempt can recover from a transient failure. This
+    /// derives provider execution and same-provider remediation budgets. A
+    /// configured provider rotation receives its own additional execution
+    /// allowance unless an advanced budget flag explicitly caps it (default 3).
+    #[arg(
+        long = "max-attempts",
+        default_value_t = 3,
+        value_parser = clap::value_parser!(u32).range(1..),
+        value_name = "N"
+    )]
     pub max_attempts: u32,
     /// Stop after the work is verified but before opening the pull request,
     /// leaving the committed change on the worktree branch for manual review or

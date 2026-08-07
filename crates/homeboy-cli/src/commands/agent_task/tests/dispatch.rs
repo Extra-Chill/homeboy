@@ -999,6 +999,26 @@ fn cook_execution_budget_flags_parse_and_reject_legacy_attempts_mix() {
 }
 
 #[test]
+fn cook_rejects_zero_max_attempts_at_the_cli_boundary() {
+    assert!(Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "homeboy@execution-budget",
+        "--verify",
+        "true",
+        "--backend",
+        "sample-backend",
+        "--prompt",
+        "cook",
+        "--max-attempts",
+        "0",
+    ])
+    .is_err());
+}
+
+#[test]
 fn active_cursor_continues_discovery_and_cannot_scope_fleet_reconciliation() {
     let cli = Cli::try_parse_from([
         "homeboy",

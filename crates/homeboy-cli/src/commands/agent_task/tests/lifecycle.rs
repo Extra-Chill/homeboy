@@ -217,6 +217,35 @@ fn goal_and_prompt_remain_a_valid_single_source_cook_shape() {
     validate_cook_request(&args).expect("goal plus prompt is one valid Cook source");
 }
 
+#[test]
+fn cook_preflight_rejects_contradictory_retry_budget_with_corrected_command() {
+    let args = cook_args_from_cli(vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--prompt".to_string(),
+        "Implement the outcome".to_string(),
+        "--to-worktree".to_string(),
+        "sample-plugin@fix-issue".to_string(),
+        "--backend".to_string(),
+        "fixture".to_string(),
+        "--no-finalize".to_string(),
+        "--max-attempts".to_string(),
+        "2".to_string(),
+        "--max-provider-executions".to_string(),
+        "1".to_string(),
+    ]);
+
+    let error = validate_cook_request(&args).expect_err("unfunded retry intent fails preflight");
+    assert_eq!(error.details["field"], "max-provider-executions");
+    assert!(
+        error
+            .message
+            .contains("--max-attempts 2 --max-provider-executions 2 --max-same-provider-retries 1 --max-provider-rotations 0"),
+        "{error}"
+    );
+}
+
 impl AgentTaskCookAttemptDispatcher for RecoverableRunnerDispatcher {
     fn durable_recipe(&self) -> Result<Value> {
         Ok(json!({ "kind": "test-recoverable-runner" }))

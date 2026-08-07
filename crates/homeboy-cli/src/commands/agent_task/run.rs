@@ -103,6 +103,16 @@ pub(crate) fn cook_rotation_disclosure(plan: &AgentTaskPlan) -> String {
     }
 }
 
+fn cook_resolved_policy_disclosure(max_attempts: u32, plan: &AgentTaskPlan) -> String {
+    let budget = &plan.options.execution_budget;
+    format!(
+        "cook: retry policy: 1 initial execution, {} same-provider remediation retry(ies), {} rotation(s), {} provider execution(s) maximum",
+        budget.max_same_provider_retries,
+        budget.max_provider_rotations,
+        budget.max_provider_executions.max(max_attempts),
+    )
+}
+
 /// Serialize a completed run aggregate and, when the run did not fully succeed,
 /// surface a prominent top-level `failure_reasons` summary so the operator sees
 /// the root cause (recipe validation, PHP fatal, provider registration, missing
@@ -770,6 +780,30 @@ pub(crate) fn validate_cook_request_with_provenance(
             None,
         ));
     }
+    // Resolve against the same filtered rotation policy that compilation uses,
+    // while Cook is still in its no-side-effect validation phase.
+    let request = dispatch_service::resolve_dispatch_request(dispatch.into())?;
+    let configured_rotations = dispatch_service::controller_resolved_execution_policy(&request)
+        .rotation
+        .as_ref()
+        .map(|rotation| {
+            rotation
+                .max_total_attempts()
+                .min(
+                    u32::try_from(rotation.entries.len())
+                        .unwrap_or(u32::MAX)
+                        .saturating_add(1),
+                )
+                .saturating_sub(1)
+        })
+        .unwrap_or(0);
+    homeboy::agents::agent_task_service::resolve_cook_budget(
+        args.max_attempts,
+        configured_rotations,
+        args.dispatch.core.attempts,
+        args.dispatch.core.same_provider_retries,
+        args.dispatch.core.provider_rotations,
+    )?;
     Ok(())
 }
 
@@ -911,7 +945,12 @@ where
         record_cook_provision(&mut initial_plan, provision);
         record_cook_goal(&mut initial_plan, args.goal.as_deref());
     }
+    resolve_cook_execution_budget(&args, &mut initial_plan)?;
     if !no_progress {
+        eprintln!(
+            "{}",
+            cook_resolved_policy_disclosure(args.max_attempts, &initial_plan)
+        );
         eprintln!("{}", cook_rotation_disclosure(&initial_plan));
     }
     if let Some(provenance) = provenance {
@@ -1056,6 +1095,41 @@ pub(super) fn dispatch_args_for_cook(args: &AgentTaskCookArgs) -> DispatchArgs {
         dispatch_args.prompt = args.goal.clone();
     }
     dispatch_args
+}
+
+fn resolve_cook_execution_budget(
+    args: &AgentTaskCookArgs,
+    plan: &mut AgentTaskPlan,
+) -> homeboy::core::Result<()> {
+    let core = &args.dispatch.core;
+    let resolved = homeboy::agents::agent_task_service::resolve_cook_budget(
+        args.max_attempts,
+        plan.options.execution_budget.max_provider_rotations,
+        core.attempts,
+        core.same_provider_retries,
+        core.provider_rotations,
+    )?;
+    plan.options.execution_budget =
+        homeboy::agents::agent_task_scheduler::AgentTaskExecutionBudget::new(
+            resolved.provider_executions,
+            resolved.same_provider_remediations,
+            resolved.provider_rotations,
+        );
+    plan.metadata["cook_retry_policy"] = serde_json::json!({
+        "operator_intent": {
+            "max_attempts": args.max_attempts,
+            "max_provider_executions": core.attempts,
+            "max_same_provider_retries": core.same_provider_retries,
+            "max_provider_rotations": core.provider_rotations,
+        },
+        "resolved": {
+            "max_attempts": resolved.requested_attempts,
+            "max_provider_executions": resolved.provider_executions,
+            "max_same_provider_retries": resolved.same_provider_remediations,
+            "max_provider_rotations": resolved.provider_rotations,
+        },
+    });
+    Ok(())
 }
 
 /// Resolve `--prompt` through the structured-input contract its help already
@@ -1538,7 +1612,8 @@ pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cook_report_with_continuation, durable_cook_identity_lines, preflight_continue_cook,
+        cook_report_with_continuation, cook_resolved_policy_disclosure,
+        durable_cook_identity_lines, preflight_continue_cook,
     };
     use crate::commands::agent_task::args::CookContinueArgs;
 
@@ -1564,6 +1639,18 @@ mod tests {
 
         assert!(!lines[0].contains("(cook"), "no redundant alias: {lines:?}");
         assert!(lines[0].contains("run-9163"));
+    }
+
+    #[test]
+    fn resolved_cook_policy_disclosure_reports_the_execution_budget() {
+        let mut plan = homeboy::agents::agent_task_scheduler::AgentTaskPlan::new("plan", vec![]);
+        plan.options.execution_budget =
+            homeboy::agents::agent_task_scheduler::AgentTaskExecutionBudget::new(4, 1, 2);
+
+        assert_eq!(
+            cook_resolved_policy_disclosure(2, &plan),
+            "cook: retry policy: 1 initial execution, 1 same-provider remediation retry(ies), 2 rotation(s), 4 provider execution(s) maximum"
+        );
     }
 
     #[test]

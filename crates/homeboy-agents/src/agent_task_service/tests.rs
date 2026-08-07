@@ -265,6 +265,69 @@ fn cook_budget_preflight_rejects_unfunded_attempts_and_form_remediation() {
 }
 
 #[test]
+fn cook_retry_intent_derives_single_provider_and_gate_remediation_budgets() {
+    let resolved = resolve_cook_budget(2, 0, None, None, None).expect("derived budget");
+
+    assert_eq!(resolved.requested_attempts, 2);
+    assert_eq!(resolved.provider_executions, 2);
+    assert_eq!(resolved.same_provider_remediations, 1);
+    assert_eq!(resolved.provider_rotations, 0);
+
+    let explicit = resolve_cook_budget(2, 0, Some(2), Some(1), Some(0))
+        .expect("compatible explicit caller retains its budget");
+    assert_eq!(explicit, resolved);
+}
+
+#[test]
+fn cook_retry_intent_adds_configured_rotation_allowance() {
+    let resolved = resolve_cook_budget(2, 2, None, None, None).expect("derived rotation budget");
+
+    assert_eq!(resolved.provider_executions, 4);
+    assert_eq!(resolved.same_provider_remediations, 1);
+    assert_eq!(resolved.provider_rotations, 2);
+}
+
+#[test]
+fn cook_retry_intent_preserves_explicit_zero_rotation_override() {
+    let resolved = resolve_cook_budget(2, 2, None, None, Some(0))
+        .expect("an explicit rotation disablement is a valid Cook policy");
+
+    assert_eq!(resolved.provider_executions, 2);
+    assert_eq!(resolved.same_provider_remediations, 1);
+    assert_eq!(resolved.provider_rotations, 0);
+}
+
+#[test]
+fn cook_retry_intent_rejects_contradictory_explicit_override_with_correction() {
+    let error = resolve_cook_budget(2, 1, Some(2), Some(1), None)
+        .expect_err("rotation requires its own provider execution allowance");
+
+    assert_eq!(error.details["field"], "max-provider-executions");
+    assert!(
+        error.message.contains(
+            "--max-provider-executions 3 --max-same-provider-retries 1 --max-provider-rotations 1"
+        ),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn cook_retry_intent_rejects_explicitly_disabled_gate_remediation() {
+    let error = resolve_cook_budget(2, 0, None, Some(0), None)
+        .expect_err("a gate remediation slot cannot be disabled when Cook may retry");
+
+    assert_eq!(error.details["field"], "max-same-provider-retries");
+    assert!(
+        error
+            .message
+            .contains("--max-provider-executions 2 --max-same-provider-retries 1"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
 fn service_run_loaded_plan_persists_durable_lifecycle() {
     with_isolated_home(|_| {
         let result = run_loaded_plan(test_plan(), Some("service-run"), SucceedingExecutor)
