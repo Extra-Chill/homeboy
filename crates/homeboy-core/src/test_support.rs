@@ -1712,6 +1712,18 @@ fn handle_reverse_broker_request(
     use serde_json::json;
 
     let ok = |body| json!({ "success": true, "data": { "body": body } });
+    if request.method == "GET" && request.path == "/jobs" {
+        let active_runner_jobs = store.active_runner_jobs();
+        let stale_runner_jobs = store.stale_runner_jobs();
+        return ok(json!({
+            "command": "api.jobs.list",
+            "jobs": store.list(),
+            "active_runner_job_count": active_runner_jobs.len(),
+            "active_runner_jobs": active_runner_jobs,
+            "stale_runner_job_count": stale_runner_jobs.len(),
+            "stale_runner_jobs": stale_runner_jobs,
+        }));
+    }
     if request.method == "POST" && request.path == "/runner/sessions" {
         return ok(json!({ "registered": true }));
     }
@@ -1929,6 +1941,73 @@ mod tests {
             assert_eq!(command_env(&command, source), Some(None));
             assert_eq!(command_env(&command, lab), Some(None));
         }
+    }
+
+    #[test]
+    fn reverse_broker_fixture_projects_active_and_stale_runner_jobs() {
+        let store = JobStore::default();
+        let active = store
+            .submit_remote_runner_job(
+                serde_json::from_value(serde_json::json!({
+                    "runner_id": "lab",
+                    "command": ["true"],
+                }))
+                .expect("active runner request"),
+            )
+            .expect("queue active runner job");
+        let response = handle_reverse_broker_request(
+            &store,
+            "lab",
+            ReverseBrokerRequest {
+                method: "GET".to_string(),
+                path: "/jobs".to_string(),
+                body: serde_json::Value::Null,
+            },
+        );
+
+        assert_eq!(response["success"], true);
+        assert_eq!(
+            response["data"]["body"]["jobs"][0]["id"],
+            active.id.to_string()
+        );
+        assert_eq!(response["data"]["body"]["active_runner_job_count"], 1);
+        assert_eq!(
+            response["data"]["body"]["active_runner_jobs"][0]["job_id"],
+            active.id.to_string()
+        );
+        assert_eq!(response["data"]["body"]["stale_runner_job_count"], 0);
+
+        let temp = tempfile::tempdir().expect("job store directory");
+        let path = temp.path().join("jobs.json");
+        let store = JobStore::open(&path).expect("open durable store");
+        let stale = store
+            .submit_remote_runner_job(
+                serde_json::from_value(serde_json::json!({
+                    "runner_id": "lab",
+                    "command": ["true"],
+                }))
+                .expect("stale runner request"),
+            )
+            .expect("queue stale runner job");
+        store
+            .claim_remote_runner_job("lab", None, 30_000, None)
+            .expect("claim stale runner job");
+        let recovered = JobStore::open(&path).expect("recover stale runner job");
+        let response = handle_reverse_broker_request(
+            &recovered,
+            "lab",
+            ReverseBrokerRequest {
+                method: "GET".to_string(),
+                path: "/jobs".to_string(),
+                body: serde_json::Value::Null,
+            },
+        );
+
+        assert_eq!(response["data"]["body"]["stale_runner_job_count"], 1);
+        assert_eq!(
+            response["data"]["body"]["stale_runner_jobs"][0]["job_id"],
+            stale.id.to_string()
+        );
     }
 
     #[test]
