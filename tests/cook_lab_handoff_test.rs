@@ -14,9 +14,13 @@ use homeboy_core::test_support::{bounded_output, HermeticTestContext, TestBinary
 /// `HermeticTestContext::command` owns the complete isolation contract — HOME,
 /// XDG config and data roots, artifact root, runtime and temp dirs — and strips
 /// the Lab transport variables. Overriding only HOME on a hand-rolled `Command`
-/// leaves that leak open (#10717, #10718). These cases run with a default
-/// operator context; the transport variables are injected explicitly only by
-/// the case that asserts they cannot change a validation outcome (#10917).
+/// leaves that leak open (#10717, #10718). The transport variables are injected
+/// explicitly only by the case that asserts they cannot change a validation
+/// outcome (#10917); the Lab-route case likewise opts into CI resource admission
+/// so live host pressure cannot preempt the routing diagnostic.
+/// Cook cases name the test-support `fixture` backend explicitly: test HOME is
+/// intentionally empty, so backend selection must never depend on an operator
+/// default provider policy.
 ///
 /// `controller_runtime_command` adds the controller-runtime pins on top of that
 /// contract. Every `agent-task cook` invocation is sealed into an immutable
@@ -93,6 +97,8 @@ fn contradictory_cook_arguments_survive_controller_transport_context() {
         "--detach-after-handoff",
         "agent-task",
         "cook",
+        "--backend",
+        "fixture",
         "--prompt",
         "implement the fix",
         "--to-worktree",
@@ -116,6 +122,8 @@ fn contradictory_cook_arguments_survive_controller_transport_context() {
     let queue_only = cook(&[
         "agent-task",
         "cook",
+        "--backend",
+        "fixture",
         "--prompt",
         "implement the fix",
         "--to-worktree",
@@ -149,6 +157,8 @@ fn cook_rejects_invalid_controller_transport_before_worktree_resolution() {
         "homeboy-lab",
         "agent-task",
         "cook",
+        "--backend",
+        "fixture",
         "--prompt",
         "implement the fix",
         "--to-worktree",
@@ -260,6 +270,8 @@ fn non_tty_local_wait_stays_foreground() {
         "local",
         "agent-task",
         "cook",
+        "--backend",
+        "fixture",
         "--prompt",
         "implement the fix",
         "--to-worktree",
@@ -314,6 +326,8 @@ fn detached_cook_admission_is_bounded_with_a_hundred_unavailable_recovery_record
             "--detach-after-handoff",
             "agent-task",
             "cook",
+            "--backend",
+            "fixture",
             "--prompt",
             "admit despite stale runner records",
             "--to-worktree",
@@ -323,8 +337,11 @@ fn detached_cook_admission_is_bounded_with_a_hundred_unavailable_recovery_record
         ]);
     let started = Instant::now();
     let output = bounded_output(command);
+    // The handoff itself is capped at five seconds above. Leave enough room for
+    // concurrent controller-runtime pins in this integration binary; this
+    // bound detects recovery blocking rather than host-local fixture startup.
     assert!(
-        started.elapsed() < Duration::from_secs(10),
+        started.elapsed() < Duration::from_secs(30),
         "Cook admission must not wait for stale daemon recovery"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -388,6 +405,8 @@ fn cook_rejects_queue_only_before_worktree_resolution() {
     let output = homeboy(&[
         "agent-task",
         "cook",
+        "--backend",
+        "fixture",
         "--prompt",
         "implement the fix",
         "--to-worktree",
@@ -405,7 +424,14 @@ fn cook_rejects_queue_only_before_worktree_resolution() {
 
 #[test]
 fn required_lab_route_without_a_selected_runner_fails_deterministically() {
-    let output = homeboy(&["--placement", "lab", "review", "lint"]);
+    let context = HermeticTestContext::new();
+    let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    command
+        // Resource admission is tested independently. This routing test needs
+        // the no-runner diagnostic even when the host is deliberately warm.
+        .env("GITHUB_ACTIONS", "true")
+        .args(["--placement", "lab", "review", "lint"]);
+    let output = bounded_output(command);
 
     assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
