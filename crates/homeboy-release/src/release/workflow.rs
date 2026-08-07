@@ -106,6 +106,22 @@ pub fn run_command_with_workspace(
         .as_ref()
         .map(super::types::readiness_is_valid)
         .unwrap_or(false);
+    if readiness.is_some() && !readiness_succeeded {
+        let error = Error::validation_invalid_argument(
+            "release.preflight",
+            "Portable release preflight has invalid selected gate evidence",
+            None,
+            None,
+        );
+        if let Some(owner_run_ref) = readiness_owner_run_ref.as_deref() {
+            complete_readiness_operation(
+                owner_run_ref,
+                false,
+                serde_json::json!({ "error": error.to_string() }),
+            )?;
+        }
+        return Err(error);
+    }
     match run_command_with_workspace_inner(input, recovery_owner_run_ref) {
         Ok((mut output, exit_code)) => {
             if let Some(owner_run_ref) = readiness_owner_run_ref.as_deref() {

@@ -42,6 +42,7 @@ pub fn package_existing_tag(
     )?;
     let head_commit = git::get_head_commit(&component.local_path)?;
     validate_existing_tag_at_head(&component.local_path, tag, &head_commit)?;
+    super::executor::package_preflight::run_package_preflight(&component.local_path)?;
 
     let version = super::version::read_component_version(&component)?.version;
     let extensions = resolve_extensions(&component)?;

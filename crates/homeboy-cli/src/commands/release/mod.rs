@@ -891,6 +891,17 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
     guard_no_github_release(&args, &component_ids)?;
 
     if args.package_only {
+        if readiness
+            .as_ref()
+            .is_some_and(|value| !release::readiness_is_valid(value))
+        {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "release.preflight",
+                "Portable release preflight has invalid selected gate evidence",
+                None,
+                None,
+            ));
+        }
         return run_package_only(args, &component_ids);
     }
 
