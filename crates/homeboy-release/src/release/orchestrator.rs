@@ -161,21 +161,12 @@ fn ensure_readiness_passed(options: &ReleaseOptions) -> Result<()> {
     let Some(readiness) = options.readiness.as_ref() else {
         return Ok(());
     };
-    let failed = readiness
-        .gate_results
-        .iter()
-        .filter(|gate| gate.status == "failed")
-        .map(|gate| gate.gate.as_str())
-        .collect::<Vec<_>>();
-    if failed.is_empty() {
+    if super::types::readiness_is_valid(readiness) {
         return Ok(());
     }
     Err(Error::validation_invalid_argument(
         "release.preflight",
-        format!(
-            "Portable release preflight failed for: {}",
-            failed.join(", ")
-        ),
+        format!("Portable release preflight has invalid selected gate evidence"),
         Some(readiness.source.commit.clone()),
         Some(
             readiness

@@ -525,6 +525,26 @@ impl ReleaseReadinessProvenance {
     }
 }
 
+/// A readiness envelope authorizes release planning only when it has an
+/// explicit selected-gate outcome. Bare `--skip-checks` remains authorized
+/// because it records every selected portable gate as `skipped`.
+pub fn readiness_is_valid(readiness: &ReleaseReadinessEnvelope) -> bool {
+    !readiness.gate_results.is_empty()
+        && readiness
+            .gate_results
+            .iter()
+            .all(|gate| match gate.status.as_str() {
+                "passed" => {
+                    gate.source_sha.as_deref() == Some(readiness.source.commit.as_str())
+                        && gate.provenance.as_ref().is_some_and(|provenance| {
+                            !ReleaseReadinessProvenance::is_empty(provenance)
+                        })
+                }
+                "skipped" => gate.source_sha.as_deref() == Some(readiness.source.commit.as_str()),
+                _ => false,
+            })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReleaseReadinessGateResult {
     pub gate: String,

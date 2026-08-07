@@ -102,7 +102,10 @@ pub fn run_command_with_workspace(
         None
     };
     let readiness = input.readiness.clone();
-    let readiness_succeeded = readiness.as_ref().map(readiness_is_valid).unwrap_or(false);
+    let readiness_succeeded = readiness
+        .as_ref()
+        .map(super::types::readiness_is_valid)
+        .unwrap_or(false);
     match run_command_with_workspace_inner(input, recovery_owner_run_ref) {
         Ok((mut output, exit_code)) => {
             if let Some(owner_run_ref) = readiness_owner_run_ref.as_deref() {
@@ -132,20 +135,6 @@ pub fn run_command_with_workspace(
             Err(error)
         }
     }
-}
-
-fn readiness_is_valid(readiness: &super::types::ReleaseReadinessEnvelope) -> bool {
-    readiness
-        .gate_results
-        .iter()
-        .filter(|gate| matches!(gate.status.as_str(), "passed" | "failed"))
-        .all(|gate| {
-            gate.status == "passed"
-                && gate.source_sha.as_deref() == Some(readiness.source.commit.as_str())
-                && gate.provenance.as_ref().is_some_and(|provenance| {
-                    !super::types::ReleaseReadinessProvenance::is_empty(provenance)
-                })
-        })
 }
 
 fn complete_readiness_operation(
@@ -1381,6 +1370,66 @@ mod tests {
             .expect("record");
             assert_eq!(record.terminal_disposition.as_deref(), Some("succeeded"));
             assert!(record.attributes["downstream_release"]["error"].is_string());
+        });
+    }
+
+    #[test]
+    fn empty_and_unknown_readiness_gates_fail_durably_and_block_mutation() {
+        with_isolated_home(|_| {
+            for (source, mutate) in [("empty-gates", None), ("unknown-gate", Some("unknown"))] {
+                let mut readiness = successful_readiness(source);
+                if let Some(status) = mutate {
+                    readiness.gate_results[0].status = status.to_string();
+                } else {
+                    readiness.gate_results.clear();
+                }
+                run_command_with_workspace(
+                    ReleaseCommandInput {
+                        component_id: source.to_string(),
+                        readiness: Some(readiness),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .expect_err("invalid readiness blocks before component mutation");
+                let record = super::super::operation_record::OperationRecordStore::for_subject(
+                    "release_readiness",
+                    source,
+                    false,
+                )
+                .expect("records")
+                .pop()
+                .expect("record");
+                assert_eq!(record.terminal_disposition.as_deref(), Some("failed"));
+            }
+        });
+    }
+
+    #[test]
+    fn explicitly_skipped_gates_authorize_readiness() {
+        with_isolated_home(|_| {
+            let mut readiness = successful_readiness("skipped-gates");
+            let gate = &mut readiness.gate_results[0];
+            gate.status = "skipped".to_string();
+            gate.provenance = None;
+            run_command_with_workspace(
+                ReleaseCommandInput {
+                    component_id: "missing-component".to_string(),
+                    readiness: Some(readiness),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect_err("downstream component error follows authorized skipped readiness");
+            let record = super::super::operation_record::OperationRecordStore::for_subject(
+                "release_readiness",
+                "missing-component",
+                false,
+            )
+            .expect("records")
+            .pop()
+            .expect("record");
+            assert_eq!(record.terminal_disposition.as_deref(), Some("succeeded"));
         });
     }
 
