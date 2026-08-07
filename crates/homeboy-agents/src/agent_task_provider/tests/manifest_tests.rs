@@ -316,6 +316,7 @@ fn provider_adapter_receives_and_consumes_resolved_stdio_runtime_tool() {
 process.stdin.once('data', input => {
   const request = JSON.parse(input); const tool = request.resolved_runtime_tools[0];
   if (request.runtime_tools !== undefined) throw new Error('raw runtime tools leaked to adapter');
+  if (tool.timeout_ms !== 600000) throw new Error('runtime tool timeout was not projected');
   const result = spawnSync(tool.argv[0], tool.argv.slice(1), { input: 'ping', encoding: 'utf8', env: { ...process.env, ...tool.env } });
   process.stdout.write(JSON.stringify({ schema: 'homeboy/agent-task-outcome/v1', task_id: request.task_id, status: 'succeeded', outputs: { tool_result: result.stdout.trim() } }));
   process.exit(0);
@@ -329,6 +330,7 @@ process.stdin.once('data', input => {
         "env": { "FIXTURE_MODE": "isolated", "PROBE_HOME": "declared" },
         "secret_env": ["HOME"],
         "required_capabilities": ["browser"],
+        "timeout_ms": 600000,
         "readiness": { "command_prefix": [tool], "version_command": ["--version"], "capability_probe": { "argv": ["--capability-probe"] } }
     }))
     .expect("runtime tool")];
@@ -372,6 +374,10 @@ process.stdin.once('data', input => {
     assert_eq!(
         outcome.metadata["resolved_runtime_tools"][0]["version"],
         "fixture 1.0"
+    );
+    assert_eq!(
+        outcome.metadata["resolved_runtime_tools"][0]["timeout_ms"],
+        600_000
     );
     assert_eq!(
         outcome.metadata["resolved_runtime_tools"][0]["readiness"],

@@ -83,6 +83,8 @@ pub struct ResolvedAgentTaskRuntimeTool {
     pub env_names: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_env_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
     pub readiness: ResolvedAgentTaskRuntimeToolReadiness,
     pub lifecycle: AgentTaskRuntimeToolLifecycle,
 }

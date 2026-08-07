@@ -107,6 +107,7 @@ pub(crate) fn resolve_runtime_tools(
             capability_probe,
             env_names: tool.env.keys().cloned().collect(),
             secret_env_names: tool.secret_env.clone(),
+            timeout_ms: tool.timeout_ms,
             readiness: ResolvedAgentTaskRuntimeToolReadiness {
                 status: "ready".to_string(),
                 evidence: readiness_evidence,
