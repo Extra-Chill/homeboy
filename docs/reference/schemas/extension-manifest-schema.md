@@ -209,7 +209,11 @@ prefix, never a shell command or template.
   "notification_transports": [{
     "schema": "homeboy/notification-transport/v1",
     "id": "discord.run-completion",
-    "command": ["bin/notify-discord"]
+    "command": ["bin/notify"],
+    "route_resolver": {
+      "schema": "homeboy/notification-route-resolver/v1",
+      "command": ["bin/resolve-notification-route"]
+    }
   }]
 }
 ```
@@ -250,6 +254,47 @@ text-only transport receives the same information as bounded prose.
 Transports that print a JSON object on stdout have it retained verbatim in
 homeboy's `NotifyOutcome.result`, so delivery mode, attempt counts, truncation,
 and classified error kinds survive instead of collapsing to an exit code.
+
+#### Route resolver (optional)
+
+`notification_transports[].route_resolver` lets a transport derive its own
+opaque destination from caller context it owns. The declaration is a versioned,
+non-empty literal argv array. Homeboy does not inspect caller environment names,
+values, or ambient context keys; extensions alone choose what inherited context
+to read. Extension list and show output expose only `has_route_resolver`, never
+resolver argv or caller context.
+
+Homeboy invokes declared resolvers only after neither `--notification-transport`
+plus `--notification-route` nor the paired `HOMEBOY_NOTIFICATION_TRANSPORT` and
+`HOMEBOY_NOTIFICATION_ROUTE` values selected a route. Explicit CLI values win,
+then the environment pair, then exactly one resolver match. No match preserves
+the route-less policy.
+
+The resolver receives this JSON object on stdin:
+
+```json
+{"schema":"homeboy/notification-route-resolver-request/v1","transport":"example.completed"}
+```
+
+It must write exactly one JSON result to stdout:
+
+```json
+{"schema":"homeboy/notification-route-resolver/v1","status":"unmatched"}
+```
+
+or:
+
+```json
+{"schema":"homeboy/notification-route-resolver/v1","status":"matched","route":"opaque-destination"}
+```
+
+Resolvers have a two-second execution limit and a 16 KiB stdout limit. Their
+stderr is not retained. Multiple matches, a non-zero exit, malformed or
+oversized output, a timeout, an unsupported schema, an invalid result shape, or
+an invalid/secret-bearing route fail closed with a typed
+`notification_route_resolver` diagnostic. A selected route is validated and
+bound before durable submission, so detached, fanout, resume, daemon, and
+delivery paths reuse their existing route persistence.
 
 Known sidecar names default to these run-directory paths when `path` is omitted:
 

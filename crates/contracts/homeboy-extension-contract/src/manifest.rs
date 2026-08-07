@@ -607,6 +607,7 @@ mod tests {
             schema: NOTIFICATION_TRANSPORT_SCHEMA.to_string(),
             id: id.to_string(),
             command: vec!["notify".to_string()],
+            route_resolver: None,
         }
     }
 

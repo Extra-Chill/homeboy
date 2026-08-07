@@ -205,18 +205,21 @@ mod tests {
             schema: "wrong".to_string(),
             id: "test.run-completion".to_string(),
             command: vec!["true".to_string()],
+            route_resolver: None,
         };
         assert!(invalid.validate().is_err());
         let invalid = NotificationTransportConfig {
             schema: NOTIFICATION_TRANSPORT_SCHEMA.to_string(),
             id: "bad id".to_string(),
             command: vec!["true".to_string()],
+            route_resolver: None,
         };
         assert!(invalid.validate().is_err());
         let invalid = NotificationTransportConfig {
             schema: NOTIFICATION_TRANSPORT_SCHEMA.to_string(),
             id: "test.run-completion".to_string(),
             command: vec![],
+            route_resolver: None,
         };
         assert!(invalid.validate().is_err());
     }

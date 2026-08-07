@@ -539,21 +539,28 @@ impl CliRuntime {
         };
         let mut cli = compiled.value;
         let command_provenance = compiled.provenance;
-        let notification_route = match crate::core::notification_route::from_cli_or_env(
-            cli.notification_transport.as_deref(),
-            cli.notification_route.as_deref(),
-        ) {
-            Ok(route) => route,
-            Err(err) => {
-                output_runtime::emit_json_result_for_identity(
-                    Err(err),
-                    output_file.as_deref(),
-                    2,
-                    &command_identity,
-                );
-                return std::process::ExitCode::from(2);
-            }
-        };
+        let notification_route =
+            match crate::core::notification_route_resolver::resolve_from_cli_or_env(
+                cli.notification_transport.as_deref(),
+                cli.notification_route.as_deref(),
+            ) {
+                Ok(route) => route,
+                Err(err) => {
+                    output_runtime::emit_json_result_for_identity(
+                        Err(err),
+                        output_file.as_deref(),
+                        2,
+                        &command_identity,
+                    );
+                    return std::process::ExitCode::from(2);
+                }
+            };
+        if let Some(route) = &notification_route {
+            // Placement routing happens before the thread-local command scope.
+            // Mirror the selected route into its existing durable handoff input.
+            cli.notification_transport = Some(route.transport.clone());
+            cli.notification_route = Some(route.route.clone());
+        }
         commands::set_skip_deps_hydration(cli.skip_deps_hydration);
         normalize_runs_runner_options(&mut cli, &normalized);
         normalize_cook_runner_option(&mut cli, &normalized);
