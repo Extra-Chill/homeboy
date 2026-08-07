@@ -847,6 +847,58 @@ pub fn record_child_finalization(
     write_batch(&batch)
 }
 
+/// Record that this batch's coordinator was cancelled by its durable owner.
+///
+/// # Why this cannot be inferred from child state
+///
+/// A batch coordinator's cancellation is not derivable from its children. A
+/// child that has not been claimed yet has no lifecycle record at all, so
+/// [`agent_task_lifecycle::cancel_run`] has nothing to terminalize for it and a
+/// coordinator that only read child records would keep starting fresh cooks
+/// after the batch was cancelled. Nor is the aggregate `state` a usable signal:
+/// a batch whose first children succeeded before cancellation aggregates to
+/// `PartialFailure`, not `Cancelled`.
+///
+/// So cancellation is recorded as its own explicit fact, and the claim loop
+/// reads exactly this. It is deliberately kept in `metadata` rather than in
+/// `state`, because [`status`] recomputes `state` from live child observation
+/// on every read and would erase a marker written there.
+pub fn record_coordinator_cancellation(batch_id: &str, reason: &str) -> Result<()> {
+    let mut batch = read_batch(batch_id)?;
+    if !batch.metadata.is_object() {
+        batch.metadata = json!({});
+    }
+    let metadata = batch.metadata.as_object_mut().expect("metadata object");
+    // First writer wins: a repeated cancellation must not rewrite the instant
+    // the batch was actually stopped, so replayed cancellation converges.
+    if metadata.contains_key(COORDINATOR_CANCELLATION_KEY) {
+        return Ok(());
+    }
+    metadata.insert(
+        COORDINATOR_CANCELLATION_KEY.to_string(),
+        json!({
+            "requested_at": now_timestamp(),
+            "reason": reason,
+        }),
+    );
+    batch.updated_at = Some(now_timestamp());
+    write_batch(&batch)
+}
+
+/// Whether this batch's coordinator has been cancelled by its durable owner.
+///
+/// An unreadable or absent batch record is reported as "not cancelled" rather
+/// than as an error: this is consulted from the coordinator's claim loop, where
+/// a transient read failure must not be allowed to abandon a live batch.
+pub fn coordinator_is_cancelled(batch_id: &str) -> bool {
+    read_batch(batch_id)
+        .ok()
+        .and_then(|batch| batch.metadata.get(COORDINATOR_CANCELLATION_KEY).cloned())
+        .is_some_and(|value| value.is_object())
+}
+
+const COORDINATOR_CANCELLATION_KEY: &str = "coordinator_cancellation";
+
 pub fn dependency_action_receipt(batch_id: &str, key: &str) -> Result<Option<Value>> {
     let batch = read_batch(batch_id)?;
     Ok(batch.metadata["dependency_action_receipts"][key]
