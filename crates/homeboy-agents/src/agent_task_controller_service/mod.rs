@@ -583,9 +583,15 @@ pub fn apply_event(request: ControllerApplyEventRequest) -> Result<ControllerEve
     })
 }
 
-/// Reconcile accepted Lab handoffs before selecting the next pending action.
+/// Reconcile accepted Lab handoffs and open waits before selecting the next
+/// pending action.
+///
 /// This is the reconnect path: lifecycle status refreshes the authoritative
-/// runner snapshot, then the same typed terminal projection is applied.
+/// runner snapshot, then the same typed terminal projection is applied. It
+/// also resolves `WaitForEvent`/`WaitForController` waits whose subject is
+/// already durably terminal — see [`reconcile_open_waits`] for the evidence
+/// rule — because a controller parked in `Waiting` has no pending action, so
+/// `resume` returns `idle` and exits without ever looking at the wait.
 fn reconcile_waiting_runner_actions(record: &mut AgentTaskLoopControllerRecord) -> Result<bool> {
     let mut changed = false;
     for action in record
@@ -604,7 +610,414 @@ fn reconcile_waiting_runner_actions(record: &mut AgentTaskLoopControllerRecord) 
             changed = true;
         }
     }
+    changed |= reconcile_open_waits(record)?.changed();
     Ok(changed)
+}
+
+// ---------------------------------------------------------------------------
+// Open-wait reconciliation (W3-9)
+// ---------------------------------------------------------------------------
+
+/// Wait event types whose subject is a durable agent-task run.
+///
+/// The allowlist is the whole safety argument. A wait carries only an event
+/// type, an optional entity, and an opaque `external_ref`; nothing in that
+/// shape says whether Homeboy can observe the thing being waited on. Resolving
+/// by inference would satisfy a `github.pr.merged` wait because *some* local
+/// record happened to be terminal, and a wait that resolves wrongly is worse
+/// than one that stalls — the controller would advance past a gate the world
+/// has not actually passed.
+const RUN_TERMINAL_WAIT_EVENT_TYPES: &[&str] = &[
+    "agent_task.runner_terminal",
+    "agent_task.run_terminal",
+    "agent_task.cook_terminal",
+];
+
+/// The event type `WaitForController` records for a child controller.
+const CONTROLLER_TERMINAL_WAIT_EVENT_TYPE: &str = "controller.terminal";
+
+/// Escalation policy value that turns an expired wait into a terminal
+/// controller state rather than merely unblocking the loop.
+const ESCALATE_ON_TIMEOUT_POLICY: &str = "escalate";
+
+/// What one open-wait reconcile pass did to a controller.
+#[derive(Debug, Clone, Default)]
+pub struct WaitReconcileOutcome {
+    /// Wait keys satisfied by durable evidence.
+    pub resolved: Vec<String>,
+    /// Wait keys whose declared `timeout_at` had passed.
+    pub timed_out: Vec<String>,
+    /// `true` when an expired wait escalated the controller to a terminal state.
+    pub escalated: bool,
+    /// Open waits remaining after the pass.
+    pub open_waits: usize,
+}
+
+impl WaitReconcileOutcome {
+    pub fn changed(&self) -> bool {
+        !self.resolved.is_empty() || !self.timed_out.is_empty()
+    }
+}
+
+/// Resolve open waits from durable run and controller state, and expire waits
+/// whose declared deadline has passed.
+///
+/// # Evidence accepted
+///
+/// - A `controller.terminal` wait resolves when the named child controller's
+///   persisted record is in one of the terminal states the wait declared (or
+///   the default terminal set when it declared none). The child loop id comes
+///   from the recorded subcontroller reference when there is one, because that
+///   id is already sanitized the way the record on disk is named.
+/// - A run-terminal wait (see [`RUN_TERMINAL_WAIT_EVENT_TYPES`]) resolves when
+///   the run named by `external_ref` has a terminal durable lifecycle state.
+///
+/// # Evidence refused
+///
+/// - Any other `event_type`. `github.pr.checks_changed`, `github.pr.merged`,
+///   and every operator-authored type describe things Homeboy does not
+///   observe locally; there is no durable evidence to read, so the wait stays
+///   open until something applies the event.
+/// - A wait with no `external_ref`. Its only remaining identity is an entity
+///   id, which names what the wait is *about*, not what would satisfy it.
+///   Matching on that alone is a guess.
+/// - A subject whose record cannot be read. A transient store error is not
+///   evidence of terminality, exactly as it is not in the daemon's completion
+///   notifier.
+/// - A non-terminal subject. Keep waiting.
+///
+/// # Expiry
+///
+/// Only an explicitly declared `timeout_at` expires a wait. That field has
+/// existed on the wait type since it was written and was never enforced
+/// anywhere, so honouring it is the escalation the type was designed for. No
+/// deadline is invented for a wait that declared none: guessing a timeout is
+/// the same class of error as guessing evidence, and it would silently unblock
+/// long-running waits that are working correctly. An unparseable `timeout_at`
+/// never expires a wait — a malformed timestamp must not become a deadline.
+fn reconcile_open_waits(
+    record: &mut AgentTaskLoopControllerRecord,
+) -> Result<WaitReconcileOutcome> {
+    let now = chrono::Utc::now();
+    let open: Vec<controller::AgentTaskLoopWait> = record
+        .waits
+        .iter()
+        .filter(|wait| wait.status == controller::AgentTaskLoopWaitStatus::Open)
+        .cloned()
+        .collect();
+
+    let mut satisfied: Vec<(String, String)> = Vec::new();
+    let mut expired: Vec<(String, Option<String>)> = Vec::new();
+    for wait in &open {
+        if let Some(evidence) = durable_wait_evidence(record, wait) {
+            satisfied.push((wait.wait_key.clone(), evidence));
+            continue;
+        }
+        if wait_deadline_passed(wait, now) {
+            expired.push((wait.wait_key.clone(), wait.escalation_policy.clone()));
+        }
+    }
+
+    let mut outcome = WaitReconcileOutcome::default();
+    for (wait_key, evidence) in &satisfied {
+        let Some(wait) = open_wait_mut(record, wait_key) else {
+            continue;
+        };
+        wait.status = controller::AgentTaskLoopWaitStatus::Satisfied;
+        wait.satisfied_by_event_id = Some(evidence.clone());
+        outcome.resolved.push(wait_key.clone());
+    }
+    for (wait_key, _) in &expired {
+        let Some(wait) = open_wait_mut(record, wait_key) else {
+            continue;
+        };
+        wait.status = controller::AgentTaskLoopWaitStatus::TimedOut;
+        outcome.timed_out.push(wait_key.clone());
+    }
+
+    if !outcome.resolved.is_empty() {
+        push_controller_history(
+            record,
+            "controller.wait.resolved",
+            None,
+            serde_json::json!({
+                "wait_keys": outcome.resolved,
+                "source": "durable_state_reconcile",
+            }),
+        );
+    }
+    if !outcome.timed_out.is_empty() {
+        push_controller_history(
+            record,
+            "controller.wait.timed_out",
+            None,
+            serde_json::json!({
+                "wait_keys": outcome.timed_out,
+                "observed_at": now.to_rfc3339(),
+            }),
+        );
+    }
+
+    // Mirrors `apply_event`: a controller with nothing left to wait for is
+    // runnable again, so its pending actions become reachable.
+    if outcome.changed()
+        && record.open_wait_count() == 0
+        && record.state == AgentTaskLoopControllerState::Waiting
+    {
+        record.state = AgentTaskLoopControllerState::Running;
+    }
+
+    // Escalation is opt-in on the exact declared policy. A wait whose author
+    // said nothing about escalation is unblocked, not terminalized.
+    if expired
+        .iter()
+        .any(|(_, policy)| policy.as_deref() == Some(ESCALATE_ON_TIMEOUT_POLICY))
+    {
+        record.state = AgentTaskLoopControllerState::Escalated;
+        outcome.escalated = true;
+        push_controller_history(
+            record,
+            "controller.wait.escalated",
+            None,
+            serde_json::json!({
+                "wait_keys": outcome.timed_out,
+                "escalation_policy": ESCALATE_ON_TIMEOUT_POLICY,
+            }),
+        );
+    }
+
+    outcome.open_waits = record.open_wait_count();
+    Ok(outcome)
+}
+
+fn open_wait_mut<'record>(
+    record: &'record mut AgentTaskLoopControllerRecord,
+    wait_key: &str,
+) -> Option<&'record mut controller::AgentTaskLoopWait> {
+    record.waits.iter_mut().find(|wait| {
+        wait.wait_key == wait_key && wait.status == controller::AgentTaskLoopWaitStatus::Open
+    })
+}
+
+/// Durable evidence that an open wait is already satisfied, or `None`.
+///
+/// Every failure path returns `None`. Refusing to resolve leaves the wait
+/// exactly as it was, which is always recoverable; resolving on a guess is not.
+fn durable_wait_evidence(
+    record: &AgentTaskLoopControllerRecord,
+    wait: &controller::AgentTaskLoopWait,
+) -> Option<String> {
+    if wait.event_type == CONTROLLER_TERMINAL_WAIT_EVENT_TYPE {
+        return controller_wait_evidence(record, wait);
+    }
+    if RUN_TERMINAL_WAIT_EVENT_TYPES.contains(&wait.event_type.as_str()) {
+        return run_wait_evidence(wait);
+    }
+    None
+}
+
+fn controller_wait_evidence(
+    record: &AgentTaskLoopControllerRecord,
+    wait: &controller::AgentTaskLoopWait,
+) -> Option<String> {
+    let subcontroller = record
+        .subcontrollers
+        .iter()
+        .find(|sub| sub.wait_key.as_deref() == Some(wait.wait_key.as_str()));
+    // The subcontroller reference is preferred: its loop id is already
+    // sanitized the way the child's record is named on disk, where
+    // `external_ref` carries whatever the policy author wrote.
+    let child_loop_id = subcontroller
+        .map(|sub| sub.loop_id.clone())
+        .or_else(|| wait.external_ref.clone())?;
+    if child_loop_id.trim().is_empty() {
+        return None;
+    }
+    let terminal_states = controller::controller_terminal_states(
+        subcontroller
+            .map(|sub| sub.terminal_states.as_slice())
+            .unwrap_or_default(),
+    );
+    // `load_controller`, not `controller_status`: reading the persisted record
+    // is the evidence. `controller_status` refreshes child projections and
+    // would recurse through a controller graph on every wait.
+    let child = controller::load_controller(&child_loop_id).ok()?;
+    terminal_states
+        .contains(&child.state)
+        .then(|| format!("controller-terminal:{child_loop_id}:{:?}", child.state))
+}
+
+fn run_wait_evidence(wait: &controller::AgentTaskLoopWait) -> Option<String> {
+    let run_id = wait.external_ref.as_deref()?.trim();
+    if run_id.is_empty() {
+        return None;
+    }
+    let run = lifecycle::status(run_id).ok()?;
+    run.state
+        .is_terminal()
+        .then(|| format!("run-terminal:{run_id}:{:?}", run.state))
+}
+
+fn wait_deadline_passed(
+    wait: &controller::AgentTaskLoopWait,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Some(deadline) = wait.timeout_at.as_deref() else {
+        return false;
+    };
+    chrono::DateTime::parse_from_rfc3339(deadline)
+        .map(|deadline| deadline.with_timezone(&chrono::Utc) <= now)
+        // A malformed deadline is not a deadline.
+        .unwrap_or(false)
+}
+
+/// Schema for the controller wait-reconcile report.
+pub const WAIT_RECONCILE_RESULT_SCHEMA: &str = "homeboy/agent-task-controller-wait-reconcile/v1";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ControllerWaitReconcileEntry {
+    pub loop_id: String,
+    pub before_state: AgentTaskLoopControllerState,
+    pub after_state: AgentTaskLoopControllerState,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resolved_waits: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub timed_out_waits: Vec<String>,
+    pub open_waits: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ControllerWaitReconcileReport {
+    pub schema: &'static str,
+    pub considered: usize,
+    pub changed: usize,
+    pub failed: usize,
+    pub controllers: Vec<ControllerWaitReconcileEntry>,
+}
+
+/// Sweep every durable controller with open waits and resolve what durable
+/// state already satisfies.
+///
+/// This is the automatic driver `Waiting` never had. `resume` stops at `idle`
+/// for a controller whose only remaining work is a wait, and nothing polled,
+/// subscribed, or timed out — so a controller that dispatched a cook sat there
+/// indefinitely even after that cook terminalized, until a human ran
+/// `apply-event`.
+///
+/// Every controller is reconciled independently: one unreadable or
+/// unwriteable record is recorded against its own entry and never aborts the
+/// sweep.
+pub fn reconcile_waiting_controllers() -> Result<ControllerWaitReconcileReport> {
+    let records = controller::list_controllers()?;
+    let mut entries = Vec::new();
+    let mut changed = 0usize;
+    let mut failed = 0usize;
+
+    for mut record in records {
+        if record.open_wait_count() == 0 {
+            continue;
+        }
+        let loop_id = record.loop_id.clone();
+        let before_state = record.state;
+        let outcome = match reconcile_open_waits(&mut record) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                failed += 1;
+                entries.push(ControllerWaitReconcileEntry {
+                    loop_id,
+                    before_state,
+                    after_state: before_state,
+                    resolved_waits: Vec::new(),
+                    timed_out_waits: Vec::new(),
+                    open_waits: 0,
+                    error: Some(error.message),
+                });
+                continue;
+            }
+        };
+        if !outcome.changed() {
+            continue;
+        }
+        if let Err(error) = controller::write_controller(&record) {
+            failed += 1;
+            entries.push(ControllerWaitReconcileEntry {
+                loop_id,
+                before_state,
+                after_state: before_state,
+                resolved_waits: outcome.resolved,
+                timed_out_waits: outcome.timed_out,
+                open_waits: outcome.open_waits,
+                error: Some(error.message),
+            });
+            continue;
+        }
+        changed += 1;
+        emit_wait_reconcile_notifications(&record, before_state, &outcome);
+        entries.push(ControllerWaitReconcileEntry {
+            loop_id,
+            before_state,
+            after_state: record.state,
+            resolved_waits: outcome.resolved,
+            timed_out_waits: outcome.timed_out,
+            open_waits: outcome.open_waits,
+            error: None,
+        });
+    }
+
+    Ok(ControllerWaitReconcileReport {
+        schema: WAIT_RECONCILE_RESULT_SCHEMA,
+        considered: entries.len(),
+        changed,
+        failed,
+        controllers: entries,
+    })
+}
+
+/// Announce what the sweep changed.
+///
+/// Only emitted when the pass actually moved something. A controller that is
+/// still waiting on the same events it was waiting on last minute is not news,
+/// and a sweep that announced it every tick would be a heartbeat — exactly the
+/// noise the cook emitters were kept sparse to avoid.
+fn emit_wait_reconcile_notifications(
+    record: &AgentTaskLoopControllerRecord,
+    before_state: AgentTaskLoopControllerState,
+    outcome: &WaitReconcileOutcome,
+) {
+    let phase = (!record.phase.is_empty()).then_some(record.phase.as_str());
+    if record.state != before_state {
+        let reason = if outcome.escalated {
+            Some("a declared wait deadline passed")
+        } else if !outcome.timed_out.is_empty() {
+            Some("a declared wait deadline passed")
+        } else {
+            Some("durable state satisfied every open wait")
+        };
+        crate::agent_task_notify::controller_state_changed(
+            &record.loop_id,
+            phase,
+            before_state,
+            record.state,
+            reason,
+            outcome.open_waits,
+        );
+        return;
+    }
+    if record.state == AgentTaskLoopControllerState::Waiting {
+        let waits = record
+            .waits
+            .iter()
+            .filter(|wait| wait.status == controller::AgentTaskLoopWaitStatus::Open)
+            .map(|wait| crate::agent_task_notify::ControllerWaitSummary {
+                wait_key: wait.wait_key.clone(),
+                event_type: wait.event_type.clone(),
+                external_ref: wait.external_ref.clone(),
+            })
+            .collect::<Vec<_>>();
+        crate::agent_task_notify::controller_waiting(&record.loop_id, phase, &waits);
+    }
 }
 
 fn replay_runner_terminal_event(
