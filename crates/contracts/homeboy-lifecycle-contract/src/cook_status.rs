@@ -38,6 +38,26 @@
 //!
 //! [`CookStatus::Unknown`] preserves the raw string so a status this binary
 //! does not recognize is never rewritten.
+//!
+//! # Classifying an open vocabulary for a machine consumer
+//!
+//! Openness is right for reporting and wrong for classification. A consumer
+//! that receives `{"status": "moving_base"}` over HTTP, or reads it back from
+//! a persisted report, has no process exit code to branch on and cannot decide
+//! success, terminality, or retry from the string alone.
+//!
+//! `homeboy_core::run_lifecycle_status::RunLifecycleStatus` is the closed
+//! vocabulary that answers those questions, and `From<&CookStatus>` is the
+//! projection onto it. Reports emit it as an additive `lifecycle_status`
+//! beside the unchanged `status`, so callers that match on the raw string keep
+//! working while a machine consumer gets a decidable classification.
+//!
+//! That projection is deliberately *not* an authority on terminality. It is
+//! pinned to agree with [`CookStatus::is_in_flight`] for every known variant,
+//! and reports emit `terminal` from the declared [`CookDisposition`] below.
+//! [`CookStatus::Unknown`] projects to an explicit "unknown" rather than a
+//! manufactured failure, for exactly the reason terminality is declared here
+//! rather than inferred.
 
 use std::fmt;
 

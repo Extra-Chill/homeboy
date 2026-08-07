@@ -22,6 +22,7 @@ use crate::agent_task_scheduler::{
 use crate::agent_task_timeout::{capture_cook_deadline, expired_cook_deadline, CookDeadline};
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
+use homeboy_core::run_lifecycle_status::RunLifecycleStatus;
 use homeboy_core::{Error, Result};
 
 use super::cook_activity::{CookActivityProbe, CookProviderActivity};
@@ -841,15 +842,20 @@ pub struct AgentTaskCandidateAdoptionOptions {
     pub replace_interrupted: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+/// A Cook outcome.
+///
+/// `Serialize` is written by hand rather than derived so the additive
+/// [`RunLifecycleProjection`] is emitted by *every* producer of this type
+/// without each of the ~30 struct literals that build it having to carry three
+/// more fields it would then be free to compute differently. The projection is
+/// derived from `status` and `disposition`, which are already present, so
+/// there is nothing for a call site to supply and nothing for it to get wrong.
+#[derive(Debug, Clone)]
 pub struct AgentTaskCookReport {
     pub schema: &'static str,
     pub cook_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history_run_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub invocation_run_ids: Vec<String>,
     pub status: String,
     /// Whether the Cook will advance on its own, declared by the exit that
@@ -859,31 +865,174 @@ pub struct AgentTaskCookReport {
     /// pattern-matching `status`, which is an open vocabulary.
     pub disposition: CookDisposition,
     pub attempts: Vec<AgentTaskCookAttemptReport>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub finalization: Option<Value>,
     /// A verified review outcome that intentionally has no candidate to promote
     /// or finalize.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub intentional_no_change: Option<AgentTaskCookIntentionalNoChangeReport>,
     /// Candidate authority is separate from `latest_run_id`, which remains the
     /// chronological invocation/index compatibility field.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_candidate: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
     /// Preserves the lifecycle-owned failure boundary when cook stops before
     /// provider dispatch instead of collapsing it into an attempt-budget result.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_phase: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_failure_classification: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub moving_base_recovery: Option<MovingBaseCookRecovery>,
     /// Generic durable recovery coordinates for a Cook that stopped after its
     /// recipe was materialized. This intentionally contains no provider or gate
     /// evidence; operators retrieve that through the listed diagnose command.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_context: Option<AgentTaskCookFailureContext>,
+}
+
+/// The closed-vocabulary classification emitted beside an open `status`
+/// string.
+///
+/// # Why a report carries this at all
+///
+/// `status` is an open vocabulary and stays that way — callers match on it and
+/// several exits feed it straight from finalization JSON. `exit_code` is the
+/// contract every *process* caller branches on, but a consumer reading a
+/// persisted report or an HTTP response has no exit code. Without this, such a
+/// consumer receiving `{"status": "moving_base"}` cannot decide success,
+/// completion, or retry at all.
+///
+/// # Where each field's authority comes from
+///
+/// - `lifecycle_status` is [`RunLifecycleStatus`], projected from
+///   [`CookStatus`]. Closed, so it is always decidable.
+/// - `terminal` is the *declared* [`CookDisposition`], never re-derived from
+///   the status string. The exit that produced the report already knew whether
+///   it handed the work to a durable owner; that answer is authoritative and
+///   this only forwards it.
+/// - `retryable` is [`RunLifecycleStatus::is_retryable`], gated on `terminal`.
+///   A Cook a durable owner is still carrying must never be advertised as
+///   retryable, whatever its status string reads.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct RunLifecycleProjection {
+    pub lifecycle_status: RunLifecycleStatus,
+    pub terminal: bool,
+    pub retryable: bool,
+}
+
+impl RunLifecycleProjection {
+    /// Classify a report whose exit declared a [`CookDisposition`].
+    pub fn from_status_and_disposition(status: &str, disposition: CookDisposition) -> Self {
+        Self::new(
+            RunLifecycleStatus::from(&CookStatus::from_status(status)),
+            disposition.is_terminal(),
+        )
+    }
+
+    /// Classify a report that has no declared disposition — a batch cell whose
+    /// child never produced one, for instance.
+    ///
+    /// Terminality then falls back to [`CookStatus::is_in_flight`], the
+    /// vocabulary's own closed reading of "still progressing". That is the
+    /// existing status-only answer documented in `cook_status`, not a new
+    /// opinion: an unrecognized status reads as not-in-flight there, and reads
+    /// as terminal here.
+    pub fn from_status(status: &str) -> Self {
+        let status = CookStatus::from_status(status);
+        let terminal = !status.is_in_flight();
+        Self::new(RunLifecycleStatus::from(&status), terminal)
+    }
+
+    fn new(lifecycle_status: RunLifecycleStatus, terminal: bool) -> Self {
+        Self {
+            lifecycle_status,
+            terminal,
+            // Gated on terminality so a Cook still being carried by a durable
+            // owner is never advertised as something to retry.
+            retryable: terminal && lifecycle_status.is_retryable(),
+        }
+    }
+}
+
+impl serde::Serialize for AgentTaskCookReport {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        /// Mirrors [`AgentTaskCookReport`] field for field, in order, with the
+        /// same `skip_serializing_if` rules, plus the three appended
+        /// projection fields. Borrowed so serialization stays
+        /// allocation-free.
+        #[derive(serde::Serialize)]
+        struct Wire<'a> {
+            schema: &'static str,
+            cook_id: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            latest_run_id: Option<&'a String>,
+            #[serde(skip_serializing_if = "slice_is_empty")]
+            history_run_ids: &'a [String],
+            #[serde(skip_serializing_if = "slice_is_empty")]
+            invocation_run_ids: &'a [String],
+            status: &'a str,
+            disposition: CookDisposition,
+            attempts: &'a [AgentTaskCookAttemptReport],
+            #[serde(skip_serializing_if = "Option::is_none")]
+            finalization: Option<&'a Value>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            intentional_no_change: Option<&'a AgentTaskCookIntentionalNoChangeReport>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            selected_candidate: Option<&'a Value>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            stop_reason: Option<&'a String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            terminal_phase: Option<&'a String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            terminal_failure_classification: Option<&'a String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            moving_base_recovery: Option<&'a MovingBaseCookRecovery>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            failure_context: Option<&'a AgentTaskCookFailureContext>,
+            // Additive. `status` above is unchanged and remains the field
+            // callers match on.
+            lifecycle_status: RunLifecycleStatus,
+            terminal: bool,
+            retryable: bool,
+        }
+
+        let lifecycle = self.lifecycle();
+        let wire = Wire {
+            schema: self.schema,
+            cook_id: &self.cook_id,
+            latest_run_id: self.latest_run_id.as_ref(),
+            history_run_ids: &self.history_run_ids,
+            invocation_run_ids: &self.invocation_run_ids,
+            status: &self.status,
+            disposition: self.disposition,
+            attempts: &self.attempts,
+            finalization: self.finalization.as_ref(),
+            intentional_no_change: self.intentional_no_change.as_ref(),
+            selected_candidate: self.selected_candidate.as_ref(),
+            stop_reason: self.stop_reason.as_ref(),
+            terminal_phase: self.terminal_phase.as_ref(),
+            terminal_failure_classification: self.terminal_failure_classification.as_ref(),
+            moving_base_recovery: self.moving_base_recovery.as_ref(),
+            failure_context: self.failure_context.as_ref(),
+            lifecycle_status: lifecycle.lifecycle_status,
+            terminal: lifecycle.terminal,
+            retryable: lifecycle.retryable,
+        };
+        serde::Serialize::serialize(&wire, serializer)
+    }
+}
+
+impl AgentTaskCookReport {
+    /// The closed-vocabulary classification of this report.
+    pub fn lifecycle(&self) -> RunLifecycleProjection {
+        RunLifecycleProjection::from_status_and_disposition(&self.status, self.disposition)
+    }
+}
+
+/// `skip_serializing_if` predicate for a borrowed slice field.
+///
+/// Serde passes the predicate a reference to the field, so a `&'a [T]` field
+/// arrives as `&&[T]`. Spelled out rather than relying on `<[T]>::is_empty`
+/// resolving through an extra layer of deref.
+fn slice_is_empty<T>(value: &&[T]) -> bool {
+    value.is_empty()
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -988,19 +1137,81 @@ pub struct AgentTaskCookBatchOptions {
     pub max_concurrency: usize,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+/// One child's outcome inside a batch.
+///
+/// `Serialize` is hand-written for the same reason as [`AgentTaskCookReport`]:
+/// the lifecycle projection is derived from fields already present, so it is
+/// emitted for every producer instead of being a fourth thing a call site can
+/// forget or contradict.
+#[derive(Debug, Clone)]
 pub struct AgentTaskCookBatchCellReport {
     pub cook_id: String,
     pub initial_run_id: String,
     pub status: String,
     pub exit_code: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<AgentTaskCookReport>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+impl AgentTaskCookBatchCellReport {
+    /// The closed-vocabulary classification of this cell.
+    ///
+    /// A child that produced a Cook report is classified by that report, whose
+    /// declared [`CookDisposition`] is authoritative. A child that never got
+    /// that far — an infrastructure failure before any durable record — is
+    /// classified from its status alone.
+    pub fn lifecycle(&self) -> RunLifecycleProjection {
+        match &self.result {
+            Some(result) => result.lifecycle(),
+            None => RunLifecycleProjection::from_status(&self.status),
+        }
+    }
+}
+
+impl serde::Serialize for AgentTaskCookBatchCellReport {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        struct Wire<'a> {
+            cook_id: &'a str,
+            initial_run_id: &'a str,
+            status: &'a str,
+            exit_code: i32,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            result: Option<&'a AgentTaskCookReport>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            error: Option<&'a String>,
+            lifecycle_status: RunLifecycleStatus,
+            terminal: bool,
+            retryable: bool,
+        }
+
+        let lifecycle = self.lifecycle();
+        let wire = Wire {
+            cook_id: &self.cook_id,
+            initial_run_id: &self.initial_run_id,
+            status: &self.status,
+            exit_code: self.exit_code,
+            result: self.result.as_ref(),
+            error: self.error.as_ref(),
+            lifecycle_status: lifecycle.lifecycle_status,
+            terminal: lifecycle.terminal,
+            retryable: lifecycle.retryable,
+        };
+        serde::Serialize::serialize(&wire, serializer)
+    }
+}
+
+/// A batch's aggregate outcome.
+///
+/// Its `status` comes from
+/// [`AgentTaskBatchState::outcome_status`](crate::agent_task_batch::AgentTaskBatchState::outcome_status),
+/// a closed vocabulary that is *already* a subset of [`RunLifecycleStatus`] —
+/// so the projection parses it rather than re-listing it by hand, which is the
+/// exact drift `cook_status` was created to end.
+#[derive(Debug, Clone)]
 pub struct AgentTaskCookBatchReport {
     pub schema: &'static str,
     pub batch_id: String,
@@ -1013,6 +1224,257 @@ pub struct AgentTaskCookBatchReport {
     pub cancelled: usize,
     pub timed_out: usize,
     pub cooks: Vec<AgentTaskCookBatchCellReport>,
+}
+
+/// Project a batch aggregate status onto the canonical vocabulary.
+///
+/// [`AgentTaskBatchState::outcome_status`](crate::agent_task_batch::AgentTaskBatchState::outcome_status)
+/// emits exactly the snake_case names [`RunLifecycleStatus`] deserializes
+/// from, so this parses instead of keeping a second copy of that list.
+/// Anything unparseable stays `Unknown` rather than being guessed.
+fn batch_lifecycle_status(status: &str) -> RunLifecycleStatus {
+    serde_json::from_value(Value::String(status.to_string())).unwrap_or(RunLifecycleStatus::Unknown)
+}
+
+impl AgentTaskCookBatchReport {
+    /// The closed-vocabulary classification of this batch.
+    pub fn lifecycle(&self) -> RunLifecycleProjection {
+        let lifecycle_status = batch_lifecycle_status(&self.status);
+        RunLifecycleProjection {
+            lifecycle_status,
+            terminal: lifecycle_status.is_terminal(),
+            retryable: lifecycle_status.is_retryable(),
+        }
+    }
+}
+
+impl serde::Serialize for AgentTaskCookBatchReport {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        struct Wire<'a> {
+            schema: &'static str,
+            batch_id: &'a str,
+            status: &'a str,
+            total: usize,
+            queued: usize,
+            running: usize,
+            succeeded: usize,
+            failed: usize,
+            cancelled: usize,
+            timed_out: usize,
+            cooks: &'a [AgentTaskCookBatchCellReport],
+            lifecycle_status: RunLifecycleStatus,
+            terminal: bool,
+            retryable: bool,
+        }
+
+        let lifecycle = self.lifecycle();
+        let wire = Wire {
+            schema: self.schema,
+            batch_id: &self.batch_id,
+            status: &self.status,
+            total: self.total,
+            queued: self.queued,
+            running: self.running,
+            succeeded: self.succeeded,
+            failed: self.failed,
+            cancelled: self.cancelled,
+            timed_out: self.timed_out,
+            cooks: &self.cooks,
+            lifecycle_status: lifecycle.lifecycle_status,
+            terminal: lifecycle.terminal,
+            retryable: lifecycle.retryable,
+        };
+        serde::Serialize::serialize(&wire, serializer)
+    }
+}
+
+/// The wire contract for the additive lifecycle projection.
+///
+/// These assert two things that are easy to break by accident: that `status`
+/// and `exit_code` semantics are untouched, and that `terminal` continues to
+/// come from the declared disposition rather than being re-derived from the
+/// status string.
+#[cfg(test)]
+mod run_lifecycle_projection_tests {
+    use super::*;
+
+    fn report(status: &str, disposition: CookDisposition) -> AgentTaskCookReport {
+        AgentTaskCookReport {
+            schema: "homeboy/agent-task-cook/v1",
+            cook_id: "cook-projection".to_string(),
+            latest_run_id: None,
+            history_run_ids: Vec::new(),
+            invocation_run_ids: Vec::new(),
+            status: status.to_string(),
+            disposition,
+            attempts: Vec::new(),
+            finalization: None,
+            intentional_no_change: None,
+            selected_candidate: None,
+            stop_reason: None,
+            terminal_phase: None,
+            terminal_failure_classification: None,
+            moving_base_recovery: None,
+            failure_context: None,
+        }
+    }
+
+    fn cell(status: &str, result: Option<AgentTaskCookReport>) -> AgentTaskCookBatchCellReport {
+        AgentTaskCookBatchCellReport {
+            cook_id: "cook-projection".to_string(),
+            initial_run_id: "cook-projection-attempt-1".to_string(),
+            status: status.to_string(),
+            exit_code: 1,
+            result,
+            error: None,
+        }
+    }
+
+    /// The whole point: the raw, open status is untouched and the closed
+    /// classification arrives beside it.
+    #[test]
+    fn a_cook_report_emits_the_projection_without_changing_status() {
+        let value = serde_json::to_value(report("durable_failure", CookDisposition::Terminal))
+            .expect("serialize");
+
+        assert_eq!(value["status"], "durable_failure");
+        assert_eq!(value["lifecycle_status"], "failed");
+        assert_eq!(value["terminal"], true);
+        assert_eq!(value["retryable"], true);
+        // Unchanged fields must still be present and still be skipped when
+        // absent, exactly as the derived implementation did.
+        assert_eq!(value["schema"], "homeboy/agent-task-cook/v1");
+        assert_eq!(value["disposition"], "terminal");
+        assert!(value.get("latest_run_id").is_none());
+        assert!(value.get("history_run_ids").is_none());
+        assert!(value.get("failure_context").is_none());
+    }
+
+    /// `disposition` is the authority on terminality. A Cook a durable owner is
+    /// still carrying must not be advertised as finished, or as retryable,
+    /// however its status string reads.
+    #[test]
+    fn terminality_follows_the_declared_disposition_not_the_status_string() {
+        let value = serde_json::to_value(report("durable_failure", CookDisposition::InFlight))
+            .expect("serialize");
+
+        assert_eq!(value["lifecycle_status"], "failed");
+        assert_eq!(value["terminal"], false);
+        assert_eq!(
+            value["retryable"], false,
+            "a Cook a durable owner still carries must never be advertised as retryable"
+        );
+    }
+
+    /// A status from a newer binary produces an explicit "unknown"
+    /// classification, never a manufactured failure — while `terminal` still
+    /// arrives, because the exit declared it.
+    #[test]
+    fn an_unreadable_status_reports_unknown_but_still_reports_terminality() {
+        let value = serde_json::to_value(report("moving_base", CookDisposition::Terminal))
+            .expect("serialize");
+
+        assert_eq!(value["status"], "moving_base");
+        assert_eq!(value["lifecycle_status"], "unknown");
+        assert_eq!(value["terminal"], true);
+        assert_eq!(value["retryable"], false);
+    }
+
+    /// A cell that carries a child report defers to that report's declared
+    /// disposition rather than re-deriving anything.
+    #[test]
+    fn a_batch_cell_defers_to_its_childs_declared_disposition() {
+        let value = serde_json::to_value(cell(
+            "durable_failure",
+            Some(report("durable_failure", CookDisposition::InFlight)),
+        ))
+        .expect("serialize");
+
+        assert_eq!(value["status"], "durable_failure");
+        assert_eq!(value["exit_code"], 1);
+        assert_eq!(value["lifecycle_status"], "failed");
+        assert_eq!(value["terminal"], false);
+        assert_eq!(value["result"]["terminal"], false);
+    }
+
+    /// A child that failed before producing any Cook report has no declared
+    /// disposition, so the cell falls back to the vocabulary's own closed
+    /// in-flight reading.
+    #[test]
+    fn a_batch_cell_without_a_child_report_classifies_from_status_alone() {
+        let value = serde_json::to_value(cell("failed", None)).expect("serialize");
+
+        assert_eq!(value["lifecycle_status"], "failed");
+        assert_eq!(value["terminal"], true);
+        assert_eq!(value["retryable"], true);
+        assert!(value.get("result").is_none());
+    }
+
+    /// The batch aggregate vocabulary is a subset of the canonical one by
+    /// construction. The exhaustive `match` makes a new `AgentTaskBatchState`
+    /// variant a compile error here rather than a silent `Unknown` on the wire.
+    #[test]
+    fn every_batch_state_projects_onto_the_canonical_vocabulary() {
+        use crate::agent_task_batch::AgentTaskBatchState;
+
+        for state in [
+            AgentTaskBatchState::Queued,
+            AgentTaskBatchState::Running,
+            AgentTaskBatchState::Succeeded,
+            AgentTaskBatchState::PartialFailure,
+            AgentTaskBatchState::Failed,
+            AgentTaskBatchState::Cancelled,
+            AgentTaskBatchState::TimedOut,
+        ] {
+            let expected = match state {
+                AgentTaskBatchState::Queued => RunLifecycleStatus::Queued,
+                AgentTaskBatchState::Running => RunLifecycleStatus::Running,
+                AgentTaskBatchState::Succeeded => RunLifecycleStatus::Succeeded,
+                AgentTaskBatchState::PartialFailure => RunLifecycleStatus::PartialFailure,
+                AgentTaskBatchState::Failed => RunLifecycleStatus::Failed,
+                AgentTaskBatchState::Cancelled => RunLifecycleStatus::Cancelled,
+                AgentTaskBatchState::TimedOut => RunLifecycleStatus::TimedOut,
+            };
+
+            assert_eq!(
+                batch_lifecycle_status(state.outcome_status()),
+                expected,
+                "{} must project onto the canonical vocabulary",
+                state.outcome_status()
+            );
+        }
+    }
+
+    #[test]
+    fn a_batch_report_emits_the_projection_beside_its_status() {
+        let report = AgentTaskCookBatchReport {
+            schema: "homeboy/agent-task-cook-batch/v1",
+            batch_id: "batch-projection".to_string(),
+            status: "partial_failure".to_string(),
+            total: 2,
+            queued: 0,
+            running: 0,
+            succeeded: 1,
+            failed: 1,
+            cancelled: 0,
+            timed_out: 0,
+            cooks: Vec::new(),
+        };
+
+        let value = serde_json::to_value(&report).expect("serialize");
+
+        assert_eq!(value["status"], "partial_failure");
+        assert_eq!(value["lifecycle_status"], "partial_failure");
+        assert_eq!(value["terminal"], true);
+        assert_eq!(
+            value["retryable"], false,
+            "a partially failed batch must not be advertised as blanket-retryable"
+        );
+    }
 }
 
 /// Resolves a generic dispatch command once, before a typed cook is scheduled.
