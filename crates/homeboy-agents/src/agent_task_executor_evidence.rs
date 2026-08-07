@@ -18,6 +18,7 @@
 //! the redaction pass because [`RedactionPolicy`] only rewrites known-sensitive
 //! keys and leaves the rest of the JSON intact.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -34,11 +35,22 @@ pub const EXECUTOR_INPUT_EVIDENCE_KIND: &str = "executor-input";
 /// outcome). Surfaced as a first-class run evidence ref.
 pub const EXECUTOR_RESULT_EVIDENCE_KIND: &str = "executor-result";
 
+/// Evidence kinds for Homeboy-owned provider runtime evidence.
+pub const EXECUTOR_ARTIFACT_ROOT_EVIDENCE_KIND: &str = "executor-artifact-root";
+pub const PROVIDER_SESSION_EVIDENCE_KIND: &str = "provider-session";
+pub const RUNTIME_STDOUT_EVIDENCE_KIND: &str = "provider-runtime-stdout";
+pub const RUNTIME_STDERR_EVIDENCE_KIND: &str = "provider-runtime-stderr";
+pub const RUNTIME_PROGRESS_EVIDENCE_KIND: &str = "provider-runtime-progress";
+pub const RUNTIME_EVIDENCE_KIND: &str = "executor-runtime-evidence";
+
 /// File name for the persisted latest raw executor request.
 pub const EXECUTOR_INPUT_FILE: &str = "executor-input.json";
 
 /// File name for the persisted latest raw executor result.
 pub const EXECUTOR_RESULT_FILE: &str = "executor-result.json";
+
+/// File name for the redacted runtime evidence index.
+pub const RUNTIME_EVIDENCE_FILE: &str = "executor-runtime-evidence.json";
 
 /// Persist the latest raw executor request and result for `request`/`outcome`
 /// and append linking evidence refs onto the outcome.
@@ -87,6 +99,137 @@ pub(crate) fn link_latest_executor_evidence(
             },
         );
     }
+
+    link_runtime_evidence(request, outcome, &dir, &policy);
+}
+
+/// Link provider-neutral runtime evidence retained under the executor's owned
+/// artifact root. The index records absent optional streams explicitly, while
+/// individual file refs remain directly hydratable when they exist.
+fn link_runtime_evidence(
+    request: &AgentTaskExecutorRequest,
+    outcome: &mut AgentTaskOutcome,
+    evidence_dir: &Path,
+    policy: &RedactionPolicy,
+) {
+    let artifact_root = request.artifacts_path.canonicalize().ok();
+    let runtime_files = artifact_root
+        .as_deref()
+        .map(discover_runtime_files)
+        .unwrap_or_default();
+    let sessions = provider_session_metadata(outcome);
+    let index = json!({
+        "artifact_root": artifact_root.as_ref().map(|path| format!("file://{}", path.display())),
+        "provider_runtime_identities": sessions,
+        "runtime_stdout": runtime_files.get(RUNTIME_STDOUT_EVIDENCE_KIND),
+        "runtime_stderr": runtime_files.get(RUNTIME_STDERR_EVIDENCE_KIND),
+        "runtime_progress": runtime_files.get(RUNTIME_PROGRESS_EVIDENCE_KIND),
+    });
+    let Some(index_uri) = persist_evidence_file(
+        &evidence_dir.join(RUNTIME_EVIDENCE_FILE),
+        &policy.redact_json(&index),
+    ) else {
+        return;
+    };
+
+    push_unique_evidence_ref(
+        outcome,
+        AgentTaskEvidenceRef {
+            kind: RUNTIME_EVIDENCE_KIND.to_string(),
+            uri: index_uri.clone(),
+            label: Some("provider runtime evidence index".to_string()),
+        },
+    );
+    if let Some(root) = artifact_root {
+        push_unique_evidence_ref(
+            outcome,
+            AgentTaskEvidenceRef {
+                kind: EXECUTOR_ARTIFACT_ROOT_EVIDENCE_KIND.to_string(),
+                uri: format!("file://{}", root.display()),
+                label: Some("executor artifact root".to_string()),
+            },
+        );
+    }
+    if !sessions.is_empty() {
+        push_unique_evidence_ref(
+            outcome,
+            AgentTaskEvidenceRef {
+                kind: PROVIDER_SESSION_EVIDENCE_KIND.to_string(),
+                uri: index_uri,
+                label: Some("provider-native session metadata".to_string()),
+            },
+        );
+    }
+    for (kind, paths) in runtime_files {
+        for path in paths {
+            push_unique_evidence_ref(
+                outcome,
+                AgentTaskEvidenceRef {
+                    kind: kind.clone(),
+                    uri: format!("file://{}", path.display()),
+                    label: Some(kind.replace("provider-", "").replace('-', " ")),
+                },
+            );
+        }
+    }
+}
+
+fn provider_session_metadata(outcome: &AgentTaskOutcome) -> Vec<Value> {
+    outcome
+        .metadata
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(key, value)| key.to_ascii_lowercase().contains("session") && !value.is_null())
+        .map(|(key, value)| {
+            let id = value
+                .as_object()
+                .and_then(|session| {
+                    ["id", "session_id", "sessionId"]
+                        .iter()
+                        .find_map(|key| session.get(*key).and_then(Value::as_str))
+                })
+                .filter(|id| !id.trim().is_empty());
+            json!({
+                "source": key,
+                "id": id,
+                "details": value,
+            })
+        })
+        .collect()
+}
+
+fn discover_runtime_files(root: &Path) -> BTreeMap<String, Vec<PathBuf>> {
+    let mut files = BTreeMap::new();
+    let Ok(entries) = fs::read_dir(root) else {
+        return files;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(path) = path.canonicalize() else {
+            continue;
+        };
+        if !path.starts_with(root) || !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        let kind = if name.contains("runtime") && name.contains("stdout") {
+            Some(RUNTIME_STDOUT_EVIDENCE_KIND)
+        } else if name.contains("runtime") && name.contains("stderr") {
+            Some(RUNTIME_STDERR_EVIDENCE_KIND)
+        } else if name.contains("progress") {
+            Some(RUNTIME_PROGRESS_EVIDENCE_KIND)
+        } else {
+            None
+        };
+        if let Some(kind) = kind {
+            files
+                .entry(kind.to_string())
+                .or_insert_with(Vec::new)
+                .push(path);
+        }
+    }
+    files
 }
 
 fn executor_evidence_dir(run_id: Option<&str>, task_id: &str) -> PathBuf {
@@ -321,7 +464,7 @@ mod tests {
                     .uri
                     .strip_prefix("file://")
                     .expect("file uri prefix");
-                assert!(Path::new(path).is_file(), "evidence file should exist");
+                assert!(Path::new(path).exists(), "evidence path should exist");
             }
         });
     }
@@ -392,6 +535,86 @@ mod tests {
     }
 
     #[test]
+    fn links_retained_runtime_files_and_redacted_provider_session_metadata() {
+        with_artifact_root(|_| {
+            let request = executor_test_request();
+            fs::write(
+                request.artifacts_path.join("provider-runtime-stdout.log"),
+                "runtime stdout",
+            )
+            .expect("write stdout");
+            fs::write(
+                request.artifacts_path.join("provider-runtime-stderr.log"),
+                "runtime stderr",
+            )
+            .expect("write stderr");
+            fs::write(
+                request.artifacts_path.join("provider-progress.jsonl"),
+                "{}\n",
+            )
+            .expect("write progress");
+            let mut outcome = test_outcome();
+            outcome.status = AgentTaskOutcomeStatus::Failed;
+            outcome.metadata = json!({
+                "provider_session": { "id": "session-123", "token": "secret-session-token" }
+            });
+
+            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+
+            for kind in [
+                EXECUTOR_ARTIFACT_ROOT_EVIDENCE_KIND,
+                PROVIDER_SESSION_EVIDENCE_KIND,
+                RUNTIME_STDOUT_EVIDENCE_KIND,
+                RUNTIME_STDERR_EVIDENCE_KIND,
+                RUNTIME_PROGRESS_EVIDENCE_KIND,
+            ] {
+                assert!(
+                    outcome
+                        .evidence_refs
+                        .iter()
+                        .any(|evidence| evidence.kind == kind),
+                    "missing {kind} evidence ref"
+                );
+            }
+            let index = outcome
+                .evidence_refs
+                .iter()
+                .find(|evidence| evidence.kind == RUNTIME_EVIDENCE_KIND)
+                .expect("runtime evidence index");
+            let raw = fs::read_to_string(index.uri.strip_prefix("file://").expect("file uri"))
+                .expect("read runtime evidence index");
+            assert!(raw.contains("session-123"));
+            assert!(!raw.contains("secret-session-token"));
+            assert!(raw.contains("[REDACTED]"));
+        });
+    }
+
+    #[test]
+    fn runtime_evidence_index_records_absent_optional_streams() {
+        with_artifact_root(|_| {
+            let request = executor_test_request();
+            let mut outcome = test_outcome();
+
+            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+
+            let index = outcome
+                .evidence_refs
+                .iter()
+                .find(|evidence| evidence.kind == RUNTIME_EVIDENCE_KIND)
+                .expect("runtime evidence index");
+            let value: Value = serde_json::from_slice(
+                &fs::read(index.uri.strip_prefix("file://").expect("file uri"))
+                    .expect("read runtime evidence index"),
+            )
+            .expect("parse runtime evidence index");
+            assert_eq!(value["provider_runtime_identities"], json!([]));
+            assert_eq!(value["runtime_stdout"], Value::Null);
+            assert_eq!(value["runtime_stderr"], Value::Null);
+            assert_eq!(value["runtime_progress"], Value::Null);
+        });
+    }
+
+    #[test]
     fn persisted_input_redacts_runtime_tool_literal_environment_values() {
         let mut request = executor_test_request();
         request.request.runtime_tools = vec![serde_json::from_value(json!({
@@ -453,12 +676,14 @@ mod tests {
 
     #[test]
     fn evidence_dir_is_stable_for_a_run_and_task_id() {
-        let first = executor_evidence_dir(Some("run/attempt:1"), "task/with weird:chars");
-        let second = executor_evidence_dir(Some("run/attempt:1"), "task/with weird:chars");
-        assert_eq!(first, second);
-        assert!(first
-            .to_string_lossy()
-            .contains("agent-task/executor-evidence"));
+        with_artifact_root(|_| {
+            let first = executor_evidence_dir(Some("run/attempt:1"), "task/with weird:chars");
+            let second = executor_evidence_dir(Some("run/attempt:1"), "task/with weird:chars");
+            assert_eq!(first, second);
+            assert!(first
+                .to_string_lossy()
+                .contains("agent-task/executor-evidence"));
+        });
     }
 
     #[test]
