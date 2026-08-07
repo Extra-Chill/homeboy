@@ -117,6 +117,12 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                 )
             }
         };
+        let workspace_root = request.request.workspace.root.clone();
+        bind_workspace_permission_root(
+            &mut request.request.executor,
+            workspace_root.as_deref(),
+            &provider,
+        );
 
         if let Err(error) = resolve_runtime_tools(&mut request, &provider) {
             return failure_outcome(
@@ -207,6 +213,37 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
 
         run_materialized_provider_command(&request, &provider, context.run_id.as_deref())
     }
+}
+
+/// Pass the scheduler-selected workspace without deriving a path from runtime
+/// identifiers. The explicit capability keeps this provider-owned config field
+/// out of executors that do not consume it.
+fn bind_workspace_permission_root(
+    executor: &mut crate::agent_task::AgentTaskExecutor,
+    workspace_root: Option<&str>,
+    provider: &AgentTaskExecutorProvider,
+) {
+    if !provider
+        .capabilities
+        .iter()
+        .any(|capability| capability == AGENT_TASK_PROVIDER_CAPABILITY_WORKSPACE_PERMISSION_ROOT_V1)
+    {
+        return;
+    }
+    let Some(root) = workspace_root else {
+        return;
+    };
+    if !executor.config.is_object() {
+        executor.config = Value::Object(Default::default());
+    }
+    executor
+        .config
+        .as_object_mut()
+        .expect("executor config object")
+        .insert(
+            "workspace_permission_root".to_string(),
+            Value::String(root.to_string()),
+        );
 }
 
 fn resolved_provider_from_request(
@@ -449,5 +486,50 @@ mod tests {
 
         assert!(path.starts_with(blocked_root.path()));
         assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn workspace_permission_root_is_emitted_only_for_the_versioned_capability() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "id": "permission-aware",
+            "backend": "fixture",
+            "capabilities": [AGENT_TASK_PROVIDER_CAPABILITY_WORKSPACE_PERMISSION_ROOT_V1]
+        }))
+        .expect("provider declaration");
+        let mut executor = AgentTaskExecutor {
+            backend: "fixture".to_string(),
+            selector: None,
+            runtime_selection: None,
+            required_capabilities: Vec::new(),
+            secret_env: Vec::new(),
+            model: None,
+            config: json!({ "preserve": true }),
+        };
+        let workspace = "/scratch/cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874/workspace";
+
+        bind_workspace_permission_root(&mut executor, Some(workspace), &provider);
+
+        assert_eq!(executor.config["workspace_permission_root"], workspace);
+        let provider_without_capability: AgentTaskExecutorProvider =
+            serde_json::from_value(json!({
+                "id": "unaware",
+                "backend": "fixture"
+            }))
+            .expect("provider declaration");
+        let mut unaffected = executor.clone();
+        unaffected
+            .config
+            .as_object_mut()
+            .expect("config object")
+            .remove("workspace_permission_root");
+
+        bind_workspace_permission_root(
+            &mut unaffected,
+            Some("/different-materialized-workspace"),
+            &provider_without_capability,
+        );
+
+        assert!(unaffected.config.get("workspace_permission_root").is_none());
+        assert_eq!(unaffected.config["preserve"], true);
     }
 }
