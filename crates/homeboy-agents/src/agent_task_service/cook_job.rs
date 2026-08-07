@@ -286,10 +286,17 @@ impl ControllerJobDriver for CookJobDriver {
     /// observes the durable outcome of one that is not.
     fn resume(&self, checkpoint: Value, handle: ControllerJobHandle) -> Result<Value> {
         let mut job = AgentTaskCookJob::parse(checkpoint)?;
-        if job.phase == AgentTaskCookJobPhase::Completed {
-            return job.completed_result();
+        match job.resume_disposition() {
+            // Replaying a finished job reports its durable result and touches
+            // nothing. This is what makes repeated recovery safe.
+            CookJobResumeDisposition::AlreadyComplete => job.completed_result(),
+            // Neither branch spawns anything: supervision either re-attaches to
+            // a child that is still provably ours, or observes on its first
+            // iteration that the child is gone and terminalizes from durable
+            // state.
+            CookJobResumeDisposition::ReadoptLiveChild
+            | CookJobResumeDisposition::ObserveTerminalOutcome => self.supervise(&mut job, handle),
         }
-        self.supervise(&mut job, handle)
     }
 
     /// Stop the cook through the one established cancellation path.
@@ -349,7 +356,32 @@ impl CookJobDriver {
     }
 }
 
+/// What a resumed cook job must do, decided before any job handle is needed.
+///
+/// Extracted so the idempotency property can be asserted directly: no variant
+/// here spawns provider work, and the enum is exhaustive over the states a
+/// recovered checkpoint can be in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CookJobResumeDisposition {
+    /// The job already reached a durable terminal state. Replay it.
+    AlreadyComplete,
+    /// The supervised child is still provably the process we were handed.
+    ReadoptLiveChild,
+    /// The child is gone. Read the cook's durable outcome; never re-run it.
+    ObserveTerminalOutcome,
+}
+
 impl AgentTaskCookJob {
+    pub fn resume_disposition(&self) -> CookJobResumeDisposition {
+        if self.phase == AgentTaskCookJobPhase::Completed {
+            return CookJobResumeDisposition::AlreadyComplete;
+        }
+        if child_is_live(&self.request) {
+            return CookJobResumeDisposition::ReadoptLiveChild;
+        }
+        CookJobResumeDisposition::ObserveTerminalOutcome
+    }
+
     fn progress_projection(&self) -> Value {
         json!({
             "phase": self.phase,
@@ -436,4 +468,258 @@ pub fn cook_job_submission(
         "idempotency_key": job.idempotency_key,
         "request": job.to_checkpoint()?,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use homeboy_core::test_support::with_isolated_home;
+
+    const IDENTITY: ProcessStartIdentity = ProcessStartIdentity::Linux {
+        starttime_ticks: 4242,
+    };
+
+    fn submission(cook_id: &str, pid: u32) -> Value {
+        cook_job_submission(cook_id, pid, &IDENTITY).expect("build cook job submission")
+    }
+
+    fn request_of(cook_id: &str, pid: u32) -> Value {
+        submission(cook_id, pid)
+            .get("request")
+            .cloned()
+            .expect("submission carries a request")
+    }
+
+    /// The wire payload the launcher sends must be exactly what the driver
+    /// admits, or detachment silently stops being daemon-owned.
+    #[test]
+    fn the_submission_round_trips_through_the_driver() {
+        let submission = submission("cook-round-trip", 4242);
+
+        assert_eq!(submission["type"], AGENT_TASK_COOK_JOB_TYPE);
+        assert_eq!(submission["version"], AGENT_TASK_COOK_JOB_VERSION);
+        assert_eq!(
+            submission["idempotency_key"],
+            "agent-task-cook:cook-round-trip"
+        );
+
+        let job = AgentTaskCookJob::parse(submission["request"].clone()).expect("parse request");
+        assert_eq!(job.request.cook_id, "cook-round-trip");
+        assert_eq!(job.request.child_pid, 4242);
+        assert_eq!(job.request.child_start_identity, IDENTITY);
+        assert_eq!(job.phase, AgentTaskCookJobPhase::Queued);
+        assert_eq!(job.run_id, None);
+        assert_eq!(job.terminal_state, None);
+
+        let driver = CookJobDriver;
+        driver
+            .validate_secret_references(&submission["request"])
+            .expect("a reference-only request validates");
+        driver
+            .public_request(&submission["request"])
+            .expect("public projection");
+    }
+
+    /// The cook id is the durable identity of this work, so a replayed submit
+    /// must converge on one supervisor rather than spawn a second.
+    #[test]
+    fn the_idempotency_key_is_the_cook_id() {
+        assert_eq!(
+            submission("cook-same", 1)["idempotency_key"],
+            submission("cook-same", 2)["idempotency_key"],
+        );
+        assert_ne!(
+            submission("cook-a", 1)["idempotency_key"],
+            submission("cook-b", 1)["idempotency_key"],
+        );
+    }
+
+    /// The prompt, provider invocation, notification route and worktree are all
+    /// sensitive and none of them belong in a job whose request is a reference.
+    /// `deny_unknown_fields` is what enforces that, so prove it rejects.
+    #[test]
+    fn inline_secrets_are_refused_rather_than_carried() {
+        let driver = CookJobDriver;
+        for smuggled in [
+            json!({ "prompt": "the private task text" }),
+            json!({ "env": { "ANTHROPIC_API_KEY": "sk-live-secret" } }),
+            json!({ "provider_invocation": { "command": "claude --token sk-live" } }),
+            json!({ "notification_route": "opaque-destination" }),
+            json!({ "launcher_log": "/home/operator/.homeboy/cook.log" }),
+        ] {
+            let mut request = request_of("cook-secrets", 4242);
+            let object = request.as_object_mut().expect("request is an object");
+            for (key, value) in smuggled.as_object().expect("smuggled object") {
+                object.insert(key.clone(), value.clone());
+            }
+
+            assert!(
+                driver.validate_secret_references(&request).is_err(),
+                "an inline secret must be refused: {smuggled}"
+            );
+        }
+    }
+
+    /// Even a well-formed job must not project anything a reader could use to
+    /// locate the operator's filesystem or the child's kernel identity.
+    #[test]
+    fn public_projections_withhold_paths_and_process_identity() {
+        let driver = CookJobDriver;
+        let mut job =
+            AgentTaskCookJob::parse(request_of("cook-public", 4242)).expect("parse request");
+        job.phase = AgentTaskCookJobPhase::Completed;
+        job.run_id = Some("cook-public-attempt-1".to_string());
+        job.terminal_state = Some(agent_task_lifecycle::AgentTaskRunState::Succeeded);
+        let value = job.to_checkpoint().expect("serialize job");
+
+        let public = driver.public_request(&value).expect("public request");
+        let public_text = public.to_string();
+        assert!(!public_text.contains("4242"), "{public_text}");
+        assert!(!public_text.contains("starttime_ticks"), "{public_text}");
+        assert!(!public_text.contains("child_pid"), "{public_text}");
+        assert_eq!(public["cook_id"], "cook-public");
+        assert_eq!(public["run_id"], "cook-public-attempt-1");
+        assert_eq!(public["terminal_state"], "succeeded");
+
+        // Progress and result are projected field by field, so a private field
+        // added to either payload later cannot escape by default.
+        let private = json!({
+            "phase": "supervising",
+            "cook_id": "cook-public",
+            "run_id": "cook-public-attempt-1",
+            "prompt": "the private task text",
+        });
+        let progress = driver.public_progress(&private).expect("public progress");
+        assert!(!progress.to_string().contains("private task text"));
+        let result = driver.public_result(&private).expect("public result");
+        assert!(!result.to_string().contains("private task text"));
+    }
+
+    /// A cook's error text can quote provider output, which can quote the
+    /// prompt. Only the typed code may cross into public job state.
+    #[test]
+    fn the_public_error_carries_only_a_code() {
+        let public = CookJobDriver.public_error(&invalid_cook_job("prompt: the private task text"));
+
+        assert_eq!(public.message, "controller-owned cook supervision failed");
+        assert!(!public.data.to_string().contains("private task text"));
+    }
+
+    /// The single most important correctness property: a daemon restart must
+    /// not be able to run an attempt twice. No disposition spawns work, and a
+    /// finished job replays rather than re-executes.
+    #[test]
+    fn resume_never_re_runs_a_completed_job() {
+        let mut job =
+            AgentTaskCookJob::parse(request_of("cook-complete", 4242)).expect("parse request");
+        job.phase = AgentTaskCookJobPhase::Completed;
+        job.run_id = Some("cook-complete-attempt-1".to_string());
+        job.terminal_state = Some(agent_task_lifecycle::AgentTaskRunState::Succeeded);
+
+        assert_eq!(
+            job.resume_disposition(),
+            CookJobResumeDisposition::AlreadyComplete
+        );
+        // Replay is byte-identical however many times recovery happens.
+        let first = job.completed_result().expect("first replay");
+        let second = job.completed_result().expect("second replay");
+        assert_eq!(first, second);
+        assert_eq!(first["terminal_state"], "succeeded");
+        assert_eq!(first["run_id"], "cook-complete-attempt-1");
+    }
+
+    /// A checkpoint whose child is gone resolves to observation, never to a
+    /// re-execution. PID 0 is never live, so this is deterministic.
+    #[test]
+    fn resume_observes_rather_than_restarts_a_dead_child() {
+        let mut job =
+            AgentTaskCookJob::parse(request_of("cook-dead-child", 4242)).expect("parse request");
+        job.phase = AgentTaskCookJobPhase::Supervising;
+        // u32::MAX is not a live pid, and the recorded start identity cannot
+        // match, so liveness is provably false.
+        job.request.child_pid = u32::MAX;
+
+        assert_eq!(
+            job.resume_disposition(),
+            CookJobResumeDisposition::ObserveTerminalOutcome
+        );
+    }
+
+    /// A child that ended without ever publishing durable identity is not a
+    /// success. Reporting it as one would reproduce the dishonesty detachment
+    /// exists to remove.
+    #[test]
+    fn an_unfinished_cook_terminalizes_as_failed() {
+        with_isolated_home(|_| {
+            let mut job = AgentTaskCookJob::parse(request_of("cook-never-submitted", 4242))
+                .expect("parse request");
+            job.phase = AgentTaskCookJobPhase::Supervising;
+
+            let result = job.observe_terminal(None).expect("observe terminal");
+
+            assert_eq!(job.phase, AgentTaskCookJobPhase::Completed);
+            assert_eq!(result["terminal_state"], "failed");
+        });
+    }
+
+    /// Cancelling a finished job is a no-op rather than an error, so a
+    /// cancellation racing completion cannot fail the durable job.
+    #[test]
+    fn cancelling_a_completed_job_is_a_no_op() {
+        let mut job =
+            AgentTaskCookJob::parse(request_of("cook-cancel-complete", 4242)).expect("parse");
+        job.phase = AgentTaskCookJobPhase::Completed;
+        job.terminal_state = Some(agent_task_lifecycle::AgentTaskRunState::Succeeded);
+
+        CookJobDriver
+            .cancel(&job.to_checkpoint().expect("serialize"))
+            .expect("cancelling a completed cook job is a no-op");
+    }
+
+    /// Cancellation must actually stop the provider. Before an attempt exists
+    /// the detached child is the containment owner, so terminating its tree is
+    /// the stop — and this proves the driver reaches that established path
+    /// rather than only marking durable state.
+    #[test]
+    fn cancelling_a_supervised_job_terminates_the_detached_child() {
+        with_isolated_home(|_| {
+            let cook_id = "cook-driver-cancel";
+            agent_task_lifecycle::record_detached_cook_handoff_parent(cook_id)
+                .expect("persist handoff parent");
+            let child = std::process::Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn detached cook fixture");
+            let start_identity = homeboy_core::process::process_start_identity(child.id())
+                .expect("inspect fixture")
+                .expect("fixture has a start identity");
+            agent_task_lifecycle::record_detached_cook_handoff_child(
+                cook_id,
+                child.id(),
+                start_identity.clone(),
+            )
+            .expect("persist detached child identity");
+
+            let submission = cook_job_submission(cook_id, child.id(), &start_identity)
+                .expect("build submission");
+
+            CookJobDriver
+                .cancel(&submission["request"])
+                .expect("driver cancellation reaches the lifecycle stop path");
+
+            assert!(
+                matches!(
+                    homeboy_core::process::process_identity_state(child.id(), None),
+                    homeboy_core::process::ProcessIdentityState::Dead
+                ),
+                "a cancelled cook job must leave no live child"
+            );
+        });
+    }
+
+    #[test]
+    fn driver_registration_is_idempotent() {
+        register_cook_job_driver();
+        register_cook_job_driver();
+    }
 }
