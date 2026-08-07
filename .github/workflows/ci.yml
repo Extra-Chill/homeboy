@@ -8,6 +8,10 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    # A closed PR starts one lightweight run in the existing concurrency group.
+    # That cancels an in-flight candidate DAG, while pr-state keeps this run from
+    # admitting the reusable workflow's binary, inventory, and shard jobs.
+    types: [opened, synchronize, reopened, closed]
   workflow_dispatch:
 
 concurrency:
@@ -21,6 +25,25 @@ permissions:
   issues: write
 
 jobs:
+  # The event payload is authoritative for a closure run. Non-PR invocations
+  # remain active so manual CI and future push CI behavior are unchanged. Check
+  # out the default branch: the closure decision must not come from PR code.
+  pr-state:
+    name: homeboy / PR State
+    runs-on: ubuntu-latest
+    outputs:
+      active: ${{ steps.state.outputs.active }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Determine whether candidate work may start
+        id: state
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_ACTION: ${{ github.event.action }}
+        run: bash .github/ci-pr-state.sh
+
   # Named for what a green tick here actually proves: the DECLARATION is intact.
   # It used to be called "Required Gates Policy" and run `--local`, which reads
   # as "GitHub requires these checks" while only proving "ci.yml emits these
@@ -32,6 +55,8 @@ jobs:
   # this stays reporting and no PR is newly blocked by it.
   required-gates-declaration:
     name: homeboy / Required Gates Declaration
+    needs: pr-state
+    if: ${{ needs.pr-state.outputs.active == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -50,6 +75,8 @@ jobs:
   # (codegen-free, so it's cheap) and fails closed if any of them break.
   workspace-tests-compile:
     name: homeboy / Workspace Tests Compile
+    needs: pr-state
+    if: ${{ needs.pr-state.outputs.active == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -61,6 +88,8 @@ jobs:
 
   warning-clean:
     name: homeboy / Warning Clean
+    needs: pr-state
+    if: ${{ needs.pr-state.outputs.active == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -79,6 +108,8 @@ jobs:
   # Unix-only test helpers rely on that boundary.
   windows-compile:
     name: homeboy / Windows Compile
+    needs: pr-state
+    if: ${{ needs.pr-state.outputs.active == 'true' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
@@ -96,6 +127,8 @@ jobs:
   # non-differential whole-workspace check, so it catches drift anywhere.
   rustfmt:
     name: homeboy / Rustfmt
+    needs: pr-state
+    if: ${{ needs.pr-state.outputs.active == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -109,6 +142,8 @@ jobs:
 
   homeboy-fast:
     name: homeboy / ${{ matrix.title }}
+    needs: pr-state
+    if: ${{ needs.pr-state.outputs.active == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -167,6 +202,8 @@ jobs:
   # ambiguous source changes fail closed or use Homeboy's full-scope fallback.
   homeboy:
     name: homeboy
+    needs: pr-state
+    if: ${{ needs.pr-state.outputs.active == 'true' }}
     uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2
     with:
       commands: review test
