@@ -62,7 +62,7 @@ pub fn route_after_parse_with_provenance(
     // runner-side bail-out because the request needs a verdict — detach here,
     // or an explicit rejection there — in both contexts.
     if let Some(exit_code) =
-        local_detach::intercept_local_detached_cook(cli, normalized_args, runner_side)?
+        local_detach::intercept_local_detached_cook(cli, normalized_args, output_file, runner_side)?
     {
         return Ok(Some(exit_code));
     }

@@ -47,6 +47,8 @@ use homeboy::cli_surface::{Cli, Commands};
 use homeboy::core::Error;
 use serde_json::{json, Value};
 
+use crate::core::io::output_file::write_output_file;
+
 const HANDOFF_SCHEMA: &str = "homeboy/agent-task-cook-local-detach-handoff/v1";
 
 /// Bound on how long the launcher waits for the detached cook to publish its
@@ -69,10 +71,9 @@ const HANDOFF_POLL: Duration = Duration::from_millis(100);
 /// Test and operator override for the bounded handoff wait.
 const HANDOFF_TIMEOUT_ENV: &str = "HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS";
 
-/// Whether this invocation is a locally-placed Cook asking to be detached.
-fn is_local_detached_cook(cli: &Cli) -> bool {
+/// Whether this invocation is a Cook asking its controller to detach.
+fn is_detached_cook(cli: &Cli) -> bool {
     cli.detach_after_handoff
-        && cli.placement == homeboy::cli_surface::Placement::Local
         && matches!(
             cli.command,
             Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
@@ -81,8 +82,8 @@ fn is_local_detached_cook(cli: &Cli) -> bool {
         )
 }
 
-/// Serve `--placement local --detach-after-handoff` by re-executing this exact
-/// Cook in its own session and returning a bounded handoff.
+/// Serve `--detach-after-handoff` by re-executing this exact controller-owned
+/// Cook in its own session and returning after durable daemon ownership exists.
 ///
 /// `runner_side` is true when this process is a Lab offload subprocess, a
 /// managed-runner placement, or a runner-resident execution. There the request
@@ -92,9 +93,10 @@ fn is_local_detached_cook(cli: &Cli) -> bool {
 pub(super) fn intercept_local_detached_cook(
     cli: &Cli,
     normalized_args: &[String],
+    output_file: Option<&str>,
     runner_side: bool,
 ) -> homeboy::core::Result<Option<i32>> {
-    if !is_local_detached_cook(cli) {
+    if !is_detached_cook(cli) {
         return Ok(None);
     }
     if runner_side {
@@ -120,6 +122,11 @@ pub(super) fn intercept_local_detached_cook(
     // prompt survives the handoff instead of the cook stalling on an empty read.
     materialize_stdin_prompt(&mut child_args, &session_root)?;
     let log_path = session_root.join("cook.log");
+
+    // A daemon-owned job is the authority that outlives this launcher. Prove it
+    // is reachable before a provider-capable child exists, so unsupported
+    // detachment is rejected before dispatch.
+    let controller_client = homeboy::core::daemon::LocalControllerJobClient::connect()?;
 
     // Make the returned Cook ID resolvable before a child exists. If this fails,
     // nothing has been spawned and no detached work can leak.
@@ -169,65 +176,76 @@ pub(super) fn intercept_local_detached_cook(
     if handoff_parent.state.is_terminal() {
         terminate_and_reap_detached_child(&mut child);
     }
-    // Hand durable ownership of the cook's lifecycle to the daemon. This is
-    // additive to the handoff record above, never a precondition for it: the
-    // child is already running, so a daemon that cannot be reached must not
-    // fail the cook. The outcome is reported in the envelope either way.
-    //
-    // A parent that is already terminal has no lifecycle left to own, and
-    // submitting would start a daemon only to supervise a child this launcher
-    // just killed.
-    let controller_job = if handoff_parent.state.is_terminal() {
-        ControllerJobHandoff::Unavailable {
-            reason: "cook was terminal before controller submission".to_string(),
-        }
-    } else {
-        submit_cook_controller_job(&cook_id, pid, &start_identity)
+    if handoff_parent.state.is_terminal() {
+        terminate_and_reap_detached_child(&mut child);
+        return Err(Error::validation_invalid_argument(
+            "detach-after-handoff",
+            "detached Cook became terminal before durable controller ownership could be established",
+            Some(cook_id),
+            None,
+        ));
+    }
+    let controller_job =
+        match submit_cook_controller_job(&controller_client, &cook_id, pid, &start_identity) {
+            Ok(job) => job,
+            Err(error) => {
+                terminate_and_reap_detached_child(&mut child);
+                let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent(
+                    &cook_id,
+                    "durable controller ownership could not be established",
+                );
+                return Err(error);
+            }
+        };
+    // The parent record and admitted controller job are the authoritative durable
+    // transition. Do not wait for a slow provider to materialize its first attempt.
+    let handoff = DetachedCookHandoff {
+        state: DetachedHandoffState::Accepted,
+        run_id: Some(cook_id.clone()),
+        waited_ms: 0,
     };
-    let handoff = await_durable_handoff(&cook_id, &mut child, handoff_timeout());
-    if handoff.state == DetachedHandoffState::ExitedBeforeHandoff {
-        let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent(
-            &cook_id,
-            "detached Cook exited before materializing its first attempt",
-        );
-    }
+    crate::commands::agent_task::run::announce_durable_cook_identity(Some(&cook_id), &cook_id);
+    let envelope = handoff_envelope(
+        &cook_id,
+        pid,
+        &log_path,
+        &handoff,
+        &controller_job,
+        cli.placement,
+    );
+    let stdout = finalize_handoff_envelope(&envelope, output_file)?;
+    println!("{stdout}");
+    Ok(Some(0))
+}
 
-    if let Some(run_id) = handoff.run_id.as_deref() {
-        crate::commands::agent_task::run::announce_durable_cook_identity(Some(&cook_id), run_id);
-    }
-    let envelope = handoff_envelope(&cook_id, pid, &log_path, &handoff, &controller_job);
-    let stdout = serde_json::to_string_pretty(&envelope).map_err(|error| {
+/// Serialize once, then write that exact acknowledgement wherever the caller
+/// requested it. This keeps stdout and `--output` from becoming competing
+/// handoff contracts.
+fn finalize_handoff_envelope(
+    envelope: &Value,
+    output_file: Option<&str>,
+) -> homeboy::core::Result<String> {
+    let stdout = serde_json::to_string_pretty(envelope).map_err(|error| {
         Error::internal_json(
             error.to_string(),
             Some("serialize detached local cook handoff".to_string()),
         )
     })?;
-    println!("{stdout}");
-    Ok(Some(0))
+    if let Some(path) = output_file {
+        write_output_file(path, &stdout)?;
+    }
+    Ok(stdout)
 }
 
-/// What the daemon returned when offered ownership of this cook.
-///
-/// Submission is best-effort by design. By the time it runs, the child is
-/// already spawned and the handoff parent is already durable, so a daemon that
-/// is unreachable or refuses admission must degrade to exactly the previous
-/// behavior — a PID-owned detached cook — rather than fail an operator's run.
-/// The failure is reported rather than swallowed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ControllerJobHandoff {
     Owned { job_id: String },
-    Unavailable { reason: String },
 }
 
 impl ControllerJobHandoff {
     fn projection(&self) -> Value {
         match self {
             Self::Owned { job_id } => json!({ "state": "owned", "job_id": job_id }),
-            Self::Unavailable { reason } => json!({
-                "state": "unavailable",
-                "job_id": Value::Null,
-                "reason": reason,
-            }),
         }
     }
 }
@@ -239,26 +257,23 @@ impl ControllerJobHandoff {
 /// idempotency key, so a replayed submit converges on one supervisor rather
 /// than creating a second one for the same child.
 fn submit_cook_controller_job(
+    client: &homeboy::core::daemon::LocalControllerJobClient,
     cook_id: &str,
     pid: u32,
     start_identity: &homeboy::core::process::ProcessStartIdentity,
-) -> ControllerJobHandoff {
-    match submit_cook_controller_job_inner(cook_id, pid, start_identity) {
-        Ok(job_id) => ControllerJobHandoff::Owned { job_id },
-        Err(error) => ControllerJobHandoff::Unavailable {
-            reason: error.message,
-        },
-    }
+) -> homeboy::core::Result<ControllerJobHandoff> {
+    submit_cook_controller_job_inner(client, cook_id, pid, start_identity)
+        .map(|job_id| ControllerJobHandoff::Owned { job_id })
 }
 
 fn submit_cook_controller_job_inner(
+    client: &homeboy::core::daemon::LocalControllerJobClient,
     cook_id: &str,
     pid: u32,
     start_identity: &homeboy::core::process::ProcessStartIdentity,
 ) -> homeboy::core::Result<String> {
     let submission =
         homeboy::agents::agent_task_service::cook_job_submission(cook_id, pid, start_identity)?;
-    let client = homeboy::core::daemon::LocalControllerJobClient::connect()?;
     let job = client.submit(submission)?;
     let job_id = job.id.to_string();
     client.start(&job_id)?;
@@ -291,14 +306,23 @@ fn detached_cook_child_args(
     cook_id: &str,
     has_explicit_cook_id: bool,
 ) -> Vec<String> {
-    let mut args: Vec<String> = normalized_args
-        .iter()
-        .skip(1)
-        .filter(|arg| {
-            arg.as_str() != "--detach-after-handoff" && !arg.starts_with("--detach-after-handoff=")
-        })
-        .cloned()
-        .collect();
+    let mut args = Vec::new();
+    let mut values = normalized_args.iter().skip(1);
+    while let Some(arg) = values.next() {
+        if arg == "--detach-after-handoff" || arg.starts_with("--detach-after-handoff=") {
+            continue;
+        }
+        // The launcher writes the handoff envelope to both destinations. The
+        // child must not overwrite that durable acknowledgement at completion.
+        if arg == "--output" || arg == "-o" {
+            let _ = values.next();
+            continue;
+        }
+        if arg.starts_with("--output=") {
+            continue;
+        }
+        args.push(arg.clone());
+    }
     if !has_explicit_cook_id {
         args.push("--run-id".to_string());
         args.push(cook_id.to_string());
@@ -545,10 +569,13 @@ fn handoff_envelope(
     log_path: &Path,
     handoff: &DetachedCookHandoff,
     controller_job: &ControllerJobHandoff,
+    requested_placement: homeboy::cli_surface::Placement,
 ) -> Value {
     json!({
         "schema": HANDOFF_SCHEMA,
-        "placement": "local",
+        "placement": "controller_local",
+        "effective_placement": "controller_local",
+        "provider_placement": placement_name(requested_placement),
         "detached": true,
         "cook_id": cook_id,
         "run_id": handoff.run_id,
@@ -565,10 +592,17 @@ fn handoff_envelope(
         "status_command": format!("homeboy agent-task status {cook_id}"),
         "logs_command": format!("homeboy agent-task logs {cook_id}"),
         "cancel_command": format!("homeboy agent-task cancel {cook_id}"),
-        // The detached cook, not this launcher, owns any `--output-file`: it
-        // writes the final Cook report there when the run completes.
-        "output_file_owner": "detached_cook",
+        "output_file_owner": "handoff_launcher",
     })
+}
+
+fn placement_name(placement: homeboy::cli_surface::Placement) -> &'static str {
+    match placement {
+        homeboy::cli_surface::Placement::Auto => "auto",
+        homeboy::cli_surface::Placement::Local => "local",
+        homeboy::cli_surface::Placement::Lab => "lab",
+        homeboy::cli_surface::Placement::LabOrLocal => "lab-or-local",
+    }
 }
 
 #[cfg(test)]
@@ -654,7 +688,7 @@ mod tests {
     fn a_runner_owned_execution_still_refuses_to_detach() {
         let (cli, normalized) = cook_cli(&["--placement", "local", "--detach-after-handoff"]);
 
-        let error = intercept_local_detached_cook(&cli, &normalized, true)
+        let error = intercept_local_detached_cook(&cli, &normalized, None, true)
             .expect_err("a runner-owned execution cannot detach");
 
         assert!(
@@ -671,25 +705,29 @@ mod tests {
         );
     }
 
-    /// Nothing but a locally-placed, detach-requesting Cook may be intercepted:
+    /// Nothing but a detach-requesting Cook may be intercepted:
     /// every other invocation has to fall through to normal routing untouched.
     /// These cases must not spawn anything.
     #[test]
-    fn only_a_locally_placed_detaching_cook_is_intercepted() {
-        for extra in [
-            vec!["--placement", "local"],
-            vec!["--detach-after-handoff"],
-            vec!["--placement", "lab-or-local", "--detach-after-handoff"],
-            vec![],
-        ] {
+    fn only_a_detaching_cook_is_intercepted() {
+        for extra in [vec!["--placement", "local"], vec![]] {
             let (cli, normalized) = cook_cli(&extra);
 
-            assert!(!is_local_detached_cook(&cli), "{extra:?}");
+            assert!(!is_detached_cook(&cli), "{extra:?}");
             assert_eq!(
-                intercept_local_detached_cook(&cli, &normalized, false).expect("no interception"),
+                intercept_local_detached_cook(&cli, &normalized, None, false)
+                    .expect("no interception"),
                 None,
                 "{extra:?}"
             );
+        }
+    }
+
+    #[test]
+    fn detachment_owns_the_controller_for_auto_lab_and_local_placement() {
+        for placement in ["auto", "lab", "local", "lab-or-local"] {
+            let (cli, _) = cook_cli(&["--placement", placement, "--detach-after-handoff"]);
+            assert!(is_detached_cook(&cli), "{placement}");
         }
     }
 
@@ -698,7 +736,7 @@ mod tests {
         let cli = Cli::try_parse_from(["homeboy", "--placement", "local", "status"])
             .expect("parse status invocation");
 
-        assert!(!is_local_detached_cook(&cli));
+        assert!(!is_detached_cook(&cli));
     }
 
     #[test]
@@ -770,6 +808,28 @@ mod tests {
                 "fix it",
             ])
         );
+    }
+
+    #[test]
+    fn child_args_leave_the_handoff_output_owned_by_the_launcher() {
+        let child = detached_cook_child_args(
+            &args(&[
+                "homeboy",
+                "--detach-after-handoff",
+                "--output",
+                "/tmp/handoff.json",
+                "agent-task",
+                "cook",
+                "--prompt",
+                "fix it",
+            ]),
+            "cook-output",
+            false,
+        );
+
+        assert!(!child
+            .iter()
+            .any(|arg| arg == "--output" || arg == "/tmp/handoff.json"));
     }
 
     /// The re-executed cook must be the requested cook. Anything the launcher
@@ -893,10 +953,13 @@ mod tests {
             &ControllerJobHandoff::Owned {
                 job_id: "3f2b1c00-0000-4000-8000-000000000001".to_string(),
             },
+            homeboy::cli_surface::Placement::Local,
         );
 
         assert_eq!(envelope["schema"], HANDOFF_SCHEMA);
-        assert_eq!(envelope["placement"], "local");
+        assert_eq!(envelope["placement"], "controller_local");
+        assert_eq!(envelope["effective_placement"], "controller_local");
+        assert_eq!(envelope["provider_placement"], "local");
         assert_eq!(envelope["detached"], true);
         assert_eq!(envelope["cook_id"], "cook-11476");
         assert_eq!(envelope["run_id"], "cook-11476-attempt-1-ab12cd34");
@@ -939,9 +1002,10 @@ mod tests {
                 4242,
                 Path::new("/tmp/cook.log"),
                 &handoff,
-                &ControllerJobHandoff::Unavailable {
-                    reason: "daemon unreachable".to_string(),
+                &ControllerJobHandoff::Owned {
+                    job_id: "job-unproven".to_string(),
                 },
+                homeboy::cli_surface::Placement::Auto,
             );
 
             assert_eq!(envelope["handoff"]["state"], expected);
@@ -950,11 +1014,9 @@ mod tests {
         }
     }
 
-    /// The daemon is an ownership upgrade, never a dependency. A launcher that
-    /// could not reach it must still return the same actionable envelope it
-    /// always did, because the cook is already running by then.
+    /// The admitted controller job is included in every successful handoff.
     #[test]
-    fn an_unreachable_daemon_still_returns_the_full_handoff_contract() {
+    fn an_owned_daemon_returns_the_full_handoff_contract() {
         let handoff = DetachedCookHandoff {
             state: DetachedHandoffState::Accepted,
             run_id: Some("cook-degraded-attempt-1".to_string()),
@@ -966,9 +1028,10 @@ mod tests {
             4242,
             Path::new("/tmp/cook.log"),
             &handoff,
-            &ControllerJobHandoff::Unavailable {
-                reason: "daemon unreachable".to_string(),
+            &ControllerJobHandoff::Owned {
+                job_id: "job-owned".to_string(),
             },
+            homeboy::cli_surface::Placement::Lab,
         );
 
         // Every pre-existing field survives unchanged.
@@ -985,11 +1048,21 @@ mod tests {
             envelope["cancel_command"],
             "homeboy agent-task cancel cook-degraded"
         );
-        assert_eq!(envelope["output_file_owner"], "detached_cook");
-        // The degradation is reported rather than hidden.
-        assert_eq!(envelope["controller_job"]["state"], "unavailable");
-        assert_eq!(envelope["controller_job"]["job_id"], Value::Null);
-        assert_eq!(envelope["controller_job"]["reason"], "daemon unreachable");
+        assert_eq!(envelope["output_file_owner"], "handoff_launcher");
+        assert_eq!(envelope["controller_job"]["state"], "owned");
+        assert_eq!(envelope["controller_job"]["job_id"], "job-owned");
+    }
+
+    #[test]
+    fn output_file_receives_the_exact_stdout_handoff_envelope() {
+        let directory = tempfile::tempdir().expect("output directory");
+        let path = directory.path().join("handoff.json");
+        let envelope = serde_json::json!({ "schema": HANDOFF_SCHEMA, "cook_id": "cook-output" });
+
+        let stdout = finalize_handoff_envelope(&envelope, Some(path.to_str().expect("utf-8 path")))
+            .expect("finalize handoff");
+
+        assert_eq!(std::fs::read_to_string(path).expect("read output"), stdout);
     }
 
     #[test]
