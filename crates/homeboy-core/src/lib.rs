@@ -141,6 +141,7 @@ pub mod matrix_artifact_summary;
 pub use homeboy_lab_contract::notification_payload;
 pub use homeboy_lab_contract::notification_route;
 pub mod notify;
+pub mod notify_outbox;
 pub mod observation;
 pub mod output;
 pub(crate) mod ownership;

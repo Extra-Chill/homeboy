@@ -9,7 +9,7 @@
 
 use std::process::Command;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::notification_payload::{
     NotifyEventKind, NotifyPayload, NOTIFICATION_PAYLOAD_SCHEMA, NOTIFY_KIND_ENV,
@@ -23,7 +23,12 @@ const TRANSPORT_OUTPUT_INSPECTION_LIMIT: usize = 256 * 1024;
 const TRANSPORT_ERROR_TAIL_CHARS: usize = 800;
 
 /// A lifecycle event passed to extension transports as typed argv values.
-#[derive(Debug, Clone, Serialize)]
+///
+/// Deserializable so [`crate::notify_outbox`] can persist an undelivered event
+/// and rehydrate it in a later process. Deliberately not `deny_unknown_fields`:
+/// an outbox entry written by a newer homeboy must still parse after a
+/// downgrade rather than becoming an unreadable, undeliverable file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotifyEvent {
     pub run_id: String,
     pub status: String,
@@ -31,13 +36,14 @@ pub struct NotifyEvent {
     pub body: String,
     /// Where this event sits in its subject's lifecycle. Terminal by default so
     /// producers written before lifecycle events existed keep their meaning.
+    #[serde(default)]
     pub kind: NotifyEventKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<String>,
     /// The machine-readable half. Absent for producers that only have prose.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<NotifyPayload>,
 }
 

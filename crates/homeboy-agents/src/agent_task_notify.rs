@@ -25,7 +25,8 @@ use homeboy_core::notification_payload::{
     NotifyAction, NotifyEventKind, NotifyLink, NotifyPayload, NotifySubject,
 };
 use homeboy_core::notification_route::{self, NotificationRoute};
-use homeboy_core::notify::{self, NotifyDelivery, NotifyEvent, NotifyOutcome};
+use homeboy_core::notify::{NotifyDelivery, NotifyEvent, NotifyOutcome};
+use homeboy_core::notify_outbox::{self, NotifyOnceMarker, NotifyOutboxDisposition};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 
@@ -94,11 +95,18 @@ fn deliver(event: NotifyEvent, run_id: &str) {
     if !should_deliver(event.kind, route.is_some()) {
         return;
     }
-    // A notification is observability, never a cook failure mode.
-    let _ = notify::dispatch(&event.with_route(route.as_ref()));
+    // A notification is observability, never a cook failure mode. The outbox
+    // preserves that exactly: enqueue is infallible from here, every storage
+    // error degrades to "not queued", and nothing propagates to the cook.
+    let _ = notify_outbox::dispatch_with_outbox(&event.with_route(route.as_ref()), None);
 }
 
-fn terminal_outcome(cook_id: &str, explicit_route: bool, outcome: &NotifyOutcome) -> Value {
+fn terminal_outcome(
+    cook_id: &str,
+    explicit_route: bool,
+    outcome: &NotifyOutcome,
+    disposition: &NotifyOutboxDisposition,
+) -> Value {
     let (transport, error_class) = match &outcome.delivery {
         NotifyDelivery::NotConfigured => (None, Some("not_configured")),
         NotifyDelivery::Transport {
@@ -114,6 +122,22 @@ fn terminal_outcome(cook_id: &str, explicit_route: bool, outcome: &NotifyOutcome
             }),
         ),
     };
+    // `status` keeps its historical vocabulary. A failed attempt that the
+    // outbox durably queued is still `queued` rather than `failed`: the
+    // operator's question is "will this arrive?", and the answer changed.
+    let status = if outcome.delivered {
+        "delivered"
+    } else if matches!(disposition, NotifyOutboxDisposition::Queued { .. }) {
+        "queued"
+    } else if matches!(outcome.delivery, NotifyDelivery::NotConfigured) {
+        "not_configured"
+    } else {
+        "failed"
+    };
+    let outbox_entry_id = match disposition {
+        NotifyOutboxDisposition::Queued { entry_id } => Some(entry_id.clone()),
+        _ => None,
+    };
     json!({
         "schema": "homeboy/cook-notification-delivery/v1",
         "cook_id": cook_id,
@@ -121,8 +145,9 @@ fn terminal_outcome(cook_id: &str, explicit_route: bool, outcome: &NotifyOutcome
         "event_kind": outcome.event_kind,
         "transport": transport,
         "route_classification": if explicit_route { "explicit" } else { "default" },
-        "status": if outcome.delivered { "delivered" } else if matches!(outcome.delivery, NotifyDelivery::NotConfigured) { "not_configured" } else { "failed" },
+        "status": status,
         "error_class": error_class,
+        "outbox_entry_id": outbox_entry_id,
         "transport_result": safe_transport_result(outcome.result.as_ref()),
     })
 }
@@ -385,20 +410,47 @@ pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str
         ))
         .with_payload(payload);
     let route = effective_route(&route_run_id);
-    let outcome = notify::dispatch(&event.clone().with_route(route.as_ref()));
-    let persisted = terminal_outcome(&report.cook_id, route.is_some(), &outcome);
+    let dispatch = notify_outbox::dispatch_with_outbox(
+        &event.with_route(route.as_ref()),
+        Some(NotifyOnceMarker::new(
+            COOK_SUBJECT_KIND,
+            &report.cook_id,
+            COOK_TERMINAL_DELIVERED_BY,
+        )),
+    );
+    let persisted = terminal_outcome(
+        &report.cook_id,
+        route.is_some(),
+        &dispatch.outcome,
+        &dispatch.disposition,
+    );
     let _ = crate::agent_task_lifecycle::record_cook_terminal_notification_outcome(
         &report.cook_id,
         persisted,
     );
-    if outcome.delivered {
-        let _ = crate::agent_task_lifecycle::confirm_cook_terminal_notification(
-            &report.cook_id,
-            COOK_TERMINAL_DELIVERED_BY,
-        );
-    } else {
-        let _ =
-            crate::agent_task_lifecycle::release_cook_terminal_notification_claim(&report.cook_id);
+    match dispatch.disposition {
+        // Delivered, or durably queued: either way this cook's outcome will
+        // reach its destination without another observer producing it. The
+        // claim's exactly-once eligibility is consumed, which is precisely
+        // what `confirm` records. Confirming on `Queued` is the fix for the
+        // three-hour cook whose terminal event used to die with a sixty-second
+        // transport outage: the claim lease is five minutes and the retry
+        // budget is twenty, so leaving the claim merely *held* would let it
+        // expire mid-retry and produce a duplicate.
+        NotifyOutboxDisposition::Delivered | NotifyOutboxDisposition::Queued { .. } => {
+            let _ = crate::agent_task_lifecycle::confirm_cook_terminal_notification(
+                &report.cook_id,
+                COOK_TERMINAL_DELIVERED_BY,
+            );
+        }
+        // Nothing durable exists — no transport is configured, or the queue
+        // could not be written. Release, exactly as before, so a later
+        // terminal observer is eligible to try again.
+        NotifyOutboxDisposition::Dropped => {
+            let _ = crate::agent_task_lifecycle::release_cook_terminal_notification_claim(
+                &report.cook_id,
+            );
+        }
     }
 }
 
@@ -688,14 +740,12 @@ mod tests {
             set_default_transport("test.reject");
             cook_terminal(&report("durable_failure", None), None, 1);
             let rejected = latest_delivery("cook-abc");
-            assert_eq!(rejected["status"], "failed");
+            // A rejected transport is an outage, so the event is now durably
+            // queued rather than lost. The classification of *why* the attempt
+            // failed is unchanged.
+            assert_eq!(rejected["status"], "queued");
             assert_eq!(rejected["error_class"], "transport_rejected");
-            assert!(
-                crate::agent_task_lifecycle::claim_cook_terminal_notification("cook-abc", "test")
-                    .unwrap()
-            );
-            crate::agent_task_lifecycle::release_cook_terminal_notification_claim("cook-abc")
-                .unwrap();
+            assert!(rejected["outbox_entry_id"].is_string());
 
             install_transport(
                 "test.spawn",
@@ -707,6 +757,56 @@ mod tests {
             cook_terminal(&spawn, None, 1);
             let spawned = latest_delivery("cook-spawn");
             assert_eq!(spawned["error_class"], "transport_spawn_failed");
+            assert_eq!(spawned["status"], "queued");
+        });
+    }
+
+    #[test]
+    fn a_terminal_outcome_survives_a_transport_outage() {
+        // The whole point of W3-6. A cook that ran for hours must not lose its
+        // outcome because the chat transport was down for a minute.
+        homeboy_core::test_support::with_isolated_home(|_| {
+            install_transport("test.outage", vec!["false"]);
+            set_default_transport("test.outage");
+            cook_terminal(&report("succeeded", None), None, 0);
+
+            let queued = homeboy_core::notify_outbox::pending_entries();
+            assert_eq!(queued.len(), 1, "{queued:?}");
+            assert_eq!(queued[0].event.run_id, "cook-abc");
+            assert_eq!(
+                queued[0]
+                    .once_marker
+                    .as_ref()
+                    .map(|marker| marker.subject_id.as_str()),
+                Some("cook-abc"),
+            );
+
+            // The transport comes back. The daemon tick's drain delivers it,
+            // and no producer had to be alive for that to happen.
+            install_transport("test.outage", vec!["true"]);
+            let drained = homeboy_core::notify_outbox::drain(
+                chrono::Utc::now() + chrono::Duration::seconds(60),
+            );
+            assert_eq!(drained.delivered, 1, "{drained:?}");
+            assert!(homeboy_core::notify_outbox::pending_entries().is_empty());
+        });
+    }
+
+    #[test]
+    fn a_queued_terminal_event_consumes_its_once_claim() {
+        // Once the event is durable the outbox owns delivery. Leaving the claim
+        // merely *held* would let its five-minute lease expire inside the
+        // twenty-minute retry budget, and a second observer would announce the
+        // same outcome a second time.
+        homeboy_core::test_support::with_isolated_home(|_| {
+            install_transport("test.hold", vec!["false"]);
+            set_default_transport("test.hold");
+            cook_terminal(&report("succeeded", None), None, 0);
+            assert!(
+                !crate::agent_task_lifecycle::claim_cook_terminal_notification("cook-abc", "test")
+                    .unwrap(),
+                "a queued terminal event must not stay re-claimable",
+            );
         });
     }
 

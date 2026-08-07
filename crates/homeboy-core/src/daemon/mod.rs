@@ -1285,85 +1285,127 @@ fn spawn_completion_notifier(shutdown: mpsc::Receiver<()>) -> std::thread::JoinH
     })
 }
 
-/// Poll the observation store for in-flight runs and notify on completion.
+/// Run one tick body with every failure contained, including a panic.
+///
+/// The daemon is long-lived and shared: a panic inside one mechanism's pass
+/// must not end that mechanism's loop, and must not stop the other mechanisms
+/// that share the thread. Catching here — rather than letting the panic unwind
+/// out of the thread closure — is the difference between "one pass was lost"
+/// and "this tick is silently dead until the daemon restarts".
+///
+/// `AssertUnwindSafe` is deliberate. Every tick body's state is either
+/// re-derived from durable storage on the next pass or is a completion tracker
+/// whose worst case after a panic is re-observing a run that the exactly-once
+/// marker then dedupes. There is no invariant here that a partially-executed
+/// pass can corrupt.
+fn isolated_tick(body: impl FnOnce()) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+}
+
+/// Poll the observation store for in-flight runs and notify on completion, and
+/// drain the durable notification outbox.
 ///
 /// Each pass refreshes mirrored runner evidence for currently-running records
 /// (so offloaded runs advance to their terminal state locally), re-reads the
 /// running set, and pings for any run that left it since the previous pass.
+///
+/// The outbox drain shares this loop because it shares its cadence: the first
+/// backoff step is exactly this interval, so a notification whose inline
+/// attempt failed is retried on the very next tick. The two mechanisms are
+/// individually isolated — an outbox drain that panics does not stop
+/// completion notification, and vice versa.
 fn completion_notify_loop(interval: std::time::Duration, shutdown: mpsc::Receiver<()>) {
-    use crate::observation::ObservationStore;
-
     let mut tracker = completion_tracker::CompletionTracker::default();
     loop {
-        if let Ok(store) = ObservationStore::open_initialized() {
-            let running = list_running_run_ids(&store);
-            for run_id in &running {
-                crate::observation::runs_service::refresh_mirrored_daemon_evidence_best_effort(
-                    run_id,
-                );
-            }
-            let running_after = list_running_run_ids(&store);
-            // Departure from the running set is only a *candidate* completion.
-            // Confirm terminality against the record itself before reporting:
-            // marking delivery is irreversible, so a run wrongly reported here
-            // would consume its exactly-once marker while still in flight and
-            // silence its real completion on every path.
-            let mut terminal_runs: HashMap<String, crate::observation::RunRecord> = HashMap::new();
-            let completed = tracker.observe(running_after, |run_id| match store.get_run(run_id) {
-                Ok(Some(run)) => {
-                    match crate::observation::RunStatus::from_label(&run.status) {
-                        Some(status) if status.is_terminal() => {
-                            terminal_runs.insert(run_id.to_string(), run);
-                            completion_tracker::RunTerminality::Terminal
-                        }
-                        // Still running, or a status label Homeboy does not
-                        // own: keep watching rather than guessing terminality.
-                        _ => completion_tracker::RunTerminality::Unresolved,
-                    }
-                }
-                Ok(None) => completion_tracker::RunTerminality::Vanished,
-                // A transient store error is not evidence of completion.
-                Err(_) => completion_tracker::RunTerminality::Unresolved,
-            });
-            for completed_id in completed {
-                let already_delivered = store
-                    .is_notification_delivered(&completed_id)
-                    .unwrap_or(false);
-                if already_delivered {
-                    continue;
-                }
-                // Loaded by the terminality resolver above; no second read.
-                let run = terminal_runs.remove(&completed_id);
-                let status = run
-                    .as_ref()
-                    .map(|run| run.status.as_str())
-                    .unwrap_or("unknown");
-                let route = run.as_ref().and_then(|run| {
-                    crate::notification_route::NotificationRoute::from_metadata(&run.metadata_json)
-                });
-                let won_race = store
-                    .mark_notification_delivered(&completed_id, "controller")
-                    .unwrap_or(false);
-                if !won_race {
-                    continue;
-                }
-                let mut event = crate::notify::NotifyEvent::run_completed_with_route(
-                    &completed_id,
-                    status,
-                    route.as_ref(),
-                );
-                // The completed record is already loaded above; carry its
-                // component, command, and evidence handles instead of
-                // re-deriving prose from the id and status alone.
-                if let Some(run) = run.as_ref() {
-                    event = event.with_payload(crate::notify::run_completed_payload(run));
-                }
-                let _ = crate::notify::dispatch(&event);
-            }
-        }
+        isolated_tick(|| completion_notify_pass(&mut tracker));
+        isolated_tick(|| {
+            let _ = crate::notify_outbox::drain(chrono::Utc::now());
+        });
         if shutdown.recv_timeout(interval).is_ok() {
             return;
         }
+    }
+}
+
+/// One completion-notification pass.
+fn completion_notify_pass(tracker: &mut completion_tracker::CompletionTracker) {
+    use crate::observation::ObservationStore;
+
+    let Ok(store) = ObservationStore::open_initialized() else {
+        return;
+    };
+    let running = list_running_run_ids(&store);
+    for run_id in &running {
+        crate::observation::runs_service::refresh_mirrored_daemon_evidence_best_effort(run_id);
+    }
+    let running_after = list_running_run_ids(&store);
+    // Departure from the running set is only a *candidate* completion.
+    // Confirm terminality against the record itself before reporting:
+    // marking delivery is irreversible, so a run wrongly reported here
+    // would consume its exactly-once marker while still in flight and
+    // silence its real completion on every path.
+    let mut terminal_runs: HashMap<String, crate::observation::RunRecord> = HashMap::new();
+    let completed = tracker.observe(running_after, |run_id| match store.get_run(run_id) {
+        Ok(Some(run)) => {
+            match crate::observation::RunStatus::from_label(&run.status) {
+                Some(status) if status.is_terminal() => {
+                    terminal_runs.insert(run_id.to_string(), run);
+                    completion_tracker::RunTerminality::Terminal
+                }
+                // Still running, or a status label Homeboy does not
+                // own: keep watching rather than guessing terminality.
+                _ => completion_tracker::RunTerminality::Unresolved,
+            }
+        }
+        Ok(None) => completion_tracker::RunTerminality::Vanished,
+        // A transient store error is not evidence of completion.
+        Err(_) => completion_tracker::RunTerminality::Unresolved,
+    });
+    for completed_id in completed {
+        let already_delivered = store
+            .is_notification_delivered(&completed_id)
+            .unwrap_or(false);
+        if already_delivered {
+            continue;
+        }
+        // Loaded by the terminality resolver above; no second read.
+        let run = terminal_runs.remove(&completed_id);
+        let status = run
+            .as_ref()
+            .map(|run| run.status.as_str())
+            .unwrap_or("unknown");
+        let route = run.as_ref().and_then(|run| {
+            crate::notification_route::NotificationRoute::from_metadata(&run.metadata_json)
+        });
+        let won_race = store
+            .mark_notification_delivered(&completed_id, "controller")
+            .unwrap_or(false);
+        if !won_race {
+            continue;
+        }
+        let mut event = crate::notify::NotifyEvent::run_completed_with_route(
+            &completed_id,
+            status,
+            route.as_ref(),
+        );
+        // The completed record is already loaded above; carry its
+        // component, command, and evidence handles instead of
+        // re-deriving prose from the id and status alone.
+        if let Some(run) = run.as_ref() {
+            event = event.with_payload(crate::notify::run_completed_payload(run));
+        }
+        // Outbox-backed: a transport outage no longer destroys the
+        // completion of a detached run. The exactly-once marker above
+        // is already consumed and is carried into the entry so the
+        // outbox settles it rather than re-claiming it.
+        let _ = crate::notify_outbox::dispatch_with_outbox(
+            &event,
+            Some(crate::notify_outbox::NotifyOnceMarker::new(
+                "run",
+                &completed_id,
+                "controller",
+            )),
+        );
     }
 }
 
