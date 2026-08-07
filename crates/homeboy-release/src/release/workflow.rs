@@ -48,9 +48,49 @@ pub fn run_command_with_recovery_owner(
 /// Additive staging-aware command entry point. CLI callers use the workspace
 /// envelope when provider staging or recovery reconciliation produced metadata.
 pub fn run_command_with_workspace(
-    input: ReleaseCommandInput,
+    mut input: ReleaseCommandInput,
     recovery_owner_run_ref: Option<&str>,
 ) -> Result<(ReleaseWorkspaceCommandResult, i32)> {
+    if let Some(readiness) = input.readiness.as_mut() {
+        let owner_run_ref = format!(
+            "release-readiness-{}-{}",
+            input.component_id, readiness.source.commit
+        );
+        super::operation_record::OperationRecordStore::create(
+            &super::operation_record::OperationRecord {
+                owner_run_ref: owner_run_ref.clone(),
+                operation: "release_readiness".to_string(),
+                subject: input.component_id.clone(),
+                provider: readiness
+                    .runner_id
+                    .clone()
+                    .unwrap_or_else(|| "controller".to_string()),
+                handle: readiness.source.commit.clone(),
+                path: None,
+                source_sha: readiness.source.commit.clone(),
+                cleanup_policy: "retain".to_string(),
+                lifecycle_state: "validated".to_string(),
+                terminal_disposition: Some("succeeded".to_string()),
+                finalization_status: "completed".to_string(),
+                finalization_lease: None,
+                finalization_lease_started_ms: None,
+                attempt_count: 1,
+                continuation_evidence: readiness.evidence_refs.clone(),
+                attributes: serde_json::Map::from_iter([(
+                    "readiness".to_string(),
+                    serde_json::to_value(&*readiness).map_err(|error| {
+                        Error::internal_json(
+                            error.to_string(),
+                            Some("release readiness".to_string()),
+                        )
+                    })?,
+                )]),
+            },
+        )?;
+        readiness
+            .evidence_refs
+            .push(format!("operation://{owner_run_ref}"));
+    }
     let execution = release_execution_plan(&input);
 
     if input.recover {

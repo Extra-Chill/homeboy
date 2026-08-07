@@ -456,7 +456,7 @@ fn run_portable_preflight(
         )
     })?;
     let mut gate_results = Vec::new();
-    for gate in ["lint", "test"] {
+    for gate in ["audit", "lint", "test"] {
         let mut command = Command::new(&executable);
         if let Some(runner_id) = runner_id {
             command.args(["--runner", runner_id]);
@@ -539,7 +539,7 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
         None
     };
     if readiness.is_some() {
-        for gate in ["lint", "test"] {
+        for gate in ["audit", "lint", "test"] {
             if !skip_checks_granular.iter().any(|existing| existing == gate) {
                 skip_checks_granular.push(gate.to_string());
             }
@@ -1105,6 +1105,8 @@ mod tests {
             project: None,
             outdated: false,
             path: None,
+            preflight_runner: None,
+            preflight_placement: ReleasePreflightPlacementArg::Local,
             dry_run_args: DryRunArgs { dry_run: true },
             apply: false,
             deploy: false,
@@ -1161,6 +1163,8 @@ mod tests {
             project: None,
             outdated: false,
             path: None,
+            preflight_runner: None,
+            preflight_placement: ReleasePreflightPlacementArg::Local,
             dry_run_args: DryRunArgs { dry_run: true },
             apply: false,
             deploy: false,
