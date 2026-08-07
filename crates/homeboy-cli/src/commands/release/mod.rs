@@ -64,6 +64,22 @@ enum ReleaseSubcommand {
     Contains(contains::ContainsArgs),
     /// Report how far the installed build is behind the newest release
     Gap(contains::GapArgs),
+    /// Inspect retained portable release-readiness evidence
+    Readiness(ReleaseReadinessArgs),
+}
+
+#[derive(Args)]
+struct ReleaseReadinessArgs {
+    #[command(subcommand)]
+    command: ReleaseReadinessCommand,
+}
+
+#[derive(Subcommand)]
+enum ReleaseReadinessCommand {
+    /// Show one retained readiness operation by operation:// reference or ID
+    Show { reference: String },
+    /// List retained readiness operations for a component
+    List { component_id: String },
 }
 
 #[derive(Args)]
@@ -285,6 +301,18 @@ pub struct ArtifactSourceAuthorityOutput {
 }
 
 #[derive(Serialize)]
+pub struct ReleaseReadinessShowOutput {
+    pub variant: &'static str,
+    pub record: release::operation_record::OperationRecord,
+}
+
+#[derive(Serialize)]
+pub struct ReleaseReadinessListOutput {
+    pub variant: &'static str,
+    pub records: Vec<release::operation_record::OperationRecord>,
+}
+
+#[derive(Serialize)]
 #[serde(untagged)]
 pub enum ReleaseCommandOutput {
     Single(Box<ReleaseOutput>),
@@ -296,6 +324,8 @@ pub enum ReleaseCommandOutput {
     Version(version::VersionOutput),
     Contains(Box<release::ReleaseContainsReport>),
     Gap(Box<release::ReleaseGapReport>),
+    ReadinessShow(ReleaseReadinessShowOutput),
+    ReadinessList(ReleaseReadinessListOutput),
 }
 
 fn map_nested<T>(
@@ -433,6 +463,41 @@ pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
                 0,
             ));
         }
+        Some(ReleaseSubcommand::Readiness(args)) => match args.command {
+            ReleaseReadinessCommand::Show { reference } => {
+                let owner_run_ref = reference.strip_prefix("operation://").unwrap_or(&reference);
+                let record = release::operation_record::OperationRecordStore::load(owner_run_ref)?
+                    .ok_or_else(|| {
+                        homeboy::core::Error::validation_invalid_argument(
+                            "reference",
+                            "release readiness operation does not exist",
+                            Some(reference),
+                            None,
+                        )
+                    })?;
+                return Ok((
+                    ReleaseCommandOutput::ReadinessShow(ReleaseReadinessShowOutput {
+                        variant: "readiness-show",
+                        record,
+                    }),
+                    0,
+                ));
+            }
+            ReleaseReadinessCommand::List { component_id } => {
+                let records = release::operation_record::OperationRecordStore::for_subject(
+                    "release_readiness",
+                    &component_id,
+                    false,
+                )?;
+                return Ok((
+                    ReleaseCommandOutput::ReadinessList(ReleaseReadinessListOutput {
+                        variant: "readiness-list",
+                        records,
+                    }),
+                    0,
+                ));
+            }
+        },
         None => {}
     }
 
@@ -458,6 +523,7 @@ struct PortableStageRequest<'a> {
     gate: &'a str,
     component_id: &'a str,
     path: &'a str,
+    source_commit: &'a str,
     requested_runner_id: Option<&'a str>,
     placement: ReleasePreflightPlacementArg,
 }
@@ -502,6 +568,8 @@ impl PortableStageDispatcher for CliPortableStageDispatcher {
             request.component_id,
             "--path",
             request.path,
+            "--release-readiness-source",
+            request.source_commit,
         ]);
         let output = command.output().map_err(|error| {
             homeboy::core::Error::internal_io(
@@ -521,7 +589,7 @@ impl PortableStageDispatcher for CliPortableStageDispatcher {
                     None,
                 )
             })?;
-        Ok(envelope.project(output.status.success()))
+        envelope.project(output.status.success(), request.source_commit)
     }
 }
 
@@ -560,25 +628,24 @@ struct PortableChildRunRef {
 struct PortableChildArtifactRef {
     uri: String,
 }
-#[derive(Default, Deserialize)]
+#[derive(Deserialize)]
 struct PortableReviewChildData {
-    #[serde(default)]
-    execution_provenance: Option<PortableExecutionProvenance>,
-    #[serde(default)]
-    release_readiness_provenance: ReleaseReadinessProvenance,
-}
-#[derive(Deserialize)]
-struct PortableExecutionProvenance {
-    resolved_execution: PortableResolvedExecution,
-}
-#[derive(Deserialize)]
-struct PortableResolvedExecution {
-    #[serde(default)]
-    runner_id: Option<String>,
+    release_readiness: PortableChildReadinessEvidence,
 }
 
+#[derive(Deserialize)]
+struct PortableChildReadinessEvidence {
+    requested_source_commit: String,
+    source_commit: String,
+    runner_id: Option<String>,
+    provenance: ReleaseReadinessProvenance,
+}
 impl PortableReviewChildEnvelope {
-    fn project(self, process_passed: bool) -> PortableStageChildResult {
+    fn project(
+        self,
+        process_passed: bool,
+        requested_source_commit: &str,
+    ) -> homeboy::core::Result<PortableStageChildResult> {
         let mut evidence_refs = self
             .evidence
             .into_iter()
@@ -596,23 +663,73 @@ impl PortableReviewChildEnvelope {
         );
         evidence_refs.sort();
         evidence_refs.dedup();
-        let provenance = self
-            .data
-            .as_ref()
-            .map(|data| data.release_readiness_provenance.clone())
-            .unwrap_or_default();
-        let runner_id = self
-            .data
-            .and_then(|data| data.execution_provenance)
-            .and_then(|provenance| provenance.resolved_execution.runner_id)
-            .or_else(|| self.run.and_then(|run| run.location));
-        PortableStageChildResult {
-            passed: process_passed && self.success,
-            runner_id,
-            evidence_refs,
-            provenance,
+        let child = self.data.ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "release.preflight",
+                "portable child omitted typed readiness evidence",
+                None,
+                None,
+            )
+        })?;
+        let readiness = child.release_readiness;
+        if process_passed && self.success {
+            validate_portable_child_success(&readiness, requested_source_commit, &evidence_refs)?;
         }
+        Ok(PortableStageChildResult {
+            passed: process_passed && self.success,
+            runner_id: readiness.runner_id,
+            evidence_refs,
+            provenance: readiness.provenance,
+        })
     }
+}
+
+fn validate_portable_child_success(
+    child: &PortableChildReadinessEvidence,
+    requested_source_commit: &str,
+    evidence_refs: &[String],
+) -> homeboy::core::Result<()> {
+    if child.source_commit != requested_source_commit {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "release.preflight",
+            "portable child source commit does not match frozen release source",
+            Some(child.source_commit.clone()),
+            None,
+        ));
+    }
+    if child.requested_source_commit != requested_source_commit {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "release.preflight",
+            "portable child did not retain the frozen release source request",
+            Some(child.requested_source_commit.clone()),
+            None,
+        ));
+    }
+    if child.runner_id.is_none() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "release.preflight",
+            "portable child omitted its resolved runner ID",
+            None,
+            None,
+        ));
+    }
+    if evidence_refs.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "release.preflight",
+            "portable child omitted durable run, artifact, or evidence references",
+            None,
+            None,
+        ));
+    }
+    if ReleaseReadinessProvenance::is_empty(&child.provenance) {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "release.preflight",
+            "portable child omitted immutable dependency and extension provenance",
+            None,
+            None,
+        ));
+    }
+    Ok(())
 }
 
 fn run_portable_preflight_with(
@@ -649,6 +766,7 @@ fn run_portable_preflight_with(
             gate,
             component_id,
             path: &component.local_path,
+            source_commit: &commit,
             requested_runner_id: runner_id,
             placement: args.preflight_placement,
         });
@@ -791,7 +909,7 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
         return Ok((
             ReleaseCommandOutput::Single(Box::new(ReleaseOutput {
                 variant: "single",
-                actionable: recovery_actionable_metadata(&result),
+                actionable: release_actionable_metadata(&result),
                 result,
                 workspace: workspace_result.workspace,
                 cascade,
@@ -889,15 +1007,29 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
     ))
 }
 
-fn recovery_actionable_metadata(
-    result: &ReleaseCommandResult,
-) -> Option<CommandActionableMetadata> {
-    result.continuation_command.as_ref().map(|command| {
-        CommandActionableMetadata::default().with_next_action(
+fn release_actionable_metadata(result: &ReleaseCommandResult) -> Option<CommandActionableMetadata> {
+    let mut metadata = CommandActionableMetadata::default();
+    if let Some(command) = result.continuation_command.as_ref() {
+        metadata = metadata.with_next_action(
             CommandNextAction::new("finish release publication", command)
                 .with_kind(CommandNextActionKind::Repair),
-        )
-    })
+        );
+    }
+    if let Some(reference) = result.readiness.as_ref().and_then(|readiness| {
+        readiness
+            .evidence_refs
+            .iter()
+            .find_map(|reference| reference.strip_prefix("operation://"))
+    }) {
+        metadata = metadata.with_next_action(
+            CommandNextAction::new(
+                "inspect release readiness",
+                format!("homeboy release readiness show {reference}"),
+            )
+            .with_kind(CommandNextActionKind::Show),
+        );
+    }
+    (!metadata.is_empty()).then_some(metadata)
 }
 
 /// Run the dependency-aware cascade after a single-component release, when
@@ -1703,7 +1835,7 @@ jobs:
         };
         let output = ReleaseOutput {
             variant: "single",
-            actionable: recovery_actionable_metadata(&result),
+            actionable: release_actionable_metadata(&result),
             result,
             workspace: None,
             cascade: None,
@@ -1730,16 +1862,20 @@ jobs:
             "refs": { "runs": [{ "id": "review-run-7" }] },
             "evidence": [{ "uri": "runner-artifact://lab-runner-7/review.json" }],
             "data": {
-                "execution_provenance": { "resolved_execution": { "runner_id": "lab-runner-7" } },
-                "release_readiness_provenance": {
-                    "dependencies": { "fixture-dependency": "child-locked-sha" },
-                    "extensions": { "fixture-extension": "sha256:child-manifest" }
+                "release_readiness": {
+                    "requested_source_commit": "frozen-source",
+                    "source_commit": "frozen-source",
+                    "runner_id": "lab-runner-7",
+                    "provenance": {
+                        "dependencies": { "fixture-dependency": "child-locked-sha" },
+                        "extensions": { "fixture-extension": "sha256:child-manifest" }
+                    }
                 }
             }
         }))
         .expect("stable child result");
 
-        let projected = child.project(true);
+        let projected = child.project(true, "frozen-source").expect("valid child");
 
         assert!(projected.passed);
         assert_eq!(projected.runner_id.as_deref(), Some("lab-runner-7"));
@@ -1758,6 +1894,102 @@ jobs:
                 "runner-artifact://lab-runner-7/review.json".to_string(),
             ]
         );
+    }
+
+    fn valid_child_evidence() -> PortableChildReadinessEvidence {
+        PortableChildReadinessEvidence {
+            requested_source_commit: "frozen-source".to_string(),
+            source_commit: "frozen-source".to_string(),
+            runner_id: Some("lab-runner".to_string()),
+            provenance: ReleaseReadinessProvenance {
+                dependencies: std::collections::BTreeMap::from([(
+                    "dependency".to_string(),
+                    "locked-sha".to_string(),
+                )]),
+                extensions: Default::default(),
+            },
+        }
+    }
+
+    #[test]
+    fn portable_child_success_rejects_missing_source_commit() {
+        let mut child = valid_child_evidence();
+        child.source_commit.clear();
+        assert!(
+            validate_portable_child_success(&child, "frozen-source", &["run://1".to_string()])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn portable_child_success_rejects_mismatched_source_commit() {
+        let mut child = valid_child_evidence();
+        child.source_commit = "other-source".to_string();
+        assert!(
+            validate_portable_child_success(&child, "frozen-source", &["run://1".to_string()])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn portable_child_success_rejects_missing_runner_or_durable_evidence() {
+        let mut child = valid_child_evidence();
+        child.runner_id = None;
+        assert!(
+            validate_portable_child_success(&child, "frozen-source", &["run://1".to_string()])
+                .is_err()
+        );
+        let child = valid_child_evidence();
+        assert!(validate_portable_child_success(&child, "frozen-source", &[]).is_err());
+    }
+
+    #[test]
+    fn portable_child_success_rejects_empty_provenance() {
+        let mut child = valid_child_evidence();
+        child.provenance = Default::default();
+        assert!(
+            validate_portable_child_success(&child, "frozen-source", &["run://1".to_string()])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn readiness_show_resolves_operation_reference_for_operators() {
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let record = release::operation_record::OperationRecord {
+                owner_run_ref: "release-readiness-operator-test".to_string(),
+                operation: "release_readiness".to_string(),
+                subject: "fixture".to_string(),
+                provider: "lab".to_string(),
+                handle: "commit".to_string(),
+                path: None,
+                source_sha: "commit".to_string(),
+                cleanup_policy: "retain".to_string(),
+                lifecycle_state: "finalized".to_string(),
+                terminal_disposition: Some("succeeded".to_string()),
+                finalization_status: "completed".to_string(),
+                finalization_lease: None,
+                finalization_lease_started_ms: None,
+                attempt_count: 1,
+                continuation_evidence: Vec::new(),
+                attributes: Default::default(),
+            };
+            release::operation_record::OperationRecordStore::create(&record).expect("record");
+            let (output, exit_code) = run(ReleaseArgs {
+                command: Some(ReleaseSubcommand::Readiness(ReleaseReadinessArgs {
+                    command: ReleaseReadinessCommand::Show {
+                        reference: format!("operation://{}", record.owner_run_ref),
+                    },
+                })),
+                execute: args(&[]),
+            })
+            .expect("show readiness");
+            assert_eq!(exit_code, 0);
+            let ReleaseCommandOutput::ReadinessShow(output) = output else {
+                panic!("expected readiness show output");
+            };
+            assert_eq!(output.record.owner_run_ref, record.owner_run_ref);
+        });
     }
 
     struct RecordingPortableDispatcher {

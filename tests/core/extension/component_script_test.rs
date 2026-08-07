@@ -27,6 +27,7 @@ fn component_script_args(root: &Path) -> PositionalComponentArgs {
 fn test_command_args(root: &Path) -> TestArgs {
     TestArgs {
         comp: component_script_args(root),
+        release_readiness_source: None,
         extension_override: ExtensionOverrideArgs::default(),
         skip_lint: false,
         coverage: false,

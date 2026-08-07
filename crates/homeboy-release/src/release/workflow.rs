@@ -105,16 +105,27 @@ pub fn run_command_with_workspace(
     match run_command_with_workspace_inner(input, recovery_owner_run_ref) {
         Ok((mut output, exit_code)) => {
             if let Some(owner_run_ref) = readiness_owner_run_ref.as_deref() {
-                complete_readiness_operation(owner_run_ref, exit_code == 0, None)?;
+                complete_readiness_operation(
+                    owner_run_ref,
+                    true,
+                    serde_json::json!({
+                        "exit_code": exit_code,
+                        "status": output.result.status,
+                    }),
+                )?;
             }
             output.result.readiness = readiness;
             Ok((output, exit_code))
         }
         Err(error) => {
             if let Some(owner_run_ref) = readiness_owner_run_ref.as_deref() {
-                complete_readiness_operation(owner_run_ref, false, Some(error.to_string()))?;
+                complete_readiness_operation(
+                    owner_run_ref,
+                    false,
+                    serde_json::json!({ "error": error.to_string() }),
+                )?;
                 return Err(error.with_hint(format!(
-                    "Readiness evidence retained at operation://{owner_run_ref}"
+                    "Inspect readiness evidence: homeboy release readiness show {owner_run_ref}"
                 )));
             }
             Err(error)
@@ -125,7 +136,7 @@ pub fn run_command_with_workspace(
 fn complete_readiness_operation(
     owner_run_ref: &str,
     succeeded: bool,
-    error: Option<String>,
+    downstream_release: serde_json::Value,
 ) -> Result<()> {
     super::operation_record::OperationRecordStore::update(owner_run_ref, |record| {
         let mut record = record.ok_or_else(|| {
@@ -140,9 +151,9 @@ fn complete_readiness_operation(
         record.terminal_disposition =
             Some(if succeeded { "succeeded" } else { "failed" }.to_string());
         record.finalization_status = "completed".to_string();
-        if let Some(error) = error {
-            record.continuation_evidence.push(error);
-        }
+        record
+            .attributes
+            .insert("downstream_release".to_string(), downstream_release);
         Ok(record)
     })?;
     Ok(())
@@ -1155,7 +1166,7 @@ mod tests {
             .expect("readiness record is retained");
             let owner = record.owner_run_ref.clone();
             assert!(error.hints.iter().any(|hint| hint.message
-                == format!("Readiness evidence retained at operation://{owner}")));
+                == format!("Inspect readiness evidence: homeboy release readiness show {owner}")));
             assert_eq!(record.terminal_disposition.as_deref(), Some("failed"));
             assert_eq!(record.finalization_status, "completed");
             assert_eq!(
@@ -1244,6 +1255,51 @@ mod tests {
                     && record.terminal_disposition.as_deref() == Some("failed")
                     && record.finalization_status == "completed"
             }));
+        });
+    }
+
+    #[test]
+    fn readiness_succeeds_when_downstream_release_is_intentionally_skipped() {
+        with_isolated_home(|_| {
+            let owner = "release-readiness-skip";
+            super::super::operation_record::OperationRecordStore::create(
+                &super::super::operation_record::OperationRecord {
+                    owner_run_ref: owner.to_string(),
+                    operation: "release_readiness".to_string(),
+                    subject: "fixture".to_string(),
+                    provider: "lab".to_string(),
+                    handle: "commit".to_string(),
+                    path: None,
+                    source_sha: "commit".to_string(),
+                    cleanup_policy: "retain".to_string(),
+                    lifecycle_state: "running".to_string(),
+                    terminal_disposition: None,
+                    finalization_status: "pending".to_string(),
+                    finalization_lease: None,
+                    finalization_lease_started_ms: None,
+                    attempt_count: 1,
+                    continuation_evidence: Vec::new(),
+                    attributes: Default::default(),
+                },
+            )
+            .expect("create readiness");
+
+            complete_readiness_operation(
+                owner,
+                true,
+                serde_json::json!({ "exit_code": SKIPPED_RELEASE_EXIT_CODE, "status": "skipped" }),
+            )
+            .expect("complete readiness");
+
+            let record = super::super::operation_record::OperationRecordStore::load(owner)
+                .expect("load")
+                .expect("record");
+            assert_eq!(record.terminal_disposition.as_deref(), Some("succeeded"));
+            assert_eq!(
+                record.attributes["downstream_release"]["exit_code"],
+                SKIPPED_RELEASE_EXIT_CODE
+            );
+            assert_eq!(record.attributes["downstream_release"]["status"], "skipped");
         });
     }
 
