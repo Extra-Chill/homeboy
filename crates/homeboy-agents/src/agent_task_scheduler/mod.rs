@@ -66,4 +66,8 @@ use resources::{
     active_resource_units, adaptive_concurrency_decision, executor_key, model_key,
     task_resource_units,
 };
+pub use resources::{
+    resolve_batch_concurrency, BatchConcurrencyDecision, BatchConcurrencyInputs,
+    BatchConcurrencySource,
+};
 pub(crate) use scheduling::AgentTaskScheduleSupport;
