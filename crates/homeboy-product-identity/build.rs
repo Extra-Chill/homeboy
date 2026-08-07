@@ -3,6 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "src/git_watch_paths.rs"]
+mod git_watch_paths;
+
 fn main() {
     let manifest_dir =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR missing"));
@@ -13,6 +16,7 @@ fn main() {
     let manifest = root.join("Cargo.toml");
 
     println!("cargo:rerun-if-changed={}", manifest.display());
+    println!("cargo:rerun-if-changed=src/git_watch_paths.rs");
     println!(
         "cargo:rustc-env=HOMEBOY_PRODUCT_VERSION={}",
         root_package_version(&manifest)
@@ -56,12 +60,14 @@ fn rerun_if_changed_when_present(path: &Path) {
 fn emit_git_identity(root: &Path) {
     let git_dir = resolve_git_dir(root).unwrap_or_else(|| root.join(".git"));
     let common_dir = git_common_dir(root, &git_dir).unwrap_or_else(|| git_dir.clone());
-    rerun_if_changed_when_present(&git_dir.join("HEAD"));
-    rerun_if_changed_when_present(&common_dir.join("packed-refs"));
-    if let Ok(head) = fs::read_to_string(git_dir.join("HEAD")) {
-        if let Some(reference) = head.trim().strip_prefix("ref: ") {
-            rerun_if_changed_when_present(&git_dir.join(reference));
-        }
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok();
+    for path in git_watch_paths::git_watch_paths(
+        &git_dir,
+        &common_dir,
+        head.as_deref(),
+        "refs/notes/homeboy-snapshot",
+    ) {
+        rerun_if_changed_when_present(&path);
     }
 
     // `.git/index` is deliberately NOT declared. This build script runs
