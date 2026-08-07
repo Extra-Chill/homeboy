@@ -537,6 +537,9 @@ pub struct ReleaseReadinessGateResult {
     pub runner_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_refs: Vec<String>,
+    /// Immutable identities emitted by the child that executed this gate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ReleaseReadinessProvenance>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -871,6 +874,7 @@ mod tests {
                 source_sha: None,
                 runner_id: Some("homeboy-lab".to_string()),
                 evidence_refs: Vec::new(),
+                provenance: None,
             }],
         };
 

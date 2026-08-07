@@ -11,6 +11,7 @@ use homeboy_release::release::{
     ReleaseCommandResult, ReleaseExecutionPlan, ReleasePackageResult, ReleasePhase,
     ReleasePipelineOptions, ReleasePreflightPlacement, ReleasePreflightPlacementPolicy,
     ReleasePreflightSourceIdentity, ReleaseReadinessEnvelope, ReleaseReadinessGateResult,
+    ReleaseReadinessProvenance,
 };
 
 use super::utils::args::DryRunArgs;
@@ -441,9 +442,16 @@ pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
 fn run_portable_preflight(
     args: &ReleaseExecuteArgs,
     component_id: &str,
+    skip_all: bool,
     skipped: &[String],
 ) -> homeboy::core::Result<Option<ReleaseReadinessEnvelope>> {
-    run_portable_preflight_with(&CliPortableStageDispatcher, args, component_id, skipped)
+    run_portable_preflight_with(
+        &CliPortableStageDispatcher,
+        args,
+        component_id,
+        skip_all,
+        skipped,
+    )
 }
 
 struct PortableStageRequest<'a> {
@@ -459,6 +467,7 @@ struct PortableStageChildResult {
     passed: bool,
     runner_id: Option<String>,
     evidence_refs: Vec<String>,
+    provenance: ReleaseReadinessProvenance,
 }
 
 trait PortableStageDispatcher {
@@ -555,6 +564,8 @@ struct PortableChildArtifactRef {
 struct PortableReviewChildData {
     #[serde(default)]
     execution_provenance: Option<PortableExecutionProvenance>,
+    #[serde(default)]
+    release_readiness_provenance: ReleaseReadinessProvenance,
 }
 #[derive(Deserialize)]
 struct PortableExecutionProvenance {
@@ -585,6 +596,11 @@ impl PortableReviewChildEnvelope {
         );
         evidence_refs.sort();
         evidence_refs.dedup();
+        let provenance = self
+            .data
+            .as_ref()
+            .map(|data| data.release_readiness_provenance.clone())
+            .unwrap_or_default();
         let runner_id = self
             .data
             .and_then(|data| data.execution_provenance)
@@ -594,6 +610,7 @@ impl PortableReviewChildEnvelope {
             passed: process_passed && self.success,
             runner_id,
             evidence_refs,
+            provenance,
         }
     }
 }
@@ -602,6 +619,7 @@ fn run_portable_preflight_with(
     dispatcher: &dyn PortableStageDispatcher,
     args: &ReleaseExecuteArgs,
     component_id: &str,
+    skip_all: bool,
     skipped: &[String],
 ) -> homeboy::core::Result<Option<ReleaseReadinessEnvelope>> {
     let runner_id = args.preflight_runner.as_deref();
@@ -615,7 +633,7 @@ fn run_portable_preflight_with(
     let mut evidence_refs = Vec::new();
     let mut resolved_runner_id = None;
     for gate in ["audit", "lint", "test"] {
-        if skipped.iter().any(|skip| skip == gate) {
+        if skip_all || skipped.iter().any(|skip| skip == gate) {
             gate_results.push(ReleaseReadinessGateResult {
                 gate: gate.to_string(),
                 status: "skipped".to_string(),
@@ -623,6 +641,7 @@ fn run_portable_preflight_with(
                 source_sha: Some(commit.clone()),
                 runner_id: None,
                 evidence_refs: Vec::new(),
+                provenance: None,
             });
             continue;
         }
@@ -644,6 +663,7 @@ fn run_portable_preflight_with(
                     source_sha: Some(commit.clone()),
                     runner_id: child.runner_id,
                     evidence_refs: child.evidence_refs,
+                    provenance: Some(child.provenance),
                 });
             }
             Err(error) => {
@@ -656,6 +676,7 @@ fn run_portable_preflight_with(
                     source_sha: Some(commit.clone()),
                     runner_id: runner_id.map(str::to_string),
                     evidence_refs: Vec::new(),
+                    provenance: None,
                 });
             }
         }
@@ -670,6 +691,7 @@ fn run_portable_preflight_with(
         source_sha: Some(commit.clone()),
         runner_id: None,
         evidence_refs: Vec::new(),
+        provenance: None,
     });
     let placement = ReleasePreflightPlacement {
         policy: if runner_id.is_some()
@@ -688,7 +710,17 @@ fn run_portable_preflight_with(
         placement,
         runner_id: resolved_runner_id.or_else(|| runner_id.map(str::to_string)),
         evidence_refs,
-        provenance: release::readiness_provenance(&component)?,
+        provenance: gate_results
+            .iter()
+            .filter_map(|gate| gate.provenance.as_ref())
+            .fold(
+                ReleaseReadinessProvenance::default(),
+                |mut all, provenance| {
+                    all.dependencies.extend(provenance.dependencies.clone());
+                    all.extensions.extend(provenance.extensions.clone());
+                    all
+                },
+            ),
         gate_results,
     }))
 }
@@ -710,7 +742,7 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
         ));
     }
     let readiness = if component_ids.len() == 1 {
-        run_portable_preflight(&args, &component_ids[0], &skip_checks_granular)?
+        run_portable_preflight(&args, &component_ids[0], skip_checks, &skip_checks_granular)?
     } else {
         None
     };
@@ -1697,7 +1729,13 @@ jobs:
             "run": { "id": "review-run-7", "location": "lab-runner-7" },
             "refs": { "runs": [{ "id": "review-run-7" }] },
             "evidence": [{ "uri": "runner-artifact://lab-runner-7/review.json" }],
-            "data": { "execution_provenance": { "resolved_execution": { "runner_id": "lab-runner-7" } } }
+            "data": {
+                "execution_provenance": { "resolved_execution": { "runner_id": "lab-runner-7" } },
+                "release_readiness_provenance": {
+                    "dependencies": { "fixture-dependency": "child-locked-sha" },
+                    "extensions": { "fixture-extension": "sha256:child-manifest" }
+                }
+            }
         }))
         .expect("stable child result");
 
@@ -1705,6 +1743,14 @@ jobs:
 
         assert!(projected.passed);
         assert_eq!(projected.runner_id.as_deref(), Some("lab-runner-7"));
+        assert_eq!(
+            projected.provenance.dependencies["fixture-dependency"],
+            "child-locked-sha"
+        );
+        assert_eq!(
+            projected.provenance.extensions["fixture-extension"],
+            "sha256:child-manifest"
+        );
         assert_eq!(
             projected.evidence_refs,
             vec![
@@ -1735,6 +1781,7 @@ jobs:
                 passed: true,
                 runner_id: Some("test-runner".to_string()),
                 evidence_refs: vec![format!("evidence://{}", request.gate)],
+                provenance: ReleaseReadinessProvenance::default(),
             })
         }
     }
@@ -1785,6 +1832,7 @@ jobs:
             &dispatcher,
             &portable_preflight_args(temp.path()),
             "fixture",
+            false,
             &["lint".to_string()],
         )
         .expect("preflight should complete")
@@ -1807,6 +1855,7 @@ jobs:
             &dispatcher,
             &portable_preflight_args(temp.path()),
             "fixture",
+            false,
             &[],
         )
         .expect("dispatch failure is retained as a gate result")
@@ -1828,5 +1877,86 @@ jobs:
             .gate_results
             .iter()
             .any(|gate| gate.gate == "test" && gate.status == "passed"));
+    }
+
+    #[test]
+    fn portable_preflight_bare_skip_checks_dispatches_no_remote_gates() {
+        let temp = portable_preflight_fixture();
+        let dispatcher = RecordingPortableDispatcher {
+            calls: RefCell::new(Vec::new()),
+            failing_gate: None,
+        };
+
+        let readiness = run_portable_preflight_with(
+            &dispatcher,
+            &portable_preflight_args(temp.path()),
+            "fixture",
+            true,
+            &[],
+        )
+        .expect("preflight should complete")
+        .expect("lab preflight is enabled");
+
+        assert!(dispatcher.calls.borrow().is_empty());
+        assert!(readiness
+            .gate_results
+            .iter()
+            .filter(|gate| ["audit", "lint", "test"].contains(&gate.gate.as_str()))
+            .all(|gate| gate.status == "skipped"));
+    }
+
+    #[test]
+    fn portable_preflight_retains_child_provenance_not_controller_state() {
+        let temp = portable_preflight_fixture();
+        let child_provenance = ReleaseReadinessProvenance {
+            dependencies: std::collections::BTreeMap::from([(
+                "fixture-dependency".to_string(),
+                "child-locked-sha".to_string(),
+            )]),
+            extensions: std::collections::BTreeMap::from([(
+                "fixture-extension".to_string(),
+                "sha256:child-manifest".to_string(),
+            )]),
+        };
+        struct ProvenanceDispatcher(ReleaseReadinessProvenance);
+        impl PortableStageDispatcher for ProvenanceDispatcher {
+            fn dispatch(
+                &self,
+                _request: PortableStageRequest<'_>,
+            ) -> homeboy::core::Result<PortableStageChildResult> {
+                Ok(PortableStageChildResult {
+                    passed: true,
+                    runner_id: Some("lab".to_string()),
+                    evidence_refs: Vec::new(),
+                    provenance: self.0.clone(),
+                })
+            }
+        }
+
+        let readiness = run_portable_preflight_with(
+            &ProvenanceDispatcher(child_provenance.clone()),
+            &portable_preflight_args(temp.path()),
+            "fixture",
+            false,
+            &[],
+        )
+        .expect("preflight should complete")
+        .expect("lab preflight is enabled");
+
+        let controller_component = component::resolve_effective(
+            Some("fixture"),
+            Some(temp.path().to_string_lossy().as_ref()),
+            None,
+        )
+        .expect("controller component");
+        let controller_provenance =
+            release::readiness_provenance(&controller_component).expect("controller provenance");
+        assert_ne!(controller_provenance, child_provenance);
+        assert_eq!(readiness.provenance, child_provenance);
+        assert!(readiness
+            .gate_results
+            .iter()
+            .filter(|gate| ["audit", "lint", "test"].contains(&gate.gate.as_str()))
+            .all(|gate| gate.provenance.as_ref() == Some(&child_provenance)));
     }
 }

@@ -1,6 +1,5 @@
 use homeboy_core::component::{self, Component};
-use homeboy_core::error::{Error, Result};
-use homeboy_core::git;
+use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_extension as extension;
 use homeboy_extension::{self, ExtensionManifest};
 
@@ -29,16 +28,28 @@ pub(super) fn resolve_extensions(component: &Component) -> Result<Vec<ExtensionM
     Ok(extensions)
 }
 
-/// Capture immutable identities for the dependency and extension resolutions
-/// that release will consume before portable work begins.
+/// Capture immutable identities from the dependency adapters and materialized
+/// extension manifests in the process that executed a portable review gate.
 pub fn readiness_provenance(component: &Component) -> Result<ReleaseReadinessProvenance> {
     let mut provenance = ReleaseReadinessProvenance::default();
-    for dependency in &component.dependency_stack {
-        let upstream = component::resolve_effective(Some(&dependency.upstream), None, None)?;
-        let revision = git::get_head_commit(&upstream.local_path)?;
-        provenance
-            .dependencies
-            .insert(dependency.package.clone(), revision);
+    let dependencies =
+        match homeboy_core::deps::status(Some(&component.id), Some(&component.local_path), None) {
+            Ok(status) => status.packages,
+            // Dependency hydration treats a component with no declared provider as
+            // a no-op; provenance must preserve that same contract.
+            Err(error)
+                if error.code == ErrorCode::ValidationInvalidArgument
+                    && error.details.get("field").and_then(|value| value.as_str())
+                        == Some("dependency_provider") =>
+            {
+                Vec::new()
+            }
+            Err(error) => return Err(error),
+        };
+    for dependency in dependencies {
+        if let Some(revision) = dependency.locked_reference.or(dependency.locked_version) {
+            provenance.dependencies.insert(dependency.name, revision);
+        }
     }
     for extension in resolve_extensions(component)? {
         let path = extension.extension_path.as_deref().ok_or_else(|| {

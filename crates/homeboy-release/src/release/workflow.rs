@@ -52,10 +52,7 @@ pub fn run_command_with_workspace(
     recovery_owner_run_ref: Option<&str>,
 ) -> Result<(ReleaseWorkspaceCommandResult, i32)> {
     let readiness_owner_run_ref = if let Some(readiness) = input.readiness.as_mut() {
-        let owner_run_ref = format!(
-            "release-readiness-{}-{}",
-            input.component_id, readiness.source.commit
-        );
+        let owner_run_ref = format!("release-readiness-{}", uuid::Uuid::new_v4());
         let operation_ref = format!("operation://{owner_run_ref}");
         if !readiness.evidence_refs.contains(&operation_ref) {
             readiness.evidence_refs.push(operation_ref.clone());
@@ -1074,6 +1071,27 @@ mod tests {
     use homeboy_core::plan::{PlanStep, PlanStepStatus, PlanValues};
     use homeboy_core::test_support::with_isolated_home;
 
+    fn failed_readiness(source: &str) -> ReleaseReadinessEnvelope {
+        ReleaseReadinessEnvelope {
+            source: ReleasePreflightSourceIdentity {
+                commit: source.to_string(),
+            },
+            placement: ReleasePreflightPlacement::default(),
+            runner_id: Some("lab-test".to_string()),
+            evidence_refs: vec!["evidence://lint".to_string()],
+            provenance: Default::default(),
+            gate_results: vec![ReleaseReadinessGateResult {
+                gate: "lint".to_string(),
+                status: "failed".to_string(),
+                reason: Some("portable dispatch failed".to_string()),
+                source_sha: Some(source.to_string()),
+                runner_id: Some("lab-test".to_string()),
+                evidence_refs: Vec::new(),
+                provenance: None,
+            }],
+        }
+    }
+
     #[test]
     fn batch_status_bucket_rolls_up_non_released_outcomes_as_failed() {
         // Issue #6916: a failed component must not be counted as released.
@@ -1111,6 +1129,7 @@ mod tests {
                     source_sha: Some(source.clone()),
                     runner_id: Some("lab-test".to_string()),
                     evidence_refs: Vec::new(),
+                    provenance: None,
                 }],
             };
 
@@ -1125,12 +1144,18 @@ mod tests {
             )
             .expect_err("failed readiness must stop release before controller mutation");
 
-            let owner = format!("release-readiness-fixture-{source}");
+            let record = super::super::operation_record::OperationRecordStore::for_subject(
+                "release_readiness",
+                "fixture",
+                false,
+            )
+            .expect("list readiness records")
+            .into_iter()
+            .find(|record| record.source_sha == source)
+            .expect("readiness record is retained");
+            let owner = record.owner_run_ref.clone();
             assert!(error.hints.iter().any(|hint| hint.message
                 == format!("Readiness evidence retained at operation://{owner}")));
-            let record = super::super::operation_record::OperationRecordStore::load(&owner)
-                .expect("load operation record")
-                .expect("readiness record is retained");
             assert_eq!(record.terminal_disposition.as_deref(), Some("failed"));
             assert_eq!(record.finalization_status, "completed");
             assert_eq!(
@@ -1146,6 +1171,79 @@ mod tests {
                     .trim(),
                 source
             );
+        });
+    }
+
+    #[test]
+    fn sequential_same_commit_readiness_invocations_retain_distinct_records() {
+        with_isolated_home(|_| {
+            let source = "same-commit";
+            for _ in 0..2 {
+                run_command_with_workspace(
+                    ReleaseCommandInput {
+                        component_id: "fixture".to_string(),
+                        readiness: Some(failed_readiness(source)),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .expect_err("failed readiness blocks before component resolution");
+            }
+
+            let records = super::super::operation_record::OperationRecordStore::for_subject(
+                "release_readiness",
+                "fixture",
+                false,
+            )
+            .expect("list records");
+            assert_eq!(records.len(), 2);
+            assert_ne!(records[0].owner_run_ref, records[1].owner_run_ref);
+            assert!(records.iter().all(|record| {
+                record.source_sha == source
+                    && record.terminal_disposition.as_deref() == Some("failed")
+                    && record.finalization_status == "completed"
+            }));
+        });
+    }
+
+    #[test]
+    fn concurrent_same_commit_readiness_invocations_retain_distinct_records() {
+        with_isolated_home(|_| {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let workers = (0..2)
+                .map(|_| {
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        run_command_with_workspace(
+                            ReleaseCommandInput {
+                                component_id: "fixture".to_string(),
+                                readiness: Some(failed_readiness("concurrent-commit")),
+                                ..Default::default()
+                            },
+                            None,
+                        )
+                        .expect_err("failed readiness blocks before component resolution");
+                    })
+                })
+                .collect::<Vec<_>>();
+            for worker in workers {
+                worker.join().expect("worker succeeds");
+            }
+
+            let records = super::super::operation_record::OperationRecordStore::for_subject(
+                "release_readiness",
+                "fixture",
+                false,
+            )
+            .expect("list records");
+            assert_eq!(records.len(), 2);
+            assert_ne!(records[0].owner_run_ref, records[1].owner_run_ref);
+            assert!(records.iter().all(|record| {
+                record.source_sha == "concurrent-commit"
+                    && record.terminal_disposition.as_deref() == Some("failed")
+                    && record.finalization_status == "completed"
+            }));
         });
     }
 

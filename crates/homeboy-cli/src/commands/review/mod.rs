@@ -327,14 +327,50 @@ fn dispatch_review_plan_step(
 
 pub fn run(args: ReviewArgs) -> CmdResult<Value> {
     match args.command {
-        Some(ReviewCommand::Audit(args)) => to_value(audit::run(args.audit)),
+        Some(ReviewCommand::Audit(args)) => {
+            let component = args.audit.comp.load()?;
+            to_value_with_readiness_provenance(audit::run(args.audit), &component)
+        }
         Some(ReviewCommand::AuditBaseline(args)) => to_value(audit_baseline::run(args)),
-        Some(ReviewCommand::Lint(args)) => to_value(lint::run(review_lint_args(args))),
-        Some(ReviewCommand::Test(args)) => to_value(test::run(args)),
+        Some(ReviewCommand::Lint(args)) => {
+            let component = args.comp.load()?;
+            to_value_with_readiness_provenance(lint::run(review_lint_args(args)), &component)
+        }
+        Some(ReviewCommand::Test(args)) => {
+            let component = args.comp.load()?;
+            to_value_with_readiness_provenance(test::run(args), &component)
+        }
         Some(ReviewCommand::Build(args)) => to_value(build::run(args)),
         Some(ReviewCommand::Ci(args)) => to_value(ci::run(args)),
         None => to_value(run_umbrella(args)),
     }
+}
+
+/// Portable release preflight consumes this child-produced provenance from the
+/// command result. Capture it after execution on the runner that tested it.
+fn to_value_with_readiness_provenance<T: Serialize>(
+    result: CmdResult<T>,
+    component: &homeboy::core::component::Component,
+) -> CmdResult<Value> {
+    let (output, exit_code) = result?;
+    let mut value = serde_json::to_value(output).map_err(|error| {
+        homeboy::core::Error::internal_unexpected(format!(
+            "failed to serialize review command output: {error}"
+        ))
+    })?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        homeboy::core::Error::internal_unexpected("review command output was not an object")
+    })?;
+    let provenance = homeboy_release::release::readiness_provenance(component)?;
+    object.insert(
+        "release_readiness_provenance".to_string(),
+        serde_json::to_value(provenance).map_err(|error| {
+            homeboy::core::Error::internal_unexpected(format!(
+                "failed to serialize review readiness provenance: {error}"
+            ))
+        })?,
+    );
+    Ok((value, exit_code))
 }
 
 fn to_value<T: Serialize>(result: CmdResult<T>) -> CmdResult<Value> {
