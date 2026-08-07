@@ -94,7 +94,7 @@ pub(super) fn intercept_local_detached_cook(
     materialize_stdin_prompt(&mut child_args, &session_root)?;
     let log_path = session_root.join("cook.log");
 
-    let mut child = spawn_detached_cook(&child_args, &log_path)?;
+    let mut child = spawn_detached_cook(&child_args, &log_path, detached_route(cli).as_ref())?;
     let pid = child.id();
     let handoff = await_durable_handoff(&cook_id, &mut child, handoff_timeout());
 
@@ -151,6 +151,26 @@ fn detached_cook_child_args(
         args.push(cook_id.to_string());
     }
     args
+}
+
+/// The destination the detached cook's notifications belong to.
+///
+/// Resolved from the launcher's own arguments rather than from
+/// `notification_route::current()`, because detachment is intercepted during
+/// argument routing — before the runtime binds the thread-local route — so the
+/// thread-local is still empty here.
+///
+/// A route this process could not resolve is `None` rather than an error. The
+/// runtime already validated this exact pair before routing, so a failure here
+/// is unreachable; and notification routing is observability, which must never
+/// take a cook down with it.
+fn detached_route(cli: &Cli) -> Option<homeboy::core::notification_route::NotificationRoute> {
+    homeboy::core::notification_route::from_cli_or_env(
+        cli.notification_transport.as_deref(),
+        cli.notification_route.as_deref(),
+    )
+    .ok()
+    .flatten()
 }
 
 /// Replace a `--prompt -` stdin request with a file the detached cook can read.
@@ -217,9 +237,17 @@ fn detached_session_root(cook_id: &str) -> homeboy::core::Result<PathBuf> {
     Ok(root)
 }
 
+/// Spawn the cook in its own session.
+///
+/// The route is set explicitly rather than left to environment inheritance so
+/// the detached cook is bound to the destination the launcher resolved, whether
+/// that came from argv or from the launcher's own environment. Setting both
+/// variables together also normalizes a half-set pair inherited from the
+/// launcher, which the child would otherwise reject as a validation error.
 fn spawn_detached_cook(
     args: &[String],
     log_path: &Path,
+    route: Option<&homeboy::core::notification_route::NotificationRoute>,
 ) -> homeboy::core::Result<std::process::Child> {
     let exe = std::env::current_exe().map_err(|error| {
         Error::internal_io(
@@ -237,6 +265,7 @@ fn spawn_detached_cook(
     let mut command = Command::new(exe);
     command
         .args(args)
+        .envs(homeboy::core::notification_route::child_env(route))
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
@@ -386,6 +415,57 @@ mod tests {
         ]);
         let cli = Cli::try_parse_from(argv.clone()).expect("parse cook invocation");
         (cli, args(&argv))
+    }
+
+    /// A detached cook is a different process, so the launcher's route reaches
+    /// it only if something writes it onto the child environment.
+    #[test]
+    fn a_detached_cook_child_carries_an_explicit_route() {
+        let (cli, _) = cook_cli(&[
+            "--placement",
+            "local",
+            "--detach-after-handoff",
+            "--notification-transport",
+            "extension.run-completion",
+            "--notification-route",
+            "opaque-destination",
+        ]);
+
+        let route = detached_route(&cli).expect("an explicit route resolves");
+
+        assert_eq!(
+            homeboy::core::notification_route::child_env(Some(&route)),
+            vec![
+                (
+                    homeboy::core::notification_route::NOTIFICATION_TRANSPORT_ENV,
+                    "extension.run-completion".to_string()
+                ),
+                (
+                    homeboy::core::notification_route::NOTIFICATION_ROUTE_ENV,
+                    "opaque-destination".to_string()
+                ),
+            ]
+        );
+    }
+
+    /// Half a pair is a hard validation error in the child, so propagation is
+    /// all-or-nothing.
+    ///
+    /// A cook launched without CLI values can still legitimately inherit a
+    /// route from this test process's own environment, so the deterministic
+    /// assertion is the all-or-nothing rule rather than a fixed count.
+    #[test]
+    fn a_detached_cook_never_propagates_half_a_route() {
+        assert!(homeboy::core::notification_route::child_env(None).is_empty());
+
+        let (cli, _) = cook_cli(&["--placement", "local", "--detach-after-handoff"]);
+
+        let propagated =
+            homeboy::core::notification_route::child_env(detached_route(&cli).as_ref());
+        assert!(
+            propagated.is_empty() || propagated.len() == 2,
+            "propagated {propagated:?}"
+        );
     }
 
     /// The rejection this replaces was unconditional. Preserving it inside a

@@ -45,9 +45,21 @@ the higher-level system model and core/extension boundary, see
 
 Notification caller context can be supplied per process with
 `HOMEBOY_NOTIFICATION_TRANSPORT` and `HOMEBOY_NOTIFICATION_ROUTE`; both are
-required together. Explicit `--notification-transport` and
-`--notification-route` CLI values take precedence over these environment
-variables.
+required together, and setting only one is an error.
+
+A run resolves its destination in this order, most explicit first:
+
+1. Explicit `--notification-transport` and `--notification-route` CLI values.
+2. `HOMEBOY_NOTIFICATION_TRANSPORT` and `HOMEBOY_NOTIFICATION_ROUTE`.
+3. The route persisted on the durable run record, which is what lets a run
+   resumed in another process — `cook --continue`, controller adoption, a
+   claimed continuation — keep reporting to the destination that launched it.
+
+Homeboy sets both environment variables on the child processes it spawns when a
+route is in scope, so a detached or deferred run inherits its caller's
+destination. They are always written as a pair or not at all. The route itself
+is an opaque, non-secret value owned by the transport; credentials belong to the
+transport extension, never to the route.
 
 ## Storage Locations
 

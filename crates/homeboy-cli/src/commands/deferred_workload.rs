@@ -333,9 +333,11 @@ fn dispatch_record(
         )
     })?;
     let args = child_args(record, runner_id);
+    let route = record_notification_route(record);
     let mut child = Command::new(executable)
         .args(&args[1..])
         .env("HOMEBOY_DEFERRED_WORKLOAD_REPLAY", "1")
+        .envs(homeboy::core::notification_route::child_env(route.as_ref()))
         .spawn()
         .map_err(|error| {
             homeboy::core::Error::internal_io(
@@ -365,6 +367,40 @@ fn dispatch_record(
         }
         thread::sleep(Duration::from_secs(1));
     }
+}
+
+/// The destination a deferred workload's notifications belong to.
+///
+/// Read from the record's own persisted argv, never from the worker's ambient
+/// route. The deferred-workload worker is a long-lived singleton that claims
+/// records deferred by unrelated callers; propagating the worker's own route
+/// would deliver every deferred workload's notifications to whoever happened to
+/// start the worker, which is a mis-attribution rather than a fix.
+///
+/// A record deferred by a caller who supplied the route through the environment
+/// rather than argv still cannot be recovered here, because the route is not
+/// persisted on the record. That gap belongs to the deferral producer.
+fn record_notification_route(
+    record: &deferred_workload::DeferredWorkload,
+) -> Option<homeboy::core::notification_route::NotificationRoute> {
+    let transport = argv_flag_value(&record.args, "--notification-transport")?;
+    let route = argv_flag_value(&record.args, "--notification-route")?;
+    // Observability must never fail a dispatch, so a malformed persisted pair
+    // is dropped rather than propagated or raised.
+    homeboy::core::notification_route::NotificationRoute::new(transport, route).ok()
+}
+
+/// The value of `flag` in an argv, covering both spellings clap accepts:
+/// a separated `--flag value` and an attached `--flag=value`.
+fn argv_flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    let attached = format!("{flag}=");
+    args.iter().enumerate().find_map(|(index, arg)| {
+        if arg == flag {
+            args.get(index + 1).map(String::as_str)
+        } else {
+            arg.strip_prefix(attached.as_str())
+        }
+    })
 }
 
 fn child_args(record: &deferred_workload::DeferredWorkload, runner_id: &str) -> Vec<String> {
@@ -468,6 +504,88 @@ mod tests {
             },
             job_overrides: Default::default(),
         }
+    }
+
+    fn input_with_args(extra: &[&str]) -> deferred_workload::DeferredWorkloadInput {
+        let mut input = input();
+        input
+            .args
+            .extend(extra.iter().map(|value| value.to_string()));
+        input
+    }
+
+    /// A deferred workload is replayed by a separate worker process, so its
+    /// route reaches the dispatched child only through the child environment.
+    #[test]
+    fn a_deferred_workload_child_carries_the_recorded_route() {
+        crate::test_support::with_isolated_home(|_| {
+            let record = deferred_workload::defer(input_with_args(&[
+                "--notification-transport",
+                "extension.run-completion",
+                "--notification-route",
+                "opaque-destination",
+            ]))
+            .expect("defer routed workload");
+
+            let route = record_notification_route(&record).expect("recorded route resolves");
+
+            assert_eq!(
+                homeboy::core::notification_route::child_env(Some(&route)),
+                vec![
+                    (
+                        homeboy::core::notification_route::NOTIFICATION_TRANSPORT_ENV,
+                        "extension.run-completion".to_string()
+                    ),
+                    (
+                        homeboy::core::notification_route::NOTIFICATION_ROUTE_ENV,
+                        "opaque-destination".to_string()
+                    ),
+                ]
+            );
+        });
+    }
+
+    /// Half a pair is a hard validation error in the child, so a workload
+    /// deferred without a route must leave both variables untouched.
+    #[test]
+    fn a_deferred_workload_without_a_route_sets_neither_variable() {
+        crate::test_support::with_isolated_home(|_| {
+            let record = deferred_workload::defer(input()).expect("defer unrouted workload");
+
+            assert!(record_notification_route(&record).is_none());
+            assert!(homeboy::core::notification_route::child_env(None).is_empty());
+        });
+    }
+
+    /// An incomplete recorded pair cannot be completed, and a half-set child
+    /// environment would make the dispatched child fail to start.
+    #[test]
+    fn a_partially_recorded_route_propagates_nothing() {
+        crate::test_support::with_isolated_home(|_| {
+            let record = deferred_workload::defer(input_with_args(&[
+                "--notification-transport",
+                "extension.run-completion",
+            ]))
+            .expect("defer half-routed workload");
+
+            assert!(record_notification_route(&record).is_none());
+        });
+    }
+
+    #[test]
+    fn argv_flag_value_reads_both_spellings_clap_accepts() {
+        let separated = vec!["--notification-route".to_string(), "opaque".to_string()];
+        let attached = vec!["--notification-route=opaque".to_string()];
+
+        assert_eq!(
+            argv_flag_value(&separated, "--notification-route"),
+            Some("opaque")
+        );
+        assert_eq!(
+            argv_flag_value(&attached, "--notification-route"),
+            Some("opaque")
+        );
+        assert_eq!(argv_flag_value(&[], "--notification-route"), None);
     }
 
     #[test]
