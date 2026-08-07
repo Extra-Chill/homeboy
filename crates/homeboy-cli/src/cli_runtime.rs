@@ -979,6 +979,12 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
     let Some(run_id) = run_id else {
         return Ok(None);
     };
+    if let Some(pinned) =
+        crate::agents::agent_tasks::lifecycle::runner_pinned_runtime_for_mutation(run_id)?
+    {
+        return delegate_agent_task_lifecycle_to_runner_pinned_runtime(&pinned, normalized_args)
+            .map(Some);
+    }
     let Some(pinned) = crate::agents::agent_tasks::lifecycle::pinned_runtime_for_mutation(run_id)?
     else {
         return Ok(None);
@@ -1010,7 +1016,8 @@ fn delegate_cook_continue_to_pinned_runtime(
     if let Some(pinned) =
         crate::agents::agent_tasks::lifecycle::runner_pinned_runtime_for_mutation(&run_id)?
     {
-        return delegate_cook_continue_to_runner_pinned_runtime(&pinned, normalized_args).map(Some);
+        return delegate_agent_task_lifecycle_to_runner_pinned_runtime(&pinned, normalized_args)
+            .map(Some);
     }
     let Some(pinned) = crate::agents::agent_tasks::lifecycle::pinned_runtime_for_mutation(&run_id)?
     else {
@@ -1031,7 +1038,7 @@ fn delegate_cook_continue_to_pinned_runtime(
     Ok(Some(status.code().unwrap_or(1)))
 }
 
-fn delegate_cook_continue_to_runner_pinned_runtime(
+fn delegate_agent_task_lifecycle_to_runner_pinned_runtime(
     pinned: &crate::agents::agent_tasks::lifecycle::RunnerPinnedRuntime,
     normalized_args: &[String],
 ) -> homeboy::core::Result<i32> {
@@ -1044,12 +1051,34 @@ fn delegate_cook_continue_to_runner_pinned_runtime(
             raw_exec: true,
             ..Default::default()
         },
-    )?;
+    )
+    .map_err(|error| annotate_runner_pinned_runtime_failure(error, &pinned.runner_id))?;
     if !output.stderr.is_empty() {
         eprint!("{}", output.stderr);
     }
     print!("{}", output.stdout);
     Ok(exit_code)
+}
+
+fn annotate_runner_pinned_runtime_failure(
+    mut error: homeboy::core::Error,
+    runner_id: &str,
+) -> homeboy::core::Error {
+    error.message = format!(
+        "runner `{runner_id}` could not execute its pinned controller runtime: {}",
+        error.message
+    );
+    if !error.details.is_object() {
+        error.details = serde_json::json!({});
+    }
+    error.details["runner_id"] = serde_json::json!(runner_id);
+    error.details["next_actions"] = serde_json::json!([
+        format!("homeboy runner status {runner_id}"),
+        format!("homeboy runner connect {runner_id}")
+    ]);
+    error.with_hint(format!(
+        "Verify runner `{runner_id}` is reachable, then retry the exact durable command."
+    ))
 }
 
 /// A terminal recipe-bound continuation is controller-owned. Provider execution
@@ -3138,6 +3167,85 @@ mod tests {
                 .expect("explicit local continuation stays on the controller"),
             None
         );
+    }
+
+    #[test]
+    fn run_delegates_a_runner_owned_linux_v2_pin_before_controller_validation() {
+        crate::test_support::with_isolated_home(|_| {
+            let run_id = "runner-owned-linux-v2-run";
+            let plan: crate::agents::agent_tasks::scheduler::AgentTaskPlan = serde_json::from_str(
+                include_str!("../../../tests/fixtures/agent_task_smoke_plan.json"),
+            )
+            .expect("deserialize durable test plan");
+            crate::agents::agent_tasks::lifecycle::submit_plan(&plan, Some(run_id))
+                .expect("persist durable run");
+            crate::agents::agent_tasks::lifecycle::record_detached_lab_run(
+                crate::agents::agent_tasks::lifecycle::DetachedLabRunRecord {
+                    run_id,
+                    runner_id: "homeboy-lab",
+                    runner_job_id: "linux-v2-pin-job",
+                    remote_workspace: "/home/chubes/reaped-lab-workspace",
+                    remote_command: &[
+                        "homeboy".to_string(),
+                        "agent-task".to_string(),
+                        "run".to_string(),
+                    ],
+                },
+            )
+            .expect("persist runner authority");
+            crate::agents::agent_tasks::lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata[homeboy::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
+                    serde_json::json!({
+                        "schema": "homeboy/controller-runtime-pin/v2",
+                        "originating": {
+                            "build_identity": "homeboy linux-runner",
+                            "pinned_executable": "/home/chubes/.local/share/homeboy/controller-runtimes/linux/homeboy",
+                            "sha256": "linux-runner-sha256"
+                        }
+                    });
+            })
+            .expect("persist runner-owned v2 pin");
+
+            let cli = Cli::parse_from([
+                "homeboy",
+                "--runner",
+                "homeboy-lab",
+                "agent-task",
+                "run",
+                run_id,
+            ]);
+            let error = delegate_agent_task_lifecycle_to_pinned_runtime(
+                &cli,
+                &argv(&[
+                    "homeboy",
+                    "--runner",
+                    "homeboy-lab",
+                    "agent-task",
+                    "run",
+                    run_id,
+                ]),
+            )
+            .expect_err("the unavailable persisted runner must fail closed");
+
+            assert!(
+                !error.message.contains("pinned controller executable is missing"),
+                "runner authority must be selected before controller-local path validation: {error}"
+            );
+            assert!(
+                error.to_string().contains("homeboy-lab"),
+                "runner failure must identify the recorded authority: {error}"
+            );
+            assert_eq!(
+                error.details["next_actions"][0], "homeboy runner status homeboy-lab",
+                "runner recovery guidance must be durable and specific: {error}"
+            );
+            assert_eq!(
+                crate::agents::agent_tasks::lifecycle::status(run_id)
+                    .expect("runner dispatch failure leaves the durable record intact")
+                    .run_id,
+                run_id
+            );
+        });
     }
 
     #[cfg(unix)]
