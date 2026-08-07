@@ -185,6 +185,8 @@ fn cook_detaches_local_placement_instead_of_rejecting_it() {
             "--detach-after-handoff",
             "agent-task",
             "cook",
+            "--backend",
+            "fixture",
             "--prompt",
             "implement the fix",
             "--to-worktree",
@@ -224,6 +226,17 @@ fn cook_detaches_local_placement_instead_of_rejecting_it() {
         format!("homeboy agent-task status {cook_id}"),
         "{stdout}"
     );
+    for operation in ["status", "logs", "cancel"] {
+        let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+        command.args(["agent-task", operation, cook_id]);
+        let output = bounded_output(command);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success()
+                || (operation == "cancel" && stdout.contains("already terminal")),
+            "{operation} must resolve the returned detached Cook id: {stdout}"
+        );
+    }
     let pid = envelope["pid"]
         .as_u64()
         .unwrap_or_else(|| panic!("handoff names the detached pid\n{stdout}"));
