@@ -86,6 +86,9 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         (HttpMethod::Get, ["activity", id]) => Ok(HttpEndpoint::ActivityItem {
             id: (*id).to_string(),
         }),
+        (HttpMethod::Get, ["agent-task", "runs", id]) => Ok(HttpEndpoint::AgentTaskRun {
+            id: (*id).to_string(),
+        }),
         (HttpMethod::Get, ["jobs"]) => Ok(HttpEndpoint::Jobs),
         (HttpMethod::Get, ["jobs", id]) => Ok(HttpEndpoint::Job {
             id: (*id).to_string(),
@@ -145,6 +148,7 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /bench/runs".to_string(),
                 "GET /activity".to_string(),
                 "GET /activity/:id".to_string(),
+                "GET /agent-task/runs/:id".to_string(),
                 "GET /jobs".to_string(),
                 "GET /jobs/:id".to_string(),
                 "GET /jobs/:id/events".to_string(),
@@ -274,6 +278,7 @@ where
             "command": "api.activity.show",
             "activity": activity::show_activity(id)?,
         }),
+        HttpEndpoint::AgentTaskRun { id } => agent_task_run(id)?,
         HttpEndpoint::Jobs => {
             let active_runner_jobs = job_store.active_runner_jobs();
             let stale_runner_jobs = job_store.stale_runner_jobs();
@@ -343,6 +348,119 @@ where
         endpoint: endpoint.name().to_string(),
         body,
     })
+}
+
+/// Upper bound on an accepted agent-task run id.
+///
+/// The id arrives as a raw URL path segment and is handed to a durable-store
+/// lookup. Every real id is a slug or a UUID-suffixed Cook attempt well under
+/// this, so the bound costs nothing and keeps an adversarial multi-kilobyte
+/// segment from reaching the record store — the same discipline
+/// `daemon_endpoint_identity` applies to its nonce.
+const MAX_AGENT_TASK_RUN_ID_LEN: usize = 256;
+
+/// `GET /agent-task/runs/:id` — the durable agent-task run projection.
+///
+/// # This is a pure read, deliberately
+///
+/// The CLI's `agent-task status` is `agent_task_lifecycle::status()`, and it is
+/// a *reconciling read that writes*: it rewrites the durable record on the way
+/// out (admission status, candidate adoption, aggregate projection, terminal
+/// model repair) and, for a record that is not controller-local, performs a
+/// **live network probe of the runner**. Neither belongs behind this route:
+///
+/// 1. The daemon accept loop is serial — one connection is handled inline
+///    before the next is accepted. A read whose latency is a remote round trip
+///    stalls every other client of a long-lived shared process.
+/// 2. This module is the read-only contract. `require_run` already refuses the
+///    same reconciling facade for the same reason (#6768); a GET that mutates
+///    would contradict a decision this file has already made once.
+///
+/// So this route resolves through the **activity agent-task provider**, whose
+/// `probe_by_id` is documented as an indexed, non-mutating lookup precisely
+/// because `activity` is a read model that must not reconcile (#10308). It
+/// already understands Cook-id aliasing, so the id an operator was handed
+/// resolves here too.
+///
+/// The cost is honesty about staleness, not silence about it: the response
+/// carries `reconciles: false` and names the command that does reconcile.
+///
+/// # Bounding
+///
+/// Exactly one indexed probe. This is not `activity::show_activity`, which
+/// falls back to a full-corpus scan of up to 1000 records across three stores
+/// when the probes miss — unbounded work on a serial daemon, and wrong here
+/// anyway, since a non-agent-task id has no business resolving on an
+/// agent-task route.
+///
+/// # Redaction
+///
+/// The `ActivityItem` projection is a typed, field-by-field allowlist built by
+/// the agent-task provider, matching the discipline the controller-job
+/// `public_*` projections apply to cook job state. It carries ids, timestamps,
+/// state, and evidence *references* — `command` and `cwd` are `None` for an
+/// agent-task record, and no provider output, prompt, or error text is
+/// reachable through it.
+fn agent_task_run(run_id: &str) -> Result<Value> {
+    if run_id.len() > MAX_AGENT_TASK_RUN_ID_LEN {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!("agent-task run id exceeds {MAX_AGENT_TASK_RUN_ID_LEN} bytes"),
+            None,
+            None,
+        ));
+    }
+
+    // A failing probe is reported as a miss with a flag, never with its message.
+    // Error text from this subsystem can quote durable record contents, and the
+    // daemon copies `message`/`details` straight into the response body. The
+    // caller still learns that the lookup itself failed — that is what
+    // `probe_failed` is for — without being handed the text.
+    let probe = activity::agent_task_provider::probe_by_id(run_id);
+    let probe_failed = probe.is_err();
+    let Some(run) = probe.unwrap_or(None) else {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!("agent-task run not found: {run_id}"),
+            Some(run_id.to_string()),
+            Some(vec![
+                if probe_failed {
+                    "The agent-task record lookup failed; run `homeboy agent-task status <id>` for the reconciling read."
+                } else {
+                    "Run `homeboy agent-task active` to list agent-task runs."
+                }
+                .to_string(),
+            ]),
+        ));
+    };
+
+    Ok(json!({
+        "command": "api.agent_task.runs.show",
+        // The resolved id, which is not always the requested one: a Cook id is
+        // an alias for its latest attempt record.
+        "run_id": run.id.clone(),
+        "requested_id": run_id,
+        "run": run,
+        "projection": {
+            "source": "agent-task.lifecycle",
+            // A GET that mutates is a decision, not an accident. This one does
+            // not, and says so rather than leaving a caller to assume freshness.
+            "reconciles": false,
+            "probe_failed": probe_failed,
+            "reconcile_with": "homeboy agent-task status",
+        },
+        // A run is not a job: the job supervises the run. Cook and fanout are
+        // both controller jobs, so watching and cancelling a detached run is
+        // already the generic controller-job surface — named here so an
+        // orchestrator does not have to rediscover it.
+        "job_surface": {
+            "list": "/jobs",
+            "show": "/jobs/:job_id",
+            "events": "/jobs/:job_id/events",
+            "cancel": "/controller/jobs/:job_id/cancel",
+            "note": "POST /jobs/:id/cancel refuses controller jobs; controller-owned work is cancelled through its driver so the driver can stop the work it owns.",
+        },
+    }))
 }
 
 fn activity_scope_for_path(path: &str) -> activity::ActivityScope {
