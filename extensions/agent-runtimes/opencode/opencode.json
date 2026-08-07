@@ -117,7 +117,8 @@
         "live_progress_events",
         "nested_orchestrator",
         "run_scoped_scratch",
-        "runtime_tool_attachment"
+        "runtime_tool_attachment",
+        "workspace_permission_root/v1"
       ],
       "workspace_materialization": {
         "cwd": "git_checkout",

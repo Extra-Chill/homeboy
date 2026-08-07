@@ -131,6 +131,7 @@ assert.equal(provider.capabilities.includes('patch_artifacts'), true);
 assert.equal(provider.capabilities.includes('run_scoped_scratch'), true);
 assert.equal(provider.capabilities.includes('runtime_tool_attachment'), true);
 assert.equal(provider.capabilities.includes('live_progress_events'), true);
+assert.equal(provider.capabilities.includes('workspace_permission_root/v1'), true);
 assert.equal(provider.capabilities.includes('browser_runtime'), false);
 
 const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'opencode.json'), 'utf8'));
@@ -339,8 +340,9 @@ assert.equal(config.agent.title.disable, true);
 	const permissionWorkspaces = [
 		{
 			label: 'controller-scratch',
-			attemptRoot: path.join(root, 'controller-scratch', 'wp-codebox-1825-gate-fix-2d'),
-			workspace: path.join(root, 'controller-scratch', 'wp-codebox-1825-gate-fix-2d', 'workspace'),
+			attemptRoot: path.join(root, 'controller-scratch', 'cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874'),
+			workspace: path.join(root, 'controller-scratch', 'cook-detached-37abbb52-d638495c-b270-46fdc965fc9c-attempt-1-fb890874', 'workspace'),
+			workspacePermissionRoot: path.join(root, 'controller-scratch', 'cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874', 'workspace'),
 			workspaceConfig: 'cwd',
 			allowAttemptRoot: true,
 		},
@@ -367,6 +369,9 @@ assert.equal(config.agent.title.disable, true);
 	const ambientTmpdir = path.join(root, 'ambient-process-tmpdir');
 	for (const permissionWorkspace of permissionWorkspaces) {
 		fs.mkdirSync(permissionWorkspace.workspace, { recursive: true });
+		if (permissionWorkspace.workspacePermissionRoot) {
+			fs.mkdirSync(permissionWorkspace.workspacePermissionRoot, { recursive: true });
+		}
 		spawnSync('git', ['init'], { cwd: permissionWorkspace.workspace, encoding: 'utf8' });
 		spawnSync('git', ['commit', '--allow-empty', '-m', 'initial'], {
 			cwd: permissionWorkspace.workspace,
@@ -380,7 +385,8 @@ assert.equal(config.agent.title.disable, true);
 			},
 		});
 		const concreteWorkspace = concretePath(permissionWorkspace.workspace);
-		const workspacePattern = path.join(concreteWorkspace, '**');
+		const concretePermissionRoot = concretePath(permissionWorkspace.workspacePermissionRoot || permissionWorkspace.workspace);
+		const workspacePattern = path.join(concretePermissionRoot, '**');
 		const concreteAttemptRoot = permissionWorkspace.attemptRoot && concretePath(permissionWorkspace.attemptRoot);
 		const attemptRootPattern = concreteAttemptRoot && path.join(concreteAttemptRoot, '*');
 		const expectedAttemptRootPattern = permissionWorkspace.allowAttemptRoot ? attemptRootPattern : undefined;
@@ -453,6 +459,9 @@ process.exit(0);
 		} else {
 			workspaceRequest.workspace_path = permissionWorkspace.workspace;
 		}
+		if (permissionWorkspace.workspacePermissionRoot) {
+			workspaceRequest.executor.config.workspace_permission_root = permissionWorkspace.workspacePermissionRoot;
+		}
 		if (permissionWorkspace.attemptRoot) {
 			workspaceRequest.executor.config.runtime_env.TMPDIR = permissionWorkspace.attemptRoot;
 		}
@@ -499,6 +508,12 @@ process.exit(0);
 			externalDirectoryAction(generatedConfig, 'build', path.join(root, 'controller-scratch', 'unrelated-attempt', '*')),
 			'deny'
 		);
+		if (permissionWorkspace.workspacePermissionRoot) {
+			assert.equal(
+				externalDirectoryAction(generatedConfig, 'build', path.join(concreteWorkspace, '**')),
+				'deny'
+			);
+		}
 		if (permissionWorkspace.label === 'controller-scratch') {
 			const opencode = spawnSync('opencode', ['--version'], { encoding: 'utf8' });
 			if (opencode.status === 0) {

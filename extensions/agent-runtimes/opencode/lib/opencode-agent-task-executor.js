@@ -86,6 +86,7 @@ const OPENCODE_CAPABILITIES = [
 	'nested_orchestrator',
 	'run_scoped_scratch',
 	'runtime_tool_attachment',
+	'workspace_permission_root/v1',
 ];
 
 const OPENCODE_COMMAND = 'node {{runtime_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs';
@@ -334,7 +335,7 @@ function opencodeExternalDirectoryPatterns(request = {}, config = {}) {
 		return [];
 	}
 
-	const concreteWorkspace = concretePath(resolveOpenCodeCwd(request, config));
+	const concreteWorkspace = concretePath(opencodeWorkspacePermissionRoot(request, config));
 	const patterns = [...workspacePatterns];
 	const attemptRoot = config.runtime_env?.TMPDIR;
 	if (isAbsolutePath(attemptRoot)) {
@@ -349,8 +350,12 @@ function opencodeExternalDirectoryPatterns(request = {}, config = {}) {
 }
 
 function opencodeWorkspaceReadPatterns(request = {}, config = {}) {
-	const cwd = resolveOpenCodeCwd(request, config);
-	return isAbsolutePath(cwd) ? [path.join(concretePath(cwd), '**')] : [];
+	const workspaceRoot = opencodeWorkspacePermissionRoot(request, config);
+	return isAbsolutePath(workspaceRoot) ? [path.join(concretePath(workspaceRoot), '**')] : [];
+}
+
+function opencodeWorkspacePermissionRoot(request = {}, config = {}) {
+	return config.workspace_permission_root || resolveOpenCodeCwd(request, config);
 }
 
 function concretePath(candidate) {
