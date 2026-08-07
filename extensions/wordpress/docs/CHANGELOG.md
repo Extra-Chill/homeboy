@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.41] - 2026-08-07
+
+### Fixed
+- resolve PHPStan config paths
+
 ## [3.34.40] - 2026-08-06
 
 ### Changed
