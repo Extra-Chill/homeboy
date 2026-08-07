@@ -253,6 +253,28 @@ const MIGRATIONS: &[Migration] = &[
             WHERE kind = 'runner_exec_recovery' AND status = 'running';
         "#,
     },
+    Migration {
+        // A short opaque handle is the only artifact identifier exposed by the
+        // bounded evidence projection. It is derived from immutable ownership
+        // identity and indexed so handle lookup never needs a run-id selector.
+        version: 15,
+        sql: r#"
+        ALTER TABLE artifacts ADD COLUMN artifact_handle TEXT;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_handle
+            ON artifacts(artifact_handle);
+        "#,
+    },
+    Migration {
+        // Rust backfill records the full-report rank semantics once, avoiding
+        // SQLite numeric coercion when a bounded projection selects a diagnostic.
+        version: 16,
+        sql: r#"
+        ALTER TABLE artifacts ADD COLUMN failure_diagnostic INTEGER;
+        ALTER TABLE artifacts ADD COLUMN failure_diagnostic_rank TEXT;
+        CREATE INDEX IF NOT EXISTS idx_artifacts_failure_diagnostic
+            ON artifacts(run_id, failure_diagnostic, failure_diagnostic_rank);
+        "#,
+    },
 ];
 
 /// The schema version a freshly initialized store lands on.

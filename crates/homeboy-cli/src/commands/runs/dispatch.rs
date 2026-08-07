@@ -139,7 +139,7 @@ impl RunsArgs {
             | RunsCommand::Proof { run_id, .. }
             | RunsCommand::Dossier { run_id, .. }
             | RunsCommand::ResumePlan { run_id }
-            | RunsCommand::Evidence { run_id }
+            | RunsCommand::Evidence { run_id, .. }
             | RunsCommand::Env { run_id } => (
                 format!(
                     "Lab-offloaded run records are mirrored locally; inspect run `{run_id}` with `homeboy runs show {run_id}` without --runner."
@@ -218,7 +218,18 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
             presentation: _,
         } => dossier::runs_dossier(&run_id),
         RunsCommand::ResumePlan { run_id } => handlers::resume_plan(&run_id),
-        RunsCommand::Evidence { run_id } => evidence::evidence(&run_id),
+        RunsCommand::Evidence {
+            run_id,
+            full,
+            field,
+        } => {
+            let (output, exit_code) = evidence::evidence_projection(&run_id, full)?;
+            if field.is_empty() {
+                Ok((output, exit_code))
+            } else {
+                handlers::apply_field_selection(output, &field)
+            }
+        }
         RunsCommand::Env { run_id } => handlers::env(&run_id),
         RunsCommand::Artifacts(args) => handlers::artifacts_from_args(args),
         RunsCommand::Artifact(args) => handlers::artifact_command(args),
