@@ -248,6 +248,10 @@ pub struct CancelArgs {
 #[derive(Args, Debug)]
 pub struct ReviewArgs {
     pub run_id: String,
+    /// Include complete lifecycle, promotion, and gate evidence. The default
+    /// keeps one actionable candidate and bounded gate findings.
+    #[arg(long)]
+    pub full: bool,
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: Option<String>,
     #[arg(

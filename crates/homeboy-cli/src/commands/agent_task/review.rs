@@ -32,6 +32,7 @@ use homeboy::core::config;
 use homeboy::core::gate::HomeboyGateResult;
 
 use super::super::CmdResult;
+use super::candidate::{canonical_candidate_projection, classify_candidates};
 use super::{
     AdoptArgs, FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs,
     RecordReplacementGateProofArgs, ReviewArgs,
@@ -309,7 +310,86 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
         value["candidate_selection"] = selection;
     }
     super::status::bound_full_reader_payload(&mut value);
-    Ok((value, 0))
+    Ok((compact_review(value, args.full), 0))
+}
+
+/// Default review output is an actionable handoff, not a second copy of every
+/// lifecycle and gate record. Full evidence remains available through --full.
+fn compact_review(value: Value, full: bool) -> Value {
+    if full {
+        return value;
+    }
+    let run_id = value
+        .get("run_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let canonical_candidate = canonical_candidate_projection(classify_candidates(&value));
+    let promotion = value.pointer("/record/metadata/latest_promotion");
+    let selected_candidate = promotion
+        .map(compact_selected_candidate)
+        .unwrap_or(Value::Null);
+    let gates = promotion
+        .and_then(|promotion| promotion.get("deterministic_gates"))
+        .and_then(Value::as_array)
+        .map(|gates| {
+            gates
+                .iter()
+                .map(|gate| compact_fields(gate, &["name", "status", "exit_code", "command"]))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    serde_json::json!({
+        "schema": value.get("schema"),
+        "view": "summary",
+        "run_id": value.get("run_id"),
+        "state": value.get("state"),
+        "plan_id": value.get("plan_id"),
+        "plan_path": value.get("plan_path"),
+        "aggregate_path": value.get("aggregate_path"),
+        "aggregate_review": { "summary": value.pointer("/aggregate_review/summary") },
+        "diagnostic_summary": value.get("diagnostic_summary"),
+        "failure_reasons": value.get("failure_reasons"),
+        "execution_states": value.get("execution_states"),
+        "canonical_candidate": canonical_candidate,
+        "selected_candidate": selected_candidate,
+        "gates": gates,
+        "promotion_candidates": value.get("promotion_candidates"),
+        "next_actions": value.get("next_actions"),
+        "candidate_selection": value.get("candidate_selection"),
+        "contributing_attempt": value.get("contributing_attempt"),
+        "durable_read": value.get("durable_read"),
+        "full_command": format!("homeboy agent-task review {run_id} --full"),
+    })
+}
+
+fn compact_selected_candidate(promotion: &Value) -> Value {
+    let artifact = promotion
+        .get("patch_artifact")
+        .or_else(|| promotion.get("patch"))
+        .map(|artifact| compact_fields(artifact, &["id", "kind", "path", "sha256"]));
+    let size_bytes = artifact
+        .as_ref()
+        .and_then(|artifact| artifact.get("path"))
+        .and_then(Value::as_str)
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|metadata| metadata.len());
+    serde_json::json!({
+        "status": promotion.get("status"),
+        "task_id": promotion.pointer("/source/task_id").or_else(|| promotion.get("task_id")),
+        "artifact": artifact,
+        "size_bytes": size_bytes,
+        "changed_files": promotion.get("changed_files"),
+    })
+}
+
+fn compact_fields(value: &Value, fields: &[&str]) -> Value {
+    let mut object = serde_json::Map::new();
+    for field in fields {
+        if let Some(value) = value.get(*field) {
+            object.insert((*field).to_string(), value.clone());
+        }
+    }
+    Value::Object(object)
 }
 
 pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
@@ -1744,6 +1824,56 @@ mod tests {
         assert!(serde_json::to_vec(&providers).expect("provider JSON").len() < 20_000);
         assert!(diagnostic["message"].as_str().expect("message").len() <= DEFAULT_TEXT_LIMIT + 3);
         assert_eq!(diagnostic["response_body"]["omitted_bytes"], 100_000);
+    }
+
+    #[test]
+    fn compact_review_preserves_one_promoted_candidate_fingerprint() {
+        let patch = tempfile::NamedTempFile::new().expect("patch");
+        std::fs::write(patch.path(), "x".repeat(7_635)).expect("write patch");
+        let value = compact_review(
+            serde_json::json!({
+                "schema": "homeboy/agent-task-review/v1",
+                "run_id": "agent-task-11805",
+                "state": "succeeded",
+                "record": {
+                    "metadata": {
+                        "latest_promotion": {
+                            "status": "applied",
+                            "source": { "task_id": "task-1" },
+                            "patch_artifact": {
+                                "id": "candidate",
+                                "kind": "patch",
+                                "path": patch.path(),
+                            },
+                            "changed_files": ["a.rs", "b.rs", "c.rs"],
+                            "deterministic_gates": [{
+                                "name": "cargo test",
+                                "status": "succeeded",
+                                "exit_code": 0,
+                                "command": ["cargo", "test"],
+                                "stdout": "large duplicate evidence"
+                            }]
+                        }
+                    }
+                },
+                "logs": { "events": ["large lifecycle payload"] },
+                "artifacts": { "artifacts": ["large lifecycle payload"] }
+            }),
+            false,
+        );
+
+        assert_eq!(value["selected_candidate"]["artifact"]["id"], "candidate");
+        assert_eq!(value["selected_candidate"]["size_bytes"], 7_635);
+        assert_eq!(
+            value["selected_candidate"]["changed_files"]
+                .as_array()
+                .map(Vec::len),
+            Some(3)
+        );
+        assert_eq!(value["gates"][0]["name"], "cargo test");
+        assert!(value.get("record").is_none());
+        assert!(value.get("logs").is_none());
+        assert!(value.get("artifacts").is_none());
     }
 
     #[test]

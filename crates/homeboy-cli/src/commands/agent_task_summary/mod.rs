@@ -354,6 +354,23 @@ fn code_production_lines(metrics: &CodeProductionMetrics) -> Vec<String> {
 fn code_production_metrics(payload: &Value) -> CodeProductionMetrics {
     let mut metrics = CodeProductionMetrics::default();
     let canonical = classify_candidates(payload);
+    if let Some(patch) = selected_candidate_patch(payload) {
+        match patch.size_bytes {
+            Some(size) if size > 0 => {
+                metrics.non_empty_patches = 1;
+                metrics.diff_bytes = size;
+                match patch.changed_files {
+                    Some(count) => metrics.changed_files = count,
+                    None => metrics.changed_files_unknown_patches = 1,
+                }
+            }
+            Some(_) => metrics.empty_patches = 1,
+            None => metrics.unknown_size_patches = 1,
+        }
+        metrics.candidate_state = canonical.state();
+        metrics.candidate_scan_degraded = canonical.is_degraded();
+        return metrics;
+    }
     if payload.get("aggregate").is_none()
         && payload
             .pointer("/canonical_candidate/schema")
@@ -421,7 +438,7 @@ fn collect_patch_artifacts(payload: &Value) -> Vec<PatchArtifact> {
     if let Some(inventory) =
         value_at(payload, &["aggregate_review", "artifact_inventory"]).and_then(Value::as_array)
     {
-        let candidate_ids = review_apply_candidate_ids(payload);
+        let candidate_ids = review_candidate_ids(payload);
         return inventory
             .iter()
             .filter_map(|item| {
@@ -509,28 +526,47 @@ fn collect_patch_artifacts(payload: &Value) -> Vec<PatchArtifact> {
     Vec::new()
 }
 
-fn review_apply_candidate_ids(payload: &Value) -> Vec<(&str, &str)> {
+fn review_candidate_ids(payload: &Value) -> Vec<(&str, &str)> {
     let mut ids = Vec::new();
-    let Some(candidates) =
-        value_at(payload, &["aggregate_review", "apply_candidates"]).and_then(Value::as_array)
-    else {
-        return ids;
-    };
-    for candidate in candidates {
-        let Some(task_id) = string_value(candidate, &["task_id"]) else {
-            continue;
-        };
-        let Some(artifact_ids) = value_at(candidate, &["artifact_ids"]).and_then(Value::as_array)
-        else {
-            continue;
-        };
-        for artifact_id in artifact_ids {
-            if let Some(artifact_id) = artifact_id.as_str() {
-                ids.push((task_id, artifact_id));
+    for kind in ["apply_candidates", "review_candidates"] {
+        if let Some(candidates) =
+            value_at(payload, &["aggregate_review", kind]).and_then(Value::as_array)
+        {
+            for candidate in candidates {
+                let Some(task_id) = string_value(candidate, &["task_id"]) else {
+                    continue;
+                };
+                let Some(artifact_ids) =
+                    value_at(candidate, &["artifact_ids"]).and_then(Value::as_array)
+                else {
+                    continue;
+                };
+                for artifact_id in artifact_ids {
+                    if let Some(artifact_id) = artifact_id.as_str() {
+                        ids.push((task_id, artifact_id));
+                    }
+                }
             }
         }
     }
     ids
+}
+
+fn selected_candidate_patch(payload: &Value) -> Option<PatchArtifact> {
+    let candidate = payload.get("selected_candidate")?;
+    let artifact = candidate.get("artifact")?;
+    let changed_files = candidate
+        .get("changed_files")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .or_else(|| resolve_changed_files(artifact));
+    Some(PatchArtifact {
+        size_bytes: candidate
+            .get("size_bytes")
+            .and_then(Value::as_u64)
+            .or_else(|| u64_value(artifact, &["size_bytes"])),
+        changed_files,
+    })
 }
 
 fn is_apply_kind(artifact: &Value) -> bool {
@@ -993,6 +1029,61 @@ mod tests {
             summary.contains("Changed files: 3\n"),
             "expected 3 changed files parsed from patch content, got: {summary}"
         );
+    }
+
+    #[test]
+    fn review_summary_uses_the_promoted_candidate_fingerprint() {
+        // A promoted candidate is no longer an apply candidate, but its durable
+        // promotion fingerprint remains the authoritative review summary source.
+        let payload = json!({
+            "run_id": "agent-task-11805",
+            "state": "succeeded",
+            "canonical_candidate": {
+                "schema": "homeboy/agent-task-candidate/v1",
+                "state": "promoted",
+                "diff_bytes": 0,
+                "counts": { "patch_available": 1 },
+                "scan": { "degraded": false }
+            },
+            "selected_candidate": {
+                "status": "applied",
+                "artifact": { "id": "candidate", "kind": "patch" },
+                "size_bytes": 7635,
+                "changed_files": ["a.rs", "b.rs", "c.rs"]
+            },
+            "aggregate_review": { "summary": { "apply_candidates": 0, "failed": 0 } },
+            "next_actions": ["finalize the pull request"]
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Review, &payload).unwrap();
+
+        assert!(summary.contains("Outcome: patch promoted\n"));
+        assert!(summary.contains("Changed files: 3\n"));
+        assert!(summary.contains("Diff bytes: 7635\n"));
+    }
+
+    #[test]
+    fn review_summary_counts_recoverable_candidate_artifacts() {
+        let payload = json!({
+            "run_id": "agent-task-11805-recoverable",
+            "state": "partial_failure",
+            "aggregate_review": {
+                "summary": { "apply_candidates": 0, "failed": 0 },
+                "review_candidates": [{ "task_id": "task", "artifact_ids": ["candidate"] }],
+                "artifact_inventory": [{
+                    "task_id": "task",
+                    "artifact_id": "candidate",
+                    "kind": "patch",
+                    "size_bytes": 7635,
+                    "metadata": { "changed_files": ["a.rs", "b.rs", "c.rs"] }
+                }]
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Review, &payload).unwrap();
+
+        assert!(summary.contains("Changed files: 3\n"));
+        assert!(summary.contains("Diff bytes: 7635\n"));
     }
 
     #[test]
