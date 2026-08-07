@@ -293,6 +293,7 @@ fn looks_like_signature_line(line: &str) -> bool {
 }
 
 pub(super) fn lint_finding_scope_files(
+    root: &Path,
     findings: &[homeboy_core::finding::HomeboyFinding],
 ) -> Vec<String> {
     let mut files = BTreeSet::new();
@@ -300,7 +301,16 @@ pub(super) fn lint_finding_scope_files(
         let Some(file) = finding.location.file.as_deref() else {
             continue;
         };
-        if let Some(normalized) = normalize_relative_release_path(file) {
+        let path = Path::new(file);
+        let path = if path.is_absolute() {
+            let Ok(path) = path.strip_prefix(root) else {
+                continue;
+            };
+            path
+        } else {
+            path
+        };
+        if let Some(normalized) = normalize_relative_release_path(&path.to_string_lossy()) {
             files.insert(normalized);
         }
     }
@@ -607,20 +617,27 @@ diff --git a/src/lib.php b/src/lib.php
                 .file("src/b.php")
                 .build(),
             homeboy_core::finding::HomeboyFinding::builder("lint", "message")
+                .file("/repo/src/c.php")
+                .build(),
+            homeboy_core::finding::HomeboyFinding::builder("lint", "message")
                 .file("./src/a.php")
                 .build(),
             homeboy_core::finding::HomeboyFinding::builder("lint", "message")
                 .file("src/b.php")
                 .build(),
             homeboy_core::finding::HomeboyFinding::builder("lint", "message")
-                .file("../outside.php")
+                .file("/outside.php")
                 .build(),
             homeboy_core::finding::HomeboyFinding::builder("lint", "message").build(),
         ];
 
         assert_eq!(
-            lint_finding_scope_files(&findings),
-            vec!["src/a.php".to_string(), "src/b.php".to_string()]
+            lint_finding_scope_files(Path::new("/repo"), &findings),
+            vec![
+                "src/a.php".to_string(),
+                "src/b.php".to_string(),
+                "src/c.php".to_string()
+            ]
         );
     }
 }

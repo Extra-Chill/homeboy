@@ -418,7 +418,7 @@ pub(super) fn run_lint_stage(
     // Diagnostics are the authoritative fallback scope for every invocation
     // shape. A glob identifies the diagnostic pass; its reported files select
     // the extension-declared fixer route. Explicit selected files still win.
-    let finding_scope_files = lint_finding_scope_files(&lint_findings);
+    let finding_scope_files = lint_finding_scope_files(root, &lint_findings);
     let fix_scope_files = requested_scope_files
         .or((!finding_scope_files.is_empty()).then_some(finding_scope_files.as_slice()));
     let (stage_changed_files, fix_results, stage_warnings) = if write && !lint_findings.is_empty() {
@@ -998,7 +998,7 @@ mod tests {
         fs::write(
             extension.join("lint.sh"),
             format!(
-                "#!/bin/sh\nset -eu\nfile=\"$HOMEBOY_COMPONENT_PATH/src/example.fixture\"\necho \"${{HOMEBOY_FIX_ONLY:-diagnose}}:${{HOMEBOY_STEP:-all}}:${{HOMEBOY_SUMMARY_MODE:-0}}\" >> \"$HOMEBOY_COMPONENT_PATH/runner.log\"\nif [ \"${{HOMEBOY_FIX_ONLY:-}}\" = 1 ]; then\n  [ \"${{HOMEBOY_STEP:-}}\" = fixture-fixer ] || exit 91\n  {}\n  exit 0\nfi\nif grep -q unresolved \"$file\"; then\n  printf '%s\\n' '[{{\"tool\":\"fixture\",\"file\":\"src/example.fixture\",\"message\":\"unresolved fixture finding\",\"rule\":\"fixture.rule\",\"fixable\":true}}]' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nelse\n  printf '%s\\n' '[]' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nfi\n",
+                "#!/bin/sh\nset -eu\nfile=\"$HOMEBOY_COMPONENT_PATH/src/example.fixture\"\necho \"${{HOMEBOY_FIX_ONLY:-diagnose}}:${{HOMEBOY_STEP:-all}}:${{HOMEBOY_SUMMARY_MODE:-0}}\" >> \"$HOMEBOY_COMPONENT_PATH/runner.log\"\nif [ \"${{HOMEBOY_FIX_ONLY:-}}\" = 1 ]; then\n  [ \"${{HOMEBOY_STEP:-}}\" = fixture-fixer ] || exit 91\n  {}\n  exit 0\nfi\nif grep -q unresolved \"$file\"; then\n  printf '%s\\n' \"[{{\\\"tool\\\":\\\"fixture\\\",\\\"file\\\":\\\"$file\\\",\\\"message\\\":\\\"unresolved fixture finding\\\",\\\"rule\\\":\\\"fixture.rule\\\",\\\"fixable\\\":true}}]\" > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nelse\n  printf '%s\\n' '[]' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nfi\n",
                 if mutates { "printf 'resolved\\n' > \"$file\"" } else { ":" }
             ),
         )
@@ -1067,7 +1067,7 @@ mod tests {
     }
 
     #[test]
-    fn local_lint_write_applies_routed_fixer_once_and_reports_changed_file() {
+    fn local_lint_write_routes_absolute_finding_path_to_declared_fixer() {
         homeboy_core::test_support::with_isolated_home(|home| {
             let root = tmp_dir("glob-routed-fix");
             init_routed_lint_repo(&root);
