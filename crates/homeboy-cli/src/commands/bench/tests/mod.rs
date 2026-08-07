@@ -426,6 +426,30 @@ fn first_warmup_metric(output: BenchOutput) -> f64 {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn conventional_workloads_under_a_symlinked_component_root_are_filtered() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("temp root");
+    let component = root.path().join("component");
+    let workload = component.join("bench/fixture.bench.mjs");
+    fs::create_dir_all(workload.parent().expect("bench parent")).expect("create bench directory");
+    fs::write(&workload, "// fixture\n").expect("write workload");
+    let alias = root.path().join("component-alias");
+    symlink(&component, &alias).expect("symlink component");
+
+    let filtered = filter_component_conventional_bench_workloads(
+        vec![workload],
+        Some(alias.to_string_lossy().as_ref()),
+    );
+
+    assert!(
+        filtered.is_empty(),
+        "aliased component roots share an identity"
+    );
+}
+
 fn list_args(component: Option<&str>, rig: Vec<String>) -> BenchListArgs {
     BenchListArgs {
         comp: PositionalComponentArgs {

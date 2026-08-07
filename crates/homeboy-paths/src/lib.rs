@@ -331,6 +331,17 @@ pub fn normalize_local_path(path: impl AsRef<Path>) -> PathBuf {
     }
 }
 
+/// Resolve an existing local path to its filesystem identity, falling back to
+/// lexical normalization when the path does not exist yet.
+///
+/// This makes aliases such as symlinked roots and macOS's `/var` ->
+/// `/private/var` resolve to one identity without conflating distinct paths
+/// that cannot be canonicalized.
+pub fn canonical_or_normalized_local_path(path: impl AsRef<Path>) -> PathBuf {
+    let path = path.as_ref();
+    std::fs::canonicalize(path).unwrap_or_else(|_| normalize_local_path(path))
+}
+
 /// Render each path component as a lossy UTF-8 string, in order.
 ///
 /// Centralizes the `path.components()` + `as_os_str().to_string_lossy()`

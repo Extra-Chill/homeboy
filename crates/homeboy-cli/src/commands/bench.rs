@@ -1043,6 +1043,8 @@ pub(crate) fn filter_component_conventional_bench_workloads(
 }
 
 fn is_component_conventional_bench_workload(path: &Path, component_root: &Path) -> bool {
+    let path = homeboy::core::paths::canonical_or_normalized_local_path(path);
+    let component_root = homeboy::core::paths::canonical_or_normalized_local_path(component_root);
     let Ok(relative) = path.strip_prefix(component_root) else {
         return false;
     };

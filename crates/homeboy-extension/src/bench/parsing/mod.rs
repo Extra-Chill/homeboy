@@ -65,7 +65,7 @@ mod normalize;
 mod validate;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use homeboy_core::error::{Error, Result};
 use homeboy_core::structured_sidecar;
@@ -218,7 +218,8 @@ fn resolve_duplicate_scenario_ids(
         return Ok(());
     };
 
-    let preferred_workspace_path = preferred_workspace_path.map(lexical_normalize_path);
+    let preferred_workspace_path =
+        preferred_workspace_path.map(homeboy_core::paths::canonical_or_normalized_local_path);
     let mut seen_id_paths = BTreeSet::new();
     scenarios.retain(|scenario| {
         let Some(id) = scenario.get("id").and_then(serde_json::Value::as_str) else {
@@ -351,26 +352,12 @@ fn display_path_key(path: &str, base_path: Option<&Path>) -> String {
 fn path_with_base(path: &str, base_path: Option<&Path>) -> PathBuf {
     let path = PathBuf::from(path);
     if path.is_absolute() {
-        lexical_normalize_path(&path)
+        homeboy_core::paths::canonical_or_normalized_local_path(path)
     } else if let Some(base_path) = base_path {
-        lexical_normalize_path(&base_path.join(path))
+        homeboy_core::paths::canonical_or_normalized_local_path(base_path.join(path))
     } else {
-        lexical_normalize_path(&path)
+        homeboy_core::paths::canonical_or_normalized_local_path(path)
     }
-}
-
-fn lexical_normalize_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized
 }
 
 #[cfg(test)]
@@ -450,6 +437,67 @@ mod tests {
         assert_eq!(parsed.scenarios.len(), 1);
         assert_eq!(parsed.scenarios[0].id, "static-site-fixture-matrix");
         assert_eq!(parsed.scenarios[0].metrics.get("p95_ms"), Some(1.0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn duplicate_scenario_ids_from_symlinked_workspace_are_deduped() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("temp root");
+        let workspace = root.path().join("workspace");
+        let bench = workspace.join("bench");
+        std::fs::create_dir_all(&bench).expect("create bench directory");
+        let workload = bench.join("fixture.bench.mjs");
+        std::fs::write(&workload, "// fixture\n").expect("write workload");
+        let alias = root.path().join("workspace-alias");
+        symlink(&workspace, &alias).expect("symlink workspace");
+
+        let raw = format!(
+            r#"{{
+                "component_id": "example",
+                "iterations": 0,
+                "scenarios": [
+                    {{ "id": "fixture", "file": "{}", "iterations": 0, "metrics": {{}} }},
+                    {{ "id": "fixture", "file": "bench/fixture.bench.mjs", "iterations": 0, "metrics": {{}} }}
+                ]
+            }}"#,
+            alias.join("bench/fixture.bench.mjs").display(),
+        );
+
+        let parsed = parse_bench_results_str_with_artifact_context_scenarios_and_workspace(
+            &raw,
+            None,
+            &["fixture".to_string()],
+            Some(&workspace),
+        )
+        .expect("filesystem aliases should identify one scenario source");
+
+        assert_eq!(parsed.scenarios.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_scenario_ids_from_distinct_existing_files_are_diagnostic() {
+        let root = tempfile::tempdir().expect("temp root");
+        let first = root.path().join("one.bench.mjs");
+        let second = root.path().join("two.bench.mjs");
+        std::fs::write(&first, "// first\n").expect("write first workload");
+        std::fs::write(&second, "// second\n").expect("write second workload");
+        let raw = format!(
+            r#"{{
+                "component_id": "example",
+                "iterations": 0,
+                "scenarios": [
+                    {{ "id": "fixture", "file": "{}", "iterations": 0, "metrics": {{}} }},
+                    {{ "id": "fixture", "file": "{}", "iterations": 0, "metrics": {{}} }}
+                ]
+            }}"#,
+            first.display(),
+            second.display(),
+        );
+
+        let err = parse_bench_results_str(&raw).expect_err("distinct files must remain distinct");
+        assert!(err.to_string().contains("duplicate_scenario_id"));
     }
 
     #[test]

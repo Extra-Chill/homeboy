@@ -113,6 +113,70 @@ fn run_list_serializes_installed_rig_package_evidence() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn run_list_filters_installed_rig_workloads_discovered_under_a_component_alias() {
+    use std::os::unix::fs::symlink;
+
+    with_isolated_home(|home| {
+        write_bench_extension(home);
+        let fixture_root = tempfile::tempdir().expect("fixture root");
+        let component = fixture_root.path().join("component");
+        let conventional_workload = component.join("bench/fixture.bench.js");
+        fs::create_dir_all(conventional_workload.parent().expect("bench directory"))
+            .expect("create bench directory");
+        fs::write(&conventional_workload, "// fixture\n").expect("write workload");
+
+        let package_root = home.path().join("installed-rig-package");
+        let rig_dir = package_root.join("rigs/installed-alias-rig");
+        fs::create_dir_all(&rig_dir).expect("create rig directory");
+        fs::write(
+            rig_dir.join("rig.json"),
+            format!(
+                r#"{{
+                    "components": {{
+                        "studio": {{
+                            "path": "{}",
+                            "extensions": {{ "fixture-bench": {{}} }}
+                        }}
+                    }},
+                    "bench": {{ "default_component": "studio" }},
+                    "bench_workloads": {{ "fixture-bench": [
+                        {{ "path": "${{components.studio.path}}/bench/fixture.bench.js" }}
+                    ] }}
+                }}"#,
+                component.display()
+            ),
+        )
+        .expect("write rig");
+        homeboy::rig::install(
+            package_root.to_string_lossy().as_ref(),
+            Some("installed-alias-rig"),
+            false,
+        )
+        .expect("install rig");
+
+        let alias = fixture_root.path().join("component-alias");
+        symlink(&component, &alias).expect("symlink component");
+        let mut args = list_args(None, vec!["installed-alias-rig".to_string()]);
+        args.comp.path = Some(alias.to_string_lossy().into_owned());
+
+        let (output, exit_code) = run_list(&args).expect("list installed rig through alias");
+
+        assert_eq!(exit_code, 0);
+        match output {
+            BenchOutput::List(result) => {
+                assert_eq!(result.count, 3);
+                assert!(result
+                    .scenarios
+                    .iter()
+                    .all(|scenario| scenario.id != "fixture"));
+            }
+            _ => panic!("expected list output"),
+        }
+    });
+}
+
 #[test]
 fn run_list_prefers_enclosing_local_rig_package_over_installed_package() {
     let _guard = current_dir_lock().lock().expect("lock current dir");
