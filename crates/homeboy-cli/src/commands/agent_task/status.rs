@@ -393,7 +393,10 @@ fn cook_lifecycle_projection(
     };
     let publication = if !reported_success {
         "blocked"
-    } else if matches!(status.as_str(), "review_ready" | "green_no_finalize") {
+    } else if matches!(
+        status.as_str(),
+        "review_ready" | "draft_published" | "green_no_finalize"
+    ) {
         "completed"
     } else if matches!(status.as_str(), "gate_failed" | "finalization_failed") {
         "blocked"
@@ -443,7 +446,7 @@ fn finalization_state(record: &Value) -> String {
         .pointer("/metadata/cook_finalization/status")
         .and_then(Value::as_str)
         .map(|status| match status {
-            "review_ready" => "completed".to_string(),
+            "review_ready" | "draft_published" => "completed".to_string(),
             "failed" | "finalization_failed" => "finalization_failed".to_string(),
             "pending" | "finalization_pending" => "finalization_pending".to_string(),
             other => other.to_string(),
@@ -1249,21 +1252,34 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
                         "hydrated_evidence",
                         &mut nested_reasons,
                     );
+                    collect_process_stream_diagnostics(
+                        &outcome.task_id,
+                        summary
+                            .pointer("/summary/process_streams")
+                            .unwrap_or(&Value::Null),
+                        &mut nested_reasons,
+                    );
                     hydrated_evidence.push(summary);
                 }
             }
         }
     }
 
-    let root_cause = ranked_diagnostics(nested_reasons)
-        .into_iter()
+    let ranked_reasons = ranked_diagnostics(nested_reasons);
+    let root_cause = ranked_reasons
+        .first()
+        .cloned()
         .map(collected_diagnostic_value)
-        .next()
         .or_else(|| {
             aggregate
                 .as_ref()
                 .and_then(|aggregate| failure_reasons_from_aggregate(aggregate).into_iter().next())
         });
+    let diagnostic_chain = ranked_reasons
+        .into_iter()
+        .take(FAILURE_REASON_LIMIT)
+        .map(collected_diagnostic_value)
+        .collect::<Vec<_>>();
 
     let missing_artifacts = aggregate
         .as_ref()
@@ -1281,6 +1297,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         "run_id": record.run_id.clone(),
         "state": record.state,
         "root_cause": root_cause,
+        "diagnostic_chain": diagnostic_chain,
         "causal_chain": causal_chain,
         "missing_artifacts": missing_artifacts.clone(),
         "hydrated_evidence": hydrated_evidence,
@@ -2708,10 +2725,11 @@ fn ranked_diagnostics(collected: Vec<CollectedDiagnostic>) -> Vec<CollectedDiagn
         deduped.push(item);
     }
 
-    deduped.sort_by_key(|item| diagnostic_priority(&item.class, &item.message));
+    deduped.sort_by_key(diagnostic_priority);
     deduped
 }
 
+#[derive(Clone)]
 struct CollectedDiagnostic {
     task_id: String,
     class: String,
@@ -2723,9 +2741,14 @@ struct CollectedDiagnostic {
 /// (validation/fatal/registration/missing-path) are surfaced before generic or
 /// transient noise so the first reason an operator sees is the one worth acting
 /// on.
-fn diagnostic_priority(class: &str, message: &str) -> u8 {
-    let text = format!("{} {}", class, message).to_ascii_lowercase();
-    if text.contains("typed_artifacts_missing")
+fn diagnostic_priority(item: &CollectedDiagnostic) -> (u8, u8) {
+    let text = format!("{} {}", item.class, item.message).to_ascii_lowercase();
+    let priority = if text.contains("provider_malformed_json")
+        || text.contains("malformed executor")
+        || text.contains("outcome-normalization")
+    {
+        8
+    } else if text.contains("typed_artifacts_missing")
         || text.contains("required_typed_artifacts_missing")
         || text.contains("required typed artifacts")
         || text.contains("declared artifact result envelope")
@@ -2747,8 +2770,40 @@ fn diagnostic_priority(class: &str, message: &str) -> u8 {
         || text.contains("io")
     {
         3
+    } else if item.source == "hydrated_process_stream" {
+        4
     } else {
         9
+    };
+    // Stream provenance is causal only among equally actionable diagnostics;
+    // it must not hide a stronger typed validation or fatal failure.
+    (priority, u8::from(item.source != "hydrated_process_stream"))
+}
+
+/// Process streams are untrusted wrapper output. When a stream is JSON, its
+/// diagnostics are the execution-layer cause and therefore rank ahead of the
+/// wrapper's outcome-normalization consequence.
+fn collect_process_stream_diagnostics(
+    task_id: &str,
+    streams: &Value,
+    out: &mut Vec<CollectedDiagnostic>,
+) {
+    for stream in streams.as_array().into_iter().flatten() {
+        let Some(excerpt) = stream.get("excerpt").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Ok(value) = serde_json::from_str(excerpt) {
+            collect_nested_diagnostics(task_id, &value, "hydrated_process_stream", out);
+            continue;
+        }
+        if !excerpt.trim().is_empty() {
+            out.push(CollectedDiagnostic {
+                task_id: task_id.to_string(),
+                class: "provider.process_stream".to_string(),
+                message: excerpt.to_string(),
+                source: "hydrated_process_stream".to_string(),
+            });
+        }
     }
 }
 
@@ -3794,12 +3849,27 @@ fn evidence_is_test(kind: &str, uri: &str) -> bool {
 }
 
 fn collected_diagnostic_value(item: CollectedDiagnostic) -> Value {
+    let owner = diagnostic_owner(&item.class, &item.source);
     json!({
         "task_id": item.task_id,
         "class": item.class,
         "message": item.message,
         "source": item.source,
+        "owner": owner,
     })
+}
+
+fn diagnostic_owner(class: &str, source: &str) -> &'static str {
+    let class = class.to_ascii_lowercase();
+    if source == "hydrated_process_stream" {
+        "provider_runtime"
+    } else if class.contains("malformed") || class.contains("normalization") {
+        "executor_wrapper"
+    } else if class.contains("provider") || class.contains("runtime") {
+        "provider_runtime"
+    } else {
+        "agent_task"
+    }
 }
 
 fn missing_artifact_summaries(aggregate: &AgentTaskAggregate) -> Vec<Value> {

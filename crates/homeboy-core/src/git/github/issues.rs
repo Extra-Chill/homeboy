@@ -296,6 +296,7 @@ pub(super) fn parse_issue_list_json(
             title: i.title,
             body: i.body.unwrap_or_default(),
             url: i.url,
+            is_draft: false,
             state: i.state,
             state_reason: i.state_reason.unwrap_or_default(),
             closed_at: i.closed_at.unwrap_or_default(),

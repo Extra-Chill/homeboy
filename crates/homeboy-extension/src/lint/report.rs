@@ -69,6 +69,9 @@ pub fn from_main_workflow_with_ci_context(
             autofix: result.autofix,
             hints: result.hints,
             baseline_comparison: result.baseline_comparison,
+            baseline_provenance: result.baseline_provenance.map(|provenance| {
+                serde_json::to_value(provenance).expect("lint provenance serializes")
+            }),
             formatting_findings: result.formatting_findings,
             findings: if json_summary { None } else { result.findings },
             producer_summaries: result.producer_summaries,
@@ -202,6 +205,7 @@ pub fn from_lint_fix(component_label: String, run: LintFixInput) -> (LintCommand
             autofix: Some(autofix),
             hints,
             baseline_comparison: None,
+            baseline_provenance: None,
             formatting_findings: None,
             findings: None,
             producer_summaries: Vec::new(),
@@ -279,6 +283,7 @@ mod tests {
             autofix: None,
             hints: None,
             baseline_comparison: None,
+            baseline_provenance: None,
             formatting_findings: None,
             findings: Some(vec![
                 HomeboyFinding::builder("eslint", "eslint error").build(),
@@ -314,6 +319,7 @@ mod tests {
             autofix: None,
             hints: None,
             baseline_comparison: None,
+            baseline_provenance: None,
             formatting_findings: None,
             findings: Some(vec![HomeboyFinding::builder("phpcs", "phpcs warning")
                 .severity("warning")
@@ -347,6 +353,7 @@ mod tests {
             autofix: None,
             hints: None,
             baseline_comparison: None,
+            baseline_provenance: None,
             formatting_findings: None,
             findings: Some(Vec::new()),
             producer_summaries: vec![
@@ -374,6 +381,7 @@ mod tests {
             autofix: None,
             hints: None,
             baseline_comparison: None,
+            baseline_provenance: None,
             formatting_findings: Some(FormattingFindings {
                 files: vec!["src/lib.rs".to_string(), "src/main.rs".to_string()],
                 summary: Some("FMT SUMMARY: 2 files need formatting".to_string()),
@@ -409,6 +417,7 @@ mod tests {
             autofix: None,
             hints: None,
             baseline_comparison: None,
+            baseline_provenance: None,
             formatting_findings: None,
             findings: Some(Vec::new()),
             producer_summaries: vec![FindingProducerSummary::new(

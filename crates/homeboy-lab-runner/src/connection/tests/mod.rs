@@ -103,6 +103,61 @@ fn failed_generation_cleanup_kills_the_exact_daemon_and_tunnel() {
 }
 
 #[test]
+fn candidate_daemon_freshness_accepts_the_materialized_immutable_binary_hash() {
+    let expected = "a".repeat(64);
+    let report = DaemonFreshnessReport {
+        fresh: true,
+        stale_reason_code: None,
+        restartable: false,
+        lease_id: Some("lease-candidate".to_string()),
+        pid: Some(4242),
+        recovery_evidence: None,
+        ownership_evidence: None,
+        adoption_command: None,
+        binary_hash: Some(expected.clone()),
+        daemon_version: Some("test".to_string()),
+        daemon_build_identity: Some("homeboy test+candidate".to_string()),
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    };
+
+    verify_candidate_daemon_freshness("homeboy-lab", &expected, Ok(report))
+        .expect("candidate rotates");
+}
+
+#[test]
+fn candidate_daemon_freshness_mismatch_reports_expected_and_observed_hashes() {
+    let expected = "a".repeat(64);
+    let observed = "b".repeat(64);
+    let report = DaemonFreshnessReport {
+        fresh: false,
+        stale_reason_code: Some(DaemonStaleReasonCode::BinaryHashMismatch),
+        restartable: true,
+        lease_id: Some("lease-candidate".to_string()),
+        pid: Some(4242),
+        recovery_evidence: None,
+        ownership_evidence: None,
+        adoption_command: None,
+        binary_hash: Some(observed.clone()),
+        daemon_version: Some("test".to_string()),
+        daemon_build_identity: Some("homeboy test+candidate".to_string()),
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    };
+
+    let error = verify_candidate_daemon_freshness("homeboy-lab", &expected, Ok(report))
+        .expect_err("mismatch");
+    assert!(error.message.contains(&format!("expected {expected}")));
+    assert!(error.message.contains(&format!("observed {observed}")));
+    assert!(error.message.contains("fresh=false"));
+    assert!(error.message.contains("BinaryHashMismatch"));
+}
+
+#[test]
 fn generation_data_root_preserves_home_scoped_config_and_auth() {
     let command = super::remote_daemon::generation_daemon_ensure_command(
         "/opt/homeboy",

@@ -843,6 +843,184 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
 }
 
 #[test]
+fn diagnose_prioritizes_provider_stream_cause_over_malformed_wrapper() {
+    with_temp_home(|| {
+        let evidence_dir = tempfile::tempdir().expect("evidence dir");
+        let evidence_path = evidence_dir.path().join("executor-result.json");
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_string(&json!({
+                "diagnostics": [{
+                    "class": "agent_task.provider_malformed_json",
+                    "message": "executor wrapper returned malformed JSON",
+                    "data": {
+                        "stdout": serde_json::to_string(&json!({
+                            "diagnostics": [{
+                                "class": "provider.runtime_unavailable",
+                                "message": "runtime executable is unavailable"
+                            }]
+                        })).expect("stream json"),
+                        "stderr": "token=raw-secret"
+                    }
+                }, {
+                    "class": "agent_task.required_typed_artifacts_missing",
+                    "message": "agent task did not produce required typed artifacts: concept_packet"
+                }]
+            }))
+            .expect("evidence json"),
+        )
+        .expect("write evidence");
+
+        let run_id = "run-cli-diagnose-provider-stream";
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            ExecutorResultEvidenceFailureExecutor {
+                evidence_uri: format!("file://{}", evidence_path.display()),
+            },
+        )
+        .expect("run completed with failed outcome");
+
+        let (value, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose loaded");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["root_cause"]["class"], "provider.runtime_unavailable");
+        assert_eq!(value["root_cause"]["source"], "hydrated_process_stream");
+        assert_eq!(value["root_cause"]["owner"], "provider_runtime");
+        assert!(value["diagnostic_chain"]
+            .as_array()
+            .expect("diagnostic chain")
+            .iter()
+            .any(|diagnostic| diagnostic["owner"] == "executor_wrapper"));
+        assert_eq!(
+            value["hydrated_evidence"][0]["summary"]["diagnostics"][0]["class"],
+            "agent_task.provider_malformed_json"
+        );
+        assert!(value["hydrated_evidence"][0]["summary"]["process_streams"]
+            .as_array()
+            .expect("process streams")
+            .iter()
+            .any(|stream| stream["excerpt"] == "token=[REDACTED]"));
+    });
+}
+
+#[test]
+fn diagnose_surfaces_a_raw_provider_cause_from_a_bounded_stream_uri() {
+    with_temp_home(|| {
+        let evidence_dir = tempfile::tempdir().expect("evidence dir");
+        let stream_path = evidence_dir.path().join("executor.stderr");
+        std::fs::write(
+            &stream_path,
+            "The 'gpt-5.6-terra' model requires a newer version of Codex. token=raw-secret",
+        )
+        .expect("write stream");
+        let evidence_path = evidence_dir.path().join("executor-result.json");
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_string(&json!({
+                "diagnostics": [{
+                    "class": "agent_task.provider_malformed_json",
+                    "message": "executor wrapper returned malformed JSON",
+                    "data": { "stderr_uri": format!("file://{}", stream_path.display()) }
+                }]
+            }))
+            .expect("evidence json"),
+        )
+        .expect("write evidence");
+
+        let run_id = "run-cli-diagnose-provider-stream-uri";
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            ExecutorResultEvidenceFailureExecutor {
+                evidence_uri: format!("file://{}", evidence_path.display()),
+            },
+        )
+        .expect("run completed with failed outcome");
+
+        let (value, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose loaded");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["root_cause"]["class"], "provider.process_stream");
+        assert_eq!(value["root_cause"]["owner"], "provider_runtime");
+        assert!(value["root_cause"]["message"]
+            .as_str()
+            .expect("root cause message")
+            .contains("requires a newer version of Codex"));
+        assert!(!value["root_cause"]["message"]
+            .as_str()
+            .expect("root cause message")
+            .contains("raw-secret"));
+        assert_eq!(
+            value["hydrated_evidence"][0]["summary"]["process_streams"][0]["source"],
+            "uri"
+        );
+    });
+}
+
+#[test]
+fn diagnose_reports_unavailable_process_streams_without_failing() {
+    with_temp_home(|| {
+        let evidence_dir = tempfile::tempdir().expect("evidence dir");
+        let evidence_path = evidence_dir.path().join("executor-result.json");
+        let missing_stream = evidence_dir.path().join("missing.stderr");
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_string(&json!({
+                "diagnostics": [{
+                    "class": "agent_task.provider_malformed_json",
+                    "message": "executor wrapper returned malformed JSON",
+                    "data": {
+                        "stdout_path": missing_stream,
+                        "stderr_path": evidence_dir.path()
+                    }
+                }]
+            }))
+            .expect("evidence json"),
+        )
+        .expect("write evidence");
+
+        let run_id = "run-cli-diagnose-missing-stream";
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            ExecutorResultEvidenceFailureExecutor {
+                evidence_uri: format!("file://{}", evidence_path.display()),
+            },
+        )
+        .expect("run completed with failed outcome");
+
+        let (value, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose loaded");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            value["root_cause"]["class"],
+            "agent_task.provider_malformed_json"
+        );
+        assert_eq!(
+            value["hydrated_evidence"][0]["summary"]["process_streams"][0]["status"],
+            "unavailable"
+        );
+        assert_eq!(
+            value["hydrated_evidence"][0]["summary"]["process_streams"][1]["status"],
+            "unavailable"
+        );
+    });
+}
+
+#[test]
 fn diagnose_derives_next_actions_from_the_failure_classification() {
     with_temp_home(|| {
         let run_id = "run-cli-diagnose-actionable-timeout";

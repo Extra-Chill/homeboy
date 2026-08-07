@@ -318,12 +318,14 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         {
             let result: CandidateAdoptionTerminalResult = serde_json::from_value(result)
                 .map_err(|error| Error::internal_json(error.to_string(), None))?;
-            let exit_code =
-                if matches!(result.status.as_str(), "review_ready" | "green_no_finalize") {
-                    0
-                } else {
-                    1
-                };
+            let exit_code = if matches!(
+                result.status.as_str(),
+                "review_ready" | "draft_published" | "green_no_finalize"
+            ) {
+                0
+            } else {
+                1
+            };
             // Replaying an already-completed adoption is exactly the path an
             // orchestrator hits when it re-polls a Cook it already ran, so it
             // is the path that must not fall back to the cross-invocation Cook
@@ -392,7 +394,10 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
      rerun_completed_gates to rerun its gates"
                     .to_string(),
             ),
-            exit_code: if status == "review_ready" || status == "green_no_finalize" {
+            exit_code: if matches!(
+                status.as_str(),
+                "review_ready" | "draft_published" | "green_no_finalize"
+            ) {
                 0
             } else {
                 1
@@ -789,7 +794,11 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         .as_str()
         .unwrap_or("unknown")
         .to_string();
-    let exit_code = if status == "review_ready" { 0 } else { 1 };
+    let exit_code = if matches!(status.as_str(), "review_ready" | "draft_published") {
+        0
+    } else {
+        1
+    };
     Ok(cook_report(CookReportInput {
         cook_id: cook_id.to_string(),
         status: &status,

@@ -63,6 +63,15 @@ pub(super) fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             )?;
             Ok((GitCommandOutput::Pr(output), 0))
         }
+        PrCommand::Ready {
+            component_id,
+            number,
+            path_args,
+        } => {
+            let ComponentPathArgs { path } = path_args;
+            let output = git::pr_ready(Some(&component_id), number, path)?;
+            Ok((GitCommandOutput::Pr(output), 0))
+        }
         PrCommand::Find {
             component_id,
             base,
