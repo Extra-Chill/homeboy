@@ -150,7 +150,7 @@ pub(super) fn intercept_local_detached_cook(
     let handoff_parent = match agent_task_lifecycle::record_detached_cook_handoff_child(
         &cook_id,
         pid,
-        start_identity,
+        start_identity.clone(),
     ) {
         Ok(record) => record,
         Err(error) => {
@@ -173,7 +173,17 @@ pub(super) fn intercept_local_detached_cook(
     // additive to the handoff record above, never a precondition for it: the
     // child is already running, so a daemon that cannot be reached must not
     // fail the cook. The outcome is reported in the envelope either way.
-    let controller_job = submit_cook_controller_job(&cook_id, pid, &start_identity);
+    //
+    // A parent that is already terminal has no lifecycle left to own, and
+    // submitting would start a daemon only to supervise a child this launcher
+    // just killed.
+    let controller_job = if handoff_parent.state.is_terminal() {
+        ControllerJobHandoff::Unavailable {
+            reason: "cook was terminal before controller submission".to_string(),
+        }
+    } else {
+        submit_cook_controller_job(&cook_id, pid, &start_identity)
+    };
     let handoff = await_durable_handoff(&cook_id, &mut child, handoff_timeout());
     if handoff.state == DetachedHandoffState::ExitedBeforeHandoff {
         let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent(
@@ -938,6 +948,48 @@ mod tests {
             assert_eq!(envelope["run_id"], Value::Null);
             assert_eq!(envelope["launcher_log"], "/tmp/cook.log");
         }
+    }
+
+    /// The daemon is an ownership upgrade, never a dependency. A launcher that
+    /// could not reach it must still return the same actionable envelope it
+    /// always did, because the cook is already running by then.
+    #[test]
+    fn an_unreachable_daemon_still_returns_the_full_handoff_contract() {
+        let handoff = DetachedCookHandoff {
+            state: DetachedHandoffState::Accepted,
+            run_id: Some("cook-degraded-attempt-1".to_string()),
+            waited_ms: 12,
+        };
+
+        let envelope = handoff_envelope(
+            "cook-degraded",
+            4242,
+            Path::new("/tmp/cook.log"),
+            &handoff,
+            &ControllerJobHandoff::Unavailable {
+                reason: "daemon unreachable".to_string(),
+            },
+        );
+
+        // Every pre-existing field survives unchanged.
+        assert_eq!(envelope["schema"], HANDOFF_SCHEMA);
+        assert_eq!(envelope["cook_id"], "cook-degraded");
+        assert_eq!(envelope["run_id"], "cook-degraded-attempt-1");
+        assert_eq!(envelope["pid"], 4242);
+        assert_eq!(envelope["handoff"]["state"], "accepted");
+        assert_eq!(
+            envelope["status_command"],
+            "homeboy agent-task status cook-degraded"
+        );
+        assert_eq!(
+            envelope["cancel_command"],
+            "homeboy agent-task cancel cook-degraded"
+        );
+        assert_eq!(envelope["output_file_owner"], "detached_cook");
+        // The degradation is reported rather than hidden.
+        assert_eq!(envelope["controller_job"]["state"], "unavailable");
+        assert_eq!(envelope["controller_job"]["job_id"], Value::Null);
+        assert_eq!(envelope["controller_job"]["reason"], "daemon unreachable");
     }
 
     #[test]
