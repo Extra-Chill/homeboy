@@ -69,6 +69,8 @@ pub struct LintRunWorkflowResult {
     pub hints: Option<Vec<String>>,
     pub baseline_comparison: Option<lint_baseline::BaselineComparison>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_provenance: Option<lint_baseline::LintBaselineProvenance>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub formatting_findings: Option<FormattingFindings>,
     pub findings: Option<Vec<HomeboyFinding>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
