@@ -1412,6 +1412,44 @@ impl AgentTaskCookAttemptDispatcher for AcceptedDetachedAttemptDispatcher {
 }
 
 #[derive(Debug)]
+struct ProviderStartObservingDispatcher {
+    run_id: String,
+    phase_at_dispatch: Arc<Mutex<Option<Value>>>,
+}
+
+impl AgentTaskCookAttemptDispatcher for ProviderStartObservingDispatcher {
+    fn durable_recipe(&self) -> Result<Value> {
+        Ok(serde_json::json!({ "kind": "test-provider-start-observing" }))
+    }
+
+    fn dispatch_attempt(
+        &self,
+        _plan: AgentTaskPlan,
+        run_id: &str,
+        _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> Result<()> {
+        assert_eq!(run_id, self.run_id);
+        let identity = homeboy_core::lab_contract::RunnerJobIdentity::new(
+            run_id,
+            "fixture-lab",
+            "provider-start-observing-job",
+        );
+        agent_task_lifecycle::bind_accepted_lab_runner_job(
+            &identity,
+            "/runner/workspace",
+            &["homeboy".to_string(), "agent-task".to_string()],
+        )?;
+        let record = agent_task_lifecycle::status(run_id)?;
+        *self.phase_at_dispatch.lock().expect("provider start phase") = Some(serde_json::json!({
+            "phase": record.metadata["cook_progress"]["phase"],
+            "state": record.state,
+            "runner_job_id": record.runner_job_id(),
+        }));
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 struct RecordingDetachedAttemptDispatcher {
     dispatches: Arc<AtomicUsize>,
 }
@@ -3214,6 +3252,37 @@ fn cook_publishes_durable_identity_before_materialization_and_survives_interrupt
         // Recoverable, not merely observable: the operator can act on the id.
         assert!(
             agent_task_lifecycle::retry(cook_id, Some("cook-durable-identity-first-retry")).is_ok()
+        );
+    });
+}
+
+#[test]
+fn provider_dispatch_observes_a_durable_provider_start_boundary() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-provider-start-durable";
+        let run_id = format!("{cook_id}-run");
+        let phase_at_dispatch = Arc::new(Mutex::new(None));
+        let options = batch_cook_options(
+            cook_id,
+            Arc::new(ProviderStartObservingDispatcher {
+                run_id: run_id.clone(),
+                phase_at_dispatch: Arc::clone(&phase_at_dispatch),
+            }),
+        );
+
+        let result = run_cook(options, UnusedExecutor).expect("dispatch Cook");
+
+        assert_eq!(result.value.status, "in_flight");
+        assert_eq!(
+            phase_at_dispatch
+                .lock()
+                .expect("provider start phase")
+                .as_ref(),
+            Some(&serde_json::json!({
+                "phase": "provider_start",
+                "state": "running",
+                "runner_job_id": "provider-start-observing-job",
+            }))
         );
     });
 }

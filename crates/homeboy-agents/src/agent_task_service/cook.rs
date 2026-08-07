@@ -2648,6 +2648,12 @@ where
         };
         let needs_execution = cook_attempt_needs_execution(&run_id);
         if needs_execution {
+            // `provider_start` is a durable lifecycle transition. Create the
+            // record before reporting it so a new Cook run is observable before
+            // any preflight or provider work can block.
+            if !agent_task_lifecycle::run_record_exists(&run_id)? {
+                agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
+            }
             report_cook_progress(
                 durable_observer,
                 &cook_id,
@@ -2674,13 +2680,6 @@ where
             }
             if options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some() {
                 validate_cook_workspace(&options)?;
-            }
-            // Claim the durable attempt before candidate baseline staging. That
-            // staging can take longer than the foreground controller's timeout;
-            // a restarted controller must find the same immutable plan rather
-            // than create an ownerless Lab admission.
-            if !agent_task_lifecycle::run_record_exists(&run_id)? {
-                agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
             }
             let mut failed_dispatch_plan = None;
             let execution = (|| {

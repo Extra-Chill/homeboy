@@ -144,7 +144,7 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--gate-extension-input` | `<JSON>` | Explicit extension input as a JSON object with `id` and absolute `source`. Only selected inputs are copied into isolated HOME |
 | `--isolate-gate-home` | `<ISOLATE_GATE_HOME>` | Run gates with an isolated `$HOME` so gate side effects do not touch the operator's home directory (default true) Values: `true`, `false`. |
 | `--isolate-gate-xdg` | `<ISOLATE_GATE_XDG>` | Run gates with isolated XDG base directories so gate side effects do not touch the operator's config/cache/data dirs (default true) Values: `true`, `false`. |
-| `--max-attempts` | `<N>` | Maximum Cook attempts before giving up. Each attempt re-runs the agent and gates; a later attempt can recover from a transient failure. Set --max-provider-executions to at least this value and --max-same-provider-retries to at least one less so gate and required review-form remediation remain possible (default 3) |
+| `--max-attempts` | `<N>` | Maximum Cook attempts before giving up. Each attempt re-runs the agent and gates; a later attempt can recover from a transient failure. This derives provider execution and same-provider remediation budgets. A configured provider rotation receives its own additional execution allowance unless an advanced budget flag explicitly caps it (default 3) |
 | `--no-finalize` | flag | Stop after the work is verified but before opening the pull request, leaving the committed change on the worktree branch for manual review or a later `agent-task review`/finalize |
 | `--draft-pr` | flag | Complete normal verified finalization but create a draft pull request. Existing pull requests retain their current draft or ready state |
 | `--full` | flag | Return the complete cook report, including nested promotion and gate evidence |
@@ -328,11 +328,12 @@ Read durable run status
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--exact` | flag | Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt |
+| `--exact` | flag | _no help text_ |
 | `--bridge` | flag | _no help text_ |
 | `--since-cursor` | `<CURSOR>` | _no help text_ |
 | `--full` | flag | _no help text_ |
-| `--no-runner-probe` | flag | Answer from durable controller state only, without reaching the runner |
+| `--strict-subject-exit` | flag | Exit nonzero when the inspected Cook needs follow-up action |
+| `--no-runner-probe` | flag | _no help text_ |
 
 ## `homeboy agent-task list`
 
@@ -705,6 +706,8 @@ Every child requires a deterministic gate from shared --verify/ --private-verify
 | `--isolate-gate-home` | `<ISOLATE_GATE_HOME>` | Run gates with an isolated `$HOME` so gate side effects do not touch the operator's home directory (default true) Values: `true`, `false`. |
 | `--isolate-gate-xdg` | `<ISOLATE_GATE_XDG>` | Run gates with isolated XDG base directories so gate side effects do not touch the operator's config/cache/data dirs (default true) Values: `true`, `false`. |
 | `--verification-profiles` | `<JSON>` | JSON verification profile declaration, inline or @file.json. Profiles append to or replace shared --verify/--private-verify gates per issue |
+| `--max-concurrency` | `<N>` | Maximum number of child cooks to run at once |
+| `--max-duration` | `<SECONDS>` | Wall-clock budget, in seconds, for the whole batch — every child, every attempt, and every gate |
 | `--dry-run` | flag | _no help text_ |
 | `--run-plan` | flag | _no help text_ |
 
@@ -815,6 +818,8 @@ Successful child cooks open or update their own pull requests.
 | `--model` | `<MODEL>` | _no help text_ |
 | `--record-run-id` | `<ID>` | _no help text_ |
 | `--ai-tool` | `<TEXT>` | AI tool disclosure recorded in every child PR's assistance attribution. Overrides the persisted plan value for this execution |
+| `--max-concurrency` | `<N>` | Maximum number of child cooks to run at once. See `fanout cook-batch --max-concurrency` |
+| `--max-duration` | `<SECONDS>` | Wall-clock budget, in seconds, for the whole batch. See `fanout cook-batch --max-duration` |
 
 ## `homeboy agent-task review`
 
