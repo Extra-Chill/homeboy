@@ -1,5 +1,6 @@
 use super::common::{request, script};
 use super::*;
+use crate::agent_task::AgentTaskArtifactDeclaration;
 use crate::agent_task_scheduler::{
     AgentTaskAggregateStatus, AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
 };
@@ -791,6 +792,48 @@ fn parent_visible_progress_keeps_provider_alive_until_wall_deadline() {
         json!(300)
     );
     assert_eq!(outcome.diagnostics[0].data["timeout_ms"], json!(500));
+}
+
+#[test]
+fn stalled_provider_retains_declared_attempt_workspace_artifact() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = linked_cook_source(&temp);
+    let command = format!(
+        "node {}",
+        script("let fs=require('fs'); fs.writeFileSync('partial.patch','retained partial patch\\n'); process.stderr.write('artifact written\\n'); setInterval(() => {}, 1000);")
+    );
+    let (mut request, provider) = request("task-stalled-artifact", command);
+    request.workspace.root = Some(workspace.display().to_string());
+    request.metadata = serde_json::json!({
+        "cook_attempt_workspace_identity": crate::agent_task_workspace_identity::attest_workspace(&workspace)
+            .expect("attest workspace"),
+    });
+    request.artifact_declarations = vec![AgentTaskArtifactDeclaration {
+        name: "partial_patch".to_string(),
+        artifact_type: Some("patch".to_string()),
+        artifact_schema: None,
+        path: Some("partial.patch".to_string()),
+        required: true,
+        description: None,
+        metadata: Value::Null,
+    }];
+    request.limits.liveness_timeout_ms = Some(5_000);
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
+    let artifact = outcome.artifacts.first().expect("retained artifact");
+    let path = std::path::Path::new(artifact.path.as_deref().expect("finalized path"));
+    assert_eq!(
+        std::fs::read(path).expect("retained bytes"),
+        b"retained partial patch\n"
+    );
+    assert_eq!(artifact.size_bytes, Some(23));
+    assert_eq!(
+        artifact.sha256,
+        Some(homeboy_core::artifact_metadata::sha256_file(path).expect("retained hash"))
+    );
+    assert_eq!(artifact.metadata["executor_artifact_finalized"], true);
 }
 
 #[test]
