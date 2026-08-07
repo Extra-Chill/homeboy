@@ -5,9 +5,11 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 use super::*;
 use homeboy_core::test_support;
@@ -1342,6 +1344,162 @@ esac
             Some("lease-new")
         );
         drop(endpoint);
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn stale_state_loss_replay_is_retired_before_exact_live_lease_adoption() {
+    test_support::with_isolated_home(|home| {
+        let daemon = home.path().join("remote-homeboy");
+        let replayed = home.path().join("state-loss-replayed");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let address = listener.local_addr().expect("address");
+        let serving = Arc::new(AtomicBool::new(true));
+        let serving_endpoint = Arc::clone(&serving);
+        let endpoint = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while serving_endpoint.load(Ordering::SeqCst) && Instant::now() < deadline {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let mut request = [0; 4096];
+                let length = stream.read(&mut request).expect("read endpoint request");
+                let request = String::from_utf8_lossy(&request[..length]);
+                let body = if request.starts_with("GET /health ") {
+                    r#"{"freshness":{"fresh":true,"restartable":true,"lease_id":"lease-live","pid":4444,"active_jobs":0},"pid":4444}"#
+                } else if request.starts_with("GET /jobs ") {
+                    r#"{"active_runner_jobs":[],"stale_runner_jobs":[]}"#
+                } else {
+                    r#"{"version":"0.284.0","build_identity":{"display":"homeboy 0.284.0+test"}}"#
+                };
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .expect("endpoint response");
+            }
+        });
+        std::fs::write(
+            &daemon,
+            format!(
+                r#"#!/bin/sh
+case "$1 $2" in
+  "self identity")
+    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test"}}}}'
+    ;;
+  "daemon status")
+    printf '%s\n' '{{"success":true,"data":{{"running":true,"fresh":true,"reachable":true,"state":{{"address":"{address}","pid":4444,"lease_id":"lease-live"}},"freshness":{{"active_jobs":0}}}}}}'
+    ;;
+  "daemon recover-missing-lease-state")
+    : > "{replayed}"
+    exit 99
+    ;;
+esac
+"#,
+                address = address,
+                replayed = replayed.display(),
+            ),
+        )
+        .expect("write remote Homeboy shim");
+        let mut permissions = std::fs::metadata(&daemon).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&daemon, permissions).expect("make shim executable");
+        server::create(
+            &serde_json::json!({ "id": "local-runner", "host": "localhost", "user": "test" })
+                .to_string(),
+            false,
+        )
+        .expect("create local server");
+        crate::create(
+            &serde_json::json!({ "id": "local-runner", "kind": "ssh", "homeboy_path": daemon })
+                .to_string(),
+            false,
+        )
+        .expect("create local runner");
+        crate::generation_store::replacement_operation("local-runner")
+            .expect("create replacement operation");
+        crate::generation_store::record_replacement_operation_replay(
+            "local-runner",
+            "state-loss",
+            "remote-homeboy daemon recover-missing-lease-state",
+        )
+        .expect("record stale state-loss replay");
+
+        let (adopted, adopted_exit) =
+            connect_with_live_lease_adoption("local-runner", "lease-live", 4444)
+                .expect("adopt result");
+        assert_eq!(
+            adopted_exit, 0,
+            "adoption failed: {:?}",
+            adopted.failure_message
+        );
+        assert!(adopted.connected);
+        assert_eq!(adopted.remote_daemon_pid, Some(4444));
+        assert_eq!(
+            read_session("local-runner")
+                .expect("read adopted session")
+                .expect("adopted session")
+                .remote_daemon_lease_id
+                .as_deref(),
+            Some("lease-live")
+        );
+        assert!(
+            !replayed.exists(),
+            "adoption must bypass stale state-loss replay"
+        );
+        server::create(
+            &serde_json::json!({ "id": "normal-runner", "host": "localhost", "user": "test" })
+                .to_string(),
+            false,
+        )
+        .expect("create normal server");
+        crate::create(
+            &serde_json::json!({ "id": "normal-runner", "kind": "ssh", "homeboy_path": daemon })
+                .to_string(),
+            false,
+        )
+        .expect("create normal runner");
+        crate::generation_store::replacement_operation("normal-runner")
+            .expect("create replacement operation for normal connect");
+        crate::generation_store::record_replacement_operation_replay(
+            "normal-runner",
+            "state-loss",
+            "remote-homeboy daemon recover-missing-lease-state",
+        )
+        .expect("reseed stale state-loss replay for normal connect");
+
+        let (normal, normal_exit) = connect("normal-runner").expect("normal connect result");
+        assert_eq!(normal_exit, 20);
+        assert!(normal.failure_message.as_deref().is_some_and(|message| {
+            message.contains("--adopt-live-lease lease-live --expected-live-pid 4444")
+        }));
+        assert!(
+            !replayed.exists(),
+            "normal connect must not replay an inapplicable state-loss operation"
+        );
+        let journal_dir = homeboy_core::paths::runner_sessions_dir()
+            .expect("runner sessions")
+            .join("normal-runner");
+        let operation: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(journal_dir.join("replacement-operation.json"))
+                .expect("retired operation journal"),
+        )
+        .expect("retired operation JSON");
+        assert_eq!(operation["retired_replay"]["kind"], "state-loss");
+        assert!(operation["retired_replay"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("reachable idle endpoint")));
+        serving.store(false, Ordering::SeqCst);
+        endpoint.join().expect("endpoint");
     });
 }
 

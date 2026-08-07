@@ -617,6 +617,27 @@ fn connect_with_orphan_adoption_and_live_lease(
             }
         }
     }
+    if pending_replacement.is_none()
+        && super::generation_store::replacement_operation_replay(runner_id)?
+            .is_some_and(|(kind, _)| kind == "state-loss")
+    {
+        if let Ok(mut observed) = remote_daemon_status(&client, homeboy) {
+            probe_remote_daemon_endpoint(&client, &mut observed, Some(runner_id));
+            if let Some(reason) = inapplicable_state_loss_replay_reason(
+                &observed,
+                &configured_build_identity,
+                live_lease_expectation,
+            ) {
+                replacement_operation_id = Some(
+                    super::generation_store::retire_inapplicable_replacement_replay(
+                        runner_id,
+                        "state-loss",
+                        reason,
+                    )?,
+                );
+            }
+        }
+    }
     // This write precedes every remote mutation. A retry reuses the same key
     // even when the SSH command completed but its response was lost.
     let replacement_operation_id = match replacement_operation_id {
@@ -1158,6 +1179,28 @@ fn remote_daemon_from_recovery(
         version: None,
         build_identity: Some(configured_build_identity.to_string()),
         inspected_freshness: None,
+    }
+}
+
+fn inapplicable_state_loss_replay_reason(
+    status: &RemoteDaemonStatus,
+    configured_build_identity: &str,
+    live_lease_expectation: Option<(&str, u32)>,
+) -> Option<&'static str> {
+    let daemon = status.daemon.as_ref()?;
+    if !status.reachable || status.endpoint_probe_error.is_some() {
+        return None;
+    }
+    if status.fresh
+        && live_lease_expectation == daemon.lease_id.as_deref().zip(daemon.pid)
+        && daemon.build_identity.as_deref().map(str::trim) == Some(configured_build_identity.trim())
+    {
+        return Some("explicit exact live lease/PID adoption supersedes state-loss recovery");
+    }
+    if status.active_jobs == 0 {
+        Some("remote daemon state and reachable idle endpoint disprove state-loss recovery")
+    } else {
+        Some("remote daemon state and reachable endpoint disprove state-loss recovery; active jobs remain protected")
     }
 }
 

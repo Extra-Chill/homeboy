@@ -92,6 +92,14 @@ struct ReplacementOperation {
     replay_command: Option<String>,
     #[serde(default)]
     kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retired_replay: Option<RetiredReplacementReplay>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RetiredReplacementReplay {
+    kind: String,
+    reason: String,
 }
 
 pub(crate) fn write_durable_json<T: serde::Serialize>(
@@ -696,6 +704,7 @@ pub(crate) fn replacement_operation(runner_id: &str) -> Result<String> {
                 operation_id: operation_id.clone(),
                 replay_command: None,
                 kind: None,
+                retired_replay: None,
             },
         )?;
         Ok(operation_id)
@@ -768,6 +777,29 @@ pub(crate) fn record_pending_replacement(runner_id: &str, session: &RunnerSessio
 /// remote lease and proved that these recorded coordinates are no longer a
 /// publishable daemon. A later attempt receives a new operation identity.
 pub(crate) fn retire_pending_replacement(runner_id: &str) -> Result<String> {
+    retire_replacement(runner_id, None)
+}
+
+/// Retire a replay whose remote preconditions have been authoritatively
+/// disproved, preserving the typed reason alongside its successor token.
+pub(crate) fn retire_inapplicable_replacement_replay(
+    runner_id: &str,
+    kind: &str,
+    reason: &str,
+) -> Result<String> {
+    retire_replacement(
+        runner_id,
+        Some(RetiredReplacementReplay {
+            kind: kind.to_string(),
+            reason: reason.to_string(),
+        }),
+    )
+}
+
+fn retire_replacement(
+    runner_id: &str,
+    retired_replay: Option<RetiredReplacementReplay>,
+) -> Result<String> {
     with_registry_lock(runner_id, || {
         let operation_id = uuid::Uuid::new_v4().to_string();
         // Publish the successor receipt before releasing the old coordinates.
@@ -779,6 +811,7 @@ pub(crate) fn retire_pending_replacement(runner_id: &str) -> Result<String> {
                 operation_id: operation_id.clone(),
                 replay_command: None,
                 kind: None,
+                retired_replay,
             },
         )?;
         let pending_path = pending_replacement_path(runner_id)?;
