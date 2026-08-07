@@ -14,6 +14,7 @@ const {
 	createCliAgentTaskExecutor,
 } = require('../../lib/cli-agent-task-executor');
 const { codexRuntimeToolConfigArgs } = require('../../lib/runtime-tool-adapter');
+const { cliRuntimeReadiness } = require('../../lib/cli-runtime-readiness');
 
 const CODEX_RUNTIME_ID = 'codex';
 const CODEX_PROVIDER_ID = 'codex.agent-task-executor';
@@ -27,6 +28,13 @@ const CODEX_SECRET_ENV = [
 	'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
 	'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
 ];
+
+const CODEX_READINESS_INVOCATION = {
+	schema: 'homeboy/command-invocation/v1',
+	argv: ['node', '{{runtime_path}}/scripts/agent/homeboy-codex-provider-readiness.cjs'],
+	env_allowlist: ['HOMEBOY_CODEX_COMMAND', 'HOMEBOY_CODEX_COMMAND_ARGS', ...CODEX_SECRET_ENV],
+	display: 'node {{runtime_path}}/scripts/agent/homeboy-codex-provider-readiness.cjs',
+};
 
 const CODEX_CAPABILITIES = [
 	'cli_runtime',
@@ -56,6 +64,7 @@ function providerContract(options = {}) {
 			argv: ['node', '{{runtime_path}}/scripts/agent/homeboy-codex-agent-task-executor.cjs'],
 			display: 'node {{runtime_path}}/scripts/agent/homeboy-codex-agent-task-executor.cjs',
 		},
+		readiness_invocation: options.readinessInvocation || CODEX_READINESS_INVOCATION,
 		...contractFields,
 		secret_env_requirements: [providerSecretEnvRequirement('codex', CODEX_SECRET_ENV)],
 		capabilities: CODEX_CAPABILITIES,
@@ -80,6 +89,19 @@ function providerContract(options = {}) {
 		status: 'available',
 		integration_contract: 'homeboy-codex-agent-task/v1',
 	};
+}
+
+function codexRuntimeReadiness(request = {}, options = {}) {
+	return cliRuntimeReadiness(request, {
+		runtimeId: CODEX_RUNTIME_ID,
+		providerId: CODEX_PROVIDER_ID,
+		label: 'Codex',
+		defaultCommand: CODEX_DEFAULT_COMMAND,
+		commandEnv: 'HOMEBOY_CODEX_COMMAND',
+		commandConfigKey: 'executor.config.command',
+		requiredSecretEnv: CODEX_SECRET_ENV.slice(0, 4),
+		identityEnv: ['HOMEBOY_CODEX_COMMAND', 'HOMEBOY_CODEX_COMMAND_ARGS', ...CODEX_SECRET_ENV],
+	}, options);
 }
 
 function resolveCommandSpec(config = {}, options = {}) {
@@ -146,10 +168,12 @@ module.exports = {
 	CODEX_CAPABILITIES,
 	CODEX_DEFAULT_COMMAND,
 	CODEX_DEFAULT_COMMAND_ARGS,
+	CODEX_READINESS_INVOCATION,
 	CODEX_PROVIDER_ID,
 	CODEX_PROVIDER_LABEL,
 	CODEX_RUNTIME_ID,
 	CODEX_SECRET_ENV,
+	codexRuntimeReadiness,
 	executeCodexAgentTask,
 	outcome,
 	providerContract,

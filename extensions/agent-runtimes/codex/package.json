@@ -12,7 +12,8 @@
   },
   "scripts": {
     "test:declared-artifact-harvester": "node tests/declared-artifact-harvester.test.js",
-    "test:codex-agent-task-executor-boundary": "npm run test:declared-artifact-harvester && node tests/codex-agent-task-executor-boundary.test.js"
+    "test:codex-agent-task-executor-boundary": "npm run test:declared-artifact-harvester && node tests/codex-agent-task-executor-boundary.test.js",
+    "test:codex-runtime-readiness": "node tests/codex-runtime-readiness.test.js"
   },
   "engines": {
     "node": ">=18.12.0"
