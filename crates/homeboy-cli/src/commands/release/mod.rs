@@ -1,5 +1,6 @@
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
+use std::process::Command;
 use std::{fs, path::Path};
 
 use homeboy::core::component;
@@ -8,7 +9,8 @@ use homeboy_deploy::{self as deploy, ReleaseStateStatus};
 use homeboy_release::release::{
     self, ArtifactSourceAuthorityManifest, BatchReleaseResult, ReleaseCommandInput,
     ReleaseCommandResult, ReleaseExecutionPlan, ReleasePackageResult, ReleasePhase,
-    ReleasePipelineOptions,
+    ReleasePipelineOptions, ReleasePreflightPlacement, ReleasePreflightPlacementPolicy,
+    ReleasePreflightSourceIdentity, ReleaseReadinessEnvelope,
 };
 
 use super::utils::args::DryRunArgs;
@@ -103,6 +105,15 @@ pub struct ReleaseExecuteArgs {
     /// Override local_path for version file lookup (single component only)
     #[arg(long)]
     pub path: Option<String>,
+
+    /// Run portable lint and test release gates through the existing Lab review
+    /// commands before controller-owned release mutation.
+    #[arg(long, value_name = "RUNNER_ID", conflicts_with = "preflight_placement")]
+    preflight_runner: Option<String>,
+
+    /// Placement policy for portable release preflight gates.
+    #[arg(long, value_enum, default_value_t = ReleasePreflightPlacementArg::Local)]
+    preflight_placement: ReleasePreflightPlacementArg,
 
     #[command(flatten)]
     dry_run_args: DryRunArgs,
@@ -224,6 +235,13 @@ pub struct ReleaseExecuteArgs {
     /// releases only.
     #[arg(long)]
     cascade: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum ReleasePreflightPlacementArg {
+    #[default]
+    Local,
+    Lab,
 }
 
 #[derive(Serialize)]
@@ -420,11 +438,113 @@ pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
     run_execute(args.execute)
 }
 
+fn run_portable_preflight(
+    args: &ReleaseExecuteArgs,
+    component_id: &str,
+) -> homeboy::core::Result<Option<ReleaseReadinessEnvelope>> {
+    let runner_id = args.preflight_runner.as_deref();
+    if runner_id.is_none() && !matches!(args.preflight_placement, ReleasePreflightPlacementArg::Lab)
+    {
+        return Ok(None);
+    }
+    let component = component::resolve_effective(Some(component_id), args.path.as_deref(), None)?;
+    let commit = homeboy::core::git::get_head_commit(&component.local_path)?;
+    let executable = std::env::current_exe().map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some("release preflight executable".to_string()),
+        )
+    })?;
+    let mut gate_results = Vec::new();
+    for gate in ["lint", "test"] {
+        let mut command = Command::new(&executable);
+        if let Some(runner_id) = runner_id {
+            command.args(["--runner", runner_id]);
+        } else {
+            command.args(["--placement", "lab"]);
+        }
+        command.args([
+            "review",
+            gate,
+            component_id,
+            "--path",
+            &component.local_path,
+        ]);
+        let output = command.output().map_err(|error| {
+            homeboy::core::Error::internal_io(
+                format!("start portable release {gate} preflight: {error}"),
+                Some(component.local_path.clone()),
+            )
+        })?;
+        let result = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+            serde_json::json!({
+                "gate": gate,
+                "stdout": String::from_utf8_lossy(&output.stdout),
+                "stderr": String::from_utf8_lossy(&output.stderr),
+            })
+        });
+        if !output.status.success() {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "release.preflight",
+                format!(
+                    "Portable release {gate} gate failed with exit status {:?}",
+                    output.status.code()
+                ),
+                Some(component.local_path.clone()),
+                Some(vec![format!(
+                    "Inspect the returned {gate} evidence before retrying release."
+                )]),
+            ));
+        }
+        gate_results.push(result);
+    }
+    let placement = ReleasePreflightPlacement {
+        policy: if runner_id.is_some()
+            || matches!(args.preflight_placement, ReleasePreflightPlacementArg::Lab)
+        {
+            ReleasePreflightPlacementPolicy::Lab
+        } else {
+            ReleasePreflightPlacementPolicy::Local
+        },
+        runner_id: runner_id.map(str::to_string),
+    };
+    Ok(Some(ReleaseReadinessEnvelope {
+        source: ReleasePreflightSourceIdentity { commit },
+        placement,
+        runner_id: runner_id.map(str::to_string),
+        evidence_refs: Vec::new(),
+        gate_results,
+    }))
+}
+
 fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
-    let (skip_checks, skip_checks_granular) = args.resolve_skip_checks()?;
+    let (skip_checks, mut skip_checks_granular) = args.resolve_skip_checks()?;
     let execution = args.execution_plan(skip_checks);
     validate_apply_boundary(&execution)?;
     let component_ids = resolve_component_ids(&args, &args.components)?;
+    if component_ids.len() > 1
+        && (args.preflight_runner.is_some()
+            || matches!(args.preflight_placement, ReleasePreflightPlacementArg::Lab))
+    {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "preflight-runner",
+            "portable release preflight currently requires one component",
+            None,
+            None,
+        ));
+    }
+    let readiness = if component_ids.len() == 1 {
+        run_portable_preflight(&args, &component_ids[0])?
+    } else {
+        None
+    };
+    if readiness.is_some() {
+        for gate in ["lint", "test"] {
+            if !skip_checks_granular.iter().any(|existing| existing == gate) {
+                skip_checks_granular.push(gate.to_string());
+            }
+        }
+    }
     let bump_override = args.bump.clone();
 
     guard_no_github_release(&args, &component_ids)?;
@@ -452,6 +572,7 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
             skip_github_release: args.no_github_release,
             git_identity: args.git_identity.clone(),
             execution: Some(execution.clone()),
+            readiness,
         };
         let (workspace_result, exit_code) =
             release::run_command_with_workspace(input.clone(), args.owner_run_ref.as_deref())?;
@@ -535,6 +656,7 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
         skip_github_release: args.no_github_release,
         git_identity: args.git_identity.clone(),
         execution: Some(execution),
+        readiness: None,
     };
 
     let batch_result = release::run_batch(&component_ids, &input_template);

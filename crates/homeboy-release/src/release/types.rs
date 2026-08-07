@@ -454,6 +454,8 @@ pub struct ReleaseOptions {
     /// always remains controller-owned; a runner is evidence provenance only.
     #[serde(default, skip_serializing_if = "ReleasePreflightPlacement::is_default")]
     pub preflight_placement: ReleasePreflightPlacement,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<ReleaseReadinessEnvelope>,
 }
 
 /// Typed placement policy for the portable portion of release preflight.
@@ -503,6 +505,8 @@ pub struct ReleaseReadinessEnvelope {
     pub placement: ReleasePreflightPlacement,
     pub runner_id: Option<String>,
     pub evidence_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gate_results: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -571,6 +575,8 @@ pub struct ReleaseCommandInput {
     /// Internal execution contract resolved before the workflow runs.
     #[serde(skip_serializing)]
     pub execution: Option<ReleaseExecutionPlan>,
+    #[serde(skip_serializing)]
+    pub readiness: Option<ReleaseReadinessEnvelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -825,6 +831,7 @@ mod tests {
             },
             runner_id: Some("homeboy-lab".to_string()),
             evidence_refs: vec!["runner-artifact://homeboy-lab/release/lint.json".to_string()],
+            gate_results: vec![serde_json::json!({ "gate": "lint", "status": "passed" })],
         };
 
         let value = serde_json::to_value(envelope).expect("serialize readiness envelope");

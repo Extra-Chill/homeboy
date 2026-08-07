@@ -124,7 +124,11 @@ fn run_with_plan_inner(
     // identity before building the mutation plan; any later checkout movement
     // invalidates its evidence and must block controller-owned mutation.
     let preflight_component = super::context::load_component(component_id, options)?;
-    let preflight_source = super::preflight_identity::capture(&preflight_component)?;
+    let preflight_source = options
+        .readiness
+        .as_ref()
+        .map(|readiness| readiness.source.clone())
+        .unwrap_or(super::preflight_identity::capture(&preflight_component)?);
 
     // Rebuild the full plan after executable preflights. `preflight.remote_sync`
     // may fast-forward HEAD and `preflight.changelog_bootstrap` may create the

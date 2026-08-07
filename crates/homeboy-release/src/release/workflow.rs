@@ -201,6 +201,7 @@ pub fn run_command_with_workspace(
             require_explicit_major,
         },
         preflight_placement: Default::default(),
+        readiness: input.readiness.clone(),
     };
 
     if options.dry_run {
@@ -888,6 +889,7 @@ pub fn run_batch(
             skip_github_release: input_template.skip_github_release,
             git_identity: input_template.git_identity.clone(),
             execution: input_template.execution.clone(),
+            readiness: None,
         };
 
         match run_command(input) {
@@ -1936,6 +1938,7 @@ fn legacy_release_command_input_struct_literal_remains_source_compatible() {
         skip_github_release: false,
         git_identity: None,
         execution: None,
+        readiness: None,
     };
     let _ = ReleaseOptions {
         bump_type: "patch".to_string(),
@@ -1950,5 +1953,6 @@ fn legacy_release_command_input_struct_literal_remains_source_compatible() {
         git_identity: None,
         bump_policy: Default::default(),
         preflight_placement: Default::default(),
+        readiness: None,
     };
 }
