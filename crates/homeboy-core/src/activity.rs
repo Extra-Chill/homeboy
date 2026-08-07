@@ -143,6 +143,13 @@ pub fn activity_report_with(
 /// keeps `show`/`watch` agreeing with `list`, where the lifecycle projection
 /// wins the same id (#10308).
 fn resolve_activity_item(id: &str) -> Result<(Option<ActivityItem>, ActivityRunnerFederation)> {
+    resolve_activity_item_with(id, ActivityOptions::default())
+}
+
+fn resolve_activity_item_with(
+    id: &str,
+    options: ActivityOptions,
+) -> Result<(Option<ActivityItem>, ActivityRunnerFederation)> {
     // Bounded, indexed probes for the id shapes `show`/`watch` are called with.
     // A failing probe (missing store, etc.) must not abort resolution — treat it
     // as "not found here" and continue so a partial-source outage still resolves
@@ -169,7 +176,7 @@ fn resolve_activity_item(id: &str) -> Result<(Option<ActivityItem>, ActivityRunn
     // federation here would make `homeboy activity watch <cook-id>` — the exact
     // command the cook notification hands the operator — permanently report
     // "activity item not found" for the window that matters most.
-    let report = activity_report(ActivityScope::All, 1000)?;
+    let report = activity_report_with(ActivityScope::All, 1000, options)?;
     Ok((
         resolve_item(&report.items, id).cloned(),
         report.runner_federation,
@@ -188,7 +195,17 @@ fn activity_item_not_found(id: &str) -> Error {
 }
 
 pub fn show_activity(id: &str) -> Result<ActivityReport> {
-    let (item, federation) = resolve_activity_item(id)?;
+    show_activity_with(id, ActivityOptions::default())
+}
+
+/// `show_activity` with an explicit federation policy.
+///
+/// The daemon needs this: its HTTP surface runs on a single-threaded accept
+/// loop, and the three controller-local probes always miss for a
+/// runner-resident id, so the default would fall through to a bounded runner
+/// probe and stall every other route for its duration.
+pub fn show_activity_with(id: &str, options: ActivityOptions) -> Result<ActivityReport> {
+    let (item, federation) = resolve_activity_item_with(id, options)?;
     let Some(item) = item else {
         return Err(activity_item_not_found(id));
     };
