@@ -1705,6 +1705,61 @@ fn job_timestamp_ms_to_rfc3339(timestamp_ms: u64) -> String {
 pub(super) const DAEMON_POLL_TRANSIENT_GRACE: Duration = Duration::from_secs(30);
 pub(super) const DAEMON_POLL_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 
+/// First wait between terminal-status polls. Matches the flat 200ms this loop
+/// used before it was bounded, so a job that settles quickly is still observed
+/// just as quickly.
+const DAEMON_TERMINAL_WAIT_INITIAL_BACKOFF: Duration = Duration::from_millis(200);
+/// Ceiling for terminal-wait backoff, so a long-running job is polled at a
+/// steady low rate instead of 5 times a second for its whole duration.
+const DAEMON_TERMINAL_WAIT_MAX_BACKOFF: Duration = Duration::from_secs(5);
+/// Longest uninterrupted sleep while waiting, bounding cancellation latency
+/// independently of how far backoff has grown.
+const DAEMON_TERMINAL_WAIT_CANCELLATION_SLICE: Duration = Duration::from_millis(200);
+
+/// Sleep up to `interval`, returning `true` if cancellation was observed.
+fn sleep_daemon_wait_unless_cancelled(interval: Duration, cancelled: &dyn Fn() -> bool) -> bool {
+    let mut remaining = interval;
+    while !remaining.is_zero() {
+        if cancelled() {
+            return true;
+        }
+        let slice = remaining.min(DAEMON_TERMINAL_WAIT_CANCELLATION_SLICE);
+        std::thread::sleep(slice);
+        remaining = remaining.saturating_sub(slice);
+    }
+    cancelled()
+}
+
+fn daemon_terminal_wait_cancelled_error(job_id: &str) -> Error {
+    Error::internal_unexpected(format!(
+        "cancelled while waiting for runner job `{job_id}` to reach a terminal status"
+    ))
+}
+
+/// Classified retryable: running out of budget does not prove the job failed,
+/// and it is very likely still executing remotely.
+fn daemon_terminal_wait_deadline_error(job_id: &str, waited: Duration, budget: Duration) -> Error {
+    let mut error = Error::new(
+        ErrorCode::InternalUnexpected,
+        format!(
+            "runner job `{job_id}` did not reach a terminal status within {:.1}s (budget {:.1}s)",
+            waited.as_secs_f64(),
+            budget.as_secs_f64()
+        ),
+        json!({
+            "daemon_terminal_wait_timeout": {
+                "runner_job_id": job_id,
+                "waited_ms": waited.as_millis() as u64,
+                "budget_ms": budget.as_millis() as u64,
+            },
+        }),
+    );
+    error.retryable = Some(true);
+    error.with_hint(format!(
+        "The remote job is probably still running. Inspect it with `homeboy runner job logs <runner-id> {job_id}`."
+    ))
+}
+
 /// Poll a daemon job, tolerating transient failures within the grace window.
 ///
 /// The job store is durable across daemon restarts, so a connection error or a
@@ -1729,10 +1784,18 @@ pub(crate) struct DaemonTerminalObservation {
     pub(crate) events: Vec<JobEvent>,
 }
 
+/// Wait for a daemon job to reach a terminal status.
+///
+/// `budget` bounds the total wait so a job that never settles cannot pin the
+/// caller forever; `cancelled` is polled between sleep slices so a caller with
+/// a cancellation token stays responsive while waiting. Both are supplied by
+/// the caller because only it knows the lifecycle budget the wait belongs to.
 pub(crate) fn observe_daemon_job_until_terminal(
     runner_id: &str,
     runner_job_id: &str,
     accepted_daemon_identity: Option<&str>,
+    budget: Duration,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<DaemonTerminalObservation> {
     let client = Client::builder()
         .no_proxy()
@@ -1752,7 +1815,13 @@ pub(crate) fn observe_daemon_job_until_terminal(
             "runner `{runner_id}` has no direct daemon endpoint for observation"
         ))
     })?;
+    let started = Instant::now();
+    let deadline = started + budget;
+    let mut backoff = DAEMON_TERMINAL_WAIT_INITIAL_BACKOFF;
     let job = loop {
+        if cancelled() {
+            return Err(daemon_terminal_wait_cancelled_error(runner_job_id));
+        }
         let (job, refreshed_endpoint) = fetch_daemon_job_resilient_with_endpoint_reload(
             &client,
             &endpoint,
@@ -1763,7 +1832,24 @@ pub(crate) fn observe_daemon_job_until_terminal(
         if job.status.is_terminal() {
             break job;
         }
-        std::thread::sleep(Duration::from_millis(200));
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(daemon_terminal_wait_deadline_error(
+                runner_job_id,
+                started.elapsed(),
+                budget,
+            ));
+        }
+        // Never sleep past the deadline, and never sleep longer than the
+        // cancellation slice in one go, so growing backoff cannot delay a
+        // cancellation response.
+        let interval = backoff.min(deadline - now);
+        if sleep_daemon_wait_unless_cancelled(interval, cancelled) {
+            return Err(daemon_terminal_wait_cancelled_error(runner_job_id));
+        }
+        backoff = backoff
+            .saturating_mul(2)
+            .min(DAEMON_TERMINAL_WAIT_MAX_BACKOFF);
     };
     let events = fetch_daemon_events(&client, &endpoint, runner_job_id)?;
     super::super::generation_store::record_job_artifacts(
