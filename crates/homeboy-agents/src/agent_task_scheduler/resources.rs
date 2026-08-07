@@ -173,6 +173,145 @@ pub(super) fn resource_capacity_available(
         <= max_active_units
 }
 
+/// How many whole tasks the resource budget still has room for, or `None` when
+/// the budget declares no ceiling.
+///
+/// This is the one place the "available units divided by per-task units"
+/// arithmetic lives. Both the scheduler's adaptive concurrency loop and the
+/// batch-cook fanout ceiling read it, so a host that tightens
+/// `max_active_units` tightens both by the same rule instead of by two
+/// hand-maintained copies that can disagree.
+pub(super) fn resource_budget_slots(
+    budget: &AgentTaskResourceBudget,
+    active_units: u32,
+) -> Option<usize> {
+    let max_active_units = budget.max_active_units?;
+    let default_task_units = budget.default_task_units.max(1);
+    let available_units = max_active_units.saturating_sub(active_units);
+    Some((available_units / default_task_units) as usize)
+}
+
+/// Why the batch fanout chose the concurrency it chose.
+///
+/// Reported alongside the limit so an operator reading a batch result can tell
+/// a deliberate `--max-concurrency 1` from a host config ceiling from a
+/// resource budget that quietly scaled the batch down, without re-deriving the
+/// decision from inputs that are no longer on hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchConcurrencySource {
+    /// An explicit `--max-concurrency` flag.
+    Flag,
+    /// The host's `/agent_task/max_batch_concurrency` setting.
+    Config,
+    /// The plan's resource budget had fewer whole task slots than the ceiling.
+    ResourceBudget,
+    /// Fewer children than any ceiling: the batch is its own limit.
+    ChildCount,
+}
+
+impl BatchConcurrencySource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Flag => "flag",
+            Self::Config => "config",
+            Self::ResourceBudget => "resource_budget",
+            Self::ChildCount => "child_count",
+        }
+    }
+}
+
+/// The inputs a batch concurrency ceiling is resolved from.
+#[derive(Debug, Clone)]
+pub struct BatchConcurrencyInputs<'a> {
+    /// Explicit operator override, if one was given.
+    pub requested: Option<usize>,
+    /// Host config ceiling, if one is set.
+    pub configured: Option<usize>,
+    /// Fallback ceiling when neither of the above is set.
+    pub default_limit: usize,
+    /// The batch's resource budget, consulted for whole task slots.
+    pub resource_budget: &'a AgentTaskResourceBudget,
+    /// Units already committed. A batch coordinator starts at zero.
+    pub active_units: u32,
+    /// How many children the batch actually has.
+    pub child_count: usize,
+}
+
+/// The resolved ceiling and the reason for it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BatchConcurrencyDecision {
+    pub limit: usize,
+    pub source: BatchConcurrencySource,
+    pub reason: String,
+}
+
+/// Resolve how many child cooks a batch may run at once.
+///
+/// An explicit flag is operator authority and is taken as the ceiling. With no
+/// flag, the host config ceiling (or the caller's default) applies. Either way
+/// the resource budget and the child count can only lower the result, never
+/// raise it, so declaring a budget can never be made less protective by a
+/// larger ceiling somewhere else.
+///
+/// The floor is 1: a batch with work to do always makes progress.
+pub fn resolve_batch_concurrency(inputs: BatchConcurrencyInputs<'_>) -> BatchConcurrencyDecision {
+    let (ceiling, source) = match inputs.requested {
+        Some(requested) => (requested.max(1), BatchConcurrencySource::Flag),
+        None => (
+            inputs.configured.unwrap_or(inputs.default_limit).max(1),
+            BatchConcurrencySource::Config,
+        ),
+    };
+    let mut limit = ceiling;
+    let mut source = source;
+    let mut reason = match source {
+        BatchConcurrencySource::Flag => {
+            format!("--max-concurrency {ceiling} requested by the caller")
+        }
+        _ => match inputs.configured {
+            Some(configured) => {
+                format!("host config /agent_task/max_batch_concurrency {configured}")
+            }
+            None => format!(
+                "built-in default ceiling {} with no --max-concurrency flag or host config",
+                inputs.default_limit
+            ),
+        },
+    };
+
+    // A resource budget is a statement about what the host can physically
+    // sustain, so it lowers even an explicit flag.
+    if let Some(slots) = resource_budget_slots(inputs.resource_budget, inputs.active_units) {
+        let slots = slots.max(1);
+        if slots < limit {
+            limit = slots;
+            source = BatchConcurrencySource::ResourceBudget;
+            reason = format!(
+                "resource budget allows {slots} concurrent tasks (max_active_units={:?} active_units={} default_task_units={}), below the {ceiling} ceiling",
+                inputs.resource_budget.max_active_units,
+                inputs.active_units,
+                inputs.resource_budget.default_task_units.max(1),
+            );
+        }
+    }
+
+    if inputs.child_count > 0 && inputs.child_count < limit {
+        reason = format!(
+            "batch has {} children, fewer than the effective ceiling {limit}",
+            inputs.child_count,
+        );
+        limit = inputs.child_count;
+        source = BatchConcurrencySource::ChildCount;
+    }
+
+    BatchConcurrencyDecision {
+        limit: limit.max(1),
+        source,
+        reason,
+    }
+}
+
 pub(super) fn adaptive_concurrency_decision(
     policy: Option<&AgentTaskAdaptiveConcurrencyPolicy>,
     configured_max_concurrency: usize,
@@ -217,10 +356,11 @@ pub(super) fn adaptive_concurrency_decision(
         }
     }
 
-    if let Some(max_active_units) = resource_budget.max_active_units {
+    if let Some(resource_slots) = resource_budget_slots(resource_budget, active_units) {
+        let max_active_units = resource_budget
+            .max_active_units
+            .expect("resource slots are only produced by a budget with a ceiling");
         let default_task_units = resource_budget.default_task_units.max(1);
-        let available_units = max_active_units.saturating_sub(active_units);
-        let resource_slots = (available_units / default_task_units) as usize;
         if resource_slots == 0 {
             effective_concurrency = 0;
             reason = format!(
@@ -345,5 +485,153 @@ pub(super) fn render_value_templates(value: &mut Value, bindings: &HashMap<Strin
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod batch_concurrency_tests {
+    use super::*;
+
+    fn inputs<'a>(
+        budget: &'a AgentTaskResourceBudget,
+        child_count: usize,
+    ) -> BatchConcurrencyInputs<'a> {
+        BatchConcurrencyInputs {
+            requested: None,
+            configured: None,
+            default_limit: 4,
+            resource_budget: budget,
+            active_units: 0,
+            child_count,
+        }
+    }
+
+    /// The regression this whole path exists for: a large batch on a host with
+    /// no flag and no config must not fan out to the core count.
+    #[test]
+    fn an_unconfigured_batch_is_capped_by_the_built_in_default() {
+        let budget = AgentTaskResourceBudget::default();
+        let decision = resolve_batch_concurrency(inputs(&budget, 32));
+        assert_eq!(decision.limit, 4);
+        assert_eq!(decision.source, BatchConcurrencySource::Config);
+    }
+
+    #[test]
+    fn an_explicit_flag_is_the_ceiling_and_is_reported_as_the_source() {
+        let budget = AgentTaskResourceBudget::default();
+        let decision = resolve_batch_concurrency(BatchConcurrencyInputs {
+            requested: Some(2),
+            configured: Some(8),
+            ..inputs(&budget, 32)
+        });
+        assert_eq!(decision.limit, 2);
+        assert_eq!(decision.source, BatchConcurrencySource::Flag);
+    }
+
+    #[test]
+    fn host_config_applies_when_no_flag_is_given() {
+        let budget = AgentTaskResourceBudget::default();
+        let decision = resolve_batch_concurrency(BatchConcurrencyInputs {
+            configured: Some(1),
+            ..inputs(&budget, 32)
+        });
+        assert_eq!(decision.limit, 1);
+        assert_eq!(decision.source, BatchConcurrencySource::Config);
+    }
+
+    /// A budget is a statement about the host, so it lowers even an explicit
+    /// flag. Getting this backwards is how a declared budget stops protecting.
+    #[test]
+    fn a_resource_budget_lowers_even_an_explicit_flag() {
+        let budget = AgentTaskResourceBudget {
+            max_active_units: Some(2),
+            default_task_units: 1,
+            ..AgentTaskResourceBudget::default()
+        };
+        let decision = resolve_batch_concurrency(BatchConcurrencyInputs {
+            requested: Some(8),
+            ..inputs(&budget, 32)
+        });
+        assert_eq!(decision.limit, 2);
+        assert_eq!(decision.source, BatchConcurrencySource::ResourceBudget);
+        assert!(
+            decision.reason.contains("resource budget"),
+            "{}",
+            decision.reason
+        );
+    }
+
+    #[test]
+    fn a_budget_larger_than_the_ceiling_does_not_raise_it() {
+        let budget = AgentTaskResourceBudget {
+            max_active_units: Some(64),
+            default_task_units: 1,
+            ..AgentTaskResourceBudget::default()
+        };
+        let decision = resolve_batch_concurrency(BatchConcurrencyInputs {
+            requested: Some(2),
+            ..inputs(&budget, 32)
+        });
+        assert_eq!(decision.limit, 2);
+        assert_eq!(decision.source, BatchConcurrencySource::Flag);
+    }
+
+    #[test]
+    fn a_small_batch_is_limited_by_its_own_child_count() {
+        let budget = AgentTaskResourceBudget::default();
+        let decision = resolve_batch_concurrency(BatchConcurrencyInputs {
+            requested: Some(8),
+            ..inputs(&budget, 2)
+        });
+        assert_eq!(decision.limit, 2);
+        assert_eq!(decision.source, BatchConcurrencySource::ChildCount);
+    }
+
+    /// A batch with work to do always makes progress, however tight the budget.
+    #[test]
+    fn the_floor_is_one_worker() {
+        let budget = AgentTaskResourceBudget {
+            max_active_units: Some(0),
+            default_task_units: 8,
+            ..AgentTaskResourceBudget::default()
+        };
+        let decision = resolve_batch_concurrency(BatchConcurrencyInputs {
+            requested: Some(0),
+            ..inputs(&budget, 32)
+        });
+        assert_eq!(decision.limit, 1);
+    }
+
+    #[test]
+    fn the_source_serializes_as_the_documented_vocabulary() {
+        for (source, expected) in [
+            (BatchConcurrencySource::Flag, "flag"),
+            (BatchConcurrencySource::Config, "config"),
+            (BatchConcurrencySource::ResourceBudget, "resource_budget"),
+            (BatchConcurrencySource::ChildCount, "child_count"),
+        ] {
+            assert_eq!(source.as_str(), expected);
+            assert_eq!(
+                serde_json::to_value(source).expect("source serializes"),
+                serde_json::Value::String(expected.to_string()),
+            );
+        }
+    }
+
+    /// The scheduler's adaptive loop and the batch ceiling must divide units
+    /// the same way, which is the point of sharing this helper.
+    #[test]
+    fn budget_slots_are_absent_without_a_ceiling_and_floor_at_zero_when_full() {
+        let unbounded = AgentTaskResourceBudget::default();
+        assert_eq!(resource_budget_slots(&unbounded, 0), None);
+
+        let bounded = AgentTaskResourceBudget {
+            max_active_units: Some(10),
+            default_task_units: 4,
+            ..AgentTaskResourceBudget::default()
+        };
+        assert_eq!(resource_budget_slots(&bounded, 0), Some(2));
+        assert_eq!(resource_budget_slots(&bounded, 8), Some(0));
+        assert_eq!(resource_budget_slots(&bounded, 999), Some(0));
     }
 }

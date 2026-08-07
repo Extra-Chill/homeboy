@@ -19,6 +19,7 @@ use crate::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionSt
 use crate::agent_task_scheduler::{
     AgentTaskExecutionBudget, AgentTaskExecutorAdapter, AgentTaskPlan,
 };
+use crate::agent_task_timeout::{capture_cook_deadline, expired_cook_deadline, CookDeadline};
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
 use homeboy_core::{Error, Result};
@@ -160,6 +161,41 @@ fn pre_artifact_interruption_report(
     });
     report.value.terminal_phase = Some(phase.name().to_string());
     report.value.terminal_failure_classification = Some("pre_artifact_interruption".to_string());
+    report
+}
+
+/// Terminalize a Cook that ran out of wall-clock budget.
+///
+/// Reported as [`CookStatus::TimedOut`] — the existing vocabulary entry for
+/// "exceeded its wall-clock budget" — rather than a new status, so the batch
+/// totals, exit-code classification, and terminality rules that already
+/// understand `timed_out` need no teaching. Exit code is 1: the Cook did not
+/// finish the work it was asked to do, and an operator has something to act on.
+///
+/// [`CookDisposition::Terminal`] is declared explicitly: nothing is left
+/// carrying this Cook forward, so the orchestrator's completion is due now.
+fn cook_deadline_report(
+    cook_id: String,
+    attempts: Vec<AgentTaskCookAttemptReport>,
+    run_id: &str,
+    deadline: &CookDeadline,
+    boundary: &str,
+) -> AgentTaskRunResult<AgentTaskCookReport> {
+    let mut report = cook_report(CookReportInput {
+        cook_id,
+        // The existing vocabulary entry for "exceeded its wall-clock budget"
+        // ([`CookStatus::TimedOut`]). Written as the literal every other exit
+        // in this file uses; the linkage is pinned by test.
+        status: "timed_out",
+        disposition: CookDisposition::Terminal,
+        attempts,
+        finalization: None,
+        stop_reason: Some(deadline.stop_reason(boundary)),
+        exit_code: 1,
+        invocation_latest_run_id: Some(run_id),
+    });
+    report.value.terminal_phase = Some("cook_deadline".to_string());
+    report.value.terminal_failure_classification = Some("timed_out".to_string());
     report
 }
 
@@ -1054,6 +1090,11 @@ where
     // The caller's route is thread-local, so each worker must re-bind it or its
     // children submit unrouted and never notify the originating destination.
     let notification_route = homeboy_core::notification_route::capture();
+    // The wall-clock budget is thread-local for the same reason and must cross
+    // the same boundary. A budget bound only on the coordinator would leave
+    // every child it started unbounded, which is the fanout multiplication this
+    // budget exists to stop.
+    let cook_deadline = capture_cook_deadline();
     std::thread::scope(|scope| {
         for _ in 0..workers {
             let cooks = Arc::clone(&cooks);
@@ -1062,36 +1103,38 @@ where
             let executor = executor.clone();
             let notification_route = notification_route.clone();
             scope.spawn(move || {
-                notification_route.bind(|| loop {
-                    let index = {
-                        let mut next = next.lock().expect("cook batch work queue");
-                        if *next == cooks.len() {
-                            return;
-                        }
-                        let index = *next;
-                        *next += 1;
-                        index
-                    };
-                    let cook = cooks[index].clone();
-                    let cell = match run_cook(cook.clone(), executor.clone()) {
-                        Ok(result) => AgentTaskCookBatchCellReport {
-                            cook_id: cook.cook_id,
-                            initial_run_id: cook.initial_run_id,
-                            status: result.value.status.clone(),
-                            exit_code: result.exit_code,
-                            result: Some(result.value),
-                            error: None,
-                        },
-                        Err(error) => AgentTaskCookBatchCellReport {
-                            cook_id: cook.cook_id,
-                            initial_run_id: cook.initial_run_id,
-                            status: "failed".to_string(),
-                            exit_code: 1,
-                            result: None,
-                            error: Some(error.to_string()),
-                        },
-                    };
-                    let _ = tx.send((index, cell));
+                cook_deadline.bind(|| {
+                    notification_route.bind(|| loop {
+                        let index = {
+                            let mut next = next.lock().expect("cook batch work queue");
+                            if *next == cooks.len() {
+                                return;
+                            }
+                            let index = *next;
+                            *next += 1;
+                            index
+                        };
+                        let cook = cooks[index].clone();
+                        let cell = match run_cook(cook.clone(), executor.clone()) {
+                            Ok(result) => AgentTaskCookBatchCellReport {
+                                cook_id: cook.cook_id,
+                                initial_run_id: cook.initial_run_id,
+                                status: result.value.status.clone(),
+                                exit_code: result.exit_code,
+                                result: Some(result.value),
+                                error: None,
+                            },
+                            Err(error) => AgentTaskCookBatchCellReport {
+                                cook_id: cook.cook_id,
+                                initial_run_id: cook.initial_run_id,
+                                status: "failed".to_string(),
+                                exit_code: 1,
+                                result: None,
+                                error: Some(error.to_string()),
+                            },
+                        };
+                        let _ = tx.send((index, cell));
+                    })
                 })
             });
         }
@@ -2587,6 +2630,18 @@ where
         max_attempts
     };
     for attempt in first_attempt..=attempt_limit {
+        // Attempt boundary. Checked before any provider work is dispatched, so
+        // an expired budget costs nothing further and the attempt that would
+        // have run is never started rather than started and killed.
+        if let Some(deadline) = expired_cook_deadline() {
+            return Ok(cook_deadline_report(
+                cook_id,
+                attempts,
+                &run_id,
+                &deadline,
+                &format!("attempt {attempt} could be started"),
+            ));
+        }
         let plan = match next_plan.take() {
             Some(plan) => plan,
             None => agent_task_lifecycle::load_plan(&run_id)?,
@@ -2783,10 +2838,15 @@ where
                         .tasks
                         .first()
                         .map(|task| task.executor.backend.clone());
+                    // Captured before the spawn: the budget lives in a
+                    // thread-local, and the heartbeat runs on a thread of its
+                    // own that would otherwise start unbudgeted.
+                    let heartbeat_deadline = capture_cook_deadline();
                     std::thread::scope(|scope| {
                         scope.spawn(move || {
                             let mut supervisor =
                                 CookSupervisor::new(supervision_policy, supervision_backend);
+                            let mut deadline_stop_issued = false;
                             while let Err(mpsc::RecvTimeoutError::Timeout) =
                                 heartbeat_wait.recv_timeout(COOK_HEARTBEAT_INTERVAL)
                             {
@@ -2844,6 +2904,56 @@ where
                                         // reader conclude the run was stopped.
                                         Err(error) => serde_json::json!({
                                             "status": "termination_failed",
+                                            "error": error.to_string(),
+                                            "recovery_commands":
+                                                homeboy_core::process::process_tree_recovery_commands(
+                                                    heartbeat_owner_pid,
+                                                ),
+                                        }),
+                                    };
+                                    let _ = agent_task_lifecycle::record_cook_supervision_stop(
+                                        &heartbeat_run_id,
+                                        attempt,
+                                        outcome,
+                                    );
+                                }
+                                // A deadline that only fired at attempt and
+                                // gate boundaries would not bound a single
+                                // provider execution that runs past it, so the
+                                // budget would be advisory for exactly the case
+                                // it exists to bound. Expiry therefore takes
+                                // the same route a supervision stop does:
+                                // terminate the provider's process tree, from
+                                // the same thread, recorded through the same
+                                // durable evidence. Issued once — a second
+                                // SIGKILL adds nothing and would overwrite the
+                                // first outcome record.
+                                if !deadline_stop_issued
+                                    && heartbeat_deadline
+                                        .deadline()
+                                        .is_some_and(|deadline| deadline.is_expired())
+                                {
+                                    deadline_stop_issued = true;
+                                    let outcome = match homeboy_core::process::terminate_process_tree(
+                                        heartbeat_owner_pid,
+                                    ) {
+                                        Ok(termination) => serde_json::json!({
+                                            "status": "terminated",
+                                            "cause": "cook_deadline",
+                                            "signal": termination.signal,
+                                            "signalled_pids": termination.signalled_pids,
+                                            "killed_pids": termination.killed_pids,
+                                            "surviving_pids": termination.surviving_pids,
+                                            "recovery_commands": termination.recovery_commands,
+                                        }),
+                                        // Same reasoning as the supervision
+                                        // stop above: a host that cannot
+                                        // terminate the tree must say so rather
+                                        // than let a reader conclude the
+                                        // provider was stopped.
+                                        Err(error) => serde_json::json!({
+                                            "status": "termination_failed",
+                                            "cause": "cook_deadline",
                                             "error": error.to_string(),
                                             "recovery_commands":
                                                 homeboy_core::process::process_tree_recovery_commands(
@@ -3163,6 +3273,32 @@ where
             }));
         }
 
+        // Gate dispatch boundary. Promotion is where the deterministic gates
+        // run, and gates are the expensive half of the budget: five gates at
+        // the default 30-minute timeout outlast the provider execution that
+        // produced the candidate. Checked before dispatch so an expired budget
+        // does not start a fresh multi-hour gate sweep.
+        //
+        // The provider's candidate is already durable at this point, so this
+        // stops without discarding work: the Cook is recoverable by the normal
+        // continuation route once the operator grants more budget.
+        if let Some(deadline) = expired_cook_deadline() {
+            attempts.push(AgentTaskCookAttemptReport {
+                attempt,
+                run_id: run_id.clone(),
+                run_state: format!("{:?}", record.state),
+                aggregate_path: record.aggregate_path.clone(),
+                promotion: None,
+                feedback: None,
+            });
+            return Ok(cook_deadline_report(
+                cook_id,
+                attempts,
+                &run_id,
+                &deadline,
+                &format!("attempt {attempt} could enter promotion and run its gates"),
+            ));
+        }
         report_cook_progress(
             durable_observer,
             &cook_id,
@@ -4205,3 +4341,107 @@ fn rebind_baseline_continuation_workspace(
 #[cfg(test)]
 #[path = "cook_tests.rs"]
 mod tests;
+
+/// Wall-clock budget behaviour at the boundaries the Cook loop checks.
+///
+/// These cover the decision and the contract it produces. The loop plumbing
+/// that calls them is exercised by the integration cases in `cook_tests.rs`.
+#[cfg(test)]
+mod cook_deadline_tests {
+    use super::*;
+    use crate::agent_task_timeout::{
+        current_cook_deadline, now_unix_ms, with_current_cook_deadline,
+    };
+
+    fn expired() -> CookDeadline {
+        CookDeadline::from_unix_ms(now_unix_ms().saturating_sub(1))
+    }
+
+    /// The default has to remain "no budget": every caller that never set one
+    /// must reach its attempt boundary exactly as before.
+    #[test]
+    fn an_unbudgeted_cook_never_reports_an_expired_boundary() {
+        assert_eq!(current_cook_deadline(), None);
+        assert_eq!(expired_cook_deadline(), None);
+    }
+
+    /// A live budget must not stop a Cook that still has time. Firing early is
+    /// the failure mode that kills real work.
+    #[test]
+    fn a_live_budget_does_not_trip_a_boundary() {
+        with_current_cook_deadline(Some(CookDeadline::from_duration_seconds(3_600)), || {
+            assert_eq!(expired_cook_deadline(), None);
+        });
+    }
+
+    #[test]
+    fn an_expired_budget_trips_the_boundary() {
+        let deadline = expired();
+        with_current_cook_deadline(Some(deadline), || {
+            assert_eq!(expired_cook_deadline(), Some(deadline));
+        });
+    }
+
+    /// Expiry must terminalize cleanly and inspectably: a known status, a
+    /// declared terminal disposition, a non-zero exit, and a stop reason that
+    /// names the boundary and the remedy.
+    #[test]
+    fn deadline_expiry_at_an_attempt_boundary_terminalizes_as_timed_out() {
+        let deadline = expired();
+        let result = cook_deadline_report(
+            "cook-1".to_string(),
+            Vec::new(),
+            "run-1",
+            &deadline,
+            "attempt 2 could be started",
+        );
+
+        assert_eq!(result.exit_code, 1, "expiry is not a success");
+        assert_eq!(result.value.status, "timed_out");
+        assert_eq!(result.value.disposition, CookDisposition::Terminal);
+        assert_eq!(
+            result.value.terminal_phase.as_deref(),
+            Some("cook_deadline"),
+            "the phase must distinguish a budget stop from any other timeout"
+        );
+        assert_eq!(
+            result.value.terminal_failure_classification.as_deref(),
+            Some("timed_out")
+        );
+
+        let reason = result.value.stop_reason.clone().expect("a stop reason");
+        assert!(reason.contains("--max-duration"), "{reason}");
+        assert!(reason.contains("attempt 2 could be started"), "{reason}");
+    }
+
+    /// The status must classify the same way every other terminal Cook status
+    /// does, or batch totals and exit codes disagree with the report.
+    ///
+    /// Also pins the literal written by `cook_deadline_report` to the enum
+    /// entry it is meant to be, so the two cannot drift apart.
+    #[test]
+    fn the_reported_status_reads_as_terminal_and_not_as_success() {
+        assert_eq!(CookStatus::TimedOut.as_str(), "timed_out");
+        let status = CookStatus::from_status("timed_out");
+        assert_eq!(status, CookStatus::TimedOut);
+        assert!(!status.is_in_flight());
+        assert!(!status.is_success_exit());
+    }
+
+    /// A gate-boundary stop names the gates, because "out of time" and "out of
+    /// time before the gates could run" call for different follow-ups.
+    #[test]
+    fn a_gate_boundary_stop_names_the_gate_phase() {
+        let reason = cook_deadline_report(
+            "cook-1".to_string(),
+            Vec::new(),
+            "run-1",
+            &expired(),
+            "attempt 1 could enter promotion and run its gates",
+        )
+        .value
+        .stop_reason
+        .expect("a stop reason");
+        assert!(reason.contains("run its gates"), "{reason}");
+    }
+}

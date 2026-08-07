@@ -728,7 +728,32 @@ pub struct AgentTaskConfig {
     /// request on stdin and returns a signed verdict on stdout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance_verifier: Option<AgentTaskAcceptanceVerifierConfig>,
+    /// Host-level ceiling on how many child cooks a batch fanout may run at
+    /// once, settable via `homeboy config set /agent_task/max_batch_concurrency
+    /// <n>`.
+    ///
+    /// Batch fanout previously derived its worker count from
+    /// `available_parallelism()` alone, so an eight-core host started eight
+    /// concurrent cooks. Concurrency is a property of what those cooks *do*,
+    /// not of the core count: a cook whose gate is a compile consumes tens of
+    /// gigabytes of disk, and eight of those exhaust a volume that fits one.
+    /// The core count cannot express that, so the host has to.
+    ///
+    /// `None` falls back to [`DEFAULT_AGENT_TASK_MAX_BATCH_CONCURRENCY`]. An
+    /// explicit `--max-concurrency` flag overrides both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_batch_concurrency: Option<usize>,
 }
+
+/// Fallback ceiling on concurrent child cooks in a batch fanout when neither
+/// `--max-concurrency` nor `/agent_task/max_batch_concurrency` is set.
+///
+/// Deliberately generous relative to what a resource-constrained host can
+/// actually sustain, because it applies to every host and cannot know what the
+/// gates do. It exists to make the limit *finite* — the previous behaviour had
+/// no ceiling at all beyond the core count. Hosts that need a tighter bound set
+/// the config value or a resource budget; both lower it from here.
+pub const DEFAULT_AGENT_TASK_MAX_BATCH_CONCURRENCY: usize = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskAcceptanceVerifierConfig {

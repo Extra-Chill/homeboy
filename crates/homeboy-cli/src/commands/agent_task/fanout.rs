@@ -7,6 +7,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::process::Command;
 
 use homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration;
+use homeboy::agents::agent_task_scheduler::{
+    resolve_batch_concurrency, BatchConcurrencyDecision, BatchConcurrencyInputs,
+};
+use homeboy::agents::agent_task_timeout::{with_current_cook_deadline, CookDeadline};
 use homeboy::agents::agent_tasks::batch;
 use homeboy::agents::agent_tasks::dependency_actions::{
     execute_resolved_dependency_actions, DependencyAction, DependencyActionExecutor,
@@ -1070,6 +1074,8 @@ fn batch_artifacts(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
 fn run_batch_cook_fanout(args: AgentTaskFanoutRunPlanArgs) -> CmdResult<Value> {
     let mut plan = load_batch_cook_fanout_plan(&args.input)?;
     plan.apply_ai_tool_override(args.ai_tool.as_deref());
+    plan.apply_max_concurrency_override(args.max_concurrency.map(|value| value as usize));
+    plan.apply_max_duration_override(args.max_duration);
     if let Some(record_run_id) = args.record_run_id {
         plan.rekey(record_run_id);
     }
@@ -1084,6 +1090,8 @@ pub(crate) fn run_batch_cook_fanout_with_attempt_dispatcher(
 ) -> CmdResult<Value> {
     let mut plan = load_batch_cook_fanout_plan(&args.input)?;
     plan.apply_ai_tool_override(args.ai_tool.as_deref());
+    plan.apply_max_concurrency_override(args.max_concurrency.map(|value| value as usize));
+    plan.apply_max_duration_override(args.max_duration);
     if let Some(record_run_id) = args.record_run_id {
         plan.rekey(record_run_id);
     }
@@ -1124,18 +1132,25 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher(
     persist_fanout_run_batch_record(&plan)?;
     persist_batch_cook_recipes(&plan)?;
     let ready_plan = plan.ready_plan()?;
-    let result = agent_task_service::run_cook_batch(
-        agent_task_service::AgentTaskCookBatchOptions {
-            batch_id: plan.fanout_id.clone(),
-            cooks: compile_batch_cooks(&ready_plan, |options| {
-                options.attempt_dispatcher = Some(attempt_dispatcher(options));
-            })?,
-            max_concurrency: batch_worker_limit(&plan),
-        },
-        provider::ExtensionProviderAgentTaskExecutor::discover(),
-    )?;
+    let cooks = compile_batch_cooks(&ready_plan, |options| {
+        options.attempt_dispatcher = Some(attempt_dispatcher(options));
+    })?;
+    let concurrency = batch_concurrency(&plan, &cooks);
+    // Resolved once, here, and bound for the whole batch: every worker thread
+    // re-binds this same absolute instant, so the budget covers the batch
+    // rather than restarting per child.
+    let result = with_current_cook_deadline(plan.cook_deadline(), || {
+        agent_task_service::run_cook_batch(
+            agent_task_service::AgentTaskCookBatchOptions {
+                batch_id: plan.fanout_id.clone(),
+                cooks,
+                max_concurrency: concurrency.limit,
+            },
+            provider::ExtensionProviderAgentTaskExecutor::discover(),
+        )
+    })?;
     record_terminal_batch_admission_failures(&plan, &result.value)?;
-    Ok(batch_cook_result(&plan, result))
+    Ok(batch_cook_result(&plan, result, &concurrency))
 }
 
 fn run_batch_cook_fanout_plan(plan: BatchCookFanoutPlan) -> CmdResult<Value> {
@@ -1155,16 +1170,22 @@ where
     persist_fanout_run_batch_record(&plan)?;
     persist_batch_cook_recipes(&plan)?;
     let ready_plan = plan.ready_plan()?;
-    let result = agent_task_service::run_cook_batch(
-        agent_task_service::AgentTaskCookBatchOptions {
-            batch_id: plan.fanout_id.clone(),
-            cooks: compile_batch_cooks(&ready_plan, |_| {})?,
-            max_concurrency: batch_worker_limit(&plan),
-        },
-        executor,
-    )?;
+    let cooks = compile_batch_cooks(&ready_plan, |_| {})?;
+    let concurrency = batch_concurrency(&plan, &cooks);
+    // See the sibling runner: the budget is resolved once and bound for the
+    // whole batch so it does not restart per child.
+    let result = with_current_cook_deadline(plan.cook_deadline(), || {
+        agent_task_service::run_cook_batch(
+            agent_task_service::AgentTaskCookBatchOptions {
+                batch_id: plan.fanout_id.clone(),
+                cooks,
+                max_concurrency: concurrency.limit,
+            },
+            executor,
+        )
+    })?;
     record_terminal_batch_admission_failures(&plan, &result.value)?;
-    Ok(batch_cook_result(&plan, result))
+    Ok(batch_cook_result(&plan, result, &concurrency))
 }
 
 /// Recipes are the durable restart boundary. Persist blocked dependents before
@@ -1223,15 +1244,43 @@ fn compile_batch_cooks(
         .collect()
 }
 
-fn batch_worker_limit(plan: &BatchCookFanoutPlan) -> usize {
-    plan.cooks
-        .len()
-        .min(std::thread::available_parallelism().map_or(1, usize::from))
+/// Resolve how many children this batch may run at once.
+///
+/// This used to be `min(children, available_parallelism())`, which is not a
+/// limit: an eight-core host started eight concurrent cooks regardless of what
+/// those cooks did. A cook whose gate compiles can consume tens of gigabytes of
+/// disk, so the core count is the wrong quantity entirely. The ceiling now
+/// comes from the operator, the host config, or the plan's resource budget —
+/// resolved by the scheduler's own resource module so the batch path and the
+/// scheduler apply one rule rather than two.
+fn batch_concurrency(
+    plan: &BatchCookFanoutPlan,
+    cooks: &[AgentTaskCookServiceOptions],
+) -> BatchConcurrencyDecision {
+    // A batch coordinator commits nothing before it starts, so the budget is
+    // read at zero active units. The budget itself is the children's own, taken
+    // from the first compiled plan: every child in a batch is compiled from the
+    // same host policy.
+    let resource_budget = cooks
+        .first()
+        .map(|cook| cook.initial_plan.options.resource_budget.clone())
+        .unwrap_or_default();
+    resolve_batch_concurrency(BatchConcurrencyInputs {
+        requested: plan.max_concurrency,
+        configured: homeboy_core::defaults::load_config()
+            .agent_task
+            .max_batch_concurrency,
+        default_limit: homeboy_core::defaults::DEFAULT_AGENT_TASK_MAX_BATCH_CONCURRENCY,
+        resource_budget: &resource_budget,
+        active_units: 0,
+        child_count: cooks.len(),
+    })
 }
 
 fn batch_cook_result(
     plan: &BatchCookFanoutPlan,
     result: agent_task_service::AgentTaskRunResult<agent_task_service::AgentTaskCookBatchReport>,
+    concurrency: &BatchConcurrencyDecision,
 ) -> (Value, i32) {
     let report = result.value;
     let cooks = report
@@ -1260,6 +1309,14 @@ fn batch_cook_result(
             "schema": AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA,
             "fanout_id": plan.fanout_id,
             "status": report.status,
+            // Reported so an operator can tell a deliberate ceiling from one a
+            // resource budget imposed, without re-deriving it from inputs that
+            // are no longer on hand.
+            "concurrency": {
+                "limit": concurrency.limit,
+                "source": concurrency.source.as_str(),
+                "reason": concurrency.reason,
+            },
             "summary": {
                 "total": report.total,
                 "queued": report.queued,
@@ -1568,6 +1625,19 @@ struct BatchCookFanoutPlan {
     schema: String,
     fanout_id: String,
     cooks: Vec<BatchCookSpec>,
+    /// Operator ceiling on how many children run at once, carried on the plan
+    /// so a plan built by `cook-batch` keeps its limit when it is persisted and
+    /// later executed by `run-plan`. `None` defers to host config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_concurrency: Option<usize>,
+    /// Wall-clock budget for the whole batch, in seconds.
+    ///
+    /// Stored as a duration rather than an absolute instant so a plan
+    /// persisted today and executed tomorrow gets the budget it asked for
+    /// instead of one that expired while it sat on disk. It is resolved to an
+    /// absolute deadline once, when the batch starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_duration_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     metadata: Value,
 }
@@ -1637,6 +1707,28 @@ impl BatchCookFanoutPlan {
         for cook in &mut self.cooks {
             cook.ai_tool = ai_tool.to_string();
         }
+    }
+
+    /// An execution-time `--max-concurrency` replaces the ceiling the plan was
+    /// built with. Absent, the persisted plan value stands.
+    fn apply_max_concurrency_override(&mut self, max_concurrency: Option<usize>) {
+        if max_concurrency.is_some() {
+            self.max_concurrency = max_concurrency;
+        }
+    }
+
+    /// An execution-time `--max-duration` replaces the budget the plan was
+    /// built with. Absent, the persisted plan value stands.
+    fn apply_max_duration_override(&mut self, max_duration_seconds: Option<u64>) {
+        if max_duration_seconds.is_some() {
+            self.max_duration_seconds = max_duration_seconds;
+        }
+    }
+
+    /// Resolve this batch's wall-clock budget to an absolute deadline, now.
+    fn cook_deadline(&self) -> Option<CookDeadline> {
+        self.max_duration_seconds
+            .map(CookDeadline::from_duration_seconds)
     }
 
     fn dependency_nodes(&self) -> Vec<AgentTaskDependencyNode> {
@@ -2144,6 +2236,8 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
         schema: batch_cook_fanout_plan_schema(),
         fanout_id,
         cooks,
+        max_concurrency: args.max_concurrency.map(|value| value as usize),
+        max_duration_seconds: args.max_duration,
         metadata: serde_json::json!({
             "source": "agent-task fanout cook-batch",
             "issue_count": args.issues.len(),
@@ -2697,6 +2791,14 @@ mod tests {
     use serde_json::json;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+
+    fn test_concurrency_decision() -> BatchConcurrencyDecision {
+        BatchConcurrencyDecision {
+            limit: 2,
+            source: homeboy::agents::agent_task_scheduler::BatchConcurrencySource::ChildCount,
+            reason: "batch has 2 children".to_string(),
+        }
+    }
 
     fn test_batch_plan() -> BatchCookFanoutPlan {
         BatchCookFanoutPlan::from_value(
@@ -3432,6 +3534,8 @@ fi
                 isolate_gate_xdg: true,
             },
             verification_profiles: None,
+            max_concurrency: None,
+            max_duration: None,
             dry_run: true,
             run_plan: false,
         }
@@ -3935,6 +4039,8 @@ fi
         let mut legacy = BatchCookFanoutPlan {
             schema: batch_cook_fanout_plan_schema(),
             fanout_id: "legacy".to_string(),
+            max_concurrency: None,
+            max_duration_seconds: None,
             cooks: vec![BatchCookSpec {
                 cook_id: "issue-6453".to_string(),
                 ..plan.cooks[0].clone()
@@ -4108,7 +4214,7 @@ fi
         active_failed_report.succeeded = 0;
         active_failed_report.failed = 1;
         active_failed_report.cooks[0].status = "in_flight".to_string();
-        let (data, exit_code) = batch_cook_result(&plan, result);
+        let (data, exit_code) = batch_cook_result(&plan, result, &test_concurrency_decision());
         let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
             &Ok(data),
             exit_code,
@@ -4131,6 +4237,7 @@ fi
                 exit_code: 1,
                 value: all_failed_report,
             },
+            &test_concurrency_decision(),
         );
         let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
             &Ok(data),
@@ -4148,6 +4255,7 @@ fi
                 exit_code: 0,
                 value: active_failed_report.clone(),
             },
+            &test_concurrency_decision(),
         );
         let (resumed, resume_exit_code) =
             batch_resume_result(active_failed_report, 0, "test-batch", None);
@@ -4324,6 +4432,203 @@ fi
         assert_eq!(
             args.ai_tool.as_deref(),
             Some("OpenAI GPT-5.6 Sol via OpenCode")
+        );
+    }
+
+    #[test]
+    fn run_plan_cli_parses_max_concurrency() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "run-plan",
+            "--input",
+            "@plan.json",
+            "--max-concurrency",
+            "2",
+        ])
+        .expect("run-plan parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let AgentTaskCommand::Fanout(fanout) = agent_task.command else {
+            panic!("fanout command");
+        };
+        let AgentTaskFanoutCommand::RunPlan(args) = fanout.command else {
+            panic!("run-plan command");
+        };
+        assert_eq!(args.max_concurrency, Some(2));
+    }
+
+    /// Zero workers would deadlock a batch that has work to do, so the flag
+    /// refuses it at parse time rather than silently clamping later.
+    #[test]
+    fn max_concurrency_rejects_zero() {
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "run-plan",
+            "--input",
+            "@plan.json",
+            "--max-concurrency",
+            "0",
+        ])
+        .is_err());
+    }
+
+    /// A ceiling declared at plan time has to survive persistence, or a batch
+    /// planned with `--max-concurrency 1` fans out unbounded when `run-plan`
+    /// executes it later.
+    #[test]
+    fn a_persisted_plan_carries_its_concurrency_ceiling() {
+        let mut plan = test_batch_plan();
+        assert_eq!(plan.max_concurrency, None);
+        plan.max_concurrency = Some(1);
+
+        let encoded = serde_json::to_value(&plan).expect("plan serializes");
+        assert_eq!(encoded["max_concurrency"], 1);
+
+        let reloaded = BatchCookFanoutPlan::from_value(encoded, &args()).expect("plan reloads");
+        assert_eq!(reloaded.max_concurrency, Some(1));
+    }
+
+    #[test]
+    fn an_execution_time_flag_overrides_the_persisted_ceiling() {
+        let mut plan = test_batch_plan();
+        plan.max_concurrency = Some(4);
+
+        plan.apply_max_concurrency_override(None);
+        assert_eq!(plan.max_concurrency, Some(4), "absent flag must not clear");
+
+        plan.apply_max_concurrency_override(Some(1));
+        assert_eq!(plan.max_concurrency, Some(1));
+    }
+
+    #[test]
+    fn run_plan_cli_parses_max_duration() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "run-plan",
+            "--input",
+            "@plan.json",
+            "--max-duration",
+            "5400",
+        ])
+        .expect("run-plan parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let AgentTaskCommand::Fanout(fanout) = agent_task.command else {
+            panic!("fanout command");
+        };
+        let AgentTaskFanoutCommand::RunPlan(args) = fanout.command else {
+            panic!("run-plan command");
+        };
+        assert_eq!(args.max_duration, Some(5400));
+    }
+
+    /// A zero-second budget would expire before the first attempt could start,
+    /// so it is refused at parse time rather than silently killing the batch.
+    #[test]
+    fn max_duration_rejects_zero() {
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "run-plan",
+            "--input",
+            "@plan.json",
+            "--max-duration",
+            "0",
+        ])
+        .is_err());
+    }
+
+    /// Absent the flag, a batch must stay unbudgeted — the pre-existing
+    /// behaviour for every caller that never asked for a deadline.
+    #[test]
+    fn a_plan_without_a_budget_resolves_no_deadline() {
+        let plan = test_batch_plan();
+        assert_eq!(plan.max_duration_seconds, None);
+        assert!(plan.cook_deadline().is_none());
+    }
+
+    /// The budget is persisted as a duration and resolved to an absolute
+    /// instant only at execution, so a plan that sat on disk still gets the
+    /// budget it asked for instead of one that expired while it waited.
+    #[test]
+    fn a_budget_is_persisted_as_a_duration_and_resolved_at_run_time() {
+        let mut plan = test_batch_plan();
+        plan.max_duration_seconds = Some(3_600);
+
+        let encoded = serde_json::to_value(&plan).expect("plan serializes");
+        assert_eq!(encoded["max_duration_seconds"], 3_600);
+
+        let reloaded = BatchCookFanoutPlan::from_value(encoded, &args()).expect("plan reloads");
+        assert_eq!(reloaded.max_duration_seconds, Some(3_600));
+
+        let deadline = reloaded.cook_deadline().expect("a resolved deadline");
+        assert!(
+            !deadline.is_expired(),
+            "a fresh budget must not start spent"
+        );
+        assert!(deadline.remaining_ms() > 0);
+    }
+
+    #[test]
+    fn an_execution_time_flag_overrides_the_persisted_budget() {
+        let mut plan = test_batch_plan();
+        plan.max_duration_seconds = Some(7_200);
+
+        plan.apply_max_duration_override(None);
+        assert_eq!(
+            plan.max_duration_seconds,
+            Some(7_200),
+            "absent flag must not clear the persisted budget"
+        );
+
+        plan.apply_max_duration_override(Some(60));
+        assert_eq!(plan.max_duration_seconds, Some(60));
+    }
+
+    /// The operator-facing half of the fix: the limit and why it was chosen
+    /// have to be readable off the result.
+    #[test]
+    fn the_batch_result_reports_the_effective_limit_and_its_source() {
+        let plan = test_batch_plan();
+        let report = agent_task_service::AgentTaskCookBatchReport {
+            schema: "homeboy/agent-task-cook-batch/v1",
+            batch_id: "test-batch".to_string(),
+            status: "succeeded".to_string(),
+            total: 2,
+            queued: 0,
+            running: 0,
+            succeeded: 2,
+            failed: 0,
+            cancelled: 0,
+            timed_out: 0,
+            cooks: Vec::new(),
+        };
+        let (data, _exit_code) = batch_cook_result(
+            &plan,
+            agent_task_service::AgentTaskRunResult {
+                exit_code: 0,
+                value: report,
+            },
+            &BatchConcurrencyDecision {
+                limit: 1,
+                source: homeboy::agents::agent_task_scheduler::BatchConcurrencySource::Flag,
+                reason: "--max-concurrency 1 requested by the caller".to_string(),
+            },
+        );
+        assert_eq!(data["concurrency"]["limit"], 1);
+        assert_eq!(data["concurrency"]["source"], "flag");
+        assert_eq!(
+            data["concurrency"]["reason"],
+            "--max-concurrency 1 requested by the caller"
         );
     }
 

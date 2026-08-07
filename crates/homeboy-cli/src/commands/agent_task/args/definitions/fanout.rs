@@ -84,6 +84,34 @@ pub struct AgentTaskFanoutCookBatchArgs {
     /// append to or replace shared --verify/--private-verify gates per issue.
     #[arg(long = "verification-profiles", value_name = "JSON")]
     pub verification_profiles: Option<String>,
+    /// Maximum number of child cooks to run at once.
+    ///
+    /// Without this, the ceiling is the host's
+    /// `/agent_task/max_batch_concurrency` config or a built-in default. A
+    /// declared resource budget and the number of children can lower the
+    /// result further, never raise it. The effective limit and the reason for
+    /// it are reported as `concurrency` in the batch result.
+    #[arg(
+        long = "max-concurrency",
+        value_parser = clap::value_parser!(u32).range(1..),
+        value_name = "N"
+    )]
+    pub max_concurrency: Option<u32>,
+    /// Wall-clock budget, in seconds, for the whole batch — every child, every
+    /// attempt, and every gate.
+    ///
+    /// The per-provider and per-gate timeouts bound only the parts, and the
+    /// parts multiply: with `--max-attempts 3` and five gates a single child
+    /// can legally run for hours. On expiry each child terminalizes as
+    /// `timed_out` at its next attempt or gate boundary, and a provider still
+    /// running has its process tree terminated. Unset means no budget, which
+    /// is the existing behaviour.
+    #[arg(
+        long = "max-duration",
+        value_parser = clap::value_parser!(u64).range(1..),
+        value_name = "SECONDS"
+    )]
+    pub max_duration: Option<u64>,
     #[arg(long = "dry-run")]
     pub dry_run: bool,
     #[arg(long = "run-plan")]
@@ -145,4 +173,20 @@ pub struct AgentTaskFanoutRunPlanArgs {
     /// Overrides the persisted plan value for this execution.
     #[arg(long = "ai-tool", value_name = "TEXT")]
     pub ai_tool: Option<String>,
+    /// Maximum number of child cooks to run at once. See
+    /// `fanout cook-batch --max-concurrency`.
+    #[arg(
+        long = "max-concurrency",
+        value_parser = clap::value_parser!(u32).range(1..),
+        value_name = "N"
+    )]
+    pub max_concurrency: Option<u32>,
+    /// Wall-clock budget, in seconds, for the whole batch. See
+    /// `fanout cook-batch --max-duration`.
+    #[arg(
+        long = "max-duration",
+        value_parser = clap::value_parser!(u64).range(1..),
+        value_name = "SECONDS"
+    )]
+    pub max_duration: Option<u64>,
 }
