@@ -45,7 +45,7 @@ pub(crate) struct LabWorkspaceHydrationStep {
 
 /// Aggregate hydration outcome for a single materialized workspace.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct LabWorkspaceHydrationOutput {
+pub struct LabWorkspaceHydrationOutput {
     pub(crate) schema: &'static str,
     /// `hydrated` when at least one provider install ran, `skipped_no_provider`
     /// when the workspace exposed no detected dependency provider, or
@@ -53,6 +53,8 @@ pub(crate) struct LabWorkspaceHydrationOutput {
     pub(crate) status: &'static str,
     pub(crate) workspace: String,
     pub(crate) steps: Vec<LabWorkspaceHydrationStep>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cache_source: Option<String>,
 }
 
 impl LabWorkspaceHydrationOutput {
@@ -62,6 +64,7 @@ impl LabWorkspaceHydrationOutput {
             status: "skipped_no_provider",
             workspace: workspace.to_string(),
             steps: Vec::new(),
+            cache_source: None,
         }
     }
 
@@ -71,6 +74,7 @@ impl LabWorkspaceHydrationOutput {
             status: "reused_prepared_cache",
             workspace: workspace.to_string(),
             steps: Vec::new(),
+            cache_source: Some("runner_prepared_source".to_string()),
         }
     }
 
@@ -97,6 +101,17 @@ pub(crate) fn hydrate_lab_workspace_dependencies(
     remote_path: &str,
 ) -> Result<LabWorkspaceHydrationOutput> {
     hydrate_lab_workspace_dependencies_for_run(runner_id, local_path, remote_path, None)
+}
+
+/// Offline-safe dependency setup for `runner exec --sync-workspace`. It uses a
+/// runner-owned cache first, then a sealed controller package; it never starts a
+/// package-manager command that could require runner network egress.
+pub fn hydrate_runner_workspace_dependencies(
+    runner_id: &str,
+    local_path: &str,
+    remote_path: &str,
+) -> Result<LabWorkspaceHydrationOutput> {
+    hydrate_lab_workspace_dependencies_with_policy(runner_id, local_path, remote_path, None, true)
 }
 
 const HYDRATION_RUN_SEGMENT: &str = "-lab-hydration-";
@@ -132,6 +147,22 @@ fn hydrate_lab_workspace_dependencies_for_run(
     remote_path: &str,
     parent_run_id: Option<&str>,
 ) -> Result<LabWorkspaceHydrationOutput> {
+    hydrate_lab_workspace_dependencies_with_policy(
+        runner_id,
+        local_path,
+        remote_path,
+        parent_run_id,
+        false,
+    )
+}
+
+fn hydrate_lab_workspace_dependencies_with_policy(
+    runner_id: &str,
+    local_path: &str,
+    remote_path: &str,
+    parent_run_id: Option<&str>,
+    offline_only: bool,
+) -> Result<LabWorkspaceHydrationOutput> {
     let plan = deps::dependency_install_plan(std::path::Path::new(local_path))?;
     if plan.is_empty() {
         return Ok(LabWorkspaceHydrationOutput::skipped_no_provider(
@@ -146,6 +177,29 @@ fn hydrate_lab_workspace_dependencies_for_run(
     if prepared_source_view_is_ready(runner_id, remote_path, &plan)? {
         return Ok(LabWorkspaceHydrationOutput::reused_prepared_cache(
             remote_path,
+        ));
+    }
+    if let Some(package) =
+        super::dependency_package::prepare(std::path::Path::new(local_path), &plan)?
+    {
+        restore_controller_dependency_package(runner_id, remote_path, &package)?;
+        return Ok(LabWorkspaceHydrationOutput {
+            schema: HYDRATION_SCHEMA,
+            status: "restored_controller_cache",
+            workspace: remote_path.to_string(),
+            steps: Vec::new(),
+            cache_source: Some("controller_package".to_string()),
+        });
+    }
+    if offline_only {
+        return Err(Error::validation_invalid_argument(
+            "workspace_setup",
+            "offline dependency setup has no safe package for this workspace identity",
+            Some(remote_path.to_string()),
+            Some(vec![
+                "Build dependencies on the controller so Homeboy can seal a bounded cache package, or use a runner with a matching prepared cache.".to_string(),
+                "The workload was not started and no runner package-manager command was executed.".to_string(),
+            ]),
         ));
     }
 
@@ -184,7 +238,59 @@ fn hydrate_lab_workspace_dependencies_for_run(
         status: "hydrated",
         workspace: remote_path.to_string(),
         steps,
+        cache_source: None,
     })
+}
+
+fn restore_controller_dependency_package(
+    runner_id: &str,
+    remote_path: &str,
+    package: &super::dependency_package::DependencyPackage,
+) -> Result<()> {
+    super::dependency_package::verify(&package.path, &package.sha256)?;
+    let runner = crate::load(runner_id)?;
+    let root = runner.workspace_root.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace_root",
+            "runner dependency cache requires workspace_root",
+            Some(runner_id.to_string()),
+            None,
+        )
+    })?;
+    let cache_dir = format!(
+        "{}/_dependency_cache/controller/{}",
+        root.trim_end_matches('/'),
+        package.key
+    );
+    let archive = format!("{cache_dir}/package.zip");
+    let transfer =
+        crate::RunnerFileTransfer::for_runner(&runner, crate::status(runner_id).ok().as_ref())?;
+    transfer.ensure_directory(&cache_dir)?;
+    transfer.upload_file(&package.path.display().to_string(), &archive)?;
+    let verify_and_restore = format!(
+        "test \"$(wc -c < {archive})\" -le {max} && test \"$(shasum -a 256 {archive} | awk '{{print $1}}')\" = {sha} && unzip -oq {archive} -d {workspace}",
+        archive = shell::quote_arg(&archive), max = super::dependency_package::MAX_PACKAGE_BYTES,
+        sha = shell::quote_arg(&package.sha256), workspace = shell::quote_arg(remote_path),
+    );
+    let (_, exit_code) = exec(
+        runner_id,
+        RunnerExecOptions::raw_command(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            verify_and_restore,
+        ])
+        .with_cwd(remote_path)
+        .without_evidence_mirror(),
+    )?;
+    if exit_code != 0 {
+        return Err(Error::validation_invalid_argument(
+            "workspace_setup",
+            "runner rejected or could not restore the controller dependency package",
+            Some(remote_path.to_string()),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 fn prepared_source_view_is_ready(
