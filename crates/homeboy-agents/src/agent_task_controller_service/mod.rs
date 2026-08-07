@@ -921,6 +921,12 @@ pub fn reconcile_waiting_controllers() -> Result<ControllerWaitReconcileReport> 
         }
         let loop_id = record.loop_id.clone();
         let before_state = record.state;
+        // Optimistic-concurrency token. Controller records have no locking, so
+        // a background writer on a timer could clobber an operator's `resume`
+        // that landed while this pass was reading. `reconcile_open_waits` does
+        // not touch `updated_at`, which makes the loaded value a usable
+        // version marker for a re-check immediately before the write.
+        let observed_at = record.updated_at.clone();
         let outcome = match reconcile_open_waits(&mut record) {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -940,6 +946,17 @@ pub fn reconcile_waiting_controllers() -> Result<ControllerWaitReconcileReport> 
         if !outcome.changed() {
             continue;
         }
+        // Somebody else advanced this controller while the pass ran. Their
+        // write is newer and is based on state this pass never saw; drop this
+        // one and let the next tick re-derive from the record they left.
+        // Reconciliation is idempotent, so losing a pass costs one interval.
+        if controller::load_controller(&loop_id)
+            .map(|current| current.updated_at != observed_at)
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        record.touch();
         if let Err(error) = controller::write_controller(&record) {
             failed += 1;
             entries.push(ControllerWaitReconcileEntry {
