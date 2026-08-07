@@ -10,6 +10,7 @@ use homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration;
 use homeboy::agents::agent_task_scheduler::{
     resolve_batch_concurrency, BatchConcurrencyDecision, BatchConcurrencyInputs,
 };
+use homeboy::agents::agent_task_timeout::{with_current_cook_deadline, CookDeadline};
 use homeboy::agents::agent_tasks::batch;
 use homeboy::agents::agent_tasks::dependency_actions::{
     execute_resolved_dependency_actions, DependencyAction, DependencyActionExecutor,
@@ -1074,6 +1075,7 @@ fn run_batch_cook_fanout(args: AgentTaskFanoutRunPlanArgs) -> CmdResult<Value> {
     let mut plan = load_batch_cook_fanout_plan(&args.input)?;
     plan.apply_ai_tool_override(args.ai_tool.as_deref());
     plan.apply_max_concurrency_override(args.max_concurrency);
+    plan.apply_max_duration_override(args.max_duration);
     if let Some(record_run_id) = args.record_run_id {
         plan.rekey(record_run_id);
     }
@@ -1089,6 +1091,7 @@ pub(crate) fn run_batch_cook_fanout_with_attempt_dispatcher(
     let mut plan = load_batch_cook_fanout_plan(&args.input)?;
     plan.apply_ai_tool_override(args.ai_tool.as_deref());
     plan.apply_max_concurrency_override(args.max_concurrency);
+    plan.apply_max_duration_override(args.max_duration);
     if let Some(record_run_id) = args.record_run_id {
         plan.rekey(record_run_id);
     }
@@ -1133,14 +1136,19 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher(
         options.attempt_dispatcher = Some(attempt_dispatcher(options));
     })?;
     let concurrency = batch_concurrency(&plan, &cooks);
-    let result = agent_task_service::run_cook_batch(
-        agent_task_service::AgentTaskCookBatchOptions {
-            batch_id: plan.fanout_id.clone(),
-            cooks,
-            max_concurrency: concurrency.limit,
-        },
-        provider::ExtensionProviderAgentTaskExecutor::discover(),
-    )?;
+    // Resolved once, here, and bound for the whole batch: every worker thread
+    // re-binds this same absolute instant, so the budget covers the batch
+    // rather than restarting per child.
+    let result = with_current_cook_deadline(plan.cook_deadline(), || {
+        agent_task_service::run_cook_batch(
+            agent_task_service::AgentTaskCookBatchOptions {
+                batch_id: plan.fanout_id.clone(),
+                cooks,
+                max_concurrency: concurrency.limit,
+            },
+            provider::ExtensionProviderAgentTaskExecutor::discover(),
+        )
+    })?;
     record_terminal_batch_admission_failures(&plan, &result.value)?;
     Ok(batch_cook_result(&plan, result, &concurrency))
 }
@@ -1164,14 +1172,18 @@ where
     let ready_plan = plan.ready_plan()?;
     let cooks = compile_batch_cooks(&ready_plan, |_| {})?;
     let concurrency = batch_concurrency(&plan, &cooks);
-    let result = agent_task_service::run_cook_batch(
-        agent_task_service::AgentTaskCookBatchOptions {
-            batch_id: plan.fanout_id.clone(),
-            cooks,
-            max_concurrency: concurrency.limit,
-        },
-        executor,
-    )?;
+    // See the sibling runner: the budget is resolved once and bound for the
+    // whole batch so it does not restart per child.
+    let result = with_current_cook_deadline(plan.cook_deadline(), || {
+        agent_task_service::run_cook_batch(
+            agent_task_service::AgentTaskCookBatchOptions {
+                batch_id: plan.fanout_id.clone(),
+                cooks,
+                max_concurrency: concurrency.limit,
+            },
+            executor,
+        )
+    })?;
     record_terminal_batch_admission_failures(&plan, &result.value)?;
     Ok(batch_cook_result(&plan, result, &concurrency))
 }
@@ -1618,6 +1630,14 @@ struct BatchCookFanoutPlan {
     /// later executed by `run-plan`. `None` defers to host config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_concurrency: Option<usize>,
+    /// Wall-clock budget for the whole batch, in seconds.
+    ///
+    /// Stored as a duration rather than an absolute instant so a plan
+    /// persisted today and executed tomorrow gets the budget it asked for
+    /// instead of one that expired while it sat on disk. It is resolved to an
+    /// absolute deadline once, when the batch starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_duration_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     metadata: Value,
 }
@@ -1695,6 +1715,20 @@ impl BatchCookFanoutPlan {
         if max_concurrency.is_some() {
             self.max_concurrency = max_concurrency;
         }
+    }
+
+    /// An execution-time `--max-duration` replaces the budget the plan was
+    /// built with. Absent, the persisted plan value stands.
+    fn apply_max_duration_override(&mut self, max_duration_seconds: Option<u64>) {
+        if max_duration_seconds.is_some() {
+            self.max_duration_seconds = max_duration_seconds;
+        }
+    }
+
+    /// Resolve this batch's wall-clock budget to an absolute deadline, now.
+    fn cook_deadline(&self) -> Option<CookDeadline> {
+        self.max_duration_seconds
+            .map(CookDeadline::from_duration_seconds)
     }
 
     fn dependency_nodes(&self) -> Vec<AgentTaskDependencyNode> {
@@ -2203,6 +2237,7 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
         fanout_id,
         cooks,
         max_concurrency: args.max_concurrency,
+        max_duration_seconds: args.max_duration,
         metadata: serde_json::json!({
             "source": "agent-task fanout cook-batch",
             "issue_count": args.issues.len(),
@@ -3500,6 +3535,7 @@ fi
             },
             verification_profiles: None,
             max_concurrency: None,
+            max_duration: None,
             dry_run: true,
             run_plan: false,
         }
@@ -4004,6 +4040,7 @@ fi
             schema: batch_cook_fanout_plan_schema(),
             fanout_id: "legacy".to_string(),
             max_concurrency: None,
+            max_duration_seconds: None,
             cooks: vec![BatchCookSpec {
                 cook_id: "issue-6453".to_string(),
                 ..plan.cooks[0].clone()
@@ -4466,6 +4503,95 @@ fi
 
         plan.apply_max_concurrency_override(Some(1));
         assert_eq!(plan.max_concurrency, Some(1));
+    }
+
+    #[test]
+    fn run_plan_cli_parses_max_duration() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "run-plan",
+            "--input",
+            "@plan.json",
+            "--max-duration",
+            "5400",
+        ])
+        .expect("run-plan parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let AgentTaskCommand::Fanout(fanout) = agent_task.command else {
+            panic!("fanout command");
+        };
+        let AgentTaskFanoutCommand::RunPlan(args) = fanout.command else {
+            panic!("run-plan command");
+        };
+        assert_eq!(args.max_duration, Some(5400));
+    }
+
+    /// A zero-second budget would expire before the first attempt could start,
+    /// so it is refused at parse time rather than silently killing the batch.
+    #[test]
+    fn max_duration_rejects_zero() {
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "run-plan",
+            "--input",
+            "@plan.json",
+            "--max-duration",
+            "0",
+        ])
+        .is_err());
+    }
+
+    /// Absent the flag, a batch must stay unbudgeted — the pre-existing
+    /// behaviour for every caller that never asked for a deadline.
+    #[test]
+    fn a_plan_without_a_budget_resolves_no_deadline() {
+        let plan = test_batch_plan();
+        assert_eq!(plan.max_duration_seconds, None);
+        assert!(plan.cook_deadline().is_none());
+    }
+
+    /// The budget is persisted as a duration and resolved to an absolute
+    /// instant only at execution, so a plan that sat on disk still gets the
+    /// budget it asked for instead of one that expired while it waited.
+    #[test]
+    fn a_budget_is_persisted_as_a_duration_and_resolved_at_run_time() {
+        let mut plan = test_batch_plan();
+        plan.max_duration_seconds = Some(3_600);
+
+        let encoded = serde_json::to_value(&plan).expect("plan serializes");
+        assert_eq!(encoded["max_duration_seconds"], 3_600);
+
+        let reloaded = BatchCookFanoutPlan::from_value(encoded, &args()).expect("plan reloads");
+        assert_eq!(reloaded.max_duration_seconds, Some(3_600));
+
+        let deadline = reloaded.cook_deadline().expect("a resolved deadline");
+        assert!(
+            !deadline.is_expired(),
+            "a fresh budget must not start spent"
+        );
+        assert!(deadline.remaining_ms() > 0);
+    }
+
+    #[test]
+    fn an_execution_time_flag_overrides_the_persisted_budget() {
+        let mut plan = test_batch_plan();
+        plan.max_duration_seconds = Some(7_200);
+
+        plan.apply_max_duration_override(None);
+        assert_eq!(
+            plan.max_duration_seconds,
+            Some(7_200),
+            "absent flag must not clear the persisted budget"
+        );
+
+        plan.apply_max_duration_override(Some(60));
+        assert_eq!(plan.max_duration_seconds, Some(60));
     }
 
     /// The operator-facing half of the fix: the limit and why it was chosen

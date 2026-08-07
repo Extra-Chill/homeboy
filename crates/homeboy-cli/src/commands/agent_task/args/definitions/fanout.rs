@@ -97,6 +97,21 @@ pub struct AgentTaskFanoutCookBatchArgs {
         value_name = "N"
     )]
     pub max_concurrency: Option<usize>,
+    /// Wall-clock budget, in seconds, for the whole batch — every child, every
+    /// attempt, and every gate.
+    ///
+    /// The per-provider and per-gate timeouts bound only the parts, and the
+    /// parts multiply: with `--max-attempts 3` and five gates a single child
+    /// can legally run for hours. On expiry each child terminalizes as
+    /// `timed_out` at its next attempt or gate boundary, and a provider still
+    /// running has its process tree terminated. Unset means no budget, which
+    /// is the existing behaviour.
+    #[arg(
+        long = "max-duration",
+        value_parser = clap::value_parser!(u64).range(1..),
+        value_name = "SECONDS"
+    )]
+    pub max_duration: Option<u64>,
     #[arg(long = "dry-run")]
     pub dry_run: bool,
     #[arg(long = "run-plan")]
@@ -166,4 +181,12 @@ pub struct AgentTaskFanoutRunPlanArgs {
         value_name = "N"
     )]
     pub max_concurrency: Option<usize>,
+    /// Wall-clock budget, in seconds, for the whole batch. See
+    /// `fanout cook-batch --max-duration`.
+    #[arg(
+        long = "max-duration",
+        value_parser = clap::value_parser!(u64).range(1..),
+        value_name = "SECONDS"
+    )]
+    pub max_duration: Option<u64>,
 }
