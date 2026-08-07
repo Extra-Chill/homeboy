@@ -450,6 +450,59 @@ pub struct ReleaseOptions {
     /// Bump policy controls that affect release plan validation.
     #[serde(default, skip_serializing_if = "ReleaseBumpPolicyOptions::is_default")]
     pub bump_policy: ReleaseBumpPolicyOptions,
+    /// Placement selected for portable release-readiness gates. Release mutation
+    /// always remains controller-owned; a runner is evidence provenance only.
+    #[serde(default, skip_serializing_if = "ReleasePreflightPlacement::is_default")]
+    pub preflight_placement: ReleasePreflightPlacement,
+}
+
+/// Typed placement policy for the portable portion of release preflight.
+///
+/// This deliberately does not describe versioning, tagging, pushing, or
+/// publication. Those operations mutate controller-owned state and are never
+/// authorized by readiness evidence from a runner.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleasePreflightPlacement {
+    #[serde(default)]
+    pub policy: ReleasePreflightPlacementPolicy,
+    /// Runner selected for portable gate execution, when policy pinning is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleasePreflightPlacementPolicy {
+    #[default]
+    Auto,
+    Local,
+    Lab,
+    LabOrLocal,
+}
+
+impl ReleasePreflightPlacement {
+    fn is_default(value: &Self) -> bool {
+        value == &Self::default()
+    }
+}
+
+/// Immutable source identity bound to release-readiness evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleasePreflightSourceIdentity {
+    pub commit: String,
+}
+
+/// Portable gate evidence that the controller may consume before mutation.
+///
+/// The envelope is intentionally data-only: Lab dispatch owns runner execution
+/// and artifact persistence, while release owns the decision to mutate only
+/// after this identity is revalidated locally.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseReadinessEnvelope {
+    pub source: ReleasePreflightSourceIdentity,
+    pub placement: ReleasePreflightPlacement,
+    pub runner_id: Option<String>,
+    pub evidence_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -758,6 +811,27 @@ mod tests {
         let input = ReleaseCommandInput::default();
 
         assert!(!input.force_lower_bump);
+    }
+
+    #[test]
+    fn readiness_envelope_keeps_runner_provenance_separate_from_mutation_policy() {
+        let envelope = ReleaseReadinessEnvelope {
+            source: ReleasePreflightSourceIdentity {
+                commit: "abc123".to_string(),
+            },
+            placement: ReleasePreflightPlacement {
+                policy: ReleasePreflightPlacementPolicy::Lab,
+                runner_id: Some("homeboy-lab".to_string()),
+            },
+            runner_id: Some("homeboy-lab".to_string()),
+            evidence_refs: vec!["runner-artifact://homeboy-lab/release/lint.json".to_string()],
+        };
+
+        let value = serde_json::to_value(envelope).expect("serialize readiness envelope");
+
+        assert_eq!(value["source"]["commit"], "abc123");
+        assert_eq!(value["runner_id"], "homeboy-lab");
+        assert!(value.get("mutation_runner_id").is_none());
     }
 
     #[test]

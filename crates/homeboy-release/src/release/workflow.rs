@@ -200,6 +200,7 @@ pub fn run_command_with_workspace(
             force_empty_release: input.bump_override.is_some(),
             require_explicit_major,
         },
+        preflight_placement: Default::default(),
     };
 
     if options.dry_run {
@@ -1948,5 +1949,6 @@ fn legacy_release_command_input_struct_literal_remains_source_compatible() {
         skip_github_release: false,
         git_identity: None,
         bump_policy: Default::default(),
+        preflight_placement: Default::default(),
     };
 }

@@ -27,6 +27,7 @@ mod planning_policy;
 mod planning_quality;
 mod planning_semver;
 mod planning_worktree;
+mod preflight_identity;
 pub use homeboy_deploy::provider_impl;
 mod types;
 mod utils;
@@ -68,9 +69,10 @@ pub use types::{
     BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseArtifact,
     ReleaseCommandInput, ReleaseCommandResult, ReleaseDeploymentResult, ReleaseDeploymentSummary,
     ReleaseExecutionPlan, ReleaseOptions, ReleasePhase, ReleasePipelineOptions, ReleasePlan,
-    ReleaseProjectDeployResult, ReleaseRollbackEvidence, ReleaseRun, ReleaseRunResult,
-    ReleaseRunSummary, ReleaseSemverCommit, ReleaseSemverRecommendation, ReleaseStepResult,
-    ReleaseStepStatus, ReleaseWorkspaceCommandResult, ReleaseWorkspaceOutput,
+    ReleasePreflightPlacement, ReleasePreflightPlacementPolicy, ReleasePreflightSourceIdentity,
+    ReleaseProjectDeployResult, ReleaseReadinessEnvelope, ReleaseRollbackEvidence, ReleaseRun,
+    ReleaseRunResult, ReleaseRunSummary, ReleaseSemverCommit, ReleaseSemverRecommendation,
+    ReleaseStepResult, ReleaseStepStatus, ReleaseWorkspaceCommandResult, ReleaseWorkspaceOutput,
 };
 pub use utils::{extract_latest_notes, parse_release_artifacts};
 pub use workflow::{

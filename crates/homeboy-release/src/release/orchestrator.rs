@@ -120,6 +120,12 @@ fn run_with_plan_inner(
         return Ok((initial_plan, run));
     }
 
+    // The portable portion of preflight is now complete. Freeze its source
+    // identity before building the mutation plan; any later checkout movement
+    // invalidates its evidence and must block controller-owned mutation.
+    let preflight_component = super::context::load_component(component_id, options)?;
+    let preflight_source = super::preflight_identity::capture(&preflight_component)?;
+
     // Rebuild the full plan after executable preflights. `preflight.remote_sync`
     // may fast-forward HEAD and `preflight.changelog_bootstrap` may create the
     // first changelog file; changelog/version planning must observe those
@@ -127,6 +133,8 @@ fn run_with_plan_inner(
     let release_plan = plan(component_id, options)?;
     let completed_preflights: HashSet<&'static str> =
         initial_executable_preflight_ids().iter().copied().collect();
+
+    super::preflight_identity::revalidate(&preflight_component, &preflight_source)?;
 
     timer.time("package", || {
         super::execution_plan::execute_plan_steps_at_source(
