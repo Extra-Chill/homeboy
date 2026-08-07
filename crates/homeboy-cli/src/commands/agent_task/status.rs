@@ -102,8 +102,14 @@ pub(super) fn resolve_cook_reader_target(
 pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     let target = resolve_cook_reader_target(&args.run_id, args.exact)?;
     if args.bridge {
+        // `--bridge` routes through `agent_task_lifecycle::status()`, which is a
+        // reconciling read that WRITES: it refreshes accepted runner handoffs,
+        // expires unbound controller handoffs, and persists the result. So this
+        // answer is not merely a different view from `activity show <id>` — it
+        // can also change what a later `activity show` returns. Say so (#W3-15).
         let bridge_status = agent_task_service::run_status(&target.run_id, args.since_cursor)?;
         let mut value = serde_json::to_value(bridge_status).unwrap_or(Value::Null);
+        attach_reconciled(&mut value, true);
         if let Some(selection) = target.selection {
             value["candidate_selection"] = selection;
         }
@@ -144,6 +150,11 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
         }
     }
     let mut value = serde_json::to_value(&record).unwrap_or(Value::Null);
+    // The default/`--full` status path is a durable-local read: reconciliation
+    // has its own explicit command so an unavailable runner cannot hold status
+    // hostage. That makes this answer directly comparable to `activity show`,
+    // and the flag says so instead of leaving the caller to guess (#W3-15).
+    attach_reconciled(&mut value, false);
     attach_status_identity(&mut value, &args.run_id, &target);
     attach_cook_notification_delivery(&mut value, &record, &target);
     attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
@@ -202,6 +213,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     }
     let summary = compact_status_summary(&value, run_id);
     let mut summary = summary;
+    attach_reconciled(&mut summary, false);
     attach_status_identity(&mut summary, &args.run_id, &target);
     if let Some(selection) = target.selection {
         summary["candidate_selection"] = selection;
@@ -211,6 +223,21 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     preserve_controller_owner_placement(&mut summary, run_id);
     let exit_code = subject_exit_code(&summary, args.strict_subject_exit);
     Ok((summary, exit_code))
+}
+
+/// Record whether this read reconciled — i.e. whether producing this answer
+/// also *wrote*, and therefore changed what a later read of the same run
+/// returns.
+///
+/// `activity show <id>` and `agent-task status <id>` can legitimately disagree
+/// about the same run at the same instant because one is a read model and the
+/// other (on `--bridge`) is a reconciling read. That is by design and is not
+/// changed here; it is only made visible, so a consumer can tell which kind of
+/// answer it received without inferring it from the command name (#W3-15).
+fn attach_reconciled(value: &mut Value, reconciled: bool) {
+    if let Value::Object(fields) = value {
+        fields.insert("reconciled".to_string(), Value::Bool(reconciled));
+    }
 }
 
 fn attach_status_identity(value: &mut Value, requested_run_id: &str, target: &CookReaderTarget) {

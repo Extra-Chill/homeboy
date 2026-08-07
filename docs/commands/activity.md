@@ -7,11 +7,13 @@ Unified read-only activity surface for orchestrators and operators asking what H
 ```bash
 homeboy activity
 homeboy activity list --limit 50
+homeboy activity list --no-runners
 homeboy activity show <id>
 homeboy activity watch <id> --timeout 30m
+homeboy agent-task watch <id>          # alias for `activity watch`
 ```
 
-`<id>` resolves across observation run ids, agent-task run ids, and runner daemon job ids.
+`<id>` resolves across observation run ids, agent-task run ids, cook ids, and runner daemon job ids.
 
 ## Output
 
@@ -26,7 +28,20 @@ JSON output uses the standard command-result envelope with `data.schema = homebo
 
 `agent_task_record_health` is a full-corpus diagnostic attached by `list` only. `show` and `watch` resolve a single id and leave it null rather than scanning every durable agent-task record to fill it.
 
+`reconciled` is always `false` here. It is emitted because `agent-task status <id> --bridge` is a reconciling read that *writes*, so the two surfaces can legitimately report different states for the same run at the same instant — and calling the reconciling one changes what this one returns next. The flag lets a consumer tell which kind of answer it received.
+
 Human output is a compact table followed by next-action command lines per item.
+
+## Runner federation
+
+Records for a run offloaded to a Lab runner live on that runner until it reports back, so a controller-local read cannot see them. `activity` federates connected Lab runners by default:
+
+- The remote read is `statuses_indexed` — one `/jobs` query against the already-connected session, with no generation reconcile — bounded by `HOMEBOY_READONLY_PROBE_TIMEOUT_SECONDS` (15s default).
+- A runner with no connected session is never queried: no session is opened and no network is performed. It appears with `queried: false`.
+- A connected runner that fails or times out sets `partial: true` and is named in `runner_federation.runners[].error`. Every other source still returns; a runner outage is never a command failure.
+- Federation is skipped entirely when no runner layer is registered in the process.
+
+Opt out with `--no-runners`, or `HOMEBOY_ACTIVITY_FEDERATE_RUNNERS=0` for a whole process (for example a long-lived daemon serving the HTTP activity endpoint).
 
 ## Scope
 

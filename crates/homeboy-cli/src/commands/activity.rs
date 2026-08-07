@@ -95,6 +95,11 @@ pub struct ActivityWatchOutput {
     pub command: &'static str,
     pub id: String,
     pub state: ActivityState,
+    /// Always `false`: the activity poller is deliberately non-reconciling,
+    /// unlike `runs watch`'s `StorePoller`. Emitted so a consumer polling this
+    /// (including through the `agent-task watch` alias) knows the poll is not
+    /// itself advancing the record it is watching (#W3-15).
+    pub reconciled: bool,
     pub terminal: bool,
     pub timed_out: bool,
     pub waited_secs: u64,
@@ -344,6 +349,7 @@ fn watch_output(
             command: "activity.watch",
             id: args.id,
             state: item.state,
+            reconciled: false,
             terminal: !timed_out,
             timed_out,
             waited_secs: waited.as_secs(),
@@ -788,6 +794,37 @@ mod tests {
         });
     }
 
+    /// The non-reconciling contract above is now *declared* in the output, not
+    /// only enforced by that test. `activity show <id>` and `agent-task status
+    /// <id> --bridge` can legitimately report different states for the same run
+    /// at the same instant, and the reconciling one changes what the other
+    /// returns next; `reconciled` is how a consumer tells them apart (#W3-15).
+    #[test]
+    fn every_activity_surface_declares_itself_unreconciled() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("activity-reconciled-flag").build())
+                .expect("running run");
+
+            for output in [
+                list(ActivityListArgs {
+                    limit: 5,
+                    all: false,
+                    no_runners: true,
+                })
+                .expect("list activity")
+                .0,
+                show(&run.id).expect("show activity").0,
+            ] {
+                let ActivityOutput::Report(report) = output else {
+                    panic!("list/show return reports");
+                };
+                assert!(!report.report.reconciled);
+            }
+        });
+    }
+
     /// `activity watch` and `runs watch` are separate commands over separate
     /// domain models, but they must agree on the timeout exit code. It used to
     /// be declared once per command; both now read the shared constant, and
@@ -817,6 +854,10 @@ mod tests {
             panic!("watch returns a watch output");
         };
         // The wire shape is unchanged by the shared-loop extraction.
+        assert!(
+            !output.reconciled,
+            "the activity poller must never reconcile"
+        );
         assert_eq!(output.command, "activity.watch");
         assert_eq!(output.schema, activity::ACTIVITY_REPORT_SCHEMA);
         assert_eq!(output.id, "run-1");
