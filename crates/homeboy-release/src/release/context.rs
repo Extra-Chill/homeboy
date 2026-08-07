@@ -65,6 +65,24 @@ mod tests {
     }
 
     #[test]
+    fn load_component_rejects_missing_path_override() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing = temp.path().join("missing-component");
+
+        let error = load_component(
+            "fixture",
+            &ReleaseOptions {
+                path_override: Some(missing.to_string_lossy().to_string()),
+                ..Default::default()
+            },
+        )
+        .expect_err("release path overrides must exist");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("--path override does not exist"));
+    }
+
+    #[test]
     fn test_resolve_extensions() {
         let component = Component::default();
 

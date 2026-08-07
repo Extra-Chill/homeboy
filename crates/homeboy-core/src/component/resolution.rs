@@ -191,7 +191,7 @@ fn artifact_pattern_providers(component: &Component) -> BTreeMap<String, String>
     providers
 }
 
-/// Validates component local_path is usable (absolute and exists).
+/// Validates a persisted component `local_path` is usable (absolute and exists).
 pub fn validate_local_path(component: &Component) -> Result<PathBuf> {
     let expanded = shellexpand::tilde(&component.local_path);
     let path = PathBuf::from(expanded.as_ref());
@@ -200,7 +200,7 @@ pub fn validate_local_path(component: &Component) -> Result<PathBuf> {
         return Err(Error::validation_invalid_argument(
             "local_path",
             format!(
-                "Component '{}' has relative local_path '{}' which cannot be resolved. Use absolute path like /Users/user/path/to/component",
+                "Component '{}' configured local_path '{}' is relative and cannot be resolved. Use an absolute path like /Users/user/path/to/component",
                 component.id, component.local_path
             ),
             Some(component.id.clone()),
@@ -217,7 +217,7 @@ pub fn validate_local_path(component: &Component) -> Result<PathBuf> {
         return Err(Error::validation_invalid_argument(
             "local_path",
             format!(
-                "Component '{}' local_path does not exist: {}",
+                "Component '{}' configured local_path does not exist: {}",
                 component.id,
                 path.display()
             ),
@@ -651,10 +651,12 @@ pub fn resolve_target(spec: TargetSpec<'_>) -> Result<ResolvedTarget> {
         spec.project,
         spec.accept_bare_directory,
         spec.registry_lookup,
+        !spec.allow_synthetic,
     )?;
 
     let explicit_path = spec
         .path_override
+        .map(|_| component.local_path.as_str())
         .or_else(|| component_id_is_bare_dir.then_some(component.local_path.as_str()));
     let synthetic = explicit_path
         .map(|path| path_has_portable_config(Path::new(path)).map(|has_config| !has_config))
@@ -781,6 +783,7 @@ pub fn resolve_effective(
         project,
         true,
         RegistryLookupPolicy::Allow,
+        true,
     )
 }
 
@@ -790,7 +793,16 @@ fn resolve_effective_inner(
     project: Option<&crate::project::Project>,
     accept_bare_directory: bool,
     registry_lookup: RegistryLookupPolicy,
+    require_existing_path_override: bool,
 ) -> Result<Component> {
+    // CLI --path values describe the invocation target, unlike persisted
+    // component.local_path values. Resolve them once before any portable-config
+    // lookup or local_path validation so relative paths have CWD semantics.
+    let resolved_path_override = path_override
+        .map(|path| resolve_explicit_path_override(path, require_existing_path_override))
+        .transpose()?;
+    let path_override = resolved_path_override.as_deref();
+
     if let (Some(project), Some(id)) = (project, id) {
         let component = crate::project::resolve_project_component(project, id)?;
         if let Some(path) = path_override {
@@ -921,6 +933,46 @@ fn resolve_effective_inner(
         }
 
         resolve(None)
+    }
+}
+
+/// Resolve an explicit `--path` override from the invocation directory.
+///
+/// Existing targets are canonicalized so subsequent component resolution and
+/// validation use one absolute spelling, including when the override traverses
+/// a symlink. Persisted component `local_path` values deliberately do not use
+/// this helper: their configured semantics remain unchanged.
+fn resolve_explicit_path_override(raw: &str, require_existing: bool) -> Result<String> {
+    let expanded = shellexpand::tilde(raw);
+    let candidate = Path::new(expanded.as_ref());
+    let absolute = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("resolve current directory for --path override".to_string()),
+                )
+            })?
+            .join(candidate)
+    };
+    let display_path = crate::paths::normalize_local_path(&absolute);
+    match absolute.canonicalize() {
+        Ok(canonical) => Ok(canonical.to_string_lossy().into_owned()),
+        Err(_) if require_existing => Err(Error::validation_invalid_argument(
+            "path",
+            format!("--path override does not exist: {}", display_path.display()),
+            Some(raw.to_string()),
+            Some(vec![format!(
+                "Verify the override path exists: ls -la {}",
+                display_path.display()
+            )]),
+        )),
+        // Synthetic ad-hoc targets deliberately permit a missing path. Retain an
+        // absolute, lexically normalized spelling even though it cannot yet be
+        // canonicalized.
+        Err(_) => Ok(display_path.to_string_lossy().into_owned()),
     }
 }
 
@@ -1180,7 +1232,10 @@ mod tests {
         .expect("explicit path should select the nested config");
 
         assert_eq!(resolved.id, "fixture");
-        assert_eq!(resolved.local_path, nested.to_string_lossy());
+        assert_eq!(
+            Path::new(&resolved.local_path),
+            nested.canonicalize().expect("canonical nested component")
+        );
     }
 
     #[test]
@@ -1310,7 +1365,7 @@ mod tests {
                 // The exact message is stable too, including the provider list.
                 assert_eq!(
                     err.message,
-                    "Component 'plugin' has multiple linked extensions with build support: nodejs, wordpress"
+                    "Invalid argument 'extension': Component 'plugin' has multiple linked extensions providing 'build': nodejs, wordpress"
                 );
             }
         });
@@ -1454,6 +1509,94 @@ mod tests {
     }
 
     #[test]
+    fn resolve_effective_resolves_dot_path_override_from_cwd() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let component = with_cwd(dir.path(), || {
+            resolve_effective(Some("fixture"), Some("."), None)
+                .expect("dot path override should resolve")
+        });
+
+        assert_eq!(
+            Path::new(&component.local_path)
+                .canonicalize()
+                .expect("canonical path"),
+            dir.path().canonicalize().expect("canonical tempdir")
+        );
+    }
+
+    #[test]
+    fn resolve_effective_resolves_parent_path_override_from_cwd() {
+        let parent = tempfile::tempdir().expect("parent tempdir");
+        let child = parent.path().join("child");
+        fs::create_dir(&child).expect("child dir");
+
+        let component = with_cwd(&child, || {
+            resolve_effective(Some("fixture"), Some(".."), None)
+                .expect("parent path override should resolve")
+        });
+
+        assert_eq!(
+            Path::new(&component.local_path)
+                .canonicalize()
+                .expect("canonical path"),
+            parent.path().canonicalize().expect("canonical parent")
+        );
+    }
+
+    #[test]
+    fn resolve_effective_resolves_relative_child_path_override_from_cwd() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let child = dir.path().join("child");
+        fs::create_dir(&child).expect("child dir");
+
+        let component = with_cwd(dir.path(), || {
+            resolve_effective(Some("fixture"), Some("child"), None)
+                .expect("child path override should resolve")
+        });
+
+        assert_eq!(
+            Path::new(&component.local_path)
+                .canonicalize()
+                .expect("canonical path"),
+            child.canonicalize().expect("canonical child")
+        );
+    }
+
+    #[test]
+    fn resolve_effective_reports_missing_path_as_override_error() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let error = with_cwd(dir.path(), || {
+            resolve_effective(Some("fixture"), Some("missing"), None)
+                .expect_err("missing path override should fail")
+        });
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("--path override does not exist"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_effective_canonicalizes_symlink_path_override() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("target");
+        let link = dir.path().join("link");
+        fs::create_dir(&target).expect("target dir");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let component = with_cwd(dir.path(), || {
+            resolve_effective(Some("fixture"), Some("link"), None)
+                .expect("symlink path override should resolve")
+        });
+
+        assert_eq!(
+            Path::new(&component.local_path),
+            target.canonicalize().expect("canonical target")
+        );
+    }
+
+    #[test]
     fn resolve_effective_preserves_explicit_path_override_id() {
         let dir = tempfile::tempdir().expect("temp dir");
         let repo = dir.path().join("override-repo");
@@ -1463,7 +1606,10 @@ mod tests {
             .expect("explicit path override should resolve");
 
         assert_eq!(component.id, "registered-id");
-        assert_eq!(component.local_path, repo.to_string_lossy());
+        assert_eq!(
+            Path::new(&component.local_path),
+            repo.canonicalize().expect("canonical override repo")
+        );
     }
 
     #[test]
@@ -1476,7 +1622,10 @@ mod tests {
             .expect("path-only override should resolve");
 
         assert_eq!(component.id, "external-repo");
-        assert_eq!(component.local_path, repo.to_string_lossy());
+        assert_eq!(
+            Path::new(&component.local_path),
+            repo.canonicalize().expect("canonical override repo")
+        );
     }
 
     #[test]
@@ -1494,7 +1643,10 @@ mod tests {
             .expect("path-only portable config should resolve");
 
         assert_eq!(component.id, "portable-id");
-        assert_eq!(component.local_path, repo.to_string_lossy());
+        assert_eq!(
+            Path::new(&component.local_path),
+            repo.canonicalize().expect("canonical override repo")
+        );
         assert!(component
             .extensions
             .as_ref()
@@ -1647,7 +1799,12 @@ mod tests {
                 None,
             )
             .expect("task worktree resolves through explicit target");
-            assert_eq!(task_component.local_path, task_worktree.to_string_lossy());
+            assert_eq!(
+                Path::new(&task_component.local_path),
+                task_worktree
+                    .canonicalize()
+                    .expect("canonical task worktree")
+            );
             assert!(!task_component.env.contains_key("REPO_RELATIVE_CACHE"));
 
             let path_component = resolve_effective(
@@ -1656,7 +1813,10 @@ mod tests {
                 None,
             )
             .expect("path-only target resolves");
-            assert_eq!(path_component.local_path, dmc_worktree.to_string_lossy());
+            assert_eq!(
+                Path::new(&path_component.local_path),
+                dmc_worktree.canonicalize().expect("canonical DMC worktree")
+            );
             assert!(!path_component.env.contains_key("REPO_RELATIVE_CACHE"));
         });
     }
@@ -1833,7 +1993,10 @@ mod tests {
             let component = resolve_effective(Some("fixture"), worktree.to_str(), None)
                 .expect("unmatched explicit id remains synthetic");
             assert_eq!(component.id, "fixture");
-            assert_eq!(component.local_path, worktree.to_string_lossy());
+            assert_eq!(
+                Path::new(&component.local_path),
+                worktree.canonicalize().expect("canonical worktree")
+            );
             assert_ne!(component.remote_path, "wp-content/plugins/other");
         });
     }
@@ -1858,7 +2021,10 @@ mod tests {
 
             let component = resolve_effective(Some("fixture"), nested.to_str(), None)
                 .expect("nested legacy target resolves");
-            assert_eq!(component.local_path, nested.to_string_lossy());
+            assert_eq!(
+                Path::new(&component.local_path),
+                nested.canonicalize().expect("canonical nested target")
+            );
         });
     }
 
@@ -2025,7 +2191,10 @@ mod tests {
         let target = resolve_target(TargetSpec::new(None, repo.to_str())).expect("path target");
 
         assert_eq!(target.component_id, "path-id");
-        assert_eq!(target.source_path, repo);
+        assert_eq!(
+            target.source_path,
+            repo.canonicalize().expect("canonical path repo")
+        );
         assert!(!target.synthetic);
     }
 
@@ -2070,8 +2239,88 @@ mod tests {
             resolve_target(TargetSpec::new(None, repo.to_str())).expect("synthetic target");
 
         assert_eq!(target.component_id, "synthetic-repo");
-        assert_eq!(target.source_path, repo);
+        assert_eq!(
+            target.source_path,
+            repo.canonicalize().expect("canonical synthetic repo")
+        );
         assert!(target.synthetic);
+    }
+
+    #[test]
+    fn target_spec_allows_missing_synthetic_path_override() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("missing-repo");
+
+        let target = resolve_target(TargetSpec::new(None, missing.to_str()))
+            .expect("synthetic targets allow a missing path override");
+
+        assert_eq!(target.component_id, "missing-repo");
+        assert_eq!(
+            target.source_path,
+            crate::paths::normalize_local_path(&missing)
+        );
+        assert!(target.synthetic);
+    }
+
+    #[test]
+    fn target_spec_rejects_missing_non_synthetic_path_override() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("missing-repo");
+
+        let error = resolve_target(TargetSpec {
+            component_id: None,
+            path_override: missing.to_str(),
+            allow_synthetic: false,
+            ..TargetSpec::default()
+        })
+        .expect_err("non-synthetic targets require an existing path override");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("--path override does not exist"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_spec_allows_broken_symlink_only_for_synthetic_target() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let broken_link = dir.path().join("broken-link");
+        std::os::unix::fs::symlink(dir.path().join("missing-target"), &broken_link)
+            .expect("broken symlink");
+
+        let target = resolve_target(TargetSpec::new(None, broken_link.to_str()))
+            .expect("synthetic targets allow a broken symlink override");
+        assert_eq!(
+            target.source_path,
+            crate::paths::normalize_local_path(&broken_link)
+        );
+        assert!(target.synthetic);
+
+        let error = resolve_target(TargetSpec {
+            component_id: None,
+            path_override: broken_link.to_str(),
+            allow_synthetic: false,
+            ..TargetSpec::default()
+        })
+        .expect_err("non-synthetic targets reject a broken symlink override");
+        assert!(error.message.contains("--path override does not exist"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_effective_canonicalizes_symlink_to_file_override() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("component-file");
+        let link = dir.path().join("component-link");
+        fs::write(&file, "fixture").expect("component file");
+        std::os::unix::fs::symlink(&file, &link).expect("file symlink");
+
+        let component = resolve_effective(Some("fixture"), link.to_str(), None)
+            .expect("existing file overrides retain their prior accepted behavior");
+
+        assert_eq!(
+            Path::new(&component.local_path),
+            file.canonicalize().expect("canonical component file")
+        );
     }
 
     #[test]
