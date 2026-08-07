@@ -241,7 +241,8 @@ fn bench_observation_persists_success_with_metrics_and_artifacts() {
             diagnostics: Vec::new(),
         };
 
-        let args = bench_args();
+        let mut args = bench_args();
+        args.run_id = Some("fixture87-forms-frontend-proof-retry".to_string());
         let selected_scenarios = vec!["cold".to_string()];
         let observation = start(BenchObservationStart {
             component_id: "homeboy",
@@ -277,6 +278,10 @@ fn bench_observation_persists_success_with_metrics_and_artifacts() {
         assert_eq!(run.status, "pass");
         assert_eq!(run.component_id.as_deref(), Some("homeboy"));
         assert_eq!(run.metadata_json["selected_scenarios"][0], "cold");
+        assert_eq!(
+            run.metadata_json["caller_run_id"],
+            "fixture87-forms-frontend-proof-retry"
+        );
         assert_eq!(
             run.metadata_json["scenario_metrics"][0]["scenario_id"],
             "cold"

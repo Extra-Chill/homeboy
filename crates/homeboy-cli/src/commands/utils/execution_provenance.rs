@@ -283,4 +283,35 @@ mod tests {
         assert!(command.contains("-- --filter=SmokeTest"));
         assert!(!command.contains(crate::commands::utils::args::EXPLICIT_PASSTHROUGH_SENTINEL));
     }
+
+    #[test]
+    fn bench_provenance_preserves_passthrough_and_caller_run_id_with_redaction() {
+        let value = provenance(&[
+            "homeboy",
+            "bench",
+            "--rig=static-site-importer-fixture-matrix",
+            "--run-id",
+            "fixture87-forms-frontend-proof-retry",
+            "--",
+            "--fixture-root",
+            "/tmp/fixture root",
+            "--fixture-id=87",
+            "--api-token=secret-value",
+        ]);
+        let argv = value["operator_intent"]["argv"]
+            .as_array()
+            .expect("canonical argv");
+        let command = value["operator_intent"]["rerun_command"]
+            .as_str()
+            .expect("shell-safe rerun command");
+
+        assert_eq!(argv[4], "fixture87-forms-frontend-proof-retry");
+        assert_eq!(argv[6], "--fixture-root");
+        assert_eq!(argv[7], "/tmp/fixture root");
+        assert_eq!(argv[8], "--fixture-id=87");
+        assert_eq!(argv[9], "--api-token=[REDACTED]");
+        assert!(command.contains("--run-id fixture87-forms-frontend-proof-retry"));
+        assert!(command.contains("--fixture-root '/tmp/fixture root'"));
+        assert!(!command.contains("secret-value"));
+    }
 }

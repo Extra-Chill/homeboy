@@ -10,7 +10,12 @@ pub(super) fn bench_observation_command(
     component_id: &str,
     args: &BenchRunArgs,
     rig_id: Option<&str>,
+    execution_provenance: Option<&serde_json::Value>,
 ) -> String {
+    if let Some(command) = canonical_rerun_command(execution_provenance) {
+        return command;
+    }
+
     let mut parts = vec![
         "homeboy".to_string(),
         "bench".to_string(),
@@ -31,6 +36,13 @@ pub(super) fn bench_observation_command(
     parts.join(" ")
 }
 
+fn canonical_rerun_command(execution_provenance: Option<&serde_json::Value>) -> Option<String> {
+    execution_provenance?
+        .pointer("/operator_intent/rerun_command")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
 pub(super) fn bench_observation_initial_metadata(
     component_label: &str,
     args: &BenchRunArgs,
@@ -43,6 +55,7 @@ pub(super) fn bench_observation_initial_metadata(
         .map(resource_policy::resource_policy_context_to_json)
         .unwrap_or(serde_json::Value::Null);
     serde_json::json!({
+        "schema": "homeboy/bench-observation/v1",
         "component_label": component_label,
         "iterations": args.iterations,
         "warmup_iterations": args.warmup,
@@ -58,9 +71,11 @@ pub(super) fn bench_observation_initial_metadata(
         "selected_scenarios": selected_scenarios,
         "shared_state": args.shared_state.as_ref().map(|path| path.to_string_lossy().to_string()),
         "status_file": args.status_file.as_ref().map(|path| path.to_string_lossy().to_string()),
+        "caller_run_id": args.run_id,
         "run_dir": run_dir.path().to_string_lossy().to_string(),
         "rig_state": rig_snapshot,
         "resource_policy": resource_policy,
+        "execution_provenance": crate::commands::utils::execution_provenance::captured(),
     })
 }
 
@@ -120,4 +135,24 @@ fn scenario_metric_summaries(results: &BenchResults) -> Vec<serde_json::Value> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_rerun_command;
+
+    #[test]
+    fn canonical_rerun_command_reads_shell_safe_provenance() {
+        let provenance = serde_json::json!({
+            "operator_intent": {
+                "argv": ["homeboy", "bench", "--", "--fixture-root", "/tmp/a b"],
+                "rerun_command": "homeboy bench -- --fixture-root '/tmp/a b'"
+            }
+        });
+
+        assert_eq!(
+            canonical_rerun_command(Some(&provenance)).as_deref(),
+            Some("homeboy bench -- --fixture-root '/tmp/a b'")
+        );
+    }
 }
