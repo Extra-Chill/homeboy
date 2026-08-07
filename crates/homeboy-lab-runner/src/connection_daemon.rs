@@ -523,7 +523,9 @@ fn daemon_freshness_report(
     expected_version: &str,
     expected_identity: &str,
 ) -> std::result::Result<DaemonFreshnessReport, String> {
-    let DaemonVersionResponse { body, raw_body } = daemon_http_body(local_url)?;
+    // Freshness, including the immutable executable hash, is a daemon health
+    // contract. A version response is only an identity compatibility fallback.
+    let DaemonVersionResponse { body, raw_body } = daemon_http_body_at(local_url, "health")?;
     if let Some(report) = daemon_freshness_from_body(&body) {
         if report.fresh
             && daemon_version_identity_mismatch(
@@ -672,6 +674,51 @@ mod tests {
             build_identity: None,
             inspected_freshness: None,
         }
+    }
+
+    #[test]
+    fn freshness_reads_the_hash_bearing_health_contract() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let expected_hash = "a".repeat(64);
+        let mut freshness = report("lease-candidate", 4242).freshness;
+        freshness.fresh = true;
+        freshness.binary_hash = Some(expected_hash.clone());
+        let body = serde_json::json!({
+            "version": "test",
+            "build_identity": { "display": "homeboy test+candidate" },
+            "lease": { "lease_id": "lease-candidate" },
+            "freshness": freshness,
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("health request");
+            let mut request = [0; 1024];
+            let read = stream.read(&mut request).expect("read request");
+            assert!(std::str::from_utf8(&request[..read])
+                .expect("request text")
+                .starts_with("GET /health HTTP/1.1"));
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(), body
+                    )
+                    .as_bytes(),
+                )
+                .expect("health response");
+        });
+
+        let report = daemon_http_freshness(
+            "homeboy-lab",
+            &format!("http://{address}"),
+            "test",
+            "homeboy test+candidate",
+        )
+        .expect("freshness report");
+        assert!(report.fresh);
+        assert_eq!(report.binary_hash.as_deref(), Some(expected_hash.as_str()));
+        server.join().expect("server");
     }
 
     #[test]
