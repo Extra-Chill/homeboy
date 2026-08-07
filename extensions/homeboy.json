@@ -14,6 +14,8 @@
       "bash tests/cross-extension-sidecar-normalization-smoke.sh",
       "node tests/deferred-init-browser-helper-smoke.mjs",
       "node tests/dependency-adapter-manifests-smoke.mjs",
+      "node discord/tests/notify.test.mjs",
+      "node discord/tests/resolve-route.test.mjs",
       "node tests/local-shell-agent-task-executor-boundary.test.mjs",
       "bash tests/project-scripts-pnpm-workspace-smoke.sh",
       "node tests/runtime-provider-resolver-smoke.mjs",

@@ -12,7 +12,11 @@
     {
       "schema": "homeboy/notification-transport/v1",
       "id": "discord.run-completion",
-      "command": ["node", "{extension_path}/scripts/notify.mjs"]
+      "command": ["node", "{extension_path}/scripts/notify.mjs"],
+      "route_resolver": {
+        "schema": "homeboy/notification-route-resolver/v1",
+        "command": ["node", "{extension_path}/scripts/resolve-route.mjs"]
+      }
     }
   ]
 }

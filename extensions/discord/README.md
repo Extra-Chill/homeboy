@@ -21,20 +21,26 @@ export DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/...'
 ```
 
 Homeboy discovers the `discord.run-completion` transport from this extension's
-manifest. Select it as the notification transport in Homeboy configuration or
-with the corresponding CLI option; Homeboy invokes the typed command with each
-run's caller context.
+manifest. A Homeboy version with extension-owned route resolver support can
+select it automatically from invocation-scoped Discord context. Explicit
+notification CLI or environment routes always take precedence.
 
 ## Usage
 
-A Discord-originated run must carry its non-secret, versioned route when it is
-created: `discord:v1:thread:<guild-id>:<thread-id>` or
-`discord:v1:channel:<guild-id>:<channel-id>`. Homeboy persists that opaque
-route with the run, so concurrent detached runs deliver independently.
+Kimaki-backed shell commands expose the owning Discord thread as
+`KIMAKI_THREAD_ID`. The extension validates that invocation-scoped value and
+derives `discord:v1:thread:<thread-id>` without notification flags. Homeboy
+persists the opaque route with the run, so concurrent detached runs deliver
+independently. Missing Kimaki context preserves route-less behavior; invalid
+context fails closed.
+
+Explicit routes remain available for other callers. The canonical thread form
+is `discord:v1:thread:<thread-id>`; legacy guild-bearing routes remain accepted
+for existing persisted runs.
 
 ```sh
 homeboy --notification-transport discord.run-completion \
-  --notification-route 'discord:v1:thread:123456789012345678:234567890123456789' \
+  --notification-route 'discord:v1:thread:234567890123456789' \
   --detach-after-handoff test
 ```
 
