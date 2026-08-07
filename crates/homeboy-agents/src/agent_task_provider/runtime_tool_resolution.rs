@@ -2,8 +2,9 @@ use super::runner_readiness::resolve_executable_candidate;
 use super::*;
 use crate::agent_task::{
     AgentCommandDecision, AgentTaskRuntimeTool, AgentTaskRuntimeToolProbeEvidence,
-    AgentToolExecutionLocation, ResolvedAgentTaskRuntimeTool, AGENT_TASK_RUNTIME_TOOL_SCHEMA,
-    RESOLVED_AGENT_TASK_RUNTIME_TOOL_SCHEMA,
+    AgentToolExecutionLocation, ResolvedAgentTaskRuntimeTool,
+    ResolvedAgentTaskRuntimeToolReadiness, ResolvedAgentTaskRuntimeToolReadinessEvidence,
+    AGENT_TASK_RUNTIME_TOOL_SCHEMA, RESOLVED_AGENT_TASK_RUNTIME_TOOL_SCHEMA,
 };
 use crate::agent_task_process_containment::AgentTaskProcessContainment;
 use std::process::{Command, Stdio};
@@ -51,7 +52,7 @@ pub(crate) fn resolve_runtime_tools(
             }
         })?;
         let readiness_command = std::iter::once(executable.as_str())
-            .chain(tool.command.iter().skip(1).map(String::as_str))
+            .chain(readiness_command_prefix(tool).iter().map(String::as_str))
             .chain(tool.readiness.version_command.iter().map(String::as_str))
             .collect::<Vec<_>>()
             .join(" ");
@@ -76,6 +77,19 @@ pub(crate) fn resolve_runtime_tools(
                 request.request.executor.secret_env.push(secret.clone());
             }
         }
+        let readiness_evidence = if capability_probe.is_some() {
+            Some(ResolvedAgentTaskRuntimeToolReadinessEvidence {
+                kind: "declared_probe".to_string(),
+                success: true,
+            })
+        } else {
+            version
+                .as_ref()
+                .map(|_| ResolvedAgentTaskRuntimeToolReadinessEvidence {
+                    kind: "version_command".to_string(),
+                    success: true,
+                })
+        };
         resolved.push(ResolvedAgentTaskRuntimeTool {
             schema: RESOLVED_AGENT_TASK_RUNTIME_TOOL_SCHEMA.to_string(),
             id: tool.id.clone(),
@@ -93,7 +107,10 @@ pub(crate) fn resolve_runtime_tools(
             capability_probe,
             env_names: tool.env.keys().cloned().collect(),
             secret_env_names: tool.secret_env.clone(),
-            readiness: "ready".to_string(),
+            readiness: ResolvedAgentTaskRuntimeToolReadiness {
+                status: "ready".to_string(),
+                evidence: readiness_evidence,
+            },
             lifecycle: tool.lifecycle,
         });
     }
@@ -166,7 +183,7 @@ fn probe_capabilities(
         return Ok(None);
     };
     let command = std::iter::once(executable)
-        .chain(tool.command.iter().skip(1).map(String::as_str))
+        .chain(readiness_command_prefix(tool).iter().map(String::as_str))
         .chain(probe.argv.iter().map(String::as_str))
         .collect::<Vec<_>>()
         .join(" ");
@@ -180,7 +197,7 @@ fn probe_capabilities(
     }
     let mut command = Command::new(executable);
     command
-        .args(tool.command.iter().skip(1))
+        .args(readiness_command_prefix(tool))
         .args(&probe.argv)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -262,7 +279,7 @@ fn probe_version(
     }
     let mut command = Command::new(executable);
     command
-        .args(tool.command.iter().skip(1))
+        .args(readiness_command_prefix(tool))
         .args(&tool.readiness.version_command)
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -339,6 +356,13 @@ fn probe_version(
 
 fn apply_probe_environment(command: &mut Command, tool: &AgentTaskRuntimeTool) {
     command.env_clear().envs(&tool.env);
+}
+
+fn readiness_command_prefix(tool: &AgentTaskRuntimeTool) -> &[String] {
+    tool.readiness
+        .command_prefix
+        .as_deref()
+        .unwrap_or(&tool.command[1..])
 }
 
 fn valid_identifier(value: &str) -> bool {

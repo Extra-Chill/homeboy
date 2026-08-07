@@ -309,7 +309,7 @@ process.stdin.on('end', () => {
 #[test]
 fn provider_adapter_receives_and_consumes_resolved_stdio_runtime_tool() {
     let tool = script(
-        "if (process.env.FIXTURE_MODE !== 'isolated') process.exit(17); if (process.argv[2] !== undefined && (process.env.PROBE_HOME !== 'declared' || process.env.PATH !== undefined || process.env.HOME !== undefined)) process.exit(19); if (process.argv[2] === '--version') { process.stdout.write('fixture 1.0'); process.exit(0); } if (process.argv[2] === '--capability-probe') process.exit(0); if (process.argv[2] !== undefined) process.exit(18); process.stdout.write(process.env.FIXTURE_MODE + ':ping'); process.exit(0);",
+        "if (process.env.FIXTURE_MODE !== 'isolated') process.exit(17); if (process.argv[2] !== '--launch-only' && (process.env.PROBE_HOME !== 'declared' || process.env.PATH !== undefined || process.env.HOME !== undefined)) process.exit(19); if (process.argv[2] === '--version') { process.stdout.write('fixture 1.0'); process.exit(0); } if (process.argv[2] === '--capability-probe') process.exit(0); if (process.argv[2] !== '--launch-only') process.exit(18); process.stdout.write(process.env.FIXTURE_MODE + ':ping'); process.exit(0);",
     );
     let provider_script = script(
         r#"const { spawnSync } = require('child_process');
@@ -325,11 +325,11 @@ process.stdin.once('data', input => {
         request("runtime-tool-projection", format!("node {provider_script}"));
     request.runtime_tools = vec![serde_json::from_value(json!({
         "id": "fixture.mcp",
-        "command": ["node", tool],
+        "command": ["node", tool, "--launch-only"],
         "env": { "FIXTURE_MODE": "isolated", "PROBE_HOME": "declared" },
         "secret_env": ["HOME"],
         "required_capabilities": ["browser"],
-        "readiness": { "version_command": ["--version"], "capability_probe": { "argv": ["--capability-probe"] } }
+        "readiness": { "command_prefix": [tool], "version_command": ["--version"], "capability_probe": { "argv": ["--capability-probe"] } }
     }))
     .expect("runtime tool")];
     request.policy.tools.tools.insert(
@@ -372,6 +372,10 @@ process.stdin.once('data', input => {
     assert_eq!(
         outcome.metadata["resolved_runtime_tools"][0]["version"],
         "fixture 1.0"
+    );
+    assert_eq!(
+        outcome.metadata["resolved_runtime_tools"][0]["readiness"],
+        json!({ "status": "ready", "evidence": { "kind": "declared_probe", "success": true } })
     );
     assert_eq!(
         outcome.metadata["capability_evidence"]["tool_contributed"][0]["capabilities"][0],

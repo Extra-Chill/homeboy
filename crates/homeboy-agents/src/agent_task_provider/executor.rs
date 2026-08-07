@@ -175,7 +175,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                     json!({
                         "tool_id": required.id,
                         "missing_capabilities": missing,
-                        "readiness": resolved.map_or("missing", |tool| tool.readiness.as_str()),
+                        "readiness": resolved.map_or("missing", |tool| tool.readiness.status.as_str()),
                     })
                 })
             })
