@@ -1887,15 +1887,24 @@ fn release_inventory(names: &[&str]) -> String {
 
 /// Drive the asset contract the way both callers do, through a pre-fetched
 /// inventory so no network or `gh` is involved.
-fn asset_contract(inventory: &str, require_announce_assets: &str) -> (i32, String) {
-    let output = std::process::Command::new("bash")
+fn asset_contract_with_expected_assets(
+    inventory: &str,
+    expected_assets: Option<&str>,
+    require_announce_assets: &str,
+) -> (i32, String) {
+    let mut command = std::process::Command::new("bash");
+    command
         .arg(".github/release-asset-completeness.sh")
         .env("RELEASE_TAG", "v9.9.9")
         .env("RELEASE_INVENTORY_JSON", inventory)
         .env("REQUIRE_ANNOUNCE_ASSETS", require_announce_assets)
         // Never let a test append to the surrounding job's real step output.
         .env_remove("GITHUB_OUTPUT")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"));
+    if let Some(expected_assets) = expected_assets {
+        command.env("EXPECTED_ASSETS", expected_assets);
+    }
+    let output = command
         .output()
         .expect("release asset completeness script should run");
 
@@ -1905,6 +1914,10 @@ fn asset_contract(inventory: &str, require_announce_assets: &str) -> (i32, Strin
         String::from_utf8_lossy(&output.stderr)
     );
     (output.status.code().unwrap_or(-1), combined)
+}
+
+fn asset_contract(inventory: &str, require_announce_assets: &str) -> (i32, String) {
+    asset_contract_with_expected_assets(inventory, None, require_announce_assets)
 }
 
 fn declared_dist_targets() -> Vec<String> {
@@ -1944,6 +1957,43 @@ fn asset_contract_accepts_a_complete_release_and_rejects_the_one_that_shipped_br
         out.contains("dist-manifest.json"),
         "`dist-manifest.json` is absent on exactly the broken releases and must be \
          part of the published contract: {out}"
+    );
+}
+
+#[test]
+fn planned_contract_rejects_host_only_assets_and_accepts_every_supported_platform() {
+    let expected_assets = serde_json::to_string(HEALTHY_RELEASE_ASSETS).expect("asset contract");
+
+    let (code, out) = asset_contract_with_expected_assets(
+        &release_inventory(BROKEN_RELEASE_ASSETS),
+        Some(&expected_assets),
+        "true",
+    );
+    assert_ne!(
+        code, 0,
+        "host-only assets must not satisfy the cargo-dist plan: {out}"
+    );
+    assert!(
+        out.contains("homeboy-x86_64-unknown-linux-gnu.tar.xz"),
+        "{out}"
+    );
+    assert!(
+        out.contains("homeboy-x86_64-unknown-linux-gnu.tar.xz.sha256"),
+        "the plan must require the matching checksum too: {out}"
+    );
+
+    let (code, out) = asset_contract_with_expected_assets(
+        &release_inventory(HEALTHY_RELEASE_ASSETS),
+        Some(&expected_assets),
+        "true",
+    );
+    assert_eq!(
+        code, 0,
+        "the complete supported-platform plan must pass: {out}"
+    );
+    assert!(
+        out.contains("13 assets from cargo-dist release plan"),
+        "the final contract must include every planned asset, including dist-manifest.json: {out}"
     );
 }
 
@@ -2060,6 +2110,10 @@ fn publication_is_gated_on_the_declared_asset_set_before_it_happens() {
     assert!(
         gate.contains("REQUIRE_ANNOUNCE_ASSETS: 'false'"),
         "the pre-publication gate runs before announce attaches dist-manifest.json; got:\n{gate}"
+    );
+    assert!(
+        gate.contains("EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}"),
+        "the pre-publication gate must consume cargo-dist's planned asset contract; got:\n{gate}"
     );
 
     let gate_at = host
