@@ -32,6 +32,10 @@ pub struct AgentTaskRuntimeTool {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AgentTaskRuntimeToolReadiness {
+    /// Arguments after the executable that identify the tool for readiness
+    /// probes. When omitted, probes retain all declared launch arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_prefix: Option<Vec<String>>,
     /// Arguments used to collect a stable executable version before dispatch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub version_command: Vec<String>,

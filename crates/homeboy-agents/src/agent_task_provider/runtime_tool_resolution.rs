@@ -51,7 +51,7 @@ pub(crate) fn resolve_runtime_tools(
             }
         })?;
         let readiness_command = std::iter::once(executable.as_str())
-            .chain(tool.command.iter().skip(1).map(String::as_str))
+            .chain(readiness_command_prefix(tool).iter().map(String::as_str))
             .chain(tool.readiness.version_command.iter().map(String::as_str))
             .collect::<Vec<_>>()
             .join(" ");
@@ -166,7 +166,7 @@ fn probe_capabilities(
         return Ok(None);
     };
     let command = std::iter::once(executable)
-        .chain(tool.command.iter().skip(1).map(String::as_str))
+        .chain(readiness_command_prefix(tool).iter().map(String::as_str))
         .chain(probe.argv.iter().map(String::as_str))
         .collect::<Vec<_>>()
         .join(" ");
@@ -180,7 +180,7 @@ fn probe_capabilities(
     }
     let mut command = Command::new(executable);
     command
-        .args(tool.command.iter().skip(1))
+        .args(readiness_command_prefix(tool))
         .args(&probe.argv)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -262,7 +262,7 @@ fn probe_version(
     }
     let mut command = Command::new(executable);
     command
-        .args(tool.command.iter().skip(1))
+        .args(readiness_command_prefix(tool))
         .args(&tool.readiness.version_command)
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -339,6 +339,13 @@ fn probe_version(
 
 fn apply_probe_environment(command: &mut Command, tool: &AgentTaskRuntimeTool) {
     command.env_clear().envs(&tool.env);
+}
+
+fn readiness_command_prefix(tool: &AgentTaskRuntimeTool) -> &[String] {
+    tool.readiness
+        .command_prefix
+        .as_deref()
+        .unwrap_or(&tool.command[1..])
 }
 
 fn valid_identifier(value: &str) -> bool {
