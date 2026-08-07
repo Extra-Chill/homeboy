@@ -1362,6 +1362,7 @@ jobs:
       - name: Gate publication on the declared asset set
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
+          EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}
           REQUIRE_ANNOUNCE_ASSETS: 'false'
         run: |
           bash .github/release-asset-completeness.sh
