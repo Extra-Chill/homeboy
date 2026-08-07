@@ -92,7 +92,7 @@ pub(crate) fn materialize_lab_job_extension_overlays(
         return Ok(overlays);
     }
     let command = lab_job_extension_overlay_command(runtime_root, &overlays);
-    let (_, exit_code) = exec(&runner.id, RunnerExecOptions::diagnostic_raw_shell(command))?;
+    let (_, exit_code) = exec(&runner.id, runner_raw_shell(command))?;
     if exit_code != 0 {
         return Err(Error::validation_invalid_argument(
             "extensions",
@@ -507,7 +507,7 @@ fn upload_snapshot(
     transfer.ensure_directory(remote_parent)?;
     transfer.upload_file(&archive.display().to_string(), &remote_archive)?;
     let extract = extension_snapshot_extract_command(&plan.synced_source_path, &remote_archive);
-    let (_output, exit_code) = exec(&runner.id, RunnerExecOptions::diagnostic_raw_shell(extract))?;
+    let (_output, exit_code) = exec(&runner.id, runner_raw_shell(extract))?;
     if exit_code != 0 {
         return Err(Error::validation_invalid_argument(
             "extensions",
@@ -602,8 +602,12 @@ fn runner_exec_options(
     env: Option<&HashMap<String, String>>,
     command: Vec<String>,
 ) -> RunnerExecOptions {
-    RunnerExecOptions::diagnostic_raw_command(command)
+    RunnerExecOptions::raw_command(command)
         .with_env(env.cloned().unwrap_or_else(|| runner.env.clone()))
+}
+
+fn runner_raw_shell(script: String) -> RunnerExecOptions {
+    RunnerExecOptions::raw_command(vec!["bash".to_string(), "-lc".to_string(), script])
 }
 
 fn runner_exec_detail(output: &super::RunnerExecOutput) -> String {
@@ -948,6 +952,17 @@ mod tests {
             handoff: None,
             diagnostics: None,
         }
+    }
+
+    #[test]
+    fn extension_materialization_uses_daemon_admission() {
+        let command_options = runner_exec_options(&runner(), None, vec!["homeboy".to_string()]);
+        let shell_options = runner_raw_shell("mkdir -p /tmp/extension".to_string());
+
+        assert!(command_options.raw_exec);
+        assert!(!command_options.allow_diagnostic_ssh);
+        assert!(shell_options.raw_exec);
+        assert!(!shell_options.allow_diagnostic_ssh);
     }
 
     #[test]
