@@ -101,6 +101,12 @@ impl HermeticTestContext {
         self.runtime.path()
     }
 
+    /// Short runtime root inherited by fixture subprocesses for invocation
+    /// state and socket-capable workload paths.
+    pub fn invocation_runtime_dir(&self) -> &Path {
+        self.invocation_runtime.path()
+    }
+
     pub fn temp_dir(&self) -> PathBuf {
         self.root().join("tmp")
     }
@@ -610,28 +616,47 @@ impl Default for HomeGuard {
 
 /// Return a short-path tempdir suitable for the invocation runtime root.
 ///
-/// Two competing constraints:
-/// 1. The path must be **short** so runtime unix sockets stay within the
-///    `sockaddr_un` budget (~104 bytes) even on macOS, where `$TMPDIR`
-///    typically lives at a long `/var/folders/<14>/T/.tmpXXXXXX/` path.
-/// 2. The path must be **exec-capable** — tests execute capability scripts
-///    from runtime paths, so a `noexec` mount (common for `/tmp` on hardened
-///    VPS hosts, containers, and CI sandboxes) causes deterministic exit-126
-///    "Permission denied" failures (#6760).
-///
-/// Previously this anchored unconditionally to `/tmp`, which satisfies (1) but
-/// silently breaks (2) on `noexec`-`/tmp` hosts. Instead we probe short
-/// candidate roots for real exec capability and use the first that passes,
-/// falling back to the default tempdir if none qualify.
+/// The generated root must leave room for the short invocation-id leaf and the
+/// production `sockaddr_un` headroom contract. Unlike the general runtime
+/// tempdir, this root only holds invocation state and sockets, so it need not
+/// be executable. Failing closed here prevents nested fixture Homeboy processes
+/// from inheriting an override that production correctly rejects (#11867).
 fn short_invocation_tempdir() -> TempDir {
     #[cfg(unix)]
     {
-        tempdir_with_cached_exec_base(
-            SHORT_EXEC_CAPABLE_TEMP_BASE.get_or_init(|| Mutex::new(None)),
-            short_tempdir_candidates(),
-            &owned_tempdir_prefix(),
-            dir_allows_exec,
-        )
+        sweep_leaked_test_tempdirs_once();
+        let cache = SHORT_EXEC_CAPABLE_TEMP_BASE.get_or_init(|| Mutex::new(None));
+        let cached = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(base) = cached {
+            if let Ok(directory) = tempfile::Builder::new()
+                .prefix(&owned_tempdir_prefix())
+                .tempdir_in(&base)
+            {
+                if invocation_runtime_dir_fits(directory.path()) {
+                    return directory;
+                }
+            }
+        }
+
+        for base in short_tempdir_candidates() {
+            let Ok(directory) = tempfile::Builder::new()
+                .prefix(&owned_tempdir_prefix())
+                .tempdir_in(&base)
+            else {
+                continue;
+            };
+            if invocation_runtime_dir_fits(directory.path()) {
+                *cache
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(base);
+                return directory;
+            }
+        }
+
+        panic!("no writable test invocation runtime root satisfies the sockaddr_un budget");
     }
     #[cfg(not(unix))]
     {
@@ -652,29 +677,29 @@ fn marked_tempdir(context: &str) -> TempDir {
 
 /// Ordered short base directories to consider for the invocation runtime root.
 ///
-/// Honors an explicit `$TMPDIR` first (respecting operator intent, e.g. a
-/// dedicated exec-capable tmp), but only when it is short enough to keep unix
-/// socket paths within budget. Then the conventional short system roots.
+/// Conventional system roots are stable, short candidates. `$TMPDIR` is
+/// intentionally excluded: on macOS it is commonly a long per-user path and
+/// would make hermetic child behavior depend on the operator environment.
 #[cfg(unix)]
 fn short_tempdir_candidates() -> Vec<PathBuf> {
-    // Leave generous headroom under the ~104-byte sockaddr_un limit for the
-    // per-tempdir suffix, socket filename, and run-id segments appended later.
-    const MAX_BASE_LEN: usize = 40;
-
     let mut candidates: Vec<PathBuf> = Vec::new();
     let mut push_if_usable = |path: PathBuf| {
-        if path.as_os_str().len() <= MAX_BASE_LEN && path.is_dir() && !candidates.contains(&path) {
+        if path.is_dir() && !candidates.contains(&path) {
             candidates.push(path);
         }
     };
 
-    if let Some(tmpdir) = std::env::var_os("TMPDIR") {
-        push_if_usable(PathBuf::from(tmpdir));
-    }
     push_if_usable(PathBuf::from("/tmp"));
     push_if_usable(PathBuf::from("/var/tmp"));
     push_if_usable(PathBuf::from("/dev/shm"));
     candidates
+}
+
+/// Verify the actual generated root plus the 10-byte invocation leaf. Checking
+/// the root alone misses the path component every workload receives.
+#[cfg(unix)]
+fn invocation_runtime_dir_fits(root: &Path) -> bool {
+    crate::engine::invocation::enforce_path_budget(&root.join("0123456789")).is_ok()
 }
 
 /// Probe whether files created under `dir` can actually be executed.
@@ -2295,7 +2320,7 @@ mod tests {
     #[test]
     fn the_invocation_tempdir_still_fits_the_socket_budget() {
         let dir = short_invocation_tempdir();
-        crate::engine::invocation::enforce_path_budget(dir.path())
-            .expect("invocation tempdir must leave room for a workload socket name");
+        crate::engine::invocation::enforce_path_budget(&dir.path().join("0123456789"))
+            .expect("invocation runtime plus its leaf must leave room for a workload socket name");
     }
 }

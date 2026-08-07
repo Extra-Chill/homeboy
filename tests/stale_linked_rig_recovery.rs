@@ -65,6 +65,13 @@ fn hermetic_fixture_command_cannot_use_operator_paths_or_installed_homeboy() {
         configured_env["HOMEBOY_RUNTIME_TMPDIR"],
         context.runtime_dir().display().to_string()
     );
+    let invocation_runtime = std::path::PathBuf::from(
+        configured_env[homeboy_core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV]
+            .as_str(),
+    );
+    assert_eq!(invocation_runtime, context.invocation_runtime_dir());
+    homeboy_core::engine::invocation::enforce_path_budget(&invocation_runtime.join("0123456789"))
+        .expect("nested Homeboy fixture receives a socket-safe invocation runtime root");
     assert!(removed_env.contains(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV));
     assert!(removed_env.contains(homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV));
     assert!(context.config_dir().starts_with(context.root()));
