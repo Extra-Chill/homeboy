@@ -2299,6 +2299,9 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
+    // The local detached launcher persists this fence before spawn. Recheck it
+    // at each durable/external boundary so a dead launcher cannot revive work.
+    agent_task_lifecycle::require_detached_cook_handoff_fence_open(&options.cook_id)?;
     // Validate new Cooks before provider discovery, workspace staging, recipe
     // persistence, or a detached handoff can spend provider work. Historical
     // immutable recipes retain their persisted behavior and receive actionable
@@ -2373,6 +2376,7 @@ where
             super::persist_initial_recipe(&options)?
         }
     } else {
+        agent_task_lifecycle::require_detached_cook_handoff_fence_open(&options.cook_id)?;
         super::persist_initial_recipe(&options)?
     };
     // A recipe can survive an interruption before its first lifecycle record.
@@ -2453,6 +2457,7 @@ where
             )
         })
         .transpose()?;
+    agent_task_lifecycle::require_detached_cook_handoff_fence_open(&options.cook_id)?;
     materialize_initial_cook_attempt(&options)?;
     record_active_cook_worktree_warning(&options)?;
     // Durable identity now exists and resolves through the Cook alias. Publish
@@ -2648,6 +2653,9 @@ where
         };
         let needs_execution = cook_attempt_needs_execution(&run_id);
         if needs_execution {
+            // The local detached launcher persists this fence before spawn.
+            // Recheck immediately before this attempt can publish provider work.
+            agent_task_lifecycle::require_detached_cook_handoff_fence_open(&cook_id)?;
             // `provider_start` is a durable lifecycle transition. Create the
             // record before reporting it so a new Cook run is observable before
             // any preflight or provider work can block.

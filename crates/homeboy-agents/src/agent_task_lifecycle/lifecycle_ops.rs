@@ -314,6 +314,151 @@ pub fn submit_plan(
     })
 }
 
+/// Persist the parent for a locally detached Cook before the detached process
+/// has prepared its first attempt. The parent uses the Cook ID itself, so the
+/// normal Cook-index alias takes over automatically once that attempt exists.
+///
+/// An empty plan is intentional: this record owns only the handoff lifecycle,
+/// while the detached Cook persists the immutable execution plan and attempt.
+pub fn record_detached_cook_handoff_parent(cook_id: &str) -> Result<AgentTaskRunRecord> {
+    let cook_id = sanitize_run_id(cook_id);
+    let resolved_run_id = resolve_run_id(&cook_id)?;
+    if resolved_run_id != cook_id {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "detached Cook id already resolves to an existing Cook attempt",
+            Some(cook_id),
+            None,
+        ));
+    }
+    if let Ok(record) = store::read_record(&cook_id) {
+        if record.metadata["detached_cook_handoff"]["cook_id"] == cook_id {
+            return Ok(record);
+        }
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "detached Cook id collides with an existing non-handoff run",
+            Some(cook_id),
+            None,
+        ));
+    }
+
+    let plan = AgentTaskPlan::new(format!("detached-cook-handoff-{cook_id}"), Vec::new());
+    let mut record = submit_plan(&plan, Some(&cook_id))?;
+    record.metadata["detached_cook_handoff"] = json!({
+        "state": "pending",
+        "cook_id": cook_id,
+        "cancellation_fence": { "state": "open" },
+    });
+    store::write_record(&record)?;
+    record_cook_progress(
+        &record.run_id,
+        "detached_handoff_pending",
+        0,
+        Some("waiting for the detached Cook to materialize its first attempt"),
+    )
+}
+
+/// Reject detached Cook work after the pre-spawn parent has been cancelled.
+/// The child reads this durable fence independently of launcher liveness.
+pub fn require_detached_cook_handoff_fence_open(cook_id: &str) -> Result<()> {
+    let cook_id = sanitize_run_id(cook_id);
+    let Ok(record) = store::read_record(&cook_id) else {
+        return Ok(());
+    };
+    if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
+        return Ok(());
+    }
+    if record.state == AgentTaskRunState::Cancelled
+        || record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] == "cancelled"
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_id",
+            "detached Cook handoff was cancelled before its attempt could materialize",
+            Some(cook_id),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// Attach the child identity only after it has been spawned. Cancellation uses
+/// this durable identity to stop preparation before an attempt exists.
+pub fn record_detached_cook_handoff_child(
+    cook_id: &str,
+    pid: u32,
+    start_identity: homeboy_core::process::ProcessStartIdentity,
+) -> Result<AgentTaskRunRecord> {
+    let cook_id = sanitize_run_id(cook_id);
+    let record = store::mutate_record(&cook_id, |record| {
+        let state = if record.state == AgentTaskRunState::Cancelled {
+            "cancelled"
+        } else {
+            "pending"
+        };
+        let metadata = record.ensure_metadata_object();
+        metadata["detached_cook_handoff"] = json!({
+            "state": state,
+            "cook_id": cook_id,
+            "child_pid": pid,
+            "child_start_identity": start_identity,
+        });
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    Ok(record.expect("detached handoff parent exists"))
+}
+
+/// Terminalize a handoff parent once no child can materialize its first
+/// attempt. A previously requested cancellation remains authoritative.
+pub fn fail_detached_cook_handoff_parent(
+    cook_id: &str,
+    reason: &str,
+) -> Result<AgentTaskRunRecord> {
+    let cook_id = sanitize_run_id(cook_id);
+    let record = store::mutate_record(&cook_id, |record| {
+        if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
+            return false;
+        }
+        let cancelled = record.state == AgentTaskRunState::Cancelled;
+        let metadata = record.ensure_metadata_object();
+        metadata["detached_cook_handoff"]["state"] = json!(if cancelled {
+            "cancelled"
+        } else {
+            "exited_before_handoff"
+        });
+        metadata["detached_cook_handoff"]["reason"] = json!(reason);
+        if !record.state.is_terminal() {
+            set_run_state(record, AgentTaskRunState::Failed);
+        }
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    Ok(record.expect("detached handoff parent exists"))
+}
+
+fn complete_detached_cook_handoff_parent(cook_id: &str, attempt_run_id: &str) -> Result<()> {
+    let cook_id = sanitize_run_id(cook_id);
+    let attempt_run_id = sanitize_run_id(attempt_run_id);
+    if store::read_record(&cook_id).is_err() {
+        return Ok(());
+    }
+    let _ = store::mutate_record(&cook_id, |record| {
+        if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
+            return false;
+        }
+        let metadata = record.ensure_metadata_object();
+        metadata["detached_cook_handoff"]["state"] = json!("redirected");
+        metadata["detached_cook_handoff"]["attempt_run_id"] = json!(attempt_run_id);
+        if !record.state.is_terminal() {
+            set_run_state(record, AgentTaskRunState::Succeeded);
+        }
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    Ok(())
+}
+
 /// Build the canonical decision for a run this controller is about to execute
 /// itself. Identity is read off the plan's own workspace so the durable record
 /// names the same checkout the run operates on.
@@ -3075,7 +3220,9 @@ pub fn record_cook_attempt(
         .and_then(|aggregate| {
             substantive_candidate_from_aggregate(&record.run_id, attempt, &aggregate, None)
         });
-    store::write_cook_index_attempt(cook_id, attempt, run_id, recorded_at, candidate)
+    let index = store::write_cook_index_attempt(cook_id, attempt, run_id, recorded_at, candidate)?;
+    complete_detached_cook_handoff_parent(cook_id, run_id)?;
+    Ok(index)
 }
 
 /// Record the controller-owned boundary that a resumed Cook must advance.
