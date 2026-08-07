@@ -19,6 +19,10 @@ pub const PORTFOLIO_INACTIVE_FINDING_FINGERPRINT_LIMIT: usize = 128;
 /// Maximum inactive historical findings retained per child. Every finding in
 /// the current child observation is retained regardless of this limit.
 pub const CHILD_INACTIVE_FINDING_FINGERPRINT_LIMIT: usize = 32;
+/// Child rows projected by the default [`AgentTaskFanoutPortfolio::status`]
+/// page. Deliberately unchanged from the previous hard-coded `take(10)`: the
+/// fix makes truncation *visible*, it does not widen the default page.
+pub const PORTFOLIO_STATUS_DEFAULT_PAGE_LIMIT: usize = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskFanoutPortfolio {
@@ -200,10 +204,29 @@ pub struct AgentTaskFanoutPortfolioStatus {
     pub schema: &'static str,
     pub fanout_id: String,
     pub revision: u64,
+    /// Total children in the portfolio, before any page limit was applied.
+    /// `ready`/`blocked`/`merged` are likewise whole-portfolio counts, never
+    /// page-scoped.
     pub total: usize,
     pub ready: usize,
     pub blocked: usize,
     pub merged: usize,
+    /// Number of child rows in `children` on this page. Mirrors
+    /// [`AgentTaskDiscoveryReport::count`] so a consumer never has to infer a
+    /// page size from the array length.
+    pub count: usize,
+    /// The applied page limit, echoed back so consumers can tell a capped
+    /// projection from a complete one. `None` when every child was projected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    /// `true` when the page limit left children unprojected. Previously the
+    /// projection silently `take(10)`-ed, so a 25-child wave reported 10 rows
+    /// with no way for a consumer to know rows were missing.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    /// Offset to pass as the next page's cursor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<usize>,
     pub children: Vec<AgentTaskFanoutPortfolioChildStatus>,
     pub drill_down_ref: String,
 }
@@ -314,10 +337,24 @@ impl AgentTaskFanoutPortfolio {
         self.status(&observations)
     }
 
-    /// The default projection remains bounded even for much larger portfolios.
+    /// The default projection remains bounded even for much larger portfolios,
+    /// and reports the bound so truncation is visible rather than silent.
     pub fn status(
         &self,
         observations: &BTreeMap<String, AgentTaskFanoutPortfolioObservation>,
+    ) -> AgentTaskFanoutPortfolioStatus {
+        self.status_page(observations, Some(PORTFOLIO_STATUS_DEFAULT_PAGE_LIMIT), 0)
+    }
+
+    /// Paged projection. `limit: None` projects every child; `cursor` is a
+    /// zero-based offset into the portfolio's child order. Aggregate counts
+    /// (`total`, `ready`, `blocked`, `merged`) always describe the whole
+    /// portfolio, not the returned page.
+    pub fn status_page(
+        &self,
+        observations: &BTreeMap<String, AgentTaskFanoutPortfolioObservation>,
+        limit: Option<usize>,
+        cursor: usize,
     ) -> AgentTaskFanoutPortfolioStatus {
         let (ready, blocked, merged) =
             self.children.iter().fold((0, 0, 0), |totals, (id, child)| {
@@ -335,10 +372,17 @@ impl AgentTaskFanoutPortfolio {
                     totals.2 + usize::from(observation.pr == AgentTaskFanoutPrState::Merged),
                 )
             });
-        let children = self
+        let total = self.children.len();
+        let cursor = cursor.min(total);
+        let end = limit
+            .map(|limit| cursor.saturating_add(limit).min(total))
+            .unwrap_or(total);
+        let truncated = end < total;
+        let children: Vec<_> = self
             .children
             .iter()
-            .take(10)
+            .skip(cursor)
+            .take(end - cursor)
             .map(|(id, child)| {
                 let observation = observations.get(id).cloned().unwrap_or_default();
                 AgentTaskFanoutPortfolioChildStatus {
@@ -366,10 +410,14 @@ impl AgentTaskFanoutPortfolio {
             schema: AGENT_TASK_FANOUT_PORTFOLIO_STATUS_SCHEMA,
             fanout_id: self.fanout_id.clone(),
             revision: self.revision,
-            total: self.children.len(),
+            total,
             ready,
             blocked,
             merged,
+            count: children.len(),
+            limit,
+            truncated,
+            next_cursor: truncated.then_some(end),
             children,
             drill_down_ref: format!("homeboy://fanout/{}", self.fanout_id),
         }
@@ -1173,5 +1221,90 @@ mod tests {
         assert_eq!(row["worktree"], "clean");
         assert_eq!(row["gates"], "current");
         assert_eq!(row["acceptance"], "current");
+    }
+
+    /// A wave larger than the default page used to report ten rows with no
+    /// signal that any were withheld.
+    #[test]
+    fn oversized_portfolio_reports_visible_truncation_with_whole_portfolio_totals() {
+        let ids = (0..25)
+            .map(|index| format!("child-{index:02}"))
+            .collect::<Vec<_>>();
+        let mut portfolio =
+            AgentTaskFanoutPortfolio::new("oversized", ids.iter().map(|id| child(id)));
+        let states = ids.iter().map(|id| observation(id)).collect::<Vec<_>>();
+
+        let status = portfolio.reconcile(states, &IndependentFanoutDependencies);
+
+        // The default page size is unchanged; only its visibility is new.
+        assert_eq!(status.children.len(), PORTFOLIO_STATUS_DEFAULT_PAGE_LIMIT);
+        assert_eq!(status.count, PORTFOLIO_STATUS_DEFAULT_PAGE_LIMIT);
+        assert_eq!(status.total, 25);
+        assert_eq!(status.limit, Some(PORTFOLIO_STATUS_DEFAULT_PAGE_LIMIT));
+        assert!(status.truncated);
+        assert_eq!(status.next_cursor, Some(10));
+
+        let encoded = serde_json::to_value(&status).unwrap();
+        assert_eq!(encoded["truncated"], true);
+        assert_eq!(encoded["total"], 25);
+        assert_eq!(encoded["count"], 10);
+        assert_eq!(encoded["next_cursor"], 10);
+    }
+
+    /// A portfolio that fits the page is not truncated, and the truncation
+    /// fields stay out of the serialized payload entirely.
+    #[test]
+    fn portfolio_within_the_page_limit_is_not_marked_truncated() {
+        let ids = ["a", "b", "c"];
+        let mut portfolio = AgentTaskFanoutPortfolio::new("small", ids.into_iter().map(child));
+        let status = portfolio.reconcile(
+            ids.into_iter().map(observation).collect::<Vec<_>>(),
+            &IndependentFanoutDependencies,
+        );
+
+        assert_eq!(status.count, 3);
+        assert_eq!(status.total, 3);
+        assert!(!status.truncated);
+        assert_eq!(status.next_cursor, None);
+
+        let encoded = serde_json::to_value(&status).unwrap();
+        assert!(encoded.get("truncated").is_none());
+        assert!(encoded.get("next_cursor").is_none());
+    }
+
+    /// `next_cursor` is a real offset: following it yields the next distinct
+    /// rows, and an unlimited page projects every child.
+    #[test]
+    fn status_pages_walk_the_portfolio_without_repeating_or_dropping_children() {
+        let ids = (0..25)
+            .map(|index| format!("child-{index:02}"))
+            .collect::<Vec<_>>();
+        let mut portfolio = AgentTaskFanoutPortfolio::new("paged", ids.iter().map(|id| child(id)));
+        let states = ids.iter().map(|id| observation(id)).collect::<Vec<_>>();
+        portfolio.reconcile(states.clone(), &IndependentFanoutDependencies);
+        let observations = states
+            .into_iter()
+            .map(|state| (state.child_id.clone(), state))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut walked = Vec::new();
+        let mut cursor = Some(0);
+        while let Some(offset) = cursor {
+            let page = portfolio.status_page(
+                &observations,
+                Some(PORTFOLIO_STATUS_DEFAULT_PAGE_LIMIT),
+                offset,
+            );
+            assert_eq!(page.total, 25);
+            walked.extend(page.children.iter().map(|row| row.child_id.clone()));
+            cursor = page.next_cursor;
+        }
+        assert_eq!(walked, ids);
+
+        let everything = portfolio.status_page(&observations, None, 0);
+        assert_eq!(everything.count, 25);
+        assert_eq!(everything.limit, None);
+        assert!(!everything.truncated);
+        assert_eq!(everything.next_cursor, None);
     }
 }
