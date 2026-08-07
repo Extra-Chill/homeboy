@@ -42,10 +42,10 @@ assert.deepEqual(resolvedRuntimeTools(request, env)[0].argv, ['/fixture/mcp', '-
 assert.deepEqual(resolvedRuntimeTools({}, { [RESOLVED_RUNTIME_TOOLS_ENV]: JSON.stringify(request.resolved_runtime_tools) })[0].argv, ['/fixture/mcp', '--isolated']);
 const openCode = applyOpenCodeRuntimeTools({}, request, env);
 assert.deepEqual(openCode.mcp['fixture.mcp'], {
-	type: 'local', command: '/fixture/mcp', args: ['--isolated'], environment: { FIXTURE_MODE: 'isolated', FIXTURE_TOKEN: 'private-token' },
+	type: 'local', command: ['/fixture/mcp', '--isolated'], environment: { FIXTURE_MODE: 'isolated', FIXTURE_TOKEN: 'private-token' }, enabled: true,
 });
 assert.deepEqual(openCode.mcp['fixture.second'], {
-	type: 'local', command: '/fixture/second', args: [], environment: {},
+	type: 'local', command: ['/fixture/second'], environment: {}, enabled: true,
 });
 const codex = codexRuntimeToolConfigArgs(request, env);
 assert.equal(codex.includes('mcp_servers.fixture.mcp.command="/fixture/mcp"'), true);

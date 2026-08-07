@@ -89,9 +89,9 @@ function applyOpenCodeRuntimeTools(content = {}, request = {}, env = process.env
 	for (const tool of tools) {
 		mcp[tool.id] = {
 			type: 'local',
-			command: tool.argv[0],
-			args: tool.argv.slice(1),
+			command: [...tool.argv],
 			environment: runtimeToolEnvironment(tool, env),
+			enabled: true,
 		};
 	}
 	return { ...content, mcp };

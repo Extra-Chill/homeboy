@@ -178,8 +178,12 @@ const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}');
 assert.equal(config.agent.title.disable, true);
 if (instruction === 'Prove two attached runtime tools without leaking secrets.') {
   assert.equal(typeof config.mcp, 'object');
-  assert.deepEqual(config.mcp['fixture.mcp'].args, ['--fixture-mcp', '--isolated']);
-  assert.deepEqual(config.mcp['fixture.second'].args, ['--second-fixture-mcp']);
+  assert.equal(config.mcp['fixture.mcp'].command[0], process.execPath);
+  assert.deepEqual(config.mcp['fixture.mcp'].command.slice(1), ['--fixture-mcp', '--isolated']);
+  assert.equal(config.mcp['fixture.mcp'].enabled, true);
+  assert.equal(config.mcp['fixture.second'].command[0], process.execPath);
+  assert.deepEqual(config.mcp['fixture.second'].command.slice(1), ['--second-fixture-mcp']);
+  assert.equal(config.mcp['fixture.second'].enabled, true);
 }
 process.stdout.write(process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN || 'missing secret');
 process.stderr.write(process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN || 'missing secret');
