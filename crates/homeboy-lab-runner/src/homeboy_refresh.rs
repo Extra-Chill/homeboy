@@ -1117,7 +1117,7 @@ fn blocked_refresh_readiness(plan: &HomeboyBinaryRefreshPlan) -> HomeboyRefreshR
         daemon_fresh: false,
         owners: Vec::new(),
         continuation: Some(format!(
-            "homeboy runner refresh-homeboy {} --reconnect",
+            "homeboy runner connect {}",
             shell_arg(&plan.runner_id)
         )),
     }

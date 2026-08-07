@@ -720,6 +720,10 @@ fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
         assert_eq!(exit_code, 1);
         assert_eq!(output.updated_fields, ["homeboy_path"]);
         assert_eq!(output.selected_binary_path, binary.display().to_string());
+        assert_eq!(output.plan.mode, "select");
+        assert_eq!(output.plan.source, None);
+        assert_eq!(output.plan.git_ref, None);
+        assert_eq!(output.plan.target_dir, None);
         assert!(!output.daemon_refreshed);
         assert!(output.reconnect_required);
         assert_eq!(
@@ -742,11 +746,11 @@ fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
         assert_eq!(readiness.state, HomeboyRefreshReadinessState::Blocked);
         assert_eq!(
             readiness.continuation.as_deref(),
-            Some("homeboy runner refresh-homeboy lab-local --reconnect")
+            Some("homeboy runner connect lab-local")
         );
         assert_eq!(
             output.followup_commands,
-            ["homeboy runner refresh-homeboy lab-local --reconnect"]
+            ["homeboy runner connect lab-local"]
         );
         assert!(output.bootstrap_provenance.is_some());
         assert_eq!(
@@ -877,7 +881,7 @@ fn connected_refresh_blocker_preserves_the_newly_selected_binary() {
         );
         assert_eq!(
             output.followup_commands,
-            ["homeboy runner refresh-homeboy lab-local --reconnect"]
+            ["homeboy runner connect lab-local"]
         );
         assert_eq!(
             crate::load("lab-local")
