@@ -43,6 +43,56 @@ pub struct EffectiveCookBudget {
     pub provider_rotations: u32,
 }
 
+/// Resolve Cook's retry intent into the scheduler's three execution budgets.
+/// Rotation executions are additional to the initial execution and any
+/// same-provider remediation slots.
+pub fn resolve_cook_budget(
+    max_attempts: u32,
+    configured_rotations: u32,
+    explicit_provider_executions: Option<u32>,
+    explicit_same_provider_retries: Option<u32>,
+    explicit_provider_rotations: Option<u32>,
+) -> Result<EffectiveCookBudget> {
+    let requested_attempts = max_attempts.max(1);
+    let provider_rotations = explicit_provider_rotations.unwrap_or(configured_rotations);
+    let same_provider_remediations =
+        explicit_same_provider_retries.unwrap_or_else(|| requested_attempts.saturating_sub(1));
+    let required_provider_executions = requested_attempts.saturating_add(provider_rotations);
+    let provider_executions = explicit_provider_executions.unwrap_or(required_provider_executions);
+    let correction = format!(
+        "Start a new Cook with `--max-attempts {requested_attempts} --max-provider-executions {required_provider_executions} --max-same-provider-retries {} --max-provider-rotations {provider_rotations}`.",
+        requested_attempts.saturating_sub(1),
+    );
+
+    if provider_executions < required_provider_executions {
+        return Err(Error::validation_invalid_argument(
+            "max-provider-executions",
+            format!(
+                "Cook retry intent needs {required_provider_executions} provider executions: {requested_attempts} attempt(s) plus {provider_rotations} configured or requested provider rotation(s), but --max-provider-executions is {provider_executions}. {correction}"
+            ),
+            None,
+            Some(vec![correction]),
+        ));
+    }
+    let required_remediations = requested_attempts.saturating_sub(1);
+    if same_provider_remediations < required_remediations {
+        return Err(Error::validation_invalid_argument(
+            "max-same-provider-retries",
+            format!(
+                "Cook retry intent needs {required_remediations} same-provider remediation retry(ies), but --max-same-provider-retries is {same_provider_remediations}. {correction}"
+            ),
+            None,
+            Some(vec![correction]),
+        ));
+    }
+    Ok(EffectiveCookBudget {
+        requested_attempts,
+        provider_executions,
+        same_provider_remediations,
+        provider_rotations,
+    })
+}
+
 pub fn effective_cook_budget(
     max_attempts: u32,
     budget: &AgentTaskExecutionBudget,
