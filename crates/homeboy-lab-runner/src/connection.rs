@@ -830,6 +830,11 @@ fn connect_with_orphan_adoption_and_live_lease(
                 )
             })?;
             if !envelope.success {
+                if is_terminal_state_loss_refusal(&recovery) {
+                    super::generation_store::retire_rejected_state_loss_replacement(
+                        runner_id, &recovery,
+                    )?;
+                }
                 return Ok(failed_connect(
                     runner_id,
                     session_path,

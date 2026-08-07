@@ -1345,12 +1345,11 @@ esac
     });
 }
 
-/// #11901: a legacy replay journal can contain an already-refused exact
-/// recovery. Its evidence is retained, but its pending authority must not block
-/// a retry of plain connect.
 #[cfg(unix)]
-#[test]
-fn rejected_legacy_state_loss_replay_is_retired_before_plain_connect_retries() {
+fn rejected_state_loss_refusal_is_retired_before_plain_connect_retries(
+    legacy_replay: bool,
+    transport_success: bool,
+) {
     test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
         let generation_count = home.path().join("daemon-generations");
@@ -1388,7 +1387,7 @@ case "$1 $2" in
       printf '%s\n' 'OPTIONS:' '    --replacement-operation-id <ID>'
     else
       printf '%s\n' '{{"success":false,"diagnostics":{{"code":"validation.invalid_argument"}}}}'
-      exit 2
+{rejection_exit}
     fi
     ;;
   "daemon ensure-running")
@@ -1403,6 +1402,7 @@ esac
 "#,
                 address = address,
                 generation_count = generation_count.display(),
+                rejection_exit = if transport_success { "" } else { "      exit 2" },
             ),
         )
         .expect("write remote Homeboy shim");
@@ -1422,24 +1422,33 @@ esac
         )
         .expect("enable local runner");
 
-        let operation_id = crate::generation_store::replacement_operation("local-runner")
-            .expect("create legacy operation");
-        crate::generation_store::record_replacement_operation_replay(
-            "local-runner",
-            "state-loss",
-            &remote_state_loss_recovery_command(
-                daemon.to_str().expect("daemon path"),
-                "lease-lost",
-                41,
-                "127.0.0.1:7419",
-                &operation_id,
-            ),
-        )
-        .expect("write legacy state-loss replay");
+        if legacy_replay {
+            let operation_id = crate::generation_store::replacement_operation("local-runner")
+                .expect("create legacy operation");
+            crate::generation_store::record_replacement_operation_replay(
+                "local-runner",
+                "state-loss",
+                &remote_state_loss_recovery_command(
+                    daemon.to_str().expect("daemon path"),
+                    "lease-lost",
+                    41,
+                    "127.0.0.1:7419",
+                    &operation_id,
+                ),
+            )
+            .expect("write legacy state-loss replay");
+        }
 
-        let (_rejected, exit_code) =
-            connect_with_orphan_adoption("local-runner", None, &[], false, None, None, None)
-                .expect("rejected legacy replay result");
+        let (_rejected, exit_code) = connect_with_orphan_adoption(
+            "local-runner",
+            None,
+            &[],
+            false,
+            (!legacy_replay).then_some("lease-lost"),
+            (!legacy_replay).then_some(41),
+            (!legacy_replay).then_some("127.0.0.1:7419"),
+        )
+        .expect("rejected state-loss result");
         assert_eq!(exit_code, 20);
         let journal_dir = homeboy_core::paths::runner_sessions_dir()
             .expect("runner sessions")
@@ -1462,7 +1471,7 @@ esac
         )
         .expect("rejection evidence JSON");
         assert_eq!(evidence["kind"], "state-loss");
-        assert_eq!(evidence["exit_code"], 2);
+        assert_eq!(evidence["exit_code"], if transport_success { 0 } else { 2 });
 
         let (connected, exit_code) =
             connect_with_orphan_adoption("local-runner", None, &[], false, None, None, None)
@@ -1480,6 +1489,24 @@ esac
         );
         drop(endpoint);
     });
+}
+
+/// #11901: a legacy replay journal can contain an already-refused exact
+/// recovery. Its evidence is retained, but its pending authority must not block
+/// a retry of plain connect.
+#[cfg(unix)]
+#[test]
+fn rejected_legacy_state_loss_replay_is_retired_before_plain_connect_retries() {
+    rejected_state_loss_refusal_is_retired_before_plain_connect_retries(true, false);
+}
+
+/// #11901: the fresh exact state-loss command can receive a typed failure
+/// envelope over a successful transport. That terminal refusal must retire its
+/// replay authority before the next plain connect.
+#[cfg(unix)]
+#[test]
+fn rejected_fresh_state_loss_envelope_is_retired_before_plain_connect_retries() {
+    rejected_state_loss_refusal_is_retired_before_plain_connect_retries(false, true);
 }
 
 /// #10430: once recovery creates B, losing the controller's bounded health
