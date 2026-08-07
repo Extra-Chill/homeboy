@@ -237,6 +237,85 @@ fn routes_activity_endpoints() {
 }
 
 #[test]
+fn routes_agent_task_run_endpoint() {
+    assert_eq!(
+        http_api::route(HttpMethod::Get, "/agent-task/runs/cook-abc").expect("route"),
+        HttpEndpoint::AgentTaskRun {
+            id: "cook-abc".to_string()
+        }
+    );
+    // Trailing slashes and query strings are stripped by the shared segment
+    // parser, exactly as they are for every neighbouring route.
+    assert_eq!(
+        http_api::route(HttpMethod::Get, "/agent-task/runs/cook-abc/?x=1").expect("route"),
+        HttpEndpoint::AgentTaskRun {
+            id: "cook-abc".to_string()
+        }
+    );
+}
+
+#[test]
+fn agent_task_run_route_is_read_only_and_exact() {
+    // This change adds a read route and nothing else. Submission and retry have
+    // their own safety review, so nothing under /agent-task may be reachable by
+    // POST, and the collection path must not resolve.
+    http_api::route(HttpMethod::Post, "/agent-task/runs/cook-abc")
+        .expect_err("agent-task runs are not writable through this route");
+    http_api::route(HttpMethod::Post, "/agent-task/runs")
+        .expect_err("there is no agent-task submit route");
+    http_api::route(HttpMethod::Get, "/agent-task/runs")
+        .expect_err("there is no agent-task run collection route");
+    http_api::route(HttpMethod::Get, "/agent-task").expect_err("there is no agent-task root route");
+    http_api::route(HttpMethod::Post, "/agent-task/runs/cook-abc/cancel")
+        .expect_err("cancellation stays on the controller-job surface");
+    http_api::route(HttpMethod::Post, "/agent-task/runs/cook-abc/retry")
+        .expect_err("retry is out of scope for this change");
+}
+
+#[test]
+fn agent_task_run_lookup_miss_is_a_structured_not_found() {
+    // No agent-task provider is registered in this process, so the probe is the
+    // no-op and every id misses. That is the 404 path, and it must carry the
+    // same structured validation error shape as its neighbours rather than an
+    // opaque failure.
+    let error = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: "/agent-task/runs/no-such-agent-task-run".to_string(),
+        body: None,
+    })
+    .expect_err("an unknown agent-task run is not found");
+
+    assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
+    assert_eq!(error.details["field"], "run_id");
+    assert!(
+        error.message.contains("no-such-agent-task-run"),
+        "the caller's own id is echoed back: {}",
+        error.message
+    );
+}
+
+#[test]
+fn agent_task_run_id_is_bounded_before_the_record_lookup() {
+    // The id is a raw URL path segment handed to a durable-store lookup. An
+    // oversized segment is rejected by length alone, before the probe runs, and
+    // the rejection must not echo the oversized value back into the response.
+    let oversized = "a".repeat(4096);
+    let error = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!("/agent-task/runs/{oversized}"),
+        body: None,
+    })
+    .expect_err("an oversized agent-task run id is rejected");
+
+    assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
+    assert_eq!(error.details["field"], "run_id");
+    assert!(
+        !error.message.contains(&oversized),
+        "an oversized id must not be reflected into the error message",
+    );
+}
+
+#[test]
 fn activity_endpoint_exposes_activity_report_and_show() {
     with_isolated_home(|_home| {
         let _xdg = XdgGuard::unset();

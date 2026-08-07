@@ -97,8 +97,19 @@ A useful headless UI can be built from this read/query surface:
   `GET /runs/:id/artifacts/:artifact_id/content`, and `GET /runs/:id/findings`
   for persisted evidence
 - `GET /audit/runs` and `GET /bench/runs` for analysis-specific run history
+- `GET /agent-task/runs/:id` for the durable agent-task run projection. A
+  **pure read**: it resolves one indexed, non-mutating probe and never
+  reconciles, because the reconciling read (`homeboy agent-task status`) writes
+  durable state and can perform a live runner round trip, which a serial
+  accept loop cannot afford. Cook ids resolve through the same alias index the
+  CLI uses. A run is not a job — the job *supervises* the run, so watching and
+  cancelling stay on the controller-job surface below.
 - `GET /jobs`, `GET /jobs/:id`, `GET /jobs/:id/events`, and
-  `POST /jobs/:id/cancel` for long-running work
+  `POST /jobs/:id/cancel` for long-running work. Cook and fanout are both
+  controller jobs, so a detached cook or wave is already visible and
+  cancellable here — but through `POST /controller/jobs/:id/cancel`, not
+  `POST /jobs/:id/cancel`, which fails closed on a controller job so the
+  driver can stop the work it owns.
 - `GET /tools`, `GET /tools/:id`, and `POST /tools/:id/run` for sandbox agents
   that need typed Homeboy tool execution without arbitrary shell access
 
