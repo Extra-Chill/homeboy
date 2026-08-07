@@ -32,6 +32,7 @@ pub fn package_existing_tag(
     path_override: Option<String>,
     tag: &str,
     skip_build_validation: bool,
+    expected_source: Option<&str>,
 ) -> Result<ReleasePackageResult> {
     let component = load_component(
         component_id,
@@ -41,6 +42,14 @@ pub fn package_existing_tag(
         },
     )?;
     let head_commit = git::get_head_commit(&component.local_path)?;
+    if expected_source.is_some_and(|source| source != head_commit) {
+        return Err(Error::validation_invalid_argument(
+            "release.preflight",
+            "Package recovery source drifted from portable readiness",
+            Some(head_commit),
+            None,
+        ));
+    }
     validate_existing_tag_at_head(&component.local_path, tag, &head_commit)?;
     super::executor::package_preflight::run_package_preflight(&component.local_path)?;
 

@@ -902,7 +902,7 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
                 None,
             ));
         }
-        return run_package_only(args, &component_ids);
+        return run_package_only(args, &component_ids, readiness.as_ref());
     }
 
     // Single component: use the original single-release flow
@@ -1100,6 +1100,7 @@ fn run_cascade_if_requested(
 fn run_package_only(
     args: ReleaseExecuteArgs,
     component_ids: &[String],
+    readiness: Option<&ReleaseReadinessEnvelope>,
 ) -> CmdResult<ReleaseCommandOutput> {
     if component_ids.len() != 1 {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -1157,6 +1158,7 @@ fn run_package_only(
         args.path.clone(),
         &tag,
         args.skip_build_validation,
+        readiness.map(|value| value.source.commit.as_str()),
     )?;
 
     Ok((
@@ -1626,7 +1628,7 @@ mod tests {
         args.package_only = true;
         args.apply = true;
 
-        let err = match run_package_only(args, &["fixture".to_string()]) {
+        let err = match run_package_only(args, &["fixture".to_string()], None) {
             Ok(_) => panic!("package-only requires an explicit tag"),
             Err(err) => err,
         };
