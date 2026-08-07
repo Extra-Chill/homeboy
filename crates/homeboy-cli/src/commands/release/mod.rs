@@ -441,6 +441,7 @@ pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
 fn run_portable_preflight(
     args: &ReleaseExecuteArgs,
     component_id: &str,
+    skipped: &[String],
 ) -> homeboy::core::Result<Option<ReleaseReadinessEnvelope>> {
     let runner_id = args.preflight_runner.as_deref();
     if runner_id.is_none() && !matches!(args.preflight_placement, ReleasePreflightPlacementArg::Lab)
@@ -457,6 +458,12 @@ fn run_portable_preflight(
     })?;
     let mut gate_results = Vec::new();
     for gate in ["audit", "lint", "test"] {
+        if skipped.iter().any(|skip| skip == gate) {
+            gate_results.push(
+                serde_json::json!({ "gate": gate, "status": "skipped", "reason": "--skip-checks" }),
+            );
+            continue;
+        }
         let mut command = Command::new(&executable);
         if let Some(runner_id) = runner_id {
             command.args(["--runner", runner_id]);
@@ -483,21 +490,25 @@ fn run_portable_preflight(
                 "stderr": String::from_utf8_lossy(&output.stderr),
             })
         });
-        if !output.status.success() {
-            return Err(homeboy::core::Error::validation_invalid_argument(
-                "release.preflight",
-                format!(
-                    "Portable release {gate} gate failed with exit status {:?}",
-                    output.status.code()
-                ),
-                Some(component.local_path.clone()),
-                Some(vec![format!(
-                    "Inspect the returned {gate} evidence before retrying release."
-                )]),
-            ));
-        }
-        gate_results.push(result);
+        gate_results.push(serde_json::json!({
+            "gate": gate,
+            "status": if output.status.success() { "passed" } else { "failed" },
+            "command": command.get_args().map(|arg| arg.to_string_lossy()).collect::<Vec<_>>(),
+            "source_sha": commit,
+            "runner_id": runner_id,
+            "exit_code": output.status.code(),
+            "result": result,
+        }));
     }
+    // Package preflight owns release-specific lockfile and local-dependency
+    // guards. No portable review command exposes that contract yet, so retain
+    // the explicit controller placement while other gates still offload.
+    gate_results.push(serde_json::json!({
+        "gate": "package_preflight",
+        "status": "local_only",
+        "reason": "release package guards have no portable command contract",
+        "source_sha": commit,
+    }));
     let placement = ReleasePreflightPlacement {
         policy: if runner_id.is_some()
             || matches!(args.preflight_placement, ReleasePreflightPlacementArg::Lab)
@@ -534,7 +545,7 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
         ));
     }
     let readiness = if component_ids.len() == 1 {
-        run_portable_preflight(&args, &component_ids[0])?
+        run_portable_preflight(&args, &component_ids[0], &skip_checks_granular)?
     } else {
         None
     };

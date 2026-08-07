@@ -139,6 +139,38 @@ fn run_with_plan_inner(
         initial_executable_preflight_ids().iter().copied().collect();
 
     super::preflight_identity::revalidate(&preflight_component, &preflight_source)?;
+    if let Some(readiness) = options.readiness.as_ref() {
+        let failed = readiness
+            .gate_results
+            .iter()
+            .filter_map(|gate| {
+                (gate.get("status").and_then(serde_json::Value::as_str) == Some("failed")).then(
+                    || {
+                        gate.get("gate")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("unknown")
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        if !failed.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "release.preflight",
+                format!(
+                    "Portable release preflight failed for: {}",
+                    failed.join(", ")
+                ),
+                Some(readiness.source.commit.clone()),
+                Some(
+                    readiness
+                        .evidence_refs
+                        .iter()
+                        .map(|reference| format!("Inspect durable readiness evidence: {reference}"))
+                        .collect(),
+                ),
+            ));
+        }
+    }
 
     timer.time("package", || {
         super::execution_plan::execute_plan_steps_at_source(
