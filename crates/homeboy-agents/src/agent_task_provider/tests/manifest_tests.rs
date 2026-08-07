@@ -374,6 +374,10 @@ process.stdin.once('data', input => {
         "fixture 1.0"
     );
     assert_eq!(
+        outcome.metadata["resolved_runtime_tools"][0]["readiness"],
+        json!({ "status": "ready", "evidence": { "kind": "declared_probe", "success": true } })
+    );
+    assert_eq!(
         outcome.metadata["capability_evidence"]["tool_contributed"][0]["capabilities"][0],
         "browser"
     );

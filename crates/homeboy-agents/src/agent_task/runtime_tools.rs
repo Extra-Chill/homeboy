@@ -83,8 +83,21 @@ pub struct ResolvedAgentTaskRuntimeTool {
     pub env_names: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_env_names: Vec<String>,
-    pub readiness: String,
+    pub readiness: ResolvedAgentTaskRuntimeToolReadiness,
     pub lifecycle: AgentTaskRuntimeToolLifecycle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResolvedAgentTaskRuntimeToolReadiness {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<ResolvedAgentTaskRuntimeToolReadinessEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResolvedAgentTaskRuntimeToolReadinessEvidence {
+    pub kind: String,
+    pub success: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
