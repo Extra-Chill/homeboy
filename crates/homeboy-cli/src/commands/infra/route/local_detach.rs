@@ -19,6 +19,23 @@
 //! cook; detachment makes the cook survive *its launcher*. The detached cook is
 //! the containment owner, so a cancelled or killed cook still reaps its
 //! provider tree.
+//!
+//! # Daemon ownership
+//!
+//! Detachment alone left the cook PID-owned: durable enough to read, but with
+//! no job record, no checkpoint, and no authority that outlived the launcher.
+//! The launcher now also submits the cook to the daemon as a typed controller
+//! job (`agent_task_service::CookJobDriver`), so the daemon owns the lifecycle
+//! — durable record, checkpointing, cancellation, and HTTP inspection — while
+//! this launcher still spawns the child.
+//!
+//! Who spawns the child is the load-bearing detail, not an implementation
+//! accident. The ambient process environment is the first secret source a
+//! provider invocation consults, and the daemon inherits its environment and
+//! working directory from whichever caller first started it. Spawning the cook
+//! from the daemon would silently change which credentials the provider gets.
+//! Spawning it here preserves the operator's environment exactly, which is why
+//! the daemon supervises a child it did not create.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -33,9 +50,19 @@ use serde_json::{json, Value};
 const HANDOFF_SCHEMA: &str = "homeboy/agent-task-cook-local-detach-handoff/v1";
 
 /// Bound on how long the launcher waits for the detached cook to publish its
-/// durable identity before reporting the handoff as still pending. The wait
-/// exists so a returned run id is addressable, not so the launcher becomes a
-/// second observer of the child's lifecycle.
+/// durable identity before reporting the handoff as still pending.
+///
+/// This wait is no longer load-bearing. The daemon submit returns a job id
+/// synchronously, and `record_detached_cook_handoff_parent` makes the cook id
+/// resolvable before a child even exists, so both handles in the envelope are
+/// addressable the moment it is printed. What the wait still buys is the
+/// *attempt* id, which genuinely does not exist until the cook materializes its
+/// first attempt and which no design can conjure synchronously.
+///
+/// It is kept at its historical default so no existing caller that reads
+/// `run_id` regresses, and it is now safe to set to `0`: a zero-wait envelope
+/// still names an addressable cook and an inspectable controller job, which was
+/// not true before the daemon owned the lifecycle.
 const DEFAULT_HANDOFF_TIMEOUT_MS: u64 = 30_000;
 const HANDOFF_POLL: Duration = Duration::from_millis(100);
 
@@ -142,6 +169,11 @@ pub(super) fn intercept_local_detached_cook(
     if handoff_parent.state.is_terminal() {
         terminate_and_reap_detached_child(&mut child);
     }
+    // Hand durable ownership of the cook's lifecycle to the daemon. This is
+    // additive to the handoff record above, never a precondition for it: the
+    // child is already running, so a daemon that cannot be reached must not
+    // fail the cook. The outcome is reported in the envelope either way.
+    let controller_job = submit_cook_controller_job(&cook_id, pid, &start_identity);
     let handoff = await_durable_handoff(&cook_id, &mut child, handoff_timeout());
     if handoff.state == DetachedHandoffState::ExitedBeforeHandoff {
         let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent(
@@ -153,7 +185,7 @@ pub(super) fn intercept_local_detached_cook(
     if let Some(run_id) = handoff.run_id.as_deref() {
         crate::commands::agent_task::run::announce_durable_cook_identity(Some(&cook_id), run_id);
     }
-    let envelope = handoff_envelope(&cook_id, pid, &log_path, &handoff);
+    let envelope = handoff_envelope(&cook_id, pid, &log_path, &handoff, &controller_job);
     let stdout = serde_json::to_string_pretty(&envelope).map_err(|error| {
         Error::internal_json(
             error.to_string(),
@@ -162,6 +194,65 @@ pub(super) fn intercept_local_detached_cook(
     })?;
     println!("{stdout}");
     Ok(Some(0))
+}
+
+/// What the daemon returned when offered ownership of this cook.
+///
+/// Submission is best-effort by design. By the time it runs, the child is
+/// already spawned and the handoff parent is already durable, so a daemon that
+/// is unreachable or refuses admission must degrade to exactly the previous
+/// behavior — a PID-owned detached cook — rather than fail an operator's run.
+/// The failure is reported rather than swallowed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ControllerJobHandoff {
+    Owned { job_id: String },
+    Unavailable { reason: String },
+}
+
+impl ControllerJobHandoff {
+    fn projection(&self) -> Value {
+        match self {
+            Self::Owned { job_id } => json!({ "state": "owned", "job_id": job_id }),
+            Self::Unavailable { reason } => json!({
+                "state": "unavailable",
+                "job_id": Value::Null,
+                "reason": reason,
+            }),
+        }
+    }
+}
+
+/// Offer the detached cook to the daemon as a durable controller job.
+///
+/// `submit` admits the job and returns its id synchronously; `start` releases
+/// the daemon worker that supervises the child. The cook id is the job's
+/// idempotency key, so a replayed submit converges on one supervisor rather
+/// than creating a second one for the same child.
+fn submit_cook_controller_job(
+    cook_id: &str,
+    pid: u32,
+    start_identity: &homeboy::core::process::ProcessStartIdentity,
+) -> ControllerJobHandoff {
+    match submit_cook_controller_job_inner(cook_id, pid, start_identity) {
+        Ok(job_id) => ControllerJobHandoff::Owned { job_id },
+        Err(error) => ControllerJobHandoff::Unavailable {
+            reason: error.message,
+        },
+    }
+}
+
+fn submit_cook_controller_job_inner(
+    cook_id: &str,
+    pid: u32,
+    start_identity: &homeboy::core::process::ProcessStartIdentity,
+) -> homeboy::core::Result<String> {
+    let submission =
+        homeboy::agents::agent_task_service::cook_job_submission(cook_id, pid, start_identity)?;
+    let client = homeboy::core::daemon::LocalControllerJobClient::connect()?;
+    let job = client.submit(submission)?;
+    let job_id = job.id.to_string();
+    client.start(&job_id)?;
+    Ok(job_id)
 }
 
 /// The one context where local detachment stays a rejection.
@@ -443,6 +534,7 @@ fn handoff_envelope(
     pid: u32,
     log_path: &Path,
     handoff: &DetachedCookHandoff,
+    controller_job: &ControllerJobHandoff,
 ) -> Value {
     json!({
         "schema": HANDOFF_SCHEMA,
@@ -456,6 +548,10 @@ fn handoff_envelope(
             "state": handoff.state.as_str(),
             "waited_ms": handoff.waited_ms,
         },
+        // Additive: the daemon-owned durable job that now supervises this cook,
+        // making the run inspectable through the job API rather than only
+        // through its durable cook record.
+        "controller_job": controller_job.projection(),
         "status_command": format!("homeboy agent-task status {cook_id}"),
         "logs_command": format!("homeboy agent-task logs {cook_id}"),
         "cancel_command": format!("homeboy agent-task cancel {cook_id}"),
@@ -784,6 +880,9 @@ mod tests {
             4242,
             Path::new("/data/agent-task-detached/cook-11476/cook.log"),
             &handoff,
+            &ControllerJobHandoff::Owned {
+                job_id: "3f2b1c00-0000-4000-8000-000000000001".to_string(),
+            },
         );
 
         assert_eq!(envelope["schema"], HANDOFF_SCHEMA);
@@ -800,6 +899,11 @@ mod tests {
         assert_eq!(
             envelope["cancel_command"],
             "homeboy agent-task cancel cook-11476"
+        );
+        assert_eq!(envelope["controller_job"]["state"], "owned");
+        assert_eq!(
+            envelope["controller_job"]["job_id"],
+            "3f2b1c00-0000-4000-8000-000000000001"
         );
     }
 
@@ -820,8 +924,15 @@ mod tests {
                 waited_ms: 30_000,
             };
 
-            let envelope =
-                handoff_envelope("cook-11476", 4242, Path::new("/tmp/cook.log"), &handoff);
+            let envelope = handoff_envelope(
+                "cook-11476",
+                4242,
+                Path::new("/tmp/cook.log"),
+                &handoff,
+                &ControllerJobHandoff::Unavailable {
+                    reason: "daemon unreachable".to_string(),
+                },
+            );
 
             assert_eq!(envelope["handoff"]["state"], expected);
             assert_eq!(envelope["run_id"], Value::Null);
