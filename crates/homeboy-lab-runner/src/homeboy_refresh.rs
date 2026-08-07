@@ -812,9 +812,9 @@ pub fn refresh_homeboy_binary(
                 ));
             }
         };
-        if let Err(error) =
-            disconnect_with_session(&plan.runner_id, refresh_session.as_ref(), options.force)
-        {
+        if let Err(error) = disconnect_before_reconnect(refresh_session.as_ref(), |session| {
+            disconnect_with_session(&plan.runner_id, Some(session), options.force).map(|_| ())
+        }) {
             return rollback_refresh_error_with(error, || {
                 restore_runner_homeboy_path_if_selected(
                     &plan.runner_id,
@@ -835,7 +835,9 @@ pub fn refresh_homeboy_binary(
                 refresh_error_with_phase_summary(error, &phases)
             });
         }
-        phase_summary.push(refresh_phase("disconnect", true, 0));
+        if refresh_session.is_some() {
+            phase_summary.push(refresh_phase("disconnect", true, 0));
+        }
         let (report, connect_exit_code) = match connect_with_orphan_adoption(
             &plan.runner_id,
             refresh_owned_lease.as_deref(),
@@ -1127,6 +1129,18 @@ fn failed_refresh_readiness(plan: &HomeboyBinaryRefreshPlan) -> HomeboyRefreshRe
 /// failure can require reconciliation without requiring another reconnect.
 fn reconnect_required_after_refresh(daemon_refreshed: bool) -> bool {
     !daemon_refreshed
+}
+
+/// A refresh rotates a live daemon but starts a disconnected runner directly.
+/// The subsequent connect always uses the promoted configured binary.
+fn disconnect_before_reconnect(
+    session: Option<&super::RunnerSession>,
+    disconnect: impl FnOnce(&super::RunnerSession) -> Result<()>,
+) -> Result<()> {
+    if let Some(session) = session {
+        disconnect(session)?;
+    }
+    Ok(())
 }
 
 /// Evaluate refresh completion from the admission authority, not from daemon

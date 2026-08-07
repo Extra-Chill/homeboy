@@ -251,6 +251,59 @@ fn refresh_preserves_only_its_direct_controller_lease_for_orphan_recovery() {
     );
 }
 
+#[test]
+fn disconnected_refresh_connects_without_rotating_a_missing_daemon() {
+    let operations = std::cell::RefCell::new(Vec::new());
+
+    disconnect_before_reconnect(None, |_| {
+        panic!("a disconnected runner has no daemon to rotate")
+    })
+    .expect("disconnected refresh does not attempt daemon rotation");
+    operations.borrow_mut().push("connect promoted binary");
+
+    assert_eq!(operations.into_inner(), ["connect promoted binary"]);
+}
+
+#[test]
+fn connected_refresh_rotates_before_connecting_the_promoted_binary() {
+    let session = RunnerSession {
+        runner_id: "lab".to_string(),
+        mode: RunnerTunnelMode::DirectSsh,
+        role: RunnerSessionRole::Controller,
+        server_id: Some("lab".to_string()),
+        controller_id: None,
+        broker_url: None,
+        remote_daemon_address: Some("127.0.0.1:7421".to_string()),
+        local_port: Some(7421),
+        local_url: Some("http://127.0.0.1:7421".to_string()),
+        tunnel_pid: Some(1),
+        tunnel_process_start_identity: None,
+        proxy_forward: None,
+        remote_daemon_pid: Some(2),
+        remote_daemon_lease_id: Some("lease-refresh".to_string()),
+        homeboy_version: "test".to_string(),
+        homeboy_build_identity: None,
+        connected_at: "2026-01-01T00:00:00Z".to_string(),
+        worker_identity: None,
+        worker_pid: None,
+        last_seen_at: None,
+        leaseless_recovery_evidence: None,
+    };
+    let operations = std::cell::RefCell::new(Vec::new());
+
+    disconnect_before_reconnect(Some(&session), |_| {
+        operations.borrow_mut().push("disconnect existing daemon");
+        Ok(())
+    })
+    .expect("connected refresh rotates the existing daemon");
+    operations.borrow_mut().push("connect promoted binary");
+
+    assert_eq!(
+        operations.into_inner(),
+        ["disconnect existing daemon", "connect promoted binary"]
+    );
+}
+
 fn refreshed_daemon_status(connected: bool, identity: Option<&str>) -> RunnerStatusReport {
     RunnerStatusReport {
         runner_id: "lab".to_string(),
