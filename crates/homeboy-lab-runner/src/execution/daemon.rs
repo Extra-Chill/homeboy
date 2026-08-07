@@ -1794,12 +1794,12 @@ where
                 if !daemon_poll_transport_was_lost(&err) {
                     return Err(err);
                 }
-                if let Some(refreshed_endpoint) = reload_endpoint()? {
-                    if refreshed_endpoint != endpoint {
-                        endpoint = refreshed_endpoint;
-                        continue;
-                    }
-                }
+                // Checked before the endpoint-change fast path below, not
+                // after it. An endpoint change is still tolerated — it retries
+                // immediately and skips the backoff — but it can no longer
+                // extend the grace window without limit. When `reload_endpoint`
+                // alternates between two endpoints, every iteration used to
+                // `continue` past this check and the loop never terminated.
                 if Instant::now() >= transient_deadline {
                     let mut surfaced = err;
                     surfaced.retryable = surfaced.retryable.or(Some(true));
@@ -1807,6 +1807,12 @@ where
                         "Lost contact with the runner daemon while polling job `{job_id}` for longer than {}s; the remote job may still be in flight. Reconnect with `homeboy runner connect <runner-id>` and inspect `homeboy runner job logs <runner-id> {job_id}`.",
                         DAEMON_POLL_TRANSIENT_GRACE.as_secs()
                     )));
+                }
+                if let Some(refreshed_endpoint) = reload_endpoint()? {
+                    if refreshed_endpoint != endpoint {
+                        endpoint = refreshed_endpoint;
+                        continue;
+                    }
                 }
                 std::thread::sleep(DAEMON_POLL_RETRY_BACKOFF);
             }
