@@ -541,6 +541,12 @@ pub fn readiness_is_valid(readiness: &ReleaseReadinessEnvelope) -> bool {
                         })
                 }
                 "skipped" => gate.source_sha.as_deref() == Some(readiness.source.commit.as_str()),
+                "local_only" => {
+                    gate.gate == "package_preflight"
+                        && gate.local_only.as_ref().is_some_and(|local_only| {
+                            !local_only.reason.is_empty() && !local_only.continuation.is_empty()
+                        })
+                }
                 _ => false,
             })
 }
@@ -560,6 +566,14 @@ pub struct ReleaseReadinessGateResult {
     /// Immutable identities emitted by the child that executed this gate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance: Option<ReleaseReadinessProvenance>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_only: Option<ReleaseReadinessLocalOnly>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseReadinessLocalOnly {
+    pub reason: String,
+    pub continuation: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -895,6 +909,7 @@ mod tests {
                 runner_id: Some("homeboy-lab".to_string()),
                 evidence_refs: Vec::new(),
                 provenance: None,
+                local_only: None,
             }],
         };
 

@@ -11,7 +11,7 @@ use homeboy_release::release::{
     ReleaseCommandResult, ReleaseExecutionPlan, ReleasePackageResult, ReleasePhase,
     ReleasePipelineOptions, ReleasePreflightPlacement, ReleasePreflightPlacementPolicy,
     ReleasePreflightSourceIdentity, ReleaseReadinessEnvelope, ReleaseReadinessGateResult,
-    ReleaseReadinessProvenance,
+    ReleaseReadinessLocalOnly, ReleaseReadinessProvenance,
 };
 
 use super::utils::args::DryRunArgs;
@@ -767,6 +767,7 @@ fn run_portable_preflight_with(
                 runner_id: None,
                 evidence_refs: Vec::new(),
                 provenance: None,
+                local_only: None,
             });
             continue;
         }
@@ -790,6 +791,7 @@ fn run_portable_preflight_with(
                     runner_id: child.runner_id,
                     evidence_refs: child.evidence_refs,
                     provenance: Some(child.provenance),
+                    local_only: None,
                 });
             }
             Err(error) => {
@@ -803,6 +805,7 @@ fn run_portable_preflight_with(
                     runner_id: runner_id.map(str::to_string),
                     evidence_refs: Vec::new(),
                     provenance: None,
+                    local_only: None,
                 });
             }
         }
@@ -818,6 +821,10 @@ fn run_portable_preflight_with(
         runner_id: None,
         evidence_refs: Vec::new(),
         provenance: None,
+        local_only: Some(ReleaseReadinessLocalOnly {
+            reason: "release package guards have no portable command contract".to_string(),
+            continuation: "preflight.package".to_string(),
+        }),
     });
     let placement = ReleasePreflightPlacement {
         policy: if runner_id.is_some()
@@ -2058,7 +2065,13 @@ jobs:
                 passed: true,
                 runner_id: Some("test-runner".to_string()),
                 evidence_refs: vec![format!("evidence://{}", request.gate)],
-                provenance: ReleaseReadinessProvenance::default(),
+                provenance: ReleaseReadinessProvenance {
+                    dependencies: std::collections::BTreeMap::from([(
+                        "fixture".to_string(),
+                        "locked".to_string(),
+                    )]),
+                    extensions: Default::default(),
+                },
             })
         }
     }
@@ -2118,6 +2131,7 @@ jobs:
         assert_eq!(*dispatcher.calls.borrow(), vec!["audit", "test"]);
         assert_eq!(readiness.gate_results[1].gate, "lint");
         assert_eq!(readiness.gate_results[1].status, "skipped");
+        assert!(release::readiness_is_valid(&readiness));
     }
 
     #[test]

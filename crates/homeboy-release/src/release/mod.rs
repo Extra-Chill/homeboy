@@ -66,15 +66,16 @@ pub use executor::artifacts::{
 pub use package_recovery::{package_existing_tag, ReleasePackageResult};
 pub use pipeline::run;
 pub use planner::plan;
+pub use types::readiness_is_valid;
 pub use types::{
     BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseArtifact,
     ReleaseCommandInput, ReleaseCommandResult, ReleaseDeploymentResult, ReleaseDeploymentSummary,
     ReleaseExecutionPlan, ReleaseOptions, ReleasePhase, ReleasePipelineOptions, ReleasePlan,
     ReleasePreflightPlacement, ReleasePreflightPlacementPolicy, ReleasePreflightSourceIdentity,
     ReleaseProjectDeployResult, ReleaseReadinessEnvelope, ReleaseReadinessGateResult,
-    ReleaseReadinessProvenance, ReleaseRollbackEvidence, ReleaseRun, ReleaseRunResult,
-    ReleaseRunSummary, ReleaseSemverCommit, ReleaseSemverRecommendation, ReleaseStepResult,
-    ReleaseStepStatus, ReleaseWorkspaceCommandResult, ReleaseWorkspaceOutput,
+    ReleaseReadinessLocalOnly, ReleaseReadinessProvenance, ReleaseRollbackEvidence, ReleaseRun,
+    ReleaseRunResult, ReleaseRunSummary, ReleaseSemverCommit, ReleaseSemverRecommendation,
+    ReleaseStepResult, ReleaseStepStatus, ReleaseWorkspaceCommandResult, ReleaseWorkspaceOutput,
 };
 pub use utils::{extract_latest_notes, parse_release_artifacts};
 pub use workflow::{

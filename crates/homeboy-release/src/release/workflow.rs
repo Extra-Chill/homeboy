@@ -1103,6 +1103,7 @@ mod tests {
                 runner_id: Some("lab-test".to_string()),
                 evidence_refs: Vec::new(),
                 provenance: None,
+                local_only: None,
             }],
         }
     }
@@ -1160,6 +1161,7 @@ mod tests {
                     runner_id: Some("lab-test".to_string()),
                     evidence_refs: Vec::new(),
                     provenance: None,
+                    local_only: None,
                 }],
             };
 
