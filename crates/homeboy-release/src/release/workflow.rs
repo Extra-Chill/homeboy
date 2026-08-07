@@ -186,6 +186,17 @@ fn run_command_with_workspace_inner(
     let execution = release_execution_plan(&input);
 
     if input.recover {
+        if let Some(readiness) = input.readiness.as_ref() {
+            let component = load_component(
+                &input.component_id,
+                &ReleaseOptions {
+                    path_override: input.path_override.clone(),
+                    ..Default::default()
+                },
+            )?;
+            super::preflight_identity::revalidate(&component, &readiness.source)?;
+            super::executor::package_preflight::run_package_preflight(&component.local_path)?;
+        }
         return run_recover(&input, recovery_owner_run_ref).map(
             |(result, workspace, exit_code)| {
                 (
