@@ -712,6 +712,7 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
         .expect("logs loaded");
         let (review_value, _) = review::review(ReviewArgs {
             run_id: run_id.to_string(),
+            full: true,
             to_worktree: None,
             provider_command: None,
             provider_argv: Vec::new(),

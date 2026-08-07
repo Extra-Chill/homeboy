@@ -830,6 +830,7 @@ Build a durable aggregate review envelope from run state, logs, artifacts, and p
 
 | Option | Value | Description |
 | --- | --- | --- |
+| `--full` | flag | Include complete lifecycle, promotion, and gate evidence. The default keeps one actionable candidate and bounded gate findings |
 | `--to-worktree` | `<HANDLE>` | _no help text_ |
 | `--provider-command` | `<COMMAND>` | Deprecated promotion apply-provider command string. Migrate `--provider-command 'provider --flag value'` to `--provider-argv provider --provider-argv --flag --provider-argv value`; argv preserves exact arguments without shell splitting. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with `workspace_path`. |
 | `--provider-argv` | `<ARG>` | Promotion-only apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. This cannot select an executor. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`. |

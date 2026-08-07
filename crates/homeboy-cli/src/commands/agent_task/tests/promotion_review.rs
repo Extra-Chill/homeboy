@@ -78,6 +78,7 @@ fn review_reports_queued_run_without_chat_state() {
 
         let (value, exit_code) = review::review(ReviewArgs {
             run_id: "run-review-queued".to_string(),
+            full: true,
             to_worktree: None,
             provider_command: None,
             provider_argv: Vec::new(),
@@ -110,6 +111,7 @@ fn review_reports_completed_aggregate_and_promotion_hints() {
 
         let (value, exit_code) = review::review(ReviewArgs {
             run_id: "run-review-completed".to_string(),
+            full: true,
             to_worktree: Some("homeboy@fix-review-flow".to_string()),
             provider_command: None,
             provider_argv: Vec::new(),
@@ -147,6 +149,37 @@ fn review_reports_completed_aggregate_and_promotion_hints() {
             .as_str()
             .expect("next action")
             .contains("promotion_candidates"));
+    });
+}
+
+#[test]
+fn default_review_is_bounded_and_points_to_full_evidence() {
+    with_temp_home(|| {
+        run_loaded_plan(
+            test_plan(),
+            Some("run-review-default-bounded"),
+            ApplyArtifactExecutor,
+        )
+        .expect("run completed");
+
+        let (value, exit_code) = review::review(ReviewArgs {
+            run_id: "run-review-default-bounded".to_string(),
+            full: false,
+            to_worktree: None,
+            provider_command: None,
+            provider_argv: Vec::new(),
+        })
+        .expect("review loaded");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["view"], "summary");
+        assert!(value.get("record").is_none());
+        assert!(value.get("logs").is_none());
+        assert!(value.get("artifacts").is_none());
+        assert_eq!(
+            value["full_command"],
+            "homeboy agent-task review run-review-default-bounded --full"
+        );
     });
 }
 
@@ -281,6 +314,7 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
         .expect("Cook status is bounded");
         let (review_value, _) = review::review(ReviewArgs {
             run_id: cook_id.to_string(),
+            full: true,
             to_worktree: None,
             provider_command: None,
             provider_argv: Vec::new(),
